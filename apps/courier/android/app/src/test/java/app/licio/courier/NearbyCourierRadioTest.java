@@ -139,7 +139,7 @@ public class NearbyCourierRadioTest {
         FakeNearby fake = new FakeNearby();
         NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
         radio.startDiscovery(); // a found-endpoint callback only fires while discovery is running
-        fake.listener.onEndpointFound("ep-1", NearbyCourierRadio.DEFAULT_SERVICE_ID);
+        fake.listener.onEndpointFound("ep-1", NearbyCourierRadio.DEFAULT_SERVICE_ID, fake.lastDiscoverGen);
         assertEquals(1, fake.requested.size());
         assertEquals("ep-1", fake.requested.get(0));
     }
@@ -149,7 +149,7 @@ public class NearbyCourierRadioTest {
         FakeNearby fake = new FakeNearby();
         NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
         radio.startDiscovery();
-        fake.listener.onEndpointFound("ep-x", "some.other.app.service");
+        fake.listener.onEndpointFound("ep-x", "some.other.app.service", fake.lastDiscoverGen);
         assertEquals("no connection requested to a foreign service", 0, fake.requested.size());
     }
 
@@ -158,7 +158,7 @@ public class NearbyCourierRadioTest {
         FakeNearby fake = new FakeNearby();
         NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
         radio.startAdvertising(); // an initiated connection only arrives while the radio is running
-        fake.listener.onConnectionInitiated("ep-2");
+        fake.listener.onConnectionInitiated("ep-2", fake.lastAdvertiseGen);
         assertEquals(1, fake.accepted.size());
         assertEquals("ep-2", fake.accepted.get(0));
     }
@@ -170,10 +170,11 @@ public class NearbyCourierRadioTest {
         FakeNearby fake = new FakeNearby();
         NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
         radio.startDiscovery();
+        long gen = fake.lastDiscoverGen; // the (pre-stop) discovery generation
         radio.stop();
-        fake.listener.onEndpointFound("ep-late", NearbyCourierRadio.DEFAULT_SERVICE_ID);
+        fake.listener.onEndpointFound("ep-late", NearbyCourierRadio.DEFAULT_SERVICE_ID, gen);
         assertEquals("no connection requested after stop", 0, fake.requested.size());
-        fake.listener.onConnectionInitiated("ep-late");
+        fake.listener.onConnectionInitiated("ep-late", gen);
         assertEquals("no connection accepted after stop", 0, fake.accepted.size());
     }
 
@@ -181,19 +182,48 @@ public class NearbyCourierRadioTest {
     public void connectionResultPayloadAndDisconnectReachTheEvents() {
         FakeNearby fake = new FakeNearby();
         Recorder rec = new Recorder();
-        new NearbyCourierRadio(fake, rec);
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, rec);
+        radio.startAdvertising();
+        long gen = fake.lastAdvertiseGen;
 
-        fake.listener.onConnectionResult("ep-3", true);
+        fake.listener.onConnectionResult("ep-3", true, gen);
         assertEquals("ep-3", rec.connectedEndpoint);
         assertEquals(Boolean.TRUE, rec.connectedFlag);
 
         byte[] frame = "nearby-frame".getBytes();
-        fake.listener.onPayloadReceived("ep-3", frame);
+        fake.listener.onPayloadReceived("ep-3", frame, gen);
         assertEquals("ep-3", rec.payloadEndpoint);
         assertArrayEquals(frame, rec.payload);
 
-        fake.listener.onDisconnected("ep-3");
+        fake.listener.onDisconnected("ep-3", gen);
         assertEquals("ep-3", rec.disconnectedEndpoint);
+    }
+
+    @Test
+    public void aStaleLifecycleCallbackFromASupersededStartIsDropped() {
+        // A connection result / payload / disconnect from a PREVIOUS run, delivered after a
+        // Stop→Start, must be dropped — else it drives/responds to an exchange under the fresh
+        // controller (#E).  Only onStartFailed was generation-gated before.
+        FakeNearby fake = new FakeNearby();
+        Recorder rec = new Recorder();
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, rec);
+        radio.startDiscovery();
+        long staleGen = fake.lastDiscoverGen; // the first run's generation
+        radio.stop();
+        radio.startDiscovery(); // a fresh run — a NEW generation
+
+        fake.listener.onConnectionResult("ep-old", true, staleGen);
+        assertNull("a stale connection result is dropped", rec.connectedEndpoint);
+        fake.listener.onPayloadReceived("ep-old", "old".getBytes(), staleGen);
+        assertNull("a stale payload is dropped", rec.payloadEndpoint);
+        fake.listener.onDisconnected("ep-old", staleGen);
+        assertNull("a stale disconnect is dropped", rec.disconnectedEndpoint);
+
+        // A payload for the CURRENT generation IS forwarded.
+        byte[] fresh = "new".getBytes();
+        fake.listener.onPayloadReceived("ep-new", fresh, fake.lastDiscoverGen);
+        assertEquals("ep-new", rec.payloadEndpoint);
+        assertArrayEquals(fresh, rec.payload);
     }
 
     @Test

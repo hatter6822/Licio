@@ -108,6 +108,14 @@ public class BluetoothCourierRadio implements CourierRadio {
     // Package-private so the JVM test can drive AdvertiseCallback.onStartFailure (Robolectric's
     // shadow does not invoke it; the advertiser==null branch is also unreachable there).
     AdvertiseCallback advertiseCallback;
+    // The CURRENT GATT-server callback (recreated per startBleGattServer, capturing the generation
+    // below) + the server generation it is matched against.  A DELAYED callback from a PREVIOUS
+    // server (e.g. a STATE_DISCONNECTED for the old session, delivered after a Stop→Start while the
+    // same central has reconnected) is delivered to its OWN (old) callback instance, whose captured
+    // generation no longer matches `bleServerGeneration`, so it is dropped instead of evicting the
+    // fresh central / writing stale state (#C).  Package-private so the Robolectric test can drive it.
+    BluetoothGattServerCallback gattServerCallback;
+    private volatile long bleServerGeneration = 0;
     private final ConcurrentHashMap<String, BluetoothDevice> bleCentrals = new ConcurrentHashMap<>();
     private BluetoothLeScanner scanner;
     private ScanCallback scanCallback;
@@ -481,6 +489,8 @@ public class BluetoothCourierRadio implements CourierRadio {
     private void startBleGattServer() {
         BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
         if (bm == null) return;
+        // A fresh server generation: the new callback drops any delayed event from the prior server.
+        gattServerCallback = newGattServerCallback(++bleServerGeneration);
         gattServer = bm.openGattServer(ctx, gattServerCallback);
         if (gattServer == null) return;
         BluetoothGattService service = buildCourierGattService();
@@ -526,24 +536,37 @@ public class BluetoothCourierRadio implements CourierRadio {
                 advertiseCallback);
     }
 
-    final BluetoothGattServerCallback gattServerCallback = new BluetoothGattServerCallback() {
+    /** Build a GATT-server callback bound to this server `gen` — every method drops a callback whose
+     *  generation has been superseded (a Stop→Start opened a new server), so a delayed event from the
+     *  OLD server never mutates the new session's state (#C). */
+    private BluetoothGattServerCallback newGattServerCallback(final long gen) {
+      return new BluetoothGattServerCallback() {
         @Override
         public void onServiceAdded(int status, BluetoothGattService service) {
             // A late onServiceAdded delivered AFTER stop() (addService was still pending when
             // stopBle() ran) must NOT begin advertising — a stopped courier cannot become
             // discoverable again.
-            if (!running.get()) return;
+            if (!running.get() || gen != bleServerGeneration) return;
             // The courier service is now registered — only NOW is it safe to advertise (a scanner
-            // that connects can resolve the service).  A failed registration ⇒ no advertising (the
-            // BLE peripheral path is unavailable; RFCOMM remains).
+            // that connects can resolve the service).
             if (status == BluetoothGatt.GATT_SUCCESS && BLE_SERVICE_UUID.equals(service.getUuid())) {
                 startBleAdvertising();
+            } else if (status != BluetoothGatt.GATT_SUCCESS) {
+                // A FAILED service registration means the BLE peripheral cannot be discovered — surface
+                // it (like the missing-advertiser / advertise-failure paths) instead of silently
+                // leaving the channel marked running but not discoverable (#D).
+                events.onStartFailed("advertise",
+                        new IllegalStateException("ble_service_add_failed_" + status));
             }
         }
 
         @Override
         @SuppressWarnings("MissingPermission")
         public void onConnectionStateChange(BluetoothDevice device, int status, int newState) {
+            // Drop a delayed connect/DISCONNECT from a SUPERSEDED server (a Stop→Start opened a new
+            // one) — else a stale STATE_DISCONNECTED would evict the central that has since
+            // reconnected under the new server (#C).
+            if (gen != bleServerGeneration) return;
             String endpointId = device.getAddress();
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 // A late CONNECT delivered AFTER stopBle() (the GATT server was closed + the maps
@@ -566,6 +589,7 @@ public class BluetoothCourierRadio implements CourierRadio {
 
         @Override
         public void onMtuChanged(BluetoothDevice device, int mtu) {
+            if (gen != bleServerGeneration) return; // a stale MTU report from an old server
             bleMtu.put(device.getAddress(), mtu);
         }
 
@@ -574,7 +598,8 @@ public class BluetoothCourierRadio implements CourierRadio {
         public void onCharacteristicWriteRequest(BluetoothDevice device, int requestId,
                 BluetoothGattCharacteristic characteristic, boolean preparedWrite,
                 boolean responseNeeded, int offset, byte[] value) {
-            if (!running.get()) return; // a late inbound write after stopBle() — drop, never process
+            // a late inbound write after stopBle() / from a superseded server — drop, never process
+            if (!running.get() || gen != bleServerGeneration) return;
             if (BLE_CHAR_UUID.equals(characteristic.getUuid()) && value != null) {
                 feedAssembler(device.getAddress(), value);
             }
@@ -590,8 +615,8 @@ public class BluetoothCourierRadio implements CourierRadio {
                 int offset, byte[] value) {
             // A queued CCC write delivered AFTER stopBle() must NOT announce a fresh link for a
             // stopped courier — gate before sendResponse/onConnectionResult (the client path guards
-            // its late STATE_CONNECTED the same way).
-            if (!running.get()) return;
+            // its late STATE_CONNECTED the same way).  Also drop a CCC write from a SUPERSEDED server.
+            if (!running.get() || gen != bleServerGeneration) return;
             // The central enabling/disabling notifications (CCC) — accept it.
             if (responseNeeded && gattServer != null) {
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null);
@@ -606,10 +631,12 @@ public class BluetoothCourierRadio implements CourierRadio {
 
         @Override
         public void onNotificationSent(BluetoothDevice device, int status) {
+            if (gen != bleServerGeneration) return; // a stale ack from an old server's notify
             BleSendPump pump = blePumps.get(device.getAddress());
             if (pump != null) pump.onAck(status);
         }
-    };
+      };
+    }
 
     // --- BLE GATT fallback: central (scan + GATT client) ----------------------------
 
@@ -862,6 +889,9 @@ public class BluetoothCourierRadio implements CourierRadio {
             }
             gattServer = null;
         }
+        // Invalidate the current GATT-server callback: a delayed event from this (now-closed) server
+        // is dropped by its generation guard rather than mutating a later session's state (#C).
+        bleServerGeneration++;
         bleClients.clear();
         blePendingClients.clear();
         bleClientChars.clear();

@@ -76,9 +76,10 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     // --- NearbyConnections.Listener: the courier orchestration ----------------------
 
     @Override
-    public void onEndpointFound(String endpointId, String foundServiceId) {
-        // A queued callback after stop() must not open a fresh link (the courier is stopped).
-        if (!running.get()) return;
+    public void onEndpointFound(String endpointId, String foundServiceId, long generation) {
+        // A queued callback after stop()/restart must not open a fresh link: the courier is stopped
+        // (running=false) OR this is a stale callback from a SUPERSEDED start (#E).
+        if (!running.get() || generation != startGeneration) return;
         // Request a connection only to a courier advertising OUR service id.
         if (serviceId.equals(foundServiceId)) {
             nearby.requestConnection(localName, endpointId);
@@ -86,26 +87,36 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     }
 
     @Override
-    public void onConnectionInitiated(String endpointId) {
-        // A queued initiation after stop() must not be accepted (no later stop would tear it down).
-        if (!running.get()) return;
+    public void onConnectionInitiated(String endpointId, long generation) {
+        // A queued/stale initiation must not be accepted (the courier is stopped, or a newer start
+        // has superseded this one — no later stop would tear the link down) (#E).
+        if (!running.get() || generation != startGeneration) return;
         // The courier moves PUBLIC bytes; content trust is enforced by validate() on the TS
         // side, so we accept the link and gate WHAT is offered above (WS-R.15.4e).
         nearby.acceptConnection(endpointId);
     }
 
     @Override
-    public void onConnectionResult(String endpointId, boolean connected) {
+    public void onConnectionResult(String endpointId, boolean connected, long generation) {
+        // Drop a stale result from a SUPERSEDED start — else a connection that succeeded in the
+        // PREVIOUS run drives an exchange under the fresh controller (#E).
+        if (generation != startGeneration) return;
         events.onConnectionResult(endpointId, connected);
     }
 
     @Override
-    public void onDisconnected(String endpointId) {
+    public void onDisconnected(String endpointId, long generation) {
+        // A stale disconnect from a superseded start would spuriously signal a drop to the fresh
+        // controller — drop it (#E).
+        if (generation != startGeneration) return;
         events.onDisconnected(endpointId);
     }
 
     @Override
-    public void onPayloadReceived(String endpointId, byte[] bytes) {
+    public void onPayloadReceived(String endpointId, byte[] bytes, long generation) {
+        // Drop a stale payload from a superseded start — a payload from the PREVIOUS run must not be
+        // ingested/responded to under the fresh controller (#E).
+        if (generation != startGeneration) return;
         events.onPayload(endpointId, bytes);
     }
 

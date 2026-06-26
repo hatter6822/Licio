@@ -24,6 +24,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
+import android.bluetooth.BluetoothGattServerCallback;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
@@ -435,6 +436,40 @@ public class BluetoothCourierRadioTest {
     }
 
     @Test
+    public void aStaleServerDisconnectFromASupersededGattServerIsDropped() {
+        // The peripheral GATT server is stopped + restarted and the SAME central reconnects; a
+        // DELAYED STATE_DISCONNECTED from the OLD server must be dropped (its callback generation is
+        // superseded) so it does not evict the freshly reconnected central / emit a spurious
+        // disconnect under the new controller (#C).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothDevice device = peerDevice();
+
+        radio.startAdvertising();
+        BluetoothGattServerCallback oldCb = radio.gattServerCallback;
+        oldCb.onConnectionStateChange(
+                device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+
+        radio.stop();
+        radio.startAdvertising(); // a FRESH server + callback (generation bumped past oldCb's)
+        radio.gattServerCallback.onConnectionStateChange(
+                device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED); // same central
+        rec.disconnectedEndpoint = null; // ignore anything before the stale event
+
+        // The OLD server's delayed disconnect fires on its (superseded) callback — must be dropped.
+        oldCb.onConnectionStateChange(
+                device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED);
+        assertNull("a stale server disconnect from a superseded server is dropped",
+                rec.disconnectedEndpoint);
+
+        // The CURRENT callback's disconnect IS delivered (the fresh central is still tracked).
+        radio.gattServerCallback.onConnectionStateChange(
+                device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED);
+        assertEquals(PEER, rec.disconnectedEndpoint);
+        radio.stop();
+    }
+
+    @Test
     public void aQueuedPeripheralCccWriteAfterStopDoesNotAnnounceAFreshLink() {
         // A GATT-server callback can arrive AFTER stopBle() closed the server + cleared the maps.
         // The peripheral path must gate on `running` like the client path does — else a late
@@ -580,6 +615,7 @@ public class BluetoothCourierRadioTest {
         Recorder rec = new Recorder();
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
         BluetoothDevice device = peerDevice();
+        radio.startAdvertising(); // opens the GATT server → creates the (generation-bound) callback
         radio.gattServerCallback.onConnectionStateChange(
                 device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
 

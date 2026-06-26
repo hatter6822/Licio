@@ -11,22 +11,26 @@ package app.licio.courier;
 
 public interface NearbyConnections {
 
-    /** The Nearby events the radio reacts to (the impl translates GMS callbacks into these). */
+    /** The Nearby events the radio reacts to (the impl translates GMS callbacks into these).
+     *  Every callback carries the {@code generation} of the start it belongs to (the impl records
+     *  it per endpoint at initiation), so the radio can DROP a stale lifecycle callback from a
+     *  SUPERSEDED start — a connection/payload/disconnect from a previous run delivered after a
+     *  Stop→Start must not drive/respond to an exchange under the fresh controller (#E). */
     interface Listener {
         /** A peer advertising on a service id was discovered. */
-        void onEndpointFound(String endpointId, String serviceId);
+        void onEndpointFound(String endpointId, String serviceId, long generation);
 
         /** A connection was initiated (the radio decides whether to accept). */
-        void onConnectionInitiated(String endpointId);
+        void onConnectionInitiated(String endpointId, long generation);
 
         /** A connection attempt resolved (connected or not). */
-        void onConnectionResult(String endpointId, boolean connected);
+        void onConnectionResult(String endpointId, boolean connected, long generation);
 
         /** A connected endpoint dropped. */
-        void onDisconnected(String endpointId);
+        void onDisconnected(String endpointId, long generation);
 
         /** A BYTES payload arrived (null/non-BYTES payloads are filtered by the impl). */
-        void onPayloadReceived(String endpointId, byte[] bytes);
+        void onPayloadReceived(String endpointId, byte[] bytes, long generation);
 
         /** A start request ({@code "advertise"}/{@code "discover"}) FAILED — GMS delivers this
          *  asynchronously via the start Task, so it must be surfaced (not dropped) or the caller

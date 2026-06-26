@@ -132,11 +132,49 @@ public class WifiDirectRadioJvmTest {
         info.isGroupOwner = false; // the CLIENT dials the owner — an observable single dial
         info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
 
-        radio.onConnectionInfo(info);
-        radio.onConnectionInfo(info); // duplicate for the SAME group — must NOT dial again
+        radio.onConnectionInfo(radio.startGeneration, info);
+        radio.onConnectionInfo(radio.startGeneration, info); // duplicate for the SAME group — must NOT dial again
         assertTrue("the one client dial reported a result", firstResult.await(5, TimeUnit.SECONDS));
         Thread.sleep(300); // give a (wrongly) second dial time to also fail, were the guard broken
         assertEquals("one formed group ⇒ exactly one client dial", 1, results.get());
+        radio.stop();
+    }
+
+    @Test
+    public void aStaleConnectionInfoFromASupersededGroupIsDropped() throws Exception {
+        // A requestConnectionInfo result issued under a PREVIOUS start, delivered after a Stop→Start,
+        // must be dropped — else it claims the group + dials a socket for the OLD group under the new
+        // controller (#A).
+        AtomicInteger results = new AtomicInteger();
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new CourierRadio.Events() {
+            @Override
+            public void onConnectionResult(String endpointId, boolean connected) {
+                results.incrementAndGet();
+            }
+
+            @Override
+            public void onPayload(String endpointId, byte[] bytes) {}
+
+            @Override
+            public void onDisconnected(String endpointId) {}
+        });
+        radio.startDiscovery();
+        long staleGen = radio.startGeneration; // the first start's generation
+        radio.stop();
+        radio.startDiscovery(); // a fresh start — startGeneration bumped PAST staleGen
+
+        WifiP2pInfo info = new WifiP2pInfo();
+        info.groupFormed = true;
+        info.isGroupOwner = false; // the client dial is the observable action
+        info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
+
+        radio.onConnectionInfo(staleGen, info); // the OLD group's result — must be dropped
+        Thread.sleep(300); // give a (wrongly) dial time to fire if the guard were broken
+        assertEquals("a stale superseded connection info is dropped (no dial)", 0, results.get());
+
+        // A result for the CURRENT generation IS acted on (dials → one result).
+        radio.onConnectionInfo(radio.startGeneration, info);
+        waitForCount(results, 1);
         radio.stop();
     }
 
@@ -163,9 +201,9 @@ public class WifiDirectRadioJvmTest {
         info.isGroupOwner = false;
         info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
 
-        radio.onConnectionInfo(info);
+        radio.onConnectionInfo(radio.startGeneration, info);
         waitForCount(results, 1); // the first dial failed (refused) → claim released
-        radio.onConnectionInfo(info); // RETRY for the same formed group — must dial again
+        radio.onConnectionInfo(radio.startGeneration, info); // RETRY for the same formed group — must dial again
         waitForCount(results, 2);
         radio.stop();
     }
@@ -218,11 +256,11 @@ public class WifiDirectRadioJvmTest {
         // after stop()) does not abort this LIVE session.
         radio.startDiscovery();
         try {
-            radio.onConnectionInfo(info);  // first dial: connects, then the owner closes → EOF
+            radio.onConnectionInfo(radio.startGeneration, info);  // first dial: connects, then the owner closes → EOF
             waitForCount(connects, 1);
             waitForCount(disconnects, 1); // the session ended (onDisconnected emitted)
             Thread.sleep(200);            // let connectClientSocket's finally release the claim
-            radio.onConnectionInfo(info);  // redial for the SAME still-formed group must be ALLOWED
+            radio.onConnectionInfo(radio.startGeneration, info);  // redial for the SAME still-formed group must be ALLOWED
             waitForCount(connects, 2);     // hangs here if the claim were not released
             assertEquals("exactly the two dials we triggered", 2, connects.get());
         } finally {
@@ -261,9 +299,9 @@ public class WifiDirectRadioJvmTest {
         owner.isGroupOwner = true; // this device is the group owner → it binds the server socket
 
         try {
-            radio.onConnectionInfo(owner);   // claim → startServerSocket → bind fails → release + fail
+            radio.onConnectionInfo(radio.startGeneration, owner);   // claim → startServerSocket → bind fails → release + fail
             waitForCount(bindFailures, 1);
-            radio.onConnectionInfo(owner);   // re-claim is possible ONLY if the first failure released it
+            radio.onConnectionInfo(radio.startGeneration, owner);   // re-claim is possible ONLY if the first failure released it
             waitForCount(bindFailures, 2);
             assertEquals("each owner callback bind-failed (claim released between)", 2, bindFailures.get());
         } finally {
@@ -297,7 +335,7 @@ public class WifiDirectRadioJvmTest {
         info.groupFormed = true;
         info.isGroupOwner = false; // would otherwise dial the owner
         info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
-        radio.onConnectionInfo(info); // a late callback after stop — must be ignored
+        radio.onConnectionInfo(radio.startGeneration, info); // a late callback after stop — must be ignored
         Thread.sleep(300);            // give a (wrongly) issued dial time to fail, were the guard gone
         assertEquals("no dial after stop", 0, results.get());
     }

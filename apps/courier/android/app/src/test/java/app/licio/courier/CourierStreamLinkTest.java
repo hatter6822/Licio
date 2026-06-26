@@ -97,9 +97,11 @@ public class CourierStreamLinkTest {
     }
 
     @Test
-    public void anAlreadyDeadLinkAnnouncesConnectThenDisconnectsWithoutReading() throws Exception {
-        // alive=false up front: the read loop does no read; the link still announces connect then
-        // immediately disconnects + closes (the lifecycle is symmetric).
+    public void anAlreadyDeadLinkIsClosedWithoutAnnouncing() throws Exception {
+        // Stop won the race BEFORE run() announced (alive=false at entry): the link must NOT announce
+        // a connection — a stale connectionResult(true) could drive an exchange over a dead stream
+        // once a quick restart re-registers the JS listeners — it just closes + bails, no outbound
+        // entry, no events (#B).
         Recorder rec = new Recorder(1);
         PipedInputStream in = new PipedInputStream();
         new PipedOutputStream(in); // keep the pipe valid (never written)
@@ -109,10 +111,10 @@ public class CourierStreamLinkTest {
 
         CourierStreamLink.run(in, out, () -> closed.set(true), "ep", outbound, rec, () -> false);
 
-        assertTrue(rec.connected.await(1, TimeUnit.SECONDS));
-        assertTrue("disconnect still announced", rec.disconnected.await(1, TimeUnit.SECONDS));
-        assertTrue("connection closed", closed.get());
-        assertFalse(outbound.containsKey("ep"));
+        assertTrue("the dead stream is closed", closed.get());
+        assertFalse("no outbound entry registered for a dead link", outbound.containsKey("ep"));
+        assertEquals("no connect announced for a dead link", 1, rec.connected.getCount());
+        assertEquals("no disconnect announced for a dead link", 1, rec.disconnected.getCount());
     }
 
     @Test

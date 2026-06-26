@@ -40,6 +40,13 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     private final ConnectionsClient client;
     private Listener listener;
+    // The generation of the latest start (#E), so a connection initiated under it can be tagged.
+    private volatile long currentGeneration = 0;
+    // endpoint id → the generation under which its connection was INITIATED, so every later
+    // lifecycle callback (result/payload/disconnect) carries that generation and the radio can drop
+    // a stale one from a superseded start.  Populated at initiation, removed on disconnect/failure.
+    private final java.util.Map<String, Long> endpointGeneration =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public GmsNearbyConnections(Context ctx) {
         this.client = Nearby.getConnectionsClient(ctx);
@@ -57,6 +64,7 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     @Override
     public void startAdvertising(String localName, String serviceId, long generation) {
+        currentGeneration = generation; // tag connections initiated under this start (#E)
         // The start Task fails when GMS refuses (missing runtime permission, disabled Nearby/Play
         // Services, radio off) — surface that instead of dropping it, so the caller is not told a
         // start succeeded when no advertising is actually running.  Echo the generation so the radio
@@ -70,6 +78,7 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     @Override
     public void startDiscovery(String serviceId, long generation) {
+        currentGeneration = generation; // tag connections initiated under this start (#E)
         client.startDiscovery(serviceId, discovery,
                         new DiscoveryOptions.Builder().setStrategy(STRATEGY).build())
                 .addOnFailureListener(e -> {
@@ -86,7 +95,7 @@ public class GmsNearbyConnections implements NearbyConnections {
         // is free to dial again on the next endpoint-found.
         client.requestConnection(localName, endpointId, lifecycle)
                 .addOnFailureListener(e -> {
-                    if (listener != null) listener.onConnectionResult(endpointId, false);
+                    if (listener != null) listener.onConnectionResult(endpointId, false, currentGeneration);
                 });
     }
 
@@ -119,27 +128,33 @@ public class GmsNearbyConnections implements NearbyConnections {
     private final ConnectionLifecycleCallback lifecycle = new ConnectionLifecycleCallback() {
         @Override
         public void onConnectionInitiated(@NonNull String endpointId, @NonNull ConnectionInfo info) {
-            if (listener != null) listener.onConnectionInitiated(endpointId);
+            // Record the generation this connection is born under; every later callback for it
+            // carries that generation so the radio can drop one from a superseded start (#E).
+            endpointGeneration.put(endpointId, currentGeneration);
+            if (listener != null) listener.onConnectionInitiated(endpointId, currentGeneration);
         }
 
         @Override
         public void onConnectionResult(@NonNull String endpointId, @NonNull ConnectionResolution resolution) {
-            if (listener != null) {
-                listener.onConnectionResult(endpointId,
-                        resolution.getStatus().getStatusCode() == ConnectionsStatusCodes.STATUS_OK);
-            }
+            long generation = endpointGeneration.getOrDefault(endpointId, currentGeneration);
+            boolean ok = resolution.getStatus().getStatusCode() == ConnectionsStatusCodes.STATUS_OK;
+            if (!ok) endpointGeneration.remove(endpointId); // failed connection — stop tracking it
+            if (listener != null) listener.onConnectionResult(endpointId, ok, generation);
         }
 
         @Override
         public void onDisconnected(@NonNull String endpointId) {
-            if (listener != null) listener.onDisconnected(endpointId);
+            Long generation = endpointGeneration.remove(endpointId);
+            if (listener != null) {
+                listener.onDisconnected(endpointId, generation != null ? generation : currentGeneration);
+            }
         }
     };
 
     private final EndpointDiscoveryCallback discovery = new EndpointDiscoveryCallback() {
         @Override
         public void onEndpointFound(@NonNull String endpointId, @NonNull DiscoveredEndpointInfo info) {
-            if (listener != null) listener.onEndpointFound(endpointId, info.getServiceId());
+            if (listener != null) listener.onEndpointFound(endpointId, info.getServiceId(), currentGeneration);
         }
 
         @Override
@@ -162,7 +177,9 @@ public class GmsNearbyConnections implements NearbyConnections {
             }
             byte[] bytes = payload.asBytes();
             if (bytes != null && listener != null) {
-                listener.onPayloadReceived(endpointId, bytes); // a small BYTES payload carries frames too
+                // a small BYTES payload carries frames too — tag with the connection's generation (#E)
+                listener.onPayloadReceived(endpointId, bytes,
+                        endpointGeneration.getOrDefault(endpointId, currentGeneration));
             }
         }
 
@@ -177,7 +194,10 @@ public class GmsNearbyConnections implements NearbyConnections {
             if (stream == null || listener == null) return;
             try (InputStream in = stream.asInputStream()) {
                 byte[] bytes = readStreamBounded(in);
-                if (bytes != null) listener.onPayloadReceived(endpointId, bytes);
+                if (bytes != null) {
+                    listener.onPayloadReceived(endpointId, bytes,
+                            endpointGeneration.getOrDefault(endpointId, currentGeneration));
+                }
             } catch (IOException e) {
                 // a truncated / failed stream — drop it; the exchange re-syncs on a later pass
             }

@@ -177,8 +177,9 @@ public class WifiDirectRadio implements CourierRadio {
                 public void onSuccess() {
                     if (isStale(generation)) return;
                     // The group forms asynchronously; pull connection info so an already-formed group
-                    // still drives onConnectionInfo → the group-owner server socket.
-                    manager.requestConnectionInfo(channel, WifiDirectRadio.this::onConnectionInfo);
+                    // still drives onConnectionInfo → the group-owner server socket.  Tag the result
+                    // with this start's generation so a Stale callback after a restart is dropped (#A).
+                    manager.requestConnectionInfo(channel, info -> onConnectionInfo(generation, info));
                 }
 
                 @Override
@@ -188,7 +189,7 @@ public class WifiDirectRadio implements CourierRadio {
                     // BUSY means a group already exists — drive setup from it rather than failing;
                     // any other reason is a real advertise failure to surface.
                     if (reason == WifiP2pManager.BUSY) {
-                        manager.requestConnectionInfo(channel, WifiDirectRadio.this::onConnectionInfo);
+                        manager.requestConnectionInfo(channel, info -> onConnectionInfo(generation, info));
                     } else {
                         events.onStartFailed("advertise",
                                 new IllegalStateException("wifi_p2p_create_group_failed_" + reason));
@@ -287,7 +288,7 @@ public class WifiDirectRadio implements CourierRadio {
                                 // broadcast) still drives onConnectionInfo → the socket setup (which
                                 // clears connectPending once the connection state resolves).
                                 manager.requestConnectionInfo(
-                                        channel, WifiDirectRadio.this::onConnectionInfo);
+                                        channel, info -> onConnectionInfo(connectGen, info));
                             }
 
                             @Override
@@ -304,7 +305,10 @@ public class WifiDirectRadio implements CourierRadio {
                         });
                     });
                 } else if (WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION.equals(action)) {
-                    manager.requestConnectionInfo(channel, WifiDirectRadio.this::onConnectionInfo);
+                    // Capture the CURRENT generation at broadcast time; if a Stop→Start runs before
+                    // this result returns, onConnectionInfo drops it as stale (#A).
+                    final long infoGen = startGeneration;
+                    manager.requestConnectionInfo(channel, info -> onConnectionInfo(infoGen, info));
                 }
             }
         };
@@ -326,11 +330,15 @@ public class WifiDirectRadio implements CourierRadio {
      *  socket data path both branches dispatch to is unit-tested via `CourierStreamLink` (pipes);
      *  this thin role decision + the bind/accept/connect socket setup are exercised on real radios
      *  (a unit test would have to bind the fixed `DATA_PORT`, which the no-fixed-port policy avoids). */
-    void onConnectionInfo(WifiP2pInfo info) {
+    void onConnectionInfo(long generation, WifiP2pInfo info) {
         // A queued requestConnectionInfo callback delivered AFTER stop() must not claim groupActive
         // or start any socket setup — stop() already cleared the claims, and a late claim here would
         // block the next start until Android reports the group dissolved.
         if (!running.get()) return;
+        // A result from a SUPERSEDED group (the requestConnectionInfo was issued under a previous
+        // start, then a Stop→Start ran before this callback) must be dropped — else it could claim
+        // groupActive + open a server/client socket for the OLD group under the new controller (#A).
+        if (isStale(generation)) return;
         if (info == null || !info.groupFormed) {
             // Release the per-group claim, AND clear the connect claim ONLY if a group had actually
             // formed (this is a dissolve).  An EARLY post-connect snapshot (groupFormed not yet true,

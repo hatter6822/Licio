@@ -93,6 +93,18 @@ final class CourierStreamLink {
             Map<String, DataOutputStream> outbound, CourierRadio.Events events,
             BooleanSupplier alive) {
         DataOutputStream dos = new DataOutputStream(out);
+        // If Stop already won the race (the socket was handed to run() AFTER the courier went down),
+        // do NOT announce the link — a stale connectionResult(true) could drive an exchange over a
+        // closed/old stream once a quick restart re-registers the JS listeners (#B).  Close + bail
+        // (no outbound entry, no event) so the dead stream is reaped.
+        if (!alive.getAsBoolean()) {
+            try {
+                conn.close();
+            } catch (IOException ignored) {
+                // already closed
+            }
+            return;
+        }
         outbound.put(endpointId, dos);
         events.onConnectionResult(endpointId, true);
         try {
