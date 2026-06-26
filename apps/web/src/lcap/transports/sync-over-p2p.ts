@@ -95,6 +95,10 @@ export async function syncRoomOverP2p(
     // Public content: derive the shared signaling key from the public room hash so any public
     // peer can join the rendezvous (signaling secrecy is not the trust root here).
     const signalKeyBytes = await derivePublicSignalKeyBytes(params.roomIdHash);
+    // Cancel / unmount may have fired WHILE buildClientExchangeRequest + the signal-key derivation
+    // awaited; `connectWebrtc` only ATTACHES an abort listener, so an already-fired abort would not
+    // be observed before the initiator POSTs its sealed offer — bail before any signaling (#V).
+    if (params.signal?.aborted) return null;
     channel = await connectLcapWebrtcChannel({
       signalKeyBytes,
       roomIdHash: params.roomIdHash,

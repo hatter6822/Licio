@@ -95,6 +95,10 @@ export async function runWebrtcBidirectionalExchange(
   };
 
   params.channel.onmessage = (event): void => {
+    // A cancel / timeout that already settled this exchange must do NO further inbound work — else a
+    // message completing just before settle would still commit the peer's response/push into
+    // IndexedDB after the UI owner is gone (#W).
+    if (settled || aborted()) return;
     const data = toBytes(event.data);
     if (!data) return;
     let complete: Uint8Array | null;
@@ -105,6 +109,7 @@ export async function runWebrtcBidirectionalExchange(
     }
     if (!complete) return; // mid-message
     void handleInboundExchangeMessage(params.db, complete, params.scope).then((out) => {
+      if (settled || aborted()) return; // settled WHILE ingesting — don't reply / count the result
       if (out.wasRequest) {
         served = true;
         if (out.reply) sendMessage(out.reply); // serve the peer

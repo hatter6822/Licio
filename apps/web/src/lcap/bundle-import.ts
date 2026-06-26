@@ -208,7 +208,7 @@ export async function commitImportedBundle(
   pack: ParsedPack,
   importResult: ImportResult,
   nowMs: number = Date.now(),
-  opts: { readonly roomAllowlist?: ReadonlySet<string> } = {},
+  opts: { readonly roomAllowlist?: ReadonlySet<string>; readonly publicOnly?: boolean } = {},
 ): Promise<CommitCounts> {
   const entryByCid = new Map(pack.entries.map((entry) => [entry.cid, entry]));
   // A room-scoped ingest (a "Sync this room" response) commits ONLY records in the allowlisted
@@ -224,6 +224,20 @@ export async function commitImportedBundle(
     const room = roomOf(cid);
     return room !== undefined && allow.has(room);
   };
+  // On the PUBLIC plane ingress (courier / WebRTC), commit ONLY records whose SIGNED body decodes to
+  // PUBLIC visibility — `readBundleForImport` only refuses `contains_private_encrypted`, so an
+  // `in_room`/`private` record (or one under a misleading public header) would otherwise land in the
+  // public `lcap_v2` store (#P).  Decoded from the bytes, never the pack header/metadata.
+  const decode = opts.publicOnly ? (await import('@licio/lcap')).decodeAndRouteRecord : undefined;
+  const isPublicBody = (body: Uint8Array): boolean => {
+    if (!decode) return true;
+    try {
+      const r = decode(body);
+      return !('visibility_scope' in r) || r.visibility_scope === 'public';
+    } catch {
+      return false; // undecodable on a public ingress → never commit
+    }
+  };
 
   const recordRows: RecordRow[] = [];
   const proofRows: ProofRow[] = [];
@@ -236,6 +250,7 @@ export async function commitImportedBundle(
     const entry = entryByCid.get(cid);
     if (frame.frameKind === 'record_body') {
       if (!inScope(cid)) continue; // out-of-scope room — never committed under a room-scoped ingest
+      if (!isPublicBody(frame.payload)) continue; // non-public record on a public ingress (#P)
       // Store the room key as the LOSSLESS canonical hex of the room_id_hash bytes (not a lossy
       // TextDecoder), so it compares equal to the room frontier + the "Sync this room" UI hash.
       const roomHash = entry?.room_id_hash !== undefined ? bytesToHex(entry.room_id_hash) : '';
@@ -279,6 +294,8 @@ export async function commitImportedBundle(
   for (const status of importResult.statuses) {
     if (status.status === 'quarantined_missing_dependency') {
       if (!inScope(status.cid)) continue; // out-of-scope room — do not quarantine / advertise its gaps
+      const qBody = pack.frames.get(status.cid)?.payload;
+      if (qBody !== undefined && !isPublicBody(qBody)) continue; // non-public on a public ingress (#P)
       const missingCids = quarantineMissing(status);
       for (const dep of missingCids) missing.add(dep);
       const qEntry = entryByCid.get(status.cid);

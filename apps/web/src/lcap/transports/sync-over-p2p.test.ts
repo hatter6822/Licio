@@ -195,6 +195,7 @@ async function putPublicRecordWithBlock(db: IDBDatabase, blockCid: string): Prom
     revocation_epoch_claim: 0,
     client_nonce: new Uint8Array([1]),
     priority: 2,
+    body_block_cid: blockCid, // referenced in the SIGNED body so the share closure derives it (#O)
   });
   const recordCid = await lcap.cidFor('record', body);
   const tx = db.transaction(LCAP_STORE.records, 'readwrite');
@@ -360,5 +361,30 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     expect(result).toBeNull();
     // The cancelled sync uploaded NOTHING to the server (the anchor fetch was never reached).
     expect(urls.some((u) => u.includes('/exchange'))).toBe(false);
+  });
+
+  it('does NOT start WebRTC signaling when the signal is already aborted (#V)', async () => {
+    // Cancel / unmount can fire WHILE buildClientExchangeRequest + the signal-key derivation await;
+    // execution must NOT reach the WebRTC connect (which would POST a sealed offer) with an
+    // already-aborted signal.
+    const controller = new AbortController();
+    controller.abort();
+    let rtcCreated = false;
+    const result = await syncRoomOverP2p({
+      db: initiatorDb,
+      roomIdHash: ROOM,
+      selfPeerKey: 'alice',
+      remotePeerKey: 'bob',
+      initiator: true,
+      privacy: { mode: 'standard', userEnabled: true }, // WebRTC ENABLED — only the abort stops it
+      rtcFactory: () => {
+        rtcCreated = true;
+        return new FakePeer(new FakeLink(), 'initiator');
+      },
+      signal: controller.signal,
+      timeoutMs: 50,
+    });
+    expect(result).toBeNull();
+    expect(rtcCreated).toBe(false); // WebRTC signaling never started for an already-cancelled sync
   });
 });

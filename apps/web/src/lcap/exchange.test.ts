@@ -87,6 +87,9 @@ async function putPublicRecord(
     revocation_epoch_claim: 0,
     client_nonce: new Uint8Array([1, 2, 3, seq & 0xff]),
     priority,
+    // The record's content block in the SIGNED body — so the share closure derives it from the body
+    // (#O), not from unauthenticated row.deps metadata.  Tests pass the block as the single dep.
+    ...(opts.deps?.[0] !== undefined ? { body_block_cid: opts.deps[0] } : {}),
   });
   const recordCid = await lcap.cidFor('record', body);
   const tx = db.transaction(LCAP_STORE.records, 'readwrite');
@@ -300,6 +303,73 @@ describe('client §16 exchange engine', () => {
     expect(counts?.records).toBe(1); // only roomB's record committed
     expect(await getHeldObject(peerA, capB)).toBeDefined();
     expect(await getHeldObject(peerA, capA)).toBeUndefined(); // roomA dropped past the scope
+  });
+
+  it('SECURITY: a block listed only in row.deps metadata (not the signed body) is NOT shared (#O)', async () => {
+    const lcap = await import('@licio/lcap');
+    // A held block (e.g. another record's in-room media) that a crafted public record tries to ride.
+    const secret = new Uint8Array([4, 2]);
+    const secretBlockCid = await cidFor('block', secret);
+    await putBlock(
+      peerB,
+      { blockCid: secretBlockCid, state: 'integrity_verified', size: secret.length },
+      [secret],
+    );
+    // A PUBLIC record whose SIGNED body does NOT reference the block; only its row.deps metadata does.
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-1',
+      visibility_scope: 'public',
+      author_account_id: 'acct',
+      author_device_id: 'dev',
+      author_device_key_id: 'key',
+      device_seq: 99,
+      capability_cid: await lcap.cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([9, 9]),
+      priority: 2,
+    });
+    const recordCid = await lcap.cidFor('record', body);
+    const tx = peerB.transaction(LCAP_STORE.records, 'readwrite');
+    tx.objectStore(LCAP_STORE.records).put({
+      recordCid,
+      body,
+      kind: 'contribution_event',
+      lane: 'C0',
+      priority: 2,
+      roomHash: '',
+      state: 'integrity_verified',
+      size: body.length,
+      deps: [secretBlockCid], // unauthenticated metadata lists the block the body never references
+    });
+    await new Promise<void>((res, rej) => {
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+    // A peer wants the secret block; the responder must NOT serve it (the body never references it).
+    await quarantineMissing(peerA, 'parent', [secretBlockCid]);
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const response = await respondToClientExchange(peerB, request);
+    expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
+  });
+
+  it('SECURITY: a non-public record is NOT committed on the public ingress (#P)', async () => {
+    const lcap = await import('@licio/lcap');
+    const inRoomCid = await putCapabilityRecord(peerB, lcap, 'in_room', 'aaaaaaaa');
+    const publicCid = await putCapabilityRecord(peerB, lcap, 'public', 'bbbbbbbb');
+    // A pack carrying BOTH (as a hostile peer would), then the PUBLIC ingress commits only public.
+    const pack = await lcap.repackHeldObjects(
+      (cid) => getHeldObject(peerB, cid),
+      [inRoomCid, publicCid],
+      1_000_000,
+    );
+    const counts = await ingestPackIntoStore(peerA, pack.pack as Uint8Array);
+    expect(counts?.records).toBe(1); // only the public record committed
+    expect(await getHeldObject(peerA, publicCid)).toBeDefined();
+    expect(await getHeldObject(peerA, inRoomCid)).toBeUndefined(); // the in_room record dropped (#P)
   });
 
   it('serves nothing (empty response) when the peer holds none of the wants', async () => {

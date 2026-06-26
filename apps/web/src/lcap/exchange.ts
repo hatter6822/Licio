@@ -103,10 +103,27 @@ async function collectShareableCids(
   for (const row of rows) {
     add(row.recordCid);
     for (const proofCid of await proofCidsForRecord(db, row.recordCid)) add(proofCid);
-    for (const dep of row.deps ?? []) {
-      // Only HELD BLOCK deps (the public record's OWN bytes); a record dep is shared only on its
-      // own merit (via enumeration), so an in-room parent can never ride a public record.
-      if (await readBlockDescriptor(db, dep)) add(dep);
+    // Re-derive the shareable BLOCK deps from the record's SIGNED body — NOT `row.deps`, which is
+    // unauthenticated pack-table metadata a crafted public record could use to list an unrelated
+    // held in-room / media block CID and exfiltrate it onto the public plane (#O).  Only the body's
+    // OWN block CIDs (body / attachment / source-snapshot) are eligible, and the readBlockDescriptor
+    // gate keeps it to HELD blocks; a record dep (parent / capability) is never pulled in here.
+    let decoded: ReturnType<typeof lcap.decodeAndRouteRecord>;
+    try {
+      decoded = lcap.decodeAndRouteRecord(row.body);
+    } catch {
+      continue; // undecodable — share nothing further for it
+    }
+    if (decoded.kind === 'contribution_event') {
+      const bodyBlockDeps: ReadonlyArray<string | undefined> = [
+        decoded.body_block_cid,
+        decoded.attachment_manifest_cid,
+        ...(decoded.source_snapshot_cids ?? []),
+        decoded.target_source_snapshot_cid,
+      ];
+      for (const dep of bodyBlockDeps) {
+        if (dep !== undefined && (await readBlockDescriptor(db, dep))) add(dep);
+      }
     }
   }
   return out;
@@ -159,13 +176,12 @@ export async function ingestPackIntoStore(
     (scope?.roomHashAllowlist?.length ?? 0) > 0
       ? new Set((scope as ExchangeScope).roomHashAllowlist?.map(normalizeRoomKey))
       : undefined;
-  return commitImportedBundle(
-    db,
-    read.pack,
-    imported,
-    Date.now(),
-    roomAllowlist !== undefined ? { roomAllowlist } : {},
-  );
+  // This is the PUBLIC plane ingress (courier / WebRTC / anchor) — commit ONLY public records, so a
+  // peer cannot push in_room/private records (or a misleading public-header pack) into lcap_v2 (#P).
+  return commitImportedBundle(db, read.pack, imported, Date.now(), {
+    publicOnly: true,
+    ...(roomAllowlist !== undefined ? { roomAllowlist } : {}),
+  });
 }
 
 /** The CIDs we are MISSING (quarantined prerequisites), as §16 `want`s — so a peer can serve our

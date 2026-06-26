@@ -10,6 +10,7 @@ import { cidFor } from '@licio/lcap';
 import type { DataChannelLike } from '@licio/lcap-p2p';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LCAP_DB_VERSION, LCAP_MIGRATIONS, LCAP_STORE, openLcapDb } from '../db.js';
+import { buildClientExchangeRequest, respondToClientExchange } from '../exchange.js';
 import { putBlock, readBlockBytes } from '../store.js';
 import { runWebrtcBidirectionalExchange } from './webrtc-sync.js';
 
@@ -65,6 +66,7 @@ async function putPublicRecordWithBlock(db: IDBDatabase, blockCid: string): Prom
     revocation_epoch_claim: 0,
     client_nonce: new Uint8Array([1]),
     priority: 2,
+    body_block_cid: blockCid, // referenced in the SIGNED body so the share closure derives it (#O)
   });
   const recordCid = await lcap.cidFor('record', body);
   const tx = db.transaction(LCAP_STORE.records, 'readwrite');
@@ -121,6 +123,30 @@ describe('runWebrtcBidirectionalExchange', () => {
 
     expect(resultA.ingested?.blocks).toBe(1); // A ingested the served block
     expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes); // A now HOLDS it
+  });
+
+  it('does NOT commit a peer response delivered AFTER the exchange settled (#W)', async () => {
+    const bytes = new Uint8Array([3, 1, 4, 1, 5, 9]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecordWithBlock(peerB, blockCid);
+    await quarantineMissing(peerA, [blockCid]);
+    // What B would serve in response to A's request (a real served pack carrying the block).
+    const aReq = await buildClientExchangeRequest(peerA, 'relay');
+    const bResp = await respondToClientExchange(peerB, aReq);
+    expect(bResp).not.toBeNull();
+
+    // A's exchange settles with NO peer (timeout) — nothing ingested.
+    const channel = new FakeDuplex();
+    const result = await runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 100 });
+    expect(result.ingested).toBeNull();
+
+    // A late response arrives AFTER settle (delivered as fragments to the still-set onmessage); it
+    // must be dropped — committing it now would mutate local state after the UI owner is gone.
+    const { fragmentMessage } = await import('@licio/lcap-p2p'); // dynamic: keep the p2p chunk lazy
+    for (const frag of fragmentMessage(bResp as Uint8Array, 0)) channel.onmessage?.({ data: frag });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await readBlockBytes(peerA, blockCid)).toBeUndefined(); // never committed post-settle
   });
 
   it('resolves (no ingest) on timeout when the channel has no peer', async () => {

@@ -764,19 +764,30 @@ export class CourierController {
       return;
     }
     const medium = this.mediumFor(channel, plugin, endpointId);
-    // The courier transport over THIS endpoint (deadline-bounded so a non-responding peer
-    // cannot stall sync forever), then the always-correct HTTPS anchor.
-    const transports: LcapTransport[] = [
-      withLegTimeout(new CourierTransport(medium as CourierMedium), COURIER_LEG_TIMEOUT_MS),
-    ];
-    for (const t of buildServerTransports(this.config.httpsConfig ?? {})) transports.push(t);
 
     let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null =
       null;
     try {
-      // PUBLIC-ONLY: the courier seam (`carriesPrivate:false`) structurally refuses any
-      // non-public pack, so the public label here is the only one a courier ever carries.
-      result = await offlineExchange(transports, request, undefined, 'public');
+      // The courier leg over THIS endpoint FIRST (deadline-bounded so a non-responding peer cannot
+      // stall sync forever).  PUBLIC-ONLY: the courier seam (`carriesPrivate:false`) structurally
+      // refuses any non-public pack, so the public label is the only one a courier ever carries.
+      result = await offlineExchange(
+        [withLegTimeout(new CourierTransport(medium as CourierMedium), COURIER_LEG_TIMEOUT_MS)],
+        request,
+        undefined,
+        'public',
+      );
+      // Fall back to the always-correct HTTPS anchor ONLY if this courier is STILL live: a Stop /
+      // disclosure revocation / deselection / forced-off mode DURING the (possibly slow) courier leg
+      // must not then let the already-built request + push_pack reach the server (#X).
+      if (!result && this.started && this.isChannelActive(channel, generation)) {
+        result = await offlineExchange(
+          buildServerTransports(this.config.httpsConfig ?? {}),
+          request,
+          undefined,
+          'public',
+        );
+      }
     } catch {
       // Swallowed: the bytes already ferried are still charged in the finally below, and the
       // outcome is reported as exchange_failed after.
