@@ -21,6 +21,9 @@ import android.util.Base64;
 
 import androidx.annotation.NonNull;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
@@ -42,12 +45,23 @@ import com.getcapacitor.annotation.PermissionCallback;
             Manifest.permission.BLUETOOTH_ADVERTISE,
             Manifest.permission.BLUETOOTH_CONNECT,
             Manifest.permission.BLUETOOTH_SCAN
+        }),
+        // Pre-S (API 23–30) BLE SCANNING requires a runtime location grant (declared maxSdk 32 in
+        // the manifest); without it the scan returns empty/rejected instead of prompting the user.
+        @Permission(alias = "location", strings = {
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
         })
     }
 )
 public class BluetoothCourierPlugin extends Plugin {
 
     private BluetoothCourierRadio radio;
+    // Bumped on stop(): a permission prompt launched before a stop has a STALE generation, so its
+    // grant callback is dropped instead of starting a radio with no active controller (#14).
+    private int permissionGen = 0;
+    // The generation captured when the current permission prompt was launched.
+    private int promptGen = 0;
 
     @Override
     public void load() {
@@ -89,8 +103,10 @@ public class BluetoothCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startAdvertising(PluginCall call) {
-        if (needsBtPermission()) {
-            requestPermissionForAlias("bluetooth", call, "btPermissionCallback");
+        String[] needed = neededAliases(false);
+        if (needed.length > 0) {
+            promptGen = permissionGen; // capture the generation so a stop during the prompt is seen
+            requestPermissionForAliases(needed, call, "btPermissionCallback");
             return;
         }
         if (!radio.isAvailable()) {
@@ -103,8 +119,10 @@ public class BluetoothCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startDiscovery(PluginCall call) {
-        if (needsBtPermission()) {
-            requestPermissionForAlias("bluetooth", call, "btPermissionCallback");
+        String[] needed = neededAliases(true);
+        if (needed.length > 0) {
+            promptGen = permissionGen;
+            requestPermissionForAliases(needed, call, "btPermissionCallback");
             return;
         }
         if (!radio.isAvailable()) {
@@ -115,22 +133,37 @@ public class BluetoothCourierPlugin extends Plugin {
         call.resolve();
     }
 
-    /** Whether the API-31+ Bluetooth runtime permissions must be REQUESTED before starting.  On
-     *  pre-31 the legacy BLUETOOTH/BLUETOOTH_ADMIN are install-time (auto-granted), so no prompt. */
-    private boolean needsBtPermission() {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                && getPermissionState("bluetooth") != PermissionState.GRANTED;
+    /** The runtime-permission aliases REQUIRED at this API level that are not yet granted.  On
+     *  API 31+ that is the BLUETOOTH_ADVERTISE/CONNECT/SCAN set; on pre-31 the legacy
+     *  BLUETOOTH/BLUETOOTH_ADMIN are install-time (auto-granted), BUT BLE SCANNING (discovery)
+     *  additionally needs a runtime location grant — so advertising needs nothing while discovery
+     *  needs `location`.  Requested before starting so the user is prompted instead of the BLE scan
+     *  failing silently into an empty result. */
+    private String[] neededAliases(boolean forDiscovery) {
+        List<String> missing = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (getPermissionState("bluetooth") != PermissionState.GRANTED) missing.add("bluetooth");
+        } else if (forDiscovery && getPermissionState("location") != PermissionState.GRANTED) {
+            missing.add("location"); // pre-S BLE scan requires location
+        }
+        return missing.toArray(new String[0]);
     }
 
     /** After the runtime prompt, re-dispatch the original start (now permitted) or reject — so the
-     *  user is asked, instead of the radio failing silently into radio_unavailable. */
+     *  user is asked, instead of the radio failing silently.  A stop() during the prompt invalidates
+     *  the grant (a stale generation): the radio must NOT start with no active controller (#14). */
     @PermissionCallback
     private void btPermissionCallback(PluginCall call) {
-        if (getPermissionState("bluetooth") != PermissionState.GRANTED) {
+        if (promptGen != permissionGen) {
+            call.reject("bluetooth_courier_stopped"); // a stop() happened while the prompt was open
+            return;
+        }
+        boolean forDiscovery = "startDiscovery".equals(call.getMethodName());
+        if (neededAliases(forDiscovery).length > 0) {
             call.reject("bluetooth_permission_denied");
             return;
         }
-        if ("startDiscovery".equals(call.getMethodName())) {
+        if (forDiscovery) {
             startDiscovery(call);
         } else {
             startAdvertising(call);
@@ -139,6 +172,7 @@ public class BluetoothCourierPlugin extends Plugin {
 
     @PluginMethod
     public void stop(PluginCall call) {
+        permissionGen++; // invalidate any permission prompt opened before this stop (#14)
         radio.stop();
         call.resolve();
     }

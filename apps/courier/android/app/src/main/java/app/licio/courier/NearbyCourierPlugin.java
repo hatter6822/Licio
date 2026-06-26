@@ -54,6 +54,10 @@ import java.util.List;
 public class NearbyCourierPlugin extends Plugin {
 
     private NearbyCourierRadio radio;
+    // Bumped on stop(): a permission prompt opened before a stop has a STALE generation, so its
+    // grant callback is dropped instead of starting a radio with no active controller.
+    private int permissionGen = 0;
+    private int promptGen = 0;
 
     @Override
     public void load() {
@@ -97,6 +101,7 @@ public class NearbyCourierPlugin extends Plugin {
     public void startAdvertising(PluginCall call) {
         String[] needed = missingAliases();
         if (needed.length > 0) {
+            promptGen = permissionGen; // capture the generation so a stop during the prompt is seen
             requestPermissionForAliases(needed, call, "permissionCallback");
             return;
         }
@@ -109,6 +114,7 @@ public class NearbyCourierPlugin extends Plugin {
     public void startDiscovery(PluginCall call) {
         String[] needed = missingAliases();
         if (needed.length > 0) {
+            promptGen = permissionGen; // capture the generation so a stop during the prompt is seen
             requestPermissionForAliases(needed, call, "permissionCallback");
             return;
         }
@@ -135,6 +141,10 @@ public class NearbyCourierPlugin extends Plugin {
     /** After the runtime prompt, re-dispatch the original start (now permitted) or reject. */
     @PermissionCallback
     private void permissionCallback(PluginCall call) {
+        if (promptGen != permissionGen) {
+            call.reject("nearby_stopped"); // a stop() happened while the prompt was open
+            return;
+        }
         if (missingAliases().length > 0) {
             call.reject("nearby_permission_denied");
             return;
@@ -148,6 +158,7 @@ public class NearbyCourierPlugin extends Plugin {
 
     @PluginMethod
     public void stop(PluginCall call) {
+        permissionGen++; // invalidate any permission prompt opened before this stop
         radio.stop();
         call.resolve();
     }

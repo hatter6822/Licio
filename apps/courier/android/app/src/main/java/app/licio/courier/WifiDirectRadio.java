@@ -23,6 +23,8 @@ import android.content.IntentFilter;
 import android.net.wifi.p2p.WifiP2pConfig;
 import android.net.wifi.p2p.WifiP2pInfo;
 import android.net.wifi.p2p.WifiP2pManager;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -51,6 +53,12 @@ public class WifiDirectRadio implements CourierRadio {
     // formation does not issue a duplicate connect (which Android rejects BUSY, whose failure handler
     // would tear down the forming courier).  Cleared once the connection state resolves.
     private final AtomicBoolean connectPending = new AtomicBoolean(false);
+    // The controller calls startAdvertising() and/or startDiscovery() back-to-back; these record
+    // WHICH were requested so the radio can pick ONE coherent Wi-Fi mode (discoverPeers vs.
+    // createGroup) on the next loop tick (see scheduleMode).  Reset on stop().
+    private final AtomicBoolean advertiseRequested = new AtomicBoolean(false);
+    private final AtomicBoolean discoverRequested = new AtomicBoolean(false);
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private BroadcastReceiver receiver;
     // endpointId (the peer host) -> the connected data socket's output stream.
     private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
@@ -72,39 +80,83 @@ public class WifiDirectRadio implements CourierRadio {
         return manager != null && channel != null;
     }
 
-    /** Wi-Fi Direct has no separate advertise vs. discover — discovery makes the device both. */
     @Override
     public void startAdvertising() {
-        startDiscovery();
+        advertiseRequested.set(true);
+        beginIfNeeded();
     }
 
     @Override
-    @SuppressWarnings("MissingPermission") // declared per-API in the manifest; runtime-granted by the gate
     public void startDiscovery() {
-        if (manager == null || channel == null) return;
-        // Idempotent: the controller may call startAdvertising() AND startDiscovery(), and advertise
-        // delegates here — without this guard a second discoverPeers is issued, which Android can
-        // reject as busy, and the onStartFailed path would then tear down the discovery the first
-        // call already started.
-        if (running.getAndSet(true)) return;
-        registerReceiver();
-        // A discovery failure (async onFailure, or a framework throw — SecurityException /
-        // DeadObjectException / IllegalStateException — for missing permission, Wi-Fi Direct
-        // disabled, or framework state) means no discovery is running, so SURFACE it via
-        // onStartFailed rather than dropping it (else the caller believes the radio is running).
-        try {
-            manager.discoverPeers(channel, new WifiP2pManager.ActionListener() {
-                @Override
-                public void onSuccess() {}
+        discoverRequested.set(true);
+        beginIfNeeded();
+    }
 
-                @Override
-                public void onFailure(int reason) {
-                    events.onStartFailed("discover",
-                            new IllegalStateException("wifi_p2p_discover_failed_" + reason));
-                }
-            });
-        } catch (RuntimeException e) {
-            events.onStartFailed("discover", e);
+    /** Claim the radio on the FIRST of advertise/discover (synchronously, so onConnectionInfo —
+     *  which gates on `running` — fires), then COALESCE both calls into one Wi-Fi mode on the next
+     *  loop tick: by then the controller's back-to-back advertise+discover have both set their flag. */
+    private void beginIfNeeded() {
+        if (manager == null || channel == null) return;
+        if (running.getAndSet(true)) return; // already claimed by the first call
+        registerReceiver();
+        handler.post(this::scheduleMode);
+    }
+
+    /**
+     * Pick the Wi-Fi Direct mode for this start.  Wi-Fi Direct has no PASSIVE advertise:
+     * `discoverPeers()` ALSO scans, so advertising via discovery would violate a discovery-OFF
+     * privacy choice.  So: when DISCOVERY is requested (alone or with advertise), run discoverPeers
+     * (it both scans and makes the device discoverable); for advertise-ONLY, become a group OWNER
+     * via createGroup — discoverable to peers WITHOUT scanning, honoring the §22.5 discovery toggle.
+     */
+    @SuppressWarnings("MissingPermission") // declared per-API in the manifest; runtime-granted by the gate
+    private void scheduleMode() {
+        if (!running.get() || manager == null || channel == null) return; // stopped before the decision ran
+        if (discoverRequested.get()) {
+            // A discovery failure (async onFailure, or a framework throw — SecurityException /
+            // DeadObjectException / IllegalStateException) means no discovery is running, so SURFACE
+            // it via onStartFailed rather than dropping it (else the caller believes it is running).
+            try {
+                manager.discoverPeers(channel, new WifiP2pManager.ActionListener() {
+                    @Override
+                    public void onSuccess() {}
+
+                    @Override
+                    public void onFailure(int reason) {
+                        events.onStartFailed("discover",
+                                new IllegalStateException("wifi_p2p_discover_failed_" + reason));
+                    }
+                });
+            } catch (RuntimeException e) {
+                events.onStartFailed("discover", e);
+            }
+        } else if (advertiseRequested.get()) {
+            try {
+                manager.createGroup(channel, new WifiP2pManager.ActionListener() {
+                    @Override
+                    @SuppressWarnings("MissingPermission")
+                    public void onSuccess() {
+                        // The group forms asynchronously; pull connection info so an already-formed
+                        // group still drives onConnectionInfo → the group-owner server socket.
+                        manager.requestConnectionInfo(channel, WifiDirectRadio.this::onConnectionInfo);
+                    }
+
+                    @Override
+                    @SuppressWarnings("MissingPermission")
+                    public void onFailure(int reason) {
+                        // BUSY means a group already exists — drive setup from it rather than failing;
+                        // any other reason is a real advertise failure to surface.
+                        if (reason == WifiP2pManager.BUSY) {
+                            manager.requestConnectionInfo(channel, WifiDirectRadio.this::onConnectionInfo);
+                        } else {
+                            events.onStartFailed("advertise",
+                                    new IllegalStateException("wifi_p2p_create_group_failed_" + reason));
+                        }
+                    }
+                });
+            } catch (RuntimeException e) {
+                events.onStartFailed("advertise", e);
+            }
         }
     }
 
@@ -113,6 +165,8 @@ public class WifiDirectRadio implements CourierRadio {
         running.set(false);
         groupActive.set(false); // a fresh start must be able to set up the group's sockets again
         connectPending.set(false); // drop any in-flight connect claim so a restart can connect
+        advertiseRequested.set(false); // a fresh start re-decides the mode from its own requests
+        discoverRequested.set(false);
         if (manager != null && channel != null) {
             // Best-effort teardown — the framework can throw if the channel is mid-operation;
             // a stop must never propagate (it runs on a PluginCall + in cleanup paths).

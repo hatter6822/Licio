@@ -394,6 +394,7 @@ public class BluetoothCourierRadioTest {
         Recorder rec = new Recorder();
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
         BluetoothDevice device = peerDevice();
+        radio.startAdvertising(); // running = true (the peripheral callbacks only fire post-start)
 
         // A central connects → the radio registers it + creates the reassembler, but does NOT
         // announce the link yet (the central has not subscribed to notifications).
@@ -428,6 +429,26 @@ public class BluetoothCourierRadioTest {
         radio.gattServerCallback.onConnectionStateChange(
                 device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED);
         assertEquals(PEER, rec.disconnectedEndpoint);
+    }
+
+    @Test
+    public void aQueuedPeripheralCccWriteAfterStopDoesNotAnnounceAFreshLink() {
+        // A GATT-server callback can arrive AFTER stopBle() closed the server + cleared the maps.
+        // The peripheral path must gate on `running` like the client path does — else a late
+        // CCC-enable would emit connectionResult(true) for a STOPPED courier.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothDevice device = peerDevice();
+        radio.startAdvertising();
+        radio.gattServerCallback.onConnectionStateChange(
+                device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        radio.stop(); // the courier stops while a central's CCC write is still queued
+
+        BluetoothGattDescriptor ccc = new BluetoothGattDescriptor(
+                BluetoothCourierRadio.CCC_UUID, BluetoothGattDescriptor.PERMISSION_WRITE);
+        radio.gattServerCallback.onDescriptorWriteRequest(
+                device, 9, ccc, false, false, 0, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        assertNull("a stopped courier must not announce a fresh link", rec.connectedFlag);
     }
 
     @Test

@@ -523,6 +523,10 @@ public class BluetoothCourierRadio implements CourierRadio {
         public void onConnectionStateChange(BluetoothDevice device, int status, int newState) {
             String endpointId = device.getAddress();
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                // A late CONNECT delivered AFTER stopBle() (the GATT server was closed + the maps
+                // cleared) must NOT re-register a central or arm a link the stopped courier would
+                // then announce; the client path already guards this — the peripheral path must too.
+                if (!running.get()) return;
                 bleCentrals.put(endpointId, device);
                 assemblers.put(endpointId, new CourierFraming.FrameAssembler());
                 // Do NOT announce the link yet: the central has not subscribed to notifications, so
@@ -547,6 +551,7 @@ public class BluetoothCourierRadio implements CourierRadio {
         public void onCharacteristicWriteRequest(BluetoothDevice device, int requestId,
                 BluetoothGattCharacteristic characteristic, boolean preparedWrite,
                 boolean responseNeeded, int offset, byte[] value) {
+            if (!running.get()) return; // a late inbound write after stopBle() — drop, never process
             if (BLE_CHAR_UUID.equals(characteristic.getUuid()) && value != null) {
                 feedAssembler(device.getAddress(), value);
             }
@@ -560,6 +565,10 @@ public class BluetoothCourierRadio implements CourierRadio {
         public void onDescriptorWriteRequest(BluetoothDevice device, int requestId,
                 BluetoothGattDescriptor descriptor, boolean preparedWrite, boolean responseNeeded,
                 int offset, byte[] value) {
+            // A queued CCC write delivered AFTER stopBle() must NOT announce a fresh link for a
+            // stopped courier — gate before sendResponse/onConnectionResult (the client path guards
+            // its late STATE_CONNECTED the same way).
+            if (!running.get()) return;
             // The central enabling/disabling notifications (CCC) — accept it.
             if (responseNeeded && gattServer != null) {
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null);
