@@ -239,12 +239,27 @@ describe('POST /exchange — §29.2 response_pack (server-push of client wants)'
     await srv.putObject(fx.recordCid, 'record', fx.body);
     await srv.putObject(proofCid, 'proof', proofBytes);
 
-    // A budget that fits exactly the first want (record + 256B frame overhead) serves one
-    // object and drops the proof → partial with a one-object response_pack.  (A budget
-    // below even the first object would serve nothing — the first want is not exempt.)
+    // Measure the REAL serialized size of a one-record response (header + table + CIDs + deps, not a
+    // payload estimate — #VV) by serving JUST the record under a generous budget.
+    const sizingRes = await createLcapRoutes(srv).request('/exchange', {
+      method: 'POST',
+      body: exchangeBytes({
+        pulse: { ...clientPulse(), budgets: { ...DEFAULT_BUDGET, max_response_bytes: 1_000_000 } },
+        interests: [],
+        want: [{ cid: fx.recordCid, cid_kind: 'record', reason: 'explicit_user_request' }],
+      }),
+    });
+    const oneRecordBytes = (
+      decodeWithSchema(exchangeResponseV2Schema, new Uint8Array(await sizingRes.arrayBuffer()))
+        .response_pack as Uint8Array
+    ).length;
+
+    // A budget that fits EXACTLY the first want serves one object and drops the proof → partial with
+    // a one-object response_pack.  (A budget below even the first object would serve nothing — the
+    // first want is not exempt.)
     const tightPulse: SyncPulseV2 = {
       ...clientPulse(),
-      budgets: { ...DEFAULT_BUDGET, max_response_bytes: fx.body.length + 256 },
+      budgets: { ...DEFAULT_BUDGET, max_response_bytes: oneRecordBytes },
     };
     const res = await createLcapRoutes(srv).request('/exchange', {
       method: 'POST',

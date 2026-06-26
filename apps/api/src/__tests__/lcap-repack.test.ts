@@ -89,14 +89,14 @@ describe('repackHeldObjects (§16.7 hints; content-derived lane/priority)', () =
     expect(tiny.truncated).toBe(true);
     expect(tiny.pack).toBeUndefined();
 
-    // A budget that fits exactly the first object (its payload + the 256B frame overhead)
-    // serves one object and truncates the remainder.
-    const oneFit = await repackHeldObjects(
-      srv,
-      [fx.recordCid, proofCid, blockCid],
-      fx.body.length + 256,
-    );
+    // A budget that fits exactly the first object — measured against its REAL serialized pack size
+    // (header + object table + CIDs + deps, not the payload estimate, #VV) — serves one object and
+    // truncates the remainder.
+    const oneObjectPack = await repackHeldObjects(srv, [fx.recordCid], 1_000_000);
+    const oneObjectBytes = (oneObjectPack.pack as Uint8Array).length;
+    const oneFit = await repackHeldObjects(srv, [fx.recordCid, proofCid, blockCid], oneObjectBytes);
     expect(oneFit.served).toEqual([fx.recordCid]);
     expect(oneFit.truncated).toBe(true);
+    expect((oneFit.pack as Uint8Array).length).toBeLessThanOrEqual(oneObjectBytes); // truly bounded
   });
 });
