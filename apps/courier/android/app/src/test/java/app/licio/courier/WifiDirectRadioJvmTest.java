@@ -12,6 +12,7 @@
 package app.licio.courier;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
@@ -86,6 +87,22 @@ public class WifiDirectRadioJvmTest {
         radio.startDiscovery();
         assertEquals(WifiDirectRadio.WifiMode.DISCOVER, radio.currentMode);
         radio.stop();
+    }
+
+    @Test
+    public void aCallbackFromASupersededStartIsStale() {
+        // The start GENERATION is what a native WifiP2pManager.ActionListener captures; a STALE
+        // failure (from a superseded start) is dropped before it emits onStartFailed.  Robolectric
+        // cannot invoke the native listener, so assert the guard (isStale) directly across a restart.
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new Recorder());
+        radio.startDiscovery();
+        long gen = radio.startGeneration;
+        assertFalse("the current generation is not stale", radio.isStale(gen));
+        radio.stop();
+        assertTrue("a callback captured before the stop is now stale", radio.isStale(gen));
+        radio.startDiscovery();
+        assertTrue("...and stays stale after the restart (the new start has a fresh gen)",
+                radio.isStale(gen));
     }
 
     @Test

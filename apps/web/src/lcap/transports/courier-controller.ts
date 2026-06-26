@@ -516,12 +516,26 @@ export class CourierController {
     const add = async (event: string, listener: (raw: unknown) => void): Promise<void> => {
       handles.push(await plugin.addListener(event, listener));
     };
-    await add('connectionResult', (raw) => this.onConnectionResult(channel, generation, raw));
-    await add('payloadReceived', (raw) => this.onPayloadReceived(channel, generation, raw));
-    await add('disconnected', (raw) => this.onDisconnected(channel, generation, raw));
-    // A radio's start is ASYNC: GMS/Wi-Fi Direct may reject it AFTER start* resolves — consume the
-    // native startFailed so a late refusal tears down THIS channel (not believed-running).
-    await add('startFailed', (raw) => void this.onStartFailed(channel, generation, raw));
+    try {
+      await add('connectionResult', (raw) => this.onConnectionResult(channel, generation, raw));
+      await add('payloadReceived', (raw) => this.onPayloadReceived(channel, generation, raw));
+      await add('disconnected', (raw) => this.onDisconnected(channel, generation, raw));
+      // A radio's start is ASYNC: GMS/Wi-Fi Direct may reject it AFTER start* resolves — consume the
+      // native startFailed so a late refusal tears down THIS channel (not believed-running).
+      await add('startFailed', (raw) => void this.onStartFailed(channel, generation, raw));
+    } catch (error) {
+      // An addListener REJECTED after earlier listeners were already installed.  handlesByChannel
+      // is not populated yet, so the launch's catch → stop() has no handle list to remove; tear the
+      // accumulated handles down HERE so a failed registration leaves NO live native listeners.
+      for (const handle of handles) {
+        try {
+          await handle.remove();
+        } catch {
+          /* removing a listener must never throw out of cleanup */
+        }
+      }
+      throw error;
+    }
     this.handlesByChannel.set(channel, handles);
   }
 
@@ -569,7 +583,7 @@ export class CourierController {
       case 'request':
         // The PEER is asking US.  Respond if a responder is configured; otherwise drop it (do NOT
         // inbox it — that is the bug this fixes: a request must never be reported as our response).
-        void this.respondToRequest(channel, event.endpointId, bytes, medium);
+        void this.respondToRequest(channel, generation, event.endpointId, bytes, medium);
         return;
       default:
         // Unparseable as either — drop (no transport trust; fail-closed).
@@ -581,6 +595,7 @@ export class CourierController {
    *  configured) and ferry it back over the medium.  A no-op when no responder is wired. */
   private async respondToRequest(
     channel: CourierChannel,
+    generation: number,
     endpointId: string,
     request: Uint8Array,
     medium: NativeChannelMedium,
@@ -590,10 +605,15 @@ export class CourierController {
     try {
       const response = await this.config.buildResponse(request, endpointId);
       if (!response) return;
-      // Re-check the LIVE who-can-exchange policy: the user may have removed this peer from the
+      // Re-check LIVENESS after the async build: a Stop / disclosure revocation / forced-off mode /
+      // channel deselection may have torn this channel down WHILE buildResponse awaited — a stopped
+      // courier must never serve a response even if the native endpoint is not fully torn down yet.
+      if (!this.started || !this.isChannelActive(channel, generation)) return;
+      // Re-check the LIVE who-can-exchange policy too: the user may have removed this peer from the
       // allowlist (or set peers→none) DURING the async build — never serve a now-disallowed peer.
       if (!mayExchangeWithEndpoint(this.controls, endpointId)) return;
-      // Account for bytes RESERVED by in-flight driveExchange()s too, so concurrent sends cannot
+      // RESERVE the response bytes (seen by concurrent budget checks) before enqueueing, accounting
+      // for bytes already reserved by in-flight exchanges — so simultaneous replies/requests cannot
       // jointly exceed the hard §22.5 storage ceiling.
       if (
         !withinStorageBudget(
@@ -604,11 +624,16 @@ export class CourierController {
       ) {
         return;
       }
-      medium.enqueueOutbound(response);
-      // Charge only the DELTA of the medium's cumulative bytesSent() — the same metric
-      // driveExchange's finally charges — so these responder bytes are counted exactly once, not
-      // also re-added there (which would prematurely trip `over_storage_budget` on later exchanges).
-      this.chargeMediumBytes(medium);
+      this.reservedBytes += response.byteLength;
+      try {
+        medium.enqueueOutbound(response);
+        // Charge only the DELTA of the medium's cumulative bytesSent() — the same metric
+        // driveExchange's finally charges — so these responder bytes are counted exactly once, not
+        // also re-added there (which would prematurely trip `over_storage_budget` on later exchanges).
+        this.chargeMediumBytes(medium);
+      } finally {
+        this.reservedBytes -= response.byteLength; // release (actual bytes now charged)
+      }
     } catch (error) {
       devWarn(`failed to build a courier response for '${channel}'`, error);
     }

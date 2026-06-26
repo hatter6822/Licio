@@ -942,4 +942,74 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // Exactly ONE request was ferried (the other was refused before sending).
     expect(f.sent.filter((s) => s.message === REQUEST_B64).length).toBe(1);
   });
+
+  it('does NOT serve a response if the channel is torn down during buildResponse (#2)', async () => {
+    let resolveResp: ((b: Uint8Array) => void) | undefined;
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      buildResponse: () =>
+        new Promise<Uint8Array>((res) => {
+          resolveResp = res;
+        }),
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    await controller.start();
+    f.emit('payloadReceived', { endpointId: 'ep1', message: REQUEST_B64 }); // → awaits buildResponse
+    await Promise.resolve();
+    await controller.stop(); // the courier stops WHILE the response is being built
+    resolveResp?.(RESPONSE_BYTES);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(f.sent.some((s) => s.message === RESPONSE_B64)).toBe(false); // a stopped courier serves nothing
+  });
+
+  it('removes accumulated listeners if an addListener REJECTS mid-registration (#3)', async () => {
+    const f = fakePlugin();
+    let removed = 0;
+    let addCount = 0;
+    f.plugin.addListener = (event: string, fn: (raw: unknown) => void) => {
+      f.listeners.push({ event, fn });
+      addCount += 1;
+      if (addCount === 2) return Promise.reject(new Error('addListener rejected'));
+      return Promise.resolve({
+        remove: vi.fn(() => {
+          removed += 1;
+          return Promise.resolve();
+        }),
+      });
+    };
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+    });
+    await controller.start().catch(() => {}); // registration rejects → propagates to the runner
+    expect(removed).toBeGreaterThan(0); // the already-installed listener was torn down (no leak)
+  });
+
+  it('concurrent responder replies respect the storage ceiling (#6)', async () => {
+    const outcomes: string[] = [];
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: { ...ON, storageBudgetBytes: RESPONSE_BYTES.length + 8 }, // room for ONE response
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      buildResponse: () => RESPONSE_BYTES,
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+      onOutcome: (o) => outcomes.push(o.skippedReason),
+    });
+    await controller.start();
+    // Two peers ask at once; only one reply fits the budget.
+    f.emit('payloadReceived', { endpointId: 'ep1', message: REQUEST_B64 });
+    f.emit('payloadReceived', { endpointId: 'ep2', message: REQUEST_B64 });
+    await vi.waitFor(() => expect(f.sent.filter((s) => s.message === RESPONSE_B64).length).toBe(1));
+    await Promise.resolve();
+    expect(f.sent.filter((s) => s.message === RESPONSE_B64).length).toBe(1); // never exceeds the ceiling
+  });
 });

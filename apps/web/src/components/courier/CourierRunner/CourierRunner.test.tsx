@@ -190,6 +190,30 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
     expect(ControllerCtor).not.toHaveBeenCalled(); // never brought radios up after the forced-off mode
   });
 
+  it('cancels the start if the runner UNMOUNTS during the async init (#7)', async () => {
+    injectNativeShell();
+    let resolvePower: (() => void) | undefined;
+    readCourierPower.mockImplementationOnce(
+      () =>
+        new Promise<object>((res) => {
+          resolvePower = () => res({});
+        }),
+    );
+    const { unmount } = render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+    await waitFor(() => expect(readCourierPower).toHaveBeenCalled());
+    unmount(); // the page leaves WHILE the battery read is still pending
+    await act(async () => {
+      resolvePower?.(); // the async init resumes after the unmount
+      await Promise.resolve();
+    });
+    expect(ControllerCtor).not.toHaveBeenCalled(); // no radios brought up after the UI owner is gone
+  });
+
   it('reconciles a RUNNING courier when the operational mode changes (§33.5 forced-off)', async () => {
     injectNativeShell();
     render(<CourierRunner />);

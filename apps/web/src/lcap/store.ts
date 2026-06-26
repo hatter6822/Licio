@@ -296,6 +296,50 @@ export async function proofCidsForRecord(db: IDBDatabase, recordCid: string): Pr
   return out;
 }
 
+/**
+ * Collect up to `limit` record rows for which `isShareable` returns true.  When `rooms` is
+ * non-empty the scan walks ONLY those rooms via the `roomHash` index (so a room's records are
+ * found regardless of how many unrelated rows precede them in the store); otherwise it cursors the
+ * whole store.  Crucially the cap counts SHAREABLE rows, not raw rows — so a long-lived store whose
+ * in-scope records appear after thousands of unrelated/over-priority rows still yields them.
+ */
+export async function collectShareableRecordRows(
+  db: IDBDatabase,
+  rooms: readonly string[] | undefined,
+  limit: number,
+  isShareable: (row: RecordRow) => boolean,
+): Promise<RecordRow[]> {
+  const out: RecordRow[] = [];
+  const tx = db.transaction(LCAP_STORE.records, 'readonly');
+  const store = tx.objectStore(LCAP_STORE.records);
+  const walk = (source: IDBObjectStore | IDBIndex, query: IDBKeyRange | null): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const request = source.openCursor(query);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor || out.length >= limit) {
+          resolve();
+          return;
+        }
+        const row = cursor.value as RecordRow;
+        if (isShareable(row)) out.push(row);
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error ?? new Error('record cursor failed'));
+    });
+  if (rooms && rooms.length > 0) {
+    const index = store.index('roomHash');
+    for (const room of rooms) {
+      if (out.length >= limit) break;
+      await walk(index, IDBKeyRange.only(room));
+    }
+  } else {
+    await walk(store, null);
+  }
+  await txComplete(tx);
+  return out;
+}
+
 // --- Capped transactions (§23.2 old-phone safety). --------------------------------
 
 /** Split `items` into batches of at most `cap` (pure). */

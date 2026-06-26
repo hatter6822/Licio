@@ -63,6 +63,14 @@ public class WifiDirectRadio implements CourierRadio {
     enum WifiMode { NONE, GROUP, DISCOVER }
 
     volatile WifiMode currentMode = WifiMode.NONE;
+    // A monotonic START GENERATION bumped on every start (applyMode) and stop().  A native
+    // WifiP2pManager.ActionListener captures the generation it was issued under; a STALE failure
+    // (e.g. a previous discoverPeers refusal) arriving after a quick Stop→Start / live restart is
+    // then dropped BEFORE it emits onStartFailed — otherwise the plugin would forward it to the new
+    // controller's listener and tear the FRESH Wi-Fi Direct courier down (#1).
+    // Package-private so the JVM test can assert the guard (a captured generation goes stale across
+    // a stop/restart) — the native ActionListener cannot itself be invoked under Robolectric.
+    volatile long startGeneration = 0;
     private BroadcastReceiver receiver;
     // endpointId (the peer host) -> the connected data socket's output stream.
     private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
@@ -120,21 +128,29 @@ public class WifiDirectRadio implements CourierRadio {
             currentMode = WifiMode.DISCOVER;
             running.set(true);
             registerReceiver();
-            discoverPeers();
+            discoverPeers(++startGeneration);
         } else if (advertiseRequested.get()) {
             if (currentMode != WifiMode.NONE) return; // advertise never downgrades an active mode
             currentMode = WifiMode.GROUP;
             running.set(true);
             registerReceiver();
-            createGroup();
+            createGroup(++startGeneration);
         }
     }
 
+    /** A late ActionListener callback whose captured generation no longer matches the current start
+     *  is STALE (a stop/restart happened since it was issued) — drop it before emitting any event.
+     *  Package-private for the JVM test (Robolectric cannot invoke the native ActionListener). */
+    boolean isStale(long generation) {
+        return generation != startGeneration;
+    }
+
     @SuppressWarnings("MissingPermission") // declared per-API in the manifest; runtime-granted by the gate
-    private void discoverPeers() {
+    private void discoverPeers(final long generation) {
         // A discovery failure (async onFailure, or a framework throw — SecurityException /
         // DeadObjectException / IllegalStateException) means no discovery is running, so SURFACE it
-        // via onStartFailed rather than dropping it (else the caller believes it is running).
+        // via onStartFailed rather than dropping it (else the caller believes it is running) — unless
+        // a stop/restart has since superseded this start (a stale failure must not tear the new one down).
         try {
             manager.discoverPeers(channel, new WifiP2pManager.ActionListener() {
                 @Override
@@ -142,22 +158,24 @@ public class WifiDirectRadio implements CourierRadio {
 
                 @Override
                 public void onFailure(int reason) {
+                    if (isStale(generation)) return;
                     events.onStartFailed("discover",
                             new IllegalStateException("wifi_p2p_discover_failed_" + reason));
                 }
             });
         } catch (RuntimeException e) {
-            events.onStartFailed("discover", e);
+            if (!isStale(generation)) events.onStartFailed("discover", e);
         }
     }
 
     @SuppressWarnings("MissingPermission")
-    private void createGroup() {
+    private void createGroup(final long generation) {
         try {
             manager.createGroup(channel, new WifiP2pManager.ActionListener() {
                 @Override
                 @SuppressWarnings("MissingPermission")
                 public void onSuccess() {
+                    if (isStale(generation)) return;
                     // The group forms asynchronously; pull connection info so an already-formed group
                     // still drives onConnectionInfo → the group-owner server socket.
                     manager.requestConnectionInfo(channel, WifiDirectRadio.this::onConnectionInfo);
@@ -166,6 +184,7 @@ public class WifiDirectRadio implements CourierRadio {
                 @Override
                 @SuppressWarnings("MissingPermission")
                 public void onFailure(int reason) {
+                    if (isStale(generation)) return;
                     // BUSY means a group already exists — drive setup from it rather than failing;
                     // any other reason is a real advertise failure to surface.
                     if (reason == WifiP2pManager.BUSY) {
@@ -177,13 +196,14 @@ public class WifiDirectRadio implements CourierRadio {
                 }
             });
         } catch (RuntimeException e) {
-            events.onStartFailed("advertise", e);
+            if (!isStale(generation)) events.onStartFailed("advertise", e);
         }
     }
 
     @Override
     public void stop() {
         running.set(false);
+        startGeneration++; // invalidate any in-flight ActionListener callbacks (a stale failure is dropped)
         currentMode = WifiMode.NONE; // a fresh start re-decides the mode from its own requests
         groupActive.set(false); // a fresh start must be able to set up the group's sockets again
         connectPending.set(false); // drop any in-flight connect claim so a restart can connect
@@ -247,6 +267,7 @@ public class WifiDirectRadio implements CourierRadio {
                         if (groupActive.get()) return;
                         if (!connectPending.compareAndSet(false, true)) return;
                         // Connect to the first discovered peer (single-group transport).
+                        final long connectGen = startGeneration; // a stop/restart invalidates this connect
                         WifiP2pConfig config = new WifiP2pConfig();
                         config.deviceAddress = peers.getDeviceList().iterator().next().deviceAddress;
                         manager.connect(channel, config, new WifiP2pManager.ActionListener() {
@@ -269,6 +290,7 @@ public class WifiDirectRadio implements CourierRadio {
                                 // instead of swallowing the async failure, so the courier doesn't
                                 // stay "running" with no socket setup and no retry.
                                 connectPending.set(false);
+                                if (isStale(connectGen)) return; // a stop/restart superseded this connect
                                 events.onStartFailed("connect",
                                         new IllegalStateException("wifi_p2p_connect_failed_" + reason));
                             }
@@ -332,6 +354,7 @@ public class WifiDirectRadio implements CourierRadio {
 
     /** The group owner accepts inbound data sockets and reads length-prefixed frames. */
     private void startServerSocket() {
+        final long serverGen = startGeneration; // a stop/restart invalidates this server setup
         new Thread(() -> {
             closeServerSocket();
             ServerSocket server;
@@ -344,7 +367,7 @@ public class WifiDirectRadio implements CourierRadio {
                 // failure — otherwise the controller would show Wi-Fi Direct as running with no
                 // server socket while the stale claim blocks every retry.
                 groupActive.set(false);
-                events.onStartFailed("server_bind", e);
+                if (!isStale(serverGen)) events.onStartFailed("server_bind", e);
                 return;
             }
             serverSocket = server;

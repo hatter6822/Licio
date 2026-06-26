@@ -105,7 +105,9 @@ public class BluetoothCourierRadio implements CourierRadio {
     private volatile BluetoothGattServer gattServer;
     private BluetoothGattCharacteristic gattCharacteristic;
     private BluetoothLeAdvertiser advertiser;
-    private AdvertiseCallback advertiseCallback;
+    // Package-private so the JVM test can drive AdvertiseCallback.onStartFailure (Robolectric's
+    // shadow does not invoke it; the advertiser==null branch is also unreachable there).
+    AdvertiseCallback advertiseCallback;
     private final ConcurrentHashMap<String, BluetoothDevice> bleCentrals = new ConcurrentHashMap<>();
     private BluetoothLeScanner scanner;
     private ScanCallback scanCallback;
@@ -492,8 +494,29 @@ public class BluetoothCourierRadio implements CourierRadio {
     @SuppressWarnings("MissingPermission")
     private void startBleAdvertising() {
         advertiser = adapter.getBluetoothLeAdvertiser();
-        if (advertiser == null) return; // controller cannot advertise — RFCOMM remains
-        advertiseCallback = new AdvertiseCallback() {};
+        if (advertiser == null) {
+            // No BLE advertiser on this controller — the device cannot be DISCOVERED by unbonded
+            // peers (BLE advertising is the only discoverability for the advertise role; the RFCOMM
+            // server is a passive listener).  SURFACE it instead of staying silent, so the UI does
+            // not show a live radio that is not actually discoverable (#9).
+            if (running.get()) {
+                events.onStartFailed("advertise",
+                        new IllegalStateException("ble_advertiser_unavailable"));
+            }
+            return;
+        }
+        advertiseCallback = new AdvertiseCallback() {
+            @Override
+            public void onStartFailure(int errorCode) {
+                // Android REJECTED the advertise (advertiser quota / unsupported parameters) — a
+                // late/async failure the synchronous start could not see.  Surface it (guarded on
+                // running so a failure after stop does not tear a stopped courier down).
+                if (running.get()) {
+                    events.onStartFailed("advertise",
+                            new IllegalStateException("ble_advertise_failed_" + errorCode));
+                }
+            }
+        };
         advertiser.startAdvertising(
                 new AdvertiseSettings.Builder()
                         .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
@@ -741,6 +764,10 @@ public class BluetoothCourierRadio implements CourierRadio {
         @SuppressWarnings("MissingPermission")
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
             if (!CCC_UUID.equals(descriptor.getUuid())) return;
+            // A late CCC-write completion can land AFTER stopBle() closed the GATT + cleared the
+            // maps; a stopped courier must NOT announce a fresh link (on a quick restart that stale
+            // native event is forwarded to the new JS listener) — gate on running first (#8).
+            if (!running.get()) return;
             String endpointId = gatt.getDevice().getAddress();
             // The notify subscription is now established (or failed) — ONLY now is the duplex link
             // ready.  On SUCCESS, report connected.  On FAILURE, tear the half-open client down

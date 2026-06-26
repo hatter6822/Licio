@@ -116,9 +116,16 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
   // bridge); a normal browser has none, so the runtime control is honestly disabled.
   const nativeAvailable = useMemo(() => nearbyCourierAvailable(), []);
 
+  // A monotonic generation bumped on unmount — an in-flight start() captures it and aborts if it
+  // changes, so a start whose async init (imports / IDB / battery) is still pending when the page
+  // unmounts does NOT construct + run a controller after its UI owner is gone (the persisted
+  // controls alone don't represent "unmounted", so the live re-read can't catch this case).
+  const startGenRef = useRef(0);
+
   // Stop the controller on unmount so a left page never leaves a radio advertising.
   useEffect(() => {
     return () => {
+      startGenRef.current += 1; // cancel any in-flight start()
       void controllerRef.current?.stop();
       controllerRef.current = null;
     };
@@ -182,6 +189,7 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       return;
     }
     if (controllerRef.current) return; // already running
+    const startGen = startGenRef.current; // captured so an unmount during the async init cancels us
     setPhase({ kind: 'starting' });
     setActivity([]);
     try {
@@ -205,6 +213,9 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       // above — and `controllerRef.current` is not assigned yet, so the live-reconcile effects have
       // no controller to stop.  Abort instead of bringing radios up after the UI forced them off, and
       // construct the controller from the LIVE state (not the snapshot captured when Start was clicked).
+      // The component UNMOUNTED during the async init — abort before constructing radios that would
+      // have no UI owner to stop them (the persisted controls can't represent "unmounted").
+      if (startGenRef.current !== startGen) return;
       const liveControls = getCourierControls();
       const liveMode = getOperationalMode();
       if (

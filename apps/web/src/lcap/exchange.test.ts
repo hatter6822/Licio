@@ -15,7 +15,8 @@ import {
   ingestPackIntoStore,
   respondToClientExchange,
 } from './exchange.js';
-import { putBlock, readBlockBytes } from './store.js';
+import type { RecordRow } from './store.js';
+import { collectShareableRecordRows, getHeldObject, putBlock, readBlockBytes } from './store.js';
 
 let peerA: IDBDatabase;
 let peerB: IDBDatabase;
@@ -52,6 +53,8 @@ async function quarantineMissing(
 }
 
 /** Put a real, decodable contribution_event record (the given visibility) into `db`'s records. */
+let recordSeq = 0;
+
 async function putPublicRecord(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
@@ -60,6 +63,7 @@ async function putPublicRecord(
 ): Promise<string> {
   const capabilityCid = await lcap.cidFor('record', new Uint8Array([0]));
   const priority = opts.priority ?? 2;
+  const seq = recordSeq++; // distinct per call so records never collide on recordCid
   const body = lcap.encodeContributionEvent({
     record_version: 2,
     kind: 'contribution_event',
@@ -69,11 +73,11 @@ async function putPublicRecord(
     author_account_id: 'acct',
     author_device_id: 'dev',
     author_device_key_id: 'key',
-    device_seq: 1,
+    device_seq: seq + 1,
     capability_cid: capabilityCid,
     policy_epoch_claim: 0,
     revocation_epoch_claim: 0,
-    client_nonce: new Uint8Array([1, 2, 3]),
+    client_nonce: new Uint8Array([1, 2, 3, seq & 0xff]),
     priority,
   });
   const recordCid = await lcap.cidFor('record', body);
@@ -88,6 +92,59 @@ async function putPublicRecord(
     state: 'integrity_verified',
     size: body.length,
     ...(opts.deps ? { deps: opts.deps } : {}),
+  });
+  await new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  return recordCid;
+}
+
+/** Put a `room_capability` record with the given visibility (room_capability ALSO carries
+ *  visibility_scope — the #5 case the contribution-only filter missed). */
+async function putCapabilityRecord(
+  db: IDBDatabase,
+  lcap: typeof import('@licio/lcap'),
+  visibility: 'public' | 'in_room' | 'private',
+): Promise<string> {
+  const body = lcap.encodeWithSchema(lcap.capabilityRecordV2Schema, {
+    record_version: 2,
+    kind: 'room_capability',
+    capability_id: `cap-${visibility}`,
+    subject_account_id: 'acct',
+    subject_device_id: 'dev',
+    subject_device_key_id: 'key',
+    room_id: 'room-1',
+    visibility_scope: visibility,
+    operations: [],
+    policy_epoch: 0,
+    revocation_epoch_floor: 0,
+    not_before_ms: 0,
+    not_after_ms: 1_000_000,
+    quotas: {
+      max_offline_events: 10,
+      max_total_payload_bytes: 1000,
+      max_single_event_bytes: 100,
+      max_media_bytes: 100,
+    },
+    transfer_policy: {
+      may_export_bundle: false,
+      may_share_with_relay: true,
+      may_share_with_courier: true,
+      may_share_with_unknown_peer: true,
+    },
+  });
+  const recordCid = await lcap.cidFor('record', body);
+  const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+  tx.objectStore(LCAP_STORE.records).put({
+    recordCid,
+    body,
+    kind: 'room_capability',
+    lane: 'C0',
+    priority: 0,
+    roomHash: '',
+    state: 'integrity_verified',
+    size: body.length,
   });
   await new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -188,6 +245,50 @@ describe('client §16 exchange engine', () => {
     const request = await buildClientExchangeRequest(peerA, 'courier');
     const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
     expect(decoded.push_pack).toBeUndefined(); // nothing public to push → no leak
+  });
+
+  it('SECURITY: a NON-PUBLIC room_capability is never pushed/shared (#5, not just contributions)', async () => {
+    const lcap = await import('@licio/lcap');
+    await putCapabilityRecord(peerA, lcap, 'in_room'); // the ONLY record A holds — an in-room cap
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    expect(decoded.push_pack).toBeUndefined(); // the in-room capability is excluded (no leak)
+    // A PUBLIC capability, by contrast, IS shareable.
+    await putCapabilityRecord(peerB, lcap, 'public');
+    const req2 = await buildClientExchangeRequest(peerB, 'courier');
+    expect(lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, req2).push_pack).toBeDefined();
+  });
+
+  it('a ROOM-SCOPED exchange does NOT ingest the peer’s ambient push (#10)', async () => {
+    const lcap = await import('@licio/lcap');
+    // A pushes a public, dep-free capability it holds; its request carries a push_pack.
+    const pushedCid = await putCapabilityRecord(peerA, lcap, 'public');
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    expect(lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request).push_pack).toBeDefined();
+    // B responds under a ROOM scope — it must NOT ingest A's ambient push for an unrelated room.
+    await respondToClientExchange(peerB, request, { roomHashAllowlist: ['room-Y'] });
+    expect(await getHeldObject(peerB, pushedCid)).toBeUndefined(); // not polluted by the push
+    // Without a room scope, the SAME push IS ingested (ambient courier gossip).
+    await respondToClientExchange(peerB, request);
+    expect(await getHeldObject(peerB, pushedCid)).toBeDefined();
+  });
+
+  it('collectShareableRecordRows isolates by the room index + filters by predicate (#4)', async () => {
+    const lcap = await import('@licio/lcap');
+    // Records in two rooms; the room-scoped walk returns ONLY the target room's rows (via the index,
+    // not a capped raw scan), so an in-scope record is found regardless of store position.
+    await putPublicRecord(peerA, lcap, 'public', { roomHash: 'room-target' });
+    await putPublicRecord(peerA, lcap, 'public', { roomHash: 'room-other' });
+    await putPublicRecord(peerA, lcap, 'public', { roomHash: 'room-other' });
+    const targeted = await collectShareableRecordRows(peerA, ['room-target'], 256, () => true);
+    expect(targeted.map((r: RecordRow) => r.roomHash)).toEqual(['room-target']);
+    // The cap counts SHAREABLE rows: a predicate rejecting all but one still yields that one.
+    let kept = 0;
+    const filtered = await collectShareableRecordRows(peerA, undefined, 256, () => {
+      kept += 1;
+      return kept === 2; // only the 2nd scanned row is "shareable"
+    });
+    expect(filtered).toHaveLength(1);
   });
 
   it('respondToClientExchange returns null for bytes that are not an exchange request', async () => {

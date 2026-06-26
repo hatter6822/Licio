@@ -30,6 +30,7 @@ import {
 import { LCAP_STORE } from './db.js';
 import {
   collectByCursor,
+  collectShareableRecordRows,
   getHeldObject,
   proofCidsForRecord,
   type RecordRow,
@@ -66,9 +67,30 @@ async function collectShareableCids(
   lcap: typeof import('@licio/lcap'),
   scope: ExchangeScope | undefined,
 ): Promise<string[]> {
-  const rooms = scope?.roomHashAllowlist;
   const maxPriority = scope?.maxPriorityClass ?? 4;
-  const records = await collectByCursor<RecordRow>(db, LCAP_STORE.records, MAX_SHARE_RECORDS);
+  // A record is shareable iff it decodes, is PUBLIC, and is within the priority cap.  The room
+  // filter is applied by the index walk in collectShareableRecordRows (so the cap counts in-scope
+  // SHAREABLE rows, never just the first N raw rows of the store).
+  const isShareable = (row: RecordRow): boolean => {
+    let decoded: ReturnType<typeof lcap.decodeAndRouteRecord>;
+    try {
+      decoded = lcap.decodeAndRouteRecord(row.body);
+    } catch {
+      return false; // undecodable — never share
+    }
+    // ANY record kind that carries a visibility_scope (contribution_event AND room_capability) is
+    // excluded when it is non-public — never push/serve a restricted record (or its proofs) over
+    // the public plane, not just contributions.
+    if ('visibility_scope' in decoded && decoded.visibility_scope !== 'public') return false;
+    const priority = decoded.kind === 'contribution_event' ? decoded.priority : 0;
+    return priority <= maxPriority;
+  };
+  const rows = await collectShareableRecordRows(
+    db,
+    scope?.roomHashAllowlist,
+    MAX_SHARE_RECORDS,
+    isShareable,
+  );
   const out: string[] = [];
   const seen = new Set<string>();
   const add = (cid: string): void => {
@@ -77,17 +99,7 @@ async function collectShareableCids(
       out.push(cid);
     }
   };
-  for (const row of records) {
-    if (rooms && rooms.length > 0 && !rooms.includes(row.roomHash)) continue; // room scope
-    let decoded: ReturnType<typeof lcap.decodeAndRouteRecord>;
-    try {
-      decoded = lcap.decodeAndRouteRecord(row.body);
-    } catch {
-      continue; // undecodable — never share
-    }
-    if (decoded.kind === 'contribution_event' && decoded.visibility_scope !== 'public') continue;
-    const priority = decoded.kind === 'contribution_event' ? decoded.priority : 0;
-    if (priority > maxPriority) continue; // priority cap
+  for (const row of rows) {
     add(row.recordCid);
     for (const proofCid of await proofCidsForRecord(db, row.recordCid)) add(proofCid);
     for (const dep of row.deps ?? []) {
@@ -230,8 +242,12 @@ export async function respondToClientExchange(
   })();
   if (request === null) return null;
 
-  // Ingest the peer's pushed content (gossip-in), CID-verified into the local store.
-  if (request.push_pack !== undefined) {
+  // Ingest the peer's pushed content (gossip-in), CID-verified into the local store — but ONLY in
+  // an UNSCOPED exchange.  A ROOM-SCOPED sync ("Sync this room") must not accept ambient gossip: a
+  // peer could otherwise push public records for UNRELATED rooms and pollute `lcap_v2` despite the
+  // room allowlist.  The scoped room's content still flows in via our explicit `want`s.
+  const roomScoped = (scope?.roomHashAllowlist?.length ?? 0) > 0;
+  if (request.push_pack !== undefined && !roomScoped) {
     await ingestPackIntoStore(db, request.push_pack);
   }
 

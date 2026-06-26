@@ -13,11 +13,13 @@ package app.licio.courier;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.le.AdvertiseCallback;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
@@ -268,6 +270,7 @@ public class BluetoothCourierRadioTest {
         // enabled.  A SUCCESS reports connected; a FAILURE reports a failed connection.
         Recorder rec = new Recorder();
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startDiscovery(); // running = true (the client callback only fires after a live dial)
         BluetoothGatt gatt = peerDevice().connectGatt(
                 ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
         BluetoothGattDescriptor ccc = new BluetoothGattDescriptor(
@@ -449,6 +452,42 @@ public class BluetoothCourierRadioTest {
         radio.gattServerCallback.onDescriptorWriteRequest(
                 device, 9, ccc, false, false, 0, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
         assertNull("a stopped courier must not announce a fresh link", rec.connectedFlag);
+    }
+
+    @Test
+    public void aLateClientCccWriteCompletionAfterStopDoesNotAnnounce() {
+        // The CLIENT link is announced from onDescriptorWrite once the CCC write completes.  If a
+        // stop lands while that async write is in flight, a late SUCCESS must NOT announce a link
+        // for a closed GATT (on a quick restart the stale event reaches the new listener) — #8.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startDiscovery(); // running = true
+        BluetoothGatt gatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        radio.gattClientCallback.onConnectionStateChange(
+                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        radio.stop(); // the courier stops while the CCC write is still in flight
+        rec.connectedFlag = null; // ignore the teardown's failed-result; we assert on the LATE write
+
+        BluetoothGattDescriptor ccc = new BluetoothGattDescriptor(
+                BluetoothCourierRadio.CCC_UUID, BluetoothGattDescriptor.PERMISSION_WRITE);
+        radio.gattClientCallback.onDescriptorWrite(gatt, ccc, BluetoothGatt.GATT_SUCCESS);
+        assertNull("a stopped courier must not announce a fresh client link", rec.connectedFlag);
+    }
+
+    @Test
+    public void aBleAdvertisingFailureIsSurfacedNotSilent() {
+        // Android can reject the advertise asynchronously (advertiser quota / unsupported params);
+        // the empty callback used to swallow it while the plugin call had resolved + the controller
+        // marked Bluetooth running — surface it via onStartFailed instead (#9).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startAdvertising(); // running = true; opens the GATT server
+        radio.gattServerCallback.onServiceAdded(
+                BluetoothGatt.GATT_SUCCESS, BluetoothCourierRadio.buildCourierGattService());
+        assertNotNull("startBleAdvertising installed a callback", radio.advertiseCallback);
+        radio.advertiseCallback.onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE);
+        assertEquals("advertise", rec.startFailedOp);
     }
 
     @Test
