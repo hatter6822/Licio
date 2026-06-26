@@ -317,6 +317,36 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(f.sent).toHaveLength(0); // nothing was ferried under the new policy
   });
 
+  it('reports exchange_failed AND allows a retry when buildRequest rejects (#CC)', async () => {
+    // A fire-and-forget driveExchange whose async builder REJECTS (e.g. IndexedDB / repack failure)
+    // must not leave the endpoint silently marked exchanged with no outcome — it reports
+    // exchange_failed and clears the mark so a later connection can retry.
+    const f = fakePlugin();
+    const outcomes: Array<{ skippedReason: string }> = [];
+    let calls = 0;
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => {
+        calls++;
+        return Promise.reject(new Error('indexeddb_fail'));
+      },
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+      onOutcome: (o) => outcomes.push({ skippedReason: o.skippedReason }),
+    });
+    await controller.start();
+
+    f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]?.skippedReason).toBe('exchange_failed');
+
+    // The endpoint was CLEARED — a later connection for it retries (it is not stuck as exchanged).
+    f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+    await vi.waitFor(() => expect(outcomes).toHaveLength(2));
+    expect(calls).toBe(2); // buildRequest was attempted AGAIN
+  });
+
   it('applyControls stops a DESELECTED channel live and keeps the others running', async () => {
     const a = fakePlugin();
     const b = fakePlugin();

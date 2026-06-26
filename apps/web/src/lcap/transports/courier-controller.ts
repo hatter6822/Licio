@@ -728,7 +728,18 @@ export class CourierController {
       return;
     }
 
-    const request = await this.config.buildRequest(endpointId);
+    let request: Uint8Array | null;
+    try {
+      request = await this.config.buildRequest(endpointId);
+    } catch {
+      // The async builder can REJECT (e.g. IndexedDB / repack failure while assembling the push
+      // pack).  Since driveExchange is invoked fire-and-forget, an unhandled rejection would leave
+      // the endpoint silently marked `exchanged` with no outcome — the live connection would never
+      // retry or report.  Clear the mark (so a later event can retry) and report the failure (#CC).
+      this.exchanged.delete(key);
+      this.emit(channel, endpointId, null, null, 'exchange_failed');
+      return;
+    }
     if (!request) {
       this.emit(channel, endpointId, null, null, 'nothing_to_request');
       return;

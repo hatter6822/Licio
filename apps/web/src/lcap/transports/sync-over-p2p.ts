@@ -122,9 +122,14 @@ export async function syncRoomOverP2p(
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
-    // The peer served us content ⇒ a successful WebRTC exchange.  If it served nothing (peer had
-    // none / unresponsive), fall through to the authoritative anchor below.
-    if (out.ingested !== null) return { transport: 'webrtc', ingested: out.ingested };
+    // A successful WebRTC exchange is one where the peer was REACHABLE — either it served us content
+    // (`ingested`) OR we served it ours (`served`, e.g. a direct sync where only the OTHER device was
+    // missing our records).  Either way the P2P round happened, so do NOT fall through to the
+    // authoritative anchor (which would needlessly re-upload our request + push_pack to the server).
+    // Only a round that moved nothing (peer unreachable / unresponsive) falls through.
+    if (out.ingested !== null || out.served) {
+      return { transport: 'webrtc', ingested: out.ingested };
+    }
   } catch {
     // WebRTC unavailable (off, force-off, unreachable, timeout) — fall back to the anchor.
   } finally {

@@ -309,6 +309,73 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     expect(await readBlockBytes(initiatorDb, blockCid)).toEqual(bytes); // the initiator HOLDS it
   });
 
+  it('a served-only WebRTC round (we served the peer, ingested nothing) returns webrtc, no anchor (#BB)', async () => {
+    // The INITIATOR holds the block + has NO gaps of its own; the RESPONDER wants it.  The initiator
+    // SERVES the peer (served=true) but ingests nothing — a reachable peer exchange, so it must NOT
+    // fall through to the HTTPS anchor (which would needlessly re-upload our request + push_pack).
+    const bytes = new Uint8Array([9, 8, 7, 6, 5]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(initiatorDb, { blockCid, state: 'integrity_verified', size: bytes.length }, [
+      bytes,
+    ]);
+    await putPublicRecordWithBlock(initiatorDb, blockCid); // the initiator can serve it
+    await quarantineMissing(responderDb, [blockCid]); // only the RESPONDER is missing it
+
+    const link = new FakeLink();
+    const relay = makeRelayFetch();
+    const anchorUrls: string[] = [];
+    const anchorFetch = (async (input: string | URL | Request) => {
+      anchorUrls.push(String(input));
+      return new Response(new Uint8Array([0]) as BodyInit, { status: 200 });
+    }) as unknown as typeof fetch;
+    const p2p = await import('@licio/lcap-p2p');
+    const signalKey = await p2p.importSignalKey(
+      await (await import('./signal-key.js')).derivePublicSignalKeyBytes(ROOM),
+    );
+    const { createSignalClient } = await import('./p2p-signaling.js');
+    const respSignals = createSignalClient({ apiBase: 'http://relay.test', fetchFn: relay });
+
+    const responderDone = p2p
+      .connectWebrtc({
+        decision: p2p.decideWebrtc({ mode: 'standard', userEnabled: true }),
+        signalKey,
+        roomIdHash: ROOM,
+        selfPeerKey: 'bob',
+        remotePeerKey: 'alice',
+        initiator: false,
+        postSignal: respSignals.postSignal,
+        pollSignal: respSignals.pollSignal,
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+        rtcFactory: () => new FakePeer(link, 'responder'),
+      })
+      .then((channel) =>
+        runWebrtcBidirectionalExchange({ db: responderDb, channel, timeoutMs: 5000 }),
+      );
+
+    const [result] = await Promise.all([
+      syncRoomOverP2p({
+        db: initiatorDb,
+        roomIdHash: ROOM,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        privacy: { mode: 'standard', userEnabled: true },
+        apiBase: 'http://relay.test',
+        fetchFn: relay,
+        httpsConfig: { fetchFn: anchorFetch },
+        rtcFactory: () => new FakePeer(link, 'initiator'),
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+      }),
+      responderDone,
+    ]);
+
+    expect(result?.transport).toBe('webrtc'); // served-only is still a successful P2P round
+    expect(result?.ingested).toBeNull(); // we ingested nothing (no gaps)
+    expect(anchorUrls.some((u) => u.includes('/exchange'))).toBe(false); // never hit the anchor
+  });
+
   it('falls back to the HTTPS anchor when WebRTC is off, and ingests the served response', async () => {
     const bytes = new Uint8Array([3, 1, 4, 1, 5, 9]);
     const blockCid = await cidFor('block', bytes);
