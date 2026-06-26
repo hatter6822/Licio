@@ -600,6 +600,30 @@ public class BluetoothCourierRadioTest {
     }
 
     @Test
+    @Config(sdk = 31)
+    public void aStaleClientConnectDoesNotClobberAFreshlyEstablishedGatt() {
+        // A delayed STATE_CONNECTED from an OLD client GATT (the same address was re-dialed, so a
+        // FRESH gatt already owns the endpoint) must NOT remove the fresh one and install the stale
+        // gatt — it is closed and dropped instead (#Y).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothGatt newGatt = connectBleClient(radio); // the CURRENT established client for PEER
+        BluetoothGatt oldGatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+
+        radio.gattClientCallback.onConnectionStateChange(
+                oldGatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        assertTrue("the stale old gatt was closed", shadowOf(oldGatt).isClosed());
+
+        // The fresh gatt is still the established client — a notification on it still reassembles
+        // (it would be DROPPED as superseded if the stale connect had clobbered it into bleClients).
+        BluetoothGattCharacteristic ch = courierCharacteristic();
+        ch.setValue(CourierFraming.framePrefixed("fresh".getBytes()));
+        radio.gattClientCallback.onCharacteristicChanged(newGatt, ch);
+        assertEquals("the fresh gatt remains the established client", 1, rec.payloadCount);
+    }
+
+    @Test
     @Config(sdk = 31) // a full successful connection needs the legacy CCC write the shadow honours
     // (the API-33 writeDescriptor is not shadowed → returns an error → the radio correctly fails it)
     public void gattClientNotificationsReassembleToOnePayload() {

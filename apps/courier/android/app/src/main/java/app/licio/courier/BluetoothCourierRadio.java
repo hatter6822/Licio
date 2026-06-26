@@ -733,8 +733,18 @@ public class BluetoothCourierRadio implements CourierRadio {
                 if (!running.get()) {
                     // stopBle() ran while this connectGatt was pending — a late STATE_CONNECTED must
                     // NOT promote the (already-closed) GATT into bleClients / start discovery / emit a
-                    // connection for a stopped radio.  Close it and drop it.
-                    blePendingClients.remove(endpointId);
+                    // connection for a stopped radio.  Close it and drop it (BY VALUE so a fresh dial
+                    // for the same address is never clobbered).
+                    blePendingClients.remove(endpointId, gatt);
+                    gatt.close();
+                    return;
+                }
+                if (isSupersededClient(endpointId, gatt)) {
+                    // A DIFFERENT gatt already owns this endpoint (a Stop→Start / quick re-dial put a
+                    // FRESH pending/established gatt for the same address) — a delayed connect from
+                    // THIS old gatt must NOT remove the fresh pending one and install itself.  Close
+                    // this stale gatt without disturbing the current one (#Y).
+                    blePendingClients.remove(endpointId, gatt); // by VALUE — never the fresh pending
                     gatt.close();
                     return;
                 }

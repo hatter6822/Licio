@@ -297,12 +297,17 @@ public class WifiDirectRadio implements CourierRadio {
 
                             @Override
                             public void onFailure(int reason) {
+                                // Check staleness FIRST: a connect failure from an OLD discovery run
+                                // can arrive after a Stop→Start has set connectPending for the NEW
+                                // run's own dial — clearing it here would let the next peer-list
+                                // refresh issue a DUPLICATE connect (BUSY/startFailed) against the
+                                // fresh courier (#Z).  A superseded failure is simply dropped.
+                                if (isStale(connectGen)) return;
                                 // The connect was rejected (peer gone / BUSY / ERROR) — release the
-                                // in-flight claim so a later refresh can retry, and surface it
-                                // instead of swallowing the async failure, so the courier doesn't
-                                // stay "running" with no socket setup and no retry.
+                                // in-flight claim so a later refresh can retry, and surface it instead
+                                // of swallowing the async failure, so the courier doesn't stay
+                                // "running" with no socket setup and no retry.
                                 connectPending.set(false);
-                                if (isStale(connectGen)) return; // a stop/restart superseded this connect
                                 events.onStartFailed("connect",
                                         new IllegalStateException("wifi_p2p_connect_failed_" + reason));
                             }

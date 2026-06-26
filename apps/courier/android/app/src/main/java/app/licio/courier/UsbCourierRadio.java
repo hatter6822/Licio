@@ -173,26 +173,32 @@ public class UsbCourierRadio implements CourierRadio {
     void attach(InputStream in, OutputStream out, String endpointId) {
         running.set(true);
         readStream = in; // tracked so stop() can close it and unblock the read below
+        // CAPTURE this attach's descriptor — NOT the mutable field at exit time.  If a Stop→Start
+        // re-opened a NEW accessory while this old read thread was still unwinding, the field already
+        // points at the FRESH descriptor/stream; reading it here would close the LIVE accessory and
+        // break the new USB courier (#AA).
+        final ParcelFileDescriptor attached = descriptor;
         // The shared blocking-stream data-path (CourierStreamLinkTest covers it via pipes).  On
-        // link exit (EOF / error / stop()) close the accessory DESCRIPTOR too and clear it — closing
-        // only `in` would leave `descriptor` non-null, so after an unplug/replug the idempotency
-        // guard in startDiscovery() would refuse to reopen and the ParcelFileDescriptor would leak.
+        // link exit (EOF / error / stop()) close THIS attach's accessory DESCRIPTOR too and clear the
+        // fields — closing only `in` would leave `descriptor` non-null, so after an unplug/replug the
+        // idempotency guard in startDiscovery() would refuse to reopen and the FD would leak.
         Closeable onExit = () -> {
             try {
                 in.close();
             } catch (IOException ignored) {
                 // already closed
             }
-            ParcelFileDescriptor d = descriptor;
-            if (d != null) {
+            if (attached != null) {
                 try {
-                    d.close();
+                    attached.close();
                 } catch (IOException ignored) {
                     // already closed
                 }
             }
-            descriptor = null;
-            readStream = null;
+            // Clear the fields ONLY if they STILL point at THIS attach's values — a fresh start may
+            // already own a new descriptor/stream for the same endpoint, which must not be cleared.
+            if (descriptor == attached) descriptor = null;
+            if (readStream == in) readStream = null;
         };
         new Thread(() ->
                 CourierStreamLink.run(in, out, onExit, endpointId, outbound, events, running::get))
