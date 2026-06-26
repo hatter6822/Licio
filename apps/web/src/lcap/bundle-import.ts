@@ -272,6 +272,9 @@ export async function commitImportedBundle(
   // committed record that DECLARES a now-dropped dep must be re-quarantined, not left committed with an
   // absent prerequisite (#RR).
   const droppedCids = new Set<string>();
+  // Each committed record's SIGNED-body BLOCK deps — used to re-quarantine a record whose body needs
+  // a block the pack table omitted (so importPack never flagged it missing) (#AC).
+  const recordBodyBlockDeps = new Map<string, string[]>();
 
   const recordRows: RecordRow[] = [];
   const proofRows: ProofRow[] = [];
@@ -328,14 +331,14 @@ export async function commitImportedBundle(
       if (scopeFiltered) {
         committedRecordCids.add(cid);
         if (decoded?.kind === 'contribution_event') {
-          for (const dep of [
+          const blockDeps = [
             decoded.body_block_cid,
             decoded.attachment_manifest_cid,
             ...(decoded.source_snapshot_cids ?? []),
             decoded.target_source_snapshot_cid,
-          ]) {
-            if (dep !== undefined) allowedBlocks.add(dep);
-          }
+          ].filter((d): d is string => d !== undefined);
+          for (const dep of blockDeps) allowedBlocks.add(dep);
+          if (blockDeps.length > 0) recordBodyBlockDeps.set(cid, blockDeps);
         }
       }
     } else if (frame.frameKind === 'proof') {
@@ -376,11 +379,28 @@ export async function commitImportedBundle(
     });
   }
 
+  // A proof may attest a record ALREADY in `lcap_v2` (heldCidsFor reported it `already_have`, so it
+  // never entered `committedRecordCids`) — admit those held records into the proof closure so a peer
+  // push/export of `record + proof` can upgrade an existing integrity-only record missing its proof (#AD).
+  const heldProofRecords = scopeFiltered
+    ? await filterPresentKeys(
+        db,
+        LCAP_STORE.records,
+        tentativeProofs
+          .map((p) => p.recordCid)
+          .filter((c) => c !== '' && !committedRecordCids.has(c)),
+      )
+    : new Set<string>();
+
   // Apply the in-scope closure (#GG): under a scoped ingest, a proof commits only if it attests a
-  // COMMITTED record, and a block/chunk only if a committed record's signed body (or our own
-  // quarantine want) references it.
+  // COMMITTED (or already-held, #AD) record, and a block/chunk only if a committed record's signed
+  // body (or our own quarantine want) references it.
   for (const p of tentativeProofs) {
-    if (scopeFiltered && !committedRecordCids.has(p.recordCid)) {
+    if (
+      scopeFiltered &&
+      !committedRecordCids.has(p.recordCid) &&
+      !heldProofRecords.has(p.recordCid)
+    ) {
       droppedCids.add(p.cid); // off-closure proof (#RR)
       continue;
     }
@@ -411,10 +431,26 @@ export async function commitImportedBundle(
   // resolved deps over EVERY CID-verified frame (counting a now-dropped frame as present), so without
   // this a public record requiring a filtered-out (non-public / off-scope) prerequisite would be
   // committed with that prerequisite absent from the store instead of waiting for it.
-  const reQuarantined = new Map<string, string[]>(); // recordCid → the dropped deps it still needs
+  // #AC additionally re-quarantines a record whose SIGNED body needs a block the pack TABLE omitted:
+  // importPack resolves over the (unauthenticated) table deps, so a peer can drop a body_block_cid from
+  // the table and have the record committed without a want for the absent block.  A body block dep is
+  // satisfied only if it is committed in THIS pack or already held — else the record must wait.
+  const blockWritesCids = new Set(blockWrites.map((b) => b.cid));
+  const unwrittenBodyDeps = [
+    ...new Set([...recordBodyBlockDeps.values()].flat().filter((d) => !blockWritesCids.has(d))),
+  ];
+  const heldBodyDeps =
+    unwrittenBodyDeps.length > 0
+      ? await filterPresentKeys(db, LCAP_STORE.blocks, unwrittenBodyDeps)
+      : new Set<string>();
+  const reQuarantined = new Map<string, string[]>(); // recordCid → the deps it still needs
   for (const r of recordRows) {
-    const droppedDeps = (r.deps ?? []).filter((d) => droppedCids.has(d));
-    if (droppedDeps.length > 0) reQuarantined.set(r.recordCid, droppedDeps);
+    const missing = new Set<string>();
+    for (const d of r.deps ?? []) if (droppedCids.has(d)) missing.add(d); // #RR dropped table dep
+    for (const d of recordBodyBlockDeps.get(r.recordCid) ?? []) {
+      if (!blockWritesCids.has(d) && !heldBodyDeps.has(d)) missing.add(d); // #AC absent body block dep
+    }
+    if (missing.size > 0) reQuarantined.set(r.recordCid, [...missing]);
   }
 
   // Quarantine rows from the per-object statuses (the precise missing prerequisites).

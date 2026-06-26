@@ -383,6 +383,52 @@ describe('client §16 exchange engine', () => {
     expect(counts?.quarantined).toBeGreaterThan(0); // R's gap is now tracked as a want
   });
 
+  it('SECURITY: re-quarantines a record whose body needs a block the pack TABLE omits (#AC)', async () => {
+    const lcap = await import('@licio/lcap');
+    const missingBlock = await cidFor('block', new Uint8Array([7, 7, 7, 2])); // NOT in pack, NOT held
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-1',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([3]),
+      priority: 2,
+      body_block_cid: missingBlock,
+    });
+    const recordCid = await cidFor('record', body);
+    // A crafted pack whose record table deps are EMPTY (a peer omitted the body's block) — importPack
+    // sees no missing dep and would commit the record even though its SIGNED body needs the absent block.
+    const pack = await lcap.writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'C0',
+          priority: 2,
+          roomIdHash: new Uint8Array(32).fill(1),
+          deps: [],
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: body.length + 1024,
+    });
+    const counts = await ingestPackIntoStore(peerA, pack as Uint8Array);
+    expect(counts?.records).toBe(0); // NOT committed — re-quarantined on the absent body block (#AC)
+    expect(await getHeldObject(peerA, recordCid)).toBeUndefined();
+    expect(counts?.quarantined).toBeGreaterThan(0); // the missing block is tracked as a want
+  });
+
   it('SECURITY: the responder SKIPS the push ingest when liveness has gone false mid-build (#OO)', async () => {
     const lcap = await import('@licio/lcap');
     const bytes = new Uint8Array([5, 5, 5, 5]);

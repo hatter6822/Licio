@@ -93,6 +93,10 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   //    dep that resolves to a held block descriptor is included; one we don't hold is omitted.
   const { decodeAndRouteRecord } = await import('@licio/lcap');
   const depCids = new Set<string>();
+  // The exported table `deps` per record — derived from the SIGNED body (record refs + block refs),
+  // the SAME closure derivation, NOT the stored `record.deps` (which may carry a stale/unauthenticated
+  // dep a recipient would then quarantine on while we omit the bytes) (#AE).
+  const recordDeps = new Map<string, string[]>();
   for (const record of records) {
     let decoded: ReturnType<typeof decodeAndRouteRecord>;
     try {
@@ -101,6 +105,18 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
       continue; // undecodable — export nothing further for it
     }
     if (decoded.kind !== 'contribution_event') continue;
+    const deps: string[] = [];
+    if (decoded.prev_device_record_cid) deps.push(decoded.prev_device_record_cid);
+    if (decoded.replaces_record_cid) deps.push(decoded.replaces_record_cid);
+    if (decoded.target_record_cid) deps.push(decoded.target_record_cid);
+    if (decoded.thread_root_cid) deps.push(decoded.thread_root_cid);
+    for (const p of decoded.parent_record_cids ?? []) deps.push(p);
+    if (decoded.body_block_cid) deps.push(decoded.body_block_cid);
+    if (decoded.attachment_manifest_cid) deps.push(decoded.attachment_manifest_cid);
+    for (const s of decoded.source_snapshot_cids ?? []) deps.push(s);
+    if (decoded.target_source_snapshot_cid) deps.push(decoded.target_source_snapshot_cid);
+    if (deps.length > 0) recordDeps.set(record.recordCid, deps);
+    // The block subset of those refs is what we export bytes for (held only).
     if (decoded.body_block_cid) depCids.add(decoded.body_block_cid);
     if (decoded.attachment_manifest_cid) depCids.add(decoded.attachment_manifest_cid);
     for (const s of decoded.source_snapshot_cids ?? []) depCids.add(s);
@@ -120,6 +136,9 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
 
   for (const record of records) {
     const priority = asPriority(record.priority);
+    // Deps from the SIGNED body (#AE), not the stored table metadata — so a recipient never
+    // quarantines on a stale dep we don't carry.
+    const signedDeps = recordDeps.get(record.recordCid);
     objects.push({
       cid: record.recordCid,
       cidKind: 'record',
@@ -129,7 +148,7 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
       priority,
       roomIdHash: roomHashBytes,
       ...(record.kind ? { recordKind: record.kind as PackObject['recordKind'] } : {}),
-      ...(record.deps ? { deps: [...record.deps] } : {}),
+      ...(signedDeps ? { deps: signedDeps } : {}),
     });
     items.push({
       roomId: roomHash,

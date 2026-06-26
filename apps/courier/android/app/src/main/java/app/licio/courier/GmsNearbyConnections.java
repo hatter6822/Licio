@@ -147,18 +147,22 @@ public class GmsNearbyConnections implements NearbyConnections {
 
             @Override
             public void onConnectionResult(@NonNull String endpointId, @NonNull ConnectionResolution resolution) {
-                long gen = endpointGeneration.getOrDefault(endpointId, generation);
+                // Use THIS callback's CAPTURED generation, not the mutable map: a stale result from an
+                // old start (delivered after a Stop→Start where the same endpoint already reconnected
+                // under a fresh generation) must carry its OWN old generation so the radio drops it —
+                // reading the map would retag it current.  Remove BY VALUE so a stale failure never
+                // evicts the fresh connection's entry (which the payload path still needs) (#AF).
                 boolean ok = resolution.getStatus().getStatusCode() == ConnectionsStatusCodes.STATUS_OK;
-                if (!ok) endpointGeneration.remove(endpointId); // failed connection — stop tracking it
-                if (listener != null) listener.onConnectionResult(endpointId, ok, gen);
+                if (!ok) endpointGeneration.remove(endpointId, generation);
+                if (listener != null) listener.onConnectionResult(endpointId, ok, generation);
             }
 
             @Override
             public void onDisconnected(@NonNull String endpointId) {
-                Long gen = endpointGeneration.remove(endpointId);
-                if (listener != null) {
-                    listener.onDisconnected(endpointId, gen != null ? gen : generation);
-                }
+                // Same: report THIS callback's generation and remove only our own entry by value, so a
+                // stale disconnect can't evict / mis-tag a freshly reconnected endpoint (#AF).
+                endpointGeneration.remove(endpointId, generation);
+                if (listener != null) listener.onDisconnected(endpointId, generation);
             }
         };
     }
