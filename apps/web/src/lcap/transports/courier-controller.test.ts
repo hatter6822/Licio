@@ -770,4 +770,88 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(controller.isRunning()).toBe(false);
     expect(f.calls).toEqual([]);
   });
+
+  it('drops a STALE native callback from a prior session after a restart (#1 generation)', async () => {
+    const f = fakePlugin();
+    // `buildRequest` is invoked SYNCHRONOUSLY at the top of driveExchange (before its first await),
+    // so its call-count deterministically reports whether a callback drove an exchange.
+    const buildRequest = vi.fn(() => REQUEST_BYTES);
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest,
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    await controller.start();
+    // Capture the OLD session's connectionResult listener, then Stop→Start (re-register).
+    const staleConn = f.listeners.find((l) => l.event === 'connectionResult')?.fn;
+    expect(staleConn).toBeDefined();
+    await controller.stop();
+    await controller.start(); // re-registers the channel under a NEW generation
+    buildRequest.mockClear();
+    // The queued old-session callback fires AFTER the restart — it must drive NOTHING.
+    staleConn?.({ endpointId: 'stale-ep', connected: true });
+    expect(buildRequest).not.toHaveBeenCalled(); // the stale (older-generation) callback was dropped
+    // A FRESH callback (current generation) still drives an exchange.
+    f.emit('connectionResult', { endpointId: 'fresh-ep', connected: true });
+    expect(buildRequest).toHaveBeenCalled();
+  });
+
+  it('charges ferried bytes ONCE — responder + request legs never double-count (#2 budget)', async () => {
+    // Budget = one request + TWO responses.  A peer request, then our driven exchange, then a
+    // SECOND peer request: with single-counting all three fit; double-counting the first response
+    // would exhaust the budget and BLOCK the second peer request.
+    const budget = REQUEST_BYTES.length + 2 * RESPONSE_BYTES.length;
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: { ...ON, storageBudgetBytes: budget },
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      buildResponse: () => RESPONSE_BYTES,
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    await controller.start();
+    f.emit('payloadReceived', { endpointId: 'ep1', message: REQUEST_B64 }); // peer request #1
+    await vi.waitFor(() => expect(f.sent.filter((s) => s.message === RESPONSE_B64).length).toBe(1));
+    f.emit('connectionResult', { endpointId: 'ep1', connected: true }); // our driven exchange
+    await vi.waitFor(() => expect(f.sent.some((s) => s.message === REQUEST_B64)).toBe(true));
+    f.emit('payloadReceived', { endpointId: 'ep1', message: REQUEST_B64 }); // peer request #2
+    // Served ⇒ TWO responses sent total (would be 1 if the first response had been double-charged).
+    await vi.waitFor(() => expect(f.sent.filter((s) => s.message === RESPONSE_B64).length).toBe(2));
+  });
+
+  it('aborts a launch when stop() races a pending native start (#3 cancel mid-start)', async () => {
+    const a = fakePlugin();
+    const b = fakePlugin();
+    // Channel A's advertise PARKS until we release it — so stop() can run mid-launch.
+    let releaseA: (() => void) | undefined;
+    const aStarted = new Promise<void>((resolve) => {
+      a.plugin.startAdvertising = vi.fn(async () => {
+        a.calls.push('advertise');
+        resolve();
+        await new Promise<void>((r) => {
+          releaseA = r;
+        });
+      });
+    });
+    const controller = new CourierController({
+      channels: [
+        { channel: 'nearby', plugin: a.plugin },
+        { channel: 'bluetooth', plugin: b.plugin },
+      ] as unknown as CourierChannelPlugin[],
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+    });
+    const startP = controller.start(); // do NOT await — A parks mid-advertise
+    await aStarted;
+    await controller.stop(); // a stop() races the still-pending launch
+    releaseA?.(); // let A's advertise resolve
+    await startP;
+    // The launch aborted after the stop — channel B's radio was NEVER brought up with no owner.
+    expect(b.plugin.startAdvertising).not.toHaveBeenCalled();
+    expect(controller.isRunning()).toBe(false);
+  });
 });

@@ -225,6 +225,15 @@ export class CourierController {
   private readonly exchanged = new Set<string>();
   /** Per-channel listener handles, so ONE channel can be torn down without touching the others. */
   private readonly handlesByChannel = new Map<CourierChannel, ListenerHandle[]>();
+  /** The CURRENT listener generation per channel — bumped on each (re)registration so a stale
+   *  native callback captured in an older session's closure is dropped after a restart. */
+  private readonly channelGeneration = new Map<CourierChannel, number>();
+  /** A monotonic source for the per-registration generation (never reused). */
+  private nextGeneration = 0;
+  /** The cumulative `bytesSent()` already CHARGED per medium — so each ferried byte is counted
+   *  against the §22.5 storage budget EXACTLY once (the request leg AND every responder reply
+   *  charge only their delta, never the whole cumulative twice). */
+  private readonly chargedBytes = new WeakMap<NativeChannelMedium, number>();
   /** Channels whose radios are currently running — a single radio's failure removes only its own
    *  channel; the courier is "running" while ANY channel is active, and only blocks when NONE are. */
   private readonly runningChannels = new Set<CourierChannel>();
@@ -330,13 +339,26 @@ export class CourierController {
     }
     const options = this.radioOptions();
     for (const { channel, plugin } of channels) {
+      // A stop() (unmount / disclosure revocation / Stealth) may have run while a PRIOR channel's
+      // native start was awaiting — abort the launch rather than bring more radios up with no owner.
+      if (!this.started) break;
       try {
         if (decision.advertise) await plugin.startAdvertising(options);
+        // If a stop() ran DURING the advertise await, undo this channel's radio (the medium may now
+        // be advertising though stop() already passed it) and abort — never leave an orphan radio.
+        if (!this.started) {
+          await this.stopChannel(channel);
+          break;
+        }
         // If an async startFailed tore THIS channel down during the advertise await (stopChannel
         // deletes its handles synchronously), do NOT also start discovery on it — that would leave
         // a native radio running with no listeners and no running mark.
         if (!this.handlesByChannel.has(channel)) continue;
         if (decision.discover) await plugin.startDiscovery(options);
+        if (!this.started) {
+          await this.stopChannel(channel);
+          break;
+        }
         // Only mark active if an async startFailed did NOT already tear this channel down mid-await.
         if (this.handlesByChannel.has(channel)) this.runningChannels.add(channel);
       } catch (error) {
@@ -468,35 +490,41 @@ export class CourierController {
   }
 
   /** Register a channel's four event listeners under its own handle list (so it can be torn down
-   *  independently).  Done BEFORE the radio starts, so no early event is missed. */
+   *  independently).  Done BEFORE the radio starts, so no early event is missed.  Each registration
+   *  gets a fresh GENERATION captured in the listener closures — so a native callback QUEUED before
+   *  a stop, that arrives after a quick Stop→Start / live-restart RE-registered the same channel,
+   *  is dropped (its generation no longer matches), never driving/answering under the new session. */
   private async registerListeners(
     channel: CourierChannel,
     plugin: NearbyCourierPlugin,
   ): Promise<void> {
+    const generation = ++this.nextGeneration;
+    this.channelGeneration.set(channel, generation);
     const handles: ListenerHandle[] = [];
     const add = async (event: string, listener: (raw: unknown) => void): Promise<void> => {
       handles.push(await plugin.addListener(event, listener));
     };
-    await add('connectionResult', (raw) => this.onConnectionResult(channel, raw));
-    await add('payloadReceived', (raw) => this.onPayloadReceived(channel, raw));
-    await add('disconnected', (raw) => this.onDisconnected(channel, raw));
+    await add('connectionResult', (raw) => this.onConnectionResult(channel, generation, raw));
+    await add('payloadReceived', (raw) => this.onPayloadReceived(channel, generation, raw));
+    await add('disconnected', (raw) => this.onDisconnected(channel, generation, raw));
     // A radio's start is ASYNC: GMS/Wi-Fi Direct may reject it AFTER start* resolves — consume the
     // native startFailed so a late refusal tears down THIS channel (not believed-running).
-    await add('startFailed', (raw) => void this.onStartFailed(channel, raw));
+    await add('startFailed', (raw) => void this.onStartFailed(channel, generation, raw));
     this.handlesByChannel.set(channel, handles);
   }
 
-  /** Whether a channel is still ACTIVE — its listeners are registered and not torn down.  A native
-   *  event QUEUED before stop()/stopChannel() removed the listeners can still invoke a handler, so
-   *  every inbound handler gates on this to avoid driving/answering an exchange after teardown.
-   *  (`handlesByChannel` is deleted SYNCHRONOUSLY by stopChannel, before any await.) */
-  private isChannelActive(channel: CourierChannel): boolean {
-    return this.handlesByChannel.has(channel);
+  /** Whether a channel is still ACTIVE for the given listener GENERATION — its listeners are
+   *  registered AND belong to the current session.  A native event QUEUED before stop()/stopChannel()
+   *  (or before a restart re-registered the channel) can still invoke a handler, so every inbound
+   *  handler gates on this to avoid driving/answering an exchange after teardown OR under a newer
+   *  session.  (`handlesByChannel` is deleted SYNCHRONOUSLY by stopChannel, before any await.) */
+  private isChannelActive(channel: CourierChannel, generation: number): boolean {
+    return this.handlesByChannel.has(channel) && this.channelGeneration.get(channel) === generation;
   }
 
   /** A `connectionResult`: when an endpoint first connects, drive ONE exchange over it. */
-  private onConnectionResult(channel: CourierChannel, raw: unknown): void {
-    if (!this.isChannelActive(channel)) return; // a late event after stop/deselect — don't exchange
+  private onConnectionResult(channel: CourierChannel, generation: number, raw: unknown): void {
+    if (!this.isChannelActive(channel, generation)) return; // a late/stale event — don't exchange
     const parsed = nativeConnectionEventSchema.safeParse(raw);
     if (!parsed.success) return; // fail-closed on a malformed native event
     const event: NativeConnectionEvent = parsed.data;
@@ -509,8 +537,8 @@ export class CourierController {
    *  exchange REQUEST goes to the responder (or is dropped) — it is NEVER delivered to our inbox,
    *  so it can't be mistaken for our exchange response; only a valid RESPONSE feeds the inbox the
    *  requester's `CourierTransport.receive()` reads. */
-  private onPayloadReceived(channel: CourierChannel, raw: unknown): void {
-    if (!this.isChannelActive(channel)) return; // a late event after stop/deselect — don't respond
+  private onPayloadReceived(channel: CourierChannel, generation: number, raw: unknown): void {
+    if (!this.isChannelActive(channel, generation)) return; // a late/stale event — don't respond
     const parsed = nativePayloadEventSchema.safeParse(raw);
     if (!parsed.success) return; // malformed — drop, never decode
     const event: NativePayloadEvent = parsed.data;
@@ -552,14 +580,18 @@ export class CourierController {
       if (!response) return;
       if (!withinStorageBudget(this.controls, this.sharedBytes, response.byteLength)) return;
       medium.enqueueOutbound(response);
-      this.sharedBytes += response.byteLength; // count the bytes we ferried back
+      // Charge only the DELTA of the medium's cumulative bytesSent() — the same metric
+      // driveExchange's finally charges — so these responder bytes are counted exactly once, not
+      // also re-added there (which would prematurely trip `over_storage_budget` on later exchanges).
+      this.chargeMediumBytes(medium);
     } catch (error) {
       devWarn(`failed to build a courier response for '${channel}'`, error);
     }
   }
 
   /** A `disconnected`: drop the endpoint's medium so a later reconnect starts fresh. */
-  private onDisconnected(channel: CourierChannel, raw: unknown): void {
+  private onDisconnected(channel: CourierChannel, generation: number, raw: unknown): void {
+    if (!this.isChannelActive(channel, generation)) return; // a stale disconnect must not drop a fresh medium
     const parsed = nativeDisconnectEventSchema.safeParse(raw);
     if (!parsed.success) return;
     const event: NativeDisconnectEvent = parsed.data;
@@ -571,9 +603,13 @@ export class CourierController {
   /** A radio reported an ASYNC start failure (e.g. GMS refused advertising after the start Task
    *  resolved).  Tear down ONLY that channel — a different working radio keeps the courier running —
    *  and report radio_unavailable to the UI only when the LAST working channel is gone. */
-  private async onStartFailed(channel: CourierChannel, raw: unknown): Promise<void> {
+  private async onStartFailed(
+    channel: CourierChannel,
+    generation: number,
+    raw: unknown,
+  ): Promise<void> {
     devWarn(`courier radio '${channel}' reported a start failure`, raw);
-    if (!this.handlesByChannel.has(channel)) return; // already torn down
+    if (!this.isChannelActive(channel, generation)) return; // already torn down OR a stale/older session
     await this.stopChannel(channel);
     // Defer the all-failed verdict while start() is still launching (its end-of-loop check owns it);
     // once running, only the LAST channel going down makes the courier unavailable.
@@ -666,7 +702,8 @@ export class CourierController {
       // exchange threw or returned nothing.  A peer that received the request but never answered
       // (while the HTTPS anchor was unreachable) STILL consumed those bytes; charging them only on
       // success would let repeated FAILED courier attempts bypass the budget on bytes already sent.
-      this.sharedBytes += medium.bytesSent();
+      // The DELTA charge avoids double-counting any responder bytes already charged above.
+      this.chargeMediumBytes(medium);
     }
 
     if (!result) {
@@ -674,6 +711,18 @@ export class CourierController {
       return;
     }
     this.emit(channel, endpointId, result.transport, result.response, '');
+  }
+
+  /** Charge a medium's NEWLY-sent bytes (the delta since we last charged it) to the §22.5 storage
+   *  budget — so a byte the medium ferried is counted exactly once, no matter how many call sites
+   *  (the request leg + each responder reply) observe its cumulative `bytesSent()`. */
+  private chargeMediumBytes(medium: NativeChannelMedium): void {
+    const sent = medium.bytesSent();
+    const already = this.chargedBytes.get(medium) ?? 0;
+    if (sent > already) {
+      this.sharedBytes += sent - already;
+      this.chargedBytes.set(medium, sent);
+    }
   }
 
   private emit(
