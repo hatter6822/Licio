@@ -118,12 +118,18 @@ public class WifiDirectRadio implements CourierRadio {
         if (discoverRequested.get()) {
             if (currentMode == WifiMode.DISCOVER) return; // already scanning
             if (currentMode == WifiMode.GROUP) {
-                // UPGRADE advertise-only → discovery: tear the group-owner group down so we can scan.
+                // UPGRADE advertise-only → discovery: tear the group-owner group AND its sockets down so
+                // we can scan.  removeGroup ALONE leaves `groupActive`, the bound data ServerSocket
+                // (8989), and any live sockets alive — with the accept() thread blocked, the generation
+                // bump can't unblock it — so the stale listener keeps the port bound and `groupActive`
+                // makes later peer-list broadcasts SKIP connecting in the new discovery mode (#AX).
                 try {
                     manager.removeGroup(channel, null);
                 } catch (RuntimeException ignored) {
                     // not formed / framework state — non-fatal; discoverPeers proceeds
                 }
+                closeGroupSockets(); // close the listener (unblocks accept + frees 8989) + live sockets
+                groupActive.set(false); // release the claim so discovery-mode connection-info can dial
             }
             currentMode = WifiMode.DISCOVER;
             running.set(true);
@@ -231,8 +237,15 @@ public class WifiDirectRadio implements CourierRadio {
                 // no group formed / framework state — non-fatal
             }
         }
+        closeGroupSockets();
+        unregisterReceiver();
+    }
+
+    /** Close the bound data listener + every live data socket (unblocking any thread parked in
+     *  accept()/read) and drop the outbound routes — shared by stop() and the advertise→discover
+     *  upgrade (#AX). */
+    private void closeGroupSockets() {
         closeServerSocket();
-        // Close live data sockets so a thread blocked mid-frame read unblocks + exits.
         for (Socket s : liveSockets) {
             try {
                 s.close();
@@ -242,7 +255,6 @@ public class WifiDirectRadio implements CourierRadio {
         }
         liveSockets.clear();
         outbound.clear();
-        unregisterReceiver();
     }
 
     @Override

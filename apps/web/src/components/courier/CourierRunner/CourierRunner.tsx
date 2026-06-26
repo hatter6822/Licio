@@ -270,17 +270,20 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         // the CURRENT sharing scope so a peer never receives over-priority / other-room content — and
         // rebuilt if the scope changed mid-build (#N).
         buildResponse: async (request, _endpointId, shouldIngestPush) => {
+          // The peer's push_pack is INGESTED with the scope captured at the call; gate that ingest on
+          // the scope NOT having changed since (as well as the controller's live check), so a stale
+          // attempt — the scope switched from all-rooms/room-A to room-B mid-await — cannot commit the
+          // peer's push under the OLD allowlist.  The retry below then rebuilds + re-ingests under the
+          // new scope (#AT).
+          const gatedFor = (v: number) => (): boolean =>
+            scopeVersionRef.current === v && (shouldIngestPush?.() ?? true);
           for (let i = 0; i < 4; i++) {
             const v = scopeVersionRef.current;
-            const bytes = await respondToClientExchange(
-              db,
-              request,
-              scopeRef.current,
-              shouldIngestPush,
-            );
+            const bytes = await respondToClientExchange(db, request, scopeRef.current, gatedFor(v));
             if (scopeVersionRef.current === v) return bytes;
           }
-          return respondToClientExchange(db, request, scopeRef.current, shouldIngestPush);
+          const v = scopeVersionRef.current;
+          return respondToClientExchange(db, request, scopeRef.current, gatedFor(v));
         },
         onOutcome: (outcome) => {
           const record = (carried: boolean, skippedReason: string): void =>

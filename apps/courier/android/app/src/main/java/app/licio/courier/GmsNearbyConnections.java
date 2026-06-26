@@ -139,9 +139,13 @@ public class GmsNearbyConnections implements NearbyConnections {
         return new ConnectionLifecycleCallback() {
             @Override
             public void onConnectionInitiated(@NonNull String endpointId, @NonNull ConnectionInfo info) {
-                // Record the generation this connection is born under; every later callback for it
-                // carries that generation so the radio can drop one from a superseded start.
-                endpointGeneration.put(endpointId, generation);
+                // Record the generation this connection is born under ONLY when it is still the current
+                // session — a delayed onConnectionInitiated from an OLD start must not overwrite a fresh
+                // reconnection's generation in the shared map, which would then tag the current
+                // connection's payloads as stale and have NearbyCourierRadio drop them (#AV).
+                if (generation == currentGeneration) {
+                    endpointGeneration.put(endpointId, generation);
+                }
                 if (listener != null) listener.onConnectionInitiated(endpointId, generation);
             }
 
@@ -206,21 +210,23 @@ public class GmsNearbyConnections implements NearbyConnections {
     private final PayloadCallback payloadCallback = new PayloadCallback() {
         @Override
         public void onPayloadReceived(@NonNull String endpointId, @NonNull Payload payload) {
+            // DROP a payload with no LIVE connection generation (the endpoint's entry was removed by a
+            // disconnect/failure): defaulting to the mutable currentGeneration would tag a late payload
+            // — delivered after a Stop→Start advanced the generation — as CURRENT, letting stale bytes
+            // reach the fresh controller (#AU).
+            Long gen = endpointGeneration.get(endpointId);
+            if (gen == null) return;
             if (payload.getType() == Payload.Type.STREAM) {
                 // A STREAM is delivered incrementally — hold it (with the generation it arrived under)
                 // until onPayloadTransferUpdate reports SUCCESS, then read the full ordered byte
                 // stream (matches the sender's fromStream).
-                incomingStreams.put(
-                        payload.getId(),
-                        new IncomingStream(
-                                payload, endpointGeneration.getOrDefault(endpointId, currentGeneration)));
+                incomingStreams.put(payload.getId(), new IncomingStream(payload, gen));
                 return;
             }
             byte[] bytes = payload.asBytes();
             if (bytes != null && listener != null) {
                 // a small BYTES payload carries frames too — tag with the connection's generation (#E)
-                listener.onPayloadReceived(endpointId, bytes,
-                        endpointGeneration.getOrDefault(endpointId, currentGeneration));
+                listener.onPayloadReceived(endpointId, bytes, gen);
             }
         }
 

@@ -813,8 +813,16 @@ export class CourierController {
       );
       // Fall back to the always-correct HTTPS anchor ONLY if this courier is STILL live: a Stop /
       // disclosure revocation / deselection / forced-off mode DURING the (possibly slow) courier leg
-      // must not then let the already-built request + push_pack reach the server (#X).
-      if (!result && this.started && this.isChannelActive(channel, generation)) {
+      // must not then let the already-built request + push_pack reach the server (#X).  The LIVE
+      // who-can-exchange policy is re-checked too: if the user removed this peer from the allowlist (or
+      // set peers→none) while the courier leg was timing out, the request must not ride the anchor for
+      // a now-disallowed peer (#AW).
+      if (
+        !result &&
+        this.started &&
+        this.isChannelActive(channel, generation) &&
+        mayExchangeWithEndpoint(this.controls, endpointId)
+      ) {
         result = await offlineExchange(
           buildServerTransports(this.config.httpsConfig ?? {}),
           request,
@@ -842,8 +850,16 @@ export class CourierController {
     // The HTTPS anchor leg has no abort signal, so it can COMPLETE after a Stop / disclosure
     // revocation / channel deselect that happened while the server request was in flight — re-check
     // liveness before emitting, since emitting drives the runner's onOutcome to INGEST the response
-    // into IndexedDB after the courier was stopped (#TT).
-    if (!this.started || !this.isChannelActive(channel, generation)) return;
+    // into IndexedDB after the courier was stopped (#TT).  The LIVE who-can-exchange policy is
+    // re-checked too: a mid-exchange allowlist revocation / peers→none must not still ingest a
+    // now-disallowed peer's served response (#AW).
+    if (
+      !this.started ||
+      !this.isChannelActive(channel, generation) ||
+      !mayExchangeWithEndpoint(this.controls, endpointId)
+    ) {
+      return;
+    }
     this.emit(channel, endpointId, result.transport, result.response, '');
   }
 
