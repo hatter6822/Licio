@@ -16,7 +16,7 @@
   <a href="https://github.com/hatter6822/Licio/actions/workflows/ci.yml">
     <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/hatter6822/Licio/ci.yml?branch=main&label=CI" />
   </a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.44-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.0-blue" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6.0-3178c6" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-informational" />
@@ -102,7 +102,7 @@ fail-closed guards, and CI gates rather than by policy prose alone.
 
 | Attribute | Value |
 | --- | --- |
-| Package version | `0.5.44` |
+| Package version | `0.6.0` |
 | Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.7` core, plus [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) |
 | Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.8`, ~992 atomic tasks across 22 workstreams |
 | Runtime | Node.js `>=22`, pinned for local development in [`.nvmrc`](.nvmrc) |
