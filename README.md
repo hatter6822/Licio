@@ -3,7 +3,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="apps/web/public/assets/dark_512.png" />
-    <img src="apps/web/public/assets/light_512.png" alt="licio logo" width="200" />
+    <img src="apps/web/public/assets/light_512.png" alt="Licio logo" width="200" />
   </picture>
 </p>
 
@@ -16,306 +16,334 @@
   <a href="https://github.com/hatter6822/Licio/actions/workflows/ci.yml">
     <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/hatter6822/Licio/ci.yml?branch=main&label=CI" />
   </a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.0-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.0-blue" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6.0-3178c6" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-informational" />
 </p>
 
-React 19 + Vite 8 (Rolldown) PWA, a Hono BFF, and PostgreSQL/Redis behind
-typed store seams, in a strict-TypeScript pnpm monorepo where zod validates
-every trust boundary and the doctrine — no likes, no votes, no karma, no
-pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
+Licio is a React 19 + Vite 8 Progressive Web App, a Hono BFF, and a set of
+pure TypeScript domain packages in a strict pnpm monorepo. It replaces popularity
+voting with mathematical invariants and participation-weighted attention: there
+are no likes, votes, karma scores, reaction bars, follower counts, or pay-to-rank
+paths in the product model. Those absences are enforced by schemas, runtime
+fail-closed guards, and CI gates rather than by policy prose alone.
+
+## Contents
+
+- [What Licio provides](#what-licio-provides)
+- [Current state](#current-state)
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
+- [Workspace map](#workspace-map)
+- [Doctrine enforcement](#doctrine-enforcement)
+- [Development and verification](#development-and-verification)
+- [Repository layout](#repository-layout)
+- [Planning and design references](#planning-and-design-references)
+- [Licensing and security](#licensing-and-security)
 
 ## What Licio provides
 
-- **No applause mechanics** — no likes, upvotes, karma, reaction bars, or follower counts anywhere; the absence is type-level, runtime-guarded, and CI-gated (`check:no-applause`).
-- **In-browser attention processing** — raw engagement (scrolls, touches, dwell) is bucketed in the browser and discarded; only coarse `AttentionAggregate`s ever reach the network (SPEC §19.2; runtime egress guard + the `check:no-raw-egress` gate).
-- **Participation-Weighted Attention (PWAtt)** — v0 + guardrailed v1 rewards source-opening, evidence, corrections, synthesis, and bridge-building; anti-signals and penalties only ever subtract. The SPEC §30.5 shadow stage has been **lifted** (a code change, `PWATT_V0_SHADOW_MODE = false`): PWAtt is now a bounded ranking input whose penalties and constraints apply only through the WS-H promotion gate, and the runtime kill switch instantly restores the score-blind chronological fallback.
-- **Inline comment-first conversation** — each story embeds a lightly nested comment section; comments can carry text and media, with evidence/correction as typed enrichments and legacy contribution types retained for backward-compatible reads. The old `/threads` directory/branch routes are retired behind story redirects; every piece of user content still reaches the DOM through a single sanctioned Markdown-lite → DOMPurify → Trusted Types sink with an external-link safety interstitial.
-- **A hardened event pipeline** — a strict topic registry of zod envelopes, authenticated replay-protected ingestion, a retention-tier-partitioned event store with sweeps, a real-time HyperLogLog layer, boot recovery + dead-letter redrive, and a pay-to-rank firewall at the consumer router.
-- **Passwordless identity** — WebAuthn-first with email-OTP and SIWE; there is no password column anywhere; RBAC with object-level authorization, an append-only audit log, steward TOTP MFA.
-- **Privacy by construction** — the client address and location are never read (statically tested); rate limiting is identity-free; DSAR export ships an encrypted signed-URL archive; account deletion has a 30-day grace then hard purge.
-- **Defense-in-depth web security** — Trusted Types + DOMPurify, a strict CSP with no `unsafe-inline`/`unsafe-eval`, serialized single-use CSRF tokens, `__Host-` session cookies, and a post-build service-worker scan.
-- **An offline-first, accessible PWA** — IndexedDB integrity layer with AES-256-GCM draft encryption (non-extractable key), background sync, push with a per-day notification budget, a token-driven design system with WCAG-validated palettes and a soft **neumorphic fabric theme** (theme-adaptive brand, paired-shadow surfaces, accessibility-flattened under high-contrast/forced-colors), axe-core assertions in E2E.
-- **A decentralized data plane (nearing completion)** — offline-first content availability over the signed, content-addressed LCAP v0.2 protocol ([`@licio/lcap`](docs/lcap/README.md)) and end-to-end-encrypted private P2P rooms ([`@licio/private-p2p`](docs/private-p2p/README.md); MLS/HPKE/Ed25519) whose content, keys, and membership the server **structurally cannot store** — it persists only an opaque room stub and a transient rendezvous record, enforced by seven CI gates and a database trigger.
+- **No applause mechanics.** No likes, upvotes, karma, reaction bars, or follower
+  counts appear in schemas, routes, components, LCAP records, or private-P2P
+  records. The `check:no-applause` gate makes that invariant mechanical.
+- **Privacy-safe attention signals.** Raw engagement is processed in the browser,
+  bucketed into coarse `AttentionAggregate` values, and discarded. Only those
+  aggregates may cross the network boundary, with runtime egress checks and
+  `check:no-raw-egress` covering the signals layer and decentralization packages.
+- **Participation-Weighted Attention (PWAtt).** PWAtt v0/v1 rewards constructive
+  participation such as source-opening, evidence, corrections, synthesis, and
+  bridge-building. Anti-signals and penalties can only subtract. The historical
+  SPEC §30.5 shadow stage has been lifted: PWAtt is now a bounded ranking input,
+  while penalties and constraints remain gated by the WS-H promotion mechanism and
+  the ranking kill switch restores the score-blind chronological fallback.
+- **Comment-first conversation.** Stories own inline comment sections with one
+  visible nested reply layer; deeper discussion opens in a dedicated comment page.
+  `evidence` and `correction` remain typed enrichments, legacy contribution types
+  remain readable, and all user-generated HTML egresses through the sanctioned
+  Markdown-lite → DOMPurify → Trusted Types path.
+- **Room-owned content and visibility.** Rooms own content, content owns
+  conversation, and visibility is enforced on submission, reads, search, events,
+  and distribution. Public/server rooms can expose public or room-only content;
+  private-P2P rooms are structurally local/E2EE and cannot place content on the
+  server.
+- **Hardened identity and privacy.** Authentication is WebAuthn-first and
+  passwordless, with email OTP, SIWE support, server-side sessions, RBAC,
+  steward TOTP MFA, audit logging, age gates, privacy controls, encrypted DSAR
+  export archives, and account deletion with grace-period plus hard purge.
+- **Event, ingestion, search, and ranking pipelines.** The API includes strict
+  event envelopes, replay protection, rate limits, retention sweeps, real-time
+  aggregate layers, story ingestion, duplicate/syndication handling, metadata
+  extraction, source profiles, Postgres full-text search, embedding storage, and
+  replayable ranking decisions.
+- **Invariant services.** MERI, MFCI, SCOI, GWEI, PHI, and six supporting
+  invariant families are implemented behind validated score-vector boundaries,
+  health metrics, regression tests, and promotion/demotion controls.
+- **Trust and safety operations.** Reports, blocks, mutes, appeals, steward queues,
+  reviewer independence, transparency export, moderation audit logs, coordinated
+  report detection, and contribution pre-checks are implemented behind role- and
+  capability-gated surfaces.
+- **AI/model governance.** Browser-safe governance packages and API services
+  provide model registry gates, risk assessments, prohibited-use checks, lineage,
+  evaluation harnesses, runtime monitoring, provenance labels, and the
+  AI-governed-rooms domain substrate.
+- **Offline and private decentralization planes.** LCAP v0.2 provides signed,
+  content-addressed offline availability, packfiles, transport-independent sync,
+  client/server I/O, WebRTC/WebTransport/IPFS/courier seams, and trust/liveness
+  projection. Private-P2P rooms provide strict schemas, MLS/HPKE/Ed25519 crypto,
+  deterministic operation logs, blind rendezvous, live WebRTC carrier support,
+  update-channel verification, and server non-storage guarantees.
+- **Accessible, offline-capable PWA.** The web app includes an IndexedDB
+  integrity layer, encrypted drafts, background sync, push with notification
+  budgets, token-driven design system, high-contrast/forced-colors behavior, axe
+  checks in E2E, and service-worker security scans.
 
 ## Current state
 
 | Attribute | Value |
-|-----------|-------|
-| Version | `v0.5.0` |
-| Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.7` |
-| Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.8` (~992 atomic tasks across 22 workstreams) |
-| Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
-| pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
-| Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
-| Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
+| --- | --- |
+| Package version | `0.6.0` |
+| Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.7` core, plus [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) |
+| Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.8`, ~992 atomic tasks across 22 workstreams |
+| Runtime | Node.js `>=22`, pinned for local development in [`.nvmrc`](.nvmrc) |
+| Package manager | pnpm `9.15.4`, pinned by `packageManager` |
+| Language/tooling | TypeScript `6.0.3`, Vite `8`, Vitest `4`, Biome `2.5` |
+| Database/cache | PostgreSQL 16 with pgvector for local DB work; Redis 7 for sessions, replay/rate-limit, leases, and realtime stores |
+| Test posture | Vitest projects are in-memory by default; integration legs run when Postgres/Redis are reachable |
 
-The core social product is complete — WS-0, WS-A through WS-K, and WS-Q, plus the
-WS-T comment model and the WS-U AI-governed-rooms redesign (doctrine + runtime
-Stages 1-4 & 5-core). The crypto/treasury/compliance/security/launch workstreams
-(WS-L through WS-P) are still planned. The **decentralized data plane (WS-R/WS-S)
-is nearing completion** — status per workstream below.
+### Workstream status
 
 | Workstream | Status |
-|---|---|
-| WS-0 – WS-C — foundation, doctrine, design system, PWA client | Complete |
-| WS-D — identity and privacy | Complete |
-| WS-E — event pipeline and PWAtt | Complete (§30.5 shadow lifted; PWAtt is a bounded, gated ranking input) |
-| WS-F — ingestion, sources, and search | Complete |
+| --- | --- |
+| WS-0 – WS-C — repository foundation, doctrine/policy, design system, PWA client | Complete |
+| WS-D — identity, accounts, and privacy | Complete |
+| WS-E — event pipeline and PWAtt | Complete; PWAtt shadow stage lifted into bounded ranking input |
+| WS-F — ingestion, source model, and search | Complete |
 | WS-G / WS-T — forum and conversation-as-comments | Complete |
-| WS-H — invariant services (MERI, MFCI, SCOI, GWEI, PHI + 6 supporting) | Complete (shadow) |
+| WS-H — core invariant services | Complete in shadow/promotion-gated form |
 | WS-I — ranking and distribution | Complete |
-| WS-J — trust, safety, and abuse operations | Complete |
-| WS-K — AI and model governance | Complete (re-scoped by WS-U) |
-| WS-Q — content–room ownership and visibility | Complete |
-| WS-U — AI-governed rooms (redesign) | Doctrine ratified + runtime Stages 1-4 & 5-core shipped |
-| WS-R — offline content availability (LCAP v0.2) | In progress — protocol core, server I/O, and live transports shipped; physical-radio field confirmation remaining |
-| WS-S — private P2P rooms (E2EE) | In progress — foundation, crypto/reducer/sync, live WebRTC carrier, update channel, and migration shipped; remaining: the two-browser convergence E2E (with multi-peer mesh) and the grant-delivery/media room UI |
-| WS-L / M / N / O / P — Knomosis & wallets, treasury, compliance, security, launch | Planned (WS-O.4.5 adversarial suite shipped) |
-
-> Local Postgres now runs the `pgvector/pgvector:pg16` image (a drop-in
-> pgvector-enabled build of Postgres 16): the WS-F migration chain installs
-> the `vector` extension. `docker compose up -d` provides it.
+| WS-J — trust, safety, and abuse operations | Complete; selected residual E2E/affordance work tracked in docs |
+| WS-K — AI and model governance | Complete; residual production adapter/client integrations tracked in docs |
+| WS-Q — content-room ownership and visibility | Complete |
+| WS-U — AI-governed rooms redesign | Doctrine ratified; runtime stages 1-4 and 5-core shipped |
+| WS-R — LCAP offline content availability | Core protocol, client/server I/O, transport seams, native courier shell, and simulator-tested live transports shipped; remaining emphasis is physical-device field confirmation |
+| WS-S — private-P2P rooms | Foundation, crypto, reducer, sync decision plane, blind rendezvous endpoint, WebRTC carrier, hardened update channel, and server→private migration shipped; remaining emphasis is full two-browser create→invite→join→connect→converge E2E and grant/media UI affordances |
+| WS-L / WS-M / WS-N / WS-O / WS-P | Planned or partially seeded; WS-O adversarial suite and WS-P BFF-in-the-loop E2E harness seed exist |
 
 ## Quick start
 
 ```sh
 corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install --frozen-lockfile
-
-pnpm dev                       # web on :5173, API on :3001 — zero setup
+pnpm dev
 ```
 
-`pnpm dev` works out of the box: with no `DATABASE_URL`/`REDIS_URL` the API
-boots on its in-memory stores and seeds a rich demo corpus through the real
-stores — several authors, public/private/expert-gated rooms, stories of varied
-submission types and visibility tiers, threads with several nested,
-multi-author comments, stories across **every** lifecycle state so the feed
-shows all seven §5.6 rating labels (not a monotone "Getting Attention"),
-invariant signals (MERI exposure labels, SCOI interpretation divergence), and
-pre-populated reading signals — so the PWA renders real end-to-end data
-immediately (idempotent; never runs in production). The in-memory stores are
-ephemeral: a restart re-seeds a fresh corpus.
+`pnpm dev` starts the web app on port `5173` and the API on port `3001`. With no
+`DATABASE_URL` or `REDIS_URL`, the API uses in-memory stores and seeds a rich demo
+corpus through the same store interfaces used by production adapters. The demo
+includes accounts, rooms, content visibility tiers, comments, lifecycle states,
+invariant signals, and reading signals. It is idempotent and ephemeral: restarting
+without durable services reseeds fresh data.
 
-For local **user testing** — the seeded admin / steward / expert accounts and
-how to sign in (Licio is passwordless; the one-time code is surfaced to the
-`pnpm dev` API log) — see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+For local sign-in details, seeded accounts, and one-time-code behavior, see
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
-To run dev against a real Postgres/Redis instead (durable data, closer to
-production), start the stack and set the connection URLs:
+### Durable local services
+
+Use Docker when you want persistent development data or want the gated
+Postgres/Redis integration legs to run locally:
 
 ```sh
-docker compose up -d           # PostgreSQL 16 + Redis 7
+docker compose up -d
 DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
 REDIS_URL=redis://localhost:6379 \
-  pnpm db:migrate              # apply the Drizzle migration chain
+  pnpm db:migrate
 DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
 REDIS_URL=redis://localhost:6379 \
   pnpm dev
 ```
 
-A fresh clone is green with just `pnpm install --frozen-lockfile && pnpm test`
-— the unit suite runs against in-memory stores, so the database stack is only
-needed for durable `pnpm dev` persistence and the gated integration tests.
-Production REQUIRES `DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`, and
-`CORS_ORIGIN` (the server refuses to boot without them).
-
-`package.json` is the source of truth for every command; [`CLAUDE.md`](CLAUDE.md)
-documents the full developer workflow and [`CONTRIBUTING.md`](CONTRIBUTING.md)
-the contribution checklist.
+Production boot is intentionally stricter: required secret/URL groups such as
+`DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`, and `CORS_ORIGIN` must be complete,
+or the server refuses to start.
 
 ## Architecture
 
 ```text
-┌──────────────────────────────────────────────────────────────────┐
-│ PWA client: TanStack Router/Query, Zustand, offline-first        │  apps/web
-│ IndexedDB, push, Trusted Types + DOMPurify, service worker       │
-├──────────────────────────────────────────────────────────────────┤
-│ In-browser signal processing: raw engagement is bucketed and     │  apps/web
-│ discarded — only coarse AttentionAggregates ever egress (§19.2)  │  (signals/)
-├──────────────────────────────────────────────────────────────────┤
-│ BFF: strict CSP/CSRF/CORS, WebAuthn + email-OTP + SIWE sessions, │  apps/api
-│ RBAC + append-only audit; the ingestion boundary (ownership,     │
-│ replay protection, fail-closed rate limits, privacy gate)        │
-├──────────────────────────────────────────────────────────────────┤
-│ Forum + rooms: 11 typed contributions, materialized-path trees,  │  apps/api
-│ the sanctioned UGC sink (Markdown-lite → DOMPurify → TT), rooms, │  (forum/)
-│ lenses, steward roles, §24.3 summaries, conversation health      │
-├──────────────────────────────────────────────────────────────────┤
-│ Event pipeline: topic registry → partitioned event store →       │  apps/api
-│ consumer router (pay-to-rank firewall, crypto-flag gate) →       │  (events/)
-│ real-time HLL → retention sweeps, recovery, dead-letter redrive  │
-├──────────────────────────────────────────────────────────────────┤
-│ PWAtt scoring: aggregation windows → anti-signals → v0 + v1      │  invariants
-│ scores → bounded, gated ranking input + private Signal Ledger    │  + apps/api
-├─────────────────────────────────┬────────────────────────────────┤
-│ PostgreSQL (Drizzle)            │ Redis                          │  packages/db
-│ identity · audit · event log    │ sessions · replay nonces ·     │
-│ (partitioned) · job leases ·    │ rate limits · real-time HLL    │
-│ isolated wallet schema          │                                │
-└─────────────────────────────────┴────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Web PWA (apps/web)                                                         │
+│ React 19, Vite, TanStack Router/Query, Zustand, IndexedDB, design tokens,  │
+│ signal bucketing, push, background sync, Trusted Types + DOMPurify         │
+├────────────────────────────────────────────────────────────────────────────┤
+│ API/BFF (apps/api)                                                         │
+│ Hono, CSP/CSRF/CORS, sessions, WebAuthn/email-OTP/SIWE, RBAC, audit,       │
+│ story ingestion, rooms, comments, trust & safety, ranking, schedulers      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ Domain packages                                                            │
+│ @licio/shared schemas · @licio/invariants math · @licio/ranking            │
+│ @licio/ai-governance · @licio/governance · @licio/lcap                    │
+│ @licio/lcap-p2p · @licio/private-p2p                                      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ Storage and adapters                                                       │
+│ PostgreSQL/Drizzle migrations and production stores · Redis session,       │
+│ replay, rate-limit, realtime, and lease stores · in-memory test/dev stores │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-One validated seam runs through everything: every payload is zod-parsed at
-the trust boundary in both directions, and production adapters (Postgres,
-Redis, S3, SES) sit behind the same interfaces as the in-memory stores the
-tests use — partial configuration fails boot rather than degrading silently.
+Every payload crossing a trust boundary is parsed with zod. Production adapters
+(Postgres, Redis, S3-compatible export archives, SES mail, and related stores)
+sit behind the same interfaces as the in-memory stores used by tests and zero-
+setup development. Partial production configuration fails closed instead of
+silently falling back.
 
-Two **decentralization planes** extend this core without weakening it: the LCAP
-v0.2 offline-availability protocol ([`@licio/lcap`](docs/lcap/README.md)) and the
-E2EE private P2P rooms ([`@licio/private-p2p`](docs/private-p2p/README.md)) live in
-code-split, browser-safe packages with their own crypto suites (ES256/COSE vs.
-MLS/HPKE/Ed25519) and no `@licio/db` access — a private room's content can never
-reach the server, proven by seven CI gates and a database trigger.
+The decentralization planes extend the core without weakening server doctrine:
+LCAP is a signed offline-availability plane, while private-P2P rooms are an E2EE
+local-content plane. They use separate packages, separate crypto suites, dynamic
+client loading where required, and CI gates that prevent private content, private
+CIDs, raw attention traces, or applause affordances from leaking into server or
+public paths.
 
-## Workspace
+## Workspace map
 
-| Package | Role | Workspace deps |
-|---------|------|----------------|
-| `apps/web` | React 19 PWA — routes, offline store, signals, push, design system, LCAP + private-P2P clients (dynamic-import) | `shared`, `invariants`, `ai-governance`, `lcap`, `lcap-p2p`, `private-p2p` |
-| `apps/api` | Hono BFF — identity, events, PWAtt, ingestion, forum + rooms, ranking, AI/room governance, LCAP server, schedulers | `shared`, `db`, `invariants`, `ranking`, `ai-governance`, `governance`, `lcap`, `lcap-p2p`, `private-p2p` |
-| `apps/courier` | native Android Capacitor courier shell (serves the `apps/web` build; no web fork) | — (consumes `apps/web/dist`) |
-| `packages/shared` | zod schemas, types, enums, constants (the wire SSOT) | none (leaf) |
-| `packages/db` | Drizzle ORM schema + SQL migrations (PostgreSQL) | `shared` |
-| `packages/invariants` | pure invariant + scoring mathematics (PWAtt v0/v1) | `shared` |
-| `packages/ranking` | pure WS-I ranking domain (no I/O; never `db`) | `shared`, `invariants` |
-| `packages/ai-governance` | pure WS-K AI-governance domain (browser-safe; never `db`) | `shared` |
-| `packages/governance` | pure WS-U AI-governed-rooms domain (browser-safe; never `db`) | `shared` |
-| `packages/lcap` | WS-R LCAP v0.2 protocol core (deterministic CBOR/CID/COSE; zero-dep core) | `shared` |
-| `packages/lcap-p2p` | WS-R optional WebRTC/IPFS transports (code-split) | `shared`, `lcap` |
-| `packages/private-p2p` | WS-S private-P2P rooms domain (DAG-CBOR + MLS/HPKE/Ed25519; code-split) | `shared` |
+| Workspace | Role | Internal dependencies |
+| --- | --- | --- |
+| `apps/web` | React PWA: routes, design system, offline store, signals, push, comments, rooms, LCAP/private clients | `shared`, `invariants`, `ai-governance`, `lcap`, `lcap-p2p`, `private-p2p` |
+| `apps/api` | Hono BFF: auth, events, ingestion, forum/rooms, ranking, governance, safety, LCAP/rendezvous routes, schedulers | `shared`, `db`, `invariants`, `ranking`, `ai-governance`, `governance`, `lcap`, `lcap-p2p`, `private-p2p` |
+| `apps/courier` | Capacitor Android courier shell serving the web build without a web fork | none |
+| `packages/shared` | Wire schemas, zod validators, enums, constants, shared types | none |
+| `packages/db` | Drizzle schema, migrations, and database helpers | `shared` |
+| `packages/invariants` | Pure invariant and PWAtt mathematics | `shared` |
+| `packages/ranking` | Pure ranking domain and replayable decision logic | `shared`, `invariants` |
+| `packages/ai-governance` | Pure AI/model-governance domain | `shared` |
+| `packages/governance` | Pure AI-governed-rooms domain | `shared` |
+| `packages/lcap` | LCAP v0.2 protocol core | `shared` |
+| `packages/lcap-p2p` | Optional LCAP WebRTC/IPFS transport support | `shared`, `lcap` |
+| `packages/private-p2p` | Private-P2P room schemas, crypto, reducer, and sync core | `shared` |
 
-Supporting directories: `scripts/` (the build-validation and security gates CI
-runs) and `docs/` (specification, planning, policy, per-workstream references).
-Boundaries are mechanical: `check:workspace-deps` fails CI if `web` imports
-`@licio/db`, and `check:deps` budgets direct production dependencies
-(web < 15, api < 20).
+`check:workspace-deps` enforces these boundaries, and `check:deps` enforces the
+web/API production dependency budgets.
 
 ## Doctrine enforcement
 
-The doctrine — no applause, no pay-to-rank, no raw-engagement egress, no
-IP/location — is not policy prose. It is enforced at three levels: schemas
-that have no applause or raw-trace fields to begin with, runtime guards that
-throw before a violation can leave the process, and CI static gates that
-block the merge.
+Licio's core doctrine is mechanical:
 
-**Fail-closed posture:** production boot fails on missing or partial secret
-groups; the crypto feature flag withholds every Knomosis topic from every
-consumer while off; the ingestion rate limiter degrades to a stricter
-in-memory budget when Redis is unreachable; and the §30.5 PWAtt shadow lift is a
-code-level change (`PWATT_V0_SHADOW_MODE = false`) — reverting it, or engaging the
-ranking kill switch, restores the score-blind chronological fallback.
+1. **Schemas exclude prohibited concepts.** Applause, raw engagement traces,
+   private-room server content, private CIDs in public routing, and financial
+   ranking inputs are not valid wire shapes.
+2. **Runtime guards fail closed.** Upload guards reject raw signals, production
+   boot rejects incomplete secret groups, ingestion rejects private-P2P server
+   writes, ranking can fall back to score-blind chronology, and cryptographic or
+   rendezvous paths prefer lock/quarantine over silent degradation.
+3. **CI gates block regressions.** Static scans and focused tests cover the same
+   invariants every PR.
 
-**Static gates (every PR):**
+Important gates include:
 
-- `check:no-applause` — no like/vote/karma/reaction affordances in components, routes, or the LCAP / private-p2p planes
-- `check:no-raw-egress` — no raw attention traces or forbidden network primitives in the signals layer (and the decentralization planes)
-- `check:neutrality` — the ten WS-I ranking-neutrality tests (the pay-to-rank gate)
-- `check:no-p2p-server-content` — a Private P2P room places no content on the server
-- `check:update-channel` — the private-mode bundle is signature + transparency-log + digest verified before activation
-- `lint:security` — `innerHTML`, `eval()`, `new Function()`, `javascript:` URLs
-- `check:workspace-deps` / `check:deps` — boundary and budget enforcement
-- `check:policy` — doctrine/policy document validation (counts, ID disjointness, severity–SLA consistency)
-- `check:sw` — the built service worker is free of remote `importScripts`/`eval`
-- bundle-size gate, lockfile integrity, AGPL header scan, secret scan, install-script detection
+- `pnpm check:no-applause`
+- `pnpm check:no-raw-egress`
+- `pnpm check:neutrality`
+- `pnpm check:no-p2p-server-content`
+- `pnpm check:no-private-cid-egress`
+- `pnpm check:private-rendezvous-schema`
+- `pnpm check:p2p-endpoint-rejections`
+- `pnpm check:p2p-ranking-exclusion`
+- `pnpm check:p2p-search-exclusion`
+- `pnpm check:update-channel`
+- `pnpm lint:security`
+- `pnpm check:workspace-deps`
+- `pnpm check:deps`
+- `pnpm check:policy`
+- `pnpm check:sw` after a production web build
 
-**Selected enforced invariants:**
+## Development and verification
 
-| Property | Where |
-|----------|-------|
-| Only bucketed aggregates egress; raw traces throw before upload | `apps/web/src/signals/privacy.ts` + `check:no-raw-egress` |
-| The chronological fallback ignores every PWAtt output (the kill switch restores the pre-§30.5 posture) | score-blind guard `apps/api/src/pwatt/shadow.ts` |
-| §5.5 weight guardrails (integer percents, sum exactly 100) | `packages/invariants/src/pwatt/profiles.ts` |
-| Anti-signals and penalties can only reduce a score | `packages/invariants/src/pwatt/penalties.ts` |
-| Knomosis events can never reach a scoring consumer | pay-to-rank firewall, `apps/api/src/events/router.ts` |
-| No code path reads the client address or location | static test (`no-client-address`) |
-| Wallet tables are unreachable from ranking context | undirected-BFS isolation test, `packages/db/src/isolation.ts` |
-| A Private P2P room places no content on the server | `check:no-p2p-server-content` + the migration-`0045` DB trigger |
-| Passwordless by construction — no password column exists | `packages/db/src/schema/` |
-
-The cryptography is validated against external vectors where they exist:
-RFC 6238 Appendix B for TOTP, the official AWS suite for the SigV4 signer,
-real WebAuthn ceremonies via a pure-crypto software authenticator, and real
-EOA signatures for SIWE. See [`docs/events/README.md`](docs/events/README.md)
-and [`docs/identity/README.md`](docs/identity/README.md) for the full
-references.
-
-## Testing
+Daily commands:
 
 ```sh
-pnpm test                  # Vitest — twelve projects (shared, db, invariants, ranking, ai-governance, governance, lcap, lcap-p2p, private-p2p, api, web, policy)
-pnpm test -- --coverage    # adds the 80% cross-workspace coverage gate
-pnpm test:e2e              # Playwright + axe-core (Chromium, Firefox, WebKit)
-pnpm --filter web test:e2e:bff  # authenticated BFF-in-the-loop E2E (in-memory API)
-pnpm typecheck             # tsc -b across all project references
-pnpm lint                  # Biome format + lint
-pnpm build && pnpm check:sw   # production build, bundle budgets, SW scan
-pnpm sbom                  # CycloneDX SBOM + license-compatibility check
+pnpm dev                         # web + API in parallel
+pnpm typecheck                   # incremental tsc -b
+pnpm typecheck:ci                # authoritative forced typecheck
+pnpm lint                        # Biome check over the repository
+pnpm test                        # Vitest projects
+pnpm test -- --coverage          # Vitest with coverage gate
+pnpm test:e2e                    # Playwright E2E via the web workspace
+pnpm --filter web test:e2e:bff   # authenticated BFF-in-the-loop E2E
+pnpm build                       # ordered monorepo production build
+pnpm sbom                        # CycloneDX SBOM/license check
 ```
 
-Unit suites run in-memory with no services. The gated integration tests —
-the real Drizzle migration chain against Postgres plus the Redis adapters —
-run whenever the services are reachable and skip otherwise. CI provisions
-`pgvector/pgvector:pg16` and `redis:7` service containers on the test job,
-so they run there too; locally:
+Before declaring a branch green, prefer `pnpm typecheck:ci` over the incremental
+`pnpm typecheck`; `tsc -b` caches can hide failures that a clean CI run catches.
+For source changes, also run the relevant doctrine/security gates listed above.
+After a production web build, run `pnpm check:sw` to scan the built service worker.
+
+Database commands:
 
 ```sh
-DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
-REDIS_URL=redis://localhost:6379 pnpm test
+pnpm db:generate                 # generate Drizzle migrations
+pnpm db:migrate                  # apply migrations
+pnpm db:push                     # development-only direct schema push
 ```
 
-Database workflow: `pnpm db:generate` (create migrations from schema),
-`pnpm db:migrate` (apply), `pnpm db:push` (development-only direct push).
+Native courier commands:
+
+```sh
+pnpm --filter courier test:unit   # pure JVM/Robolectric unit tests
+pnpm --filter courier build       # no-fork gate, Capacitor sync, debug APK
+```
 
 ## Repository layout
 
 ```text
-apps/web/                React 19 PWA — routes, offline store, signals, push, design system, LCAP + private-p2p clients
-apps/api/                Hono BFF — identity, events, PWAtt, ingestion, forum + rooms, ranking, AI/room governance, LCAP server
-apps/courier/            native Android Capacitor courier shell (serves the apps/web build; no web fork)
-packages/shared/         zod schemas, types, enums, constants (the wire SSOT; leaf)
-packages/db/             Drizzle ORM schema + hand-tuned SQL migrations (PostgreSQL)
-packages/invariants/     pure invariant + scoring mathematics (PWAtt v0/v1, guardrails)
-packages/ranking/        pure WS-I ranking domain (no I/O; never @licio/db)
-packages/ai-governance/  pure WS-K AI-governance domain (browser-safe; never @licio/db)
-packages/governance/     pure WS-U AI-governed-rooms domain (browser-safe; never @licio/db)
-packages/lcap/           WS-R LCAP v0.2 protocol core (deterministic CBOR/CID/COSE; zero-dep core)
-packages/lcap-p2p/       WS-R optional WebRTC/IPFS transports (code-split)
-packages/private-p2p/    WS-S private-P2P rooms domain (DAG-CBOR + MLS/HPKE/Ed25519; code-split)
-scripts/                 build validation + the CI security/doctrine gates
-docs/                    SPEC.md, planning/ (~992 tasks), policy/ (9 documents), per-WS references
-.github/workflows/       CI (8 jobs), CodeQL, Dependabot auto-merge
+apps/web/                React PWA, routes, UI, offline store, signal bucketing
+apps/api/                Hono API/BFF, auth, events, ingestion, ranking, safety
+apps/courier/            Android Capacitor courier shell for offline transport
+packages/shared/         Wire schemas, constants, validators, shared types
+packages/db/             Drizzle schema and PostgreSQL migrations
+packages/invariants/     PWAtt and invariant mathematics
+packages/ranking/        Pure ranking domain logic
+packages/ai-governance/  AI/model-governance domain logic
+packages/governance/     AI-governed-room domain logic
+packages/lcap/           LCAP protocol core
+packages/lcap-p2p/       Optional LCAP P2P transport package
+packages/private-p2p/    Private-P2P room protocol, crypto, reducer, sync core
+scripts/                 Security, doctrine, dependency, SBOM, and build gates
+docs/                    Specification, planning, policy, and workstream docs
+.github/workflows/       CI, CodeQL, and automation
 ```
 
-Per-file purpose lives in each file's leading comment block.
+## Planning and design references
 
-## Licensing
+- [`docs/SPEC.md`](docs/SPEC.md) — canonical core product specification.
+- [`docs/planning/00-index.md`](docs/planning/00-index.md) — dependency-ordered
+  implementation plan and workstream index.
+- [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) — LCAP/offline availability
+  extension specification.
+- [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) — private-P2P rooms extension
+  specification.
+- Workstream references: [`docs/design-system/`](docs/design-system/README.md),
+  [`docs/pwa-client/`](docs/pwa-client/README.md),
+  [`docs/identity/`](docs/identity/README.md),
+  [`docs/events/`](docs/events/README.md),
+  [`docs/ingestion/`](docs/ingestion/README.md),
+  [`docs/forum/`](docs/forum/README.md),
+  [`docs/invariants/`](docs/invariants/README.md),
+  [`docs/ranking/`](docs/ranking/README.md),
+  [`docs/trust-safety/`](docs/trust-safety/README.md),
+  [`docs/ai-governance/`](docs/ai-governance/README.md),
+  [`docs/governance/`](docs/governance/README.md),
+  [`docs/lcap/`](docs/lcap/README.md), and
+  [`docs/private-p2p/`](docs/private-p2p/README.md).
+- Policy corpus: [`docs/policy/`](docs/policy/README.md).
+- Developer workflow: [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md).
+- Contribution checklist: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-[AGPL-3.0-or-later](LICENSE) — a single license, no split. Licio is delivered
-over the network, so the AGPL's network-copyleft provision is the one that
-matters: modifications stay shared with the people who use them. Dependency
-licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
+## Licensing and security
 
-## Contributing
-
-1. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLAUDE.md`](CLAUDE.md) first.
-2. A fresh clone is green with `pnpm install --frozen-lockfile && pnpm test`.
-3. Every change must pass `pnpm typecheck`, `pnpm lint`, and `pnpm test`; Lefthook runs Biome, the secret scan, and the budget/policy gates on commit, and typecheck + lockfile integrity on push.
-4. Run the security/doctrine gates before opening a PR — CI runs the same sequence on every PR.
-
-## Planning & design
-
-- **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.7).
-- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) (`v4.8`) — 21 planning documents covering 22 workstreams (WS-0 and WS-A – WS-U; WS-R and WS-S are unified in [`19-decentralized-data-plane.md`](docs/planning/19-decentralized-data-plane.md) as the post-M3 offline/private extensions, WS-T remodels conversation as comments, and the cross-cutting [WS-U AI-governed-rooms redesign](docs/planning/22-ai-governed-rooms.md) re-scopes WS-K and amends WS-J/L/M with 49 decomposed cards), ~992 atomic tasks.
-- **Extension specs (post-M3):** [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) (LCAP v0.2 offline content availability, WS-R) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) (E2EE private P2P rooms, WS-S). Both are nearing completion — the protocol cores ([`@licio/lcap`](docs/lcap/README.md), [`@licio/private-p2p`](docs/private-p2p/README.md)), the server I/O, the live transports, the E2EE crypto/reducer/sync plane, the verify-before-unlock update channel, and the server→private migration have shipped. Remaining work — physical-radio field confirmation (the native courier is fully unit-tested with no radio + Nearby/BLE/RFCOMM netsim-verified), the live two-browser convergence E2E with multi-peer mesh, and the grant-delivery/media room UI — is tracked card-by-card in [`docs/lcap/README.md`](docs/lcap/README.md) and [`docs/private-p2p/README.md`](docs/private-p2p/README.md).
-- **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), [`docs/invariants/`](docs/invariants/README.md), [`docs/ranking/`](docs/ranking/README.md), [`docs/trust-safety/`](docs/trust-safety/README.md), [`docs/ai-governance/`](docs/ai-governance/README.md), [`docs/governance/`](docs/governance/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
-- **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).
-
-## Security
+Licio is licensed under [AGPL-3.0-or-later](LICENSE). Because Licio is delivered
+over the network, the AGPL network-copyleft provision is central: modifications
+must remain available to the people who use the service. Dependency licenses are
+checked during SBOM generation.
 
 Licio is pre-1.0 and under active development. See [`SECURITY.md`](SECURITY.md)
-for the vulnerability-disclosure policy and scope: `security@licio.app`,
-48-hour acknowledgment, 14-day critical-patch SLA.
+for the vulnerability-disclosure scope and process.
