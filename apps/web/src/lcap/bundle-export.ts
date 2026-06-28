@@ -98,33 +98,42 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   // the SAME closure derivation, NOT the stored `record.deps` (which may carry a stale/unauthenticated
   // dep a recipient would then quarantine on while we omit the bytes) (#AE).
   const recordDeps = new Map<string, string[]>();
+  // §27.1: records whose SIGNED body declares MORE block OR record (parent) refs than the fan-out cap
+  // are OMITTED from the export entirely — NOT exported with a truncated table dep list, which would
+  // let a recipient commit the record without all its prerequisites (the import path trusts the table
+  // deps).  This mirrors the server's `rejected_resource_limit` and bounds the export at O(1) per
+  // over-cap record (the count check never spreads/iterates the full array) (#3).
+  const omittedRecordCids = new Set<string>();
   for (const record of records) {
     let decoded: ReturnType<typeof decodeAndRouteRecord>;
     try {
       decoded = decodeAndRouteRecord(record.body);
     } catch {
-      continue; // undecodable — export nothing further for it
+      continue; // undecodable — no body deps, but still exported as an opaque record
     }
-    if (decoded.kind !== 'contribution_event') continue;
+    if (decoded.kind !== 'contribution_event') continue; // non-contribution — no body deps, still exported
+    const { cids: blockCids, overCap } = cappedBodyBlockCids(decoded, SERVER_CAPS.maxFanOut);
+    const parents = decoded.parent_record_cids ?? [];
+    if (overCap || parents.length > SERVER_CAPS.maxFanOut) {
+      omittedRecordCids.add(record.recordCid); // reject an over-cap record rather than truncate its deps
+      continue;
+    }
+    // Within the cap — emit the FULL closure (record refs + the complete block closure incl. the
+    // target snapshot, #1).  No truncation: an exported accepted record carries every prerequisite.
     const deps: string[] = [];
     if (decoded.prev_device_record_cid) deps.push(decoded.prev_device_record_cid);
     if (decoded.replaces_record_cid) deps.push(decoded.replaces_record_cid);
     if (decoded.target_record_cid) deps.push(decoded.target_record_cid);
     if (decoded.thread_root_cid) deps.push(decoded.thread_root_cid);
-    // §27.1 RECORD-ref fan-out cap: parent_record_cids has no schema max either, so bound it like the
-    // block refs below — a stray over-fan-out held body cannot drive an O(n) deps.push / oversized
-    // export table row.  slice(0, cap) reads at most `cap` elements, never the whole array (#3 symmetry).
-    for (const p of (decoded.parent_record_cids ?? []).slice(0, SERVER_CAPS.maxFanOut))
-      deps.push(p);
-    // §27.1 fan-out cap (the SHARED helper — never spreads source_snapshot_cids): bound the body's
-    // BLOCK refs so a stray over-cap held body cannot drive O(n) work on export (#3 defense-in-depth
-    // + symmetry with the commit/share paths).
-    const blockCids = cappedBodyBlockCids(decoded, SERVER_CAPS.maxFanOut).cids;
+    for (const p of parents) deps.push(p);
     for (const b of blockCids) deps.push(b);
     if (deps.length > 0) recordDeps.set(record.recordCid, deps);
     // The block subset of those refs is what we export bytes for (held only).
     for (const b of blockCids) depCids.add(b);
   }
+  // The exportable records + their proofs — an over-cap record (and its now-orphan proofs) is dropped.
+  const exportRecords = records.filter((r) => !omittedRecordCids.has(r.recordCid));
+  const exportProofs = proofs.filter((p) => !omittedRecordCids.has(p.recordCid));
   const blocks: Array<{ cid: string; bytes: Uint8Array }> = [];
   for (const cid of depCids) {
     const descriptor = await readBlockDescriptor(db, cid);
@@ -137,7 +146,7 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   const objects: PackObject[] = [];
   const items: ExportItem[] = [];
 
-  for (const record of records) {
+  for (const record of exportRecords) {
     const priority = asPriority(record.priority);
     // Deps from the SIGNED body (#AE), not the stored table metadata — so a recipient never
     // quarantines on a stale dep we don't carry.
@@ -163,7 +172,7 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
     });
   }
 
-  for (const proof of proofs) {
+  for (const proof of exportProofs) {
     objects.push({
       cid: proof.proofCid,
       cidKind: 'proof',
@@ -210,8 +219,8 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   return {
     objects,
     items,
-    recordCount: records.length,
-    proofCount: proofs.length,
+    recordCount: exportRecords.length,
+    proofCount: exportProofs.length,
     blockCount: blocks.length,
   };
 }

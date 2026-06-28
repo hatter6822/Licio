@@ -123,16 +123,16 @@ export async function syncRoomOverP2p(
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
-    // Suppress the authoritative anchor only when the round actually FILLED OUR needs: either the peer
-    // served us content (`ingested`), OR — for a served-only round — NO gap the anchor could still
-    // fill remains.  Re-check AFTER the round (not a pre-round snapshot): the peer's push, ingested as
-    // a side effect while WE served its request, can fill our advertised wants without surfacing in
-    // `out.ingested`, and quarantine rows are not promoted on ingest, so a held want is the source of
-    // truth.  A served-only round that left a want unfilled (peer answered past the grace window, or
-    // lacked our CIDs) backs off to the anchor (#BK/#1).
+    // Suppress the authoritative anchor only when the round did SOMETHING (served us a response, or
+    // we served the peer) AND no advertised want remains unfilled.  Re-check after ANY round — a
+    // FULL, PARTIAL, push-only, or served-only ingest — keying off what is now HELD (quarantine rows
+    // are not promoted on ingest, so the row alone is stale; the peer's push fills wants without
+    // surfacing in `out.ingested`).  A PARTIAL WebRTC ingest that leaves some advertised CIDs absent
+    // therefore still backs off to the anchor, which can fill the rest, instead of stranding them
+    // until a later sync (#BK/#1/#2).
     if (
-      out.ingested !== null ||
-      (out.served && !(await requestHasUnfilledWants(params.db, request)))
+      (out.ingested !== null || out.served) &&
+      !(await requestHasUnfilledWants(params.db, request))
     ) {
       return { transport: 'webrtc', ingested: out.ingested };
     }

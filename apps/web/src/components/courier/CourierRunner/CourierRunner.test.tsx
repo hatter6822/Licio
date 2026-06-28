@@ -75,6 +75,10 @@ vi.mock('../../../lcap/exchange.js', () => ({
   respondToClientExchange: (...a: unknown[]) => respondToClientExchange(...(a as [])),
   ingestClientExchangeResponse: (...a: unknown[]) => ingestClientExchangeResponse(...(a as [])),
 }));
+const backstopUnfilledWantsAtAnchor = vi.fn(async () => null);
+vi.mock('../../../lcap/transports/anchor-backstop.js', () => ({
+  backstopUnfilledWantsAtAnchor: (...a: unknown[]) => backstopUnfilledWantsAtAnchor(...(a as [])),
+}));
 vi.mock('../../../lcap/db.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../lcap/db.js')>();
   return { ...real, getLcapDb: vi.fn(async () => ({}) as IDBDatabase) };
@@ -183,6 +187,42 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
       skippedReason: '',
     });
     expect(ingestClientExchangeResponse).toHaveBeenCalled();
+  });
+
+  it('a courier-carried response back-stops still-unfilled wants at the anchor; an https one does not (#2b)', async () => {
+    injectNativeShell();
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+    await waitFor(() => expect(ControllerCtor).toHaveBeenCalledOnce());
+
+    // A COURIER-carried response may be PARTIAL — after ingesting it the runner drives the app-layer
+    // anchor back-stop to complete any still-unfilled wants (the radio controller's reachability anchor
+    // runs only when the courier answered with NOTHING).
+    backstopUnfilledWantsAtAnchor.mockClear();
+    lastControllerConfig?.onOutcome?.({
+      response: new Uint8Array([9]),
+      channel: 'nearby',
+      carriedBy: 'courier',
+      skippedReason: '',
+    });
+    await waitFor(() => expect(backstopUnfilledWantsAtAnchor).toHaveBeenCalled());
+
+    // A response the controller ALREADY drove the anchor for (carriedBy='https') is ingested but NOT
+    // re-anchored — the back-stop is gated on a courier-carried response, so there is no double anchor.
+    backstopUnfilledWantsAtAnchor.mockClear();
+    ingestClientExchangeResponse.mockClear();
+    lastControllerConfig?.onOutcome?.({
+      response: new Uint8Array([9]),
+      channel: 'nearby',
+      carriedBy: 'https',
+      skippedReason: '',
+    });
+    await waitFor(() => expect(ingestClientExchangeResponse).toHaveBeenCalled());
+    expect(backstopUnfilledWantsAtAnchor).not.toHaveBeenCalled();
   });
 
   it('aborts the start if a forced-off mode lands DURING the async init (#A)', async () => {

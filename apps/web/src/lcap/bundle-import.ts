@@ -412,7 +412,13 @@ export async function commitImportedBundle(
         // reject), NOT truncated-and-maybe-committed; within the cap, its bounded block deps drive the
         // #AC re-quarantine when a body block the table omitted is absent (#3).
         const { cids: blockDeps, overCap } = cappedBodyBlockCids(decodedForDeps, maxBodyRefs);
-        if (overCap) {
+        // The RECORD-ref (parent) fan-out must ALSO force-quarantine: the client has NO graph guard
+        // (checkDependencyGraph is server-only) and the #AC re-quarantine re-derives only BLOCK deps,
+        // so a body naming >maxFanOut parents with a truncated/empty table-deps list would otherwise
+        // commit WITHOUT its parents.  Mirror the export omit + the server reject (#3b).  `.length` is
+        // O(1) — never spread the parent array.
+        const parentsOverCap = (decodedForDeps.parent_record_cids?.length ?? 0) > maxBodyRefs;
+        if (overCap || parentsOverCap) {
           overCapRecord = true;
           overCapRecords.add(cid);
         } else {

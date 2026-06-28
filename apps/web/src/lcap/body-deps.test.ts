@@ -45,7 +45,6 @@ describe('cappedBodyBlockCids (§27.1 fan-out helper, #3)', () => {
       64,
     );
     expect(exact.overCap).toBe(false); // 64 snapshots (target not counted) == cap, not over
-    expect(exact.cids.length).toBe(64); // cids still bounded (the target has no room)
 
     // body + attachment + 63 snapshots == 65 > 64 ⇒ overCap.
     const over = cappedBodyBlockCids(
@@ -57,6 +56,19 @@ describe('cappedBodyBlockCids (§27.1 fan-out helper, #3)', () => {
       64,
     );
     expect(over.overCap).toBe(true);
+  });
+
+  it('ALWAYS preserves the target snapshot (a separate edge) — even when source snapshots fill the cap', () => {
+    // Regression (#1): the target snapshot must NOT compete for a fan-out slot, or an ACCEPTED record
+    // whose source snapshots exactly fill the cap silently loses its target block dep.
+    const atCap = Array.from({ length: 64 }, (_, i) => `s${i}`);
+    const result = cappedBodyBlockCids(
+      { source_snapshot_cids: atCap, target_source_snapshot_cid: 't' },
+      64,
+    );
+    expect(result.overCap).toBe(false); // accepted
+    expect(result.cids).toContain('t'); // the target is preserved despite the snapshots filling the cap
+    expect(result.cids.length).toBe(65); // 64 capped snapshots + the always-included target
   });
 
   it('handles an empty body (no refs)', () => {

@@ -33,13 +33,15 @@ export interface CappedBodyBlockCids {
  * `indexBodyBlockEdges` criterion EXACTLY (body + attachment + `source_snapshot_cids`; the target
  * snapshot is a separate edge there), so the client's reject decision matches the server's — no
  * boundary record the server accepted is falsely rejected here.  `cids` additionally includes the
- * target snapshot when there is room under the cap, so a within-cap record's full block closure is
- * tracked.  Never spreads the (possibly huge) snapshot array: the count is read via `.length` and the
- * build loop `break`s at the cap.
+ * target snapshot ALWAYS (it is a separate block edge, not part of the fan-out-capped set), so an
+ * accepted record keeps its full block closure even when its source snapshots exactly fill the cap.
+ * Never spreads the (possibly huge) snapshot array: the count is read via `.length` and the build loop
+ * `break`s at the cap.  `cids` is therefore bounded by `maxFanOut + 1` (the +1 is the target).
  */
 export function cappedBodyBlockCids(refs: BodyBlockRefs, maxFanOut: number): CappedBodyBlockCids {
   const snapshots = refs.source_snapshot_cids ?? [];
-  // O(1): read `.length`, never spread.  Matches the server's body/attachment/snapshots criterion.
+  // O(1): read `.length`, never spread.  Matches the server's body/attachment/snapshots criterion
+  // EXACTLY (the target snapshot is a separate edge there and is NOT counted toward the cap).
   const declared =
     (refs.body_block_cid !== undefined ? 1 : 0) +
     (refs.attachment_manifest_cid !== undefined ? 1 : 0) +
@@ -54,6 +56,10 @@ export function cappedBodyBlockCids(refs: BodyBlockRefs, maxFanOut: number): Cap
     if (cids.length >= maxFanOut) break; // never iterate past the cap (no O(n) spread)
     add(snapshot);
   }
-  add(refs.target_source_snapshot_cid);
+  // The target snapshot is a SEPARATE block edge (not part of the fan-out-capped body/attachment/
+  // source-snapshot set the server bounds), so it must NOT compete for a cap slot — include it
+  // unconditionally, or an ACCEPTED record whose source snapshots exactly fill the cap would silently
+  // lose its target block dep (then committed without quarantining it / omitted from share+export) (#1).
+  if (refs.target_source_snapshot_cid !== undefined) cids.push(refs.target_source_snapshot_cid);
   return { cids, overCap: declared > maxFanOut };
 }

@@ -216,11 +216,13 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         { CourierController: Controller, readCourierPower },
         { resolveCourierChannels },
         { buildClientExchangeRequest, respondToClientExchange, ingestClientExchangeResponse },
+        { backstopUnfilledWantsAtAnchor },
         { getLcapDb },
       ] = await Promise.all([
         import('../../../lcap/transports/courier-controller.js'),
         import('../../../lcap/transports/courier-channels.js'),
         import('../../../lcap/exchange.js'),
+        import('../../../lcap/transports/anchor-backstop.js'),
         import('../../../lcap/db.js'),
       ]);
       // The local `lcap_v2` store is BOTH the responder's content source and the requester's
@@ -307,7 +309,38 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
               scopeRef.current,
               () => scopeVersionRef.current === v,
             )
-              .then(() => record(outcome.carriedBy === 'courier', outcome.skippedReason))
+              .then(async () => {
+                record(outcome.carriedBy === 'courier', outcome.skippedReason);
+                // #2b: a courier peer may answer with only a SUBSET of our wants (a PARTIAL §16
+                // response).  The radio controller's reachability anchor runs ONLY when the courier
+                // answered with NOTHING (fallbackExchange stops at the first non-null response), so the
+                // remaining gaps would strand until a later round.  After ingesting a courier-carried
+                // response, COMPLETE any still-unfilled wants at the authoritative anchor — the
+                // app-layer wants-completion step (the controller can't: no DB, ingest is out-of-band).
+                if (outcome.carriedBy === 'courier' && scopeVersionRef.current === v) {
+                  const freshRequest = await buildClientExchangeRequest(
+                    db,
+                    'courier',
+                    scopeRef.current,
+                  );
+                  // Fail-closed liveness: a Stop, a sharing-scope change, OR a switch into a
+                  // forced-off mode (Stealth/Emergency) during the (async) anchor leg must suppress
+                  // this NEW server round-trip + its commit — the courier going "dark" must not then
+                  // reach the server.  Threaded to the ingest LEAF (#BA) too.  Runs silently: the
+                  // primary courier outcome is already in the activity feed, and `record` attributes to
+                  // the RADIO channel, so logging this anchor completion there would misattribute it.
+                  await backstopUnfilledWantsAtAnchor(
+                    db,
+                    freshRequest,
+                    scopeRef.current,
+                    undefined,
+                    () =>
+                      scopeVersionRef.current === v &&
+                      controllerRef.current?.isRunning() === true &&
+                      !isForcedOff(getOperationalMode()),
+                  );
+                }
+              })
               .catch((error) => {
                 devWarn('courier response ingest failed', error);
                 record(false, 'ingest_failed');

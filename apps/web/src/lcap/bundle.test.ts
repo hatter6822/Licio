@@ -223,56 +223,69 @@ describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
     expect(exportedBlocks).not.toContain(foreignBlockCid); // only in row.deps → NOT exported (#HH)
   });
 
-  it('SECURITY: caps body record-ref + block-ref fan-out on export (#3 §27 symmetry)', async () => {
-    // parent_record_cids AND source_snapshot_cids both lack a schema max; export derives its deps from
-    // the SIGNED body, so without a cap a stray over-fan-out held record would emit an O(n) deps table.
+  it('SECURITY: OMITS an over-cap record from the export instead of truncating its deps (#3)', async () => {
+    // parent_record_cids AND source_snapshot_cids lack a schema max.  Exporting an over-cap record with
+    // a TRUNCATED table dep list would let a recipient commit it WITHOUT all prerequisites, so the
+    // export must OMIT (reject) it — mirroring the server.  A within-cap record exports normally.
     const lcap = await import('@licio/lcap');
     const over = lcap.SERVER_CAPS.maxFanOut + 50;
     const roomHex = 'd4d4d4d4d4d4d4d4';
-    const parents = await Promise.all(
-      Array.from({ length: over }, (_, i) =>
-        cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 1])),
-      ),
-    );
-    const snapshots = await Promise.all(
-      Array.from({ length: over }, (_, i) =>
-        cidFor('block', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 2])),
-      ),
-    );
-    const body = lcap.encodeContributionEvent({
-      record_version: 2,
-      kind: 'contribution_event',
-      event_type: 'post',
-      home_room_id: 'room-exp',
-      visibility_scope: 'public',
-      author_account_id: 'a',
-      author_device_id: 'd',
-      author_device_key_id: 'k',
-      device_seq: 1,
-      capability_cid: await cidFor('record', new Uint8Array([0])),
-      policy_epoch_claim: 0,
-      revocation_epoch_claim: 0,
-      client_nonce: new Uint8Array([6]),
-      priority: 1,
-      parent_record_cids: parents,
-      source_snapshot_cids: snapshots,
-    });
-    const recordCid = await cidFor('record', body);
-    await put(LCAP_STORE.records, {
-      recordCid,
-      body,
-      kind: 'contribution_event',
-      lane: 'T1',
-      priority: 1,
-      roomHash: roomHex,
-      state: 'integrity_verified',
-      size: body.length,
-    });
+    const makeBody = async (spec: { parents?: number; snapshots?: number; nonce: number }) => {
+      const parents = await Promise.all(
+        Array.from({ length: spec.parents ?? 0 }, (_, i) =>
+          cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 1, spec.nonce])),
+        ),
+      );
+      const snapshots = await Promise.all(
+        Array.from({ length: spec.snapshots ?? 0 }, (_, i) =>
+          cidFor('block', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 2, spec.nonce])),
+        ),
+      );
+      return lcap.encodeContributionEvent({
+        record_version: 2,
+        kind: 'contribution_event',
+        event_type: 'post',
+        home_room_id: 'room-exp',
+        visibility_scope: 'public',
+        author_account_id: 'a',
+        author_device_id: 'd',
+        author_device_key_id: 'k',
+        device_seq: spec.nonce,
+        capability_cid: await cidFor('record', new Uint8Array([0])),
+        policy_epoch_claim: 0,
+        revocation_epoch_claim: 0,
+        client_nonce: new Uint8Array([spec.nonce]),
+        priority: 1,
+        ...(parents.length ? { parent_record_cids: parents } : {}),
+        ...(snapshots.length ? { source_snapshot_cids: snapshots } : {}),
+      });
+    };
+    const seed = async (body: Uint8Array): Promise<string> => {
+      const cid = await cidFor('record', body);
+      await put(LCAP_STORE.records, {
+        recordCid: cid,
+        body,
+        kind: 'contribution_event',
+        lane: 'T1',
+        priority: 1,
+        roomHash: roomHex,
+        state: 'integrity_verified',
+        size: body.length,
+      });
+      return cid;
+    };
+    const overParentCid = await seed(await makeBody({ parents: over, nonce: 1 }));
+    const overBlockCid = await seed(await makeBody({ snapshots: over, nonce: 2 }));
+    const normalCid = await seed(await makeBody({ parents: 2, snapshots: 2, nonce: 3 }));
+
     const exportData = await gatherRoomExport(db, roomHex);
-    const recObj = exportData.objects.find((o) => o.cid === recordCid);
-    expect(recObj).toBeDefined();
-    // record refs ≤ maxFanOut + block refs ≤ maxFanOut (no single refs set) — never the 2×`over` declared.
-    expect((recObj?.deps ?? []).length).toBeLessThanOrEqual(2 * lcap.SERVER_CAPS.maxFanOut);
+    const recordIds = new Set(
+      exportData.objects.filter((o) => o.cidKind === 'record').map((o) => o.cid),
+    );
+    expect(recordIds.has(overParentCid)).toBe(false); // over-cap parent fan-out → OMITTED (#3)
+    expect(recordIds.has(overBlockCid)).toBe(false); // over-cap block fan-out → OMITTED (#3)
+    expect(recordIds.has(normalCid)).toBe(true); // a within-cap record is exported normally
+    expect(exportData.recordCount).toBe(1); // only the within-cap record counts
   });
 
   it('computes the §26.2 disclosure (rooms, media, size) before producing a file', async () => {
@@ -705,6 +718,146 @@ describe('bundle import — quarantine (WS-R.4.3)', () => {
     expect(counts.quarantined).toBe(1);
     const stored = await collectByCursor<RecordRow>(db2, LCAP_STORE.records);
     expect(stored.find((r) => r.recordCid === recordCid)).toBeUndefined(); // body never persisted
+    db2.close();
+  });
+
+  it('SECURITY: tracks the target snapshot dep at the exact fan-out boundary (#1)', async () => {
+    // An ACCEPTED record (source snapshots EXACTLY fill the cap) that ALSO names a target snapshot:
+    // the target is a separate edge and must remain a tracked dep, so a missing target block
+    // re-quarantines the record instead of committing it without that block.  Without the fix the
+    // target was dropped from the closure (no room under the cap) and the record committed.
+    const lcap = await import('@licio/lcap');
+    const cap = lcap.SERVER_CAPS.maxFanOut;
+    const snapBlocks = await Promise.all(
+      Array.from({ length: cap }, async (_, i) => {
+        const bytes = new Uint8Array([i & 0xff, (i >> 8) & 0xff, 7]);
+        return { cid: await cidFor('block', bytes), bytes };
+      }),
+    );
+    const targetBytes = new Uint8Array([9, 9, 9, 9]);
+    const targetCid = await cidFor('block', targetBytes); // deliberately NOT supplied in the pack
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-target',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([2]),
+      priority: 1,
+      source_snapshot_cids: snapBlocks.map((b) => b.cid), // exactly `cap` snapshots
+      target_source_snapshot_cid: targetCid, // the (cap+1)-th block ref — a separate edge
+    });
+    const recordCid = await cidFor('record', body);
+    const bundle = writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-target'),
+        },
+        // ALL `cap` source-snapshot blocks are supplied (they resolve), but NOT the target block.
+        ...snapBlocks.map((b) => ({
+          cid: b.cid,
+          cidKind: 'block' as const,
+          frameKind: 'block' as const,
+          payload: b.bytes,
+          lane: 'B4' as const,
+          priority: 4 as const,
+        })),
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+    const db2 = await openLcapDb(
+      `lcap_v2-bundle-target-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    const importResult = await importBundleObjects(read.pack);
+    const counts = await commitImportedBundle(db2, read.pack, importResult); // UNSCOPED manual import
+    expect(counts.records).toBe(0); // re-quarantined on the absent target snapshot (#1)
+    expect(counts.quarantined).toBe(1);
+    expect(counts.missingCids).toContain(targetCid); // the target gap is tracked + advertisable
+    db2.close();
+  });
+
+  it('SECURITY: force-quarantines an over-cap PARENT fan-out record on import (#3b)', async () => {
+    // A malicious bundle/peer can name >maxFanOut parents in the SIGNED body while OMITTING them from
+    // the unauthenticated table deps.  The client has NO graph guard (server-only) and the #AC
+    // re-quarantine re-derives only BLOCK deps, so without the parent check importPack would commit the
+    // record WITHOUT its parents present.  It must be force-quarantined, mirroring the export omit.
+    const lcap = await import('@licio/lcap');
+    const over = lcap.SERVER_CAPS.maxFanOut + 30;
+    const parents = await Promise.all(
+      Array.from({ length: over }, (_, i) =>
+        cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 3])),
+      ),
+    );
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-parents',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([5]),
+      priority: 1,
+      parent_record_cids: parents, // over-cap RECORD fan-out (block refs minimal)
+    });
+    const recordCid = await cidFor('record', body);
+    const bundle = writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-parents'),
+          // table deps DELIBERATELY omitted — importPack sees no missing prerequisite and would commit.
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+    const db2 = await openLcapDb(
+      `lcap_v2-bundle-parents-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    const importResult = await importBundleObjects(read.pack);
+    expect(importResult.imported.has(recordCid)).toBe(true); // importPack would commit it (no table deps)
+    const counts = await commitImportedBundle(db2, read.pack, importResult); // UNSCOPED manual import
+    expect(counts.records).toBe(0); // force-quarantined on the over-cap parent fan-out (#3b)
+    expect(counts.quarantined).toBe(1);
+    const stored = await collectByCursor<RecordRow>(db2, LCAP_STORE.records);
+    expect(stored.find((r) => r.recordCid === recordCid)).toBeUndefined();
     db2.close();
   });
 });
