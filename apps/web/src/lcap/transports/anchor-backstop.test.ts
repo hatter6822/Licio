@@ -115,6 +115,26 @@ describe('backstopUnfilledWantsAtAnchor (#2/#2b)', () => {
     expect(urls.some((u) => u.includes('/exchange'))).toBe(false); // anchor never reached
   });
 
+  it('does NOT contact the anchor if liveness flips DURING the want scan (#1r)', async () => {
+    // shouldCommit is true at the pre-scan check but false by the pre-anchor check (modelling a Stop /
+    // forced-off mode landing during the async requestHasUnfilledWants DB reads).  The server must NOT
+    // be contacted — the caller can suppress the commit but not an already-sent request/push_pack.
+    const cid = await cidFor('block', new Uint8Array([8]));
+    await quarantineMissing([cid]); // an unfilled want → would otherwise proceed to the anchor
+    const request = await buildClientExchangeRequest(db, 'courier');
+    const urls: string[] = [];
+    let n = 0;
+    const result = await backstopUnfilledWantsAtAnchor(
+      db,
+      request,
+      undefined,
+      { fetchFn: recordingFetch(urls, new Uint8Array([0])) },
+      () => n++ === 0, // true at the pre-scan check, false at the (new) pre-anchor check
+    );
+    expect(result).toBeNull();
+    expect(urls.length).toBe(0); // the server was NEVER contacted (#1r)
+  });
+
   it('short-circuits (no anchor, no want scan) when shouldCommit is already false', async () => {
     const cid = await cidFor('block', new Uint8Array([7]));
     await quarantineMissing([cid]);

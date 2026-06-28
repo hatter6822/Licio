@@ -29,7 +29,7 @@ import type {
   ParsedPack,
   ReaderCaps,
 } from '@licio/lcap';
-import { cappedBodyBlockCids } from './body-deps.js';
+import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import { LCAP_STORE } from './db.js';
 import {
   bytesToHex,
@@ -407,20 +407,20 @@ export async function commitImportedBundle(
       }
       let overCapRecord = false;
       if (decodedForDeps?.kind === 'contribution_event') {
-        // §27.1 fan-out cap (the SHARED helper — never spreads source_snapshot_cids): an over-cap
-        // body is INVALID and FORCE-QUARANTINED below so it never persists (mirrors the server's
-        // reject), NOT truncated-and-maybe-committed; within the cap, its bounded block deps drive the
-        // #AC re-quarantine when a body block the table omitted is absent (#3).
-        const { cids: blockDeps, overCap } = cappedBodyBlockCids(decodedForDeps, maxBodyRefs);
-        // The RECORD-ref (parent) fan-out must ALSO force-quarantine: the client has NO graph guard
-        // (checkDependencyGraph is server-only) and the #AC re-quarantine re-derives only BLOCK deps,
-        // so a body naming >maxFanOut parents with a truncated/empty table-deps list would otherwise
-        // commit WITHOUT its parents.  Mirror the export omit + the server reject (#3b).  `.length` is
-        // O(1) — never spread the parent array.
-        const parentsOverCap = (decodedForDeps.parent_record_cids?.length ?? 0) > maxBodyRefs;
-        if (overCap || parentsOverCap) {
+        // §27.1 fan-out cap: an over-cap body — on EITHER the BLOCK edge (body/attachment/snapshots)
+        // OR the RECORD edge (the 4 singular refs + parents), the two SEPARATE gates the server
+        // enforces — is INVALID and FORCE-QUARANTINED so it never persists (mirrors the server reject),
+        // NOT truncated-and-maybe-committed.  The client has NO graph guard (server-only) and the #AC
+        // re-quarantine re-derives only BLOCK deps, so without this an over-cap RECORD fan-out (parents
+        // OR a singular prev/replaces/target/thread_root ref) with truncated table deps would commit
+        // without its prerequisites (#2/#3b).  Counts are O(1) — never spread (#3).
+        const { cids: blockDeps } = cappedBodyBlockCids(decodedForDeps, maxBodyRefs);
+        if (isOverCapContribution(decodedForDeps, maxBodyRefs)) {
           overCapRecord = true;
           overCapRecords.add(cid);
+          // Mark it DROPPED so a dependent record (whose table deps name this CID) re-quarantines too:
+          // importPack already counted this CID-verified frame as present, so #RR must re-check it (#5).
+          droppedCids.add(cid);
         } else {
           if (scopeFiltered) for (const dep of blockDeps) allowedBlocks.add(dep);
           if (blockDeps.length > 0) recordBodyBlockDeps.set(cid, blockDeps);

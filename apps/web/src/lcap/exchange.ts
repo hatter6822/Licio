@@ -20,7 +20,7 @@
 // trust projection (§8.3).  The heavy `@licio/lcap` codec is loaded by DYNAMIC import (like
 // `bundle-import`), so this module stays off the initial bundle.
 
-import { cappedBodyBlockCids } from './body-deps.js';
+import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import {
   type CommitCounts,
   commitImportedBundle,
@@ -85,6 +85,16 @@ async function collectShareableCids(
     // excluded when it is non-public — never push/serve a restricted record (or its proofs) over
     // the public plane, not just contributions.
     if ('visibility_scope' in decoded && decoded.visibility_scope !== 'public') return false;
+    // Skip an OVER-CAP contribution (a legacy/pre-fix held record whose signed body declares more
+    // block OR record refs than §27.1 allows): the record CID itself must not be served, or
+    // repackHeldObjects' record-dep derivation would expand its full source_snapshot_cids/parent
+    // arrays into the pack table — O(n) work / an oversized response for an invalid record (#4).
+    if (
+      decoded.kind === 'contribution_event' &&
+      isOverCapContribution(decoded, lcap.SERVER_CAPS.maxFanOut)
+    ) {
+      return false;
+    }
     const priority = decoded.kind === 'contribution_event' ? decoded.priority : 0;
     return priority <= maxPriority;
   };

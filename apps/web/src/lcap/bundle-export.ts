@@ -20,7 +20,7 @@ import type {
   PackHeaderV2,
   PackObject,
 } from '@licio/lcap';
-import { cappedBodyBlockCids } from './body-deps.js';
+import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import { getLcapDb, LCAP_STORE } from './db.js';
 import {
   forEachByCursor,
@@ -112,12 +112,14 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
       continue; // undecodable — no body deps, but still exported as an opaque record
     }
     if (decoded.kind !== 'contribution_event') continue; // non-contribution — no body deps, still exported
-    const { cids: blockCids, overCap } = cappedBodyBlockCids(decoded, SERVER_CAPS.maxFanOut);
-    const parents = decoded.parent_record_cids ?? [];
-    if (overCap || parents.length > SERVER_CAPS.maxFanOut) {
-      omittedRecordCids.add(record.recordCid); // reject an over-cap record rather than truncate its deps
+    // Reject (omit) an over-cap record on EITHER the block OR the record edge — rather than truncate
+    // its deps, which would let a recipient commit it without all prerequisites (the shared gate the
+    // import + share paths use too, mirroring the server's two body-derived fan-out gates) (#3/#2).
+    if (isOverCapContribution(decoded, SERVER_CAPS.maxFanOut)) {
+      omittedRecordCids.add(record.recordCid);
       continue;
     }
+    const { cids: blockCids } = cappedBodyBlockCids(decoded, SERVER_CAPS.maxFanOut);
     // Within the cap — emit the FULL closure (record refs + the complete block closure incl. the
     // target snapshot, #1).  No truncation: an exported accepted record carries every prerequisite.
     const deps: string[] = [];
@@ -125,7 +127,7 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
     if (decoded.replaces_record_cid) deps.push(decoded.replaces_record_cid);
     if (decoded.target_record_cid) deps.push(decoded.target_record_cid);
     if (decoded.thread_root_cid) deps.push(decoded.thread_root_cid);
-    for (const p of parents) deps.push(p);
+    for (const p of decoded.parent_record_cids ?? []) deps.push(p);
     for (const b of blockCids) deps.push(b);
     if (deps.length > 0) recordDeps.set(record.recordCid, deps);
     // The block subset of those refs is what we export bytes for (held only).

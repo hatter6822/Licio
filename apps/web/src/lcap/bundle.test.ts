@@ -860,6 +860,161 @@ describe('bundle import — quarantine (WS-R.4.3)', () => {
     expect(stored.find((r) => r.recordCid === recordCid)).toBeUndefined();
     db2.close();
   });
+
+  it('SECURITY: counts the SINGULAR record refs in the over-cap gate (#2)', async () => {
+    // A body with exactly maxFanOut parents is AT the cap (not over) — but the server's `requires` set
+    // ALSO counts prev/replaces/target/thread_root, so one such singular ref tips it OVER.  The client
+    // must count them too, or a server-invalid record commits locally.
+    const lcap = await import('@licio/lcap');
+    const cap = lcap.SERVER_CAPS.maxFanOut;
+    const parents = await Promise.all(
+      Array.from({ length: cap }, (_, i) =>
+        cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 6])),
+      ),
+    );
+    const threadRoot = await cidFor('record', new Uint8Array([255, 255, 6]));
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-singles',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([6]),
+      priority: 1,
+      parent_record_cids: parents, // exactly `cap` — at the cap on parents alone
+      thread_root_cid: threadRoot, // the singular ref that tips record-ref fan-out OVER (cap + 1)
+    });
+    const recordCid = await cidFor('record', body);
+    const bundle = writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-singles'),
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+    const db2 = await openLcapDb(
+      `lcap_v2-bundle-singles-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    const counts = await commitImportedBundle(db2, read.pack, await importBundleObjects(read.pack));
+    expect(counts.records).toBe(0); // force-quarantined: the singular ref tipped record-ref fan-out over (#2)
+    expect(counts.quarantined).toBe(1);
+    db2.close();
+  });
+
+  it('SECURITY: marks a force-quarantined over-cap record as DROPPED so dependents re-quarantine (#5)', async () => {
+    // Record A is over-cap (force-quarantined).  Record B's pack-table deps name A.  importPack already
+    // counted A as present, so B is imported; without adding A to droppedCids, B commits with its
+    // prerequisite (A) absent.  A must be dropped so B re-quarantines.
+    const lcap = await import('@licio/lcap');
+    const over = lcap.SERVER_CAPS.maxFanOut + 20;
+    const aParents = await Promise.all(
+      Array.from({ length: over }, (_, i) =>
+        cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 7])),
+      ),
+    );
+    const aBody = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-dep',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([7]),
+      priority: 1,
+      parent_record_cids: aParents, // A is over-cap → force-quarantined
+    });
+    const aCid = await cidFor('record', aBody);
+    const bBody = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-dep',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 2,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([8]),
+      priority: 1,
+      parent_record_cids: [aCid], // B depends on A
+    });
+    const bCid = await cidFor('record', bBody);
+    const bundle = writePack({
+      objects: [
+        {
+          cid: aCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: aBody,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-dep'),
+        },
+        {
+          cid: bCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: bBody,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-dep'),
+          deps: [aCid], // B's TABLE dep names A (so importPack resolves it over the in-pack frame A)
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+    const db2 = await openLcapDb(
+      `lcap_v2-bundle-dep-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    const counts = await commitImportedBundle(db2, read.pack, await importBundleObjects(read.pack));
+    expect(counts.records).toBe(0); // NEITHER A (over-cap) NOR B (depends on dropped A) is committed (#5)
+    const stored = await collectByCursor<RecordRow>(db2, LCAP_STORE.records);
+    expect(stored.find((r) => r.recordCid === bCid)).toBeUndefined(); // B not committed without A
+    const qrows = await collectByCursor<{ cid: string; missingDeps?: string[] }>(
+      db2,
+      LCAP_STORE.quarantine,
+    );
+    expect(qrows.find((q) => q.cid === bCid)?.missingDeps).toContain(aCid); // B re-quarantined on A
+    db2.close();
+  });
 });
 
 describe('bundle import — re-import never downgrades held trust (review)', () => {

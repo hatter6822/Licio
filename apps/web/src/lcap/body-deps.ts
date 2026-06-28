@@ -19,6 +19,52 @@ export interface BodyBlockRefs {
   readonly target_source_snapshot_cid?: string | undefined;
 }
 
+/** The SIGNED-body RECORD-reference fields of a decoded `contribution_event` — the prerequisites the
+ *  server unions into its `requires` set and fan-out-bounds (apps/api/src/lcap/routes.ts). */
+export interface RecordRefs {
+  readonly prev_device_record_cid?: string | undefined;
+  readonly replaces_record_cid?: string | undefined;
+  readonly target_record_cid?: string | undefined;
+  readonly thread_root_cid?: string | undefined;
+  readonly parent_record_cids?: readonly string[] | undefined;
+}
+
+/** The declared BLOCK-reference fan-out (body + attachment + source_snapshot_cids) — O(1), never
+ *  spreads the array.  Mirrors the server's `indexBodyBlockEdges` count EXACTLY (target excluded). */
+export function blockRefFanOut(refs: BodyBlockRefs): number {
+  return (
+    (refs.body_block_cid !== undefined ? 1 : 0) +
+    (refs.attachment_manifest_cid !== undefined ? 1 : 0) +
+    (refs.source_snapshot_cids?.length ?? 0)
+  );
+}
+
+/** The declared RECORD-reference fan-out (the 4 singular refs + parents) — O(1), never spreads.
+ *  Mirrors the server's `requires` set (the singular refs PLUS parent_record_cids). */
+export function recordRefFanOut(refs: RecordRefs): number {
+  return (
+    (refs.prev_device_record_cid !== undefined ? 1 : 0) +
+    (refs.replaces_record_cid !== undefined ? 1 : 0) +
+    (refs.target_record_cid !== undefined ? 1 : 0) +
+    (refs.thread_root_cid !== undefined ? 1 : 0) +
+    (refs.parent_record_cids?.length ?? 0)
+  );
+}
+
+/**
+ * Whether a contribution body declares MORE references than the §27.1 fan-out cap on EITHER the block
+ * edge or the record edge — the two SEPARATE gates the server enforces (`indexBodyBlockEdges` for
+ * blocks; the `requires` set for records).  Counted via `.length` (O(1), no spread).  The client uses
+ * this to reject/quarantine/skip a server-invalid record, matching the server's per-gate criterion so
+ * it is never STRICTER than the server (a record the server accepts is never falsely rejected here).
+ */
+export function isOverCapContribution(
+  refs: BodyBlockRefs & RecordRefs,
+  maxFanOut: number,
+): boolean {
+  return blockRefFanOut(refs) > maxFanOut || recordRefFanOut(refs) > maxFanOut;
+}
+
 export interface CappedBodyBlockCids {
   /** The body's block-reference CIDs in declaration order (body, attachment, snapshots, target),
    *  bounded at `maxFanOut` — built WITHOUT spreading/iterating `source_snapshot_cids` past the cap. */
@@ -40,12 +86,9 @@ export interface CappedBodyBlockCids {
  */
 export function cappedBodyBlockCids(refs: BodyBlockRefs, maxFanOut: number): CappedBodyBlockCids {
   const snapshots = refs.source_snapshot_cids ?? [];
-  // O(1): read `.length`, never spread.  Matches the server's body/attachment/snapshots criterion
-  // EXACTLY (the target snapshot is a separate edge there and is NOT counted toward the cap).
-  const declared =
-    (refs.body_block_cid !== undefined ? 1 : 0) +
-    (refs.attachment_manifest_cid !== undefined ? 1 : 0) +
-    snapshots.length;
+  // O(1): read `.length`, never spread.  `overCap` here is the BLOCK-edge gate only (the record-edge
+  // gate lives in `isOverCapContribution`); the target snapshot is a separate edge, NOT counted.
+  const declared = blockRefFanOut(refs);
   const cids: string[] = [];
   const add = (d: string | undefined): void => {
     if (d !== undefined && cids.length < maxFanOut) cids.push(d);

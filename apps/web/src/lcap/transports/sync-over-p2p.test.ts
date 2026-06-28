@@ -615,6 +615,75 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     expect(await readBlockBytes(initiatorDb, bCid)).toEqual(bBytes); // `b` filled by the anchor
   });
 
+  it('reports PARTIAL WebRTC progress when the anchor back-stop cannot complete (#3)', async () => {
+    // WebRTC ingests `a` but not `b`; the anchor is OFFLINE.  The function must NOT return null (which
+    // means EVERY path failed) — it made real progress over WebRTC.  It reports { transport: 'webrtc' }.
+    const aBytes = new Uint8Array([3, 3, 3, 3]);
+    const aCid = await cidFor('block', aBytes);
+    const bCid = await cidFor('block', new Uint8Array([4, 4, 4, 4])); // wanted; nobody serves it
+    await putBlock(
+      responderDb,
+      { blockCid: aCid, state: 'integrity_verified', size: aBytes.length },
+      [aBytes],
+    );
+    await putPublicRecordWithBlock(responderDb, aCid); // the responder serves `a`
+    await quarantineMissing(initiatorDb, [aCid, bCid]); // the initiator wants BOTH
+    // The HTTPS anchor is OFFLINE (every request fails) → offlineExchange yields null.
+    const anchorFetch = (async () =>
+      new Response(null, { status: 503 })) as unknown as typeof fetch;
+
+    const link = new FakeLink();
+    const relay = makeRelayFetch();
+    const p2p = await import('@licio/lcap-p2p');
+    const signalKey = await p2p.importSignalKey(
+      await (await import('./signal-key.js')).derivePublicSignalKeyBytes(ROOM),
+    );
+    const { createSignalClient } = await import('./p2p-signaling.js');
+    const respSignals = createSignalClient({ apiBase: 'http://relay.test', fetchFn: relay });
+
+    const responderDone = p2p
+      .connectWebrtc({
+        decision: p2p.decideWebrtc({ mode: 'standard', userEnabled: true }),
+        signalKey,
+        roomIdHash: ROOM,
+        selfPeerKey: 'bob',
+        remotePeerKey: 'alice',
+        initiator: false,
+        postSignal: respSignals.postSignal,
+        pollSignal: respSignals.pollSignal,
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+        rtcFactory: () => new FakePeer(link, 'responder'),
+      })
+      .then((channel) =>
+        runWebrtcBidirectionalExchange({ db: responderDb, channel, timeoutMs: 5000 }),
+      );
+
+    const [result] = await Promise.all([
+      syncRoomOverP2p({
+        db: initiatorDb,
+        roomIdHash: ROOM,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        privacy: { mode: 'standard', userEnabled: true },
+        apiBase: 'http://relay.test',
+        fetchFn: relay,
+        httpsConfig: { fetchFn: anchorFetch },
+        rtcFactory: () => new FakePeer(link, 'initiator'),
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+      }),
+      responderDone,
+    ]);
+
+    expect(result).not.toBeNull(); // NOT a false failure — WebRTC made real progress (#3)
+    expect(result?.transport).toBe('webrtc');
+    expect(result?.ingested?.blocks).toBe(1); // `a` committed over WebRTC
+    expect(await readBlockBytes(initiatorDb, aCid)).toEqual(aBytes);
+    expect(await readBlockBytes(initiatorDb, bCid)).toBeUndefined(); // `b` unfilled (anchor offline)
+  });
+
   it('threads the abort predicate into the anchor ingest, suppressing a post-cancel commit (#BJ)', async () => {
     // The HTTPS anchor does not thread the AbortSignal into fetch, so the anchor request can COMPLETE
     // after a Cancel/unmount fires mid-flight.  The pre-commit check at the boundary is not enough: a

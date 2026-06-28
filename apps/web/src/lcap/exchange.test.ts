@@ -802,6 +802,30 @@ describe('client §16 exchange engine', () => {
     expect(await respondToClientExchange(peerB, new Uint8Array([1, 2, 3, 4]))).toBeNull();
   });
 
+  it('SECURITY: never serves an OVER-CAP record (repackHeldObjects would expand its deps O(n)) (#4)', async () => {
+    const lcap = await import('@licio/lcap');
+    // B holds a PUBLIC contribution whose signed body declares over-cap record fan-out (a legacy /
+    // pre-fix record).  Serving it would make repackHeldObjects expand its full parent array into the
+    // pack table — O(n) work / an oversized response for an invalid record.  It must be skipped.
+    const overParents = await Promise.all(
+      Array.from({ length: lcap.SERVER_CAPS.maxFanOut + 20 }, (_, i) =>
+        cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 4])),
+      ),
+    );
+    const overCapRecordCid = await putPublicRecord(peerB, lcap, 'public', {
+      recordDeps: overParents,
+    });
+    // A wants exactly that record.
+    await quarantineMissing(peerA, 'parent', [overCapRecordCid]);
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+
+    const response = await respondToClientExchange(peerB, request);
+    expect(response).not.toBeNull();
+    if (!response) return;
+    const decoded = lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, response);
+    expect(decoded.response_pack).toBeUndefined(); // the over-cap record was NOT served (#4)
+  });
+
   it('ingestPackIntoStore refuses non-pack bytes (fail-closed, commits nothing)', async () => {
     expect(await ingestPackIntoStore(peerA, new Uint8Array([0, 1, 2, 3]))).toBeNull();
   });

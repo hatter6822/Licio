@@ -51,6 +51,11 @@ export async function backstopUnfilledWantsAtAnchor(
   if (shouldCommit && !shouldCommit()) return null;
   // The peer round already filled every advertised want ⇒ the anchor would serve nothing new.
   if (!(await requestHasUnfilledWants(db, request))) return null;
+  // Re-check liveness AFTER the (async) want scan, immediately BEFORE opening the anchor: a Stop /
+  // scope-change / forced-off (Stealth/Emergency) mode that landed DURING the scan must suppress the
+  // server CONTACT itself — not only the later commit (the courier going "dark" must not reach the
+  // server).  Without this, a flip during the DB reads still uploads the request + push_pack (#1r).
+  if (shouldCommit && !shouldCommit()) return null;
   const anchor = await offlineExchange(
     buildServerTransports(httpsConfig ?? {}),
     request,
