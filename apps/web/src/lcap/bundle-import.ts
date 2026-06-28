@@ -371,19 +371,29 @@ export async function commitImportedBundle(
       });
       trustRows.push({ recordCid: cid, state: 'integrity_verified', lastEvaluated: nowMs });
       livenessRows.push({ cid, state: 'peer_stored', updatedAt: nowMs });
-      // Record this committed record + its SIGNED-body block deps in the in-scope closure (#GG).
-      if (scopeFiltered) {
-        committedRecordCids.add(cid);
-        if (decoded?.kind === 'contribution_event') {
-          const blockDeps = [
-            decoded.body_block_cid,
-            decoded.attachment_manifest_cid,
-            ...(decoded.source_snapshot_cids ?? []),
-            decoded.target_source_snapshot_cid,
-          ].filter((d): d is string => d !== undefined);
-          for (const dep of blockDeps) allowedBlocks.add(dep);
-          if (blockDeps.length > 0) recordBodyBlockDeps.set(cid, blockDeps);
-        }
+      // Record this committed record + its SIGNED-body block deps in the in-scope closure (#GG).  Under
+      // a scoped ingest `decoded` is already in hand; for an UNSCOPED manual import decode best-effort
+      // here too (no public/scope FILTER applied), so #AC can still re-quarantine a record whose body
+      // needs a block the unauthenticated table omitted (#BI).
+      const decodedForDeps =
+        decoded ??
+        (() => {
+          try {
+            return codec(frame.payload);
+          } catch {
+            return undefined;
+          }
+        })();
+      if (scopeFiltered) committedRecordCids.add(cid);
+      if (decodedForDeps?.kind === 'contribution_event') {
+        const blockDeps = [
+          decodedForDeps.body_block_cid,
+          decodedForDeps.attachment_manifest_cid,
+          ...(decodedForDeps.source_snapshot_cids ?? []),
+          decodedForDeps.target_source_snapshot_cid,
+        ].filter((d): d is string => d !== undefined);
+        if (scopeFiltered) for (const dep of blockDeps) allowedBlocks.add(dep);
+        if (blockDeps.length > 0) recordBodyBlockDeps.set(cid, blockDeps);
       }
     } else if (frame.frameKind === 'proof') {
       // Bind the proof to its DECODED record_cid, NEVER the unauthenticated pack table — else a crafted
@@ -566,8 +576,12 @@ export async function commitImportedBundle(
   }
 
   // #RR: turn each committed-but-dependency-dropped record into a quarantine row (so the gap is
-  // tracked + advertised as a want) and exclude it from the committed rows below.  A record that
-  // passed the commit filters is PUBLIC, so its want is safe on the public plane (#NN).
+  // tracked + advertised as a want) and exclude it from the committed rows below.  The public flag
+  // is DERIVED from the record's SIGNED body, never assumed: a SCOPED ingest already dropped
+  // non-public records (so they are public here), but the #BI change re-quarantines records on an
+  // UNSCOPED manual import too, which is NOT public-filtered — so an in_room/private record can land
+  // here and its missing prerequisite must NOT leak as a public want (#NN).  Fail-closed: an
+  // undecodable body is treated as non-public so its gap never reaches the public courier/WebRTC plane.
   for (const [recCid, droppedDeps] of reQuarantined) {
     for (const dep of droppedDeps) missing.add(dep);
     const r = recordRows.find((x) => x.recordCid === recCid);
@@ -577,7 +591,7 @@ export async function commitImportedBundle(
       firstSeen: nowMs,
       missingDeps: droppedDeps,
       byteSize: r?.size ?? 0,
-      public: true,
+      public: r !== undefined ? isPublicRecordBody(r.body) : false,
       ...(r?.roomHash ? { roomHash: r.roomHash } : {}),
     });
   }

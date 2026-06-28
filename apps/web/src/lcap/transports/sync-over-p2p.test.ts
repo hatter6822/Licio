@@ -376,6 +376,149 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     expect(anchorUrls.some((u) => u.includes('/exchange'))).toBe(false); // never hit the anchor
   });
 
+  it('falls back to the anchor when WebRTC served the peer but left OUR wants unfilled (#BK)', async () => {
+    // The initiator HOLDS a block the responder wants (so it SERVES the peer → served=true) but
+    // ALSO has its OWN gap the responder LACKS (so it ingests nothing over WebRTC).  A served-only
+    // round with UNFILLED local wants must NOT be reported as carried — it must back-stop at the
+    // authoritative anchor, which DOES have our gap.  Without the fix this returned 'webrtc' and our
+    // missing content stayed unfilled.
+    const peerBytes = new Uint8Array([1, 2, 3, 4]);
+    const peerBlockCid = await cidFor('block', peerBytes);
+    await putBlock(
+      initiatorDb,
+      { blockCid: peerBlockCid, state: 'integrity_verified', size: peerBytes.length },
+      [peerBytes],
+    );
+    await putPublicRecordWithBlock(initiatorDb, peerBlockCid); // the initiator can serve it
+    await quarantineMissing(responderDb, [peerBlockCid]); // the RESPONDER wants it
+
+    const gapBytes = new Uint8Array([7, 7, 7, 7, 7]);
+    const gapCid = await cidFor('block', gapBytes);
+    await quarantineMissing(initiatorDb, [gapCid]); // the INITIATOR wants this — the peer lacks it
+
+    const anchorBody = await anchorResponseServing(new Map([[gapCid, gapBytes]]), [gapCid]);
+    const anchorUrls: string[] = [];
+    const anchorFetch = (async (input: string | URL | Request) => {
+      anchorUrls.push(String(input));
+      if (String(input).includes('/exchange'))
+        return new Response(anchorBody as BodyInit, { status: 200 });
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const link = new FakeLink();
+    const relay = makeRelayFetch();
+    const p2p = await import('@licio/lcap-p2p');
+    const signalKey = await p2p.importSignalKey(
+      await (await import('./signal-key.js')).derivePublicSignalKeyBytes(ROOM),
+    );
+    const { createSignalClient } = await import('./p2p-signaling.js');
+    const respSignals = createSignalClient({ apiBase: 'http://relay.test', fetchFn: relay });
+
+    const responderDone = p2p
+      .connectWebrtc({
+        decision: p2p.decideWebrtc({ mode: 'standard', userEnabled: true }),
+        signalKey,
+        roomIdHash: ROOM,
+        selfPeerKey: 'bob',
+        remotePeerKey: 'alice',
+        initiator: false,
+        postSignal: respSignals.postSignal,
+        pollSignal: respSignals.pollSignal,
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+        rtcFactory: () => new FakePeer(link, 'responder'),
+      })
+      .then((channel) =>
+        runWebrtcBidirectionalExchange({ db: responderDb, channel, timeoutMs: 5000 }),
+      );
+
+    const [result] = await Promise.all([
+      syncRoomOverP2p({
+        db: initiatorDb,
+        roomIdHash: ROOM,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        privacy: { mode: 'standard', userEnabled: true },
+        apiBase: 'http://relay.test',
+        fetchFn: relay,
+        httpsConfig: { fetchFn: anchorFetch },
+        rtcFactory: () => new FakePeer(link, 'initiator'),
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+      }),
+      responderDone,
+    ]);
+
+    expect(result?.transport).toBe('https'); // served-only WITH unfilled wants ⇒ back-stop at anchor
+    expect(anchorUrls.some((u) => u.includes('/exchange'))).toBe(true); // the anchor WAS reached
+    expect(result?.ingested?.blocks).toBe(1); // our gap filled from the authoritative anchor
+    expect(await readBlockBytes(initiatorDb, gapCid)).toEqual(gapBytes);
+  });
+
+  it('threads the abort predicate into the anchor ingest, suppressing a post-cancel commit (#BJ)', async () => {
+    // The HTTPS anchor does not thread the AbortSignal into fetch, so the anchor request can COMPLETE
+    // after a Cancel/unmount fires mid-flight.  The pre-commit check at the boundary is not enough: a
+    // cancel landing DURING readBundleForImport / importBundleObjects must still suppress the store
+    // write.  The fix passes a live `() => !params.signal?.aborted` predicate to
+    // ingestClientExchangeResponse, which re-checks it at the LEAF (right before the writes).
+    const bytes = new Uint8Array([3, 1, 4, 1, 5, 9]);
+    const blockCid = await cidFor('block', bytes);
+    await quarantineMissing(initiatorDb, [blockCid]);
+    const anchorBody = await anchorResponseServing(new Map([[blockCid, bytes]]), [blockCid]);
+
+    // A controllable signal: NOT aborted until the anchor has responded, then the FIRST read (the
+    // sync's pre-commit check at line ~174) still sees false (so we DON'T bail early via that check),
+    // and EVERY later read — the abort predicate at the ingest boundary AND the commit leaf — sees
+    // true.  fallbackExchange/HttpsTransport never read `.aborted`, so the first read after the fetch
+    // is guaranteed to be that pre-commit check (no brittle read-counting).
+    let anchorFetched = false;
+    let preCommitConsumed = false;
+    const signal = {
+      get aborted(): boolean {
+        if (!anchorFetched) return false; // all pre-anchor checks: not yet cancelled
+        if (!preCommitConsumed) {
+          preCommitConsumed = true;
+          return false; // the sync's post-fetch pre-commit check proceeds into the ingest
+        }
+        return true; // the cancel is now observed by the ingest predicate (boundary + leaf)
+      },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {
+        return false;
+      },
+      onabort: null,
+      reason: undefined,
+      throwIfAborted() {},
+    } as unknown as AbortSignal;
+
+    const httpsFetch = (async (input: string | URL | Request) => {
+      anchorFetched = true;
+      if (String(input).includes('/exchange'))
+        return new Response(anchorBody as BodyInit, { status: 200 });
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await syncRoomOverP2p({
+      db: initiatorDb,
+      roomIdHash: ROOM,
+      selfPeerKey: 'alice',
+      remotePeerKey: 'bob',
+      initiator: true,
+      privacy: { mode: 'standard', userEnabled: false }, // off → straight to the anchor
+      httpsConfig: { fetchFn: httpsFetch },
+      rtcFactory: () => new FakePeer(new FakeLink(), 'initiator'),
+      signal,
+      timeoutMs: 50,
+    });
+    // The anchor exchange ran (transport reported), but the ingest's leaf predicate suppressed the
+    // commit — nothing landed in IndexedDB after the cancel.  Without the fix the block IS written.
+    expect(result?.transport).toBe('https');
+    expect(result?.ingested).toBeNull(); // the leaf predicate suppressed the commit (#BJ)
+    expect(await readBlockBytes(initiatorDb, blockCid)).toBeUndefined(); // nothing written post-cancel
+  });
+
   it('falls back to the HTTPS anchor when WebRTC is off, and ingests the served response', async () => {
     const bytes = new Uint8Array([3, 1, 4, 1, 5, 9]);
     const blockCid = await cidFor('block', bytes);

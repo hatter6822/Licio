@@ -88,6 +88,20 @@ export async function syncRoomOverP2p(
   // The public P2P plane builds a PUBLIC request (and the responder serves public-only), so the
   // exchange is structurally public — the §22.6 carriage gate is inherent, not a per-call flag.
   const request = await buildClientExchangeRequest(params.db, 'relay', params.scope);
+  // Whether WE still have unfilled gaps (wants) in this request — a served-only WebRTC round (we served
+  // the peer but it sent us nothing usable) must still back-stop at the anchor when we have wants (#BK).
+  // Decoding the request we ACTUALLY send is the precise signal: buildClientExchangeRequest budget-trims
+  // its wants, and the anchor leg re-sends this SAME request, so a freshly-scanned want list could
+  // diverge from what was advertised.  Fail OPEN: if our own request cannot be decoded (it never should),
+  // assume we still have gaps and let the authoritative anchor back-stop the round.
+  const haveLocalWants = await (async (): Promise<boolean> => {
+    const lcap = await import('@licio/lcap');
+    try {
+      return (lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request).want ?? []).length > 0;
+    } catch {
+      return true;
+    }
+  })();
 
   // 1) Prefer the live WebRTC peer — a real bidirectional exchange over one duplex channel.
   let channel: Awaited<ReturnType<typeof connectLcapWebrtcChannel>> | null = null;
@@ -122,12 +136,12 @@ export async function syncRoomOverP2p(
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
-    // A successful WebRTC exchange is one where the peer was REACHABLE — either it served us content
-    // (`ingested`) OR we served it ours (`served`, e.g. a direct sync where only the OTHER device was
-    // missing our records).  Either way the P2P round happened, so do NOT fall through to the
-    // authoritative anchor (which would needlessly re-upload our request + push_pack to the server).
-    // Only a round that moved nothing (peer unreachable / unresponsive) falls through.
-    if (out.ingested !== null || out.served) {
+    // Suppress the authoritative anchor only when the P2P round actually FILLED OUR needs: either it
+    // served us content (`ingested`), OR it was served-only AND we had NOTHING to fetch (no local
+    // wants).  A served-only round where we STILL have unfilled wants — the peer answered slowly past
+    // the grace window, or simply lacks our wanted CIDs — must back-stop at the anchor, so we don't
+    // report the sync as carried while our missing content remains unfilled (#BK).
+    if (out.ingested !== null || (out.served && !haveLocalWants)) {
       return { transport: 'webrtc', ingested: out.ingested };
     }
   } catch {
@@ -163,7 +177,14 @@ export async function syncRoomOverP2p(
   // cancelled sync never mutates the local store after the UI owner is gone (#JJ).
   if (params.signal?.aborted) return null;
   // Room-scoped on the fallback too: the server serves explicit wants by CID with no room scope, so
-  // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).
-  const ingested = await ingestClientExchangeResponse(params.db, anchor.response, params.scope);
+  // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).  The
+  // abort predicate is threaded to the LEAF so a Cancel/unmount DURING readBundleForImport /
+  // importBundleObjects suppresses the store write, not just the pre-import check (#BJ).
+  const ingested = await ingestClientExchangeResponse(
+    params.db,
+    anchor.response,
+    params.scope,
+    () => !(params.signal?.aborted ?? false),
+  );
   return { transport: anchor.transport, ingested };
 }

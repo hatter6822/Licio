@@ -376,6 +376,138 @@ describe('bundle import — quarantine (WS-R.4.3)', () => {
     expect(counts.records).toBe(0); // the record is held back, not stored as renderable
     db2.close();
   });
+
+  it('SECURITY: an UNSCOPED manual import re-quarantines a record whose SIGNED body needs a block the table OMITS (#BI)', async () => {
+    // The reviewer finding (#BI): on the manual import path (no roomAllowlist, publicOnly false)
+    // the old guard skipped decoding bodies, so recordBodyBlockDeps stayed empty and a bundle that
+    // OMITS a signed body_block_cid from its UNAUTHENTICATED pack-table `deps` would be committed
+    // (importPack resolves ONLY table deps — packages/lcap/src/pack/import.ts:61) instead of
+    // quarantined, and no want would ever be advertised for the gap.  The fix decodes the signed
+    // body for unscoped imports too (no public/scope FILTER), so #AC re-quarantines it.
+    const lcap = await import('@licio/lcap');
+    const hiddenBlock = await cidFor('block', new TextEncoder().encode('omitted body block'));
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-bi',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([7]),
+      priority: 1,
+      body_block_cid: hiddenBlock, // referenced in the SIGNED body...
+    });
+    const recordCid = await cidFor('record', body);
+    // ...but the pack-table entry DELIBERATELY omits `deps`, so importPack sees no missing dep and
+    // would otherwise commit the record without the block ever being fetched.
+    const bundle = writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-bi'),
+          // deps OMITTED on purpose — the unauthenticated table hides the body block dep
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const db2 = await openLcapDb(
+      `lcap_v2-bundle-bi-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    const importResult = await importBundleObjects(read.pack);
+    // importPack, seeing no TABLE dep, IMPORTS the record (this is the gap the table hid)...
+    expect(importResult.imported.has(recordCid)).toBe(true);
+    // ...so the UNSCOPED commit (no roomAllowlist, no publicOnly) must catch the absent body block
+    // from the SIGNED body and re-quarantine the record rather than commit it (#BI).
+    const counts = await commitImportedBundle(db2, read.pack, importResult);
+    expect(counts.records).toBe(0); // held back, NOT committed as renderable
+    expect(counts.quarantined).toBe(1);
+    expect(counts.missingCids).toContain(hiddenBlock); // the gap is now tracked + advertisable
+    db2.close();
+  });
+
+  it('SECURITY: an UNSCOPED in_room import re-quarantined on a missing body block is tagged non-public (#BI/#NN)', async () => {
+    // The #BI fix enables the re-quarantine loop for unscoped imports — which are NOT public-filtered,
+    // so an in_room/private record can land there.  Its quarantine row MUST be tagged public:false so
+    // collectQuarantineWants never advertises its missing prerequisite over the PUBLIC courier/WebRTC
+    // plane (#NN).  Without the public-flag derivation the row would be public:true and the gap leaks.
+    const lcap = await import('@licio/lcap');
+    const hiddenBlock = await cidFor('block', new TextEncoder().encode('in-room body block'));
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-bi-inroom',
+      visibility_scope: 'in_room', // NON-public — its gaps must stay off the public plane
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([8]),
+      priority: 1,
+      body_block_cid: hiddenBlock,
+    });
+    const recordCid = await cidFor('record', body);
+    const bundle = writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-bi-inroom'),
+          // deps OMITTED — the signed body's block dep is hidden from the unauthenticated table
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'contains_in_room_metadata',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const db2 = await openLcapDb(
+      `lcap_v2-bundle-bi-nn-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    const importResult = await importBundleObjects(read.pack);
+    const counts = await commitImportedBundle(db2, read.pack, importResult); // UNSCOPED manual import
+    expect(counts.quarantined).toBe(1); // re-quarantined on the missing signed-body block (#BI)
+
+    const rows = await collectByCursor<{ cid: string; public?: boolean }>(
+      db2,
+      LCAP_STORE.quarantine,
+    );
+    const row = rows.find((r) => r.cid === recordCid);
+    expect(row).toBeDefined();
+    expect(row?.public).toBe(false); // an in_room gap is NEVER advertised on the public plane (#NN)
+    db2.close();
+  });
 });
 
 describe('bundle import — re-import never downgrades held trust (review)', () => {
