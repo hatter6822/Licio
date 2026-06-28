@@ -29,6 +29,7 @@ import type {
   ParsedPack,
   ReaderCaps,
 } from '@licio/lcap';
+import { cappedBodyBlockCids } from './body-deps.js';
 import { LCAP_STORE } from './db.js';
 import {
   bytesToHex,
@@ -306,6 +307,20 @@ export async function commitImportedBundle(
   // Each committed record's SIGNED-body BLOCK deps — used to re-quarantine a record whose body needs
   // a block the pack table omitted (so importPack never flagged it missing) (#AC).
   const recordBodyBlockDeps = new Map<string, string[]>();
+  // The PUBLIC flag of each processed record's SIGNED body (public, or carries no visibility_scope),
+  // cached from the decode above so the re-quarantine pass need NOT re-decode a (possibly large)
+  // body to derive it (#3) — the leak-safe replacement for an isPublicRecordBody re-decode (#NN).
+  const recordPublic = new Map<string, boolean>();
+  // Records whose SIGNED body declares MORE block references than the §27.1 fan-out cap allows.  An
+  // over-cap fan-out is INVALID (the server rejects it, `rejected_resource_limit`): these are
+  // force-quarantined below so the abusive body NEVER persists in `lcap_v2` — not committed even if
+  // a bounded subset of its deps happens to resolve (#3).
+  const overCapRecords = new Set<string>();
+  // §27.1 fan-out cap on a record's SIGNED-body block references (the SHARED `cappedBodyBlockCids`
+  // helper bounds them identically on the commit / share / export paths; mirrors the server's
+  // indexBodyBlockEdges) — without it a malicious body naming thousands of source_snapshot_cids would
+  // drive an O(n) spread / store query / oversized quarantine row (#3).
+  const maxBodyRefs = lcapCodec.SERVER_CAPS.maxFanOut;
 
   const recordRows: RecordRow[] = [];
   const proofRows: ProofRow[] = [];
@@ -384,17 +399,30 @@ export async function commitImportedBundle(
             return undefined;
           }
         })();
-      if (scopeFiltered) committedRecordCids.add(cid);
-      if (decodedForDeps?.kind === 'contribution_event') {
-        const blockDeps = [
-          decodedForDeps.body_block_cid,
-          decodedForDeps.attachment_manifest_cid,
-          ...(decodedForDeps.source_snapshot_cids ?? []),
-          decodedForDeps.target_source_snapshot_cid,
-        ].filter((d): d is string => d !== undefined);
-        if (scopeFiltered) for (const dep of blockDeps) allowedBlocks.add(dep);
-        if (blockDeps.length > 0) recordBodyBlockDeps.set(cid, blockDeps);
+      if (decodedForDeps !== undefined) {
+        recordPublic.set(
+          cid,
+          !('visibility_scope' in decodedForDeps) || decodedForDeps.visibility_scope === 'public',
+        );
       }
+      let overCapRecord = false;
+      if (decodedForDeps?.kind === 'contribution_event') {
+        // §27.1 fan-out cap (the SHARED helper — never spreads source_snapshot_cids): an over-cap
+        // body is INVALID and FORCE-QUARANTINED below so it never persists (mirrors the server's
+        // reject), NOT truncated-and-maybe-committed; within the cap, its bounded block deps drive the
+        // #AC re-quarantine when a body block the table omitted is absent (#3).
+        const { cids: blockDeps, overCap } = cappedBodyBlockCids(decodedForDeps, maxBodyRefs);
+        if (overCap) {
+          overCapRecord = true;
+          overCapRecords.add(cid);
+        } else {
+          if (scopeFiltered) for (const dep of blockDeps) allowedBlocks.add(dep);
+          if (blockDeps.length > 0) recordBodyBlockDeps.set(cid, blockDeps);
+        }
+      }
+      // An over-cap record is NOT part of the in-scope closure (its proofs/blocks must not be admitted
+      // on its behalf) — it is force-quarantined, never committed.
+      if (scopeFiltered && !overCapRecord) committedRecordCids.add(cid);
     } else if (frame.frameKind === 'proof') {
       // Bind the proof to its DECODED record_cid, NEVER the unauthenticated pack table — else a crafted
       // bundle could table a proof whose body attests an off-scope/non-public record under an in-scope
@@ -537,7 +565,11 @@ export async function commitImportedBundle(
     for (const d of recordBodyBlockDeps.get(r.recordCid) ?? []) {
       if (!blockWritesCids.has(d) && !heldBodyDeps.has(d)) missing.add(d); // #AC absent body block dep
     }
-    if (missing.size > 0) reQuarantined.set(r.recordCid, [...missing]);
+    // #3: an over-cap body-block fan-out is force-quarantined UNCONDITIONALLY — held back even if no
+    // enumerated dep is missing (we recorded none for it), so its abusive body never persists.
+    if (missing.size > 0 || overCapRecords.has(r.recordCid)) {
+      reQuarantined.set(r.recordCid, [...missing]);
+    }
   }
 
   // Quarantine rows from the per-object statuses (the precise missing prerequisites).
@@ -577,11 +609,12 @@ export async function commitImportedBundle(
 
   // #RR: turn each committed-but-dependency-dropped record into a quarantine row (so the gap is
   // tracked + advertised as a want) and exclude it from the committed rows below.  The public flag
-  // is DERIVED from the record's SIGNED body, never assumed: a SCOPED ingest already dropped
-  // non-public records (so they are public here), but the #BI change re-quarantines records on an
-  // UNSCOPED manual import too, which is NOT public-filtered — so an in_room/private record can land
-  // here and its missing prerequisite must NOT leak as a public want (#NN).  Fail-closed: an
-  // undecodable body is treated as non-public so its gap never reaches the public courier/WebRTC plane.
+  // is DERIVED from the record's SIGNED body (the cached `recordPublic`, set during the decode pass),
+  // never assumed: a SCOPED ingest already dropped non-public records (so they are public here), but
+  // the #BI change re-quarantines records on an UNSCOPED manual import too, which is NOT
+  // public-filtered — so an in_room/private record can land here and its missing prerequisite must
+  // NOT leak as a public want (#NN).  Fail-closed: a record without a cached public flag (its body
+  // never decoded) is treated as non-public so its gap never reaches the public courier/WebRTC plane.
   for (const [recCid, droppedDeps] of reQuarantined) {
     for (const dep of droppedDeps) missing.add(dep);
     const r = recordRows.find((x) => x.recordCid === recCid);
@@ -591,7 +624,7 @@ export async function commitImportedBundle(
       firstSeen: nowMs,
       missingDeps: droppedDeps,
       byteSize: r?.size ?? 0,
-      public: r !== undefined ? isPublicRecordBody(r.body) : false,
+      public: recordPublic.get(recCid) ?? false,
       ...(r?.roomHash ? { roomHash: r.roomHash } : {}),
     });
   }

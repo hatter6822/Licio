@@ -20,6 +20,7 @@
 // trust projection (§8.3).  The heavy `@licio/lcap` codec is loaded by DYNAMIC import (like
 // `bundle-import`), so this module stays off the initial bundle.
 
+import { cappedBodyBlockCids } from './body-deps.js';
 import {
   type CommitCounts,
   commitImportedBundle,
@@ -30,6 +31,7 @@ import {
 import { LCAP_STORE } from './db.js';
 import {
   collectShareableRecordRows,
+  filterPresentKeys,
   forEachByCursor,
   getHeldObject,
   normalizeRoomKey,
@@ -115,14 +117,11 @@ async function collectShareableCids(
       continue; // undecodable — share nothing further for it
     }
     if (decoded.kind === 'contribution_event') {
-      const bodyBlockDeps: ReadonlyArray<string | undefined> = [
-        decoded.body_block_cid,
-        decoded.attachment_manifest_cid,
-        ...(decoded.source_snapshot_cids ?? []),
-        decoded.target_source_snapshot_cid,
-      ];
-      for (const dep of bodyBlockDeps) {
-        if (dep !== undefined && (await readBlockDescriptor(db, dep))) add(dep);
+      // §27.1 fan-out cap (the SHARED helper — never spreads source_snapshot_cids): bound the body's
+      // block refs BEFORE the per-element readBlockDescriptor query, so a stray over-cap public body
+      // can never drive O(n) awaited store reads at share/push time (#3 defense-in-depth + symmetry).
+      for (const dep of cappedBodyBlockCids(decoded, lcap.SERVER_CAPS.maxFanOut).cids) {
+        if (await readBlockDescriptor(db, dep)) add(dep);
       }
     }
   }
@@ -306,6 +305,42 @@ export async function buildClientExchangeRequest(
     encoded = encode(want, undefined);
   }
   return encoded;
+}
+
+/**
+ * Whether `requestBytes` (a §16 exchange request WE built) still advertises wants the local store
+ * does NOT yet hold — i.e. real gaps the authoritative anchor could still fill.  The P2P sync uses
+ * this AFTER a WebRTC round to decide whether to back-stop at the anchor: the peer's `push_pack`
+ * (ingested as a side effect of `respondToClientExchange` when WE serve the peer's request) can fill
+ * our advertised wants WITHOUT surfacing in the response-ingest counts, and quarantine rows are NOT
+ * promoted on ingest — so a held want is FILLED even if its quarantine row lingers, and a stale
+ * pre-round snapshot would re-hit the anchor needlessly.  Decoding THIS request (not a fresh
+ * quarantine scan) keeps the check aligned with exactly what the anchor will be asked to serve (the
+ * anchor re-sends this request).  FAILS OPEN (returns true) when the request cannot be decoded, so an
+ * undecodable own-request still backs off to the authoritative anchor.
+ */
+export async function requestHasUnfilledWants(
+  db: IDBDatabase,
+  requestBytes: Uint8Array,
+): Promise<boolean> {
+  const lcap = await import('@licio/lcap');
+  let wantCids: string[];
+  try {
+    wantCids = (lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, requestBytes).want ?? []).map(
+      (w) => w.cid,
+    );
+  } catch {
+    return true; // cannot tell from our own request → assume gaps remain (back-stop at the anchor)
+  }
+  if (wantCids.length === 0) return false;
+  // A want is FILLED once its CID is held in ANY content store (records / proofs / blocks); a want
+  // held in none of them is a real remaining gap.
+  const [records, proofs, blocks] = await Promise.all([
+    filterPresentKeys(db, LCAP_STORE.records, wantCids),
+    filterPresentKeys(db, LCAP_STORE.proofs, wantCids),
+    filterPresentKeys(db, LCAP_STORE.blocks, wantCids),
+  ]);
+  return wantCids.some((cid) => !records.has(cid) && !proofs.has(cid) && !blocks.has(cid));
 }
 
 /**

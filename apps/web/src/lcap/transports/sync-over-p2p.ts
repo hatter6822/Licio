@@ -29,6 +29,7 @@ import {
   type CommitCounts,
   type ExchangeScope,
   ingestClientExchangeResponse,
+  requestHasUnfilledWants,
 } from '../exchange.js';
 import { type ConnectLcapWebrtcParams, connectLcapWebrtcChannel } from './connect-webrtc.js';
 import type { HttpsTransportConfig } from './https.js';
@@ -88,20 +89,6 @@ export async function syncRoomOverP2p(
   // The public P2P plane builds a PUBLIC request (and the responder serves public-only), so the
   // exchange is structurally public — the §22.6 carriage gate is inherent, not a per-call flag.
   const request = await buildClientExchangeRequest(params.db, 'relay', params.scope);
-  // Whether WE still have unfilled gaps (wants) in this request — a served-only WebRTC round (we served
-  // the peer but it sent us nothing usable) must still back-stop at the anchor when we have wants (#BK).
-  // Decoding the request we ACTUALLY send is the precise signal: buildClientExchangeRequest budget-trims
-  // its wants, and the anchor leg re-sends this SAME request, so a freshly-scanned want list could
-  // diverge from what was advertised.  Fail OPEN: if our own request cannot be decoded (it never should),
-  // assume we still have gaps and let the authoritative anchor back-stop the round.
-  const haveLocalWants = await (async (): Promise<boolean> => {
-    const lcap = await import('@licio/lcap');
-    try {
-      return (lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request).want ?? []).length > 0;
-    } catch {
-      return true;
-    }
-  })();
 
   // 1) Prefer the live WebRTC peer — a real bidirectional exchange over one duplex channel.
   let channel: Awaited<ReturnType<typeof connectLcapWebrtcChannel>> | null = null;
@@ -136,12 +123,17 @@ export async function syncRoomOverP2p(
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
-    // Suppress the authoritative anchor only when the P2P round actually FILLED OUR needs: either it
-    // served us content (`ingested`), OR it was served-only AND we had NOTHING to fetch (no local
-    // wants).  A served-only round where we STILL have unfilled wants — the peer answered slowly past
-    // the grace window, or simply lacks our wanted CIDs — must back-stop at the anchor, so we don't
-    // report the sync as carried while our missing content remains unfilled (#BK).
-    if (out.ingested !== null || (out.served && !haveLocalWants)) {
+    // Suppress the authoritative anchor only when the round actually FILLED OUR needs: either the peer
+    // served us content (`ingested`), OR — for a served-only round — NO gap the anchor could still
+    // fill remains.  Re-check AFTER the round (not a pre-round snapshot): the peer's push, ingested as
+    // a side effect while WE served its request, can fill our advertised wants without surfacing in
+    // `out.ingested`, and quarantine rows are not promoted on ingest, so a held want is the source of
+    // truth.  A served-only round that left a want unfilled (peer answered past the grace window, or
+    // lacked our CIDs) backs off to the anchor (#BK/#1).
+    if (
+      out.ingested !== null ||
+      (out.served && !(await requestHasUnfilledWants(params.db, request)))
+    ) {
       return { transport: 'webrtc', ingested: out.ingested };
     }
   } catch {

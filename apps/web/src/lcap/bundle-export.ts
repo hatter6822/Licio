@@ -20,6 +20,7 @@ import type {
   PackHeaderV2,
   PackObject,
 } from '@licio/lcap';
+import { cappedBodyBlockCids } from './body-deps.js';
 import { getLcapDb, LCAP_STORE } from './db.js';
 import {
   forEachByCursor,
@@ -91,7 +92,7 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   //    source-snapshot CIDs), NOT `record.deps`, which can be unauthenticated pack-table metadata a
   //    crafted record copied from an imported bundle to point at another room's held block (#HH).  A
   //    dep that resolves to a held block descriptor is included; one we don't hold is omitted.
-  const { decodeAndRouteRecord } = await import('@licio/lcap');
+  const { decodeAndRouteRecord, SERVER_CAPS } = await import('@licio/lcap');
   const depCids = new Set<string>();
   // The exported table `deps` per record — derived from the SIGNED body (record refs + block refs),
   // the SAME closure derivation, NOT the stored `record.deps` (which may carry a stale/unauthenticated
@@ -110,17 +111,19 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
     if (decoded.replaces_record_cid) deps.push(decoded.replaces_record_cid);
     if (decoded.target_record_cid) deps.push(decoded.target_record_cid);
     if (decoded.thread_root_cid) deps.push(decoded.thread_root_cid);
-    for (const p of decoded.parent_record_cids ?? []) deps.push(p);
-    if (decoded.body_block_cid) deps.push(decoded.body_block_cid);
-    if (decoded.attachment_manifest_cid) deps.push(decoded.attachment_manifest_cid);
-    for (const s of decoded.source_snapshot_cids ?? []) deps.push(s);
-    if (decoded.target_source_snapshot_cid) deps.push(decoded.target_source_snapshot_cid);
+    // §27.1 RECORD-ref fan-out cap: parent_record_cids has no schema max either, so bound it like the
+    // block refs below — a stray over-fan-out held body cannot drive an O(n) deps.push / oversized
+    // export table row.  slice(0, cap) reads at most `cap` elements, never the whole array (#3 symmetry).
+    for (const p of (decoded.parent_record_cids ?? []).slice(0, SERVER_CAPS.maxFanOut))
+      deps.push(p);
+    // §27.1 fan-out cap (the SHARED helper — never spreads source_snapshot_cids): bound the body's
+    // BLOCK refs so a stray over-cap held body cannot drive O(n) work on export (#3 defense-in-depth
+    // + symmetry with the commit/share paths).
+    const blockCids = cappedBodyBlockCids(decoded, SERVER_CAPS.maxFanOut).cids;
+    for (const b of blockCids) deps.push(b);
     if (deps.length > 0) recordDeps.set(record.recordCid, deps);
     // The block subset of those refs is what we export bytes for (held only).
-    if (decoded.body_block_cid) depCids.add(decoded.body_block_cid);
-    if (decoded.attachment_manifest_cid) depCids.add(decoded.attachment_manifest_cid);
-    for (const s of decoded.source_snapshot_cids ?? []) depCids.add(s);
-    if (decoded.target_source_snapshot_cid) depCids.add(decoded.target_source_snapshot_cid);
+    for (const b of blockCids) depCids.add(b);
   }
   const blocks: Array<{ cid: string; bytes: Uint8Array }> = [];
   for (const cid of depCids) {

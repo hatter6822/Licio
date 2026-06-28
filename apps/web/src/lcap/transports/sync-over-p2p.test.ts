@@ -456,6 +456,87 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     expect(await readBlockBytes(initiatorDb, gapCid)).toEqual(gapBytes);
   });
 
+  it('a served-only round does NOT re-hit the anchor when our advertised want is already HELD (#1)', async () => {
+    // A served-only WebRTC round (we served the peer; the peer had nothing for us) where our advertised
+    // want is ALREADY HELD — modelling the peer's push filling it mid-round (quarantine rows are not
+    // promoted on ingest, so the row lingers and the request still advertises it).  The post-round
+    // recheck must see the want as FILLED and NOT needlessly back-stop at the anchor (re-uploading the
+    // request + push).  Pre-fix, the stale pre-round snapshot fell through to the anchor.
+    const peerBytes = new Uint8Array([2, 2, 2, 2]);
+    const peerBlockCid = await cidFor('block', peerBytes);
+    await putBlock(
+      initiatorDb,
+      { blockCid: peerBlockCid, state: 'integrity_verified', size: peerBytes.length },
+      [peerBytes],
+    );
+    await putPublicRecordWithBlock(initiatorDb, peerBlockCid); // the initiator can serve the peer
+    await quarantineMissing(responderDb, [peerBlockCid]); // the RESPONDER wants it
+
+    // Our own advertised want is ALREADY HELD (the block is in the store; the quarantine row lingers).
+    const heldBytes = new Uint8Array([5, 5, 5]);
+    const heldCid = await cidFor('block', heldBytes);
+    await putBlock(
+      initiatorDb,
+      { blockCid: heldCid, state: 'integrity_verified', size: heldBytes.length },
+      [heldBytes],
+    );
+    await quarantineMissing(initiatorDb, [heldCid]); // stale row → the request still advertises it
+
+    const anchorUrls: string[] = [];
+    const anchorFetch = (async (input: string | URL | Request) => {
+      anchorUrls.push(String(input));
+      return new Response(new Uint8Array([0]) as BodyInit, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const link = new FakeLink();
+    const relay = makeRelayFetch();
+    const p2p = await import('@licio/lcap-p2p');
+    const signalKey = await p2p.importSignalKey(
+      await (await import('./signal-key.js')).derivePublicSignalKeyBytes(ROOM),
+    );
+    const { createSignalClient } = await import('./p2p-signaling.js');
+    const respSignals = createSignalClient({ apiBase: 'http://relay.test', fetchFn: relay });
+
+    const responderDone = p2p
+      .connectWebrtc({
+        decision: p2p.decideWebrtc({ mode: 'standard', userEnabled: true }),
+        signalKey,
+        roomIdHash: ROOM,
+        selfPeerKey: 'bob',
+        remotePeerKey: 'alice',
+        initiator: false,
+        postSignal: respSignals.postSignal,
+        pollSignal: respSignals.pollSignal,
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+        rtcFactory: () => new FakePeer(link, 'responder'),
+      })
+      .then((channel) =>
+        runWebrtcBidirectionalExchange({ db: responderDb, channel, timeoutMs: 5000 }),
+      );
+
+    const [result] = await Promise.all([
+      syncRoomOverP2p({
+        db: initiatorDb,
+        roomIdHash: ROOM,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        privacy: { mode: 'standard', userEnabled: true },
+        apiBase: 'http://relay.test',
+        fetchFn: relay,
+        httpsConfig: { fetchFn: anchorFetch },
+        rtcFactory: () => new FakePeer(link, 'initiator'),
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+      }),
+      responderDone,
+    ]);
+
+    expect(result?.transport).toBe('webrtc'); // the want is HELD ⇒ no remaining gap ⇒ anchor suppressed
+    expect(anchorUrls.some((u) => u.includes('/exchange'))).toBe(false); // anchor never reached (#1)
+  });
+
   it('threads the abort predicate into the anchor ingest, suppressing a post-cancel commit (#BJ)', async () => {
     // The HTTPS anchor does not thread the AbortSignal into fetch, so the anchor request can COMPLETE
     // after a Cancel/unmount fires mid-flight.  The pre-commit check at the boundary is not enough: a

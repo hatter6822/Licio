@@ -589,6 +589,46 @@ public class BluetoothCourierRadioTest {
         radio.stop();
     }
 
+    /** A BluetoothManager shadow that returns null from openGattServer AFTER running an injected hook —
+     *  so a test can race a stop()/Stop→Start DURING the (blocking) openGattServer call. */
+    @Implements(BluetoothManager.class)
+    public static class ShadowRacingNullGattManager extends ShadowBluetoothManager {
+        static Runnable onOpenGattServer;
+
+        @Implementation
+        protected BluetoothGattServer openGattServer(
+                Context context, BluetoothGattServerCallback callback) {
+            if (onOpenGattServer != null) onOpenGattServer.run();
+            return null;
+        }
+
+        @Implementation
+        protected BluetoothGattServer openGattServer(
+                Context context, BluetoothGattServerCallback callback, int transport) {
+            if (onOpenGattServer != null) onOpenGattServer.run();
+            return null;
+        }
+    }
+
+    @Test
+    @Config(shadows = {ShadowRacingNullGattManager.class})
+    public void aNullGattServerFromAStoppedSessionIsNotSurfaced() {
+        // openGattServer can block, so a stop() can race it and the old call then return null.  That
+        // stale null-GATT failure must NOT reach a controller that already stopped — it is gated on
+        // running/generation like the advertise-failure paths, else it would tear down a courier that
+        // a quick Stop→Start has freshly restarted (#BL2).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        // Simulate stop() landing DURING openGattServer: the hook runs mid-call, then it returns null.
+        ShadowRacingNullGattManager.onOpenGattServer = radio::stop;
+        try {
+            radio.startAdvertising();
+        } finally {
+            ShadowRacingNullGattManager.onOpenGattServer = null;
+        }
+        assertNull("a null-GATT failure from a stopped session is dropped", rec.startFailedOp);
+    }
+
     @Test
     public void aStaleBleAdvertiseFailureFromASupersededSessionIsDropped() {
         // After a quick Stop→Start, `running` is true again — but an OLD AdvertiseCallback's late
