@@ -21,10 +21,10 @@
     "@licio/lcap-p2p": "workspace:*",
     "@licio/private-p2p": "workspace:*",
     "@licio/shared": "workspace:*",
-    "@tanstack/react-query": "^5.62.0",
+    "@tanstack/react-query": "^5.101.2",
     "@tanstack/react-router": "^1.170.16",
     "dompurify": "^3.4.11",
-    "hono": "^4.12.26",
+    "hono": "^4.12.27",
     "jsqr": "^1.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -32,8 +32,8 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.11.3",
-    "@playwright/test": "^1.61.0",
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.3.1",
     "@tanstack/router-plugin": "^1.168.0",
     "@testing-library/dom": "^10.4.0",
@@ -43,13 +43,13 @@
     "@types/node": "^25.9.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@vitejs/plugin-react": "^6.0.3",
     "fake-indexeddb": "^6.0.0",
     "jest-axe": "^10.0.0",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
+    "vite": "^8.1.0",
     "vite-plugin-pwa": "^1.0.0"
   }
 }
