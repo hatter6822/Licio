@@ -27,16 +27,23 @@ import { objectStatusV2Schema, receiptRecordV2Schema } from './receipt.js';
  * Per-array element ceilings (WS-R.6 / §27.1 DoS hardening).  The whole-message byte caps
  * (`MAX_PULSE_REQUEST_BYTES` / `MAX_EXCHANGE_REQUEST_BYTES` in the routes) bound total size,
  * but a small element type (a ~60-byte CID) still admits ~17k entries inside a 1 MiB body —
- * and the server does one store round-trip PER want/frontier CID, so an attacker could force
- * thousands of sequential `hasObject`/`getObject` lookups (an amplifier, worst against the
- * Postgres store) under NO per-request CPU budget.  These caps bound that fan-out structurally
- * at the trust boundary; they are generous relative to any honest frontier/want set.
+ * and the server does one store round-trip PER want CID, so an attacker could force thousands
+ * of sequential `hasObject`/`getObject` lookups (an amplifier, worst against the Postgres
+ * store) under NO per-request CPU budget.  These caps bound that fan-out structurally at the
+ * trust boundary.
+ *
+ * They apply ONLY to caller-supplied request arrays.  The pulse FRONTIERS are deliberately NOT
+ * capped here: a frontier carries one entry per room a node tracks (server-side: ALL hosted
+ * rooms), so a shared-schema cap would make a >cap-room node's own `buildPulse` throw.  The
+ * frontiers are instead bounded by the message byte cap, and the inbound processing of a peer's
+ * frontier (the `hasObject` fan-out) is bounded separately at the route layer
+ * (`MAX_PULSE_REFERENCED_CIDS`).  The response arrays that ARE capped here (`summaries` /
+ * `receipts` / `wants` / `pushStatuses` used by the server's response) stay safely under their
+ * cap because the server bounds them by the exchange budget (`max_records` etc. = 1024).
  */
 export const SYNC_ARRAY_LIMITS = {
   /** Advertised crypto suites / compression ids / pack versions (tiny enumerations). */
   capabilities: 16,
-  /** Per-room/-scope frontier entries in one pulse. */
-  frontier: 2048,
   /** C0 critical-have / critical-want CID lists. */
   criticalCids: 1024,
   /** Lane summaries (there are only a handful of lanes). */
@@ -154,12 +161,12 @@ export const syncPulseV2Schema = z
     supported_suites: z.array(cryptoSuiteIdSchema).max(SYNC_ARRAY_LIMITS.capabilities),
     supported_compression: z.array(compressionIdSchema).max(SYNC_ARRAY_LIMITS.capabilities),
     supported_pack_versions: z.array(uintSchema).max(SYNC_ARRAY_LIMITS.capabilities),
-    checkpoint_frontier: z.array(checkpointFrontierV2Schema).max(SYNC_ARRAY_LIMITS.frontier),
-    revocation_frontier: z.array(revocationFrontierV2Schema).max(SYNC_ARRAY_LIMITS.frontier),
-    capability_frontier: z
-      .array(capabilityFrontierV2Schema)
-      .max(SYNC_ARRAY_LIMITS.frontier)
-      .optional(),
+    // Frontiers carry one entry per tracked room — NOT element-capped here (a >cap-room node's
+    // own pulse would otherwise fail validation); bounded by the message byte cap, and a peer's
+    // inbound frontier processing is bounded at the route layer (`MAX_PULSE_REFERENCED_CIDS`).
+    checkpoint_frontier: z.array(checkpointFrontierV2Schema),
+    revocation_frontier: z.array(revocationFrontierV2Schema),
+    capability_frontier: z.array(capabilityFrontierV2Schema).optional(),
     critical_have: z.array(anyCidSchema).max(SYNC_ARRAY_LIMITS.criticalCids).optional(),
     critical_want: z.array(anyCidSchema).max(SYNC_ARRAY_LIMITS.criticalCids).optional(),
     lane_summary: z.array(laneSummaryV2Schema).max(SYNC_ARRAY_LIMITS.laneSummary).optional(),

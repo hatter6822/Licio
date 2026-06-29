@@ -513,18 +513,33 @@ async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<
 // An exchange MAY carry a push pack, so it is bounded by the larger §16.5 request budget.
 const MAX_EXCHANGE_REQUEST_BYTES = 1024 * 1024;
 
+/**
+ * The hard ceiling on how many pulse-referenced CIDs the server will `hasObject`-probe for one
+ * request.  The pulse FRONTIERS are not element-capped in the schema (a node carries one entry
+ * per tracked room, so capping the shared schema would break a large node's own pulse), so this
+ * is the inbound-only bound on the frontier→`hasObject` fan-out — the DoS amplifier the §27.1
+ * hardening targets.  The whole pulse is byte-capped (`MAX_PULSE_REQUEST_BYTES`) so this rarely
+ * binds; it is the explicit worst-case ceiling regardless of the byte math.
+ */
+const MAX_PULSE_REFERENCED_CIDS = 4096;
+
 /** The bounded set of CIDs a client pulse references (for a synchronous `have` lookup). */
 function pulseReferencedCids(pulse: SyncPulseV2): string[] {
   const cids: string[] = [];
   for (const f of pulse.checkpoint_frontier) {
+    if (cids.length >= MAX_PULSE_REFERENCED_CIDS) return cids;
     if (f.latest_checkpoint_cid !== undefined) cids.push(f.latest_checkpoint_cid);
   }
   for (const f of pulse.revocation_frontier) {
+    if (cids.length >= MAX_PULSE_REFERENCED_CIDS) return cids;
     if (f.latest_revocation_checkpoint_cid !== undefined) {
       cids.push(f.latest_revocation_checkpoint_cid);
     }
   }
-  for (const cid of pulse.critical_have ?? []) cids.push(cid);
+  for (const cid of pulse.critical_have ?? []) {
+    if (cids.length >= MAX_PULSE_REFERENCED_CIDS) return cids;
+    cids.push(cid);
+  }
   return cids;
 }
 

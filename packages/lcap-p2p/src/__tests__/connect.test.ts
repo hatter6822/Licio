@@ -363,6 +363,45 @@ describe('WS-R.15.6a connectWebrtc', () => {
     ).rejects.toThrow(/aborted/);
   });
 
+  it('does NOT leave an unhandled channelReady rejection when the offer POST fails', async () => {
+    // If the initiator's offer `sendSignal` rejects (e.g. offline), the function throws before
+    // it ever awaits `channelReady`; the `finally`'s `controller.abort()` then rejects
+    // `channelReady` with no awaiter.  A defensive catch must keep that from becoming a global
+    // unhandled rejection — `connectWebrtc` still rejects with the underlying POST error.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => {
+      unhandled.push(e);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const key = await importSignalKey(KEY_BYTES);
+      const decision = await allow();
+      const link = new FakeLink();
+      await expect(
+        connectWebrtc({
+          decision,
+          signalKey: key,
+          roomIdHash: ROOM,
+          selfPeerKey: 'a',
+          remotePeerKey: 'b',
+          initiator: true,
+          postSignal: async () => {
+            throw new Error('offline');
+          },
+          pollSignal: async () => [],
+          pollIntervalMs: 1,
+          timeoutMs: 1000,
+          rtcFactory: (config) => new FakePeer(link, 'initiator', config),
+        }),
+      ).rejects.toThrow(/offline/);
+      // Let any microtask-deferred unhandled rejection surface before asserting there is none.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('closes the underlying RTCPeerConnection when the opened channel is closed', async () => {
     // The channel rides on `pc`; closing the transport must tear down the peer connection
     // too (otherwise the RTCPeerConnection + ICE agent leak for the life of the tab).

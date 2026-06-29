@@ -248,6 +248,12 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
       );
     });
   });
+  // `channelReady` can reject (via the abort listener above) BEFORE it is awaited — e.g. the
+  // initiator's offer `sendSignal` fails while offline, throwing before `await channelReady`, so
+  // the `finally`'s `controller.abort()` rejects it with no awaiter.  Attach a no-op handler so
+  // that rejection is never UNHANDLED; the real `await channelReady` below is a separate consumer
+  // that still observes the channel or the rejection.
+  void channelReady.catch(() => {});
 
   const handleMessage = async (message: WebrtcSignalMessage): Promise<void> => {
     if (message.kind === 'offer') {
