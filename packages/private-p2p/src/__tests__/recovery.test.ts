@@ -16,8 +16,13 @@ import {
 import { randomBytes } from '../crypto/runtime.js';
 
 // The cheapest params the schema floor (OWASP Argon2id minimum) still accepts; production
-// uses the stronger RECOVERY_ARGON2ID_PARAMS.
+// uses the stronger RECOVERY_ARGON2ID_PARAMS.  Even the floor (m = 19 MiB, t = 2) is an
+// intentionally expensive KDF, and CI runs the suite under V8 coverage instrumentation
+// (~10× slower), so give these real-KDF round-trips a generous timeout — the default 5 s is
+// not enough for a couple of instrumented Argon2id derivations per test.
 const FAST = { t: 2, m: 19_456, p: 1 } as const;
+
+vi.setConfig({ testTimeout: 60_000 });
 
 function material(roomId = 'room-1'): RoomKeyMaterial {
   return {

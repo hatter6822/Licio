@@ -5,7 +5,7 @@
 // binding, the §10.8 high-risk tier policy, and record validation.  Tier-1
 // (Argon2id) tests use fast cost params to stay quick; the default
 // (DEFAULT_ARGON2ID_PARAMS) is the OWASP-2024 baseline.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   type Argon2idParams,
   assertTierAllowedForRoom,
@@ -25,8 +25,13 @@ import {
 } from '../crypto/key-store.js';
 import { getSubtle, randomBytes } from '../crypto/runtime.js';
 
-// The cheapest params the schema floor (OWASP Argon2id minimum) still accepts.
+// The cheapest params the schema floor (OWASP Argon2id minimum) still accepts.  Real Argon2id
+// at the floor (m = 19 MiB, t = 2) is intentionally expensive, and CI runs under V8 coverage
+// instrumentation (~10× slower), so give the tier-1 passphrase tests a generous timeout (the
+// default 5 s is not enough for instrumented Argon2id derivations).
 const FAST: Argon2idParams = { t: 2, m: 19_456, p: 1 };
+
+vi.setConfig({ testTimeout: 60_000 });
 
 function material(roomId = 'room-1'): RoomKeyMaterial {
   return {
