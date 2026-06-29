@@ -101,9 +101,11 @@ gated integration tests.
 
 ## 2. How the pieces fit together
 
-Licio is a strict-TypeScript **pnpm monorepo**. Two runnable apps sit on
-top of four shared packages, with PostgreSQL and Redis behind typed store
-seams.
+Licio is a strict-TypeScript **pnpm monorepo**. Two runnable apps
+(`apps/web`, `apps/api`) plus a native courier shell (`apps/courier`) sit on
+top of nine workspace packages, with PostgreSQL and Redis behind typed store
+seams. For local development only `apps/web` and `apps/api` matter; the
+courier is an Android build target (Section 12).
 
 ```text
         Browser (PWA)
@@ -125,13 +127,24 @@ seams.
 **Workspace dependency graph** (enforced by `pnpm check:workspace-deps`):
 
 ```text
-@licio/shared       leaf — zod schemas, types, enums, env validation
-@licio/db           → shared            (Drizzle schema + SQL migrations)
-@licio/invariants   → shared            (pure PWAtt / invariant math)
-@licio/ranking      → shared, invariants (NEVER db)
-apps/web            → shared, invariants (NEVER db)
-apps/api            → shared, db, invariants, ranking
+@licio/shared        leaf — zod schemas, types, enums, env validation
+@licio/db            → shared                     (Drizzle schema + SQL migrations)
+@licio/invariants    → shared                     (pure PWAtt / invariant math)
+@licio/ranking       → shared, invariants         (NEVER db)
+@licio/ai-governance → shared                     (NEVER db; browser-safe)
+@licio/governance    → shared                     (NEVER db; AI-governed-rooms domain)
+@licio/lcap          → shared                     (NEVER db; LCAP offline protocol core)
+@licio/lcap-p2p      → shared, lcap               (NEVER db; optional WebRTC/IPFS transports)
+@licio/private-p2p   → shared                     (NEVER db, NEVER lcap; E2EE room plane)
+apps/web             → shared, invariants, ai-governance, lcap, lcap-p2p, private-p2p (NEVER db)
+apps/api             → shared, db, invariants, ranking, ai-governance, governance,
+                       lcap, lcap-p2p, private-p2p
+apps/courier         → (none — serves the apps/web build unchanged)
 ```
+
+`apps/web` loads `lcap`, `lcap-p2p`, and `private-p2p` only via dynamic
+import (code-split lazy chunks), so the protocol/crypto cores stay out of the
+initial bundle — enforced by `check:lcap-p2p-split` and `check:private-p2p-split`.
 
 **Default ports** (all configurable; see Section 7 and Section 11):
 
@@ -844,9 +857,11 @@ source of truth; this is the working subset.
 | `pnpm clean` | Remove build artifacts, coverage, test output, caches |
 
 **Static / security / doctrine gates** — run these locally before pushing.
-CI runs all of them on every PR **except `pnpm check:no-applause`**, which is
-not currently wired into `ci.yml`; since it guards a core product invariant
-(no like/vote/karma/reaction affordances), run it locally:
+CI runs all of them on every PR (the `Lint & Format` job runs the doctrine
+scans — including `check:no-applause` — alongside Biome and `lint:security`;
+the built service worker is scanned by `scripts/validate-build.ts` in the
+`Security Audit` job after the production build). Running them locally first
+saves a CI round-trip:
 
 | Command | Fails if… |
 |---------|-----------|
@@ -884,9 +899,9 @@ pnpm test                    # all projects, in-memory stores
 pnpm test -- --coverage      # adds the 80% line/function/branch/statement gate
 ```
 
-The seven Vitest projects (shared, db, invariants, ranking, api, web,
-policy) are composed by the root `vitest.config.ts`. Run one project or one
-file:
+The twelve Vitest projects (shared, db, invariants, ranking, ai-governance,
+governance, lcap, lcap-p2p, private-p2p, api, web, policy) are composed by the
+root `vitest.config.ts`. Run one project or one file:
 
 ```sh
 pnpm --filter api test                        # just the api project
@@ -989,12 +1004,18 @@ violation still blocks the merge.
 ### What CI enforces
 
 The CI pipeline ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml))
-runs eight jobs on every PR: **Lint & Format**, **Type Check**, **Lockfile
-Integrity**, **Dependency Budget**, **Test & Coverage** (with live
+runs nine jobs on every PR: **Lint & Format** (Biome, `lint:security`, and the
+doctrine scans including `check:no-applause` / `check:no-raw-egress` / the
+private-P2P and update-channel gates), **Type Check** (`typecheck:ci`),
+**Lockfile Integrity**, **Dependency Budget**, **Test & Coverage** (with live
 Postgres/Redis service containers so the gated suites run, plus the named
-neutrality gate), **Build & Size Check**, **E2E Tests**, and **Security
-Audit** (dependency audit, SBOM, AGPL header scan, secret scan,
-install-script detection). All must pass before merge. See
+neutrality gate), **Build & Size Check** (production build, bundle-size gate,
+and the signed update-manifest verification), **E2E Tests** (the frontend-only
+and BFF-in-the-loop Playwright suites), **Security Audit** (dependency audit,
+SBOM, workspace-boundary and build-output validation — including the service
+worker scan — AGPL header scan, secret scan, install-script detection), and
+**Native Courier APK** (builds the debug APK from the unchanged web build
+behind the byte-identity no-fork gate). All must pass before merge. See
 `CONTRIBUTING.md` for the branch-protection details.
 
 ---
