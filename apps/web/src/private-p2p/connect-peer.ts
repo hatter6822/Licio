@@ -222,7 +222,12 @@ export interface ConnectPrivatePeerParams {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-const HANDSHAKE_VERSION = 1;
+// v2 = the direction-separated post-handshake op-frame AAD (`*.o2a`/`*.a2o`).  The
+// handshake transcript binds this version and `verifyPeerHandshake` rejects a mismatch
+// (`protocol_version_mismatch`), so a peer still on the v1 bundle during a staggered PWA
+// update FAILS the handshake cleanly (and retries once both sides update) rather than
+// completing it and then silently dropping every op frame across the AAD change.
+const HANDSHAKE_VERSION = 2;
 const SIGNAL_TTL_MS = 5 * 60_000;
 
 interface DiscoveredPeer {

@@ -169,6 +169,44 @@ describe('WebTransportTransport (§22.6 / WS-R.15.5)', () => {
     await t.send(new Uint8Array([1]));
     expect(await t.receive(controller.signal)).toBeNull();
   });
+
+  it('cancels an IN-FLIGHT read when the signal fires mid-receive (no hang)', async () => {
+    // A session whose read() blocks until the reader is cancelled — modelling an idle stream
+    // waiting on the server.  An abort that fires AFTER the read is pending must cancel the
+    // reader so receive() unblocks (and the exchange can fall back to the anchor).
+    let cancelled = false;
+    let resolveRead: ((r: { value?: Uint8Array; done: boolean }) => void) | null = null;
+    const session: WebTransportLike = {
+      ready: Promise.resolve(),
+      async createBidirectionalStream() {
+        return {
+          writable: { getWriter: () => ({ async write() {}, async close() {} }) },
+          readable: {
+            getReader: () => ({
+              read: () =>
+                new Promise<{ value?: Uint8Array; done: boolean }>((resolve) => {
+                  resolveRead = resolve;
+                }),
+              async cancel() {
+                cancelled = true;
+                resolveRead?.({ done: true }); // a cancelled reader resolves pending reads with done
+              },
+            }),
+          },
+        };
+      },
+      close() {},
+    };
+    const t = new WebTransportTransport(session);
+    const controller = new AbortController();
+    await t.open();
+    await t.send(new Uint8Array([1]));
+    const pending = t.receive(controller.signal); // parks on the blocking read
+    await new Promise((r) => setTimeout(r, 5));
+    controller.abort(); // fires while the read is already in flight
+    expect(await pending).toBeNull();
+    expect(cancelled).toBe(true); // the reader was actually cancelled — no hang
+  });
 });
 
 describe('CourierTransport (§22.5 / WS-R.15.4b)', () => {

@@ -77,37 +77,56 @@ export class WebTransportTransport implements LcapTransport {
     const abort = signal ?? this.signal;
     const cap = this.capabilities.maxExchangeBytes;
     const reader = this.stream.readable.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for (;;) {
-      if (abort?.aborted) {
-        await reader.cancel?.().catch(() => {});
+    // Cancel the reader the moment the signal fires.  A cancelled reader resolves any
+    // IN-FLIGHT `read()` with `done`, so a `receive` parked on an idle stream unblocks
+    // promptly (and the exchange falls back to the HTTPS anchor) instead of hanging until
+    // the server sends or closes — observing `aborted` only before the read would miss an
+    // abort that arrives while the read is already pending.
+    let aborted = abort?.aborted ?? false;
+    const onAbort = (): void => {
+      aborted = true;
+      void reader.cancel?.().catch(() => {});
+    };
+    if (abort) {
+      if (aborted) {
+        void reader.cancel?.().catch(() => {});
         return null;
       }
-      const { value, done } = await reader.read();
-      if (value) {
-        total += value.length;
-        // The read loop is otherwise UNBOUNDED — enforce the declared per-exchange ceiling so
-        // a misbehaving server-mediated stream cannot exhaust memory before `readPack`'s caps.
-        if (total > cap) {
-          await reader.cancel?.().catch(() => {});
-          throw new TransportUnavailableError(
-            'webtransport',
-            `response exceeds the ${cap}-byte cap`,
-          );
+      abort.addEventListener('abort', onAbort, { once: true });
+    }
+    try {
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (aborted) return null; // an abort during the read cancelled the reader → give up
+        if (value) {
+          total += value.length;
+          // The read loop is otherwise UNBOUNDED — enforce the declared per-exchange ceiling
+          // so a misbehaving server-mediated stream cannot exhaust memory before `readPack`'s
+          // caps.
+          if (total > cap) {
+            await reader.cancel?.().catch(() => {});
+            throw new TransportUnavailableError(
+              'webtransport',
+              `response exceeds the ${cap}-byte cap`,
+            );
+          }
+          chunks.push(value);
         }
-        chunks.push(value);
+        if (done) break;
       }
-      if (done) break;
+      if (chunks.length === 0) return null;
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return out;
+    } finally {
+      if (abort) abort.removeEventListener('abort', onAbort);
     }
-    if (chunks.length === 0) return null;
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      out.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return out;
   }
 
   async close(): Promise<void> {
