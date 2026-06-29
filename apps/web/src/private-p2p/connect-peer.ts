@@ -945,6 +945,10 @@ async function runHandshake(
   // ephemeral ECDH + transcript once the remote device is verified (set before
   // resolveDone, so it is defined whenever `done` resolves).
   let sessionKey: Uint8Array | undefined;
+  // The device id captured AT the point its hello passes `verifyPeerHandshake` — bound here
+  // (not re-read from the mutable `remoteHello` after `done` resolves), so a later queued hello
+  // claiming a different device cannot overwrite the attribution the caller relies on.
+  let provenDeviceId: string | undefined;
   let proofSent = false;
   let settled = false;
   let resolveDone!: () => void;
@@ -969,14 +973,19 @@ async function runHandshake(
 
   const tryVerify = async (): Promise<void> => {
     if (!remoteHello || !remoteProofSig) return;
-    const resolved = p.resolveDevice(remoteHello.author_device_id);
+    // Snapshot the hello being verified NOW.  `remoteHello` is mutable (the inbox handler can
+    // overwrite it with a later queued hello), so everything below — the proof verification, the
+    // session-key derivation, AND the captured device id — must read this immutable snapshot, not
+    // the live field, or a post-verification hello could swap the attributed device.
+    const verifyingHello = remoteHello;
+    const resolved = p.resolveDevice(verifyingHello.author_device_id);
     const result = await p2p.verifyPeerHandshake({
       localHello: selfHello,
-      remoteHello,
+      remoteHello: verifyingHello,
       remoteProofSignature: remoteProofSig,
       ctx,
       resolveDevice: (deviceId) => {
-        if (!resolved || deviceId !== remoteHello?.author_device_id) return undefined;
+        if (!resolved || deviceId !== verifyingHello.author_device_id) return undefined;
         // The key import is async; we resolve it up-front below, so this returns the
         // already-imported key synchronously (verifyPeerHandshake calls it sync).
         return resolvedDevice;
@@ -998,11 +1007,13 @@ async function runHandshake(
     // SAME key (the transcript sorts the ephemeral keys).
     sessionKey = await p2p.deriveHandshakeSessionKey(
       ephemeral.privateKey,
-      p2p.fromBase64Url(remoteHello.ephemeral_public_key),
+      p2p.fromBase64Url(verifyingHello.ephemeral_public_key),
       selfHello,
-      remoteHello,
+      verifyingHello,
       ctx,
     );
+    // Bind the proven id to the hello that actually verified — immutable from here.
+    provenDeviceId = verifyingHello.author_device_id;
     resolveDone();
   };
 
@@ -1030,6 +1041,12 @@ async function runHandshake(
     }
     handshakeChain = handshakeChain
       .then(async (): Promise<void> => {
+        // Once the handshake has SETTLED (a device verified, or it failed), the outcome is
+        // FINAL: ignore any further hello/proof so a later frame can never overwrite the proven
+        // device id, the session key, or `remoteHello`.  This makes the first-verification-wins
+        // invariant explicit and independent of microtask timing (defence in depth over the
+        // immutable `provenDeviceId` capture in `tryVerify`).
+        if (settled) return;
         let frame: HandshakeFrame;
         try {
           const parsed: unknown = JSON.parse(data);
@@ -1110,15 +1127,17 @@ async function runHandshake(
       'handshake_no_session_key',
       'handshake settled without a session key',
     );
-  if (!remoteHello)
+  if (provenDeviceId === undefined)
     throw new ConnectPrivatePeerError(
-      'handshake_no_remote_hello',
-      'handshake settled without a remote hello',
+      'handshake_no_proven_device',
+      'handshake settled without a proven device id',
     );
   // The PROVEN device id (registered + active-at-epoch + Ed25519-proven by
-  // `verifyPeerHandshake`) — NOT the rendezvous-claimed id, which any current-epoch member
-  // can seal with an arbitrary value.  The caller keys its mesh/exclude/cooldown sets on this.
-  return { opStash, sessionKey, peerDeviceId: remoteHello.author_device_id };
+  // `verifyPeerHandshake`) — captured at verification time, NOT re-read from the mutable
+  // `remoteHello` (a later hello could overwrite it) and NOT the rendezvous-claimed id (any
+  // current-epoch member can seal that with an arbitrary value).  The caller keys its
+  // mesh/exclude/cooldown sets on this.
+  return { opStash, sessionKey, peerDeviceId: provenDeviceId };
 }
 
 // --- the post-handshake PeerChannel -------------------------------------------------

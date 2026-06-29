@@ -51,6 +51,7 @@ import {
   type ReceiptRecordV2,
   readPack,
   SERVER_CAPS,
+  SYNC_ARRAY_LIMITS,
   type SyncPulseV2,
   syncPulseV2Schema,
   type WantRequestV2,
@@ -576,6 +577,12 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   // record + proof are CID-addressed in the CAS).  No issuer ⇒ the statuses pass through unchanged.
   let acceptedPush: ObjectStatusV2[] | undefined;
   let pushReceipts: ReceiptRecordV2[] | undefined;
+  // A push pack can carry more objects than the response-array cap under the byte cap, and the
+  // server emits one `accepted_push` status (+ receipt) per object — so bound BOTH to the
+  // response-array caps and signal `partial` when truncated (the client re-exchanges the
+  // remainder; re-push is idempotent), rather than letting `buildExchangeResponse` throw on an
+  // over-cap server-generated response.
+  let pushTruncated = false;
   if (request.push_pack !== undefined) {
     const ingest = await ingestPackFrames(server, request.push_pack);
     if (!ingest.ok) {
@@ -583,8 +590,12 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
       return json(ingest.httpStatus, { error: ingest.error });
     }
     const issued = await server.issueReceipts(ingest.statuses);
-    acceptedPush = issued.statuses;
-    if (issued.receipts.length > 0) pushReceipts = issued.receipts.map((r) => r.record);
+    pushTruncated =
+      issued.statuses.length > SYNC_ARRAY_LIMITS.pushStatuses ||
+      issued.receipts.length > SYNC_ARRAY_LIMITS.receipts;
+    acceptedPush = issued.statuses.slice(0, SYNC_ARRAY_LIMITS.pushStatuses);
+    const receipts = issued.receipts.slice(0, SYNC_ARRAY_LIMITS.receipts);
+    if (receipts.length > 0) pushReceipts = receipts.map((r) => r.record);
   }
 
   // 2) The server's frontier diff against the client's advertised frontier: what the
@@ -600,7 +611,14 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
     localRevocationFrontier: server.revocationFrontier(),
     locallyHave: (cid) => have.has(cid),
   });
-  const wantedFromClient: readonly WantRequestV2[] = reaction.wants;
+  // The frontier diff yields one want per gap; with the client's frontier not element-capped,
+  // this can exceed the response-array cap.  Truncate to the cap and signal `partial` (the
+  // server still lacks the remainder, so it re-derives them on the next exchange).
+  const wantedTruncated = reaction.wants.length > SYNC_ARRAY_LIMITS.wants;
+  const wantedFromClient: readonly WantRequestV2[] = reaction.wants.slice(
+    0,
+    SYNC_ARRAY_LIMITS.wants,
+  );
 
   // 3) Serve the client's explicit wants the server holds, repacked within the
   // client's response budget.  A held want dropped for budget → `partial` (the peer
@@ -628,6 +646,9 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
     if (repacked.pack !== undefined) responsePack = repacked.pack;
     if (repacked.truncated) status = 'partial';
   }
+  // Any over-cap server-generated array (wants / push statuses) was truncated above → `partial`
+  // so the client comes back for the remainder.
+  if (wantedTruncated || pushTruncated) status = 'partial';
 
   const response = buildExchangeResponse({
     pulse: await server.serverPulse(),
