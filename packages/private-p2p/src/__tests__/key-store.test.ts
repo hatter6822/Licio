@@ -60,6 +60,14 @@ describe('tier 1 — Argon2id passphrase', () => {
     expectMaterialEqual(unlocked, m);
   });
 
+  it('REJECTS sub-floor Argon2id params at creation (not as a delayed parse failure)', async () => {
+    // A record sealed with weak params would derive + work in memory but become UNLOADABLE once it
+    // crosses the schema floor on load — so creation must fail fast at the shared derivation point.
+    await expect(
+      protectWithPassphrase(material(), 'pw', { t: 1, m: 256, p: 1 }),
+    ).rejects.toMatchObject({ name: 'KeyStoreError', reason: 'weak_kdf_params' });
+  });
+
   it('fails closed on the wrong passphrase', async () => {
     const record = await protectWithPassphrase(material(), 'right', FAST);
     await expect(unlockWithPassphrase(record, 'wrong')).rejects.toMatchObject({

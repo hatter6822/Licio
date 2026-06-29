@@ -41,6 +41,12 @@ function expectEqual(a: RoomKeyMaterial, b: RoomKeyMaterial): void {
 }
 
 describe('recovery kit', () => {
+  it('REJECTS sub-floor Argon2id params at creation (not a delayed decode failure)', async () => {
+    await expect(createRecoveryKit(material(), 'pw', { t: 1, m: 256, p: 1 })).rejects.toMatchObject(
+      { name: 'KeyStoreError', reason: 'weak_kdf_params' },
+    );
+  });
+
   it('round-trips a member onto a new device with no server call', async () => {
     const m = material();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');

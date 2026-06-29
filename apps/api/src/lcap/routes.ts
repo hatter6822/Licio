@@ -219,10 +219,19 @@ type PackIngestResult =
 async function ingestPackFrames(
   server: LcapIngestServer,
   body: Uint8Array,
+  maxObjects?: number,
 ): Promise<PackIngestResult> {
   const read = await readPack(body);
   if (!read.ok) {
     return { ok: false, httpStatus: packErrorStatus(read.status), error: read.status };
+  }
+  // The exchange caps `accepted_push`, so an over-cap push is rejected HERE — before any storage —
+  // and the client must batch (≤cap objects per pack).  Truncating the status PREFIX instead would
+  // strand a client that re-pushes the same idempotent pack on the first page forever (it would
+  // never receive statuses/receipts for the omitted tail, e.g. quarantines/rejections).  `/packs`
+  // passes no cap (a bundle import is unbounded by this response-array limit).
+  if (maxObjects !== undefined && read.pack.entries.length > maxObjects) {
+    return { ok: false, httpStatus: 413, error: 'push_pack_too_many_objects' };
   }
   const { frames } = read.pack;
 
@@ -577,23 +586,21 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   // record + proof are CID-addressed in the CAS).  No issuer ⇒ the statuses pass through unchanged.
   let acceptedPush: ObjectStatusV2[] | undefined;
   let pushReceipts: ReceiptRecordV2[] | undefined;
-  // A push pack can carry more objects than the response-array cap under the byte cap, and the
-  // server emits one `accepted_push` status per object.  Bound the returned statuses to the cap
-  // BEFORE issuing receipts so each receipt attests EXACTLY the objects we return — `issueReceipts`
-  // groups every same-outcome status into ONE receipt whose `subject_cids`/`status_detail` would
-  // otherwise cover all (omitted) objects, a huge payload attesting statuses absent from the
-  // truncated `accepted_push`.  The omitted objects are re-attested when the client re-exchanges
-  // (re-push is idempotent), signalled by `partial`.
-  let pushTruncated = false;
+  // The push pack is bounded to the response-array cap by `ingestPackFrames` (an over-cap push is
+  // rejected so the client batches), so every object gets a status + receipt in this round — no
+  // prefix truncation, no inconsistent/oversized receipts, no stranded tail.
   if (request.push_pack !== undefined) {
-    const ingest = await ingestPackFrames(server, request.push_pack);
+    const ingest = await ingestPackFrames(
+      server,
+      request.push_pack,
+      SYNC_ARRAY_LIMITS.pushStatuses,
+    );
     if (!ingest.ok) {
-      // A push pack that breaches the §27 caps fails the whole request (§22.1.1).
+      // A push pack that breaches the §27 caps OR carries more than the response cap of objects
+      // fails the whole request (§22.1.1); the client retries with a smaller batch.
       return json(ingest.httpStatus, { error: ingest.error });
     }
-    pushTruncated = ingest.statuses.length > SYNC_ARRAY_LIMITS.pushStatuses;
-    const boundedStatuses = ingest.statuses.slice(0, SYNC_ARRAY_LIMITS.pushStatuses);
-    const issued = await server.issueReceipts(boundedStatuses);
+    const issued = await server.issueReceipts(ingest.statuses);
     acceptedPush = issued.statuses;
     if (issued.receipts.length > 0) pushReceipts = issued.receipts.map((r) => r.record);
   }
@@ -646,9 +653,9 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
     if (repacked.pack !== undefined) responsePack = repacked.pack;
     if (repacked.truncated) status = 'partial';
   }
-  // Any over-cap server-generated array (wants / push statuses) was truncated above → `partial`
-  // so the client comes back for the remainder.
-  if (wantedTruncated || pushTruncated) status = 'partial';
+  // The server-derived `wanted_from_client` was truncated to its cap above → `partial` so the
+  // client comes back for the remainder (the over-cap push path rejects rather than truncating).
+  if (wantedTruncated) status = 'partial';
 
   const response = buildExchangeResponse({
     pulse: await server.serverPulse(),

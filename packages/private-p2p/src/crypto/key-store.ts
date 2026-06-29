@@ -61,6 +61,7 @@ export type KeyStoreReason =
   | 'tier_mismatch'
   | 'tier_not_allowed'
   | 'malformed_material'
+  | 'weak_kdf_params'
   | 'invalid_record';
 
 /** Thrown by the key store; `unlock_failed` ⇒ wrong passphrase/key/PRF. */
@@ -134,6 +135,16 @@ export async function deriveArgon2idWrapKey(
   params: Argon2idParams,
   usage: 'encrypt' | 'decrypt',
 ): Promise<CryptoKey> {
+  // Enforce the OWASP floor HERE, the shared derivation point, so a record/kit is never SEALED
+  // with sub-floor params.  Otherwise it would derive + work in memory but become UNLOADABLE the
+  // moment it crosses the `parseProtectedKeyRecord`/`decodeRecoveryKit` schema floor — a delayed,
+  // confusing failure.  Failing fast at creation matches the load-time rejection.
+  if (params.t < ARGON2ID_MIN_T || params.m < ARGON2ID_MIN_M) {
+    throw new KeyStoreError(
+      'weak_kdf_params',
+      `Argon2id params below the floor (need t≥${ARGON2ID_MIN_T}, m≥${ARGON2ID_MIN_M})`,
+    );
+  }
   const raw = await argon2idAsync(utf8(passphrase), salt, { ...params, dkLen: WRAP_KEY_LENGTH });
   return importWrapKey(raw, usage);
 }
