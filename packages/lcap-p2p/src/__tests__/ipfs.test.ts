@@ -22,6 +22,14 @@ import {
   takedownInForce,
 } from '../index.js';
 
+/** The WS-S.4.4 eligibility signals for genuinely-public content (now a required arg). */
+const PUBLIC_GATEWAY = {
+  visibility: 'public',
+  encrypted: false,
+  takenDown: false,
+  privateRoomCid: false,
+} as const;
+
 describe('CID mapping (§9.2/§22.7)', () => {
   it('encodes multibase-b base32 with the b prefix', () => {
     expect(multibaseBase32(new Uint8Array([0]))[0]).toBe('b');
@@ -148,14 +156,21 @@ describe('gateway bridge — publish enforces the gate', () => {
       },
     });
     // A non-public decision is refused BEFORE any network call.
-    const refused = await bridge.publishBlock(blockCid, payload, {
-      publishable: false,
-      reason: 'not_public',
-    });
+    const refused = await bridge.publishBlock(
+      blockCid,
+      payload,
+      { publishable: false, reason: 'not_public' },
+      PUBLIC_GATEWAY,
+    );
     expect(refused).toEqual({ ok: false, reason: 'not_public' });
     expect(pinned).toBe(false);
 
-    const ok = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    const ok = await bridge.publishBlock(
+      blockCid,
+      payload,
+      { publishable: true, reason: '' },
+      PUBLIC_GATEWAY,
+    );
     expect(ok.ok).toBe(true);
     expect(pinned).toBe(true);
   });
@@ -171,10 +186,12 @@ describe('gateway bridge — publish enforces the gate', () => {
         return new Response(null, { status: 200 });
       },
     });
-    const res = await bridge.publishBlock(blockCid, new TextEncoder().encode('WRONG bytes'), {
-      publishable: true,
-      reason: '',
-    });
+    const res = await bridge.publishBlock(
+      blockCid,
+      new TextEncoder().encode('WRONG bytes'),
+      { publishable: true, reason: '' },
+      PUBLIC_GATEWAY,
+    );
     expect(res).toEqual({ ok: false, reason: 'cid_mismatch' });
     expect(pinned).toBe(false); // verified BEFORE any network call
   });
@@ -183,12 +200,17 @@ describe('gateway bridge — publish enforces the gate', () => {
     const payload = new TextEncoder().encode('public');
     const blockCid = await cidFor('block', payload);
     const bridge = new IpfsBridge({ gatewayUrl: 'https://gw.test' });
-    expect(await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' })).toEqual(
-      {
-        ok: false,
-        reason: 'no_pinning_endpoint',
-      },
-    );
+    expect(
+      await bridge.publishBlock(
+        blockCid,
+        payload,
+        { publishable: true, reason: '' },
+        PUBLIC_GATEWAY,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: 'no_pinning_endpoint',
+    });
   });
 
   it('maps a non-ok pin response and a thrown pin to pin_error', async () => {
@@ -200,7 +222,12 @@ describe('gateway bridge — publish enforces the gate', () => {
       fetchFn: async () => new Response(null, { status: 500 }),
     });
     expect(
-      await rejecting.publishBlock(blockCid, payload, { publishable: true, reason: '' }),
+      await rejecting.publishBlock(
+        blockCid,
+        payload,
+        { publishable: true, reason: '' },
+        PUBLIC_GATEWAY,
+      ),
     ).toEqual({ ok: false, reason: 'pin_error' });
     const throwing = new IpfsBridge({
       gatewayUrl: 'https://gw.test',
@@ -210,7 +237,12 @@ describe('gateway bridge — publish enforces the gate', () => {
       },
     });
     expect(
-      await throwing.publishBlock(blockCid, payload, { publishable: true, reason: '' }),
+      await throwing.publishBlock(
+        blockCid,
+        payload,
+        { publishable: true, reason: '' },
+        PUBLIC_GATEWAY,
+      ),
     ).toEqual({ ok: false, reason: 'pin_error' });
   });
 
@@ -222,7 +254,12 @@ describe('gateway bridge — publish enforces the gate', () => {
       pinningUrl: 'https://pin.test/add',
       fetchFn: async () => new Response(null, { status: 200 }),
     });
-    const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    const res = await bridge.publishBlock(
+      blockCid,
+      payload,
+      { publishable: true, reason: '' },
+      PUBLIC_GATEWAY,
+    );
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.ipfsCid).toBe(ipfsCidForBlockCid(blockCid));
   });
@@ -342,7 +379,12 @@ describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
     const payload = new TextEncoder().encode('stale public');
     const blockCid = await cidFor('block', payload);
     const { bridge, pinned } = pinningBridge({ takedownOracle: async () => true });
-    const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    const res = await bridge.publishBlock(
+      blockCid,
+      payload,
+      { publishable: true, reason: '' },
+      PUBLIC_GATEWAY,
+    );
     expect(res).toEqual({ ok: false, reason: 'takedown_recheck_halt' });
     expect(pinned()).toBe(false);
   });
@@ -355,7 +397,12 @@ describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
         throw new Error('db down');
       },
     });
-    const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    const res = await bridge.publishBlock(
+      blockCid,
+      payload,
+      { publishable: true, reason: '' },
+      PUBLIC_GATEWAY,
+    );
     expect(res).toEqual({ ok: false, reason: 'takedown_recheck_halt' });
     expect(pinned()).toBe(false);
   });
@@ -364,7 +411,12 @@ describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
     const payload = new TextEncoder().encode('clean public');
     const blockCid = await cidFor('block', payload);
     const { bridge, pinned } = pinningBridge({ takedownOracle: async () => false });
-    const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    const res = await bridge.publishBlock(
+      blockCid,
+      payload,
+      { publishable: true, reason: '' },
+      PUBLIC_GATEWAY,
+    );
     expect(res.ok).toBe(true);
     expect(pinned()).toBe(true);
   });

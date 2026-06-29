@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  ConnectPrivatePeerError,
   type ConnectPrivatePeerParams,
   connectPrivatePeer,
   type RtcDataChannelLike,
@@ -314,6 +315,199 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     sb.close();
   });
 
+  it('attributes the channel to the PROVEN device when a late hello claims another (P1)', async () => {
+    // A malicious member proves the handshake as its REAL device (device-b), then — in the
+    // window between verification and runHandshake's return — queues another VALID hello
+    // claiming a different active device id ('device-c', for which it has no proof).  The
+    // returned attribution MUST be the device that actually passed `verifyPeerHandshake`
+    // (device-b), captured at verification time, never the later overwriting hello.
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-p1',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const devB = await p2p.generateDeviceSigningKeyPair();
+    const devAPub = p2p.toBase64Url(
+      await p2p.exportPublicKeyRaw(created.founder.signingKeyPair.publicKey),
+    );
+    const devBPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(devB.publicKey));
+    const resolve = (
+      id: string,
+    ): { signingPublicKey: string; activeAtEpoch: boolean } | undefined => {
+      if (id === 'founder-dev') return { signingPublicKey: devAPub, activeAtEpoch: true };
+      if (id === 'device-b') return { signingPublicKey: devBPub, activeAtEpoch: true };
+      return undefined;
+    };
+    // Spy on the DIALER's resolver: once the handshake settles, a late hello must be IGNORED, so
+    // the dialer must never even resolve the late-claimed 'device-c'.  This is the deterministic
+    // distinguisher — without the ignore-after-settled guard the late hello is processed (the
+    // resolver IS called with 'device-c', overwriting `remoteHello`).
+    const dialerResolved: string[] = [];
+    const dialerResolve = (
+      id: string,
+    ): { signingPublicKey: string; activeAtEpoch: boolean } | undefined => {
+      dialerResolved.push(id);
+      return resolve(id);
+    };
+
+    // The late, unproven hello claiming a different device id.
+    const victimEph = await p2p.generateX25519KeyPair();
+    const victimHello = p2p.buildHandshakeHello({
+      deviceId: 'device-c',
+      ephemeralPublicKey: victimEph.publicKey,
+      helloNonce: p2p.randomBytes(32),
+      protocolVersion: p2p.HANDSHAKE_PROTOCOL_VERSION,
+    });
+    const victimFrame = JSON.stringify({ t: 'hello', hello: victimHello });
+
+    const rendezvous = inMemoryRendezvous();
+    const link = new FakeLink();
+    // Deliver the victim hello to the DIALER (founder) the instant the responder's proof goes out
+    // — i.e. right after the dialer verifies the responder, the exact exploit window.
+    const injectAfterProof = (ch: FakeChannel): void => {
+      const realSend = ch.send.bind(ch);
+      let injected = false;
+      ch.send = (data: string | ArrayBuffer | ArrayBufferView): void => {
+        realSend(data);
+        if (!injected && typeof data === 'string' && data.includes('"t":"proof"')) {
+          injected = true;
+          const peer = ch.peer;
+          if (peer) queueMicrotask(() => peer.onmessage?.({ data: victimFrame }));
+        }
+      };
+    };
+    const base = {
+      p2p,
+      rendezvous,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey,
+      transportMode: 'direct_allowed' as const,
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 4_000,
+    } satisfies Partial<ConnectPrivatePeerParams>;
+
+    const settled = await Promise.allSettled([
+      connectPrivatePeer({
+        ...base,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: dialerResolve,
+        rtcFactory: () => new FakePeer(link),
+      }),
+      connectPrivatePeer({
+        ...base,
+        selfDeviceId: 'device-b',
+        selfSigningKey: devB.privateKey,
+        resolveDevice: resolve,
+        // The "malicious" responder: honest handshake, but its channel injects the victim hello
+        // right after it emits its proof (covering both offerer + answerer roles).
+        rtcFactory: () => {
+          const pc = new FakePeer(link);
+          const realCreate = pc.createDataChannel.bind(pc);
+          pc.createDataChannel = (): FakeChannel => {
+            const ch = realCreate() as FakeChannel;
+            injectAfterProof(ch);
+            return ch;
+          };
+          const realSetRemote = pc.setRemoteDescription.bind(pc);
+          pc.setRemoteDescription = async (d): Promise<void> => {
+            await realSetRemote(d);
+            if (d.type === 'offer' && link.answererChannel) injectAfterProof(link.answererChannel);
+          };
+          return pc;
+        },
+      }),
+    ]);
+    // Let any post-settlement chain processing drain before asserting on the resolver spy.
+    await new Promise((r) => setTimeout(r, 30));
+    const aliceResult = settled[0];
+    expect(aliceResult.status).toBe('fulfilled');
+    if (aliceResult.status !== 'fulfilled') throw new Error('dialer did not connect');
+    // The PROVEN device — never the late-claimed 'device-c'.
+    expect(aliceResult.value.peerDeviceId).toBe('device-b');
+    // The late hello arrived AFTER the handshake settled, so it must never have been processed:
+    // the dialer must not have resolved 'device-c' at all (the ignore-after-settled guard).
+    expect(dialerResolved).not.toContain('device-c');
+    aliceResult.value.channel.close();
+    if (settled[1].status === 'fulfilled') settled[1].value.channel.close();
+  });
+
+  it('a wire-version skew establishes signaling but fails FAST at the handshake (not a timeout)', async () => {
+    // Peer A is on the PREVIOUS wire build (HANDSHAKE_PROTOCOL_VERSION = 1); peer B is current (2).
+    // Because the signaling-channel KDF transcript is DECOUPLED from the wire version, both still
+    // derive the SAME signaling key and exchange SDP/ICE — so the skew is caught promptly at the
+    // §15.5 handshake (`protocol_version_mismatch`), NOT by burning the connect timeout because the
+    // signaling never opened.
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-skew',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const devB = await p2p.generateDeviceSigningKeyPair();
+    const devAPub = p2p.toBase64Url(
+      await p2p.exportPublicKeyRaw(created.founder.signingKeyPair.publicKey),
+    );
+    const devBPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(devB.publicKey));
+    const resolve = (
+      id: string,
+    ): { signingPublicKey: string; activeAtEpoch: boolean } | undefined => {
+      if (id === 'founder-dev') return { signingPublicKey: devAPub, activeAtEpoch: true };
+      if (id === 'device-b') return { signingPublicKey: devBPub, activeAtEpoch: true };
+      return undefined;
+    };
+    // Peer A's view of the wire version is the PREVIOUS one.
+    const p2pV1 = { ...p2p, HANDSHAKE_PROTOCOL_VERSION: 1 } as unknown as typeof p2p;
+    const rendezvous = inMemoryRendezvous();
+    const link = new FakeLink();
+    const base = {
+      rendezvous,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey,
+      transportMode: 'direct_allowed' as const,
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 3_000,
+      rtcFactory: () => new FakePeer(link),
+    };
+    const settled = await Promise.allSettled([
+      connectPrivatePeer({
+        ...base,
+        p2p: p2pV1,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: resolve,
+      }),
+      connectPrivatePeer({
+        ...base,
+        p2p,
+        selfDeviceId: 'device-b',
+        selfSigningKey: devB.privateKey,
+        resolveDevice: resolve,
+      }),
+    ]);
+    // Both peers reject with the TYPED handshake version mismatch (signaling reached the handshake),
+    // not 'timeout' (which is what a version-coupled signaling key would have produced).
+    for (const r of settled) {
+      expect(r.status).toBe('rejected');
+      if (r.status === 'rejected') {
+        expect((r.reason as ConnectPrivatePeerError).reason).toBe(
+          'handshake_protocol_version_mismatch',
+        );
+      }
+    }
+  });
+
   it('FAILS CLOSED when the peer device is not registered (handshake rejects)', async () => {
     const p2p = await import('@licio/private-p2p');
     const created = await p2p.createPrivateRoom({
@@ -365,6 +559,107 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     expect(String((bobResult as PromiseRejectedResult).reason)).toMatch(
       /handshake rejected: unknown_device|handshake_unknown_device/,
     );
+  });
+
+  it('REJECTS a peer whose rendezvous-claimed device id != the handshake-proven id', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-spoof',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const devB = await p2p.generateDeviceSigningKeyPair();
+    const devAPub = p2p.toBase64Url(
+      await p2p.exportPublicKeyRaw(created.founder.signingKeyPair.publicKey),
+    );
+    const devBPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(devB.publicKey));
+    const resolve = (
+      id: string,
+    ): { signingPublicKey: string; activeAtEpoch: boolean } | undefined => {
+      if (id === 'founder-dev') return { signingPublicKey: devAPub, activeAtEpoch: true };
+      if (id === 'device-b') return { signingPublicKey: devBPub, activeAtEpoch: true };
+      return undefined;
+    };
+
+    const rendezvousBase = inMemoryRendezvous();
+    const timeBucket = p2p.rendezvousTimeBucket(Date.now());
+    // The dialer's view RE-SEALS bob's (real) announcement claiming a DIFFERENT device id,
+    // keeping bob's real signaling key + blind id so the channel + signaling still establish —
+    // modelling a member who lies in the room-key-sealed (unauthenticated) rendezvous record.
+    const tampering: RendezvousTransport = {
+      announce: (r) => rendezvousBase.announce(r),
+      signal: (s) => rendezvousBase.signal(s),
+      signalPoll: (id) => rendezvousBase.signalPoll(id),
+      poll: async (roomBlindId) => {
+        const records = await rendezvousBase.poll(roomBlindId);
+        const out: PresenceRecord[] = [];
+        for (const rec of records) {
+          let ann: Awaited<ReturnType<typeof p2p.openRendezvousAnnouncement>>;
+          try {
+            ann = await p2p.openRendezvousAnnouncement(rec, rendezvousKey);
+          } catch {
+            out.push(rec);
+            continue;
+          }
+          if (ann.peer_device_id !== 'device-b') {
+            out.push(rec);
+            continue;
+          }
+          out.push(
+            await p2p.buildRendezvousRecord({
+              rendezvousKey,
+              epoch,
+              timeBucket,
+              deviceId: 'device-b', // keep bob's REAL blind id so signaling still routes to bob
+              announcement: { ...ann, peer_device_id: 'spoofed-victim' },
+              nowMs: Date.now(),
+            }),
+          );
+        }
+        return out;
+      },
+    };
+
+    const link = new FakeLink();
+    const connectBase = {
+      p2p,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey,
+      transportMode: 'direct_allowed' as const,
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 4_000,
+      rtcFactory: () => new FakePeer(link),
+    } satisfies Partial<ConnectPrivatePeerParams>;
+
+    const settled = await Promise.allSettled([
+      connectPrivatePeer({
+        ...connectBase,
+        rendezvous: tampering,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: resolve,
+      }),
+      connectPrivatePeer({
+        ...connectBase,
+        rendezvous: rendezvousBase,
+        selfDeviceId: 'device-b',
+        selfSigningKey: devB.privateKey,
+        resolveDevice: resolve,
+      }),
+    ]);
+    // The dialer membership-proves bob as 'device-b', sees the rendezvous claimed 'spoofed-victim',
+    // and FAILS CLOSED rather than attributing the channel to the spoofed id.
+    const aliceResult = settled[0];
+    expect(aliceResult.status).toBe('rejected');
+    const reason = (aliceResult as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(ConnectPrivatePeerError);
+    expect((reason as ConnectPrivatePeerError).reason).toBe('peer_device_id_mismatch');
+    if (settled[1].status === 'fulfilled') settled[1].value.channel.close();
   });
 
   it('FAILS FAST (relay_without_turn) when relay-only mode has no TURN server', async () => {

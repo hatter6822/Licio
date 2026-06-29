@@ -202,6 +202,11 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
 
   // Trickle our local ICE candidates to the peer (each sealed; never logged server-side).
   pc.onicecandidate = (event) => {
+    // Once aborted/timed-out the connection is being torn down: a late candidate must NOT
+    // continue sealing + POSTing to the relay (that would be metadata egress after the
+    // caller gave up).  `pc` stays alive until `pc.close()` in the `finally`, so this guard
+    // is what actually stops the trickle.
+    if (controller.signal.aborted) return;
     const c = event.candidate;
     if (!c?.candidate) return; // a null/empty candidate marks gathering complete
     void sendSignal({
@@ -217,6 +222,15 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
   const channelReady = new Promise<DataChannelLike>((resolve, reject) => {
     const armChannel = (channel: ConnectableDataChannel): void => {
       channel.binaryType = 'arraybuffer';
+      // The opened channel rides on `pc`, so closing the channel must also close the
+      // peer connection — otherwise `WebrtcTransport.close()` (which closes only the
+      // channel) would leave the `RTCPeerConnection` + its ICE agent running forever.
+      // Rebind `close` to tear both down (idempotent: a second `pc.close()` is a no-op).
+      const channelClose = channel.close.bind(channel);
+      channel.close = () => {
+        channelClose();
+        pc.close();
+      };
       if (channel.readyState === 'open') {
         resolve(channel);
         return;
@@ -234,6 +248,12 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
       );
     });
   });
+  // `channelReady` can reject (via the abort listener above) BEFORE it is awaited — e.g. the
+  // initiator's offer `sendSignal` fails while offline, throwing before `await channelReady`, so
+  // the `finally`'s `controller.abort()` rejects it with no awaiter.  Attach a no-op handler so
+  // that rejection is never UNHANDLED; the real `await channelReady` below is a separate consumer
+  // that still observes the channel or the rejection.
+  void channelReady.catch(() => {});
 
   const handleMessage = async (message: WebrtcSignalMessage): Promise<void> => {
     if (message.kind === 'offer') {
@@ -258,13 +278,6 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
     }
   };
 
-  // The initiator kicks off the offer; the responder waits for it over the poll loop.
-  if (params.initiator) {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await sendSignal({ kind: 'offer', sdp: offer.sdp ?? '' });
-  }
-
   const pollLoop = (async () => {
     const interval = params.pollIntervalMs ?? 250;
     while (!controller.signal.aborted) {
@@ -282,6 +295,7 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
           continue; // garbage frame
         }
         if (env.to !== params.selfPeerKey) continue; // misrouted
+        if (env.from !== params.remotePeerKey) continue; // not from the peer we are dialing
         if (!bytesEqual(env.room_id_hash, params.roomIdHash)) continue; // wrong room
         let plaintext: Uint8Array;
         try {
@@ -307,12 +321,34 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
   })();
 
   const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 30_000);
+  let opened = false;
   try {
-    return await channelReady;
+    // The initiator kicks off the offer; the responder waits for it over the poll loop.
+    // This runs INSIDE the try so a `createOffer`/`setLocalDescription`/`postSignal`
+    // failure still reaches the `finally` (closing `pc`, clearing the timer, stopping the
+    // loop) instead of leaking the connection.
+    if (params.initiator) {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      // `createOffer`/`setLocalDescription` can outlast `timeoutMs` (or the caller may abort
+      // mid-await); by here `controller` would already be aborted and `channelReady` rejected, so
+      // do NOT seal + POST the offer — that would be post-cancel signaling egress that needlessly
+      // wakes the remote for a connection this side is tearing down (mirrors the ICE-trickle guard).
+      if (!controller.signal.aborted) {
+        await sendSignal({ kind: 'offer', sdp: offer.sdp ?? '' });
+      }
+    }
+    const channel = await channelReady;
+    opened = true;
+    return channel;
   } finally {
     clearTimeout(timer);
     controller.abort(); // stop the poll loop + ICE trickle
     params.signal?.removeEventListener('abort', onCallerAbort);
     void pollLoop.catch(() => {});
+    // On any non-success path (timeout, abort, signaling failure) nothing holds the
+    // channel, so tear down `pc` here.  On success the returned channel owns `pc` and
+    // closes it via the rebound `channel.close()` above.
+    if (!opened) pc.close();
   }
 }

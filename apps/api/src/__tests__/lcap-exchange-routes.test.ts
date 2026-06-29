@@ -20,6 +20,7 @@ import {
   exchangeResponseV2Schema,
   type RevocationFrontierV2,
   readPack,
+  SYNC_ARRAY_LIMITS,
   type SyncPulseV2,
   syncPulseV2Schema,
   writePack,
@@ -135,6 +136,36 @@ describe('POST /exchange — §29.2 bidirectional sync', () => {
     expect(await srv.isAccepted(fx.recordCid)).toBe(true);
     // The freshly-accepted room now carries a checkpoint-frontier entry.
     expect(decoded.pulse.checkpoint_frontier).toHaveLength(1);
+  });
+
+  it('rejects a push pack with more objects than the response cap (413, no truncation)', async () => {
+    // An over-cap push is rejected so the client batches ≤cap objects per pack — truncating the
+    // status prefix instead would strand a re-pushing client on the first page forever.
+    const count = SYNC_ARRAY_LIMITS.pushStatuses + 1;
+    const objects = [];
+    for (let i = 0; i < count; i++) {
+      const payload = enc.encode(`blk-${i}`);
+      objects.push({
+        cid: await cidFor('block', payload),
+        cidKind: 'block' as const,
+        frameKind: 'block' as const,
+        payload,
+        lane: 'M3' as const,
+        priority: 1 as const,
+      });
+    }
+    const bigPack = writePack({
+      objects,
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 50_000_000,
+    });
+    const srv = new LcapIngestServer(NET, () => NOW);
+    const res = await createLcapRoutes(srv).request('/exchange', {
+      method: 'POST',
+      body: exchangeBytes({ pushPack: bigPack }),
+    });
+    expect(res.status).toBe(413);
   });
 
   it('is idempotent: re-exchanging the same push pack reports already_have', async () => {

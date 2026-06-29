@@ -177,13 +177,14 @@ describe('the §15.5 reject matrix', () => {
   it('rejects a protocol-version mismatch', async () => {
     const a = await makePeer('alice-dev');
     const b = await makePeer('bob-dev');
+    // The hellos are built at HANDSHAKE_PROTOCOL_VERSION; the ctx demands a DIFFERENT version
+    // (robust to the constant's value — modelling a peer on an incompatible build).
     const ctx: HandshakeContext = {
-      protocolVersion: 2,
+      protocolVersion: HANDSHAKE_PROTOCOL_VERSION + 1,
       roomIdCommitment: randomBytes(32),
       epoch: 5,
     };
     const sig = await signHandshakeProof(a.device.privateKey, a.hello, b.hello, ctx);
-    // a.hello/b.hello are at protocol version 1, ctx demands 2.
     const result = await verifyPeerHandshake({
       localHello: b.hello,
       remoteHello: a.hello,

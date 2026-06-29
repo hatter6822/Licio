@@ -15,8 +15,14 @@ import {
 } from '../crypto/recovery.js';
 import { randomBytes } from '../crypto/runtime.js';
 
-// Fast Argon2id params keep the suite quick; production uses RECOVERY_ARGON2ID_PARAMS.
-const FAST = { t: 1, m: 256, p: 1 } as const;
+// The cheapest params the schema floor (OWASP Argon2id minimum) still accepts; production
+// uses the stronger RECOVERY_ARGON2ID_PARAMS.  Even the floor (m = 19 MiB, t = 2) is an
+// intentionally expensive KDF, and CI runs the suite under V8 coverage instrumentation
+// (~10× slower), so give these real-KDF round-trips a generous timeout — the default 5 s is
+// not enough for a couple of instrumented Argon2id derivations per test.
+const FAST = { t: 2, m: 19_456, p: 1 } as const;
+
+vi.setConfig({ testTimeout: 60_000 });
 
 function material(roomId = 'room-1'): RoomKeyMaterial {
   return {
@@ -35,6 +41,12 @@ function expectEqual(a: RoomKeyMaterial, b: RoomKeyMaterial): void {
 }
 
 describe('recovery kit', () => {
+  it('REJECTS sub-floor Argon2id params at creation (not a delayed decode failure)', async () => {
+    await expect(createRecoveryKit(material(), 'pw', { t: 1, m: 256, p: 1 })).rejects.toMatchObject(
+      { name: 'KeyStoreError', reason: 'weak_kdf_params' },
+    );
+  });
+
   it('round-trips a member onto a new device with no server call', async () => {
     const m = material();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');

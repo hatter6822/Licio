@@ -51,6 +51,7 @@ import {
   type ReceiptRecordV2,
   readPack,
   SERVER_CAPS,
+  SYNC_ARRAY_LIMITS,
   type SyncPulseV2,
   syncPulseV2Schema,
   type WantRequestV2,
@@ -218,10 +219,19 @@ type PackIngestResult =
 async function ingestPackFrames(
   server: LcapIngestServer,
   body: Uint8Array,
+  maxObjects?: number,
 ): Promise<PackIngestResult> {
   const read = await readPack(body);
   if (!read.ok) {
     return { ok: false, httpStatus: packErrorStatus(read.status), error: read.status };
+  }
+  // The exchange caps `accepted_push`, so an over-cap push is rejected HERE — before any storage —
+  // and the client must batch (≤cap objects per pack).  Truncating the status PREFIX instead would
+  // strand a client that re-pushes the same idempotent pack on the first page forever (it would
+  // never receive statuses/receipts for the omitted tail, e.g. quarantines/rejections).  `/packs`
+  // passes no cap (a bundle import is unbounded by this response-array limit).
+  if (maxObjects !== undefined && read.pack.entries.length > maxObjects) {
+    return { ok: false, httpStatus: 413, error: 'push_pack_too_many_objects' };
   }
   const { frames } = read.pack;
 
@@ -513,18 +523,33 @@ async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<
 // An exchange MAY carry a push pack, so it is bounded by the larger §16.5 request budget.
 const MAX_EXCHANGE_REQUEST_BYTES = 1024 * 1024;
 
+/**
+ * The hard ceiling on how many pulse-referenced CIDs the server will `hasObject`-probe for one
+ * request.  The pulse FRONTIERS are not element-capped in the schema (a node carries one entry
+ * per tracked room, so capping the shared schema would break a large node's own pulse), so this
+ * is the inbound-only bound on the frontier→`hasObject` fan-out — the DoS amplifier the §27.1
+ * hardening targets.  The whole pulse is byte-capped (`MAX_PULSE_REQUEST_BYTES`) so this rarely
+ * binds; it is the explicit worst-case ceiling regardless of the byte math.
+ */
+const MAX_PULSE_REFERENCED_CIDS = 4096;
+
 /** The bounded set of CIDs a client pulse references (for a synchronous `have` lookup). */
 function pulseReferencedCids(pulse: SyncPulseV2): string[] {
   const cids: string[] = [];
   for (const f of pulse.checkpoint_frontier) {
+    if (cids.length >= MAX_PULSE_REFERENCED_CIDS) return cids;
     if (f.latest_checkpoint_cid !== undefined) cids.push(f.latest_checkpoint_cid);
   }
   for (const f of pulse.revocation_frontier) {
+    if (cids.length >= MAX_PULSE_REFERENCED_CIDS) return cids;
     if (f.latest_revocation_checkpoint_cid !== undefined) {
       cids.push(f.latest_revocation_checkpoint_cid);
     }
   }
-  for (const cid of pulse.critical_have ?? []) cids.push(cid);
+  for (const cid of pulse.critical_have ?? []) {
+    if (cids.length >= MAX_PULSE_REFERENCED_CIDS) return cids;
+    cids.push(cid);
+  }
   return cids;
 }
 
@@ -561,10 +586,18 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   // record + proof are CID-addressed in the CAS).  No issuer ⇒ the statuses pass through unchanged.
   let acceptedPush: ObjectStatusV2[] | undefined;
   let pushReceipts: ReceiptRecordV2[] | undefined;
+  // The push pack is bounded to the response-array cap by `ingestPackFrames` (an over-cap push is
+  // rejected so the client batches), so every object gets a status + receipt in this round — no
+  // prefix truncation, no inconsistent/oversized receipts, no stranded tail.
   if (request.push_pack !== undefined) {
-    const ingest = await ingestPackFrames(server, request.push_pack);
+    const ingest = await ingestPackFrames(
+      server,
+      request.push_pack,
+      SYNC_ARRAY_LIMITS.pushStatuses,
+    );
     if (!ingest.ok) {
-      // A push pack that breaches the §27 caps fails the whole request (§22.1.1).
+      // A push pack that breaches the §27 caps OR carries more than the response cap of objects
+      // fails the whole request (§22.1.1); the client retries with a smaller batch.
       return json(ingest.httpStatus, { error: ingest.error });
     }
     const issued = await server.issueReceipts(ingest.statuses);
@@ -585,7 +618,14 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
     localRevocationFrontier: server.revocationFrontier(),
     locallyHave: (cid) => have.has(cid),
   });
-  const wantedFromClient: readonly WantRequestV2[] = reaction.wants;
+  // The frontier diff yields one want per gap; with the client's frontier not element-capped,
+  // this can exceed the response-array cap.  Truncate to the cap and signal `partial` (the
+  // server still lacks the remainder, so it re-derives them on the next exchange).
+  const wantedTruncated = reaction.wants.length > SYNC_ARRAY_LIMITS.wants;
+  const wantedFromClient: readonly WantRequestV2[] = reaction.wants.slice(
+    0,
+    SYNC_ARRAY_LIMITS.wants,
+  );
 
   // 3) Serve the client's explicit wants the server holds, repacked within the
   // client's response budget.  A held want dropped for budget → `partial` (the peer
@@ -613,6 +653,9 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
     if (repacked.pack !== undefined) responsePack = repacked.pack;
     if (repacked.truncated) status = 'partial';
   }
+  // The server-derived `wanted_from_client` was truncated to its cap above → `partial` so the
+  // client comes back for the remainder (the over-cap push path rejects rather than truncating).
+  if (wantedTruncated) status = 'partial';
 
   const response = buildExchangeResponse({
     pulse: await server.serverPulse(),

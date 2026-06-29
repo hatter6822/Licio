@@ -139,6 +139,33 @@ function fakeChannel(): DataChannelLike & {
   return ch;
 }
 
+/** A fake channel that exposes the SCTP buffer surface so backpressure can be exercised. */
+class BufferingChannel implements DataChannelLike {
+  readyState: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
+  binaryType = 'blob';
+  bufferedAmount = 16 * 1024 * 1024; // start ABOVE the 8 MiB high-water mark
+  bufferedAmountLowThreshold = 0;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onbufferedamountlow: (() => void) | null = null;
+  readonly sent: Uint8Array[] = [];
+  send(data: Uint8Array): void {
+    this.sent.push(data);
+  }
+  close(): void {
+    this.readyState = 'closed';
+  }
+  /** Model the SCTP buffer emptying: drop to zero + fire the low-water event. */
+  drain(): void {
+    this.bufferedAmount = 0;
+    this.onbufferedamountlow?.();
+  }
+  /** Fire the low-water event WITHOUT draining (a spurious wake / still-full buffer). */
+  spuriousWake(): void {
+    this.onbufferedamountlow?.();
+  }
+}
+
 describe('WebRTC data-channel transport (§22.6)', () => {
   it('is a public-only peer transport', () => {
     const t = new WebrtcTransport(fakeChannel());
@@ -199,6 +226,54 @@ describe('WebRTC data-channel transport (§22.6)', () => {
     expect(sent[0]?.subarray(FRAGMENT_HEADER_BYTES)).toEqual(new Uint8Array([1, 2, 3]));
     ch.readyState = 'closing';
     await expect(t.send(new Uint8Array([4]))).rejects.toThrow(/closed before send/);
+  });
+
+  it('applies SCTP backpressure: a send parks until the buffer drains', async () => {
+    const ch = new BufferingChannel();
+    const t = new WebrtcTransport(ch);
+    let resolved = false;
+    const p = t.send(new Uint8Array([1, 2, 3])).then(() => {
+      resolved = true;
+    });
+    // bufferedAmount is over the high-water mark ⇒ the send is parked (no fragment written).
+    await new Promise((r) => setTimeout(r, 5));
+    expect(resolved).toBe(false);
+    expect(ch.sent.length).toBe(0);
+    ch.drain(); // SCTP drains → onbufferedamountlow wakes the parked send
+    await p;
+    expect(resolved).toBe(true);
+    expect(ch.sent.length).toBe(1);
+  });
+
+  it('does NOT resume sending on a spurious wake while the buffer is still full', async () => {
+    // A drain event can fire (or the safety timeout elapse) while `bufferedAmount` is STILL over
+    // the high-water mark; the send must re-check and stay parked rather than resume and risk
+    // overrunning the SCTP buffer.
+    const ch = new BufferingChannel();
+    const t = new WebrtcTransport(ch);
+    let resolved = false;
+    const p = t.send(new Uint8Array([1, 2, 3])).then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    ch.spuriousWake(); // low-water event, but bufferedAmount is unchanged (still full)
+    await new Promise((r) => setTimeout(r, 5));
+    expect(resolved).toBe(false); // re-checked → still parked, no fragment written
+    expect(ch.sent.length).toBe(0);
+    ch.drain(); // now it actually drains
+    await p;
+    expect(resolved).toBe(true);
+    expect(ch.sent.length).toBe(1);
+  });
+
+  it('a parked send unblocks and refuses when the channel closes mid-backpressure', async () => {
+    const ch = new BufferingChannel();
+    const t = new WebrtcTransport(ch);
+    const p = t.send(new Uint8Array([1, 2, 3]));
+    await new Promise((r) => setTimeout(r, 5));
+    ch.readyState = 'closed';
+    ch.onclose?.(); // close wakes the parked send, which then observes the closed channel
+    await expect(p).rejects.toThrow(/closed mid-send/);
   });
 
   it('receive() honours an abort signal by resolving null and clearing the waiter', async () => {

@@ -10,6 +10,7 @@ import {
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
   type InterestDescriptorV2,
+  SYNC_ARRAY_LIMITS,
 } from '../schemas/index.js';
 import {
   buildExchangeRequest,
@@ -87,6 +88,27 @@ describe('buildExchangeRequest / buildExchangeResponse (§16.3, §16.4)', () => 
       retryAfterMs: 5000,
     });
     expect(res.retry_after_ms).toBe(5000);
+  });
+
+  it('REJECTS an over-cap want array (the §27.1 store-lookup amplification bound)', () => {
+    // A want list one past the cap must fail the strict schema at the trust boundary, so the
+    // server never does an unbounded number of sequential store lookups for one request.
+    const oneWant = {
+      cid: recordCid,
+      cid_kind: 'record',
+      reason: 'explicit_user_request',
+    } as const;
+    const overCap = {
+      ...buildExchangeRequest({ pulse: pulse(), interests: [interest] }),
+      want: Array.from({ length: SYNC_ARRAY_LIMITS.wants + 1 }, () => oneWant),
+    };
+    expect(() => exchangeRequestV2Schema.parse(overCap)).toThrow();
+    // The cap itself is allowed (boundary value).
+    const atCap = {
+      ...buildExchangeRequest({ pulse: pulse(), interests: [interest] }),
+      want: Array.from({ length: SYNC_ARRAY_LIMITS.wants }, () => oneWant),
+    };
+    expect(() => exchangeRequestV2Schema.parse(atCap)).not.toThrow();
   });
 });
 

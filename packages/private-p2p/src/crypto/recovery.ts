@@ -20,6 +20,8 @@
 import { z } from 'zod';
 import { canonical, decodeCanonical } from './canonical.js';
 import {
+  ARGON2ID_MIN_M,
+  ARGON2ID_MIN_T,
   type Argon2idParams,
   deriveArgon2idWrapKey,
   deserializeRoomKeyMaterial,
@@ -49,9 +51,10 @@ export const recoveryKitSchema = z
     roomId: z.string().min(1).max(128),
     kdf: z
       .object({
+        // The OWASP Argon2id floor (shared with the key-store) — reject a downgraded kit.
         salt: base64Url,
-        t: z.number().int().min(1),
-        m: z.number().int().min(8),
+        t: z.number().int().min(ARGON2ID_MIN_T),
+        m: z.number().int().min(ARGON2ID_MIN_M),
         p: z.number().int().min(1),
       })
       .strict(),

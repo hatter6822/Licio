@@ -19,29 +19,49 @@ import {
 const ON: CourierRadioControls = { advertisingEnabled: true, discoveryEnabled: true };
 const OFF: CourierRadioControls = { advertisingEnabled: false, discoveryEnabled: false };
 
+// The §22.5 radio-metadata disclosure is acknowledged for most cases (it is a precondition to
+// running the radios at all); the dedicated gate test below drives the unacknowledged path.
+const ACKED = true;
+
 describe('WS-R.15.4e courier control gating', () => {
   it('is off by default (disabled)', () => {
-    expect(decideCourierStart(OFF, 'standard')).toEqual({
+    expect(decideCourierStart(OFF, 'standard', {}, ACKED)).toEqual({
       advertise: false,
       discover: false,
       blockedReason: 'disabled',
     });
   });
 
+  it('refuses to start until the radio-metadata disclosure is acknowledged', () => {
+    // Toggles ON but disclosure NOT acknowledged ⇒ blocked structurally (not only in the UI).
+    expect(decideCourierStart(ON, 'standard', {}, false)).toEqual({
+      advertise: false,
+      discover: false,
+      blockedReason: 'disclosure_unacknowledged',
+    });
+    // 'disabled' still takes precedence when nothing is enabled (no disclosure needed).
+    expect(decideCourierStart(OFF, 'standard', {}, false).blockedReason).toBe('disabled');
+  });
+
   it('honors explicit controls in a normal mode', () => {
-    expect(decideCourierStart(ON, 'standard')).toEqual({
+    expect(decideCourierStart(ON, 'standard', {}, ACKED)).toEqual({
       advertise: true,
       discover: true,
       blockedReason: '',
     });
     expect(
-      decideCourierStart({ advertisingEnabled: true, discoveryEnabled: false }, 'courier'),
+      decideCourierStart(
+        { advertisingEnabled: true, discoveryEnabled: false },
+        'courier',
+        {},
+        ACKED,
+      ),
     ).toEqual({ advertise: true, discover: false, blockedReason: '' });
   });
 
   it('FORCES the radios off in Stealth and Emergency regardless of controls (§33.5)', () => {
     for (const mode of ['stealth', 'emergency'] as const) {
-      expect(decideCourierStart(ON, mode)).toEqual({
+      expect(decideCourierStart(ON, mode, {}, ACKED)).toEqual({
         advertise: false,
         discover: false,
         blockedReason: 'forced_off_in_mode',
@@ -51,25 +71,27 @@ describe('WS-R.15.4e courier control gating', () => {
 
   it('refuses to advertise below the battery floor when unplugged (§22.5 battery budget)', () => {
     const controls: CourierRadioControls = { ...ON, batteryFloor: 0.3 };
-    expect(decideCourierStart(controls, 'courier', { level: 0.2, charging: false })).toEqual({
-      advertise: false,
-      discover: false,
-      blockedReason: 'below_battery_floor',
-    });
+    expect(decideCourierStart(controls, 'courier', { level: 0.2, charging: false }, ACKED)).toEqual(
+      {
+        advertise: false,
+        discover: false,
+        blockedReason: 'below_battery_floor',
+      },
+    );
     // Above the floor → allowed.
-    expect(decideCourierStart(controls, 'courier', { level: 0.5, charging: false }).advertise).toBe(
-      true,
-    );
+    expect(
+      decideCourierStart(controls, 'courier', { level: 0.5, charging: false }, ACKED).advertise,
+    ).toBe(true);
     // On charge → the floor is bypassed (the radio cost is acceptable while plugged in).
-    expect(decideCourierStart(controls, 'courier', { level: 0.1, charging: true }).advertise).toBe(
-      true,
-    );
+    expect(
+      decideCourierStart(controls, 'courier', { level: 0.1, charging: true }, ACKED).advertise,
+    ).toBe(true);
     // Unknown level → the floor cannot fire (it requires a known level).
-    expect(decideCourierStart(controls, 'courier', {}).advertise).toBe(true);
+    expect(decideCourierStart(controls, 'courier', {}, ACKED).advertise).toBe(true);
   });
 
   it('blocks when the user has opted to exchange with no one (§22.5 who-can-exchange)', () => {
-    expect(decideCourierStart({ ...ON, exchangePeers: 'none' }, 'courier')).toEqual({
+    expect(decideCourierStart({ ...ON, exchangePeers: 'none' }, 'courier', {}, ACKED)).toEqual({
       advertise: false,
       discover: false,
       blockedReason: 'no_peers',

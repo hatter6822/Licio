@@ -61,6 +61,7 @@ export type KeyStoreReason =
   | 'tier_mismatch'
   | 'tier_not_allowed'
   | 'malformed_material'
+  | 'weak_kdf_params'
   | 'invalid_record';
 
 /** Thrown by the key store; `unlock_failed` ⇒ wrong passphrase/key/PRF. */
@@ -134,17 +135,32 @@ export async function deriveArgon2idWrapKey(
   params: Argon2idParams,
   usage: 'encrypt' | 'decrypt',
 ): Promise<CryptoKey> {
+  // Enforce the OWASP floor HERE, the shared derivation point, so a record/kit is never SEALED
+  // with sub-floor params.  Otherwise it would derive + work in memory but become UNLOADABLE the
+  // moment it crosses the `parseProtectedKeyRecord`/`decodeRecoveryKit` schema floor — a delayed,
+  // confusing failure.  Failing fast at creation matches the load-time rejection.
+  if (params.t < ARGON2ID_MIN_T || params.m < ARGON2ID_MIN_M) {
+    throw new KeyStoreError(
+      'weak_kdf_params',
+      `Argon2id params below the floor (need t≥${ARGON2ID_MIN_T}, m≥${ARGON2ID_MIN_M})`,
+    );
+  }
   const raw = await argon2idAsync(utf8(passphrase), salt, { ...params, dkLen: WRAP_KEY_LENGTH });
   return importWrapKey(raw, usage);
 }
 
 // --- the at-rest record (zod-validated on load) -----------------------------
 
+// OWASP Argon2id minimums (RFC 9106 §4): m ≥ 19 MiB, t ≥ 2, p ≥ 1.  Enforce them as the
+// schema FLOOR so a tampered/downgraded record (e.g. m=8 KiB, t=1) is rejected outright at
+// load rather than honored — the at-rest passphrase wrap is only as strong as these params.
+export const ARGON2ID_MIN_T = 2;
+export const ARGON2ID_MIN_M = 19_456;
 const argon2idKdfSchema = z
   .object({
     salt: z.string().min(1),
-    t: z.number().int().min(1),
-    m: z.number().int().min(8),
+    t: z.number().int().min(ARGON2ID_MIN_T),
+    m: z.number().int().min(ARGON2ID_MIN_M),
     p: z.number().int().min(1),
   })
   .strict();

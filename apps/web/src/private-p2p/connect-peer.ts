@@ -118,6 +118,7 @@ export type ConnectPrivatePeerReason =
   | 'timeout'
   | 'aborted'
   | 'peer_not_found'
+  | 'peer_device_id_mismatch'
   | `handshake_${string}`;
 
 export class ConnectPrivatePeerError extends Error {
@@ -221,8 +222,16 @@ export interface ConnectPrivatePeerParams {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-const HANDSHAKE_VERSION = 1;
 const SIGNAL_TTL_MS = 5 * 60_000;
+// The §15.4 signaling-channel KDF transcript version, DELIBERATELY DECOUPLED from the wire
+// `HANDSHAKE_PROTOCOL_VERSION`.  The signaling layer (X25519-ECDH + AES-GCM sealing of SDP/ICE)
+// has not changed, so a wire-version bump must NOT change this transcript — otherwise two peers
+// on different builds would derive different signaling keys, `openSignal` would drop every
+// offer/answer, and the connect would burn the full timeout instead of reaching the fast, typed
+// `protocol_version_mismatch` at the handshake.  Keeping it stable lets the data channel ALWAYS
+// establish across a version skew so the handshake (which DOES bind the wire version) rejects an
+// incompatible peer promptly.  Bump this only if the signaling protocol itself changes.
+const SIGNALING_TRANSCRIPT_VERSION = 1;
 
 interface DiscoveredPeer {
   readonly peerBlindId: string;
@@ -352,12 +361,15 @@ export async function connectPrivatePeer(
     await sleep(pollIntervalMs);
   }
 
-  // 3. Derive the pairwise signaling channel key (transcript-bound; both peers agree).
+  // 3. Derive the pairwise signaling channel key (transcript-bound; both peers agree).  This
+  //    uses the STABLE signaling-transcript version, NOT the wire `HANDSHAKE_PROTOCOL_VERSION`,
+  //    so a version-skewed peer can still exchange SDP/ICE and open the channel — the wire-version
+  //    check is the handshake's job (it fails fast + typed rather than timing out the signaling).
   const channelKey = await p2p.deriveChannelKey(
     ephemeral.privateKey,
     peer.peerSignalingPublicKey,
     {
-      protocolVersion: HANDSHAKE_VERSION,
+      protocolVersion: SIGNALING_TRANSCRIPT_VERSION,
       roomIdCommitment,
       epoch,
       ephemeralPublicKeyA: ephemeral.publicKey,
@@ -422,7 +434,11 @@ export async function connectPrivatePeer(
 
     // 4. §15.5 membership-proving handshake over the open data channel.  Any op frames
     //    a faster peer sends before we finish are stashed (returned) for the channel.
-    const { opStash, sessionKey } = await runHandshake({
+    const {
+      opStash,
+      sessionKey,
+      peerDeviceId: provenPeerDeviceId,
+    } = await runHandshake({
       p2p,
       dc,
       inbox,
@@ -434,6 +450,16 @@ export async function connectPrivatePeer(
       throwIfAborted,
       sleep,
     });
+    // The rendezvous announcement's `peer_device_id` is UNAUTHENTICATED (sealed under the
+    // room-wide rendezvous key, so any current-epoch member can claim any id).  If it does
+    // not match the §15.5 handshake-PROVEN device id, the dialed peer lied about who it is —
+    // refuse the connection rather than attributing the channel to a spoofed id.
+    if (peer.peerDeviceId !== provenPeerDeviceId) {
+      throw new ConnectPrivatePeerError(
+        'peer_device_id_mismatch',
+        'rendezvous-claimed device id does not match the handshake-proven device id',
+      );
+    }
 
     // 4b. §15.4 ICE-restart recovery (post-handshake).  The sealed signaling channel stays
     //     live, so a TRANSIENT path failure (NAT rebinding, a Wi-Fi↔cellular handover) is
@@ -460,8 +486,8 @@ export async function connectPrivatePeer(
     // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the
     //    §15.5 step-4 session key; the handshake used strings).
     return {
-      channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey),
-      peerDeviceId: peer.peerDeviceId,
+      channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey, isOfferer),
+      peerDeviceId: provenPeerDeviceId, // the handshake-PROVEN id, not the rendezvous claim
     };
   } catch (error) {
     cleanup();
@@ -683,13 +709,16 @@ async function establishDataChannel(
     if (allowed.length === 0) return;
     // Carry sdpMid/sdpMLineIndex: a real addIceCandidate rejects a candidate with neither
     // (the line alone does not identify the m-line), silently dropping every candidate.
+    // A dropped trickle candidate is non-fatal (ICE retries / the other candidates cover it),
+    // but the POST can reject transiently (offline, 5xx, rate-limit).  Swallow it with a dev
+    // warning so a flaky rendezvous never surfaces as an unhandled promise rejection.
     void sendSignal({
       schema: 'licio.private.signaling_payload.v1',
       kind: 'ice',
       ice_candidate: line,
       sdp_mid: cand?.sdpMid ?? null,
       sdp_mline_index: cand?.sdpMLineIndex ?? null,
-    });
+    }).catch((error) => devWarn('ICE trickle signal send failed', error));
   };
 
   // The open data channel resolves this; the offerer creates it, the answerer receives it.
@@ -906,10 +935,10 @@ interface RunHandshakeParams {
  *  (so the caller can hand them to the op-exchange instead of losing them). */
 async function runHandshake(
   p: RunHandshakeParams,
-): Promise<{ opStash: Uint8Array[]; sessionKey: Uint8Array }> {
+): Promise<{ opStash: Uint8Array[]; sessionKey: Uint8Array; peerDeviceId: string }> {
   const { p2p, dc } = p;
   const ctx = {
-    protocolVersion: HANDSHAKE_VERSION,
+    protocolVersion: p2p.HANDSHAKE_PROTOCOL_VERSION,
     roomIdCommitment: p.roomIdCommitment,
     epoch: p.epoch,
   };
@@ -919,7 +948,7 @@ async function runHandshake(
     deviceId: p.selfDeviceId,
     ephemeralPublicKey: ephemeral.publicKey,
     helloNonce: p2p.randomBytes(32),
-    protocolVersion: HANDSHAKE_VERSION,
+    protocolVersion: p2p.HANDSHAKE_PROTOCOL_VERSION,
   });
 
   let remoteHello: HandshakeHello | undefined;
@@ -928,6 +957,10 @@ async function runHandshake(
   // ephemeral ECDH + transcript once the remote device is verified (set before
   // resolveDone, so it is defined whenever `done` resolves).
   let sessionKey: Uint8Array | undefined;
+  // The device id captured AT the point its hello passes `verifyPeerHandshake` — bound here
+  // (not re-read from the mutable `remoteHello` after `done` resolves), so a later queued hello
+  // claiming a different device cannot overwrite the attribution the caller relies on.
+  let provenDeviceId: string | undefined;
   let proofSent = false;
   let settled = false;
   let resolveDone!: () => void;
@@ -952,14 +985,19 @@ async function runHandshake(
 
   const tryVerify = async (): Promise<void> => {
     if (!remoteHello || !remoteProofSig) return;
-    const resolved = p.resolveDevice(remoteHello.author_device_id);
+    // Snapshot the hello being verified NOW.  `remoteHello` is mutable (the inbox handler can
+    // overwrite it with a later queued hello), so everything below — the proof verification, the
+    // session-key derivation, AND the captured device id — must read this immutable snapshot, not
+    // the live field, or a post-verification hello could swap the attributed device.
+    const verifyingHello = remoteHello;
+    const resolved = p.resolveDevice(verifyingHello.author_device_id);
     const result = await p2p.verifyPeerHandshake({
       localHello: selfHello,
-      remoteHello,
+      remoteHello: verifyingHello,
       remoteProofSignature: remoteProofSig,
       ctx,
       resolveDevice: (deviceId) => {
-        if (!resolved || deviceId !== remoteHello?.author_device_id) return undefined;
+        if (!resolved || deviceId !== verifyingHello.author_device_id) return undefined;
         // The key import is async; we resolve it up-front below, so this returns the
         // already-imported key synchronously (verifyPeerHandshake calls it sync).
         return resolvedDevice;
@@ -981,11 +1019,13 @@ async function runHandshake(
     // SAME key (the transcript sorts the ephemeral keys).
     sessionKey = await p2p.deriveHandshakeSessionKey(
       ephemeral.privateKey,
-      p2p.fromBase64Url(remoteHello.ephemeral_public_key),
+      p2p.fromBase64Url(verifyingHello.ephemeral_public_key),
       selfHello,
-      remoteHello,
+      verifyingHello,
       ctx,
     );
+    // Bind the proven id to the hello that actually verified — immutable from here.
+    provenDeviceId = verifyingHello.author_device_id;
     resolveDone();
   };
 
@@ -1013,6 +1053,12 @@ async function runHandshake(
     }
     handshakeChain = handshakeChain
       .then(async (): Promise<void> => {
+        // Once the handshake has SETTLED (a device verified, or it failed), the outcome is
+        // FINAL: ignore any further hello/proof so a later frame can never overwrite the proven
+        // device id, the session key, or `remoteHello`.  This makes the first-verification-wins
+        // invariant explicit and independent of microtask timing (defence in depth over the
+        // immutable `provenDeviceId` capture in `tryVerify`).
+        if (settled) return;
         let frame: HandshakeFrame;
         try {
           const parsed: unknown = JSON.parse(data);
@@ -1093,7 +1139,17 @@ async function runHandshake(
       'handshake_no_session_key',
       'handshake settled without a session key',
     );
-  return { opStash, sessionKey }; // wrapDataChannel re-consumes the inbox for op frames
+  if (provenDeviceId === undefined)
+    throw new ConnectPrivatePeerError(
+      'handshake_no_proven_device',
+      'handshake settled without a proven device id',
+    );
+  // The PROVEN device id (registered + active-at-epoch + Ed25519-proven by
+  // `verifyPeerHandshake`) — captured at verification time, NOT re-read from the mutable
+  // `remoteHello` (a later hello could overwrite it) and NOT the rendezvous-claimed id (any
+  // current-epoch member can seal that with an arbitrary value).  The caller keys its
+  // mesh/exclude/cooldown sets on this.
+  return { opStash, sessionKey, peerDeviceId: provenDeviceId };
 }
 
 // --- the post-handshake PeerChannel -------------------------------------------------
@@ -1103,9 +1159,18 @@ function toUint8(data: ArrayBuffer | ArrayBufferView): Uint8Array {
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
-/** The AEAD AAD binding a post-handshake op frame's purpose under the session key
- *  (§15.5 step 4); a frame sealed for another purpose/context cannot open here. */
-const OP_FRAME_AAD = new TextEncoder().encode('licio.private.op-frame.v1');
+/**
+ * The AEAD AAD binding a post-handshake op frame under the §15.5 step-4 session key.  The
+ * tag is DIRECTION-SEPARATED by role (offerer→answerer vs. answerer→offerer): each peer seals
+ * with its send-direction tag and opens only the OPPOSITE tag.  So a relay that reflects a
+ * peer's own frame back cannot open it, and the two directions are cryptographically
+ * distinguished — not merely non-colliding by random nonce.  Both peers agree on the mapping
+ * via the deterministic `isOfferer` (the bytewise-smaller blind id offers).  This is a
+ * `HANDSHAKE_PROTOCOL_VERSION`-2 wire format; a version skew is rejected at the handshake (see
+ * the constant), so within a live session both peers are always on the same op-frame format.
+ */
+const OP_FRAME_AAD_O2A = new TextEncoder().encode('licio.private.op-frame.v2.o2a');
+const OP_FRAME_AAD_A2O = new TextEncoder().encode('licio.private.op-frame.v2.a2o');
 
 function wrapDataChannel(
   dc: RtcDataChannelLike,
@@ -1114,7 +1179,11 @@ function wrapDataChannel(
   cleanup: () => void,
   p2p: ConnectPrivatePeerParams['p2p'],
   sessionKey: Uint8Array,
+  isOfferer: boolean,
 ): PeerChannel {
+  // Seal with our send direction; open only the peer's send (= our receive) direction.
+  const sendAad = isOfferer ? OP_FRAME_AAD_O2A : OP_FRAME_AAD_A2O;
+  const recvAad = isOfferer ? OP_FRAME_AAD_A2O : OP_FRAME_AAD_O2A;
   const buffered: Uint8Array[] = [];
   let listener: ((frame: Uint8Array) => void) | null = null;
   let closeListener: (() => void) | null = null;
@@ -1124,7 +1193,7 @@ function wrapDataChannel(
   // DROPPED fail-closed — a DTLS-terminating relay cannot inject or read op frames.
   const deliver = (sealed: Uint8Array): void => {
     void p2p
-      .aeadOpen(sessionKey, sealed, OP_FRAME_AAD)
+      .aeadOpen(sessionKey, sealed, recvAad)
       .then((frame) => {
         if (listener) listener(frame);
         else buffered.push(frame);
@@ -1153,7 +1222,7 @@ function wrapDataChannel(
 
   return {
     async send(frame: Uint8Array): Promise<void> {
-      const sealed = await p2p.aeadSeal(sessionKey, frame, OP_FRAME_AAD);
+      const sealed = await p2p.aeadSeal(sessionKey, frame, sendAad);
       // Copy into a standalone ArrayBuffer (the channel must own the bytes).
       dc.send(sealed.slice().buffer);
     },

@@ -76,6 +76,19 @@ describe('buildPulse (§16.2)', () => {
   it('fails closed on an invalid input (empty node id)', () => {
     expect(() => buildPulse(inputs({ nodeId: '' }))).toThrow();
   });
+
+  it('builds a large (>2048-room) frontier without throwing (frontiers are not element-capped)', () => {
+    // A node tracking many rooms emits one checkpoint-frontier entry per room.  The frontier must
+    // NOT be element-capped in the shared schema, or such a node's own `buildPulse` would throw
+    // (the server hosts ALL rooms) — the frontier fan-out is bounded at the route layer instead.
+    const many = Array.from({ length: 3000 }, (_, i) => ({
+      room_id_hash: new Uint8Array([i & 0xff, (i >> 8) & 0xff]),
+      latest_tree_size: i,
+    }));
+    const pulse = buildPulse(inputs({ checkpointFrontier: many }));
+    expect(() => syncPulseV2Schema.parse(pulse)).not.toThrow();
+    expect(pulse.checkpoint_frontier).toHaveLength(3000);
+  });
 });
 
 describe('applyPulse (§16.2 frontier diff)', () => {

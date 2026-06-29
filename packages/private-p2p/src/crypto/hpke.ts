@@ -167,9 +167,21 @@ export async function importRecipientPrivateScalar(
 
 async function dh(privateKey: CryptoKey, publicKeyRaw: Uint8Array): Promise<Uint8Array> {
   const pub = await getSubtle().importKey('raw', toBufferSource(publicKeyRaw), 'X25519', false, []);
-  return new Uint8Array(
+  const secret = new Uint8Array(
     await getSubtle().deriveBits({ name: 'X25519', public: pub }, privateKey, 256),
   );
+  // RFC 9180 §7.1.4 inherits RFC 7748's all-zero rejection for the DHKEM(X25519) DH.
+  // Enforce it explicitly so the KEM never proceeds on a non-contributory shared secret.  This
+  // is wire-facing on the OPEN path (a tampered/low-order encapsulated key), so it throws the
+  // typed `HpkeError('open_failed')` the invite-open callers expect — not a plain `Error` that
+  // would escape their handling as an unexpected global error.  (On the seal path the recipient
+  // key comes from validated member state, so this is defensive there.)
+  let acc = 0;
+  for (const b of secret) acc |= b;
+  if (acc === 0) {
+    throw new HpkeError('open_failed', 'DHKEM(X25519) produced an all-zero shared secret');
+  }
+  return secret;
 }
 
 async function extractAndExpand(dhBytes: Uint8Array, kemContext: Uint8Array): Promise<Uint8Array> {
@@ -196,7 +208,21 @@ async function decap(
   recipientPrivateKey: CryptoKey,
   recipientPublicKeyRaw: Uint8Array,
 ): Promise<Uint8Array> {
-  const dhBytes = await dh(recipientPrivateKey, enc);
+  let dhBytes: Uint8Array;
+  try {
+    dhBytes = await dh(recipientPrivateKey, enc);
+  } catch (error) {
+    // The OPEN path is wire-facing: a tampered/low-order `enc` makes WebCrypto REJECT inside
+    // `importKey`/`deriveBits` (a compliant impl rejects a low-order key BEFORE the explicit
+    // all-zero check runs), surfacing a raw `DOMException`.  Map it to the typed
+    // `HpkeError('open_failed')` callers expect for a malformed invite.  (`dh`'s own all-zero
+    // `HpkeError` passes through unchanged.)
+    if (error instanceof HpkeError) throw error;
+    throw new HpkeError(
+      'open_failed',
+      'DHKEM(X25519) decapsulation failed (invalid encapsulated key)',
+    );
+  }
   const kemContext = concatBytes(enc, recipientPublicKeyRaw);
   return extractAndExpand(dhBytes, kemContext);
 }

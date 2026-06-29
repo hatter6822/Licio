@@ -30,8 +30,10 @@ export const signalEnvelopeV2Schema = z
     to: z.string().min(1),
     /** The opaque sender peer key. */
     from: z.string().min(1),
-    /** AES-GCM nonce (96-bit). */
-    nonce: bytesSchema,
+    /** AES-GCM nonce (96-bit — pinned so a non-standard IV length can't be smuggled in). */
+    nonce: bytesSchema.refine((b) => b.length === 12, {
+      message: 'nonce must be 96-bit (12 bytes)',
+    }),
     /** The E2E-sealed SDP/ICE payload — opaque ciphertext to the server. */
     ciphertext: bytesSchema,
   })
