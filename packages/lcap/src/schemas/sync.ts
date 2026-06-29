@@ -24,6 +24,38 @@ import {
 import { objectStatusV2Schema, receiptRecordV2Schema } from './receipt.js';
 
 /**
+ * Per-array element ceilings (WS-R.6 / §27.1 DoS hardening).  The whole-message byte caps
+ * (`MAX_PULSE_REQUEST_BYTES` / `MAX_EXCHANGE_REQUEST_BYTES` in the routes) bound total size,
+ * but a small element type (a ~60-byte CID) still admits ~17k entries inside a 1 MiB body —
+ * and the server does one store round-trip PER want/frontier CID, so an attacker could force
+ * thousands of sequential `hasObject`/`getObject` lookups (an amplifier, worst against the
+ * Postgres store) under NO per-request CPU budget.  These caps bound that fan-out structurally
+ * at the trust boundary; they are generous relative to any honest frontier/want set.
+ */
+export const SYNC_ARRAY_LIMITS = {
+  /** Advertised crypto suites / compression ids / pack versions (tiny enumerations). */
+  capabilities: 16,
+  /** Per-room/-scope frontier entries in one pulse. */
+  frontier: 2048,
+  /** C0 critical-have / critical-want CID lists. */
+  criticalCids: 1024,
+  /** Lane summaries (there are only a handful of lanes). */
+  laneSummary: 64,
+  /** Interest descriptors in one exchange request. */
+  interests: 256,
+  /** Object summaries (known/offered). */
+  summaries: 2048,
+  /** Receipt records (ack / response). */
+  receipts: 2048,
+  /** Want requests / wanted-from-client — the primary store-lookup amplifier. */
+  wants: 2048,
+  /** Accepted-push statuses. */
+  pushStatuses: 2048,
+  /** Exchange warnings. */
+  warnings: 64,
+} as const;
+
+/**
  * The crypto-suite identifiers a node advertises (§16.2).  The matching type
  * lives in the zero-dependency `cose/suites.ts` (`CryptoSuiteId`); this is its
  * zod mirror for the schema layer (the cose core must not import zod, §31.1).
@@ -119,15 +151,18 @@ export const syncPulseV2Schema = z
     transport_profile: syncTransportProfileSchema,
     privacy_mode: syncPrivacyModeSchema,
     budgets: exchangeBudgetV2Schema,
-    supported_suites: z.array(cryptoSuiteIdSchema),
-    supported_compression: z.array(compressionIdSchema),
-    supported_pack_versions: z.array(uintSchema),
-    checkpoint_frontier: z.array(checkpointFrontierV2Schema),
-    revocation_frontier: z.array(revocationFrontierV2Schema),
-    capability_frontier: z.array(capabilityFrontierV2Schema).optional(),
-    critical_have: z.array(anyCidSchema).optional(),
-    critical_want: z.array(anyCidSchema).optional(),
-    lane_summary: z.array(laneSummaryV2Schema).optional(),
+    supported_suites: z.array(cryptoSuiteIdSchema).max(SYNC_ARRAY_LIMITS.capabilities),
+    supported_compression: z.array(compressionIdSchema).max(SYNC_ARRAY_LIMITS.capabilities),
+    supported_pack_versions: z.array(uintSchema).max(SYNC_ARRAY_LIMITS.capabilities),
+    checkpoint_frontier: z.array(checkpointFrontierV2Schema).max(SYNC_ARRAY_LIMITS.frontier),
+    revocation_frontier: z.array(revocationFrontierV2Schema).max(SYNC_ARRAY_LIMITS.frontier),
+    capability_frontier: z
+      .array(capabilityFrontierV2Schema)
+      .max(SYNC_ARRAY_LIMITS.frontier)
+      .optional(),
+    critical_have: z.array(anyCidSchema).max(SYNC_ARRAY_LIMITS.criticalCids).optional(),
+    critical_want: z.array(anyCidSchema).max(SYNC_ARRAY_LIMITS.criticalCids).optional(),
+    lane_summary: z.array(laneSummaryV2Schema).max(SYNC_ARRAY_LIMITS.laneSummary).optional(),
   })
   .strict();
 export type SyncPulseV2 = z.infer<typeof syncPulseV2Schema>;
@@ -230,11 +265,11 @@ export type ExchangeStatus = z.infer<typeof exchangeStatusSchema>;
 export const exchangeRequestV2Schema = z
   .object({
     pulse: syncPulseV2Schema,
-    interests: z.array(interestDescriptorV2Schema),
-    known_summaries: z.array(objectSummaryV2Schema).optional(),
-    ack_receipts: z.array(receiptRecordV2Schema).optional(),
+    interests: z.array(interestDescriptorV2Schema).max(SYNC_ARRAY_LIMITS.interests),
+    known_summaries: z.array(objectSummaryV2Schema).max(SYNC_ARRAY_LIMITS.summaries).optional(),
+    ack_receipts: z.array(receiptRecordV2Schema).max(SYNC_ARRAY_LIMITS.receipts).optional(),
     push_pack: bytesSchema.optional(),
-    want: z.array(wantRequestV2Schema).optional(),
+    want: z.array(wantRequestV2Schema).max(SYNC_ARRAY_LIMITS.wants).optional(),
   })
   .strict();
 export type ExchangeRequestV2 = z.infer<typeof exchangeRequestV2Schema>;
@@ -244,13 +279,13 @@ export const exchangeResponseV2Schema = z
   .object({
     pulse: syncPulseV2Schema,
     status: exchangeStatusSchema,
-    accepted_push: z.array(objectStatusV2Schema).optional(),
-    wanted_from_client: z.array(wantRequestV2Schema).optional(),
-    offer_summary: z.array(objectSummaryV2Schema).optional(),
+    accepted_push: z.array(objectStatusV2Schema).max(SYNC_ARRAY_LIMITS.pushStatuses).optional(),
+    wanted_from_client: z.array(wantRequestV2Schema).max(SYNC_ARRAY_LIMITS.wants).optional(),
+    offer_summary: z.array(objectSummaryV2Schema).max(SYNC_ARRAY_LIMITS.summaries).optional(),
     response_pack: bytesSchema.optional(),
-    receipts: z.array(receiptRecordV2Schema).optional(),
+    receipts: z.array(receiptRecordV2Schema).max(SYNC_ARRAY_LIMITS.receipts).optional(),
     retry_after_ms: uintSchema.optional(),
-    warnings: z.array(exchangeWarningV2Schema).optional(),
+    warnings: z.array(exchangeWarningV2Schema).max(SYNC_ARRAY_LIMITS.warnings).optional(),
   })
   .strict();
 export type ExchangeResponseV2 = z.infer<typeof exchangeResponseV2Schema>;

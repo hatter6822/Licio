@@ -61,7 +61,22 @@ export async function x25519SharedSecret(
     false,
     [],
   );
-  return new Uint8Array(
+  const secret = new Uint8Array(
     await getSubtle().deriveBits({ name: 'X25519', public: peer }, privateKey, 256),
   );
+  // RFC 7748 §6.1 / W3C "Secure Curves" mandate rejecting an all-zero shared secret (the
+  // result of a low-order/small-subgroup peer point — a non-contributory key agreement).
+  // Compliant WebCrypto throws on it, but enforce it explicitly here so the contributory
+  // guarantee this module's header promises never depends on the host's WebCrypto build.
+  if (isAllZero(secret)) {
+    throw new Error('X25519 produced an all-zero (non-contributory) shared secret');
+  }
+  return secret;
+}
+
+/** Constant-time all-zero check (no early return on the first non-zero byte). */
+function isAllZero(bytes: Uint8Array): boolean {
+  let acc = 0;
+  for (const b of bytes) acc |= b;
+  return acc === 0;
 }

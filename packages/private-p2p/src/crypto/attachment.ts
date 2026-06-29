@@ -260,7 +260,18 @@ export async function decryptAttachment(
   const total = manifest.encrypted_chunks.length;
   const parts: Uint8Array[] = [];
 
+  let expectedIndex = 0;
   for (const chunk of manifest.encrypted_chunks) {
+    // The AEAD AAD binds each chunk's `index`, but reassembly concatenates in ARRAY order —
+    // so assert the array is the canonical ascending, gap-free 0..N-1 permutation.  Without
+    // this, a reordered (but per-chunk-valid) manifest would silently scramble the output
+    // instead of failing; the assertion makes the per-chunk index binding self-enforcing.
+    if (chunk.index !== expectedIndex) {
+      throw new Error(
+        `decryptAttachment: chunk index ${chunk.index} out of order (expected ${expectedIndex})`,
+      );
+    }
+    expectedIndex += 1;
     const sealed = chunksByCid.get(chunk.cid);
     if (!sealed) throw new Error(`decryptAttachment: missing chunk ${chunk.index} (${chunk.cid})`);
     // Verify the ciphertext CID + hash BEFORE decrypting (cheap integrity gate).

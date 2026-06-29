@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  ConnectPrivatePeerError,
   type ConnectPrivatePeerParams,
   connectPrivatePeer,
   type RtcDataChannelLike,
@@ -365,6 +366,107 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     expect(String((bobResult as PromiseRejectedResult).reason)).toMatch(
       /handshake rejected: unknown_device|handshake_unknown_device/,
     );
+  });
+
+  it('REJECTS a peer whose rendezvous-claimed device id != the handshake-proven id', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-spoof',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const devB = await p2p.generateDeviceSigningKeyPair();
+    const devAPub = p2p.toBase64Url(
+      await p2p.exportPublicKeyRaw(created.founder.signingKeyPair.publicKey),
+    );
+    const devBPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(devB.publicKey));
+    const resolve = (
+      id: string,
+    ): { signingPublicKey: string; activeAtEpoch: boolean } | undefined => {
+      if (id === 'founder-dev') return { signingPublicKey: devAPub, activeAtEpoch: true };
+      if (id === 'device-b') return { signingPublicKey: devBPub, activeAtEpoch: true };
+      return undefined;
+    };
+
+    const rendezvousBase = inMemoryRendezvous();
+    const timeBucket = p2p.rendezvousTimeBucket(Date.now());
+    // The dialer's view RE-SEALS bob's (real) announcement claiming a DIFFERENT device id,
+    // keeping bob's real signaling key + blind id so the channel + signaling still establish —
+    // modelling a member who lies in the room-key-sealed (unauthenticated) rendezvous record.
+    const tampering: RendezvousTransport = {
+      announce: (r) => rendezvousBase.announce(r),
+      signal: (s) => rendezvousBase.signal(s),
+      signalPoll: (id) => rendezvousBase.signalPoll(id),
+      poll: async (roomBlindId) => {
+        const records = await rendezvousBase.poll(roomBlindId);
+        const out: PresenceRecord[] = [];
+        for (const rec of records) {
+          let ann: Awaited<ReturnType<typeof p2p.openRendezvousAnnouncement>>;
+          try {
+            ann = await p2p.openRendezvousAnnouncement(rec, rendezvousKey);
+          } catch {
+            out.push(rec);
+            continue;
+          }
+          if (ann.peer_device_id !== 'device-b') {
+            out.push(rec);
+            continue;
+          }
+          out.push(
+            await p2p.buildRendezvousRecord({
+              rendezvousKey,
+              epoch,
+              timeBucket,
+              deviceId: 'device-b', // keep bob's REAL blind id so signaling still routes to bob
+              announcement: { ...ann, peer_device_id: 'spoofed-victim' },
+              nowMs: Date.now(),
+            }),
+          );
+        }
+        return out;
+      },
+    };
+
+    const link = new FakeLink();
+    const connectBase = {
+      p2p,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey,
+      transportMode: 'direct_allowed' as const,
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 4_000,
+      rtcFactory: () => new FakePeer(link),
+    } satisfies Partial<ConnectPrivatePeerParams>;
+
+    const settled = await Promise.allSettled([
+      connectPrivatePeer({
+        ...connectBase,
+        rendezvous: tampering,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: resolve,
+      }),
+      connectPrivatePeer({
+        ...connectBase,
+        rendezvous: rendezvousBase,
+        selfDeviceId: 'device-b',
+        selfSigningKey: devB.privateKey,
+        resolveDevice: resolve,
+      }),
+    ]);
+    // The dialer membership-proves bob as 'device-b', sees the rendezvous claimed 'spoofed-victim',
+    // and FAILS CLOSED rather than attributing the channel to the spoofed id.
+    const aliceResult = settled[0];
+    expect(aliceResult.status).toBe('rejected');
+    const reason = (aliceResult as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(ConnectPrivatePeerError);
+    expect((reason as ConnectPrivatePeerError).reason).toBe('peer_device_id_mismatch');
+    if (settled[1].status === 'fulfilled') settled[1].value.channel.close();
   });
 
   it('FAILS FAST (relay_without_turn) when relay-only mode has no TURN server', async () => {

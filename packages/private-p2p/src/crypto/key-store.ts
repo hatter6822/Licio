@@ -140,11 +140,16 @@ export async function deriveArgon2idWrapKey(
 
 // --- the at-rest record (zod-validated on load) -----------------------------
 
+// OWASP Argon2id minimums (RFC 9106 §4): m ≥ 19 MiB, t ≥ 2, p ≥ 1.  Enforce them as the
+// schema FLOOR so a tampered/downgraded record (e.g. m=8 KiB, t=1) is rejected outright at
+// load rather than honored — the at-rest passphrase wrap is only as strong as these params.
+export const ARGON2ID_MIN_T = 2;
+export const ARGON2ID_MIN_M = 19_456;
 const argon2idKdfSchema = z
   .object({
     salt: z.string().min(1),
-    t: z.number().int().min(1),
-    m: z.number().int().min(8),
+    t: z.number().int().min(ARGON2ID_MIN_T),
+    m: z.number().int().min(ARGON2ID_MIN_M),
     p: z.number().int().min(1),
   })
   .strict();

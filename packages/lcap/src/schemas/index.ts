@@ -128,6 +128,7 @@ export {
   pulseResponseV2Schema,
   type RevocationFrontierV2,
   revocationFrontierV2Schema,
+  SYNC_ARRAY_LIMITS,
   type SyncPrivacyMode,
   type SyncPulseV2,
   type SyncTransportProfile,

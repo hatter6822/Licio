@@ -102,6 +102,7 @@ export type CourierBlockedReason =
   | ''
   | 'forced_off_in_mode'
   | 'disabled'
+  | 'disclosure_unacknowledged'
   | 'below_battery_floor'
   | 'no_peers'
   // A selected native radio rejected startAdvertising/startDiscovery (permission denied or the
@@ -129,17 +130,22 @@ export interface CourierPowerState {
  *   1. Stealth/Emergency FORCE both off regardless of the controls (§33.5) — no proximity
  *      radio ever reveals the device in a high-risk mode;
  *   2. neither advertise nor discover is enabled ⇒ `disabled` (the conservative default);
- *   3. `exchangePeers === 'none'` ⇒ `no_peers` (the user has explicitly opted to exchange
+ *   3. the §22.5 radio-metadata disclosure has NOT been acknowledged ⇒
+ *      `disclosure_unacknowledged` — a proximity radio must never start before the user has
+ *      seen + accepted what it reveals.  This is enforced HERE (not only in the controls UI)
+ *      so a non-UI caller cannot start the radios by constructing controls with the toggles on;
+ *   4. `exchangePeers === 'none'` ⇒ `no_peers` (the user has explicitly opted to exchange
  *      with nobody, so running the radios would reveal the device for no benefit);
- *   4. the device battery is below the user's floor AND not charging ⇒ `below_battery_floor`
+ *   5. the device battery is below the user's floor AND not charging ⇒ `below_battery_floor`
  *      (the §22.5 battery budget — running radios on a low, unplugged battery is refused).
  *
- * Pure + total: given the same controls/mode/power it always returns the same decision.
+ * Pure + total: given the same controls/mode/power/ack it always returns the same decision.
  */
 export function decideCourierStart(
   controls: CourierRadioControls,
   mode: CourierMode,
-  power: CourierPowerState = {},
+  power: CourierPowerState,
+  disclosureAcknowledged: boolean,
 ): CourierStartDecision {
   if (mode === 'stealth' || mode === 'emergency') {
     return { advertise: false, discover: false, blockedReason: 'forced_off_in_mode' };
@@ -148,6 +154,8 @@ export function decideCourierStart(
   const discover = controls.discoveryEnabled;
   if (!advertise && !discover)
     return { advertise: false, discover: false, blockedReason: 'disabled' };
+  if (!disclosureAcknowledged)
+    return { advertise: false, discover: false, blockedReason: 'disclosure_unacknowledged' };
   if ((controls.exchangePeers ?? 'anyone') === 'none')
     return { advertise: false, discover: false, blockedReason: 'no_peers' };
   const floor = controls.batteryFloor ?? 0;

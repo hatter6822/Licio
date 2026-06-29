@@ -117,6 +117,25 @@ describe('encryptAttachment / decryptAttachment (§13.6 media)', () => {
     ).rejects.toThrow();
   });
 
+  it('rejects a reordered manifest (chunk index must match array position)', async () => {
+    // Each chunk's AAD binds its `index`, but reassembly concatenates in ARRAY order — so a
+    // reordered (but per-chunk-valid) manifest would silently scramble the output.  The
+    // ascending, gap-free index assertion turns that into a fail-closed rejection.
+    const enc = await encryptAttachment(
+      randomBytes(ATTACHMENT_CHUNK_PLAINTEXT_SIZE * 2 + 10),
+      params(),
+    );
+    const chunks = enc.manifest.encrypted_chunks;
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    const c0 = chunks[0];
+    const c1 = chunks[1];
+    if (!c0 || !c1) throw new Error('expected at least two chunks');
+    const reordered = { ...enc.manifest, encrypted_chunks: [c1, c0, ...chunks.slice(2)] };
+    await expect(
+      decryptAttachment(reordered, enc.chunks, ctx, { objectKey: enc.objectKey }),
+    ).rejects.toThrow(/out of order/);
+  });
+
   it('rejects a missing chunk', async () => {
     const enc = await encryptAttachment(
       randomBytes(ATTACHMENT_CHUNK_PLAINTEXT_SIZE + 10),

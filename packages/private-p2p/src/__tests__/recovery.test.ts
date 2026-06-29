@@ -15,8 +15,9 @@ import {
 } from '../crypto/recovery.js';
 import { randomBytes } from '../crypto/runtime.js';
 
-// Fast Argon2id params keep the suite quick; production uses RECOVERY_ARGON2ID_PARAMS.
-const FAST = { t: 1, m: 256, p: 1 } as const;
+// The cheapest params the schema floor (OWASP Argon2id minimum) still accepts; production
+// uses the stronger RECOVERY_ARGON2ID_PARAMS.
+const FAST = { t: 2, m: 19_456, p: 1 } as const;
 
 function material(roomId = 'room-1'): RoomKeyMaterial {
   return {

@@ -13,6 +13,16 @@ import type { CourierRadioControls } from './courier-native.js';
 
 const ON: CourierRadioControls = { advertisingEnabled: true, discoveryEnabled: true };
 
+// The §22.5 radio-metadata disclosure is now a structural precondition in `decideCourierStart`,
+// so a controller that means to RUN must supply an acknowledged getter.  Default it to
+// acknowledged for the orchestration tests (a config can still override it to drive the gate).
+function makeController(
+  config: ConstructorParameters<typeof CourierController>[0],
+): CourierController {
+  const merged = { disclosureAcknowledged: () => true, ...config };
+  return new CourierController(merged);
+}
+
 // Real §16 exchange messages (built once via the lcap codec), so the fake peer answers with a
 // VALID exchange RESPONSE (not an echo of the request) — the controller now classifies inbound
 // messages and only a real response counts as a courier exchange.
@@ -108,7 +118,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
 
   it('is a clean no-op when the controls disable the radios (off by default)', async () => {
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { advertisingEnabled: false, discoveryEnabled: false },
       mode: 'standard',
@@ -123,7 +133,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('FORCES off in Stealth/Emergency regardless of the controls (§33.5)', async () => {
     for (const mode of ['stealth', 'emergency'] as const) {
       const f = fakePlugin();
-      const controller = new CourierController({
+      const controller = makeController({
         plugin: f.plugin,
         controls: ON,
         mode,
@@ -141,7 +151,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     f.plugin.startAdvertising = vi.fn(async () => {
       throw new Error('permission denied');
     });
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -163,7 +173,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // The radios start cleanly (the sync start resolves), so the controller is running...
     const f = fakePlugin();
     const decisionChanges: Array<{ blockedReason?: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -200,7 +210,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       f.calls.push('advertise');
       f.emit('startFailed', { operation: 'advertise', error: 'nearby_disabled' });
     });
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -225,7 +235,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     a.plugin.startAdvertising = vi.fn(async () => {
       a.emit('startFailed', { operation: 'advertise', error: 'nearby_disabled' });
     });
-    const controller = new CourierController({
+    const controller = makeController({
       channels: [
         { channel: 'nearby', plugin: a.plugin },
         { channel: 'bluetooth', plugin: b.plugin },
@@ -253,7 +263,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     b.plugin.startAdvertising = vi.fn(async () => {
       throw new Error('bluetooth_unavailable');
     });
-    const controller = new CourierController({
+    const controller = makeController({
       channels: [
         { channel: 'nearby', plugin: a.plugin },
         { channel: 'bluetooth', plugin: b.plugin },
@@ -275,7 +285,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // Stop — turning both radios off stops the native radios and flips the decision honestly.
     const f = fakePlugin();
     const changes: Array<{ blockedReason?: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -296,7 +306,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // that was fine a moment ago is refused without ever being ferried to.
     const f = fakePlugin();
     const outcomes: Array<{ skippedReason: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -324,7 +334,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     const f = fakePlugin();
     const outcomes: Array<{ skippedReason: string }> = [];
     let calls = 0;
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -350,7 +360,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('applyControls stops a DESELECTED channel live and keeps the others running', async () => {
     const a = fakePlugin();
     const b = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       channels: [
         { channel: 'nearby', plugin: a.plugin },
         { channel: 'bluetooth', plugin: b.plugin },
@@ -374,7 +384,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // advertising stays on must STOP + RESTART the radio with advertise-only — otherwise the scan
     // keeps running until a full Stop.
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -396,7 +406,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // stop them (the §22.5 battery budget enforced against the current level).
     const f = fakePlugin();
     const changes: Array<{ blockedReason?: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, batteryFloor: 0.5 },
       mode: 'courier',
@@ -429,7 +439,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       await startGate; // a pending native start / permission prompt
     });
     const changes: Array<{ blockedReason?: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -453,7 +463,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('switching into a forced-off mode stops a RUNNING courier immediately (§33.5)', async () => {
     const f = fakePlugin();
     const changes: Array<{ blockedReason?: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -481,7 +491,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
         f.emit('payloadReceived', { endpointId: o.endpointId, message: REQUEST_B64 });
       });
       const outcomes: Array<{ carriedBy: string | null; skippedReason: string }> = [];
-      const controller = new CourierController({
+      const controller = makeController({
         plugin: f.plugin,
         controls: ON,
         mode: 'courier',
@@ -505,7 +515,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('answers a peer’s inbound exchange REQUEST via the responder seam', async () => {
     const f = fakePlugin();
     const requestsServed: number[] = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -532,7 +542,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // mark (a space prefix never matched) would skip a reconnecting endpoint forever.
     const f = fakePlugin();
     const outcomes: string[] = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -555,7 +565,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // it must NOT drive an exchange (send a courier request) for a stopped channel.  The fake's
     // remove() is a no-op, so emit still reaches the handler — exactly the queued-event case.
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -581,7 +591,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
         f.sent.push(o); // NO echo back
       });
       const outcomes: Array<{ endpointId: string; skippedReason: string }> = [];
-      const controller = new CourierController({
+      const controller = makeController({
         plugin: f.plugin,
         controls: { ...ON, storageBudgetBytes: 8 },
         mode: 'courier',
@@ -615,7 +625,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     const f = fakePlugin();
     const outcomes: Array<{ endpointId: string; channel: string; carriedBy: string | null }> = [];
     const request = new Uint8Array([9, 8, 7]);
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -651,7 +661,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       { channel: 'bluetooth', plugin: bt.plugin },
     ];
     const outcomes: Array<{ channel: string; carriedBy: string | null }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       channels,
       controls: ON,
       mode: 'courier',
@@ -685,7 +695,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('drives at most ONE exchange per connection', async () => {
     const f = fakePlugin();
     const outcomes: unknown[] = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -703,7 +713,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('refuses an exchange with a peer the who-can-exchange control disallows', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ skippedReason: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, exchangePeers: 'known_only', allowedEndpointIds: ['ep-allowed'] },
       mode: 'courier',
@@ -721,7 +731,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('refuses an exchange that would exceed the storage budget', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ skippedReason: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, storageBudgetBytes: 2 },
       mode: 'courier',
@@ -739,7 +749,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('skips a connection with nothing to request', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ skippedReason: string }> = [];
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -755,7 +765,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
 
   it('routes a payloadReceived event to the right per-endpoint medium (fail-closed)', async () => {
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -771,7 +781,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
 
   it('stops cleanly — removes listeners and stops the radios', async () => {
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -787,7 +797,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
 
   it('refuses to start below the battery floor when unplugged (§22.5 battery budget)', async () => {
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, batteryFloor: 0.5 },
       mode: 'courier',
@@ -805,7 +815,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // `buildRequest` is invoked SYNCHRONOUSLY at the top of driveExchange (before its first await),
     // so its call-count deterministically reports whether a callback drove an exchange.
     const buildRequest = vi.fn(() => REQUEST_BYTES);
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -833,7 +843,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // would exhaust the budget and BLOCK the second peer request.
     const budget = REQUEST_BYTES.length + 2 * RESPONSE_BYTES.length;
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, storageBudgetBytes: budget },
       mode: 'courier',
@@ -865,7 +875,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
         });
       });
     });
-    const controller = new CourierController({
+    const controller = makeController({
       channels: [
         { channel: 'nearby', plugin: a.plugin },
         { channel: 'bluetooth', plugin: b.plugin },
@@ -906,7 +916,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       };
     });
     const buildRequest = vi.fn(() => REQUEST_BYTES);
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -929,7 +939,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('does NOT send a request if the channel is torn down during buildRequest (#1-followon)', async () => {
     let resolveReq: ((b: Uint8Array) => void) | undefined;
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -953,7 +963,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     const a = fakePlugin();
     const b = fakePlugin();
     const channelLists: string[][] = [];
-    const controller = new CourierController({
+    const controller = makeController({
       channels: [
         { channel: 'nearby', plugin: a.plugin },
         { channel: 'bluetooth', plugin: b.plugin },
@@ -978,7 +988,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     const outcomes: string[] = [];
     let resolveReq: ((b: Uint8Array) => void) | undefined;
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, exchangePeers: 'anyone' },
       mode: 'courier',
@@ -1009,7 +1019,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // the budget before either charges; the reservation must make the second hit over_storage_budget.
     const outcomes: string[] = [];
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, storageBudgetBytes: REQUEST_BYTES.length + 8 },
       mode: 'courier',
@@ -1028,7 +1038,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('does NOT serve a response if the channel is torn down during buildResponse (#2)', async () => {
     let resolveResp: ((b: Uint8Array) => void) | undefined;
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -1064,7 +1074,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
         }),
       });
     };
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
@@ -1077,7 +1087,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('concurrent responder replies respect the storage ceiling (#6)', async () => {
     const outcomes: string[] = [];
     const f = fakePlugin();
-    const controller = new CourierController({
+    const controller = makeController({
       plugin: f.plugin,
       controls: { ...ON, storageBudgetBytes: RESPONSE_BYTES.length + 8 }, // room for ONE response
       mode: 'courier',

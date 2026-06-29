@@ -25,7 +25,8 @@ import {
 } from '../crypto/key-store.js';
 import { getSubtle, randomBytes } from '../crypto/runtime.js';
 
-const FAST: Argon2idParams = { t: 1, m: 256, p: 1 };
+// The cheapest params the schema floor (OWASP Argon2id minimum) still accepts.
+const FAST: Argon2idParams = { t: 2, m: 19_456, p: 1 };
 
 function material(roomId = 'room-1'): RoomKeyMaterial {
   return {
@@ -49,7 +50,7 @@ describe('tier 1 — Argon2id passphrase', () => {
     const record = await protectWithPassphrase(m, 'correct horse battery staple', FAST);
     expect(record.tier).toBe('argon2id-passphrase');
     if (record.tier !== 'argon2id-passphrase') throw new Error('tier');
-    expect(record.kdf).toMatchObject({ t: 1, m: 256, p: 1 });
+    expect(record.kdf).toMatchObject({ t: 2, m: 19_456, p: 1 });
     const unlocked = await unlockWithPassphrase(record, 'correct horse battery staple');
     expectMaterialEqual(unlocked, m);
   });

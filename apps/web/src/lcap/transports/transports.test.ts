@@ -8,10 +8,11 @@
 import { TransportUnavailableError } from '@licio/lcap';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type CourierMedium, CourierTransport, InMemoryCourierMedium } from './courier.js';
-import { HttpsTransport } from './https.js';
+import { HTTPS_CAPABILITIES, HttpsTransport } from './https.js';
 import { buildServerTransports, loadWebrtcTransport, offlineExchange } from './registry.js';
 import {
   isWebTransportSupported,
+  WEBTRANSPORT_CAPABILITIES,
   type WebTransportLike,
   WebTransportTransport,
 } from './webtransport.js';
@@ -44,6 +45,37 @@ describe('HttpsTransport (§22.6 anchor)', () => {
     await t.send(new Uint8Array([1]));
     await t.close();
     expect(await t.receive()).toBeNull(); // close() dropped the pending promise
+  });
+
+  it('threads the abort signal into fetch and refuses send once aborted', async () => {
+    let seenInit: RequestInit | undefined;
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      seenInit = init;
+      return new Response(new Uint8Array([1]));
+    }) as unknown as typeof fetch;
+    const controller = new AbortController();
+    const t = new HttpsTransport({ fetchFn });
+    await t.open(controller.signal);
+    await t.send(new Uint8Array([1]));
+    expect(seenInit?.signal).toBe(controller.signal); // the POST is actually cancellable now
+    controller.abort();
+    await t.open(controller.signal);
+    await expect(t.send(new Uint8Array([1]))).rejects.toThrow(/aborted/); // no upload after Stop
+  });
+
+  it('rejects a response whose declared content-length exceeds the per-exchange cap', async () => {
+    const huge = HTTPS_CAPABILITIES.maxExchangeBytes + 1;
+    const fetchFn = (async () => ({
+      ok: true,
+      headers: { get: (k: string) => (k.toLowerCase() === 'content-length' ? String(huge) : null) },
+      body: null,
+      async arrayBuffer() {
+        return new Uint8Array(0).buffer;
+      },
+    })) as unknown as typeof fetch;
+    const t = new HttpsTransport({ fetchFn });
+    await t.send(new Uint8Array([1]));
+    await expect(t.receive()).rejects.toThrow(/exceeds/);
   });
 });
 
@@ -119,6 +151,24 @@ describe('WebTransportTransport (§22.6 / WS-R.15.5)', () => {
     expect(closed).toBe(true);
     expect(await t.receive()).toBeNull(); // stream dropped
   });
+
+  it('aborts the receive loop when the running total exceeds the per-exchange cap', async () => {
+    // A single over-cap chunk: the streaming read must reject rather than buffer it whole.
+    const over = new Uint8Array(WEBTRANSPORT_CAPABILITIES.maxExchangeBytes + 1);
+    const t = new WebTransportTransport(fakeSession(over));
+    await t.open();
+    await t.send(new Uint8Array([1]));
+    await expect(t.receive()).rejects.toThrow(/exceeds/);
+  });
+
+  it('receive returns null promptly when the signal is already aborted', async () => {
+    const t = new WebTransportTransport(fakeSession(new Uint8Array([1, 2, 3])));
+    const controller = new AbortController();
+    controller.abort();
+    await t.open();
+    await t.send(new Uint8Array([1]));
+    expect(await t.receive(controller.signal)).toBeNull();
+  });
 });
 
 describe('CourierTransport (§22.5 / WS-R.15.4b)', () => {
@@ -141,6 +191,19 @@ describe('CourierTransport (§22.5 / WS-R.15.4b)', () => {
     const t = new CourierTransport(medium);
     medium.deliverInbound(new Uint8Array([5, 6])); // arrives before receive()
     expect(await t.receive()).toEqual(new Uint8Array([5, 6]));
+  });
+
+  it('an aborted receive does not swallow a later ferried message', async () => {
+    // After an abort, the lingering inbound listener must NOT consume + discard the next
+    // delivered message (it would be lost to the subsequent receive otherwise).
+    const medium = new InMemoryCourierMedium();
+    const t = new CourierTransport(medium);
+    const controller = new AbortController();
+    const aborted = t.receive(controller.signal);
+    controller.abort();
+    expect(await aborted).toBeNull();
+    medium.deliverInbound(new Uint8Array([9, 9])); // arrives after the abort
+    expect(await t.receive()).toEqual(new Uint8Array([9, 9])); // still available, not swallowed
   });
 
   it('yields null on a non-notifying medium with nothing ferried in', async () => {

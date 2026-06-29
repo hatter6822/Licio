@@ -183,6 +183,13 @@ export interface CourierControllerConfig {
   readonly mode: CourierMode;
   /** The live device power reading the battery floor gates on. */
   readonly power?: CourierPowerState;
+  /**
+   * Read the §22.5 radio-metadata disclosure acknowledgment, FRESH at each decision (so a
+   * live ack/revocation takes effect).  `decideCourierStart` refuses to start the radios when
+   * this is false — the structural backstop to the controls-UI gate.  Defaults to a fail-closed
+   * `() => false`, so a controller built without it never starts a proximity radio.
+   */
+  readonly disclosureAcknowledged?: () => boolean;
   /** Build the §16 exchange request for a connected peer. */
   readonly buildRequest: CourierRequestBuilder;
   /**
@@ -308,7 +315,12 @@ export class CourierController {
    */
   async start(): Promise<CourierStartDecision> {
     if (this.started) return this.decision;
-    this.decision = decideCourierStart(this.controls, this.mode, this.config.power ?? {});
+    this.decision = decideCourierStart(
+      this.controls,
+      this.mode,
+      this.config.power ?? {},
+      this.config.disclosureAcknowledged?.() ?? false,
+    );
     if (!this.decision.advertise && !this.decision.discover) return this.decision;
     if (this.channels.length === 0) return this.decision; // nothing to drive
 
@@ -462,7 +474,12 @@ export class CourierController {
     power: CourierPowerState | undefined,
   ): Promise<void> {
     if (!this.started) return;
-    const decision = decideCourierStart(next, this.mode, power ?? this.config.power ?? {});
+    const decision = decideCourierStart(
+      next,
+      this.mode,
+      power ?? this.config.power ?? {},
+      this.config.disclosureAcknowledged?.() ?? false,
+    );
     if (!decision.advertise && !decision.discover) {
       // The new controls/mode/power turn the courier off entirely — stop every radio now.
       await this.stop();

@@ -70,6 +70,15 @@ class FakePeer implements RtcPeerConnectionLike {
   onicecandidate: ((event: { candidate: RtcIceCandidateInit | null }) => void) | null = null;
   ondatachannel: ((event: { channel: ConnectableDataChannel }) => void) | null = null;
   iceConnectionState = 'new';
+  closeCount = 0;
+  /** Fire one more local ICE candidate after `delayMs` (to model a late trickle). */
+  fireLateCandidate(delayMs: number): void {
+    setTimeout(() => {
+      this.onicecandidate?.({
+        candidate: { candidate: `candidate:late-${this.role}`, sdpMid: '0', sdpMLineIndex: 0 },
+      });
+    }, delayMs);
+  }
   constructor(
     private readonly link: FakeLink,
     private readonly role: 'initiator' | 'responder',
@@ -113,18 +122,23 @@ class FakePeer implements RtcPeerConnectionLike {
   }
   close(): void {
     this.iceConnectionState = 'closed';
+    this.closeCount += 1;
   }
 }
 
 // --- in-memory server-blind relay --------------------------------------------------
 function makeRelay() {
   const mailboxes = new Map<string, Uint8Array[]>();
+  const postCounts = new Map<string, number>();
   return {
     postSignal: async (to: string, body: Uint8Array): Promise<void> => {
       const box = mailboxes.get(to) ?? [];
       box.push(body);
       mailboxes.set(to, box);
+      postCounts.set(to, (postCounts.get(to) ?? 0) + 1);
     },
+    /** Total POSTs ever addressed to `to` (mailbox length is drained by polling; this is not). */
+    postsTo: (to: string): number => postCounts.get(to) ?? 0,
     pollSignal: async (self: string): Promise<readonly Uint8Array[]> => {
       const box = mailboxes.get(self) ?? [];
       mailboxes.set(self, []);
@@ -347,5 +361,84 @@ describe('WS-R.15.6a connectWebrtc', () => {
         rtcFactory: (config) => new FakePeer(link, 'initiator', config),
       }),
     ).rejects.toThrow(/aborted/);
+  });
+
+  it('closes the underlying RTCPeerConnection when the opened channel is closed', async () => {
+    // The channel rides on `pc`; closing the transport must tear down the peer connection
+    // too (otherwise the RTCPeerConnection + ICE agent leak for the life of the tab).
+    const link = new FakeLink();
+    const relay = makeRelay();
+    const key = await importSignalKey(KEY_BYTES);
+    const decision = await allow();
+    let initiatorPeer: FakePeer | undefined;
+    const common = {
+      decision,
+      signalKey: key,
+      roomIdHash: ROOM,
+      postSignal: relay.postSignal,
+      pollSignal: relay.pollSignal,
+      pollIntervalMs: 1,
+      timeoutMs: 5000,
+    };
+    const [chA, chB] = await Promise.all([
+      connectWebrtc({
+        ...common,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        rtcFactory: (config) => {
+          initiatorPeer = new FakePeer(link, 'initiator', config);
+          return initiatorPeer;
+        },
+      }),
+      connectWebrtc({
+        ...common,
+        selfPeerKey: 'bob',
+        remotePeerKey: 'alice',
+        initiator: false,
+        rtcFactory: (config) => new FakePeer(link, 'responder', config),
+      }),
+    ]);
+    const ta = new WebrtcTransport(chA);
+    expect(initiatorPeer?.closeCount).toBe(0); // still live while the channel is open
+    await ta.close();
+    expect(initiatorPeer?.closeCount).toBeGreaterThan(0); // closing the channel closed pc
+    await new WebrtcTransport(chB).close();
+  });
+
+  it('tears down pc and stops ICE egress once aborted/timed-out', async () => {
+    // No responder ⇒ the initiator times out.  On that non-success path pc must be closed,
+    // and a LATE ICE candidate firing after teardown must NOT seal+POST to the relay.
+    const relay = makeRelay();
+    const key = await importSignalKey(KEY_BYTES);
+    const decision = await allow();
+    const link = new FakeLink();
+    let peer: FakePeer | undefined;
+    await expect(
+      connectWebrtc({
+        decision,
+        signalKey: key,
+        roomIdHash: ROOM,
+        selfPeerKey: 'a',
+        remotePeerKey: 'b',
+        initiator: true,
+        postSignal: relay.postSignal,
+        pollSignal: relay.pollSignal,
+        pollIntervalMs: 1,
+        timeoutMs: 60,
+        rtcFactory: (config) => {
+          peer = new FakePeer(link, 'initiator', config);
+          return peer;
+        },
+      }),
+    ).rejects.toThrow(/aborted/);
+    expect(peer?.closeCount).toBeGreaterThan(0); // pc torn down on the non-success path
+    const postsBefore = relay.postsTo('b');
+    // A late trickle candidate after teardown: the aborted-guard must drop it (no egress).
+    peer?.onicecandidate?.({
+      candidate: { candidate: 'candidate:late', sdpMid: '0', sdpMLineIndex: 0 },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(relay.postsTo('b')).toBe(postsBefore);
   });
 });

@@ -83,9 +83,22 @@ export class CourierTransport implements LcapTransport {
     if (ready) return ready;
     if (!this.medium.onInbound) return null; // a non-notifying medium has nothing yet
     return new Promise<Uint8Array | null>((resolve) => {
-      const settle = (): void => resolve(this.medium.takeInbound());
+      // The medium's `onInbound` has no deregister hook, so after an abort the listener
+      // lingers until the next `deliverInbound`.  Guard with a settled flag so a post-abort
+      // fire is a NO-OP and never `takeInbound()`s (which would consume + discard the next
+      // ferried message for a later `receive`).
+      let settled = false;
+      const finish = (value: Uint8Array | null): void => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const settle = (): void => {
+        if (settled) return; // do not consume a message once aborted/settled
+        finish(this.medium.takeInbound());
+      };
       this.medium.onInbound?.(settle);
-      signal?.addEventListener('abort', () => resolve(null));
+      signal?.addEventListener('abort', () => finish(null));
     });
   }
 

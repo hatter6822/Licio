@@ -132,30 +132,23 @@ export class IpfsBridge {
    * `takenDown` cannot bypass a takedown that landed since `decision` was computed; then
    * (4) the CID re-verification and pin.
    *
-   * `gateway` carries the WS-S.4.4 signals; when omitted it is derived conservatively from
-   * `decision` (a refusing decision yields a refusing guard input), and `privateRoomCid`
-   * defaults to `false` — a caller bridging private content MUST pass it explicitly.
+   * `gateway` carries the WS-S.4.4 signals and is REQUIRED: the independent public-gateway
+   * eligibility check is the confidentiality backstop, so it must never run on a synthesized
+   * all-clear input (which would make it a no-op for private content).  Every caller derives
+   * these signals from the live content model and passes them explicitly.
    */
   async publishBlock(
     blockCid: string,
     bytes: Uint8Array,
     decision: PublishDecision,
-    gateway?: PublicGatewayEligibilityInput,
+    gateway: PublicGatewayEligibilityInput,
   ): Promise<PublishOutcome> {
     if (!decision.publishable) {
       return { ok: false, reason: decision.reason === '' ? 'not_public' : decision.reason };
     }
-    // WS-S.4.4 — independent public-gateway eligibility (defense-in-depth).
-    const eligibility = assertPublicGatewayEligible(
-      gateway ?? {
-        // A `publishable` decision asserts public/unencrypted/non-taken-down; mirror that
-        // here, but `privateRoomCid` cannot be inferred and stays conservatively false.
-        visibility: 'public',
-        encrypted: false,
-        takenDown: false,
-        privateRoomCid: false,
-      },
-    );
+    // WS-S.4.4 — independent public-gateway eligibility (defense-in-depth), over the
+    // caller-supplied live signals (never a synthesized all-clear).
+    const eligibility = assertPublicGatewayEligible(gateway);
     if (!eligibility.eligible) {
       return { ok: false, reason: eligibility.reason === '' ? 'not_public' : eligibility.reason };
     }

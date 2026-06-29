@@ -118,6 +118,7 @@ export type ConnectPrivatePeerReason =
   | 'timeout'
   | 'aborted'
   | 'peer_not_found'
+  | 'peer_device_id_mismatch'
   | `handshake_${string}`;
 
 export class ConnectPrivatePeerError extends Error {
@@ -422,7 +423,11 @@ export async function connectPrivatePeer(
 
     // 4. §15.5 membership-proving handshake over the open data channel.  Any op frames
     //    a faster peer sends before we finish are stashed (returned) for the channel.
-    const { opStash, sessionKey } = await runHandshake({
+    const {
+      opStash,
+      sessionKey,
+      peerDeviceId: provenPeerDeviceId,
+    } = await runHandshake({
       p2p,
       dc,
       inbox,
@@ -434,6 +439,16 @@ export async function connectPrivatePeer(
       throwIfAborted,
       sleep,
     });
+    // The rendezvous announcement's `peer_device_id` is UNAUTHENTICATED (sealed under the
+    // room-wide rendezvous key, so any current-epoch member can claim any id).  If it does
+    // not match the §15.5 handshake-PROVEN device id, the dialed peer lied about who it is —
+    // refuse the connection rather than attributing the channel to a spoofed id.
+    if (peer.peerDeviceId !== provenPeerDeviceId) {
+      throw new ConnectPrivatePeerError(
+        'peer_device_id_mismatch',
+        'rendezvous-claimed device id does not match the handshake-proven device id',
+      );
+    }
 
     // 4b. §15.4 ICE-restart recovery (post-handshake).  The sealed signaling channel stays
     //     live, so a TRANSIENT path failure (NAT rebinding, a Wi-Fi↔cellular handover) is
@@ -460,8 +475,8 @@ export async function connectPrivatePeer(
     // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the
     //    §15.5 step-4 session key; the handshake used strings).
     return {
-      channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey),
-      peerDeviceId: peer.peerDeviceId,
+      channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey, isOfferer),
+      peerDeviceId: provenPeerDeviceId, // the handshake-PROVEN id, not the rendezvous claim
     };
   } catch (error) {
     cleanup();
@@ -683,13 +698,16 @@ async function establishDataChannel(
     if (allowed.length === 0) return;
     // Carry sdpMid/sdpMLineIndex: a real addIceCandidate rejects a candidate with neither
     // (the line alone does not identify the m-line), silently dropping every candidate.
+    // A dropped trickle candidate is non-fatal (ICE retries / the other candidates cover it),
+    // but the POST can reject transiently (offline, 5xx, rate-limit).  Swallow it with a dev
+    // warning so a flaky rendezvous never surfaces as an unhandled promise rejection.
     void sendSignal({
       schema: 'licio.private.signaling_payload.v1',
       kind: 'ice',
       ice_candidate: line,
       sdp_mid: cand?.sdpMid ?? null,
       sdp_mline_index: cand?.sdpMLineIndex ?? null,
-    });
+    }).catch((error) => devWarn('ICE trickle signal send failed', error));
   };
 
   // The open data channel resolves this; the offerer creates it, the answerer receives it.
@@ -906,7 +924,7 @@ interface RunHandshakeParams {
  *  (so the caller can hand them to the op-exchange instead of losing them). */
 async function runHandshake(
   p: RunHandshakeParams,
-): Promise<{ opStash: Uint8Array[]; sessionKey: Uint8Array }> {
+): Promise<{ opStash: Uint8Array[]; sessionKey: Uint8Array; peerDeviceId: string }> {
   const { p2p, dc } = p;
   const ctx = {
     protocolVersion: HANDSHAKE_VERSION,
@@ -1093,7 +1111,15 @@ async function runHandshake(
       'handshake_no_session_key',
       'handshake settled without a session key',
     );
-  return { opStash, sessionKey }; // wrapDataChannel re-consumes the inbox for op frames
+  if (!remoteHello)
+    throw new ConnectPrivatePeerError(
+      'handshake_no_remote_hello',
+      'handshake settled without a remote hello',
+    );
+  // The PROVEN device id (registered + active-at-epoch + Ed25519-proven by
+  // `verifyPeerHandshake`) — NOT the rendezvous-claimed id, which any current-epoch member
+  // can seal with an arbitrary value.  The caller keys its mesh/exclude/cooldown sets on this.
+  return { opStash, sessionKey, peerDeviceId: remoteHello.author_device_id };
 }
 
 // --- the post-handshake PeerChannel -------------------------------------------------
@@ -1103,9 +1129,17 @@ function toUint8(data: ArrayBuffer | ArrayBufferView): Uint8Array {
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
-/** The AEAD AAD binding a post-handshake op frame's purpose under the session key
- *  (§15.5 step 4); a frame sealed for another purpose/context cannot open here. */
-const OP_FRAME_AAD = new TextEncoder().encode('licio.private.op-frame.v1');
+/**
+ * The AEAD AAD binding a post-handshake op frame's purpose under the §15.5 step-4 session
+ * key.  The tag is DIRECTION-SEPARATED by role (offerer→answerer vs. answerer→offerer): each
+ * peer seals with its send-direction tag and opens only the OPPOSITE tag.  This means a relay
+ * that reflects a peer's own frame back to it cannot open (the receiver expects the other
+ * direction), and the two directions are cryptographically distinguished — not just
+ * non-colliding by random nonce.  Both peers agree on the mapping via the deterministic
+ * `isOfferer` (the bytewise-smaller blind id offers).
+ */
+const OP_FRAME_AAD_O2A = new TextEncoder().encode('licio.private.op-frame.v1.o2a');
+const OP_FRAME_AAD_A2O = new TextEncoder().encode('licio.private.op-frame.v1.a2o');
 
 function wrapDataChannel(
   dc: RtcDataChannelLike,
@@ -1114,7 +1148,11 @@ function wrapDataChannel(
   cleanup: () => void,
   p2p: ConnectPrivatePeerParams['p2p'],
   sessionKey: Uint8Array,
+  isOfferer: boolean,
 ): PeerChannel {
+  // Seal with our send direction; open only the peer's send (= our receive) direction.
+  const sendAad = isOfferer ? OP_FRAME_AAD_O2A : OP_FRAME_AAD_A2O;
+  const recvAad = isOfferer ? OP_FRAME_AAD_A2O : OP_FRAME_AAD_O2A;
   const buffered: Uint8Array[] = [];
   let listener: ((frame: Uint8Array) => void) | null = null;
   let closeListener: (() => void) | null = null;
@@ -1124,7 +1162,7 @@ function wrapDataChannel(
   // DROPPED fail-closed — a DTLS-terminating relay cannot inject or read op frames.
   const deliver = (sealed: Uint8Array): void => {
     void p2p
-      .aeadOpen(sessionKey, sealed, OP_FRAME_AAD)
+      .aeadOpen(sessionKey, sealed, recvAad)
       .then((frame) => {
         if (listener) listener(frame);
         else buffered.push(frame);
@@ -1153,7 +1191,7 @@ function wrapDataChannel(
 
   return {
     async send(frame: Uint8Array): Promise<void> {
-      const sealed = await p2p.aeadSeal(sessionKey, frame, OP_FRAME_AAD);
+      const sealed = await p2p.aeadSeal(sessionKey, frame, sendAad);
       // Copy into a standalone ArrayBuffer (the channel must own the bytes).
       dc.send(sealed.slice().buffer);
     },

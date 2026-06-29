@@ -257,6 +257,9 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         controls: liveControls,
         mode: liveMode as CourierMode,
         power,
+        // The structural §22.5 disclosure gate, read FRESH at each decision so a live
+        // revocation stops the radios (the controller refuses to start without it).
+        disclosureAcknowledged: () => getRadioDisclosureAcknowledged(),
         // Advertise our gaps (quarantined missing deps) so a peer serves them; the push rides the
         // CURRENT sharing scope (room allowlist + priority cap).  If the scope changes WHILE the pack
         // builds, rebuild with the new scope before returning, so a narrowed selection is honored (#N).
@@ -603,6 +606,11 @@ function blockedMessage(reason: CourierBlockedReason, t: ReturnType<typeof useT>
       return t(
         'courier.runner.blocked.radioUnavailable',
         'A radio could not start (permission denied or unavailable). The courier is stopped; sync still uses the network when online.',
+      );
+    case 'disclosure_unacknowledged':
+      return t(
+        'courier.runner.blocked.disclosure',
+        'Acknowledge what a nearby radio reveals before the courier can start.',
       );
     case 'disabled':
     case '':

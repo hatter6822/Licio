@@ -24,11 +24,16 @@ import { FragmentReassembler, fragmentMessage, MAX_REASSEMBLY_BYTES } from './fr
 export interface DataChannelLike {
   readyState: 'connecting' | 'open' | 'closing' | 'closed';
   binaryType?: string;
+  /** Outbound bytes still queued in the SCTP send buffer (present on a real channel). */
+  bufferedAmount?: number;
+  /** The drain low-water mark; `onbufferedamountlow` fires when `bufferedAmount` drops below it. */
+  bufferedAmountLowThreshold?: number;
   send(data: Uint8Array): void;
   close(): void;
   onmessage: ((event: { data: unknown }) => void) | null;
   onclose: (() => void) | null;
   onerror?: ((event: unknown) => void) | null;
+  onbufferedamountlow?: (() => void) | null;
 }
 
 export const WEBRTC_CAPABILITIES: TransportCapabilities = {
@@ -65,9 +70,20 @@ export class WebrtcTransport implements LcapTransport {
   private readonly reassembler = new FragmentReassembler();
   /** Monotonic per-send message id so the receiver can detect a message boundary. */
   private nextMessageId = 0;
+  /** SCTP backpressure (§22.6): pause fragment sends once this many bytes are queued. */
+  private static readonly DRAIN_HIGH_WATER = 8 * 1024 * 1024;
+  private static readonly DRAIN_LOW_WATER = 1 * 1024 * 1024;
+  /** Send promises parked on a full SCTP buffer, woken by `onbufferedamountlow`/`onclose`. */
+  private drainWaiters: Array<() => void> = [];
 
   constructor(private readonly channel: DataChannelLike) {
     channel.binaryType = 'arraybuffer';
+    // Wire SCTP backpressure when the channel exposes it (a real RTCDataChannel does; a
+    // minimal fake does not, so `send` falls back to no-wait there).
+    if ('bufferedAmountLowThreshold' in channel) {
+      channel.bufferedAmountLowThreshold = WebrtcTransport.DRAIN_LOW_WATER;
+      channel.onbufferedamountlow = () => this.wakeDrainWaiters();
+    }
     channel.onmessage = (event) => {
       const bytes = toBytes(event.data);
       if (!bytes) return;
@@ -92,6 +108,7 @@ export class WebrtcTransport implements LcapTransport {
     channel.onclose = () => {
       this.closed = true;
       this.drainWaiterWithNull();
+      this.wakeDrainWaiters(); // unblock any parked send so it observes the closed channel
     };
   }
 
@@ -103,10 +120,42 @@ export class WebrtcTransport implements LcapTransport {
     }
   }
 
+  private wakeDrainWaiters(): void {
+    const waiters = this.drainWaiters;
+    this.drainWaiters = [];
+    for (const wake of waiters) wake();
+  }
+
+  /**
+   * Park until the SCTP send buffer drains below the high-water mark (or the channel closes).
+   * Without this, sending a multi-MiB pack as ~1024 back-to-back fragments overruns the SCTP
+   * buffer and `channel.send` throws `OperationError` mid-stream — the peer then receives a
+   * truncated message its reassembler (correctly) rejects.  A safety timeout guarantees the
+   * send never hangs if the drain event does not fire.
+   */
+  private async awaitDrain(): Promise<void> {
+    const bufferedAmount = this.channel.bufferedAmount;
+    if (typeof bufferedAmount !== 'number') return; // a fake/non-buffering channel
+    if (bufferedAmount <= WebrtcTransport.DRAIN_HIGH_WATER) return;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      // Safety net: never hang the send if the drain event does not arrive.
+      const timer = setTimeout(finish, 2_000);
+      this.drainWaiters.push(finish); // woken by onbufferedamountlow / onclose / abort
+    });
+  }
+
   /** Fail-closed teardown: mark closed, wake any waiter with `null`, close the channel. */
   private abort(): void {
     this.closed = true;
     this.drainWaiterWithNull();
+    this.wakeDrainWaiters();
     if (this.channel.readyState !== 'closed') this.channel.close();
   }
 
@@ -129,6 +178,8 @@ export class WebrtcTransport implements LcapTransport {
     const messageId = this.nextMessageId;
     this.nextMessageId = (this.nextMessageId + 1) >>> 0; // wrap as a u32 (id need not be unique forever)
     for (const fragment of fragmentMessage(message, messageId)) {
+      // Backpressure BEFORE each fragment so a large pack does not overrun the SCTP buffer.
+      await this.awaitDrain();
       if (this.channel.readyState !== 'open') {
         throw new TransportUnavailableError('webrtc', 'data channel closed mid-send');
       }

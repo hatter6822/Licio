@@ -26,7 +26,10 @@ export interface BidiStreamLike {
     getWriter(): { write(b: Uint8Array): Promise<void>; close(): Promise<void> };
   };
   readonly readable: {
-    getReader(): { read(): Promise<{ value?: Uint8Array; done: boolean }> };
+    getReader(): {
+      read(): Promise<{ value?: Uint8Array; done: boolean }>;
+      cancel?(): Promise<void>;
+    };
   };
 }
 
@@ -45,10 +48,13 @@ export function isWebTransportSupported(): boolean {
 export class WebTransportTransport implements LcapTransport {
   readonly capabilities = WEBTRANSPORT_CAPABILITIES;
   private stream: BidiStreamLike | null = null;
+  /** Captured at `open` so `send` does not write after a cancelled/Stopped sync. */
+  private signal: AbortSignal | undefined;
 
   constructor(private readonly session: WebTransportLike) {}
 
-  async open(): Promise<void> {
+  async open(signal?: AbortSignal): Promise<void> {
+    this.signal = signal;
     try {
       await this.session.ready;
       this.stream = await this.session.createBidirectionalStream();
@@ -59,22 +65,42 @@ export class WebTransportTransport implements LcapTransport {
 
   async send(message: Uint8Array): Promise<void> {
     if (!this.stream) throw new TransportUnavailableError('webtransport', 'stream not open');
+    if (this.signal?.aborted)
+      throw new TransportUnavailableError('webtransport', 'aborted before send');
     const writer = this.stream.writable.getWriter();
     await writer.write(message);
     await writer.close();
   }
 
-  async receive(): Promise<Uint8Array | null> {
+  async receive(signal?: AbortSignal): Promise<Uint8Array | null> {
     if (!this.stream) return null;
+    const abort = signal ?? this.signal;
+    const cap = this.capabilities.maxExchangeBytes;
     const reader = this.stream.readable.getReader();
     const chunks: Uint8Array[] = [];
+    let total = 0;
     for (;;) {
+      if (abort?.aborted) {
+        await reader.cancel?.().catch(() => {});
+        return null;
+      }
       const { value, done } = await reader.read();
-      if (value) chunks.push(value);
+      if (value) {
+        total += value.length;
+        // The read loop is otherwise UNBOUNDED — enforce the declared per-exchange ceiling so
+        // a misbehaving server-mediated stream cannot exhaust memory before `readPack`'s caps.
+        if (total > cap) {
+          await reader.cancel?.().catch(() => {});
+          throw new TransportUnavailableError(
+            'webtransport',
+            `response exceeds the ${cap}-byte cap`,
+          );
+        }
+        chunks.push(value);
+      }
       if (done) break;
     }
     if (chunks.length === 0) return null;
-    const total = chunks.reduce((n, c) => n + c.length, 0);
     const out = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) {

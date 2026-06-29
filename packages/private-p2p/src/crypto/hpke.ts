@@ -167,9 +167,15 @@ export async function importRecipientPrivateScalar(
 
 async function dh(privateKey: CryptoKey, publicKeyRaw: Uint8Array): Promise<Uint8Array> {
   const pub = await getSubtle().importKey('raw', toBufferSource(publicKeyRaw), 'X25519', false, []);
-  return new Uint8Array(
+  const secret = new Uint8Array(
     await getSubtle().deriveBits({ name: 'X25519', public: pub }, privateKey, 256),
   );
+  // RFC 9180 §7.1.4 inherits RFC 7748's all-zero rejection for the DHKEM(X25519) DH.
+  // Enforce it explicitly so the KEM never proceeds on a non-contributory shared secret.
+  let acc = 0;
+  for (const b of secret) acc |= b;
+  if (acc === 0) throw new Error('DHKEM(X25519) produced an all-zero shared secret');
+  return secret;
 }
 
 async function extractAndExpand(dhBytes: Uint8Array, kemContext: Uint8Array): Promise<Uint8Array> {

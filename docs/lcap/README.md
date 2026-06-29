@@ -170,7 +170,9 @@ The remaining WS-R cards are **I/O integration** — the transport profiles' rem
 adapters (WS-R.15), the client surface polish (WS-R.17), and the network simulator
 (WS-R.18) — plus the live two-browser convergence E2E for the WS-S private plane.
 The optional, non-authoritative set-reconciliation filters (WS-R.7.3) are deferred by
-the spec itself.
+the spec itself.  Discovery currently uses a single 15-minute rendezvous time bucket, so
+peers whose clocks straddle a boundary may not discover each other until both roll into
+the same bucket (a known non-blocking residual; §5.4 metadata table).
 
 ## What is implemented (WS-R.0 — `packages/lcap`)
 
