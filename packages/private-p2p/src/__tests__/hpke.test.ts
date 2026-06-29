@@ -134,6 +134,28 @@ describe('HPKE base-mode RFC 9180 conformance (suite A.1)', () => {
       ),
     ).rejects.toMatchObject({ reason: 'malformed_sealed_invite' });
   });
+
+  it('maps a low-order/all-zero encapsulated key to a typed HpkeError on open', async () => {
+    // A compliant WebCrypto rejects the X25519 DH for a low-order `enc` (raw DOMException) BEFORE
+    // the explicit all-zero check; the wire-facing open path must still surface the typed
+    // HpkeError('open_failed') that malformed-invite handlers expect, not a raw DOMException.
+    const recipient = await generateRecipientKeyPair();
+    const sealed = await sealBase(recipient.publicKey, utf8('ctx'), new Uint8Array(0), utf8('m'));
+    const lowOrderEnc = new Uint8Array(32); // correct length, but an all-zero (low-order) point
+    const err = await openBase(
+      lowOrderEnc,
+      recipient.privateKey,
+      recipient.publicKey,
+      utf8('ctx'),
+      new Uint8Array(0),
+      sealed.ciphertext,
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(HpkeError);
+    expect(err).toMatchObject({ reason: 'open_failed' });
+  });
 });
 
 describe('invite seal / open (§10.3, §12.2)', () => {

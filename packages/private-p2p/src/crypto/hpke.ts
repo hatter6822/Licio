@@ -208,7 +208,21 @@ async function decap(
   recipientPrivateKey: CryptoKey,
   recipientPublicKeyRaw: Uint8Array,
 ): Promise<Uint8Array> {
-  const dhBytes = await dh(recipientPrivateKey, enc);
+  let dhBytes: Uint8Array;
+  try {
+    dhBytes = await dh(recipientPrivateKey, enc);
+  } catch (error) {
+    // The OPEN path is wire-facing: a tampered/low-order `enc` makes WebCrypto REJECT inside
+    // `importKey`/`deriveBits` (a compliant impl rejects a low-order key BEFORE the explicit
+    // all-zero check runs), surfacing a raw `DOMException`.  Map it to the typed
+    // `HpkeError('open_failed')` callers expect for a malformed invite.  (`dh`'s own all-zero
+    // `HpkeError` passes through unchanged.)
+    if (error instanceof HpkeError) throw error;
+    throw new HpkeError(
+      'open_failed',
+      'DHKEM(X25519) decapsulation failed (invalid encapsulated key)',
+    );
+  }
   const kemContext = concatBytes(enc, recipientPublicKeyRaw);
   return extractAndExpand(dhBytes, kemContext);
 }
