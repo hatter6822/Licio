@@ -330,7 +330,7 @@ jobs:
         with:
           name: build-artifacts
           path: apps/web/dist/
-      - name: Use the runner's JDK 21 (Capacitor 7 / AGP 8.7)
+      - name: Use the runner's JDK 21 (Capacitor 8 / AGP 8.13)
         run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - name: Cache Android SDK + Gradle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
@@ -359,7 +359,7 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
           set -o pipefail
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+            "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
           {
             echo "ANDROID_HOME=$ANDROID_HOME"
             echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
