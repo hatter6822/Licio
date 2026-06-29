@@ -330,7 +330,13 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
     if (params.initiator) {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await sendSignal({ kind: 'offer', sdp: offer.sdp ?? '' });
+      // `createOffer`/`setLocalDescription` can outlast `timeoutMs` (or the caller may abort
+      // mid-await); by here `controller` would already be aborted and `channelReady` rejected, so
+      // do NOT seal + POST the offer — that would be post-cancel signaling egress that needlessly
+      // wakes the remote for a connection this side is tearing down (mirrors the ICE-trickle guard).
+      if (!controller.signal.aborted) {
+        await sendSignal({ kind: 'offer', sdp: offer.sdp ?? '' });
+      }
     }
     const channel = await channelReady;
     opened = true;

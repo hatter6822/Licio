@@ -171,10 +171,16 @@ async function dh(privateKey: CryptoKey, publicKeyRaw: Uint8Array): Promise<Uint
     await getSubtle().deriveBits({ name: 'X25519', public: pub }, privateKey, 256),
   );
   // RFC 9180 §7.1.4 inherits RFC 7748's all-zero rejection for the DHKEM(X25519) DH.
-  // Enforce it explicitly so the KEM never proceeds on a non-contributory shared secret.
+  // Enforce it explicitly so the KEM never proceeds on a non-contributory shared secret.  This
+  // is wire-facing on the OPEN path (a tampered/low-order encapsulated key), so it throws the
+  // typed `HpkeError('open_failed')` the invite-open callers expect — not a plain `Error` that
+  // would escape their handling as an unexpected global error.  (On the seal path the recipient
+  // key comes from validated member state, so this is defensive there.)
   let acc = 0;
   for (const b of secret) acc |= b;
-  if (acc === 0) throw new Error('DHKEM(X25519) produced an all-zero shared secret');
+  if (acc === 0) {
+    throw new HpkeError('open_failed', 'DHKEM(X25519) produced an all-zero shared secret');
+  }
   return secret;
 }
 

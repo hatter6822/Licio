@@ -578,10 +578,12 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   let acceptedPush: ObjectStatusV2[] | undefined;
   let pushReceipts: ReceiptRecordV2[] | undefined;
   // A push pack can carry more objects than the response-array cap under the byte cap, and the
-  // server emits one `accepted_push` status (+ receipt) per object — so bound BOTH to the
-  // response-array caps and signal `partial` when truncated (the client re-exchanges the
-  // remainder; re-push is idempotent), rather than letting `buildExchangeResponse` throw on an
-  // over-cap server-generated response.
+  // server emits one `accepted_push` status per object.  Bound the returned statuses to the cap
+  // BEFORE issuing receipts so each receipt attests EXACTLY the objects we return — `issueReceipts`
+  // groups every same-outcome status into ONE receipt whose `subject_cids`/`status_detail` would
+  // otherwise cover all (omitted) objects, a huge payload attesting statuses absent from the
+  // truncated `accepted_push`.  The omitted objects are re-attested when the client re-exchanges
+  // (re-push is idempotent), signalled by `partial`.
   let pushTruncated = false;
   if (request.push_pack !== undefined) {
     const ingest = await ingestPackFrames(server, request.push_pack);
@@ -589,13 +591,11 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
       // A push pack that breaches the §27 caps fails the whole request (§22.1.1).
       return json(ingest.httpStatus, { error: ingest.error });
     }
-    const issued = await server.issueReceipts(ingest.statuses);
-    pushTruncated =
-      issued.statuses.length > SYNC_ARRAY_LIMITS.pushStatuses ||
-      issued.receipts.length > SYNC_ARRAY_LIMITS.receipts;
-    acceptedPush = issued.statuses.slice(0, SYNC_ARRAY_LIMITS.pushStatuses);
-    const receipts = issued.receipts.slice(0, SYNC_ARRAY_LIMITS.receipts);
-    if (receipts.length > 0) pushReceipts = receipts.map((r) => r.record);
+    pushTruncated = ingest.statuses.length > SYNC_ARRAY_LIMITS.pushStatuses;
+    const boundedStatuses = ingest.statuses.slice(0, SYNC_ARRAY_LIMITS.pushStatuses);
+    const issued = await server.issueReceipts(boundedStatuses);
+    acceptedPush = issued.statuses;
+    if (issued.receipts.length > 0) pushReceipts = issued.receipts.map((r) => r.record);
   }
 
   // 2) The server's frontier diff against the client's advertised frontier: what the

@@ -363,6 +363,41 @@ describe('WS-R.15.6a connectWebrtc', () => {
     ).rejects.toThrow(/aborted/);
   });
 
+  it('does NOT post the offer when aborted during createOffer/setLocalDescription', async () => {
+    // If the RTC offer setup outlasts the timeout (or the caller aborts mid-await), the offer must
+    // NOT be sealed + POSTed afterwards — that would be post-cancel signaling egress that wakes the
+    // remote for a connection this side is already tearing down.
+    const relay = makeRelay();
+    const key = await importSignalKey(KEY_BYTES);
+    const decision = await allow();
+    const link = new FakeLink();
+    await expect(
+      connectWebrtc({
+        decision,
+        signalKey: key,
+        roomIdHash: ROOM,
+        selfPeerKey: 'a',
+        remotePeerKey: 'b',
+        initiator: true,
+        postSignal: relay.postSignal,
+        pollSignal: relay.pollSignal,
+        pollIntervalMs: 1,
+        timeoutMs: 20, // fires DURING the slow setLocalDescription below
+        rtcFactory: (config) => {
+          const pc = new FakePeer(link, 'initiator', config);
+          const realSet = pc.setLocalDescription.bind(pc);
+          pc.setLocalDescription = async (): Promise<void> => {
+            await new Promise((r) => setTimeout(r, 60)); // outlasts timeoutMs ⇒ aborts mid-await
+            return realSet();
+          };
+          return pc;
+        },
+      }),
+    ).rejects.toThrow(/aborted/);
+    // The timer aborted during setLocalDescription, so the offer was never sealed + POSTed.
+    expect(relay.postsTo('b')).toBe(0);
+  });
+
   it('does NOT leave an unhandled channelReady rejection when the offer POST fails', async () => {
     // If the initiator's offer `sendSignal` rejects (e.g. offline), the function throws before
     // it ever awaits `channelReady`; the `finally`'s `controller.abort()` then rejects

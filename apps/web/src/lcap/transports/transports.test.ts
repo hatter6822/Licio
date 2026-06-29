@@ -152,6 +152,27 @@ describe('WebTransportTransport (§22.6 / WS-R.15.5)', () => {
     expect(await t.receive()).toBeNull(); // stream dropped
   });
 
+  it('aborts a WebTransport open that hangs on the handshake (and closes the session)', async () => {
+    // A session whose `ready` never resolves — a Stopped sync must reject the open PROMPTLY and
+    // close the session so the fallback chain can move on to HTTPS instead of stranding.
+    let closed = false;
+    const session: WebTransportLike = {
+      ready: new Promise<void>(() => {}), // never resolves
+      async createBidirectionalStream() {
+        throw new Error('unreachable');
+      },
+      close() {
+        closed = true;
+      },
+    };
+    const t = new WebTransportTransport(session);
+    const controller = new AbortController();
+    const opening = t.open(controller.signal);
+    controller.abort();
+    await expect(opening).rejects.toThrow(/aborted/);
+    expect(closed).toBe(true);
+  });
+
   it('aborts the receive loop when the running total exceeds the per-exchange cap', async () => {
     // A single over-cap chunk: the streaming read must reject rather than buffer it whole.
     const over = new Uint8Array(WEBTRANSPORT_CAPABILITIES.maxExchangeBytes + 1);

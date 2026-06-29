@@ -40,6 +40,31 @@ export interface WebTransportLike {
   close(): void;
 }
 
+/** Resolve `p`, but reject promptly if `signal` aborts first (the underlying promise keeps
+ *  running but the caller is no longer blocked on it).  Returns `p` unchanged when no signal. */
+function raceAbort<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return p;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void =>
+      reject(new TransportUnavailableError('webtransport', 'aborted while opening'));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** Whether the platform exposes the WebTransport API (else the registry omits it). */
 export function isWebTransportSupported(): boolean {
   return typeof (globalThis as { WebTransport?: unknown }).WebTransport !== 'undefined';
@@ -55,10 +80,21 @@ export class WebTransportTransport implements LcapTransport {
 
   async open(signal?: AbortSignal): Promise<void> {
     this.signal = signal;
+    if (signal?.aborted) throw new TransportUnavailableError('webtransport', 'aborted before open');
     try {
-      await this.session.ready;
-      this.stream = await this.session.createBidirectionalStream();
+      // Race the open handshake (`ready` then the bidi-stream) with the abort signal, so a Stopped
+      // sync does not strand on a hung WebTransport handshake — the fallback chain can move on to
+      // the HTTPS anchor instead of waiting for the WT attempt to eventually resolve or fail.
+      await raceAbort(this.session.ready, signal);
+      this.stream = await raceAbort(this.session.createBidirectionalStream(), signal);
     } catch (error) {
+      // Close the session so a blocked/aborted attempt does not linger.
+      try {
+        this.session.close();
+      } catch {
+        /* already closing/closed */
+      }
+      if (error instanceof TransportUnavailableError) throw error;
       throw new TransportUnavailableError('webtransport', String(error));
     }
   }
