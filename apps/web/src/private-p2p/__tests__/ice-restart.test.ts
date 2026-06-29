@@ -390,9 +390,18 @@ describe('WS-S.4.3 connectPrivatePeer — §15.4 ICE-restart recovery', () => {
     // invoke recovery.  The watcher must self-drive once on install, so an already-bad path starts
     // an ICE restart immediately rather than stranding the live signaling pump until some later
     // transition (which a stuck `disconnected` path may never deliver).
-    const { a, b, offerer } = await connectPair({ iceRestartGraceMs: 2 }, (pc) => {
-      pc.silentDisconnectOnFirstAnswer = true;
-    });
+    // This asserts the HAPPY recovery (the install-time self-drive heals an already-bad path),
+    // NOT exhaustion (covered separately with `healOnRestart: false`).  The heal traverses several
+    // async signaling hops, so under heavy CI coverage load a tiny grace + the default 3-retry cap
+    // could exhaust→tear down BEFORE the heal's state-change lands (a flake that never happens in
+    // production, where the grace is 3 s).  A generous grace + retry budget lets the heal win
+    // deterministically — it still cancels the loop as soon as it registers.
+    const { a, b, offerer } = await connectPair(
+      { iceRestartGraceMs: 25, maxIceRestarts: 50 },
+      (pc) => {
+        pc.silentDisconnectOnFirstAnswer = true;
+      },
+    );
     const off = offerer();
     // No state-change event fired after install — yet recovery still starts (the re-offer), driven
     // solely by the install-time self-check.  Without it this would hang at 0 forever.

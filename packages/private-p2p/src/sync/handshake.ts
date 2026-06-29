@@ -24,8 +24,18 @@ import {
   deriveChannelKey,
 } from './secure-channel.js';
 
-/** The current handshake protocol version (§15.5). */
-export const HANDSHAKE_PROTOCOL_VERSION = 1;
+/**
+ * The private-sync wire-protocol version (§15.5).  It versions the END-TO-END format both
+ * peers must agree on: the handshake transcript AND the post-handshake op-frame AEAD.  It is
+ * bound into the proof transcript and `verifyPeerHandshake` rejects a mismatch
+ * (`protocol_version_mismatch`), so it is the single negotiated value that lets two peers
+ * detect an incompatible build.  v2 introduced the direction-separated op-frame AAD (the
+ * carrier's `op-frame.v2.{o2a,a2o}`); because a skew fails the handshake cleanly, a peer still
+ * on a v1 build during a staggered PWA update is refused (and retries once both update) rather
+ * than completing the handshake and then silently dropping every op frame across the format
+ * change.  This is the SOLE source of truth — the carrier reads it (never a local duplicate).
+ */
+export const HANDSHAKE_PROTOCOL_VERSION = 2;
 
 /** The opening message each peer sends: version + ephemeral key + a fresh nonce. */
 export const handshakeHelloSchema = z

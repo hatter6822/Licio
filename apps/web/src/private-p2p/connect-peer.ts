@@ -222,12 +222,6 @@ export interface ConnectPrivatePeerParams {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-// v2 = the direction-separated post-handshake op-frame AAD (`*.o2a`/`*.a2o`).  The
-// handshake transcript binds this version and `verifyPeerHandshake` rejects a mismatch
-// (`protocol_version_mismatch`), so a peer still on the v1 bundle during a staggered PWA
-// update FAILS the handshake cleanly (and retries once both sides update) rather than
-// completing it and then silently dropping every op frame across the AAD change.
-const HANDSHAKE_VERSION = 2;
 const SIGNAL_TTL_MS = 5 * 60_000;
 
 interface DiscoveredPeer {
@@ -363,7 +357,7 @@ export async function connectPrivatePeer(
     ephemeral.privateKey,
     peer.peerSignalingPublicKey,
     {
-      protocolVersion: HANDSHAKE_VERSION,
+      protocolVersion: p2p.HANDSHAKE_PROTOCOL_VERSION,
       roomIdCommitment,
       epoch,
       ephemeralPublicKeyA: ephemeral.publicKey,
@@ -932,7 +926,7 @@ async function runHandshake(
 ): Promise<{ opStash: Uint8Array[]; sessionKey: Uint8Array; peerDeviceId: string }> {
   const { p2p, dc } = p;
   const ctx = {
-    protocolVersion: HANDSHAKE_VERSION,
+    protocolVersion: p2p.HANDSHAKE_PROTOCOL_VERSION,
     roomIdCommitment: p.roomIdCommitment,
     epoch: p.epoch,
   };
@@ -942,7 +936,7 @@ async function runHandshake(
     deviceId: p.selfDeviceId,
     ephemeralPublicKey: ephemeral.publicKey,
     helloNonce: p2p.randomBytes(32),
-    protocolVersion: HANDSHAKE_VERSION,
+    protocolVersion: p2p.HANDSHAKE_PROTOCOL_VERSION,
   });
 
   let remoteHello: HandshakeHello | undefined;
@@ -1135,16 +1129,17 @@ function toUint8(data: ArrayBuffer | ArrayBufferView): Uint8Array {
 }
 
 /**
- * The AEAD AAD binding a post-handshake op frame's purpose under the §15.5 step-4 session
- * key.  The tag is DIRECTION-SEPARATED by role (offerer→answerer vs. answerer→offerer): each
- * peer seals with its send-direction tag and opens only the OPPOSITE tag.  This means a relay
- * that reflects a peer's own frame back to it cannot open (the receiver expects the other
- * direction), and the two directions are cryptographically distinguished — not just
- * non-colliding by random nonce.  Both peers agree on the mapping via the deterministic
- * `isOfferer` (the bytewise-smaller blind id offers).
+ * The AEAD AAD binding a post-handshake op frame under the §15.5 step-4 session key.  The
+ * tag is DIRECTION-SEPARATED by role (offerer→answerer vs. answerer→offerer): each peer seals
+ * with its send-direction tag and opens only the OPPOSITE tag.  So a relay that reflects a
+ * peer's own frame back cannot open it, and the two directions are cryptographically
+ * distinguished — not merely non-colliding by random nonce.  Both peers agree on the mapping
+ * via the deterministic `isOfferer` (the bytewise-smaller blind id offers).  This is a
+ * `HANDSHAKE_PROTOCOL_VERSION`-2 wire format; a version skew is rejected at the handshake (see
+ * the constant), so within a live session both peers are always on the same op-frame format.
  */
-const OP_FRAME_AAD_O2A = new TextEncoder().encode('licio.private.op-frame.v1.o2a');
-const OP_FRAME_AAD_A2O = new TextEncoder().encode('licio.private.op-frame.v1.a2o');
+const OP_FRAME_AAD_O2A = new TextEncoder().encode('licio.private.op-frame.v2.o2a');
+const OP_FRAME_AAD_A2O = new TextEncoder().encode('licio.private.op-frame.v2.a2o');
 
 function wrapDataChannel(
   dc: RtcDataChannelLike,
