@@ -20,6 +20,7 @@ import type {
   PackHeaderV2,
   PackObject,
 } from '@licio/lcap';
+import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import { getLcapDb, LCAP_STORE } from './db.js';
 import {
   forEachByCursor,
@@ -91,37 +92,50 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   //    source-snapshot CIDs), NOT `record.deps`, which can be unauthenticated pack-table metadata a
   //    crafted record copied from an imported bundle to point at another room's held block (#HH).  A
   //    dep that resolves to a held block descriptor is included; one we don't hold is omitted.
-  const { decodeAndRouteRecord } = await import('@licio/lcap');
+  const { decodeAndRouteRecord, SERVER_CAPS } = await import('@licio/lcap');
   const depCids = new Set<string>();
   // The exported table `deps` per record — derived from the SIGNED body (record refs + block refs),
   // the SAME closure derivation, NOT the stored `record.deps` (which may carry a stale/unauthenticated
   // dep a recipient would then quarantine on while we omit the bytes) (#AE).
   const recordDeps = new Map<string, string[]>();
+  // §27.1: records whose SIGNED body declares MORE block OR record (parent) refs than the fan-out cap
+  // are OMITTED from the export entirely — NOT exported with a truncated table dep list, which would
+  // let a recipient commit the record without all its prerequisites (the import path trusts the table
+  // deps).  This mirrors the server's `rejected_resource_limit` and bounds the export at O(1) per
+  // over-cap record (the count check never spreads/iterates the full array) (#3).
+  const omittedRecordCids = new Set<string>();
   for (const record of records) {
     let decoded: ReturnType<typeof decodeAndRouteRecord>;
     try {
       decoded = decodeAndRouteRecord(record.body);
     } catch {
-      continue; // undecodable — export nothing further for it
+      continue; // undecodable — no body deps, but still exported as an opaque record
     }
-    if (decoded.kind !== 'contribution_event') continue;
+    if (decoded.kind !== 'contribution_event') continue; // non-contribution — no body deps, still exported
+    // Reject (omit) an over-cap record on EITHER the block OR the record edge — rather than truncate
+    // its deps, which would let a recipient commit it without all prerequisites (the shared gate the
+    // import + share paths use too, mirroring the server's two body-derived fan-out gates) (#3/#2).
+    if (isOverCapContribution(decoded, SERVER_CAPS.maxFanOut)) {
+      omittedRecordCids.add(record.recordCid);
+      continue;
+    }
+    const { cids: blockCids } = cappedBodyBlockCids(decoded, SERVER_CAPS.maxFanOut);
+    // Within the cap — emit the FULL closure (record refs + the complete block closure incl. the
+    // target snapshot, #1).  No truncation: an exported accepted record carries every prerequisite.
     const deps: string[] = [];
     if (decoded.prev_device_record_cid) deps.push(decoded.prev_device_record_cid);
     if (decoded.replaces_record_cid) deps.push(decoded.replaces_record_cid);
     if (decoded.target_record_cid) deps.push(decoded.target_record_cid);
     if (decoded.thread_root_cid) deps.push(decoded.thread_root_cid);
     for (const p of decoded.parent_record_cids ?? []) deps.push(p);
-    if (decoded.body_block_cid) deps.push(decoded.body_block_cid);
-    if (decoded.attachment_manifest_cid) deps.push(decoded.attachment_manifest_cid);
-    for (const s of decoded.source_snapshot_cids ?? []) deps.push(s);
-    if (decoded.target_source_snapshot_cid) deps.push(decoded.target_source_snapshot_cid);
+    for (const b of blockCids) deps.push(b);
     if (deps.length > 0) recordDeps.set(record.recordCid, deps);
     // The block subset of those refs is what we export bytes for (held only).
-    if (decoded.body_block_cid) depCids.add(decoded.body_block_cid);
-    if (decoded.attachment_manifest_cid) depCids.add(decoded.attachment_manifest_cid);
-    for (const s of decoded.source_snapshot_cids ?? []) depCids.add(s);
-    if (decoded.target_source_snapshot_cid) depCids.add(decoded.target_source_snapshot_cid);
+    for (const b of blockCids) depCids.add(b);
   }
+  // The exportable records + their proofs — an over-cap record (and its now-orphan proofs) is dropped.
+  const exportRecords = records.filter((r) => !omittedRecordCids.has(r.recordCid));
+  const exportProofs = proofs.filter((p) => !omittedRecordCids.has(p.recordCid));
   const blocks: Array<{ cid: string; bytes: Uint8Array }> = [];
   for (const cid of depCids) {
     const descriptor = await readBlockDescriptor(db, cid);
@@ -134,7 +148,7 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   const objects: PackObject[] = [];
   const items: ExportItem[] = [];
 
-  for (const record of records) {
+  for (const record of exportRecords) {
     const priority = asPriority(record.priority);
     // Deps from the SIGNED body (#AE), not the stored table metadata — so a recipient never
     // quarantines on a stale dep we don't carry.
@@ -160,7 +174,7 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
     });
   }
 
-  for (const proof of proofs) {
+  for (const proof of exportProofs) {
     objects.push({
       cid: proof.proofCid,
       cidKind: 'proof',
@@ -207,8 +221,8 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   return {
     objects,
     items,
-    recordCount: records.length,
-    proofCount: proofs.length,
+    recordCount: exportRecords.length,
+    proofCount: exportProofs.length,
     blockCount: blocks.length,
   };
 }

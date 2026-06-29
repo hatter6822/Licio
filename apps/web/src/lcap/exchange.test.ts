@@ -13,6 +13,7 @@ import {
   buildClientExchangeRequest,
   ingestClientExchangeResponse,
   ingestPackIntoStore,
+  requestHasUnfilledWants,
   respondToClientExchange,
 } from './exchange.js';
 import type { RecordRow } from './store.js';
@@ -801,7 +802,67 @@ describe('client §16 exchange engine', () => {
     expect(await respondToClientExchange(peerB, new Uint8Array([1, 2, 3, 4]))).toBeNull();
   });
 
+  it('SECURITY: never serves an OVER-CAP record (repackHeldObjects would expand its deps O(n)) (#4)', async () => {
+    const lcap = await import('@licio/lcap');
+    // B holds a PUBLIC contribution whose signed body declares over-cap record fan-out (a legacy /
+    // pre-fix record).  Serving it would make repackHeldObjects expand its full parent array into the
+    // pack table — O(n) work / an oversized response for an invalid record.  It must be skipped.
+    const overParents = await Promise.all(
+      Array.from({ length: lcap.SERVER_CAPS.maxFanOut + 20 }, (_, i) =>
+        cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff, 4])),
+      ),
+    );
+    const overCapRecordCid = await putPublicRecord(peerB, lcap, 'public', {
+      recordDeps: overParents,
+    });
+    // A wants exactly that record.
+    await quarantineMissing(peerA, 'parent', [overCapRecordCid]);
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+
+    const response = await respondToClientExchange(peerB, request);
+    expect(response).not.toBeNull();
+    if (!response) return;
+    const decoded = lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, response);
+    expect(decoded.response_pack).toBeUndefined(); // the over-cap record was NOT served (#4)
+  });
+
   it('ingestPackIntoStore refuses non-pack bytes (fail-closed, commits nothing)', async () => {
     expect(await ingestPackIntoStore(peerA, new Uint8Array([0, 1, 2, 3]))).toBeNull();
+  });
+});
+
+describe('requestHasUnfilledWants — post-round anchor decision (#1/#BK)', () => {
+  it('treats a want as FILLED once its CID is held, even though the quarantine row lingers', async () => {
+    // Quarantine rows are NOT promoted on ingest, so after a peer push delivers a wanted block the
+    // row still lists it — the anchor decision must key off what is HELD, not the stale row.
+    const aBytes = new Uint8Array([10, 11]);
+    const bBytes = new Uint8Array([12, 13]);
+    const a = await cidFor('block', aBytes);
+    const b = await cidFor('block', bBytes);
+    await quarantineMissing(peerA, 'parent', [a, b]); // advertise BOTH as wants
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+
+    expect(await requestHasUnfilledWants(peerA, request)).toBe(true); // neither held → real gaps
+
+    // Hold one (as a push/response would deliver it) — the other is still an unfilled gap.
+    await putBlock(peerA, { blockCid: a, state: 'integrity_verified', size: aBytes.length }, [
+      aBytes,
+    ]);
+    expect(await requestHasUnfilledWants(peerA, request)).toBe(true);
+
+    // Hold both → NO gap remains even though the stale quarantine row still lists them.
+    await putBlock(peerA, { blockCid: b, state: 'integrity_verified', size: bBytes.length }, [
+      bBytes,
+    ]);
+    expect(await requestHasUnfilledWants(peerA, request)).toBe(false);
+  });
+
+  it('returns false for a request advertising no wants', async () => {
+    const request = await buildClientExchangeRequest(peerA, 'courier'); // empty quarantine → no wants
+    expect(await requestHasUnfilledWants(peerA, request)).toBe(false);
+  });
+
+  it('fails OPEN (true) for an undecodable request — back off to the authoritative anchor', async () => {
+    expect(await requestHasUnfilledWants(peerA, new Uint8Array([0, 1, 2, 3]))).toBe(true);
   });
 });

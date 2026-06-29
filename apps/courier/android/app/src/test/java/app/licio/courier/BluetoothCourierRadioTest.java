@@ -24,6 +24,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
+import android.bluetooth.BluetoothGattServer;
 import android.bluetooth.BluetoothGattServerCallback;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
@@ -48,6 +49,9 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.Implementation;
+import org.robolectric.annotation.Implements;
+import org.robolectric.shadows.ShadowBluetoothManager;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
@@ -550,6 +554,79 @@ public class BluetoothCourierRadioTest {
         assertNotNull("startBleAdvertising installed a callback", radio.advertiseCallback);
         radio.advertiseCallback.onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE);
         assertEquals("advertise", rec.startFailedOp);
+    }
+
+    /** A BluetoothManager shadow whose openGattServer returns null — modelling a controller where the
+     *  BLE GATT server cannot be opened (so the peripheral can never be advertised / discovered). */
+    @Implements(BluetoothManager.class)
+    public static class ShadowNoGattServerManager extends ShadowBluetoothManager {
+        @Implementation
+        protected BluetoothGattServer openGattServer(
+                Context context, BluetoothGattServerCallback callback) {
+            return null;
+        }
+
+        @Implementation
+        protected BluetoothGattServer openGattServer(
+                Context context, BluetoothGattServerCallback callback, int transport) {
+            return null;
+        }
+    }
+
+    @Test
+    @Config(shadows = {ShadowNoGattServerManager.class})
+    public void aNullGattServerSurfacesAnAdvertiseFailure() {
+        // On a controller where openGattServer returns null the BLE peripheral cannot be set up.  The
+        // advertiser is started ONLY from onServiceAdded, so without surfacing the failure HERE no
+        // startFailed would reach the controller — the UI would show Bluetooth running while unbonded
+        // peers cannot discover/connect.  startAdvertising must surface an advertise start failure,
+        // like the later missing-advertiser / service-add failure paths (#BL).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startAdvertising();
+        assertEquals("a null GATT server surfaces an advertise failure", "advertise",
+                rec.startFailedOp);
+        radio.stop();
+    }
+
+    /** A BluetoothManager shadow that returns null from openGattServer AFTER running an injected hook —
+     *  so a test can race a stop()/Stop→Start DURING the (blocking) openGattServer call. */
+    @Implements(BluetoothManager.class)
+    public static class ShadowRacingNullGattManager extends ShadowBluetoothManager {
+        static Runnable onOpenGattServer;
+
+        @Implementation
+        protected BluetoothGattServer openGattServer(
+                Context context, BluetoothGattServerCallback callback) {
+            if (onOpenGattServer != null) onOpenGattServer.run();
+            return null;
+        }
+
+        @Implementation
+        protected BluetoothGattServer openGattServer(
+                Context context, BluetoothGattServerCallback callback, int transport) {
+            if (onOpenGattServer != null) onOpenGattServer.run();
+            return null;
+        }
+    }
+
+    @Test
+    @Config(shadows = {ShadowRacingNullGattManager.class})
+    public void aNullGattServerFromAStoppedSessionIsNotSurfaced() {
+        // openGattServer can block, so a stop() can race it and the old call then return null.  That
+        // stale null-GATT failure must NOT reach a controller that already stopped — it is gated on
+        // running/generation like the advertise-failure paths, else it would tear down a courier that
+        // a quick Stop→Start has freshly restarted (#BL2).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        // Simulate stop() landing DURING openGattServer: the hook runs mid-call, then it returns null.
+        ShadowRacingNullGattManager.onOpenGattServer = radio::stop;
+        try {
+            radio.startAdvertising();
+        } finally {
+            ShadowRacingNullGattManager.onOpenGattServer = null;
+        }
+        assertNull("a null-GATT failure from a stopped session is dropped", rec.startFailedOp);
     }
 
     @Test

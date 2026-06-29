@@ -29,6 +29,7 @@ import {
   type CommitCounts,
   type ExchangeScope,
   ingestClientExchangeResponse,
+  requestHasUnfilledWants,
 } from '../exchange.js';
 import { type ConnectLcapWebrtcParams, connectLcapWebrtcChannel } from './connect-webrtc.js';
 import type { HttpsTransportConfig } from './https.js';
@@ -91,6 +92,10 @@ export async function syncRoomOverP2p(
 
   // 1) Prefer the live WebRTC peer — a real bidirectional exchange over one duplex channel.
   let channel: Awaited<ReturnType<typeof connectLcapWebrtcChannel>> | null = null;
+  // What the WebRTC round COMMITTED this call (null if WebRTC didn't run / served nothing).  Captured
+  // OUTSIDE the try so the anchor-fallback can REPORT this real progress rather than a false failure
+  // when the anchor leg cannot complete (the back-stop's contract: `null` = EVERY path failed) (#3).
+  let webrtcIngested: CommitCounts | null = null;
   try {
     // Public content: derive the shared signaling key from the public room hash so any public
     // peer can join the rendezvous (signaling secrecy is not the trust root here).
@@ -122,12 +127,18 @@ export async function syncRoomOverP2p(
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
-    // A successful WebRTC exchange is one where the peer was REACHABLE — either it served us content
-    // (`ingested`) OR we served it ours (`served`, e.g. a direct sync where only the OTHER device was
-    // missing our records).  Either way the P2P round happened, so do NOT fall through to the
-    // authoritative anchor (which would needlessly re-upload our request + push_pack to the server).
-    // Only a round that moved nothing (peer unreachable / unresponsive) falls through.
-    if (out.ingested !== null || out.served) {
+    webrtcIngested = out.ingested; // real progress this round — preserved for the anchor-fail fallback
+    // Suppress the authoritative anchor only when the round did SOMETHING (served us a response, or
+    // we served the peer) AND no advertised want remains unfilled.  Re-check after ANY round — a
+    // FULL, PARTIAL, push-only, or served-only ingest — keying off what is now HELD (quarantine rows
+    // are not promoted on ingest, so the row alone is stale; the peer's push fills wants without
+    // surfacing in `out.ingested`).  A PARTIAL WebRTC ingest that leaves some advertised CIDs absent
+    // therefore still backs off to the anchor, which can fill the rest, instead of stranding them
+    // until a later sync (#BK/#1/#2).
+    if (
+      (out.ingested !== null || out.served) &&
+      !(await requestHasUnfilledWants(params.db, request))
+    ) {
       return { transport: 'webrtc', ingested: out.ingested };
     }
   } catch {
@@ -157,13 +168,30 @@ export async function syncRoomOverP2p(
     params.signal,
     'public',
   );
-  if (!anchor) return null;
+  // The anchor leg cannot complete (server offline) — but a PARTIAL WebRTC round may have already
+  // committed content this call.  Report that real progress rather than a false failure: `null` is
+  // reserved for "EVERY path failed", which is untrue when WebRTC ingested something (#3).
+  if (!anchor) {
+    return webrtcIngested !== null ? { transport: 'webrtc', ingested: webrtcIngested } : null;
+  }
   // The HTTPS transport does not thread the AbortSignal into fetch, so the anchor request can still
   // COMPLETE after a Cancel/unmount fired mid-flight — re-check before COMMITTING its response, so a
   // cancelled sync never mutates the local store after the UI owner is gone (#JJ).
   if (params.signal?.aborted) return null;
   // Room-scoped on the fallback too: the server serves explicit wants by CID with no room scope, so
-  // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).
-  const ingested = await ingestClientExchangeResponse(params.db, anchor.response, params.scope);
+  // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).  The
+  // abort predicate is threaded to the LEAF so a Cancel/unmount DURING readBundleForImport /
+  // importBundleObjects suppresses the store write, not just the pre-import check (#BJ).
+  const ingested = await ingestClientExchangeResponse(
+    params.db,
+    anchor.response,
+    params.scope,
+    () => !(params.signal?.aborted ?? false),
+  );
+  // The anchor served no usable pack, but WebRTC did make progress this round — report the WebRTC
+  // result so the caller sees the real partial success, not an anchor round that moved nothing (#3).
+  if (ingested === null && webrtcIngested !== null) {
+    return { transport: 'webrtc', ingested: webrtcIngested };
+  }
   return { transport: anchor.transport, ingested };
 }

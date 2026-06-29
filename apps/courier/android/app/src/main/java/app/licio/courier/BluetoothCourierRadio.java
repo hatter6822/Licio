@@ -517,11 +517,35 @@ public class BluetoothCourierRadio implements CourierRadio {
     @SuppressWarnings("MissingPermission")
     private void startBleGattServer() {
         BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
-        if (bm == null) return;
+        if (bm == null) {
+            // No BluetoothManager ⇒ the BLE peripheral cannot be set up.  Surface it like the
+            // null-GATT-server path below, rather than returning silently while the controller shows
+            // Bluetooth running (symmetry with the missing-advertiser / service-add failure paths).
+            // Gate on `running` so a failure is never delivered to a controller that already stopped.
+            if (running.get()) {
+                events.onStartFailed("advertise", new IllegalStateException("ble_manager_unavailable"));
+            }
+            return;
+        }
         // A fresh server generation: the new callback drops any delayed event from the prior server.
-        gattServerCallback = newGattServerCallback(++bleServerGeneration);
+        // Capture the increment result ONCE (no second volatile read) so the gate's `gen` can never
+        // diverge from the generation the callback is bound to.
+        final long gen = ++bleServerGeneration;
+        gattServerCallback = newGattServerCallback(gen);
         gattServer = bm.openGattServer(ctx, gattServerCallback);
-        if (gattServer == null) return;
+        if (gattServer == null) {
+            // The advertiser is started ONLY from onServiceAdded, so a null GATT server means no
+            // advertise failure would otherwise reach the controller — the UI would show Bluetooth
+            // running while unbonded peers cannot discover/connect.  Surface it like the later
+            // missing-advertiser / service-add failure paths (#BL).  openGattServer can block, so a
+            // stop() / Stop→Start can race it: DROP a failure from a stopped (running=false) OR
+            // superseded (the generation was bumped while this call was in flight) session, so a stale
+            // failure can never tear down a freshly started courier (matches the advertise paths) (#BL2).
+            if (running.get() && gen == bleServerGeneration) {
+                events.onStartFailed("advertise", new IllegalStateException("ble_gatt_server_unavailable"));
+            }
+            return;
+        }
         BluetoothGattService service = buildCourierGattService();
         gattCharacteristic = service.getCharacteristic(BLE_CHAR_UUID);
         // addService is ASYNC (completes via onServiceAdded).  Advertising is started ONLY from
