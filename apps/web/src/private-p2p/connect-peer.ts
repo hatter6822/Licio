@@ -223,6 +223,15 @@ export interface ConnectPrivatePeerParams {
 }
 
 const SIGNAL_TTL_MS = 5 * 60_000;
+// The §15.4 signaling-channel KDF transcript version, DELIBERATELY DECOUPLED from the wire
+// `HANDSHAKE_PROTOCOL_VERSION`.  The signaling layer (X25519-ECDH + AES-GCM sealing of SDP/ICE)
+// has not changed, so a wire-version bump must NOT change this transcript — otherwise two peers
+// on different builds would derive different signaling keys, `openSignal` would drop every
+// offer/answer, and the connect would burn the full timeout instead of reaching the fast, typed
+// `protocol_version_mismatch` at the handshake.  Keeping it stable lets the data channel ALWAYS
+// establish across a version skew so the handshake (which DOES bind the wire version) rejects an
+// incompatible peer promptly.  Bump this only if the signaling protocol itself changes.
+const SIGNALING_TRANSCRIPT_VERSION = 1;
 
 interface DiscoveredPeer {
   readonly peerBlindId: string;
@@ -352,12 +361,15 @@ export async function connectPrivatePeer(
     await sleep(pollIntervalMs);
   }
 
-  // 3. Derive the pairwise signaling channel key (transcript-bound; both peers agree).
+  // 3. Derive the pairwise signaling channel key (transcript-bound; both peers agree).  This
+  //    uses the STABLE signaling-transcript version, NOT the wire `HANDSHAKE_PROTOCOL_VERSION`,
+  //    so a version-skewed peer can still exchange SDP/ICE and open the channel — the wire-version
+  //    check is the handshake's job (it fails fast + typed rather than timing out the signaling).
   const channelKey = await p2p.deriveChannelKey(
     ephemeral.privateKey,
     peer.peerSignalingPublicKey,
     {
-      protocolVersion: p2p.HANDSHAKE_PROTOCOL_VERSION,
+      protocolVersion: SIGNALING_TRANSCRIPT_VERSION,
       roomIdCommitment,
       epoch,
       ephemeralPublicKeyA: ephemeral.publicKey,

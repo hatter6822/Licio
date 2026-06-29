@@ -438,6 +438,76 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     if (settled[1].status === 'fulfilled') settled[1].value.channel.close();
   });
 
+  it('a wire-version skew establishes signaling but fails FAST at the handshake (not a timeout)', async () => {
+    // Peer A is on the PREVIOUS wire build (HANDSHAKE_PROTOCOL_VERSION = 1); peer B is current (2).
+    // Because the signaling-channel KDF transcript is DECOUPLED from the wire version, both still
+    // derive the SAME signaling key and exchange SDP/ICE — so the skew is caught promptly at the
+    // §15.5 handshake (`protocol_version_mismatch`), NOT by burning the connect timeout because the
+    // signaling never opened.
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-skew',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const devB = await p2p.generateDeviceSigningKeyPair();
+    const devAPub = p2p.toBase64Url(
+      await p2p.exportPublicKeyRaw(created.founder.signingKeyPair.publicKey),
+    );
+    const devBPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(devB.publicKey));
+    const resolve = (
+      id: string,
+    ): { signingPublicKey: string; activeAtEpoch: boolean } | undefined => {
+      if (id === 'founder-dev') return { signingPublicKey: devAPub, activeAtEpoch: true };
+      if (id === 'device-b') return { signingPublicKey: devBPub, activeAtEpoch: true };
+      return undefined;
+    };
+    // Peer A's view of the wire version is the PREVIOUS one.
+    const p2pV1 = { ...p2p, HANDSHAKE_PROTOCOL_VERSION: 1 } as unknown as typeof p2p;
+    const rendezvous = inMemoryRendezvous();
+    const link = new FakeLink();
+    const base = {
+      rendezvous,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey,
+      transportMode: 'direct_allowed' as const,
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 3_000,
+      rtcFactory: () => new FakePeer(link),
+    };
+    const settled = await Promise.allSettled([
+      connectPrivatePeer({
+        ...base,
+        p2p: p2pV1,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: resolve,
+      }),
+      connectPrivatePeer({
+        ...base,
+        p2p,
+        selfDeviceId: 'device-b',
+        selfSigningKey: devB.privateKey,
+        resolveDevice: resolve,
+      }),
+    ]);
+    // Both peers reject with the TYPED handshake version mismatch (signaling reached the handshake),
+    // not 'timeout' (which is what a version-coupled signaling key would have produced).
+    for (const r of settled) {
+      expect(r.status).toBe('rejected');
+      if (r.status === 'rejected') {
+        expect((r.reason as ConnectPrivatePeerError).reason).toBe(
+          'handshake_protocol_version_mismatch',
+        );
+      }
+    }
+  });
+
   it('FAILS CLOSED when the peer device is not registered (handshake rejects)', async () => {
     const p2p = await import('@licio/private-p2p');
     const created = await p2p.createPrivateRoom({
