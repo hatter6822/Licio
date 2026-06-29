@@ -73,6 +73,8 @@ export class WebrtcTransport implements LcapTransport {
   /** SCTP backpressure (§22.6): pause fragment sends once this many bytes are queued. */
   private static readonly DRAIN_HIGH_WATER = 8 * 1024 * 1024;
   private static readonly DRAIN_LOW_WATER = 1 * 1024 * 1024;
+  /** Bound on consecutive 2 s drain waits before declaring the channel stuck (≈60 s). */
+  private static readonly MAX_DRAIN_WAITS = 30;
   /** Send promises parked on a full SCTP buffer, woken by `onbufferedamountlow`/`onclose`. */
   private drainWaiters: Array<() => void> = [];
 
@@ -126,18 +128,10 @@ export class WebrtcTransport implements LcapTransport {
     for (const wake of waiters) wake();
   }
 
-  /**
-   * Park until the SCTP send buffer drains below the high-water mark (or the channel closes).
-   * Without this, sending a multi-MiB pack as ~1024 back-to-back fragments overruns the SCTP
-   * buffer and `channel.send` throws `OperationError` mid-stream — the peer then receives a
-   * truncated message its reassembler (correctly) rejects.  A safety timeout guarantees the
-   * send never hangs if the drain event does not fire.
-   */
-  private async awaitDrain(): Promise<void> {
-    const bufferedAmount = this.channel.bufferedAmount;
-    if (typeof bufferedAmount !== 'number') return; // a fake/non-buffering channel
-    if (bufferedAmount <= WebrtcTransport.DRAIN_HIGH_WATER) return;
-    await new Promise<void>((resolve) => {
+  /** Wait for ONE drain signal — `onbufferedamountlow` / `onclose` / `abort` — or a 2 s safety
+   *  timeout so a missing event never hangs the wait (the caller RE-CHECKS `bufferedAmount`). */
+  private waitForDrainEvent(): Promise<void> {
+    return new Promise<void>((resolve) => {
       let settled = false;
       const finish = (): void => {
         if (settled) return;
@@ -145,10 +139,33 @@ export class WebrtcTransport implements LcapTransport {
         clearTimeout(timer);
         resolve();
       };
-      // Safety net: never hang the send if the drain event does not arrive.
       const timer = setTimeout(finish, 2_000);
-      this.drainWaiters.push(finish); // woken by onbufferedamountlow / onclose / abort
+      this.drainWaiters.push(finish);
     });
+  }
+
+  /**
+   * Park until the SCTP send buffer drains below the high-water mark (or the channel closes).
+   * Without this, sending a multi-MiB pack as ~1024 back-to-back fragments overruns the SCTP
+   * buffer and `channel.send` throws `OperationError` mid-stream — the peer then receives a
+   * truncated message its reassembler (correctly) rejects.  Re-checks `bufferedAmount` after each
+   * wait: the safety timeout must NEVER let a still-full buffer through (resuming sends while SCTP
+   * is full would defeat the backpressure and risk `OperationError` / an unbounded send buffer).
+   * If it never drains within the bound, the send FAILS so the exchange falls over.
+   */
+  private async awaitDrain(): Promise<void> {
+    const ch = this.channel;
+    if (typeof ch.bufferedAmount !== 'number') return; // a fake/non-buffering channel
+    let waits = 0;
+    while (
+      ch.readyState === 'open' &&
+      (ch.bufferedAmount ?? 0) > WebrtcTransport.DRAIN_HIGH_WATER
+    ) {
+      if (++waits > WebrtcTransport.MAX_DRAIN_WAITS) {
+        throw new TransportUnavailableError('webrtc', 'SCTP send buffer did not drain');
+      }
+      await this.waitForDrainEvent();
+    }
   }
 
   /** Fail-closed teardown: mark closed, wake any waiter with `null`, close the channel. */

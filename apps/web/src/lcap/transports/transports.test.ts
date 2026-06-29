@@ -152,6 +152,36 @@ describe('WebTransportTransport (§22.6 / WS-R.15.5)', () => {
     expect(await t.receive()).toBeNull(); // stream dropped
   });
 
+  it('aborts a WebTransport send that blocks on backpressure (and closes the session)', async () => {
+    // A writer whose `write()` never resolves (SCTP backpressure) — an abort must unwind the send
+    // promptly and close the session, so `runExchangeRound` reaches its fallback instead of hanging.
+    let closed = false;
+    const session: WebTransportLike = {
+      ready: Promise.resolve(),
+      async createBidirectionalStream() {
+        return {
+          writable: {
+            getWriter: () => ({
+              write: () => new Promise<void>(() => {}), // never resolves (backpressured)
+              close: () => new Promise<void>(() => {}),
+            }),
+          },
+          readable: { getReader: () => ({ read: async () => ({ done: true }) }) },
+        };
+      },
+      close() {
+        closed = true;
+      },
+    };
+    const t = new WebTransportTransport(session);
+    const controller = new AbortController();
+    await t.open(controller.signal);
+    const sending = t.send(new Uint8Array([1, 2, 3]));
+    controller.abort();
+    await expect(sending).rejects.toThrow(/aborted/);
+    expect(closed).toBe(true);
+  });
+
   it('aborts a WebTransport open that hangs on the handshake (and closes the session)', async () => {
     // A session whose `ready` never resolves — a Stopped sync must reject the open PROMPTLY and
     // close the session so the fallback chain can move on to HTTPS instead of stranding.

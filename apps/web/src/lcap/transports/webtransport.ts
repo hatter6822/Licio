@@ -45,8 +45,7 @@ export interface WebTransportLike {
 function raceAbort<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return p;
   return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void =>
-      reject(new TransportUnavailableError('webtransport', 'aborted while opening'));
+    const onAbort = (): void => reject(new TransportUnavailableError('webtransport', 'aborted'));
     if (signal.aborted) {
       onAbort();
       return;
@@ -104,8 +103,22 @@ export class WebTransportTransport implements LcapTransport {
     if (this.signal?.aborted)
       throw new TransportUnavailableError('webtransport', 'aborted before send');
     const writer = this.stream.writable.getWriter();
-    await writer.write(message);
-    await writer.close();
+    try {
+      // Race the write + close with the abort signal: under SCTP backpressure `write`/`close` can
+      // block, and observing the signal only beforehand would strand `runExchangeRound` awaiting
+      // `send()` (never reaching its `finally`/`close()` or the HTTPS fallback).  On abort, close
+      // the session so the stuck upload unwinds.
+      await raceAbort(writer.write(message), this.signal);
+      await raceAbort(writer.close(), this.signal);
+    } catch (error) {
+      try {
+        this.session.close();
+      } catch {
+        /* already closing/closed */
+      }
+      if (error instanceof TransportUnavailableError) throw error;
+      throw new TransportUnavailableError('webtransport', String(error));
+    }
   }
 
   async receive(signal?: AbortSignal): Promise<Uint8Array | null> {
