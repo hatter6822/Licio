@@ -201,7 +201,7 @@ jobs:
           name: build-artifacts
           path: apps/web/dist/
       - name: Cache Playwright browsers
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('apps/web/node_modules/@playwright/test/package.json') }}
@@ -333,7 +333,7 @@ jobs:
       - name: Use the runner's JDK 21 (Capacitor 7 / AGP 8.7)
         run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - name: Cache Android SDK + Gradle
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/android-sdk
