@@ -301,10 +301,13 @@ describe('InMemoryRendezvousStore — signal-queue DoS caps (§27, server-blind)
     expect(drained.length).toBe(MAX_SIGNALS_PER_SENDER);
   });
 
-  it('PRESERVES the earliest bootstrap offer against a later flood (drop-newest)', async () => {
-    const store = new InMemoryRendezvousStore();
-    await store.putSignal(sig('peerA', 'THE-OFFER')); // sent FIRST
-    // A flood from many distinct senders tries to fill the rest of the queue.
+  it('PRESERVES the earliest bootstrap offer against an OVER-REPRESENTED flood (hogs evicted first)', async () => {
+    // RNG → ~1 makes the (rare) random-eviction branch target the NEWEST slot; the deterministic
+    // OVER-REPRESENTED-hog eviction handles the rest.  THE-OFFER is the OLDEST slot (index 0), which no
+    // eviction path touches — the over-represented flood senders lose their slots first.
+    const store = new InMemoryRendezvousStore(() => 0.999_999);
+    await store.putSignal(sig('peerA', 'THE-OFFER')); // sent FIRST (index 0)
+    // A flood from many distinct senders, EACH at the per-sender cap (over-represented), fills the queue.
     for (let s = 0; s < 20; s++) {
       for (let i = 0; i < MAX_SIGNALS_PER_SENDER; i++)
         await store.putSignal(sig(`flood-${s}`, `j${s}-${i}`));

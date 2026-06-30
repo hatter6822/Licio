@@ -207,17 +207,22 @@ export class InMemoryRendezvousStore implements RendezvousStore {
     for (const s of queue) if (s.senderBlindId === signal.senderBlindId) fromSender += 1;
     if (fromSender >= MAX_SIGNALS_PER_SENDER) return Promise.resolve(); // back-pressure the sender
     if (queue.length >= MAX_SIGNALS_PER_PEER) {
-      // FAIR eviction (PRIV-API-RENDEZVOUS-3/5): instead of drop-newest, make room by evicting the
-      // OLDEST signal from the sender holding STRICTLY MORE slots than THIS sender will hold AFTER
-      // inserting (`fromSender + 1`) — so an under-represented sender displaces an over-represented
-      // flooder, but a SINGLETON can NEVER evict another SINGLETON.  The threshold MUST be
-      // `fromSender + 1`, not `fromSender`: `sender_blind_id` is unauthenticated (no Tier-2), so a
-      // flooder fills the queue with one-signal forged ids; with a `fromSender` (=0 for a fresh id)
-      // threshold each new forged singleton would evict an EXISTING one-slot sender — and the FIRST
-      // such victim is the honest bootstrap offer queued earliest, starving the WebRTC dial despite
-      // the per-sender cap (PRIV-API-RENDEZVOUS-5).  Requiring a victim STRICTLY heavier than this
-      // sender's post-insert count protects every already-queued singleton: when no sender is
-      // over-represented (all at parity), the NEW signal is drop-newest, never an honest one.
+      // FAIR eviction (PRIV-API-RENDEZVOUS-3/5/6).  `sender_blind_id` is unauthenticated (no Tier-2),
+      // so a flooder saturates the queue with one-signal forged ids — and NEITHER deterministic policy
+      // is safe: evicting the OLDEST singleton lets a forged flood evict an already-queued honest offer
+      // (RENDEZVOUS-3), while dropping the NEWEST blocks a fresh honest offer arriving into a saturated
+      // queue (RENDEZVOUS-5).  So we ALWAYS admit, and choose the victim thus:
+      //   • if some sender is OVER-REPRESENTED — strictly heavier than this sender's post-insert count
+      //     (`fromSender + 1`) — evict that hog's OLDEST signal (a sender using FEWER ids to take MORE
+      //     slots loses first, deterministically); else
+      //   • evict a UNIFORMLY RANDOM existing signal — the TIMING-INDEPENDENT choice that denies a
+      //     forged singleton flood any DETERMINISTIC power to evict OR to block a specific honest
+      //     signal (the same §27 sample-poll fairness `poll` uses; index clamped so an injected RNG
+      //     returning 1 cannot read past the array).
+      // The per-sender cap above still bounds each id to MAX_SIGNALS_PER_SENDER.  The residual
+      // PROBABILISTIC degradation under a SUSTAINED flood is fundamental without the Tier-2
+      // anonymous-credential cap (the documented closure target); WebRTC retransmission + the §27
+      // sample-poll philosophy carry an honest signal through over repeated attempts.
       const counts = new Map<string, number>();
       for (const s of queue) counts.set(s.senderBlindId, (counts.get(s.senderBlindId) ?? 0) + 1);
       let victim: string | undefined;
@@ -228,10 +233,11 @@ export class InMemoryRendezvousStore implements RendezvousStore {
           victim = sender;
         }
       }
-      if (victim === undefined) return Promise.resolve(); // no over-represented sender ⇒ drop-newest
-      const evictIdx = queue.findIndex((s) => s.senderBlindId === victim);
-      if (evictIdx < 0) return Promise.resolve(); // unreachable; fail safe
-      queue.splice(evictIdx, 1);
+      const evictIdx =
+        victim !== undefined
+          ? queue.findIndex((s) => s.senderBlindId === victim) // the over-represented hog's OLDEST
+          : Math.min(queue.length - 1, Math.floor(this.random() * queue.length)); // else uniform random
+      if (evictIdx >= 0) queue.splice(evictIdx, 1); // findIndex < 0 is unreachable; fail safe
     }
     queue.push(signal);
     this.signals.set(signal.recipientBlindId, queue);
