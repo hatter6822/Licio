@@ -349,6 +349,76 @@ describe('PRIV-API-RENDEZVOUS-3 — fair signal eviction', () => {
     expect(drained.some((s) => s.ciphertext === 'honest-offer')).toBe(true);
     expect(drained.length).toBeLessThanOrEqual(MAX_SIGNALS_PER_PEER);
   });
+
+  it('ADMITS a fresh honest offer arriving into a queue saturated by forged singletons (PRIV-API-RENDEZVOUS-5)', async () => {
+    const store = new InMemoryRendezvousStore();
+    const recipient = 'recipient-blind-id';
+    const ttl = 1_000_000;
+    // The flood arrives FIRST, saturating every slot with distinct one-signal forged ids (the
+    // per-sender cap never bites — each id holds a single slot).
+    for (let i = 0; i < MAX_SIGNALS_PER_PEER; i++) {
+      await store.putSignal({
+        roomBlindId: ROOM_BLIND,
+        senderBlindId: `forged-${i}`,
+        recipientBlindId: recipient,
+        ciphertext: `forged-${i}`,
+        expiresAt: ttl,
+      });
+    }
+    // A fresh honest offer arriving LATE must be ADMITTED (evicting a uniformly-random existing
+    // singleton), never BLOCKED: a pure drop-newest threshold would deny it until drain/TTL
+    // (PRIV-API-RENDEZVOUS-5).  Always-admit ⇒ the offer is present immediately after insertion.
+    await store.putSignal({
+      roomBlindId: ROOM_BLIND,
+      senderBlindId: 'honest-peer',
+      recipientBlindId: recipient,
+      ciphertext: 'honest-offer',
+      expiresAt: ttl,
+    });
+    const drained = await store.drainSignals(recipient, 0, MAX_SIGNALS_PER_PEER);
+    expect(drained.some((s) => s.ciphertext === 'honest-offer')).toBe(true);
+    expect(drained.length).toBe(MAX_SIGNALS_PER_PEER); // one evicted + one admitted ⇒ still full
+  });
+
+  it('picks the singleton-eviction victim via the injected RNG (timing-independent, PRIV-API-RENDEZVOUS-6)', async () => {
+    const recipient = 'recipient-blind-id';
+    const ttl = 1_000_000;
+    const fill = async (store: InMemoryRendezvousStore): Promise<void> => {
+      for (let i = 0; i < MAX_SIGNALS_PER_PEER; i++)
+        await store.putSignal({
+          roomBlindId: ROOM_BLIND,
+          senderBlindId: `s-${i}`,
+          recipientBlindId: recipient,
+          ciphertext: `c-${i}`,
+          expiresAt: ttl,
+        });
+    };
+    const fresh = {
+      roomBlindId: ROOM_BLIND,
+      senderBlindId: 'fresh',
+      recipientBlindId: recipient,
+      ciphertext: 'fresh',
+      expiresAt: ttl,
+    };
+
+    // RNG → 0 evicts the OLDEST existing signal (index 0 = 'c-0'); the fresh signal is admitted.
+    const lo = new InMemoryRendezvousStore(() => 0);
+    await fill(lo);
+    await lo.putSignal(fresh);
+    const loDrained = await lo.drainSignals(recipient, 0, MAX_SIGNALS_PER_PEER);
+    expect(loDrained.some((s) => s.ciphertext === 'fresh')).toBe(true);
+    expect(loDrained.some((s) => s.ciphertext === 'c-0')).toBe(false); // RNG→0 evicted the oldest
+
+    // RNG → ~1 evicts the NEWEST existing signal; 'c-0' SURVIVES — proving the victim is the RNG's
+    // choice, NOT a fixed oldest/newest order an attacker could deterministically exploit.
+    const hi = new InMemoryRendezvousStore(() => 0.999_999);
+    await fill(hi);
+    await hi.putSignal(fresh);
+    const hiDrained = await hi.drainSignals(recipient, 0, MAX_SIGNALS_PER_PEER);
+    expect(hiDrained.some((s) => s.ciphertext === 'fresh')).toBe(true);
+    expect(hiDrained.some((s) => s.ciphertext === `c-${MAX_SIGNALS_PER_PEER - 1}`)).toBe(false);
+    expect(hiDrained.some((s) => s.ciphertext === 'c-0')).toBe(true); // oldest survives a different RNG
+  });
 });
 
 // ---------------------------------------------------------------------------

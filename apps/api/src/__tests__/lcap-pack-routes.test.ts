@@ -440,4 +440,58 @@ describe('§27.2 graph guard on import (WS-R.14.1b)', () => {
       'rejected_resource_limit',
     );
   });
+
+  it('rejects a contribution declaring too many signed-body RECORD refs (§27.1 parent_record_cids DoS bound)', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    // 65 valid record CIDs in `parent_record_cids` — one over SERVER_CAPS.maxFanOut (64).  Unlike the
+    // §27.2-guarded table deps, the signed-body record refs are unbounded (no schema `.max()`), so
+    // they must be `recordRefFanOut`-bounded BEFORE the `requires` Set is built + spread into the
+    // commit input (a §27 CPU/memory DoS otherwise).
+    const tooManyParents = await Promise.all(
+      Array.from({ length: 65 }, (_, i) =>
+        cidFor('record', new TextEncoder().encode(`parent-${i}`)),
+      ),
+    );
+    const over = await mintContribution(fx, {
+      deviceSeq: 0,
+      capabilityCid: fx.capabilityCid,
+      parentRecordCids: tooManyParents,
+    });
+    const overProofBytes = encodeWithSchema(detachedProofV2Schema, over.proof);
+    const overPack = writePack({
+      objects: [
+        {
+          cid: over.recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: over.body,
+          lane: 'M3',
+          priority: 1,
+        },
+        {
+          cid: await cidFor('proof', overProofBytes),
+          cidKind: 'proof',
+          frameKind: 'proof',
+          payload: overProofBytes,
+          lane: 'T1',
+          priority: 1,
+          providesProofFor: over.recordCid,
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1_000_000,
+    });
+    const res = await createLcapRoutes(srv).request('/packs', { method: 'POST', body: overPack });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
+    // End-to-end behaviour: over-cap signed-body record refs are rejected `rejected_resource_limit`.
+    // The route's O(1) `recordRefsWithinCap` bound is the EARLY defence (avoiding the wasted Set build);
+    // `commitBatch`'s §27.2 graph guard is the backstop that yields the SAME status — so this asserts
+    // the behaviour, while the discriminating proofs of the early bound live in lcap-caps-enforcement.
+    expect(data.statuses.find((s) => s.cid === over.recordCid)?.status).toBe(
+      'rejected_resource_limit',
+    );
+  });
 });

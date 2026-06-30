@@ -10,9 +10,11 @@
 // `check:private-p2p-split` forbids a static value import anywhere in apps/web/src,
 // tests included), mirroring how the app loads it.
 import 'fake-indexeddb/auto';
+import type { PrivateEncryptedEnvelope, PrivateRoomStorage } from '@licio/private-p2p';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { loadPrivateRoomEngine, PrivateRoomSession } from '../room-manager.js';
 import { IndexedDbPrivateRoomStorage, PRIVATE_P2P_DB_NAME } from '../storage.js';
+import type { PeerChannel } from '../sync-session.js';
 
 type P2p = typeof import('@licio/private-p2p');
 let p2p: P2p;
@@ -189,5 +191,94 @@ describe('PrivateRoomSession — §14.5 compaction persistence (WS-S.7)', () => 
       'C',
       'D',
     ]);
+  });
+});
+
+describe('PrivateRoomSession.connectPeer — serializes the live-session engine surface (PRIV-WEB-SESSION-3)', () => {
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it('queues a session-driven serveOps behind a held local authorOp (the engine never interleaves)', async () => {
+    // A storage that PARKS the first ARMED `putEnvelope` on a test-controlled gate, so a local
+    // `authorOp` can be held mid-critical-section — i.e. holding the manager op-lock — on demand.
+    const inner = new p2p.InMemoryPrivateRoomStorage();
+    let armed = false;
+    let releaseGate: () => void = () => {};
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => {
+      signalReached = r;
+    });
+    const gated: PrivateRoomStorage = {
+      async putEnvelope(opId: string, envelope: PrivateEncryptedEnvelope): Promise<void> {
+        if (armed) {
+          armed = false; // gate only the FIRST armed write (the lock-holder authorOp)
+          signalReached();
+          await new Promise<void>((r) => {
+            releaseGate = r;
+          });
+        }
+        return inner.putEnvelope(opId, envelope);
+      },
+      listEnvelopes: () => inner.listEnvelopes(),
+      deleteEnvelopes: (ids) => inner.deleteEnvelopes(ids),
+      putBlock: (cid, bytes) => inner.putBlock(cid, bytes),
+      getBlock: (cid) => inner.getBlock(cid),
+      hasBlock: (cid) => inner.hasBlock(cid),
+    };
+
+    const session = await PrivateRoomSession.create({
+      roomName: 'Serialize Room',
+      roomType: 'global_topic',
+      founderMemberId: globalThis.crypto.randomUUID(),
+      founderDeviceId: globalThis.crypto.randomUUID(),
+      createStorage: () => gated, // the engine's envelope store (genesis already written, gate disarmed)
+    });
+
+    // A capturing peer channel: record EVERY sent frame + grab the session's message listener.
+    const sent: Uint8Array[] = [];
+    let deliver: (frame: Uint8Array) => void = () => {};
+    const channel: PeerChannel = {
+      send: (frame) => {
+        sent.push(frame.slice());
+      },
+      onMessage: (listener) => {
+        deliver = listener;
+      },
+      onClose: () => {},
+      close: () => {},
+    };
+    const sync = session.connectPeer(channel); // sends an opening head_announcement (a sync read)
+    const isOpResponse = (frame: Uint8Array): boolean => {
+      try {
+        return p2p.decodeSyncMessage(frame).schema === 'licio.private.op_response.v1';
+      } catch {
+        return false;
+      }
+    };
+
+    // Hold the op-lock: a local `authorOp` (postStory) parked inside the gated `putEnvelope`.
+    armed = true;
+    const holding = session.postStory({ title: 'lock holder' });
+    await reached; // the authorOp now HOLDS the op-lock (parked mid-`applyLocalOp`)
+
+    // Deliver an op_request: the session's `serveOps` runs through the LOCKED engine surface, so it
+    // must QUEUE behind the held authorOp and emit NO op_response while the lock is held.
+    const request = p2p.encodeSyncMessage({
+      schema: 'licio.private.op_request.v1',
+      op_ids: [globalThis.crypto.randomUUID()],
+    });
+    deliver(request);
+    await flush();
+    // Before the fix (raw engine), serveOps would run immediately and send the response here.
+    expect(sent.some(isOpResponse)).toBe(false);
+
+    // Release the lock → the authorOp completes → the queued serveOps runs → the op_response is sent.
+    releaseGate();
+    await holding;
+    await flush();
+    expect(sent.some(isOpResponse)).toBe(true);
+
+    sync.close(false);
   });
 });

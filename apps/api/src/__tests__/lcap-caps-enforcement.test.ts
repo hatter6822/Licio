@@ -16,6 +16,17 @@ const NET = 'net';
 const ROOM = 'room-1';
 const accepted: ValidationResult = { state: 'authorized_provisional', missingCids: [], facts: {} };
 
+/** The apps/api source root (resolves from the monorepo root OR the package dir). */
+const apiSrcRoot =
+  [resolve(process.cwd(), 'apps/api/src'), resolve(process.cwd(), 'src')].find((p) => {
+    try {
+      readFileSync(resolve(p, 'lcap/server-ingest.ts'));
+      return true;
+    } catch {
+      return false;
+    }
+  }) ?? resolve(process.cwd(), 'src');
+
 async function recordInput(
   tag: string,
   requires: readonly string[] = [],
@@ -69,20 +80,66 @@ describe('§27.1 import CPU-time cap (commitBatch)', () => {
   });
 });
 
+describe('§27.1 signed-body record-ref fan-out bound (recordRefsWithinCap)', () => {
+  // The §29 commit path checks this O(1) bound BEFORE materializing a contribution's signed-body
+  // record refs into its `requires` set.  `parent_record_cids` carries no schema `.max()`, so without
+  // the early bound an unbounded array would build a large Set + spread it into the commit input
+  // before `commitBatch`'s §27.2 graph guard (the backstop) rejects the fan-out — a §27 CPU/memory DoS.
+  const parents = (n: number): string[] => Array.from({ length: n }, (_, i) => `parent-${i}`);
+  const srv = new LcapIngestServer(NET, () => 1_000);
+
+  it('accepts a contribution AT the fan-out cap (64 signed-body record refs)', () => {
+    expect(srv.recordRefsWithinCap({ parent_record_cids: parents(64) })).toBe(true);
+  });
+
+  it('rejects a contribution ONE OVER the cap (65 parents) — counted O(1) via .length', () => {
+    expect(srv.recordRefsWithinCap({ parent_record_cids: parents(65) })).toBe(false);
+  });
+
+  it('counts the singular refs together with the parents', () => {
+    // prev + replaces + target (3 singulars) + 62 parents = 65 > 64 → over the cap.
+    expect(
+      srv.recordRefsWithinCap({
+        prev_device_record_cid: 'p',
+        replaces_record_cid: 'r',
+        target_record_cid: 't',
+        parent_record_cids: parents(62),
+      }),
+    ).toBe(false);
+    // …the same 3 singulars + 61 parents = 64 → within the cap.
+    expect(
+      srv.recordRefsWithinCap({
+        prev_device_record_cid: 'p',
+        replaces_record_cid: 'r',
+        target_record_cid: 't',
+        parent_record_cids: parents(61),
+      }),
+    ).toBe(true);
+  });
+
+  it('uses the SERVER caps PROFILE (not the static default) — a tighter profile bounds tighter', () => {
+    const tight = new LcapIngestServer(NET, () => 1_000, undefined, clampCaps({ maxFanOut: 40 }));
+    expect(tight.recordRefsWithinCap({ parent_record_cids: parents(40) })).toBe(true);
+    expect(tight.recordRefsWithinCap({ parent_record_cids: parents(41) })).toBe(false);
+  });
+});
+
 describe('static check: the server parse imports the §27.1 caps SSOT', () => {
   it('references the shared caps + helper in server-ingest.ts', () => {
-    const srcRoot =
-      [resolve(process.cwd(), 'apps/api/src'), resolve(process.cwd(), 'src')].find((p) => {
-        try {
-          readFileSync(resolve(p, 'lcap/server-ingest.ts'));
-          return true;
-        } catch {
-          return false;
-        }
-      }) ?? resolve(process.cwd(), 'src');
-    const src = readFileSync(resolve(srcRoot, 'lcap/server-ingest.ts'), 'utf8');
+    const src = readFileSync(resolve(apiSrcRoot, 'lcap/server-ingest.ts'), 'utf8');
     expect(src).toContain('checkCap');
     expect(src).toContain('SERVER_CAPS');
     expect(src).toContain('graphLimitsFromCaps');
+  });
+
+  it('§29 commit bounds the signed-body record refs BEFORE building the requires set', () => {
+    // The DoS fix is an EARLY (O(1)) rejection; commitBatch's graph guard yields the same status as a
+    // backstop, so only the ORDER (guard before the Set) proves the wasted-work avoidance.
+    const src = readFileSync(resolve(apiSrcRoot, 'lcap/routes.ts'), 'utf8');
+    const guardIdx = src.indexOf('server.recordRefsWithinCap(record)');
+    const requiresIdx = src.indexOf('const requires = new Set<string>()');
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(requiresIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(requiresIdx);
   });
 });

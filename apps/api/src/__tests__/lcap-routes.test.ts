@@ -202,6 +202,36 @@ describe('createLcapRoutes — §29 public-serve confidentiality gate (PUB-API-C
     const res = await createLcapRoutes(server).request(`/chunks/${chunkCid}`);
     expect(res.status).toBe(404);
   });
+
+  it('serves a SIGNED-body block referenced ONLY via target_source_snapshot_cid (#1)', async () => {
+    // The signed-body ownership helper (`cappedBodyBlockCids`) ALWAYS includes the target snapshot,
+    // but the §29 edge indexer (`indexBodyBlockEdges` + the routes caller) used to omit it — so a
+    // block named ONLY as `target_source_snapshot_cid` never entered the reverse `recordsReferencing`
+    // index and `isPublicServable` could never find its accepted public owner.  This drove a 404 for a
+    // legitimately PUBLIC block.  Index ONLY the target snapshot (exactly what routes.ts now forwards)
+    // and the accepted public owner authorizes it.
+    const fresh = new LcapIngestServer('net');
+    const targetBlk = enc.encode('target-source-snapshot-block');
+    const targetBlkCid = await cidFor('block', targetBlk);
+    const ownerBody = encodeContributionEvent({
+      ...fx.publicContribution, // a public post that names the block ONLY as its target snapshot
+      target_source_snapshot_cid: targetBlkCid,
+      device_seq: 13,
+      client_nonce: new Uint8Array([5, 5, 5, 5]),
+    });
+    const ownerCid = await cidFor('record', ownerBody);
+    await fresh.putObject(ownerCid, 'record', ownerBody);
+    await fresh.putObject(targetBlkCid, 'block', targetBlk);
+    // The REAL signed-body edge indexer, passing ONLY the target snapshot (no body/attachment/source
+    // snapshots, no pack-table edge).  Before the fix this indexed NOTHING ⇒ the block stayed 404.
+    expect(
+      await fresh.indexBodyBlockEdges(ownerCid, { targetSourceSnapshotCid: targetBlkCid }),
+    ).toBe(true);
+    await fresh.appendAcceptance('room', ownerCid);
+    expect(await createLcapRoutes(fresh).request(`/blocks/${targetBlkCid}`)).toMatchObject({
+      status: 200,
+    });
+  });
 });
 
 describe('mounted at /api/lcap/v2 (GET passes the global CSRF + security middleware)', () => {

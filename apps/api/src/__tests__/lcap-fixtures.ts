@@ -311,6 +311,7 @@ export async function mintContribution(
     prevDeviceRecordCid?: string;
     text?: string;
     sourceSnapshotCids?: readonly string[];
+    parentRecordCids?: readonly string[];
   },
 ): Promise<{ recordCid: string; body: Uint8Array; proof: DetachedProofV2 }> {
   const contribution: ContributionEventRecordV2 = {
@@ -333,6 +334,9 @@ export async function mintContribution(
       : {}),
     ...(params.sourceSnapshotCids !== undefined
       ? { source_snapshot_cids: [...params.sourceSnapshotCids] }
+      : {}),
+    ...(params.parentRecordCids !== undefined
+      ? { parent_record_cids: [...params.parentRecordCids] }
       : {}),
   };
   const body = encodeContributionEvent(contribution);
