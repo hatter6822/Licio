@@ -51,12 +51,14 @@ import {
   type PulseResponseV2,
   parseCid,
   type ReceiptRecordV2,
+  type RecordRefs,
   type ResourceCaps,
   type RevocationAuthorityBinding,
   type RevocationFrontierV2,
   RevocationIndex,
   type RevocationRecordV2,
   RoomLog,
+  recordRefFanOut,
   resolveIngestionOrder,
   roomIdHash,
   SERVER_CAPS,
@@ -376,6 +378,21 @@ export class LcapIngestServer {
    *  driving the full validate→guard→commit path. */
   appendAcceptance(roomId: string, cid: string): Promise<number> {
     return this.store.appendAcceptance(roomId, cid);
+  }
+
+  /**
+   * Whether a contribution's SIGNED-BODY record references — `prev_device_record_cid` /
+   * `replaces_record_cid` / `target_record_cid` / `thread_root_cid` + `parent_record_cids` — are
+   * within the §27.1 fan-out cap, counted via the O(1) `recordRefFanOut` (`.length`, NEVER spreads
+   * `parent_record_cids`).  The §29 commit path MUST check this BEFORE materializing those refs into
+   * its `requires` set: `parent_record_cids` carries NO schema `.max()`, so an unbounded array would
+   * build a large `Set` and spread it into the commit input BEFORE the §27.2 graph guard rejects the
+   * fan-out — a §27 CPU/memory DoS.  This is the RECORD-ref counterpart of `indexBodyBlockEdges`'s
+   * block-ref bound; both reject `rejected_resource_limit` at the SAME `this.caps.maxFanOut` ceiling
+   * (the server's actual profile, not the static default), so the two ref classes stay symmetric.
+   */
+  recordRefsWithinCap(refs: RecordRefs): boolean {
+    return recordRefFanOut(refs) <= this.caps.maxFanOut;
   }
 
   /**

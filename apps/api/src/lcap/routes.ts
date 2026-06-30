@@ -384,6 +384,16 @@ async function ingestPackFrames(
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'contribution_event': {
+        // §27.1: bound the SIGNED-BODY record references (O(1) `recordRefFanOut` via `.length`,
+        // NEVER spreading `parent_record_cids`) BEFORE materializing them into `requires`.
+        // `parent_record_cids` carries no schema `.max()`, so an unbounded array would otherwise
+        // build a large `Set` and spread it into the commit input BEFORE `commitBatch`'s §27.2 graph
+        // guard rejects the fan-out — a §27 CPU/memory DoS.  Mirrors the block-ref bound in
+        // `indexBodyBlockEdges`: reject `rejected_resource_limit` at the same fan-out ceiling.
+        if (!server.recordRefsWithinCap(record)) {
+          statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });
+          break;
+        }
         // Record prerequisites come from the SIGNED BODY (authoritative), not just the
         // attacker-controlled pack table: a malicious pack could omit table `deps` while
         // the body names a parent/previous/target/replaced record, letting a reply / edit
