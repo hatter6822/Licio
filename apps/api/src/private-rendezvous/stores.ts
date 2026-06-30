@@ -26,39 +26,11 @@ const announcementCiphertextSchema = z.string().min(1).max(16_384);
 /** An opaque sealed signaling blob (SDP/ICE, E2E-encrypted) — bounded ≤ 64 KiB. */
 const signalCiphertextSchema = z.string().min(1).max(65_536);
 
-/**
- * Tier-2 per-announcer cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md): the OPTIONAL
- * anonymous-credential proof. When present, `peer_blind_id` IS the base64url BBS
- * pseudonym `nym` (the dedup key); the server verifies the proof binds `nym` to
- * `(room_blind_id, epoch, bucket)` under the per-epoch issuer key, then keys the
- * presence slot by it — capping a device to one slot per `(epoch, bucket)`. All fields
- * are opaque pseudonymous bytes; none is persisted (the proof is verified + discarded).
- */
-const capSchema = z
-  .object({
-    /** The BBS pseudonym-bound proof (opaque, bounded ≤ 4 KiB). */
-    proof: z
-      .string()
-      .min(1)
-      .max(4096)
-      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
-    /** The per-epoch issuer public key (base64url G2, ≤ 256). */
-    issuer_pubkey: z
-      .string()
-      .min(1)
-      .max(256)
-      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
-    /** The room epoch id (an opaque pseudonymous counter, bounded). */
-    epoch: z
-      .string()
-      .min(1)
-      .max(64)
-      .regex(/^[A-Za-z0-9_.-]+$/, 'epoch id'),
-    /** The time bucket index (server-validated against its clock), or -1 for per-epoch. */
-    bucket: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER),
-  })
-  .strict();
-export type CapProof = z.infer<typeof capSchema>;
+// NOTE (PRIV-API-RENDEZVOUS-1): the SERVER-side Tier-2 cap was REMOVED.  Verifying a per-announcer
+// BBS proof server-side requires the server to hold the per-(room, epoch) issuer key, which is a
+// stable cross-bucket linking handle that breaks §15.3 unlinkability.  The cap is now enforced
+// PEER-SIDE only (sealed inside the announcement, opened by a member), so the announce wire carries
+// NO cap and the server runs the §27 Tier-1 sample-poll.
 
 /** §15.3 announce: store a presence record under a room blind id. */
 export const announceRequestSchema = z
@@ -69,8 +41,6 @@ export const announceRequestSchema = z
     /** Absolute ms expiry; AAD-bound in the sealed announcement, so the server
      *  stores it VERBATIM and instead REJECTS one beyond `now + maxTtlMs` (§15.3.2). */
     expires_at: z.number().int().positive(),
-    /** Tier-2 cap proof (optional; absent ⇒ Tier-1 sample-poll, a strict superset). */
-    cap: capSchema.optional(),
   })
   .strict();
 export type AnnounceRequest = z.infer<typeof announceRequestSchema>;
@@ -216,15 +186,34 @@ export class InMemoryRendezvousStore implements RendezvousStore {
 
   putSignal(signal: StoredSignal): Promise<void> {
     const queue = this.signals.get(signal.recipientBlindId) ?? [];
-    // Per-SENDER bound: one sender_blind_id cannot occupy more than MAX_SIGNALS_PER_SENDER
-    // of the recipient's queue, so a single flooder cannot evict another peer's offer.
+    // Per-SENDER bound: one sender_blind_id cannot occupy more than MAX_SIGNALS_PER_SENDER of the
+    // recipient's queue.  NOTE (PRIV-API-RENDEZVOUS-3): `sender_blind_id` is UNAUTHENTICATED (no
+    // Tier-2), so this bounds an ACCIDENTAL single-sender flood only — a deliberate flooder simply
+    // varies the id.  The FAIR eviction below is what keeps a fresh peer's bootstrap offer insertable
+    // against such a many-id flood.
     let fromSender = 0;
     for (const s of queue) if (s.senderBlindId === signal.senderBlindId) fromSender += 1;
     if (fromSender >= MAX_SIGNALS_PER_SENDER) return Promise.resolve(); // back-pressure the sender
-    // Overall bound: DROP-NEWEST (reject this signal) once full, so the EARLIEST signal — the
-    // connection-bootstrapping offer/answer, sent first — is PRESERVED against a later flood.
-    // (The recipient's `drainSignals` clears the queue, so capacity is restored each drain.)
-    if (queue.length >= MAX_SIGNALS_PER_PEER) return Promise.resolve();
+    if (queue.length >= MAX_SIGNALS_PER_PEER) {
+      // FAIR eviction (PRIV-API-RENDEZVOUS-3): instead of drop-newest, make room by evicting the
+      // OLDEST signal from the sender holding STRICTLY MORE slots than this sender — so a fresh /
+      // under-represented sender's offer always displaces an over-represented flooder.  If THIS
+      // sender is already the heaviest, drop-newest (it must not displace a fairer peer).
+      const counts = new Map<string, number>();
+      for (const s of queue) counts.set(s.senderBlindId, (counts.get(s.senderBlindId) ?? 0) + 1);
+      let victim: string | undefined;
+      let victimCount = fromSender;
+      for (const [sender, count] of counts) {
+        if (count > victimCount) {
+          victimCount = count;
+          victim = sender;
+        }
+      }
+      if (victim === undefined) return Promise.resolve(); // this sender is heaviest ⇒ drop-newest
+      const evictIdx = queue.findIndex((s) => s.senderBlindId === victim);
+      if (evictIdx < 0) return Promise.resolve(); // unreachable; fail safe
+      queue.splice(evictIdx, 1);
+    }
     queue.push(signal);
     this.signals.set(signal.recipientBlindId, queue);
     return Promise.resolve();
@@ -234,7 +223,13 @@ export class InMemoryRendezvousStore implements RendezvousStore {
     const queue = this.signals.get(recipientBlindId);
     if (!queue) return Promise.resolve([]);
     this.signals.delete(recipientBlindId);
-    return Promise.resolve(queue.filter((s) => s.expiresAt > nowMs).slice(0, limit));
+    // The queue is CONSUMED in full (deleted above), so EVERY live signal must be returned —
+    // slicing to `limit` here silently DROPPED the connection-bootstrapping signals past the cap
+    // (RENDEZVOUS-2: a live offer/answer/ICE frame lost ⇒ a stalled WebRTC dial).  The DoS bound is
+    // the per-peer INSERT cap (MAX_SIGNALS_PER_PEER), not this drain limit; keep `limit` as a
+    // defensive ceiling held ≥ that cap so the two constants can never diverge into a silent loss.
+    const live = queue.filter((s) => s.expiresAt > nowMs);
+    return Promise.resolve(live.slice(0, Math.max(limit, MAX_SIGNALS_PER_PEER)));
   }
 
   sweepExpired(nowMs: number): Promise<number> {

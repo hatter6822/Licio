@@ -13,7 +13,11 @@
 // The native channels (Wi-Fi Direct / BLE / Nearby) ride the SAME adapter behind a
 // `CourierMedium` — the Capacitor shell that provides them is the deferred WS-R.15.4a.
 
-import type { LcapTransport, TransportCapabilities } from '@licio/lcap';
+import {
+  type LcapTransport,
+  type TransportCapabilities,
+  TransportUnavailableError,
+} from '@licio/lcap';
 
 export const COURIER_CAPABILITIES: TransportCapabilities = {
   id: 'courier',
@@ -70,8 +74,10 @@ export class CourierTransport implements LcapTransport {
   readonly capabilities = COURIER_CAPABILITIES;
   constructor(private readonly medium: CourierMedium) {}
 
-  async open(): Promise<void> {
-    // The ferry is always "open"; reachability is the user carrying a bundle.
+  async open(signal?: AbortSignal): Promise<void> {
+    // The ferry is always "open"; reachability is the user carrying a bundle.  Honor an abort that
+    // already fired so a cancelled exchange does not proceed to send (PUB-SEAM-2).
+    if (signal?.aborted) throw new TransportUnavailableError('courier', 'aborted');
   }
 
   async send(message: Uint8Array): Promise<void> {
@@ -79,6 +85,10 @@ export class CourierTransport implements LcapTransport {
   }
 
   async receive(signal?: AbortSignal): Promise<Uint8Array | null> {
+    // An ALREADY-aborted signal must resolve immediately — `addEventListener('abort')` below never
+    // fires for a prior abort, so without this a cancelled receive would park until the next
+    // `deliverInbound` (PUB-SEAM-2, mirroring the WebRTC/WebTransport carriers).
+    if (signal?.aborted) return null;
     const ready = this.medium.takeInbound();
     if (ready) return ready;
     if (!this.medium.onInbound) return null; // a non-notifying medium has nothing yet

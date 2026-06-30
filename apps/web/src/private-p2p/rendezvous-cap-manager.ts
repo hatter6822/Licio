@@ -52,23 +52,32 @@ export interface CapSyncContext {
  * after each engine ingest (the request/issue/install converges over a few rounds) and
  * `hooks(epoch)` to obtain the connect-peer cap hooks (or `undefined` ⇒ ride Tier-1).
  */
+/** The §6.8 per-poll BBS-verify bound (PR3b anti-flood): each capped announcement costs a proof
+ *  verify, so an insider flooding capped records could extract unbounded CPU.  At most this many caps
+ *  are verified per poll; the §27 sample-poll re-randomizes the set each poll, so over a few polls a
+ *  legitimate capped peer still surfaces, while a flood's verify cost is bounded per poll. */
+const MAX_CAPS_VERIFIED_PER_POLL = 64;
+
 export class RendezvousCapManager {
-  private cap: CapModule | undefined;
-  private member: Member | undefined;
+  // PRIV-CAP-4: memoize the WHOLE load so two concurrent first calls cannot each generate a distinct
+  // `nid` (a racing read-then-write would otherwise install divergent members / persist the loser).
+  private loadPromise: Promise<{ cap: CapModule; member: Member }> | undefined;
 
   constructor(private readonly storage: RendezvousCapStorage) {}
 
-  private async load(): Promise<{ cap: CapModule; member: Member }> {
-    if (this.cap === undefined) this.cap = await import('@licio/private-p2p/rendezvous-cap');
-    if (this.member === undefined) {
-      let nid = await this.storage.loadNid();
-      if (nid === undefined) {
-        nid = this.cap.generateNidSecret();
-        await this.storage.saveNid(nid);
-      }
-      this.member = new this.cap.RendezvousMember(nid);
+  private load(): Promise<{ cap: CapModule; member: Member }> {
+    if (this.loadPromise === undefined) this.loadPromise = this.doLoad();
+    return this.loadPromise;
+  }
+
+  private async doLoad(): Promise<{ cap: CapModule; member: Member }> {
+    const cap = await import('@licio/private-p2p/rendezvous-cap');
+    let nid = await this.storage.loadNid();
+    if (nid === undefined) {
+      nid = cap.generateNidSecret();
+      await this.storage.saveNid(nid);
     }
-    return { cap: this.cap, member: this.member };
+    return { cap, member: new cap.RendezvousMember(nid) };
   }
 
   /**
@@ -125,35 +134,46 @@ export class RendezvousCapManager {
     const issuerKeyBytes = member.issuerKey(String(epoch));
     if (issuerKeyBytes === null) return undefined;
     const issuerKey = cap.issuerKeyFromBytes(issuerKeyBytes); // parse once, reuse per poll
+    const roomBlindIdBytes = (s: string): Uint8Array => new TextEncoder().encode(s);
     return {
       build: (roomBlindId, e, bucket) => {
         const built = cap.buildAnnouncementCap(member, roomBlindId, e, bucket);
-        if (built === null) return null;
-        // The per-epoch issuer public key the TOP-LEVEL cap carries so a key-less verifier
-        // (server/relay) can check the proof. Computed for build's OWN epoch `e`.
-        const keyForEpoch = member.issuerKey(String(e));
-        if (keyForEpoch === null) return null;
-        return {
-          proof: built.proof,
-          pseudonym: built.pseudonym,
-          issuerPubKey: cap.toBase64Url(keyForEpoch),
-        };
+        // The cap rides SEALED inside the announcement only (PRIV-API-RENDEZVOUS-1: no top-level cap),
+        // so `build` returns just the member-verifiable {proof, pseudonym} — no issuer key (the
+        // verifier is a member who already holds the issuer key via the op log).
+        return built === null ? null : { proof: built.proof, pseudonym: built.pseudonym };
       },
-      filterVerified: (caps, roomBlindId, e, bucket, nowMs) =>
-        cap
-          .filterVerifiedPresence(
-            caps.map((c, i) => ({
-              pseudonym: cap.fromBase64Url(c.pseudonym),
-              proof: cap.fromBase64Url(c.proof),
-              epoch: String(e),
-              bucket,
-              value: i,
-            })),
-            issuerKey,
-            new TextEncoder().encode(roomBlindId),
-            { nowMs },
-          )
-          .map((v) => v.value),
+      filterVerified: (caps, roomBlindId, e, bucket, nowMs) => {
+        // PR3b anti-flood: decode each sealed cap DEFENSIVELY (a hostile member's malformed cap must
+        // be SKIPPED, never crash the whole discovery batch — PRIV-CAP-2) and bound the per-poll
+        // BBS-verify work (MAX_CAPS_VERIFIED_PER_POLL).  `filterVerifiedPresence` then dedups by the
+        // CANONICAL parsed pseudonym (so an encoding twin cannot occupy two slots) and drops any cap
+        // whose proof does not verify.  `value: i` is the ORIGINAL index so the caller maps survivors
+        // back to its candidate array.
+        const decoded: Array<{
+          pseudonym: Uint8Array;
+          proof: Uint8Array;
+          epoch: string;
+          bucket: number;
+          value: number;
+        }> = [];
+        for (let i = 0; i < caps.length && decoded.length < MAX_CAPS_VERIFIED_PER_POLL; i++) {
+          const c = caps[i];
+          if (c === undefined) continue;
+          let pseudonym: Uint8Array;
+          let proof: Uint8Array;
+          try {
+            pseudonym = cap.fromBase64Url(c.pseudonym);
+            proof = cap.fromBase64Url(c.proof);
+          } catch {
+            continue; // malformed sealed cap — skip it (never throw out of the whole batch)
+          }
+          decoded.push({ pseudonym, proof, epoch: String(e), bucket, value: i });
+        }
+        return cap
+          .filterVerifiedPresence(decoded, issuerKey, roomBlindIdBytes(roomBlindId), { nowMs })
+          .map((v) => v.value);
+      },
     };
   }
 }

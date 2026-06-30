@@ -125,8 +125,14 @@ function encodeBase64(bytes: Uint8Array): string {
  * base64-decoded back to exact bytes, and delivered to a pending `receive`.  Fail-closed
  * on a malformed native event (dropped, never decoded, never crashes the shell).
  */
+/** Hard ceiling on a single endpoint's BUFFERED inbound bytes (PUB-COURIER-2): a nearby radio peer
+ *  delivering responses faster than they are consumed cannot grow renderer memory without bound.
+ *  One courier exchange response is ≤ the exchange budget; this holds a few of them, then drops. */
+const MAX_COURIER_INBOX_BYTES = 16 * 1024 * 1024;
+
 export class NativeChannelMedium implements CourierMedium {
   private readonly inbox: Uint8Array[] = [];
+  private inboxBytes = 0;
   private listeners: Array<() => void> = [];
   private sentBytes = 0;
 
@@ -150,7 +156,9 @@ export class NativeChannelMedium implements CourierMedium {
   }
 
   takeInbound(): Uint8Array | null {
-    return this.inbox.shift() ?? null;
+    const next = this.inbox.shift() ?? null;
+    if (next) this.inboxBytes -= next.byteLength;
+    return next;
   }
 
   onInbound(listener: () => void): void {
@@ -173,9 +181,16 @@ export class NativeChannelMedium implements CourierMedium {
     }
   }
 
-  /** Deliver decoded inbound bytes to the INBOX (our exchange RESPONSE) + wake any waiter. */
+  /** Deliver decoded inbound bytes to the INBOX (our exchange RESPONSE) + wake any waiter.  Bounded
+   *  by total buffered bytes (PUB-COURIER-2): an over-ceiling delivery is DROPPED fail-closed (the
+   *  seam's deadline + the anchor back-stop still make progress) rather than growing memory. */
   deliverInbound(bytes: Uint8Array): void {
+    if (this.inboxBytes + bytes.byteLength > MAX_COURIER_INBOX_BYTES) {
+      devWarn('dropped a courier payload: inbound buffer over the per-endpoint byte ceiling');
+      return;
+    }
     this.inbox.push(bytes);
+    this.inboxBytes += bytes.byteLength;
     const listeners = this.listeners;
     this.listeners = [];
     for (const listener of listeners) listener();

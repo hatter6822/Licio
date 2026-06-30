@@ -139,9 +139,13 @@ export async function runWebrtcBidirectionalExchange(
   };
 
   params.channel.onclose = (): void => settle(ingestedResult);
+  // A NAMED handler so it is removed when the round settles by ANY path — otherwise a `{ once: true }`
+  // listener that never fires (the round completed normally) accumulates on a reused session-scoped
+  // signal across many rounds (PUB-WEB-CARRIERS-5).
+  const onAbort = (): void => settle(null);
   if (params.signal) {
     if (params.signal.aborted) settle(null);
-    else params.signal.addEventListener('abort', () => settle(null), { once: true });
+    else params.signal.addEventListener('abort', onAbort, { once: true });
   }
   const timer = setTimeout(() => settle(ingestedResult), params.timeoutMs ?? 20_000);
 
@@ -153,5 +157,6 @@ export async function runWebrtcBidirectionalExchange(
 
   const result = await done;
   clearTimeout(timer);
+  params.signal?.removeEventListener('abort', onAbort);
   return result;
 }

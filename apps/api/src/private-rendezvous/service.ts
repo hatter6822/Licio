@@ -12,7 +12,7 @@
 //     tolerance, since the client stamps `expires_at` off its own clock) or that
 //     is already expired, so auto-expiry still cannot be defeated.
 //   • Bounded poll (§15.3.1 no-existence-oracle) — `poll` ALWAYS returns a
-//     bounded list (200), never a 404, so a well-formed-but-unknown blind id is
+//     bounded list (256), never a 404, so a well-formed-but-unknown blind id is
 //     indistinguishable from a known-but-empty one.
 //   • Aggregate-only metrics — counters carry NO room/account identity (§27.2).
 //
@@ -23,7 +23,6 @@
 // WS-R LCAP signal mailbox).
 
 import { createDbClient } from '@licio/db';
-import { createPresenceVerifier } from './cap-verifier.js';
 import { DrizzleRendezvousStore } from './drizzle-store.js';
 import {
   type AnnounceRequest,
@@ -41,13 +40,6 @@ export interface RendezvousServiceConfig {
   /** Tolerance for the client stamping `expires_at` off its own (possibly-ahead)
    *  clock, so a normal max-TTL record is not rejected for minor skew. */
   readonly clockSkewToleranceMs: number;
-  /** Tier-2: the time-bucket width. The server VALIDATES a per-bucket `cap.bucket`
-   *  against its own clock so a flooder cannot mint a fresh bucket (⇒ a fresh
-   *  pseudonym ⇒ a fresh slot) per announce; only the current bucket (± grace) is
-   *  accepted. Must match the client's bucket derivation. */
-  readonly bucketWidthMs: number;
-  /** How many prior buckets to also accept (for an announce arriving near a boundary). */
-  readonly bucketGrace: number;
 }
 
 /** Mirrors the §15.3.2 client bounds (`@licio/private-p2p` RENDEZVOUS_MAX_TTL_MS /
@@ -57,57 +49,40 @@ export const DEFAULT_RENDEZVOUS_CONFIG: RendezvousServiceConfig = {
   maxTtlMs: 30 * 60 * 1000,
   maxRecordsPerPoll: 256,
   clockSkewToleranceMs: 5 * 60 * 1000,
-  // Mirrors `@licio/private-p2p`'s DEFAULT_BUCKET_WIDTH_MS === RENDEZVOUS_DEFAULT_BUCKET_MS
-  // (15 min): the client derives the cap bucket from `rendezvousTimeBucket`, so the server's
-  // bucket-window MUST use the same width or it rejects every valid capped announce.
-  bucketWidthMs: 15 * 60 * 1000,
-  bucketGrace: 1,
 };
 
-/** The Tier-2 verification context handed to the injected {@link PresenceVerifier}. */
-export interface Tier2VerifyContext {
-  readonly roomBlindId: string;
-  readonly epoch: string;
-  readonly bucket: number;
-  /** The PINNED per-epoch issuer public key (base64url G2). */
-  readonly issuerPubKey: string;
-  /** The pseudonym (base64url G1) — equals `peer_blind_id` for a Tier-2 announce. */
-  readonly nym: string;
-  /** The BBS pseudonym-bound proof (base64url). */
-  readonly proof: string;
+/** The outcome of an announce: stored as a §27 Tier-1 presence slot, or rejected for an
+ *  out-of-bound TTL.  (PRIV-API-RENDEZVOUS-1: the server-side Tier-2 cap was removed — the cap is
+ *  enforced PEER-SIDE only, sealed inside the announcement, so the server never verifies a proof.) */
+export interface AnnounceResult {
+  readonly stored: boolean;
+  readonly reason?: 'ttl';
 }
 
 /**
- * A pure Tier-2 presence verifier (returns whether the proof binds `nym` to the context
- * under `issuerPubKey`). Injected so the SERVICE stays free of `@licio/private-p2p`; the
- * production binding lives in `cap-verifier.ts`. When no verifier is configured the
- * service runs Tier-1 (the sample-poll) — a strict superset.
+ * A presence record as returned to a poller.  `room_blind_id` is echoed back (it equals the poll
+ * key the caller supplied) because the client REBUILDS the §15.3 announcement AEAD AAD from it to
+ * open the sealed `encrypted_announcement` (`openRendezvousAnnouncement` binds room+peer+expiry):
+ * omitting it makes the canonical `BlindRendezvousRecord` schema reject every polled record and the
+ * peer unable to decrypt — so the wire mirrors the canonical full record, not a stripped subset.
  */
-export type PresenceVerifier = (ctx: Tier2VerifyContext) => boolean;
-
-/** Bound the per-`(room, epoch)` issuer-key pin map (in-memory; multi-node needs a shared
- *  store — the same documented limitation as the signal mailbox). */
-const MAX_ISSUER_PINS = 50_000;
-
-/** The outcome of an announce: a capped slot, a Tier-1 slot, or a rejection (the client
- *  may retry a `cap_invalid`/`bucket` rejection WITHOUT a proof to ride Tier-1). */
-export interface AnnounceResult {
-  readonly stored: boolean;
-  readonly mode: 'cap' | 'tier1' | 'rejected';
-  readonly reason?: 'ttl' | 'bucket' | 'cap_invalid';
-}
-
-/** A presence record as returned to a poller (the room blind id is the poll key). */
 export interface WirePresenceRecord {
+  readonly room_blind_id: string;
   readonly peer_blind_id: string;
   readonly encrypted_announcement: string;
   readonly expires_at: number;
 }
 
-/** A queued signal as returned to its recipient. */
+/**
+ * A queued signal as returned to its recipient.  `recipient_blind_id` is echoed back (it equals the
+ * drain key the caller supplied) because the client REBUILDS the §15.4 signal AEAD AAD from it to
+ * open the sealed `ciphertext` (`openSignal` binds room+sender+recipient+expiry): omitting it makes
+ * the canonical `EncryptedSignal` schema reject the signal and the peer unable to decrypt.
+ */
 export interface WireSignal {
   readonly room_blind_id: string;
   readonly sender_blind_id: string;
+  readonly recipient_blind_id: string;
   readonly ciphertext: string;
   readonly expires_at: number;
 }
@@ -119,10 +94,6 @@ export interface RendezvousMetrics {
   signalsPosted: number;
   signalsDrained: number;
   swept: number;
-  /** Tier-2: announces accepted as a capped (credentialed) slot. */
-  capAccepted: number;
-  /** Tier-2: announces rejected (invalid proof or out-of-window bucket). */
-  capRejected: number;
 }
 
 export class RendezvousService {
@@ -132,67 +103,21 @@ export class RendezvousService {
     signalsPosted: 0,
     signalsDrained: 0,
     swept: 0,
-    capAccepted: 0,
-    capRejected: 0,
   };
-
-  /** First-seen per-`(room, epoch)` issuer-key pin (§6.5). A wrong first pin only
-   *  degrades the room to Tier-1 (§8, net-zero), never an existence oracle. */
-  private readonly issuerPins = new Map<string, string>();
 
   constructor(
     private readonly store: RendezvousStore,
     private readonly config: RendezvousServiceConfig = DEFAULT_RENDEZVOUS_CONFIG,
     private readonly now: () => number = () => Date.now(),
-    /** Tier-2 presence verifier; absent ⇒ Tier-1 only (a strict superset). */
-    private readonly verifier?: PresenceVerifier,
   ) {}
 
-  /** Store a presence record with its AAD-bound TTL verbatim, rejecting (not
-   *  rewriting) one that is already expired or exceeds the server retention bound.
-   *  A Tier-2 `cap` proof, when present + a verifier is configured, is verified and
-   *  (on success) keys the slot by the pseudonym — capping one slot per device per
-   *  `(epoch, bucket)`; an absent proof rides Tier-1 (the sample-poll). */
+  /** Store a presence record with its AAD-bound TTL verbatim, rejecting (not rewriting) one that is
+   *  already expired or exceeds the server retention bound.  The per-device derived `peer_blind_id`
+   *  already gives one §27 slot per device per bucket (a re-announce REPLACES it); the per-announcer
+   *  cap is enforced PEER-SIDE (sealed inside the announcement), so the server stores opaquely and
+   *  runs the Tier-1 sample-poll (PRIV-API-RENDEZVOUS-1). */
   async announce(req: AnnounceRequest): Promise<AnnounceResult> {
-    if (!this.withinTtlBound(req.expires_at))
-      return { stored: false, mode: 'rejected', reason: 'ttl' };
-
-    if (req.cap && this.verifier) {
-      // The time bucket must be the CURRENT one (± grace) so a flooder cannot mint a
-      // fresh bucket ⇒ fresh pseudonym ⇒ fresh slot per announce. `-1` = per-epoch (a
-      // single stable slot for the whole epoch — no per-bucket flood is possible).
-      if (!this.bucketIsCurrent(req.cap.bucket)) {
-        this.metricsState.capRejected += 1;
-        return { stored: false, mode: 'rejected', reason: 'bucket' };
-      }
-      const issuerPubKey = this.pinIssuerKey(
-        req.room_blind_id,
-        req.cap.epoch,
-        req.cap.issuer_pubkey,
-      );
-      const valid = this.verifier({
-        roomBlindId: req.room_blind_id,
-        epoch: req.cap.epoch,
-        bucket: req.cap.bucket,
-        issuerPubKey,
-        nym: req.peer_blind_id, // a Tier-2 peer_blind_id IS the pseudonym
-        proof: req.cap.proof,
-      });
-      if (!valid) {
-        this.metricsState.capRejected += 1;
-        return { stored: false, mode: 'rejected', reason: 'cap_invalid' };
-      }
-      await this.store.announce({
-        roomBlindId: req.room_blind_id,
-        peerBlindId: req.peer_blind_id, // = nym ⇒ dedup by it = the cap
-        encryptedAnnouncement: req.encrypted_announcement,
-        expiresAt: req.expires_at,
-      });
-      this.metricsState.announces += 1;
-      this.metricsState.capAccepted += 1;
-      return { stored: true, mode: 'cap' };
-    }
-
+    if (!this.withinTtlBound(req.expires_at)) return { stored: false, reason: 'ttl' };
     await this.store.announce({
       roomBlindId: req.room_blind_id,
       peerBlindId: req.peer_blind_id,
@@ -200,27 +125,7 @@ export class RendezvousService {
       expiresAt: req.expires_at,
     });
     this.metricsState.announces += 1;
-    return { stored: true, mode: 'tier1' };
-  }
-
-  /** True iff `bucket` is the current time bucket (± grace), or the `-1` per-epoch sentinel. */
-  private bucketIsCurrent(bucket: number): boolean {
-    if (bucket === -1) return true;
-    const current = Math.floor(this.now() / this.config.bucketWidthMs);
-    return bucket <= current && bucket >= current - this.config.bucketGrace;
-  }
-
-  /** Return the pinned issuer key for `(room, epoch)`, pinning `candidate` on first sight. */
-  private pinIssuerKey(roomBlindId: string, epoch: string, candidate: string): string {
-    const key = `${roomBlindId} ${epoch}`;
-    const existing = this.issuerPins.get(key);
-    if (existing !== undefined) return existing;
-    if (this.issuerPins.size >= MAX_ISSUER_PINS) {
-      const oldest = this.issuerPins.keys().next().value;
-      if (oldest !== undefined) this.issuerPins.delete(oldest);
-    }
-    this.issuerPins.set(key, candidate);
-    return candidate;
+    return { stored: true };
   }
 
   /** A TTL is accepted iff it is still in the future and within the server bound
@@ -244,6 +149,8 @@ export class RendezvousService {
     const records = await this.store.poll(roomBlindId, this.now(), this.config.maxRecordsPerPoll);
     return {
       records: records.map((r) => ({
+        // Echo the room blind id (the poll key) so the client can rebuild the §15.3 AEAD AAD.
+        room_blind_id: roomBlindId,
         peer_blind_id: r.peerBlindId,
         encrypted_announcement: r.encryptedAnnouncement,
         expires_at: r.expiresAt,
@@ -278,6 +185,8 @@ export class RendezvousService {
       signals: signals.map((s) => ({
         room_blind_id: s.roomBlindId,
         sender_blind_id: s.senderBlindId,
+        // Echo the recipient blind id (the drain key) so the client can rebuild the §15.4 AEAD AAD.
+        recipient_blind_id: s.recipientBlindId,
         ciphertext: s.ciphertext,
         expires_at: s.expiresAt,
       })),
@@ -302,28 +211,13 @@ function buildStore(): RendezvousStore {
   return dbUrl ? new DrizzleRendezvousStore(createDbClient(dbUrl)) : new InMemoryRendezvousStore();
 }
 
-/** Build the Tier-2 verifier; on any failure, return undefined ⇒ the service runs Tier-1
- *  (the sample-poll) — fail-open availability never depends on the cap loading. */
-function buildVerifier(): PresenceVerifier | undefined {
-  try {
-    return createPresenceVerifier();
-  } catch {
-    return undefined;
-  }
-}
-
 let service: RendezvousService | undefined;
 
-/** The process-wide rendezvous service (created lazily; Postgres when configured; the
- *  Tier-2 cap verifier wired when available, else Tier-1). */
+/** The process-wide rendezvous service (created lazily; Postgres when configured).  The server runs
+ *  the §27 Tier-1 sample-poll only — the per-announcer cap is enforced PEER-SIDE (PRIV-API-RENDEZVOUS-1). */
 export function getRendezvousService(): RendezvousService {
   if (!service) {
-    service = new RendezvousService(
-      buildStore(),
-      DEFAULT_RENDEZVOUS_CONFIG,
-      () => Date.now(),
-      buildVerifier(),
-    );
+    service = new RendezvousService(buildStore(), DEFAULT_RENDEZVOUS_CONFIG, () => Date.now());
   }
   return service;
 }

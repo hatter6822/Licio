@@ -13,8 +13,12 @@
 // Reassembly is fail-closed and DoS-bounded: a malformed, out-of-order, conflicting, or
 // over-cap fragment aborts the channel rather than mis-stitching bytes.
 //
-// A peer transport is public-only (`carriesPrivate: false`): the seam's
-// `transportMayCarry` gate keeps in_room/private packs off it (§21.4/§26.4).
+// A peer transport is public-only (`carriesPrivate: false`).  The seam's `transportMayCarry` gate
+// keeps non-public packs off any `carriesPrivate:false` transport for callers that route through
+// `fallbackExchange` — but the LIVE WebRTC sync driver (apps/web `sync-over-p2p.ts`) drives this
+// transport directly, so the REAL public-only enforcement on that path is the client responder
+// (`exchange.ts` `collectShareableCids` — a per-record `visibility_scope === 'public'` filter) plus
+// the `publicOnly` ingest, not the seam gate (§21.4/§26.4).
 
 import type { LcapTransport, TransportCapabilities } from '@licio/lcap';
 import { TransportUnavailableError } from '@licio/lcap';
@@ -64,8 +68,15 @@ export class WebrtcTransport implements LcapTransport {
   readonly capabilities = WEBRTC_CAPABILITIES;
   /** Completed (reassembled) inbound messages awaiting a `receive`. */
   private readonly inbox: Uint8Array[] = [];
+  /** Total bytes queued in {@link inbox} — bounded so a peer cannot grow renderer memory by sending
+   *  many COMPLETE messages faster than they are consumed (the reassembler caps ONE message; this
+   *  caps the accumulation across messages at the advertised `maxExchangeBytes`) (PUB-WEBRTC-4). */
+  private inboxBytes = 0;
   private waiting: ((value: Uint8Array | null) => void) | null = null;
   private closed = false;
+  /** Serializes `send()` calls (single-flight): a second send awaits the first rather than
+   *  interleaving its fragments onto the one ordered datachannel (PUB-WEBRTC-5). */
+  private sendChain: Promise<void> = Promise.resolve();
   /** Reassembles fragmented inbound datachannel messages into whole exchange bodies. */
   private readonly reassembler = new FragmentReassembler();
   /** Monotonic per-send message id so the receiver can detect a message boundary. */
@@ -105,6 +116,10 @@ export class WebrtcTransport implements LcapTransport {
         resolve(completed);
       } else {
         this.inbox.push(completed);
+        this.inboxBytes += completed.length;
+        // Bound the un-consumed queue at the advertised single-exchange ceiling: a peer that floods
+        // complete messages faster than `receive()` drains them is torn down fail-closed (PUB-WEBRTC-4).
+        if (this.inboxBytes > MAX_REASSEMBLY_BYTES) this.abort();
       }
     };
     channel.onclose = () => {
@@ -183,6 +198,19 @@ export class WebrtcTransport implements LcapTransport {
   }
 
   async send(message: Uint8Array): Promise<void> {
+    // Single-flight: a concurrent send awaits the in-flight one so its fragments are not interleaved
+    // with another message's on the single ordered datachannel (which the receiver — one in-flight
+    // message at a time — would reject) (PUB-WEBRTC-5).  A prior failure is swallowed in the CHAIN so
+    // it cannot wedge later sends, while THIS caller still gets its own rejection.
+    const run = this.sendChain.then(() => this.sendSerial(message));
+    this.sendChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async sendSerial(message: Uint8Array): Promise<void> {
     if (this.channel.readyState !== 'open') {
       throw new TransportUnavailableError('webrtc', 'data channel closed before send');
     }
@@ -206,16 +234,32 @@ export class WebrtcTransport implements LcapTransport {
 
   async receive(signal?: AbortSignal): Promise<Uint8Array | null> {
     const buffered = this.inbox.shift();
-    if (buffered) return buffered;
+    if (buffered) {
+      this.inboxBytes -= buffered.length;
+      return buffered;
+    }
     if (this.closed) return null;
+    // An ALREADY-aborted signal must resolve immediately: `addEventListener('abort', …)` does NOT
+    // fire for an abort that already happened, so parking here would hang the receive forever (the
+    // exchange-round driver passes the same signal it may have aborted before this call) (PUB-WEBRTC-1).
+    if (signal?.aborted) return null;
     return new Promise<Uint8Array | null>((resolve) => {
-      this.waiting = resolve;
-      signal?.addEventListener('abort', () => {
-        if (this.waiting === resolve) {
-          this.waiting = null;
-          resolve(null);
-        }
-      });
+      let done = false;
+      const settle = (value: Uint8Array | null): void => {
+        if (done) return;
+        done = true;
+        // Remove the abort listener on EVERY settle path (a delivered message, a close, or the
+        // abort) so listeners do not accumulate on a long-lived signal across many receives (PUB-WEBRTC-2).
+        signal?.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+      const onAbort = (): void => {
+        // Only this parked receive owns the resolver; clear it so onmessage/onclose do not also fire it.
+        if (this.waiting === settle) this.waiting = null;
+        settle(null);
+      };
+      this.waiting = settle;
+      signal?.addEventListener('abort', onAbort);
     });
   }
 

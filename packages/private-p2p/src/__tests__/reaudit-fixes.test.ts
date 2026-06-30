@@ -320,11 +320,15 @@ describe('re-audit finding 1 — applyCommit rejects a bare MLS Proposal (not an
     // `mls_commit` slot; bob must NOT mistake it for an epoch advance.
     const charlieBundle = await generateMemberKeyPackage(utf8('charlie-dev'));
     const proposal = await proposeAdd(invited.group, charlieBundle.publicPackage);
-    await expect(applyCommit(bobJoin.group, proposal)).rejects.toThrow(/did not advance the epoch/);
+    // A bare proposal is let through the §11.3 callback (it changes nothing) and rejected by the
+    // epoch-advance guard as "not a commit" — so the authority predicate is irrelevant here.
+    await expect(applyCommit(bobJoin.group, proposal, () => true)).rejects.toThrow(
+      /did not advance the epoch/,
+    );
 
     // Control: a REAL commit (the MLS Add) DOES advance bob to epoch 2.
     const realAdd = await addMember(invited.group, charlieBundle.publicPackage); // epoch 1 → 2
-    const advanced = await applyCommit(bobJoin.group, realAdd.commit);
+    const advanced = await applyCommit(bobJoin.group, realAdd.commit, () => true);
     expect(Number(currentEpoch(advanced))).toBe(2);
   });
 });

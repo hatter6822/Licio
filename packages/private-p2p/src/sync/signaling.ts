@@ -179,13 +179,28 @@ export function iceCandidateAllowed(
 }
 
 /**
+ * Neutralize the `raddr`/`rport` (RFC 8445 RELATED-ADDRESS) tokens on a candidate line.  A `relay`
+ * (TURN) candidate still carries the host's reflexive/local address in `raddr`/`rport`, which would
+ * leak the peer's IP even though the candidate itself is a relay.  Set them to `0.0.0.0`/`0` so the
+ * relay-only IP-suppression invariant holds from the PURE filter alone, independent of whatever the
+ * browser happens to redact (PRIV-SYNC-3).
+ */
+export function scrubRelatedAddress(candidate: string): string {
+  return candidate.replace(/\braddr\s+\S+/g, 'raddr 0.0.0.0').replace(/\brport\s+\d+/g, 'rport 0');
+}
+
+/**
  * Filter raw ICE candidate lines to those permitted under `mode` — the §15.4
- * relay-only IP-suppression applied before any candidate is signaled to a peer.
+ * relay-only IP-suppression applied before any candidate is signaled to a peer.  In a non-direct
+ * mode the surviving relay candidates also have their related-address tokens scrubbed, so no host IP
+ * rides a relay candidate (PRIV-SYNC-3).
  */
 export function filterIceCandidatesForMode(
   mode: TransportMode,
   candidates: readonly string[],
 ): string[] {
   if (mode === 'direct_allowed') return [...candidates];
-  return candidates.filter((c) => iceCandidateAllowed(mode, iceCandidateType(c)));
+  return candidates
+    .filter((c) => iceCandidateAllowed(mode, iceCandidateType(c)))
+    .map(scrubRelatedAddress);
 }

@@ -144,7 +144,9 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     const aliceSession = new PrivateSyncSession(alice, a, codec);
     const bobSession = new PrivateSyncSession(bob, b, codec, {
       onMlsCommit: async (commitBytes) => {
-        bobGroup = await p2p.applyCommit(bobGroup, p2p.decodeCommit(commitBytes));
+        // The §11.3 authority gate is exercised by room-manager / the adversarial suite; this
+        // convergence test drives the MLS mechanics, so it accepts any (valid-member) committer.
+        bobGroup = await p2p.applyCommit(bobGroup, p2p.decodeCommit(commitBytes), () => true);
         const be = await p2p.deriveEpochState(bobGroup, roomIdCommitment, manifestCommitment);
         bob.addEpochKeys(Number(be.epoch), p2p.heldKeysOf(be));
         await bob.retryPending();

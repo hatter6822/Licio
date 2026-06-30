@@ -31,6 +31,7 @@ import {
   DEFAULT_BUDGET,
   type DetachedProofV2,
   decodeAndRouteRecord,
+  decodeProof,
   detachedProofV2Schema,
   type ExportAuthorizationResult,
   type ExportRequestV2,
@@ -205,6 +206,80 @@ export class LcapIngestServer {
   /** Read a held object's bytes + kind by CID (§29 content fetch), or undefined. */
   getObject(cid: string): Promise<StoredObject | undefined> {
     return this.store.getObject(cid);
+  }
+
+  /**
+   * Whether a contribution/identity record's BYTES are eligible for the PUBLIC serve surface.
+   * Mirrors the client responder (apps/web/src/lcap/exchange.ts `collectShareableCids`): ONLY a
+   * record carrying a NON-PUBLIC `visibility_scope` is withheld; identity records (device
+   * certificate / revocation / account authority) carry no visibility_scope and are public
+   * validation material.  An undecodable record is never served.
+   */
+  private static recordIsPublic(bytes: Uint8Array): boolean {
+    let record: ReturnType<typeof decodeAndRouteRecord>;
+    try {
+      record = decodeAndRouteRecord(bytes);
+    } catch {
+      return false;
+    }
+    return !('visibility_scope' in record) || record.visibility_scope === 'public';
+  }
+
+  /**
+   * Whether `cid` may be served over the PUBLIC §29 read/exchange surface (the GET content routes +
+   * the pulse/exchange repack).  This is the SERVER counterpart of the client's PUBLIC-ONLY
+   * responder (`collectShareableCids`) and closes PUB-API-CORE-1: a non-public (`room_only`) record,
+   * its proofs, and its body/media BLOCKS are NEVER served by CID over the unauthenticated surface,
+   * so a caller that learns an in_room CID (e.g. a removed member) cannot exfiltrate the plaintext.
+   *
+   *   • record → public iff its own `visibility_scope` is public (or it is identity material);
+   *   • proof  → public iff the record it attests is public;
+   *   • block  → public iff SOME record that references it (body / thumbnail / image / manifest /
+   *              source-snapshot edge) is public — resolved via the reverse closure edge;
+   *   • chunk  → NEVER public here.  A `chunk` carries no visibility and the server cannot resolve
+   *              it to its owning record (a block CID addresses raw bytes; the descriptor that lists
+   *              `chunk_cids` is not stored under a server-decodable key), so — exactly like the
+   *              client responder, which also never serves chunks — a chunk is withheld over the
+   *              public surface (fail-closed).  Authorized chunked-media serving is the separate
+   *              §29.4 "if authorized" path (a tracked enhancement), never this public one.
+   *
+   * The capability-authorized §29.8 room export is a SEPARATE path and is intentionally NOT gated
+   * here (an authorized export carries the room's full in_room closure by design).
+   */
+  async isPublicServable(cid: string): Promise<boolean> {
+    const obj = await this.store.getObject(cid);
+    if (!obj) return false;
+    switch (obj.kind) {
+      case 'record':
+        return LcapIngestServer.recordIsPublic(obj.bytes);
+      case 'proof': {
+        let recordCid: string;
+        try {
+          recordCid = decodeProof(obj.bytes).record_cid;
+        } catch {
+          return false;
+        }
+        const rec = await this.store.getObject(recordCid);
+        return rec?.kind === 'record' && LcapIngestServer.recordIsPublic(rec.bytes);
+      }
+      case 'block': {
+        for (const recordCid of await this.store.recordsReferencing(cid, 'block')) {
+          const rec = await this.store.getObject(recordCid);
+          if (rec?.kind === 'record' && LcapIngestServer.recordIsPublic(rec.bytes)) return true;
+        }
+        return false;
+      }
+      case 'chunk':
+        return false;
+    }
+  }
+
+  /** The PUBLIC-servable subset of `cids`, preserving order — the want filter the pulse/exchange
+   *  responder applies BEFORE repack so a non-public want is never assembled into a served pack. */
+  async filterPublicServable(cids: readonly string[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const cid of cids) if (await this.isPublicServable(cid)) out.push(cid);
+    return out;
   }
 
   /**

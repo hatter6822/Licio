@@ -38,8 +38,10 @@ export interface PublishAuditInput {
   readonly actorUserId: string | null;
   /** The §22.7 review-gate verdict: `approved` / `review_required` / `skipped` (republish path). */
   readonly reviewVerdict: 'approved' | 'review_required' | 'skipped' | 'error';
-  /** The takedown re-check verdict the bridge applied: `clear` / `halt` / `unreadable`. */
-  readonly takedownVerdict: 'clear' | 'halt' | 'unreadable';
+  /** The takedown re-check verdict the bridge applied: `clear` (oracle answered, no takedown) /
+   *  `halt` (live takedown) / `unreadable` (oracle threw) / `not_checked` (the candidate was refused
+   *  on review or eligibility BEFORE the oracle ran, so no takedown verdict was produced). */
+  readonly takedownVerdict: 'clear' | 'halt' | 'unreadable' | 'not_checked';
   /** Whether the bridge ultimately pinned the block. */
   readonly published: boolean;
   /** The bridge's machine-readable outcome reason (e.g. `takedown_recheck_halt`, ''=ok). */

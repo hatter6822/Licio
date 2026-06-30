@@ -76,6 +76,27 @@ export function takedownInForce(status: TakedownStatus): boolean {
 export type TakedownOracle = (blockCid: string) => boolean | Promise<boolean>;
 
 /**
+ * The fail-closed takedown re-check verdict for ONE block (the richer form of
+ * {@link takedownHaltsPublish}): `clear` (oracle answered "no takedown"), `taken_down` (oracle
+ * reported a live takedown), or `oracle_error` (the oracle THREW — unreadable, treated as a halt).
+ * The `taken_down` / `oracle_error` distinction lets a caller AUDIT a genuine halt vs an unreadable
+ * oracle separately (PUB-API-PUBLISH-4), even though BOTH must refuse the (re)publish.
+ */
+export type TakedownRecheck = 'clear' | 'taken_down' | 'oracle_error';
+
+export async function takedownRecheck(
+  oracle: TakedownOracle,
+  blockCid: string,
+): Promise<TakedownRecheck> {
+  try {
+    return (await oracle(blockCid)) === true ? 'taken_down' : 'clear';
+  } catch {
+    // An oracle that cannot answer must not be read as "no takedown".
+    return 'oracle_error';
+  }
+}
+
+/**
  * Consult the oracle fail-closed: returns `true` (halt) if the oracle reports a takedown
  * OR throws.  A consumer that gets `true` here MUST refuse to publish.
  */
@@ -83,12 +104,7 @@ export async function takedownHaltsPublish(
   oracle: TakedownOracle,
   blockCid: string,
 ): Promise<boolean> {
-  try {
-    return (await oracle(blockCid)) === true;
-  } catch {
-    // An oracle that cannot answer must not be read as "no takedown".
-    return true;
-  }
+  return (await takedownRecheck(oracle, blockCid)) !== 'clear';
 }
 
 /** The eligibility verdict for one candidate re-pin CID. */

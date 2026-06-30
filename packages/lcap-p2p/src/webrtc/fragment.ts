@@ -121,6 +121,14 @@ function parseFragment(frame: Uint8Array): FragmentHeader {
   if (messageLen > MAX_REASSEMBLY_BYTES) {
     throw new FragmentError(`message_total_len ${messageLen} exceeds the reassembly cap`);
   }
+  // `fragment_total` MUST be exactly the count `message_total_len` implies (PUB-WEBRTC-3): an
+  // over-declared total would let a peer hold the reassembler open awaiting fragments that, by the
+  // length math, can never complete the message — bind them so a mismatch fails closed up front.
+  if (total !== Math.max(1, Math.ceil(messageLen / FRAGMENT_PAYLOAD_BYTES))) {
+    throw new FragmentError(
+      `fragment_total ${total} disagrees with message_total_len ${messageLen}`,
+    );
+  }
   if (payload.length > FRAGMENT_PAYLOAD_BYTES) {
     throw new FragmentError(`fragment payload ${payload.length} exceeds the per-fragment cap`);
   }

@@ -62,13 +62,17 @@ export interface LcapTransport {
 }
 
 /**
- * Whether `caps` may carry a pack with `label`.  A non-public pack
- * (`contains_in_room_metadata`/`contains_private_encrypted`/`manual_user_selected`)
- * may ride ONLY a `carriesPrivate` transport; a public pack rides anything.
+ * Whether `caps` may carry a pack with `label`.  ONLY an explicitly `'public'` label rides a
+ * public-only transport; EVERY other value — a non-public label
+ * (`contains_in_room_metadata`/`contains_private_encrypted`/`manual_user_selected`) AND an
+ * OMITTED/`undefined` label — requires a `carriesPrivate` transport.  Failing closed on an absent
+ * label (PUB-SEAM-1) means a caller that forgets to label a non-public pack cannot accidentally leak
+ * it onto a peer/public channel; the price is only that an unlabeled PUBLIC pack rides the
+ * (`carriesPrivate: true`) server anchor instead of a peer transport.
  */
 export function transportMayCarry(
   caps: TransportCapabilities,
-  label: PackHeaderV2['privacy_label'],
+  label: PackHeaderV2['privacy_label'] | undefined,
 ): boolean {
   return label === 'public' ? true : caps.carriesPrivate;
 }
@@ -117,12 +121,23 @@ export async function runExchangeRound(
   requestMessage: Uint8Array,
   signal?: AbortSignal,
 ): Promise<Uint8Array | null> {
+  // A throwing `open()` releases its OWN resources (nothing is held yet), so it stays outside the
+  // try — only a SUCCESSFULLY-opened transport must be closed.
   await transport.open(signal);
   try {
+    // The caller may have aborted between open() and here; bail before sending so a just-opened
+    // transport is not used for a cancelled exchange (the `finally` still closes it) (PUB-SEAM-2).
+    if (signal?.aborted) throw new TransportUnavailableError(transport.capabilities.id, 'aborted');
     await transport.send(requestMessage);
     return await transport.receive(signal);
   } finally {
-    await transport.close();
+    // A `close()` rejection must NEVER convert an already-received response into a fall-through (a
+    // double-ingest / re-upload upstream): swallow it (PUB-SEAM-3).
+    try {
+      await transport.close();
+    } catch {
+      /* close is best-effort cleanup; the response above is already captured */
+    }
   }
 }
 
@@ -132,11 +147,11 @@ export async function runExchangeRound(
  * result records which transport succeeded.  Because the order always ends with the
  * server anchor (when present), a reachable server guarantees a correct outcome.
  *
- * When the request carries a non-public pack, the caller passes its `privacyLabel`: a
- * transport that cannot carry it (`carriesPrivate: false` — every peer/public carrier)
- * is SKIPPED, so `in_room`/private bytes are never tried on a public-only peer transport
- * before falling back to the server anchor (§21.4/§26.4).  Omit the label for a public
- * request (any transport may carry it).
+ * The caller passes the request's `privacyLabel`: a transport that cannot carry it
+ * (`carriesPrivate: false` — every peer/public carrier) is SKIPPED, so `in_room`/private bytes are
+ * never tried on a public-only peer transport before falling back to the server anchor (§21.4/§26.4).
+ * ALWAYS pass the label — an OMITTED label is treated as NON-PUBLIC and fails closed (PUB-SEAM-1), so
+ * only an explicit `'public'` rides a peer transport.
  */
 export async function fallbackExchange(
   transports: readonly LcapTransport[],
@@ -146,10 +161,10 @@ export async function fallbackExchange(
   privacyLabel?: PackHeaderV2['privacy_label'],
 ): Promise<{ transport: TransportId; response: Uint8Array } | null> {
   for (const transport of selectTransports(transports, preference)) {
-    // The carriage gate, BEFORE any bytes are sent on this transport.
-    if (privacyLabel !== undefined && !transportMayCarry(transport.capabilities, privacyLabel)) {
-      continue;
-    }
+    if (signal?.aborted) break; // the caller cancelled — stop trying transports (PUB-SEAM-2)
+    // The carriage gate, BEFORE any bytes are sent on this transport.  Fails CLOSED on an omitted
+    // label (a non-public pack can never ride a public-only transport, even unlabeled).
+    if (!transportMayCarry(transport.capabilities, privacyLabel)) continue;
     try {
       const response = await runExchangeRound(transport, requestMessage, signal);
       if (response !== null) return { transport: transport.capabilities.id, response };

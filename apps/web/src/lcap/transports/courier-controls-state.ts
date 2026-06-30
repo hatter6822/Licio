@@ -13,6 +13,7 @@
 
 import { z } from 'zod';
 import { loadPersisted, type PersistConfig, savePersisted } from '../../stores/persist.js';
+import { COURIER_CHANNELS, type CourierChannel } from './courier-channels.js';
 import {
   type CourierExchangePeers,
   type CourierRadioControls,
@@ -20,7 +21,9 @@ import {
 } from './courier-native.js';
 
 const exchangePeersSchema = z.enum(['anyone', 'known_only', 'none']);
-const channelSchema = z.enum(['nearby', 'wifiDirect', 'bluetooth', 'usb']);
+// Single-sourced from the COURIER_CHANNELS SSOT (PUB-COURIER-5): the persisted-controls validator
+// and the controller seam now share ONE channel set, so a new radio cannot silently diverge.
+const channelSchema = z.enum(COURIER_CHANNELS as [CourierChannel, ...CourierChannel[]]);
 
 const courierControlsSchema = z
   .object({

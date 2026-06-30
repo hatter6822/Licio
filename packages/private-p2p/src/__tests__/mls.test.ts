@@ -46,6 +46,10 @@ async function twoDeviceGroup(): Promise<{
   return { alice, bob, bobKp };
 }
 
+// The §11.3 authority predicate is a ROOM-layer concept (it reads the reducer's capability state);
+// at the MLS-mechanics layer every committer here is a valid member, so accept any committer.
+const ANY_COMMITTER = (): boolean => true;
+
 describe('§10.9 applyCommit — an existing member advances to the committer epoch', () => {
   it('advances a non-committer to the new epoch + converges the epoch authenticator', async () => {
     const aliceKp = await generateMemberKeyPackage(utf8('alice'));
@@ -65,7 +69,7 @@ describe('§10.9 applyCommit — an existing member advances to the committer ep
     const addCarol = await addMember(alice, carolKp.publicPackage);
     alice = addCarol.group;
     if (!addCarol.welcome) throw new Error('no welcome for carol');
-    bob = await applyCommit(bob, addCarol.commit);
+    bob = await applyCommit(bob, addCarol.commit, ANY_COMMITTER);
 
     expect(currentEpoch(alice)).toBe(2n);
     expect(currentEpoch(bob)).toBe(2n);
@@ -84,12 +88,12 @@ describe('§10.9 applyCommit — an existing member advances to the committer ep
     const carolKp = await generateMemberKeyPackage(utf8('carol'));
     const addCarol = await addMember(alice, carolKp.publicPackage); // epoch 2
     let a = addCarol.group;
-    let b = await applyCommit(bob, addCarol.commit);
+    let b = await applyCommit(bob, addCarol.commit, ANY_COMMITTER);
     expect(currentEpoch(b)).toBe(2n);
     // alice removes carol (leaf 2) → epoch 3; bob applies the Remove commit.
     const rm = await removeMember(a, 2);
     a = rm.group;
-    b = await applyCommit(b, rm.commit);
+    b = await applyCommit(b, rm.commit, ANY_COMMITTER);
     expect(currentEpoch(a)).toBe(3n);
     expect(currentEpoch(b)).toBe(3n);
     expect(toHex(epochAuthenticator(b))).toBe(toHex(epochAuthenticator(a)));
@@ -111,7 +115,7 @@ describe('§10.9 applyCommit — an existing member advances to the committer ep
 
     // Existing member bob applies the commit AFTER a wire round-trip.
     const commitBytes = encodeCommit(addCarol.commit);
-    bob = await applyCommit(bob, decodeCommit(commitBytes));
+    bob = await applyCommit(bob, decodeCommit(commitBytes), ANY_COMMITTER);
     expect(currentEpoch(bob)).toBe(2n);
     expect(toHex(epochAuthenticator(bob))).toBe(toHex(epochAuthenticator(alice)));
 
@@ -125,6 +129,31 @@ describe('§10.9 applyCommit — an existing member advances to the committer ep
     // Fail-closed: garbage / wrong-wireformat bytes are rejected.
     expect(() => decodeCommit(new Uint8Array([1, 2, 3]))).toThrow();
     expect(() => decodeWelcomeMessage(encodeCommit(addCarol.commit))).toThrow();
+  });
+
+  it('§11.3 gate (PRIV-CRYPTO-1) — REJECTS a commit whose committer the predicate denies, leaving the epoch unadvanced', async () => {
+    const { alice, bob } = await twoDeviceGroup(); // alice+bob at epoch 1
+    const carolKp = await generateMemberKeyPackage(utf8('carol'));
+    const addCarol = await addMember(alice, carolKp.publicPackage); // alice commits → epoch 2
+    // The §11.3 predicate denies the committer (e.g. the committer is NOT an admin in the applier's
+    // reduced state): the commit is refused and bob does NOT advance — so a forged Add/Remove can
+    // never grant or revoke epoch-key access.
+    await expect(applyCommit(bob, addCarol.commit, () => false)).rejects.toThrow(/not authorized/);
+    expect(currentEpoch(bob)).toBe(1n);
+  });
+
+  it('§11.3 gate — passes the committer’s ROOM device id (its leaf basic-credential identity) to the predicate', async () => {
+    const grp = await twoDeviceGroup();
+    let bob = grp.bob;
+    const carolKp = await generateMemberKeyPackage(utf8('carol'));
+    const addCarol = await addMember(grp.alice, carolKp.publicPackage); // committed by alice
+    let seenCommitter: string | undefined = 'unset';
+    bob = await applyCommit(bob, addCarol.commit, (id) => {
+      seenCommitter = id;
+      return true;
+    });
+    expect(seenCommitter).toBe('alice');
+    expect(currentEpoch(bob)).toBe(2n);
   });
 });
 

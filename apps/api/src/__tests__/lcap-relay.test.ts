@@ -118,6 +118,40 @@ describe('LcapRelay — private-content refusal (§22.4)', () => {
     });
     expect((await relay.admit(input)).stored).toBe(true);
   });
+
+  it('refuses plaintext in_room content too (PUB-API-CORE-5: in_room treated like private)', async () => {
+    const relay = new LcapRelay(new InMemoryLcapServerStore());
+    const input = await blockInput('inroom', {
+      visibility: 'in_room',
+      encrypted: false,
+      permitted: false,
+    });
+    expect(await relay.admit(input)).toEqual({
+      stored: false,
+      cid: input.cid,
+      refused: 'private_content_refused',
+    });
+  });
+
+  it('refuses encrypted in_room content the room policy does not permit (PUB-API-CORE-5)', async () => {
+    const relay = new LcapRelay(new InMemoryLcapServerStore());
+    const input = await blockInput('inroom2', {
+      visibility: 'in_room',
+      encrypted: true,
+      permitted: false,
+    });
+    expect((await relay.admit(input)).stored).toBe(false);
+  });
+
+  it('admits encrypted + permitted in_room content (PUB-API-CORE-5)', async () => {
+    const relay = new LcapRelay(new InMemoryLcapServerStore());
+    const input = await blockInput('inroom3', {
+      visibility: 'in_room',
+      encrypted: true,
+      permitted: true,
+    });
+    expect((await relay.admit(input)).stored).toBe(true);
+  });
 });
 
 describe('LcapRelay — §27.3 quota enforcement', () => {

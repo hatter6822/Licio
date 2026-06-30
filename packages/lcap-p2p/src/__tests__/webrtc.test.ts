@@ -7,7 +7,7 @@
 // TURN, and discloses IP exposure for a direct connection; the data-channel transport
 // moves bytes, buffers, and is public-only.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   type DataChannelLike,
   decideWebrtc,
@@ -190,6 +190,33 @@ describe('WebRTC data-channel transport (§22.6)', () => {
     const pending = t.receive();
     ch.fireClose();
     expect(await pending).toBeNull();
+  });
+
+  it('resolves receive() with null immediately for an ALREADY-aborted signal (PUB-WEBRTC-1)', async () => {
+    const t = new WebrtcTransport(fakeChannel());
+    const ac = new AbortController();
+    ac.abort(); // aborted BEFORE receive(): an `abort` listener would never fire, so parking hangs
+    expect(await t.receive(ac.signal)).toBeNull();
+  });
+
+  it('aborts a parked receive via the signal, then resolves null', async () => {
+    const t = new WebrtcTransport(fakeChannel());
+    const ac = new AbortController();
+    const pending = t.receive(ac.signal);
+    ac.abort();
+    expect(await pending).toBeNull();
+  });
+
+  it('removes the abort listener when a message resolves the receive (no leak, PUB-WEBRTC-2)', async () => {
+    const ch = fakeChannel();
+    const t = new WebrtcTransport(ch);
+    const ac = new AbortController();
+    const removeSpy = vi.spyOn(ac.signal, 'removeEventListener');
+    const pending = t.receive(ac.signal);
+    ch.deliver(new Uint8Array([9]));
+    expect(await pending).toEqual(new Uint8Array([9]));
+    // The abort listener was cleaned up on the message path — it does not accumulate across receives.
+    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   it('coerces an ArrayBuffer-shaped fragment frame and ignores non-coercible junk', async () => {

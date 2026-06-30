@@ -39,6 +39,8 @@ import {
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
   type LcapTransport,
+  type PackHeaderV2,
+  readPack,
 } from '@licio/lcap';
 import { devWarn } from '../../lib/dev-log.js';
 import type { CourierMedium } from './courier.js';
@@ -69,28 +71,48 @@ import { buildServerTransports, offlineExchange } from './registry.js';
  *  server transports still get to run. */
 const COURIER_LEG_TIMEOUT_MS = 20_000;
 
+/** PUB-COURIER-3 responder DoS bounds (a peer's REQUEST triggers an expensive §16 build). */
+const MAX_INFLIGHT_RESPONSES_PER_ENDPOINT = 2;
+const MAX_SERVED_RESPONSES_PER_ENDPOINT = 64;
+const MAX_TOTAL_INFLIGHT_RESPONSES = 16;
+
 /**
  * Bound a transport's BLOCKING ops (`open`/`receive`) with a deadline: a hung leg rejects (so
  * `fallbackExchange` moves to the next transport) rather than waiting indefinitely.  `send` is
- * fire-and-forget over the medium; `close` runs in the exchange's `finally`, which unblocks any
- * pending `receive`.  Robust by construction — it does not depend on the inner transport
- * honouring the `AbortSignal`.
+ * fire-and-forget over the medium; `close` runs in the exchange's `finally`.  The timeout REJECTS
+ * regardless of whether the inner transport honours the signal (robust by construction), AND it
+ * threads a fresh `AbortController` (chained off the caller's signal) into the inner op so a timeout
+ * — or any settle — ALSO aborts it, firing `CourierTransport.receive`'s abort listener to settle the
+ * inner promise via its settled-guard and neutralize the otherwise-lingering `onInbound` consumer
+ * (PUB-COURIER-4).
  */
 function withLegTimeout(inner: LcapTransport, ms: number): LcapTransport {
-  const race = <T>(op: Promise<T>): Promise<T> => {
+  const raceWithAbort = <T>(
+    run: (signal: AbortSignal) => Promise<T>,
+    outer: AbortSignal | undefined,
+  ): Promise<T> => {
+    const controller = new AbortController();
+    const onOuterAbort = (): void => controller.abort();
+    if (outer?.aborted) controller.abort();
+    else outer?.addEventListener('abort', onOuterAbort, { once: true });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('courier_leg_timeout')), ms);
+      timer = setTimeout(() => {
+        controller.abort(); // neutralize the inner receive's lingering consumer
+        reject(new Error('courier_leg_timeout'));
+      }, ms);
     });
-    return Promise.race([op, timeout]).finally(() => {
+    return Promise.race([run(controller.signal), timeout]).finally(() => {
       if (timer !== undefined) clearTimeout(timer);
+      controller.abort(); // tear the inner op down on ANY settle path (success/timeout/error)
+      outer?.removeEventListener('abort', onOuterAbort);
     });
   };
   return {
     capabilities: inner.capabilities,
-    open: (signal) => race(inner.open(signal)),
+    open: (signal) => raceWithAbort((s) => inner.open(s), signal),
     send: (message) => inner.send(message),
-    receive: (signal) => race(inner.receive(signal)),
+    receive: (signal) => raceWithAbort((s) => inner.receive(s), signal),
     close: () => inner.close(),
   };
 }
@@ -103,6 +125,32 @@ function withLegTimeout(inner: LcapTransport, ms: number): LcapTransport {
  * with two couriers both sending requests, the first inbound bytes must NOT be reported as a
  * successful exchange.
  */
+/**
+ * Derive the carriage privacy label of an exchange request from its EMBEDDED `push_pack` header,
+ * rather than asserting `'public'` (PUB-COURIER-1).  A request with no push (a pure pull) is
+ * `'public'`; otherwise the label is the push pack's own `privacy_label`.  Fails CLOSED — an
+ * unreadable / undecodable request resolves to a non-public label, so the public-only courier is
+ * SKIPPED (the always-correct HTTPS anchor still carries it) rather than risking non-public bytes on
+ * a peer channel.  This is defense-in-depth: the real builder pushes only `collectShareableCids`
+ * (public) content, but a misbehaving `buildRequest` seam can no longer smuggle a non-public pack
+ * onto a public radio.
+ */
+async function requestPrivacyLabel(request: Uint8Array): Promise<PackHeaderV2['privacy_label']> {
+  const decoded = (() => {
+    try {
+      return decodeWithSchema(exchangeRequestV2Schema, request);
+    } catch {
+      // Not a decodable §16 request (a stub / corrupted blob): it carries no READABLE non-public
+      // content, so let carriage proceed — the receiver's `publicOnly` ingest refuses anything odd.
+      return null;
+    }
+  })();
+  if (!decoded?.push_pack) return 'public'; // undecodable, or a pure pull (no push)
+  const read = await readPack(decoded.push_pack);
+  // A decodable request whose push pack is unreadable is suspicious — fail closed (skip the courier).
+  return read.ok ? read.pack.header.privacy_label : 'contains_in_room_metadata';
+}
+
 function classifyExchangeMessage(bytes: Uint8Array): 'request' | 'response' | 'unknown' {
   try {
     decodeWithSchema(exchangeResponseV2Schema, bytes);
@@ -253,6 +301,15 @@ export class CourierController {
   /** Bytes RESERVED by in-flight exchanges (not yet charged) — a concurrent send sees these in its
    *  budget check, so simultaneous exchanges cannot jointly exceed the §22.5 storage ceiling. */
   private reservedBytes = 0;
+  /** Per-endpoint CONCURRENT responder builds in flight (PUB-COURIER-3): each `buildResponse` does ~256
+   *  IndexedDB reads + a repack, so a flooding peer must not trigger unbounded concurrent builds.
+   *  Keyed by the radio endpointId (§19.1: a radio id, never a network address). */
+  private readonly inflightResponses = new Map<string, number>();
+  /** Cumulative responder builds served to an endpoint THIS connection (reset on disconnect) — a
+   *  per-connection budget so even serial flooding over one connection is bounded (PUB-COURIER-3). */
+  private readonly servedResponses = new Map<string, number>();
+  /** Total responder builds in flight across ALL endpoints — a global concurrency ceiling. */
+  private totalInflightResponses = 0;
   /** Channels whose radios are currently running — a single radio's failure removes only its own
    *  channel; the courier is "running" while ANY channel is active, and only blocks when NONE are. */
   private readonly runningChannels = new Set<CourierChannel>();
@@ -645,6 +702,21 @@ export class CourierController {
   ): Promise<void> {
     if (!this.config.buildResponse) return; // request-only courier — drop the peer's request
     if (!mayExchangeWithEndpoint(this.controls, endpointId)) return; // the same who-can-exchange gate
+    // PUB-COURIER-3 responder admission, BEFORE the expensive build: bound concurrent + cumulative
+    // builds per endpoint and globally so a flooding peer cannot drive unbounded IndexedDB reads/repacks.
+    const rlKey = this.key(channel, endpointId);
+    const inflight = this.inflightResponses.get(rlKey) ?? 0;
+    const served = this.servedResponses.get(rlKey) ?? 0;
+    if (
+      inflight >= MAX_INFLIGHT_RESPONSES_PER_ENDPOINT ||
+      served >= MAX_SERVED_RESPONSES_PER_ENDPOINT ||
+      this.totalInflightResponses >= MAX_TOTAL_INFLIGHT_RESPONSES
+    ) {
+      return;
+    }
+    this.inflightResponses.set(rlKey, inflight + 1);
+    this.servedResponses.set(rlKey, served + 1);
+    this.totalInflightResponses += 1;
     try {
       // The responder INGESTS the peer's push_pack as a side effect; gate that ingest on a LIVE
       // check so a Stop / disclosure revocation / peers→none during the async build doesn't commit
@@ -686,6 +758,12 @@ export class CourierController {
       }
     } catch (error) {
       devWarn(`failed to build a courier response for '${channel}'`, error);
+    } finally {
+      // Release the in-flight slot (the cumulative `servedResponses` count persists until disconnect).
+      const remaining = (this.inflightResponses.get(rlKey) ?? 1) - 1;
+      if (remaining <= 0) this.inflightResponses.delete(rlKey);
+      else this.inflightResponses.set(rlKey, remaining);
+      this.totalInflightResponses -= 1;
     }
   }
 
@@ -698,6 +776,10 @@ export class CourierController {
     const key = this.key(channel, event.endpointId);
     this.mediums.delete(key);
     this.exchanged.delete(key);
+    // Reset the PUB-COURIER-3 responder budget for this endpoint so a fresh reconnect starts clean
+    // (the in-flight slot is released by respondToRequest's own finally).
+    this.servedResponses.delete(key);
+    this.inflightResponses.delete(key);
   }
 
   /** A radio reported an ASYNC start failure (e.g. GMS refused advertising after the start Task
@@ -821,17 +903,23 @@ export class CourierController {
     }
     const medium = this.mediumFor(channel, plugin, endpointId);
 
+    // PUBLIC-ONLY, DERIVED not asserted (PUB-COURIER-1): the carriage label comes from the request's
+    // own push_pack header, so a non-public pack (a misbehaving builder) is SKIPPED on the
+    // `carriesPrivate:false` courier by the seam gate — only the `carriesPrivate:true` anchor carries
+    // it.  The real builder pushes only public (`collectShareableCids`) content, so this is normally
+    // `'public'`.
+    const privacyLabel = await requestPrivacyLabel(request);
+
     let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null =
       null;
     try {
       // The courier leg over THIS endpoint FIRST (deadline-bounded so a non-responding peer cannot
-      // stall sync forever).  PUBLIC-ONLY: the courier seam (`carriesPrivate:false`) structurally
-      // refuses any non-public pack, so the public label is the only one a courier ever carries.
+      // stall sync forever).
       result = await offlineExchange(
         [withLegTimeout(new CourierTransport(medium as CourierMedium), COURIER_LEG_TIMEOUT_MS)],
         request,
         undefined,
-        'public',
+        privacyLabel,
       );
       // Fall back to the always-correct HTTPS anchor ONLY if this courier is STILL live: a Stop /
       // disclosure revocation / deselection / forced-off mode DURING the (possibly slow) courier leg
@@ -849,7 +937,7 @@ export class CourierController {
           buildServerTransports(this.config.httpsConfig ?? {}),
           request,
           undefined,
-          'public',
+          privacyLabel,
         );
       }
     } catch {

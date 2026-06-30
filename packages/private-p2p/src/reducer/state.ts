@@ -130,6 +130,26 @@ export interface RoomReducerState {
   epoch: number;
 }
 
+/**
+ * §11.3 (PRIV-CRYPTO-1): whether `deviceId` may authorize a MEMBERSHIP CHANGE in `state` — it must be
+ * a CURRENT, non-removed device whose member holds the `admin` capability (the capability that
+ * `member.add` / `member.remove` / `device.remove` / `role.*` all require).  The room-manager gates an
+ * incoming MLS commit on this BEFORE installing its new epoch keys, so a non-admin member's forged
+ * Add (a ghost reader device) or Remove (an admin eviction) can never advance an honest member's epoch
+ * — RFC 9420 has no admin role, so this room-layer rule is the §11.3 authority MLS itself lacks.
+ * `undefined` (an unresolved committer leaf) ⇒ false (fail-closed).
+ */
+export function deviceMayManageMembership(
+  state: Pick<RoomReducerState, 'devices' | 'members'>,
+  deviceId: string | undefined,
+): boolean {
+  if (deviceId === undefined) return false;
+  const device = state.devices.get(deviceId);
+  if (!device || device.removed) return false;
+  const member = state.members.get(device.memberId);
+  return member !== undefined && !member.removed && member.capabilities.has('admin');
+}
+
 /** A fresh, empty room state. */
 export function emptyRoomState(): RoomReducerState {
   return {

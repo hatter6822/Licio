@@ -183,47 +183,26 @@ function serializeAnnouncement(a: RendezvousAnnouncement): CanonicalValue {
   return out;
 }
 
-/**
- * WS-S Tier-2 — the OPTIONAL top-level cap a server (or relay) verifies WITHOUT the
- * rendezvous key (`docs/private-p2p/TIER2-RENDEZVOUS-CAP.md`).  Unlike the cap SEALED inside the
- * announcement (which only a member can open), this is the verifier-visible proof: the BBS
- * pseudonym-bound proof + the per-epoch issuer key + the `(epoch, bucket)` context the proof is
- * bound to.  When present, the record's `peer_blind_id` IS the proof pseudonym (the §15.3.1 dedup
- * key) — the proof is ZK, so the verifier learns nothing beyond that pseudonym.  Field shape
- * mirrors the server's `apps/api/src/private-rendezvous` cap schema EXACTLY.
- */
-export const rendezvousCapSchema = z
-  .object({
-    proof: z
-      .string()
-      .min(1)
-      .max(4096)
-      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
-    issuer_pubkey: z
-      .string()
-      .min(1)
-      .max(256)
-      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
-    epoch: z
-      .string()
-      .min(1)
-      .max(64)
-      .regex(/^[A-Za-z0-9_.-]+$/, 'epoch id'),
-    bucket: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER),
-  })
-  .strict();
-export type RendezvousCap = z.infer<typeof rendezvousCapSchema>;
+// NOTE (PRIV-API-RENDEZVOUS-1): the SERVER-side Tier-2 cap — a top-level, verifier-visible BBS proof
+// the server/relay checked WITHOUT the rendezvous key — was REMOVED.  Server-side ZK verification
+// intrinsically requires the server to hold the per-(room, epoch) issuer key, which is a stable,
+// bucket-spanning linking handle that lets an honest-but-curious server re-link a room's
+// bucket-rotated blind ids across an entire epoch — breaking §15.3 cross-bucket unlinkability.  There
+// is no way to keep server-side dedup AND that unlinkability, so the server reverts to the §27
+// Tier-1 sample-poll, and the per-announcer cap is enforced PEER-SIDE only: the cap SEALED INSIDE the
+// announcement (`RendezvousAnnouncement.cap`, opened only by a member holding the rendezvous key) is
+// verified + deduped by `filterVerifiedPresence` (a member already holds the issuer key, so it leaks
+// nothing).  The top-level cap field + its schema are therefore gone.
 
-/** §15.3 — the only thing the server stores for an unlisted/detached room: two
- *  opaque blind ids, the sealed announcement, a short expiry, and (Tier-2) an OPTIONAL
- *  verifier-visible cap (absent ⇒ Tier-1 sample-poll, a strict superset). */
+/** §15.3 — the only thing the server stores for an unlisted/detached room: two opaque blind ids,
+ *  the sealed announcement, and a short expiry.  The per-announcer cap rides SEALED inside the
+ *  announcement (member-only) — the server never sees a cap and runs the §27 Tier-1 sample-poll. */
 export const blindRendezvousRecordSchema = z
   .object({
     room_blind_id: base64UrlSchema,
     peer_blind_id: base64UrlSchema,
     encrypted_announcement: base64UrlSchema,
     expires_at: z.number().int().nonnegative(),
-    cap: rendezvousCapSchema.optional(),
   })
   .strict();
 export type BlindRendezvousRecord = z.infer<typeof blindRendezvousRecordSchema>;
@@ -237,21 +216,15 @@ export interface BuildRendezvousRecordParams {
   readonly nowMs: number;
   /** Defaults to the §15.3.2 maximum (30 min); clamped into `[MIN, MAX]`. */
   readonly ttlMs?: number;
-  /**
-   * WS-S Tier-2 — the verifier-visible cap to carry at the TOP level (so a server/relay without
-   * the rendezvous key can verify + dedup).  When provided, the record's `peer_blind_id` is set
-   * to the cap's pseudonym (`capPseudonym`) — the §15.3.1 dedup key — instead of the derived
-   * per-device blind id, and the AAD that seals the announcement binds that same pseudonym.
-   */
-  readonly cap?: RendezvousCap;
-  /** The cap pseudonym used as `peer_blind_id` when `cap` is present (REQUIRED with `cap`). */
-  readonly capPseudonym?: string;
 }
 
 /**
- * Build a `BlindRendezvousRecord` for the current `(epoch, time_bucket)`: derive
- * the room + peer blind ids, seal the announcement under the announce key (AAD-
- * bound to the record), and set a clamped short TTL.
+ * Build a `BlindRendezvousRecord` for the current `(epoch, time_bucket)`: derive the room + peer
+ * blind ids, seal the announcement under the announce key (AAD-bound to the record), and set a
+ * clamped short TTL.  The `peer_blind_id` is ALWAYS the deterministic per-`(device, epoch, bucket)`
+ * derived id — which already gives one server slot per device per bucket (a re-announce REPLACES it)
+ * — and the per-announcer cap rides SEALED inside the announcement for peer-side verification
+ * (PRIV-API-RENDEZVOUS-1: no top-level cap; the server runs the §27 Tier-1 sample-poll).
  */
 export async function buildRendezvousRecord(
   params: BuildRendezvousRecordParams,
@@ -262,19 +235,12 @@ export async function buildRendezvousRecord(
     params.epoch,
     params.timeBucket,
   );
-  // WS-S Tier-2: when a verifier-visible cap is carried, the pseudonym IS the peer_blind_id (the
-  // §15.3.1 dedup key the server/relay caps by); otherwise the derived per-device blind id.
-  if (params.cap !== undefined && params.capPseudonym === undefined) {
-    throw new Error('buildRendezvousRecord: capPseudonym is required when cap is present');
-  }
-  const peerBlindId =
-    params.capPseudonym ??
-    (await derivePeerBlindId(
-      params.rendezvousKey,
-      params.deviceId,
-      params.epoch,
-      params.timeBucket,
-    ));
+  const peerBlindId = await derivePeerBlindId(
+    params.rendezvousKey,
+    params.deviceId,
+    params.epoch,
+    params.timeBucket,
+  );
   const expiresAt = params.nowMs + clampRendezvousTtl(params.ttlMs ?? RENDEZVOUS_MAX_TTL_MS);
   const announceKey = await deriveAnnounceKey(params.rendezvousKey);
   const sealed = await aeadSeal(
@@ -287,7 +253,6 @@ export async function buildRendezvousRecord(
     peer_blind_id: peerBlindId,
     encrypted_announcement: toBase64Url(sealed),
     expires_at: expiresAt,
-    ...(params.cap !== undefined ? { cap: params.cap } : {}),
   });
 }
 

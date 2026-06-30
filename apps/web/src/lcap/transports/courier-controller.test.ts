@@ -130,6 +130,21 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(f.calls).toEqual([]); // no radios, no listeners
   });
 
+  it('is BLOCKED (no radio calls) when the §22.5 disclosure is unacknowledged (PUB-COURIER-6)', async () => {
+    const f = fakePlugin();
+    const controller = makeController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+      disclosureAcknowledged: () => false, // the user has NOT acknowledged the radio-metadata disclosure
+    });
+    const decision = await controller.start();
+    expect(decision.blockedReason).toBe('disclosure_unacknowledged');
+    expect(controller.isRunning()).toBe(false);
+    expect(f.calls).toEqual([]); // a proximity radio must NEVER start before acknowledgment
+  });
+
   it('FORCES off in Stealth/Emergency regardless of the controls (§33.5)', async () => {
     for (const mode of ['stealth', 'emergency'] as const) {
       const f = fakePlugin();
@@ -534,6 +549,31 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // The response was ferried back to the peer (base64 of our response bytes).
     expect(f.sent[0]?.endpointId).toBe('ep-1');
     expect(f.sent[0]?.message).toBe(toB64(RESPONSE_BYTES));
+  });
+
+  it('rate-limits a peer flooding inbound REQUESTS (PUB-COURIER-6/PUB-COURIER-3)', async () => {
+    const f = fakePlugin();
+    let served = 0;
+    const controller = makeController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      buildResponse: () => {
+        served += 1;
+        return RESPONSE_BYTES;
+      },
+    });
+    await controller.start();
+    // ONE endpoint floods 100 inbound requests; the per-endpoint responder admission cap bounds the
+    // expensive builds far below the flood (a few in-flight + a per-connection cumulative ceiling).
+    for (let i = 0; i < 100; i++) {
+      f.emit('payloadReceived', { endpointId: 'flooder', message: REQUEST_B64 });
+    }
+    await vi.waitFor(() => expect(served).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 50)); // let the async respondToRequest builds settle
+    expect(served).toBeGreaterThanOrEqual(1);
+    expect(served).toBeLessThanOrEqual(64); // ≤ MAX_SERVED_RESPONSES_PER_ENDPOINT — never the full 100
   });
 
   it('clears per-channel exchanged marks on teardown so a reconnect re-exchanges (key delimiter)', async () => {

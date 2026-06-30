@@ -146,6 +146,10 @@ export async function reauthorIntoPrivateRoom(params: {
   // The live reducer threads, so a re-run that lost its manifest still skips a
   // story whose deterministic thread is already present (state is the SSOT).
   const existingThreads = new Set(params.session.state().threads.keys());
+  // The live reducer contributions — so the SAME SSOT idempotency applies to the contribution path,
+  // not only stories (PRIV-WEB-SESSION-3): a re-run that lost its manifest still skips a comment whose
+  // deterministic id is already in reduced state.
+  const existingContributions = new Set(params.session.state().contributions.keys());
 
   let stories = 0;
   let contributions = 0;
@@ -196,11 +200,16 @@ export async function reauthorIntoPrivateRoom(params: {
     if (item.threadRef === undefined) continue;
     const threadId = threadRemap.get(item.threadRef);
     if (threadId === undefined) continue;
-    if (alreadyAuthored.has(item.id)) {
+    const contributionId = contribRemap.get(item.id);
+    // Idempotent skip: the manifest OR the live reduced state already holds it (state is the SSOT,
+    // mirroring the story path) (PRIV-WEB-SESSION-3).
+    if (
+      alreadyAuthored.has(item.id) ||
+      (contributionId !== undefined && existingContributions.has(contributionId))
+    ) {
       skipped += 1;
       continue;
     }
-    const contributionId = contribRemap.get(item.id);
     const parentContributionId =
       item.parentRef !== undefined && willAuthor.has(item.parentRef)
         ? contribRemap.get(item.parentRef)

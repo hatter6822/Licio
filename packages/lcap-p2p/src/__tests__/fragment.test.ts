@@ -159,8 +159,24 @@ describe('WS-R.15.6 fragmentation', () => {
     view.setUint32(1, 0, false);
     view.setUint32(5, 0, false);
     view.setUint32(9, 1, false);
-    view.setUint32(13, FRAGMENT_PAYLOAD_BYTES + 1, false);
+    // messageLen is CONSISTENT with total=1 (so the total↔messageLen bind passes); the over-cap is
+    // in the PAYLOAD bytes (frame length), which the per-fragment-cap check rejects.
+    view.setUint32(13, FRAGMENT_PAYLOAD_BYTES, false);
     const r = new FragmentReassembler();
     expect(() => r.accept(frame)).toThrow(/per-fragment cap/);
+  });
+
+  it('fails closed when fragment_total disagrees with message_total_len (PUB-WEBRTC-3)', () => {
+    // A small message (would be ONE fragment) but the header over-declares fragment_total — the
+    // reassembler would otherwise wait forever for fragments the length math says cannot exist.
+    const frame = new Uint8Array(FRAGMENT_HEADER_BYTES + 4);
+    const view = new DataView(frame.buffer);
+    frame[0] = 1;
+    view.setUint32(1, 0, false); // messageId
+    view.setUint32(5, 0, false); // seq
+    view.setUint32(9, 3, false); // fragment_total — in bounds, but wrong for the length
+    view.setUint32(13, 4, false); // message_total_len = 4 ⇒ ceil(4/16384) = 1, not 3
+    const r = new FragmentReassembler();
+    expect(() => r.accept(frame)).toThrow(/disagrees with message_total_len/);
   });
 });

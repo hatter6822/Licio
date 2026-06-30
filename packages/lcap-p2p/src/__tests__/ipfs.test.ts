@@ -140,6 +140,73 @@ describe('gateway bridge — no transport trust (§22.7)', () => {
     });
     expect(await erroring.fetchBlock(blockCid)).toEqual({ ok: false, reason: 'gateway_error' });
   });
+
+  it('returns bad_cid for a non-block CID instead of throwing (PUB-IPFS-HARDENING)', async () => {
+    const recordCid = await cidFor('record', new TextEncoder().encode('a record, not a block'));
+    let fetched = false;
+    const bridge = new IpfsBridge({
+      gatewayUrl: 'https://gw.test',
+      fetchFn: async () => {
+        fetched = true;
+        return new Response(null, { status: 200 });
+      },
+    });
+    expect(await bridge.fetchBlock(recordCid)).toEqual({ ok: false, reason: 'bad_cid' });
+    expect(fetched).toBe(false); // never even hit the network
+  });
+
+  it('rejects an over-cap gateway body with oversize, bounding the read (PUB-IPFS-HARDENING)', async () => {
+    const blockCid = await cidFor('block', new TextEncoder().encode('small expected block'));
+    // The gateway streams FAR more than the (tiny) configured cap; readBounded must cancel + reject.
+    const chunk = new Uint8Array(64 * 1024);
+    let produced = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= 8 * 1024 * 1024) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+        produced += chunk.length;
+      },
+    });
+    const bridge = new IpfsBridge({
+      gatewayUrl: 'https://gw.test',
+      maxBlockBytes: 256 * 1024,
+      fetchFn: async () => new Response(body, { status: 200 }),
+    });
+    expect(await bridge.fetchBlock(blockCid)).toEqual({ ok: false, reason: 'oversize' });
+    // The read was cancelled EARLY — it did not drain the full 8 MiB stream into memory.
+    expect(produced).toBeLessThan(2 * 1024 * 1024);
+  });
+
+  it('rejects an over-cap Content-Length up front without reading the body (PUB-IPFS-HARDENING)', async () => {
+    const blockCid = await cidFor('block', new TextEncoder().encode('x'));
+    const bridge = new IpfsBridge({
+      gatewayUrl: 'https://gw.test',
+      maxBlockBytes: 1024,
+      fetchFn: async () =>
+        new Response(new Uint8Array(10), {
+          status: 200,
+          headers: { 'content-length': String(50 * 1024 * 1024) }, // a forged/huge declared length
+        }),
+    });
+    expect(await bridge.fetchBlock(blockCid)).toEqual({ ok: false, reason: 'oversize' });
+  });
+
+  it('maps a timed-out gateway to gateway_error (PUB-IPFS-HARDENING)', async () => {
+    const blockCid = await cidFor('block', new TextEncoder().encode('x'));
+    const bridge = new IpfsBridge({
+      gatewayUrl: 'https://gw.test',
+      timeoutMs: 10,
+      // A gateway that never responds until aborted — the AbortController fires at timeoutMs.
+      fetchFn: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    });
+    expect(await bridge.fetchBlock(blockCid)).toEqual({ ok: false, reason: 'gateway_error' });
+  });
 });
 
 describe('gateway bridge — publish enforces the gate', () => {
@@ -150,6 +217,7 @@ describe('gateway bridge — publish enforces the gate', () => {
     const bridge = new IpfsBridge({
       gatewayUrl: 'https://gw.test',
       pinningUrl: 'https://pin.test/add',
+      takedownOracle: async () => false,
       fetchFn: async () => {
         pinned = true;
         return new Response(null, { status: 200 });
@@ -181,6 +249,7 @@ describe('gateway bridge — publish enforces the gate', () => {
     const bridge = new IpfsBridge({
       gatewayUrl: 'https://gw.test',
       pinningUrl: 'https://pin.test/add',
+      takedownOracle: async () => false,
       fetchFn: async () => {
         pinned = true;
         return new Response(null, { status: 200 });
@@ -199,7 +268,10 @@ describe('gateway bridge — publish enforces the gate', () => {
   it('reports no_pinning_endpoint when no pinning URL is configured', async () => {
     const payload = new TextEncoder().encode('public');
     const blockCid = await cidFor('block', payload);
-    const bridge = new IpfsBridge({ gatewayUrl: 'https://gw.test' });
+    const bridge = new IpfsBridge({
+      gatewayUrl: 'https://gw.test',
+      takedownOracle: async () => false,
+    });
     expect(
       await bridge.publishBlock(
         blockCid,
@@ -219,6 +291,7 @@ describe('gateway bridge — publish enforces the gate', () => {
     const rejecting = new IpfsBridge({
       gatewayUrl: 'https://gw.test',
       pinningUrl: 'https://pin.test/add',
+      takedownOracle: async () => false,
       fetchFn: async () => new Response(null, { status: 500 }),
     });
     expect(
@@ -232,6 +305,7 @@ describe('gateway bridge — publish enforces the gate', () => {
     const throwing = new IpfsBridge({
       gatewayUrl: 'https://gw.test',
       pinningUrl: 'https://pin.test/add',
+      takedownOracle: async () => false,
       fetchFn: async () => {
         throw new Error('network down');
       },
@@ -252,6 +326,7 @@ describe('gateway bridge — publish enforces the gate', () => {
     const bridge = new IpfsBridge({
       gatewayUrl: 'https://gw.test',
       pinningUrl: 'https://pin.test/add',
+      takedownOracle: async () => false,
       fetchFn: async () => new Response(null, { status: 200 }),
     });
     const res = await bridge.publishBlock(
@@ -389,7 +464,7 @@ describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
     expect(pinned()).toBe(false);
   });
 
-  it('a throwing oracle halts publish (fail-closed)', async () => {
+  it('a throwing oracle halts publish as UNREADABLE, distinctly from a takedown (PUB-API-PUBLISH-4)', async () => {
     const payload = new TextEncoder().encode('oracle down');
     const blockCid = await cidFor('block', payload);
     const { bridge, pinned } = pinningBridge({
@@ -403,7 +478,9 @@ describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
       { publishable: true, reason: '' },
       PUBLIC_GATEWAY,
     );
-    expect(res).toEqual({ ok: false, reason: 'takedown_recheck_halt' });
+    // A thrown oracle is fail-closed (no pin) but reported DISTINCTLY from a live takedown so the
+    // steward audit can tell an unreadable oracle from a genuine takedown halt.
+    expect(res).toEqual({ ok: false, reason: 'takedown_recheck_unreadable' });
     expect(pinned()).toBe(false);
   });
 
@@ -439,7 +516,7 @@ describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
     const payload = new TextEncoder().encode('republish');
     const blockCid = await cidFor('block', payload);
     const { bridge, pinned } = pinningBridge();
-    expect(await bridge.republish(blockCid, payload)).toEqual({
+    expect(await bridge.republish(blockCid, payload, PUBLIC_GATEWAY)).toEqual({
       ok: false,
       reason: 'no_takedown_oracle',
     });
@@ -450,14 +527,30 @@ describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
     const payload = new TextEncoder().encode('republish clean');
     const blockCid = await cidFor('block', payload);
     const halted = pinningBridge({ takedownOracle: async () => true });
-    expect(await halted.bridge.republish(blockCid, payload)).toEqual({
+    expect(await halted.bridge.republish(blockCid, payload, PUBLIC_GATEWAY)).toEqual({
       ok: false,
       reason: 'takedown_recheck_halt',
     });
     expect(halted.pinned()).toBe(false);
     const clean = pinningBridge({ takedownOracle: async () => false });
-    const res = await clean.bridge.republish(blockCid, payload);
+    const res = await clean.bridge.republish(blockCid, payload, PUBLIC_GATEWAY);
     expect(res.ok).toBe(true);
     expect(clean.pinned()).toBe(true);
+  });
+
+  it('republish refuses a block whose content was NARROWED to non-public (PUB-API-PUBLISH-2)', async () => {
+    const payload = new TextEncoder().encode('once public, now in_room');
+    const blockCid = await cidFor('block', payload);
+    // The oracle is clean (no takedown), but the CURRENT eligibility says in_room — the structural
+    // gateway guard refuses the re-pin before any takedown check or pin.
+    const { bridge, pinned } = pinningBridge({ takedownOracle: async () => false });
+    const res = await bridge.republish(blockCid, payload, {
+      visibility: 'in_room',
+      encrypted: false,
+      takenDown: false,
+      privateRoomCid: false,
+    });
+    expect(res.ok).toBe(false);
+    expect(pinned()).toBe(false);
   });
 });

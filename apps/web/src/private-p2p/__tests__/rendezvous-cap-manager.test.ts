@@ -97,6 +97,52 @@ describe('RendezvousCapManager (carrier orchestration)', () => {
     expect(await mgr.hooks(7)).toBeUndefined();
   });
 
+  it('PR3b anti-flood: skips malformed sealed caps instead of crashing the batch, valid cap survives', async () => {
+    // Enroll a member so it has hooks (admin issues for itself).
+    const engine = new FakeEngine();
+    const mgr = new RendezvousCapManager(memStorage());
+    await mgr.sync(ctxFor(engine, 'dev', true)); // publish commitment
+    await mgr.sync(ctxFor(engine, 'dev', true)); // issue for self
+    await mgr.sync(ctxFor(engine, 'dev', true)); // install
+    const hooks = await mgr.hooks(EPOCH);
+    if (!hooks) throw new Error('expected enrolled hooks');
+    const valid = hooks.build('room-blind', EPOCH, -1);
+    if (!valid) throw new Error('expected a built cap');
+
+    // A hostile member floods malformed sealed caps around the one valid cap.  The OLD eager
+    // decode threw out of the whole `.map` (a discovery DoS); the hardened filter SKIPS each
+    // malformed cap and still returns the valid one's ORIGINAL index — and never throws.
+    const batch = [
+      { proof: 'not-base64url!@#', pseudonym: '***' },
+      valid,
+      { proof: 'AAAA', pseudonym: 'AAAA' }, // decodes but is the wrong length / not a valid point
+      { proof: '', pseudonym: '' },
+    ];
+    let survivors: number[] = [];
+    expect(() => {
+      survivors = hooks.filterVerified(batch, 'room-blind', EPOCH, -1, 0);
+    }).not.toThrow();
+    expect(survivors).toEqual([1]); // only the valid cap, at its original index 1
+  });
+
+  it('PR3b: memoizes load() so two concurrent first calls generate exactly ONE nid (PRIV-CAP-4)', async () => {
+    let nid: Uint8Array | undefined;
+    let saves = 0;
+    const storage: RendezvousCapStorage = {
+      loadNid: async () => nid,
+      saveNid: async (n) => {
+        saves += 1;
+        nid = n;
+      },
+      loadIssuerSeed: async () => undefined,
+      saveIssuerSeed: async () => undefined,
+    };
+    const mgr = new RendezvousCapManager(storage);
+    // Two concurrent operations both trigger the lazy load on a fresh manager.
+    await Promise.all([mgr.hooks(EPOCH), mgr.hooks(EPOCH)]);
+    expect(saves).toBe(1);
+  });
+
   it('admin issuance is idempotent (a re-sync issues nothing new)', async () => {
     const engine = new FakeEngine();
     const adminMgr = new RendezvousCapManager(memStorage());

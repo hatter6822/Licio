@@ -58,6 +58,27 @@ describe('PrivateRoomSession — create / author / persist / reload', () => {
     ).toBe(true);
   });
 
+  it('serializes concurrent authoring so two ops do not collide on one author seq (PRIV-WEB-SESSION-2)', async () => {
+    const session = await PrivateRoomSession.create({
+      roomName: 'Race',
+      roomType: 'global_topic',
+      ...FOUNDER,
+    });
+    // Fire two posts WITHOUT awaiting between them.  Each authorOp reads `nextAuthorSeq` /`heads`,
+    // builds an op, and applies it (a read-modify-write of the engine).  Without the op-lock both
+    // would read the SAME author seq and produce a device-seq FORK (the reducer accepts one and
+    // rejects the other) — so only one story would land.  The lock serializes them ⇒ distinct seqs
+    // ⇒ BOTH land.
+    const [id1, id2] = await Promise.all([
+      session.postStory({ title: 'A' }),
+      session.postStory({ title: 'B' }),
+    ]);
+    expect(id1).not.toBe(id2);
+    expect(session.state().stories.has(id1)).toBe(true);
+    expect(session.state().stories.has(id2)).toBe(true);
+    expect(session.state().stories.size).toBe(2);
+  });
+
   it('lists rooms and leaves one', async () => {
     const a = await PrivateRoomSession.create({
       roomName: 'Room A',

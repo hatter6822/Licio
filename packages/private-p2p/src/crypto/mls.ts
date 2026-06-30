@@ -21,7 +21,6 @@
 // callers; this residual is tracked in docs/private-p2p/README.md.
 
 import {
-  acceptAll,
   type CiphersuiteImpl,
   type ClientState,
   type Credential,
@@ -41,6 +40,7 @@ import {
   encodeMlsMessage,
   getCiphersuiteFromName,
   getCiphersuiteImpl,
+  type IncomingMessageCallback,
   joinGroup,
   type KeyPackage,
   type MLSMessage,
@@ -203,6 +203,30 @@ export function findDeviceLeafIndex(group: MlsGroup, identity: Uint8Array): numb
   return undefined;
 }
 
+/**
+ * Resolve an MLS `leafIndex` (the committer's leaf) to the ROOM device id carried in its basic
+ * credential — the inverse of {@link findDeviceLeafIndex}.  Leaves occupy EVEN array slots, so leaf
+ * `n` is `ratchetTree[n * 2]`.  Returns `undefined` for an absent / non-basic leaf, which the
+ * authority predicate treats as unauthorized (fail-closed).
+ */
+function leafDeviceId(group: MlsGroup, leafIndex: number | undefined): string | undefined {
+  if (leafIndex === undefined) return undefined;
+  const node = group.state.ratchetTree[leafIndex * 2];
+  if (node?.nodeType !== 'leaf') return undefined;
+  const credential = node.leaf.credential;
+  if (credential.credentialType !== 'basic') return undefined;
+  return new TextDecoder().decode(credential.identity);
+}
+
+/**
+ * The §11.3 authority verdict for a received MLS commit (PRIV-CRYPTO-1): given the COMMITTER's room
+ * device id (resolved from its MLS leaf's basic credential), decide whether the commit may advance
+ * THIS member's epoch.  RFC 9420 has NO native admin role — `processMessage` only checks the
+ * committer is SOME group member — so the room-layer caller supplies this predicate over its reduced
+ * §11.3 capability state (an admin-only check for membership changes).  `undefined` ⇒ unauthorized.
+ */
+export type CommitAuthorization = (committerDeviceId: string | undefined) => boolean;
+
 /** Process a Welcome message, admitting this device into the group at the
  *  committing epoch (the MLS join path). */
 export async function processWelcome(
@@ -319,21 +343,55 @@ export function decodeKeyPackage(bytes: Uint8Array): KeyPackage {
 
 /**
  * Apply a received MLS Commit to an EXISTING member's group, advancing it to the
- * committer's new epoch (RFC 9420 §12.4 — the non-committer transition).  The commit's
- * proposals are accepted at the MLS layer (`acceptAll`); WHO may add/remove is enforced
- * separately + authoritatively by the §11.3 capability model on the signed `member.add`/
- * `member.remove` op that travels alongside, so this is defence-in-depth, not a blind
- * trust.  Fail-closed: a non-handshake message or any non-`newState` transition throws
- * (the caller must NOT advance its epoch keys on a rejected commit).
+ * committer's new epoch (RFC 9420 §12.4 — the non-committer transition).
+ *
+ * §11.3 AUTHORITY GATE (PRIV-CRYPTO-1): RFC 9420 has no native admin role, so MLS validates only
+ * that the committer is SOME group member.  Without a higher-layer check, any member could commit an
+ * Add of a ghost reader device (which would then derive the new `content_wrap_key`) or a Remove of an
+ * honest admin, and other members would blindly advance their epoch.  `authorize` is therefore
+ * REQUIRED: it receives the committer's ROOM device id (resolved from its leaf credential) and the
+ * caller (room-manager) decides per its reduced §11.3 capability state (membership commits require the
+ * committer hold `admin`).  A `reject` means `processMessage` does NOT apply the commit, so the epoch
+ * does not advance — caught here and surfaced as a typed error.  Fail-closed: a non-handshake message,
+ * an unauthorized committer, or any non-epoch-advancing transition throws, and the caller must NOT
+ * install epoch keys for a thrown commit.
  */
-export async function applyCommit(group: MlsGroup, commit: MLSMessage): Promise<MlsGroup> {
+export async function applyCommit(
+  group: MlsGroup,
+  commit: MLSMessage,
+  authorize: CommitAuthorization,
+): Promise<MlsGroup> {
   if (commit.wireformat !== 'mls_public_message' && commit.wireformat !== 'mls_private_message') {
     throw new Error(`applyCommit: expected a handshake message, got ${commit.wireformat}`);
   }
   const message: MlsPublicMessage | MlsPrivateMessage = commit;
-  const result = await processMessage(message, group.state, emptyPskIndex, acceptAll, group.cs);
+  // The §11.3 gate as the ts-mls `IncomingMessageCallback`.  A COMMIT is authorized by its
+  // committer's device id (resolved from the leaf credential); a bare PROPOSAL is let through so the
+  // epoch-advance guard below still rejects it as "not a commit" (a proposal advances nothing and
+  // cannot grant access on its own — a later commit that applies it is itself authorized here).
+  const authorizeCommit: IncomingMessageCallback = (incoming) =>
+    incoming.kind !== 'commit'
+      ? 'accept'
+      : authorize(leafDeviceId(group, incoming.senderLeafIndex))
+        ? 'accept'
+        : 'reject';
+  const result = await processMessage(
+    message,
+    group.state,
+    emptyPskIndex,
+    authorizeCommit,
+    group.cs,
+  );
   if (result.kind !== 'newState') {
     throw new Error(`applyCommit: expected a newState transition, got ${result.kind}`);
+  }
+  if (result.actionTaken === 'reject') {
+    // The committer is not authorized for this membership change: the group is UNADVANCED, so a
+    // non-admin's forged Add (ghost reader) / Remove (admin eviction) can never grant or revoke
+    // epoch-key access for honest members.
+    throw new Error(
+      'applyCommit: commit REJECTED — its committer is not authorized for this change (§11.3)',
+    );
   }
   // Fail-closed: a real Commit advances EXACTLY one epoch.  A bare Proposal is also
   // delivered as a handshake message (same wireformat) and `processMessage` returns a

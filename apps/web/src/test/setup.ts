@@ -33,6 +33,23 @@ Object.defineProperty(window, 'scrollTo', {
   configurable: true,
 });
 
+// jsdom ships `HTMLCanvasElement.getContext()` as a stub that logs "Not implemented:
+// HTMLCanvasElement's getContext() method" and returns null (the `canvas` npm package is
+// intentionally not a dependency — it would pull native bindings). The LCAP QR micro-bundle
+// (`QrMicroBundle`) calls `canvas.getContext('2d')` to paint the rendered QR and already
+// null-guards the result (`?? null`, then `if (canvas && ctx)`), so the render simply no-ops
+// in jsdom — the encode/decode math is covered headlessly by `qr/qr.test.ts`. Replace the
+// getContext stub with a quiet `() => null` so it keeps returning null (identical behavior,
+// the null-guard branch still runs) without the virtual-console noise. Real browsers keep the
+// genuine implementation. (Returning a mock 2D context instead would drive the component into
+// `new ImageData(...)`, which this jsdom build also does not implement — so null is the
+// faithful, behavior-preserving stub.)
+Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+  value: () => null,
+  writable: true,
+  configurable: true,
+});
+
 // jsdom does not honor an anchor's `download` attribute: a real browser saves the
 // blob and never navigates, but jsdom treats a programmatic `anchor.click()` on a
 // `download` link as a navigation it cannot perform, logging "Not implemented:

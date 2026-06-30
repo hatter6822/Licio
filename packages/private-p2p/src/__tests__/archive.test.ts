@@ -153,6 +153,23 @@ describe('importBlockArchive — no container-conferred trust (§15.9)', () => {
     expect(result.accepted.map((a) => a.op.op_id)).toStrictEqual(['genesis', 'cs1', 'cs2']);
   });
 
+  it('rejects an archive for a DIFFERENT room up front, before any crypto (PRIV-SYNC-2)', async () => {
+    const { ctx, roomIdHash, envelopes } = await setup();
+    const archive = buildBlockArchive({
+      kind: 'encrypted_member_backup',
+      roomIdHash,
+      createdAtBucket: '2026-06-22T00',
+      envelopes,
+    });
+    // A ctx whose room differs from the archive's DECLARED room — the importer must refuse the
+    // foreign-room container wholesale (no per-envelope AEAD work), honoring the docstring contract.
+    const otherRoomCtx: OpIntakeContext = { ...ctx, roomIdCommitment: randomBytes(32) };
+    const result = await importBlockArchive(encodeBlockArchive(archive), otherRoomCtx);
+    expect(result.accepted).toHaveLength(0);
+    expect(result.rejected).toHaveLength(3);
+    expect(result.rejected.every((r) => r.reason === 'metadata_mismatch')).toBe(true);
+  });
+
   it('rejects ALL envelopes under the wrong epoch key (container confers nothing)', async () => {
     const { ctx, roomIdHash, envelopes } = await setup();
     const archive = buildBlockArchive({

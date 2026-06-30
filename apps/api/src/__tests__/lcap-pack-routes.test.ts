@@ -94,7 +94,7 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
     expect(await srv.isAccepted(fx.recordCid)).toBe(true);
   });
 
-  it('durably stores proof + block frames so they are fetchable via the GET routes', async () => {
+  it('durably stores proof + block frames, but the §29 gate withholds an in_room record’s proof/block (PUB-API-CORE-1)', async () => {
     const srv = new LcapIngestServer(NET, () => NOW);
     await registerIdentity(srv, fx);
     setLcapIngestServer(srv);
@@ -103,6 +103,7 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
     const imported = await app.request('/api/lcap/v2/packs', { method: 'POST', body: packBytes });
     expect(imported.status).toBe(200);
     const data = (await imported.json()) as { statuses: { cid: string; status: string }[] };
+    // The frames ARE durably stored (the import side is unchanged)…
     expect(data.statuses).toContainEqual(
       expect.objectContaining({ cid: proofCid, status: 'stored_unverified' }),
     );
@@ -110,11 +111,11 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
       expect.objectContaining({ cid: blockCid, status: 'stored_unverified' }),
     );
 
-    const proofRes = await app.request(`/api/lcap/v2/proofs/${proofCid}`);
-    expect(proofRes.status).toBe(200);
-    const blockRes = await app.request(`/api/lcap/v2/blocks/${blockCid}`);
-    expect(blockRes.status).toBe(200);
-    expect(new Uint8Array(await blockRes.arrayBuffer())).toEqual(blockBytes);
+    // …but the public §29 read surface NEVER serves the in_room record's proof, nor a block that is
+    // not part of any PUBLIC record's closure — a removed member cannot exfiltrate them by CID.
+    // (A PUBLIC record's proof + body block ARE served — see lcap-routes.test.ts.)
+    expect((await app.request(`/api/lcap/v2/proofs/${proofCid}`)).status).toBe(404);
+    expect((await app.request(`/api/lcap/v2/blocks/${blockCid}`)).status).toBe(404);
   });
 
   it('quarantines the contribution and wants the capability when identity is unregistered', async () => {
@@ -304,15 +305,20 @@ describe('POST /api/lcap/v2/packs — review hardening', () => {
     expect(await srv.isAccepted(childCid)).toBe(false);
   });
 
-  it('serves stored media chunks via GET /chunks/:cid so chunk wants can be cleared', async () => {
+  it('does NOT serve media chunks over the public GET /chunks/:cid surface (PUB-API-CORE-1)', async () => {
+    // A chunk carries no visibility and the server cannot resolve it to its owning record (a block
+    // CID addresses raw bytes; the descriptor that lists chunk_cids is not stored under a
+    // server-decodable key), so — exactly like the client responder, which never serves chunks — a
+    // chunk is withheld over the public surface (fail-closed: an in_room video chunk can never be
+    // exfiltrated by CID).  Authorized chunked-media serving is the separate §29.4 path (a tracked
+    // enhancement, docs/lcap/README.md), never this unauthenticated public one.
     const srv = new LcapIngestServer(NET, () => NOW);
     setLcapIngestServer(srv);
     const chunkBytes = enc.encode('a-media-chunk-payload');
     const chunkCid = await cidFor('chunk', chunkBytes);
     await srv.putObject(chunkCid, 'chunk', chunkBytes);
     const res = await createApp().request(`/api/lcap/v2/chunks/${chunkCid}`);
-    expect(res.status).toBe(200);
-    expect(new Uint8Array(await res.arrayBuffer())).toEqual(chunkBytes);
+    expect(res.status).toBe(404);
   });
 });
 

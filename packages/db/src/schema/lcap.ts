@@ -88,15 +88,22 @@ export const lcapForkEvidence = pgTable('lcap_fork_evidence', {
  * Record-export closure edges (WS-R.12.4 §29.8): record→proof + record→block edges
  * captured at import, so a room export can gather each record's trust + media closure
  * without scanning the whole CAS.  CID-addressed (no FK edges; the offline plane).
+ *
+ * The REVERSE index `(related_cid, relation)` (migration 0050) supports the §29 public-serve
+ * visibility gate (`recordsReferencing`): resolving a wanted block/proof CID to its owning
+ * record(s) to decide public-servability, on the serve hot path, without a full-table scan.
  */
 export const lcapRecordClosure = pgTable(
   'lcap_record_closure',
   {
     recordCid: text('record_cid').notNull(),
     relatedCid: text('related_cid').notNull(),
-    relation: text('relation').notNull(), // 'proof' | 'block'
+    relation: text('relation').notNull(), // 'proof' | 'block' | 'identity'
   },
-  (t) => [primaryKey({ columns: [t.recordCid, t.relatedCid, t.relation] })],
+  (t) => [
+    primaryKey({ columns: [t.recordCid, t.relatedCid, t.relation] }),
+    index('lcap_record_closure_related_idx').on(t.relatedCid, t.relation),
+  ],
 );
 
 /**

@@ -84,10 +84,10 @@ export function createPrivateRendezvousRoutes() {
     if (body === TOO_LARGE) return c.json({ error: 'oversized_request' }, 413);
     const parsed = announceRequestSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
-    // `mode` lets a Tier-2 client whose proof was rejected (e.g. a wrong first-pinned
-    // issuer key, §8) retry WITHOUT a proof to ride Tier-1 — fail-open availability.
-    const { stored, mode, reason } = await getRendezvousService().announce(parsed.data);
-    return c.json({ stored, mode, ...(reason ? { reason } : {}) }, stored ? 202 : 200);
+    // The server runs the §27 Tier-1 sample-poll only (the per-announcer cap is enforced
+    // peer-side, PRIV-API-RENDEZVOUS-1); an announce is stored unless its TTL is out of bounds.
+    const { stored, reason } = await getRendezvousService().announce(parsed.data);
+    return c.json({ stored, ...(reason ? { reason } : {}) }, stored ? 202 : 200);
   });
 
   // §15.3 poll — read presence records for a room blind id.  ALWAYS 200 + a

@@ -20,6 +20,7 @@
 import { z } from 'zod';
 import { type CanonicalDecodeLimits, decodeCanonical } from '../crypto/canonical.js';
 import { canonicalizeRecord } from '../crypto/record-encoding.js';
+import { toBase64Url } from '../crypto/runtime.js';
 import { type SealedSnapshotWire, sealedSnapshotSchema } from '../reducer/snapshot-seal.js';
 import { type OpIntakeContext, type OpIntakeRejection, openOp } from '../reducer/validate-op.js';
 import { base64UrlSchema, timeBucketSchema } from '../schemas/common.js';
@@ -140,6 +141,20 @@ export async function importBlockArchive(
   ctx: OpIntakeContext,
 ): Promise<ImportArchiveResult> {
   const archive = decodeBlockArchive(bytes);
+  // PRIV-SYNC-2: confirm the archive is for the room the importer EXPECTS, BEFORE any per-envelope
+  // crypto.  Makes the "the importer confirms it expected this room" contract structural and avoids
+  // wasting AEAD work on a foreign-room container (whose envelopes would all fail to open anyway).
+  if (archive.room_id_hash !== toBase64Url(ctx.roomIdCommitment)) {
+    return {
+      roomIdHash: archive.room_id_hash,
+      kind: archive.kind,
+      accepted: [],
+      rejected: archive.envelopes.map((_, index) => ({
+        index,
+        reason: 'metadata_mismatch' as const,
+      })),
+    };
+  }
   const accepted: ImportedArchiveOp[] = [];
   const rejected: RejectedArchiveEnvelope[] = [];
   for (let index = 0; index < archive.envelopes.length; index++) {

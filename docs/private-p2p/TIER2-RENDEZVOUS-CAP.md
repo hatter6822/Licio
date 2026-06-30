@@ -2,6 +2,21 @@
 
 # Tier-2 — Verifiable per-announcer rendezvous cap
 
+> **UPDATE (PRIV-API-RENDEZVOUS-1) — the cap is now PEER-SIDE only.** The
+> **server-side** verifier (`apps/api/src/private-rendezvous/cap-verifier.ts`) and the
+> top-level, server-visible cap on the wire have been **REMOVED**. Server-side ZK
+> verification intrinsically requires the server to hold the per-`(room, epoch)` issuer
+> key, which is a stable, bucket-spanning **linking handle**: an honest-but-curious server
+> could cluster a room's bucket-rotated `room_blind_id`s into one epoch timeline, breaking
+> the §15.3 cross-bucket unlinkability this design otherwise protects. There is no way to
+> keep server-side dedup AND that unlinkability, and — because the cap is **optional** — a
+> flooding insider simply omitted it, so server-side verification bought no real
+> flood-resistance anyway. The cap therefore rides **sealed INSIDE the announcement**
+> (member-only) and is enforced **peer-side** by `filterVerifiedPresence` (defensively
+> decoded + per-poll-verify-bounded, PR3b); the server stores opaquely and runs the §27
+> Tier-1 sample-poll. The sections below that describe a *server* verifier
+> (§6.5–6.7, §6.6 slot-keying) are **superseded** by this peer-side model.
+
 **Status:** design proposal (not implemented). Closure target for the
 "Rendezvous presence flood" row of the WS-S §38 risk register
 (`SECURITY-REVIEW.md` §10). Supersedes the "infeasible" framing: a real

@@ -50,6 +50,12 @@ export interface LcapFixtures {
   readonly body: Uint8Array;
   readonly recordCid: string;
   readonly proof: DetachedProofV2;
+  /** A PUBLIC contribution under the SAME identity chain — the §29 public-serve happy path
+   *  (PUB-API-CORE-1): the gate serves this while withholding the `in_room` `contribution`. */
+  readonly publicContribution: ContributionEventRecordV2;
+  readonly publicBody: Uint8Array;
+  readonly publicRecordCid: string;
+  readonly publicProof: DetachedProofV2;
 }
 
 /** Mint the full valid identity chain + a signed contribution. */
@@ -141,6 +147,25 @@ export async function buildLcapFixtures(): Promise<LcapFixtures> {
     networkId: NET,
   });
 
+  // A PUBLIC contribution under the same chain (a distinct device_seq + nonce) — for the §29
+  // public-serve tests: the gate must serve THIS while withholding the in_room `contribution`.
+  const publicContribution: ContributionEventRecordV2 = {
+    ...contribution,
+    visibility_scope: 'public',
+    device_seq: 1,
+    client_nonce: new Uint8Array([5, 6, 7, 8]),
+  };
+  const publicBody = encodeContributionEvent(publicContribution);
+  const publicRecordCid = await cidFor('record', publicBody);
+  const publicProof = await buildAndSign({
+    privateKey: device.privateKey,
+    signerKeyId: DEVICE_KEY,
+    proofKind: 'device_signature',
+    recordKind: 'contribution_event',
+    recordBody: publicBody,
+    networkId: NET,
+  });
+
   return {
     accountAuthority,
     roomAuthority,
@@ -152,6 +177,10 @@ export async function buildLcapFixtures(): Promise<LcapFixtures> {
     body,
     recordCid,
     proof,
+    publicContribution,
+    publicBody,
+    publicRecordCid,
+    publicProof,
   };
 }
 

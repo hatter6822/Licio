@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Live LCAP WebRTC carrier assembly (WS-R.15.6a) — the apps/web glue that turns the
-// code-split `connectWebrtc` establishment + the server-blind signaling client into a
-// ready `LcapTransport`.  `@licio/lcap-p2p` (WebRTC + the signaling envelope) is loaded
-// by DYNAMIC import only, so the P2P core stays out of the initial bundle
-// (`check:lcap-p2p-split`).  The result is appended to the registry's transport set
-// AHEAD of the server anchor; the seam still falls back to HTTPS if the channel fails.
+// code-split `connectWebrtc` establishment + the server-blind signaling client into a ready
+// `DataChannelLike` that the §16 BIDIRECTIONAL driver (`runWebrtcBidirectionalExchange` in
+// `webrtc-sync.ts`) drives directly — both peers serve AND ingest over the one channel, with the
+// HTTPS anchor as the always-correct back-stop.  `@licio/lcap-p2p` (WebRTC + the signaling
+// envelope) is loaded by DYNAMIC import only, so the P2P core stays out of the initial bundle
+// (`check:lcap-p2p-split`).
 
-import type { LcapTransport } from '@licio/lcap';
 import type {
   DataChannelLike,
   RtcPeerConnectionFactory,
@@ -68,12 +68,4 @@ export async function connectLcapWebrtcChannel(
     ...(params.pollIntervalMs !== undefined ? { pollIntervalMs: params.pollIntervalMs } : {}),
     ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
   });
-}
-
-/** Establish a live WebRTC `LcapTransport` (the requester-only wrapper over the raw channel —
- *  used by the anchor-fallback path; the bidirectional driver uses the raw channel directly). */
-export async function connectLcapWebrtc(params: ConnectLcapWebrtcParams): Promise<LcapTransport> {
-  const p2p = await import('@licio/lcap-p2p');
-  const channel = await connectLcapWebrtcChannel(params);
-  return new p2p.WebrtcTransport(channel);
 }

@@ -223,6 +223,17 @@ export function assertCompressionAllowed(objectType: PrivateObjectType): void {
 // --- AEAD core --------------------------------------------------------------
 
 function importAesGcm(key: Uint8Array, usage: 'encrypt' | 'decrypt'): Promise<CryptoKey> {
+  // PRIV-CRYPTO-2: a wrong-length key must surface as the documented typed `PrivateAeadError`, not a
+  // raw WebCrypto throw.  This is the single chokepoint (called BEFORE the AEAD try in every open/
+  // unwrap path), so the typed reason propagates at all call sites — never remapped to aead_open_failed.
+  if (key.length !== 32) {
+    return Promise.reject(
+      new PrivateAeadError(
+        'object_key_wrong_length',
+        `AES-256-GCM key must be 32 bytes, got ${key.length}`,
+      ),
+    );
+  }
   return getSubtle().importKey('raw', toBufferSource(key), { name: 'AES-GCM' }, false, [usage]);
 }
 
@@ -243,6 +254,17 @@ function aesGcmParams(nonce: Uint8Array, aad: Uint8Array | undefined) {
  * the two-layer §10.5 op/contribution body (which uses `sealBody` + `wrapKey`):
  * the at-rest local-search shard (§25.7, no AAD) and the §15.3 rendezvous
  * announcement (AAD-bound to its record).
+ *
+ * NONCE SAFETY (PRIV-CRYPTO-3).  AES-256-GCM tolerates a random 96-bit nonce only up to the
+ * birthday bound: under ONE fixed key, the probability of a nonce collision reaches ~2^-32 near
+ * ~2^48 seals.  The two regimes here are both safe by different arguments:
+ *   • the §10.5 BODY layer (`sealBody`) generates a FRESH 32-byte `object_key` PER object, so the
+ *     (key, nonce) pair is unique by construction — nonce reuse is structurally impossible there;
+ *   • the long-lived-key layers (`wrapKey`, the rendezvous announcement, §15.4 signaling) seal under
+ *     a FIXED per-EPOCH key, so they rely on the random-nonce birthday bound.  This is safe under the
+ *     per-epoch volume assumption: an epoch is bounded by membership changes (each rotates the key),
+ *     and the number of wraps/announcements/signals per epoch is many orders of magnitude below 2^48.
+ *     A future hardening (a per-epoch monotonic or random‖counter nonce) would remove that assumption.
  */
 export async function aeadSeal(
   key: Uint8Array,

@@ -94,16 +94,116 @@ describe('runExchangeRound — deterministic open/send/receive/close', () => {
   });
 });
 
+describe('seam security + stability (PUB-SEAM-4)', () => {
+  it('refuses a NON-PUBLIC pack on public-only transports — null + NOT a single open()', async () => {
+    const log: string[] = [];
+    const webrtc = fakeTransport('webrtc', { log }); // carriesPrivate:false
+    const courier = fakeTransport('courier', { log }); // carriesPrivate:false
+    const result = await fallbackExchange(
+      [webrtc, courier],
+      new Uint8Array([1]),
+      undefined,
+      undefined,
+      'contains_in_room_metadata',
+    );
+    expect(result).toBeNull();
+    expect(log).toEqual([]); // the privacy invariant: no transport was even opened
+  });
+
+  it('orders webtransport before https (both server-mediated anchors)', () => {
+    const https = fakeTransport('https');
+    const webtransport = fakeTransport('webtransport');
+    expect(selectTransports([https, webtransport]).map((t) => t.capabilities.id)).toEqual([
+      'webtransport',
+      'https',
+    ]);
+  });
+
+  it('is stable with duplicate + unranked transport ids (anchor still last)', () => {
+    const a = fakeTransport('webrtc');
+    const b = fakeTransport('webrtc'); // duplicate id
+    const unranked = fakeTransport('qr'); // not in DEFAULT_TRANSPORT_PREFERENCE
+    const https = fakeTransport('https');
+    const ordered = selectTransports([https, a, b, unranked]).map((t) => t.capabilities.id);
+    expect(ordered.at(-1)).toBe('https'); // the server anchor is still forced last
+    expect(ordered.filter((id) => id === 'webrtc')).toHaveLength(2); // both duplicates retained
+    expect(ordered).toContain('qr');
+  });
+
+  it('closes a transport whose send throws AFTER a successful open (PUB-SEAM-3)', async () => {
+    const log: string[] = [];
+    const t: LcapTransport = {
+      capabilities: caps('webrtc'),
+      async open() {
+        log.push('open');
+      },
+      async send() {
+        log.push('send');
+        throw new Error('send failed');
+      },
+      async receive() {
+        return null;
+      },
+      async close() {
+        log.push('close');
+      },
+    };
+    await expect(runExchangeRound(t, new Uint8Array([1]))).rejects.toThrow('send failed');
+    expect(log).toEqual(['open', 'send', 'close']); // close ran despite the send throw
+  });
+
+  it('does NOT close a transport whose open throws (nothing was opened)', async () => {
+    const log: string[] = [];
+    const t: LcapTransport = {
+      capabilities: caps('webrtc'),
+      async open() {
+        log.push('open');
+        throw new TransportUnavailableError('webrtc');
+      },
+      async send() {
+        log.push('send');
+      },
+      async receive() {
+        return null;
+      },
+      async close() {
+        log.push('close');
+      },
+    };
+    await expect(runExchangeRound(t, new Uint8Array([1]))).rejects.toThrow();
+    expect(log).toEqual(['open']); // a throwing open releases its own resources — no close()
+  });
+});
+
 describe('fallbackExchange — skips failures, succeeds via the anchor', () => {
   it('falls through a failing optional transport to the https anchor', async () => {
     const log: string[] = [];
     const webrtc = fakeTransport('webrtc', { failOpen: true, log });
     const https = fakeTransport('https', { response: new Uint8Array([7]), log });
-    const result = await fallbackExchange([https, webrtc], new Uint8Array([1]));
+    // 'public' so the public-only webrtc transport is tried (and fails) before the anchor; an
+    // OMITTED label now fails closed and would skip webrtc entirely (PUB-SEAM-1).
+    const result = await fallbackExchange(
+      [https, webrtc],
+      new Uint8Array([1]),
+      undefined,
+      undefined,
+      'public',
+    );
     expect(result?.transport).toBe('https');
     expect(result?.response).toEqual(new Uint8Array([7]));
     // webrtc was tried first (and failed), https anchored the success.
     expect(log[0]).toBe('webrtc:open');
+  });
+
+  it('fails closed on an OMITTED label: a non-public-capable transport is skipped (PUB-SEAM-1)', async () => {
+    const log: string[] = [];
+    const webrtc = fakeTransport('webrtc', { response: new Uint8Array([7]), log }); // public-only
+    const https = fakeTransport('https', { response: new Uint8Array([9]), log }); // carriesPrivate
+    // No privacyLabel ⇒ treated as NON-PUBLIC ⇒ webrtc (carriesPrivate:false) is skipped, and only
+    // the anchor carries it.  webrtc.open() is NEVER called.
+    const result = await fallbackExchange([webrtc, https], new Uint8Array([1]));
+    expect(result?.transport).toBe('https');
+    expect(log).not.toContain('webrtc:open');
   });
 
   it('returns null when every transport fails', async () => {

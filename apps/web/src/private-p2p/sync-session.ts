@@ -113,6 +113,12 @@ export interface PrivateSyncSessionOptions {
    * reconnect manager should reconnect on a non-graceful drop but NOT on a graceful one.
    */
   readonly onClose?: (graceful: boolean) => void;
+  /**
+   * Fires EXACTLY ONCE when the session terminates by ANY path — a local `close()` OR an external
+   * channel drop (unlike `onClose`, which a local `close()` deliberately suppresses).  The owner
+   * uses it to prune the session from its live set so the set cannot leak (PRIV-WEB-SESSION-1).
+   */
+  readonly onTerminate?: () => void;
 }
 
 /** The §15.7 op-id request cap (mirrors `MAX_OP_IDS_PER_REQUEST` in the package). */
@@ -149,6 +155,20 @@ export class PrivateSyncSession {
   /** Whether close() was called locally — so the resulting channel onClose does not
    *  fire `options.onClose` (the caller already knows it is tearing down). */
   private selfClosed = false;
+  /** Guards `onTerminate` to fire AT MOST ONCE across the close() + channel-drop paths. */
+  private terminated = false;
+
+  /** Whether the session has ended (by either path) — lets an owner lazily prune a closed session. */
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  /** Fire the terminal teardown hook exactly once (PRIV-WEB-SESSION-1). */
+  private fireTerminate(): void {
+    if (this.terminated) return;
+    this.terminated = true;
+    this.options.onTerminate?.();
+  }
 
   constructor(
     private readonly engine: SyncEngineSurface,
@@ -168,6 +188,7 @@ export class PrivateSyncSession {
       // Report an EXTERNAL drop to the reconnect manager (a local close() set selfClosed,
       // and the caller already knows it is tearing down).  graceful ⇔ the peer said bye.
       if (wasOpen && !this.selfClosed) this.options.onClose?.(this.peerSaidBye);
+      this.fireTerminate(); // prune from the owner's live set on EITHER path (once)
     });
     this.announce();
   }
@@ -182,6 +203,7 @@ export class PrivateSyncSession {
     this.selfClosed = true;
     this.closed = true;
     this.channel.close();
+    this.fireTerminate(); // a local close() also prunes the owner's live set (onClose is suppressed)
   }
 
   private enqueue(task: () => Promise<void>): void {
