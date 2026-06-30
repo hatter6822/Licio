@@ -43,8 +43,9 @@ beforeAll(async () => {
   fx = await buildLcapFixtures();
 });
 
-/** Stage a block as PUBLIC-servable: a public record references it (the §29 public-serve gate
- *  resolves the block → its owning public record).  Without this a held block is withheld. */
+/** Stage a block as PUBLIC-servable: an ACCEPTED public record references it (the §29 public-serve
+ *  gate resolves the block → its owning public record, which must be accepted —
+ *  PUB-API-BLOCK-OWNER-1).  Without this a held block is withheld. */
 async function stagePublicBlock(
   srv: LcapIngestServer,
   blockCid: string,
@@ -53,6 +54,7 @@ async function stagePublicBlock(
   await srv.putObject(fx.publicRecordCid, 'record', fx.publicBody);
   await srv.putObject(blockCid, 'block', blockBytes);
   await srv.indexRecordEdge(fx.publicRecordCid, blockCid, 'block');
+  await srv.appendAcceptance('room', fx.publicRecordCid);
 }
 
 const accepted: ValidationResult = { state: 'authorized_provisional', missingCids: [], facts: {} };

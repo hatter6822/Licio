@@ -95,13 +95,21 @@ describe('RendezvousService — TTL bound + no-existence-oracle (§15.3)', () =>
     expect(unknown).toStrictEqual({ records: [] });
   });
 
-  it('a re-announce by the same peer replaces its record', async () => {
+  it('dedups an IDENTICAL re-announce but lets DISTINCT announcements coexist (PRIV-API-RENDEZVOUS-4)', async () => {
     const svc = new RendezvousService(new InMemoryRendezvousStore());
+    // An identical re-announce (the same sealed content) is idempotent — ONE slot.
     await svc.announce(announceBody({ encrypted_announcement: 'Zmlyc3Q' }));
+    await svc.announce(announceBody({ encrypted_announcement: 'Zmlyc3Q' }));
+    expect((await svc.poll(ROOM_BLIND)).records).toHaveLength(1);
+    // A DISTINCT announcement under the SAME (forgeable) peer_blind_id COEXISTS — it does NOT
+    // overwrite the prior record, so a hostile member who derives an honest device's peer_blind_id
+    // cannot evict that peer's presence by announcing into its slot (PRIV-API-RENDEZVOUS-4).
     await svc.announce(announceBody({ encrypted_announcement: 'c2Vjb25k' }));
     const { records } = await svc.poll(ROOM_BLIND);
-    expect(records).toHaveLength(1);
-    expect(records[0]?.encrypted_announcement).toBe('c2Vjb25k');
+    expect(records).toHaveLength(2);
+    expect(records.map((r) => r.encrypted_announcement).sort()).toEqual(
+      ['Zmlyc3Q', 'c2Vjb25k'].sort(),
+    );
   });
 });
 
@@ -319,10 +327,12 @@ describe('InMemoryRendezvousStore — sample-poll dilutes a presence flood (§27
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
+  // Distinct sealed content per peer — the store now keys presence by CONTENT (PRIV-API-RENDEZVOUS-4),
+  // and distinct peers/announcements carry distinct ciphertext, so each occupies its own slot.
   const rec = (peer: string) => ({
     roomBlindId: 'room',
     peerBlindId: peer,
-    encryptedAnnouncement: 'a',
+    encryptedAnnouncement: `enc-${peer}`,
     expiresAt: Date.now() + 60_000,
   });
 

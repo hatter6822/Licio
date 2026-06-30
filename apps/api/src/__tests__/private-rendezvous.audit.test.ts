@@ -358,7 +358,14 @@ describe('PRIV-API-RENDEZVOUS-3 — fair signal eviction', () => {
 // ---------------------------------------------------------------------------
 
 function rec(room: string, peer: string, expiresAt: number): StoredRendezvousRecord {
-  return { roomBlindId: room, peerBlindId: peer, encryptedAnnouncement: ANNOUNCEMENT, expiresAt };
+  // Distinct sealed content per peer: the store keys presence by CONTENT (PRIV-API-RENDEZVOUS-4), and
+  // distinct announcements carry distinct ciphertext, so co-resident records occupy separate slots.
+  return {
+    roomBlindId: room,
+    peerBlindId: peer,
+    encryptedAnnouncement: `${ANNOUNCEMENT}-${peer}`,
+    expiresAt,
+  };
 }
 
 async function runRendezvousStoreContract(

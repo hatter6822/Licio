@@ -251,8 +251,12 @@ async function setupOffererHarness(): Promise<Harness> {
         : undefined,
     transportMode: 'direct_allowed' as const,
     nowMs: () => Date.now(),
-    pollIntervalMs: 1,
-    timeoutMs: 3_000,
+    // PRIV-CARRIER-3-POLL: a connect now KEEPS POLLING until the deadline (a fresh peer may appear /
+    // a cooldown may expire), so a sole-failing-peer dial surfaces its typed error AT the deadline.
+    // Keep that deadline short + poll less tightly so the handshake-error tests stay fast (the
+    // handshake-COMPLETING tests resolve well under it, unaffected).
+    pollIntervalMs: 10,
+    timeoutMs: 1_000,
   } satisfies Omit<ConnectPrivatePeerParams, 'rtcFactory'>;
 
   let captured: ControllablePeer | undefined;
@@ -318,7 +322,11 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
       channel.deliver(JSON.stringify({ t: 'hello', hello: { author_device_id: 'x', junk: true } }));
 
       await expect(connectP).rejects.toMatchObject({ reason: 'handshake_malformed_hello' });
-      expect(Date.now() - started).toBeLessThan(3_000); // FAST — not via the connect deadline
+      // The TYPED handshake error is surfaced — NOT masked into a generic `timeout`.  A malformed
+      // hello is detected immediately; the connect then keeps polling to its (short) deadline for a
+      // fresh peer (PRIV-CARRIER-3-POLL) and raises THAT captured dial failure.  Bounded by the
+      // deadline, never the multi-second default.
+      expect(Date.now() - started).toBeLessThan(2_500);
     },
     TEST_TIMEOUT_MS,
   );

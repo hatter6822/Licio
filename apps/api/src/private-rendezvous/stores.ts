@@ -87,7 +87,9 @@ export interface StoredSignal {
  * room/account.
  */
 export interface RendezvousStore {
-  /** Upsert a presence record (a peer re-announce REPLACES its prior record). */
+  /** Store a presence record, deduped by its sealed-announcement CONTENT (an identical re-announce is
+   *  idempotent; a DISTINCT announcement coexists — it never replaces another by the forgeable
+   *  `peer_blind_id`, PRIV-API-RENDEZVOUS-4). */
   announce(record: StoredRendezvousRecord): Promise<void>;
   /** Non-expired presence records for a room blind id, capped at `limit`. */
   poll(roomBlindId: string, nowMs: number, limit: number): Promise<StoredRendezvousRecord[]>;
@@ -131,8 +133,10 @@ export function sampleUniform<T>(items: readonly T[], k: number, random: () => n
 
 /**
  * The in-memory rendezvous store (local/dev default).  Records are keyed by room
- * blind id (inner-keyed by peer blind id so a re-announce replaces); signals are
- * keyed by recipient blind id.  Both maps are capped + swept.
+ * blind id (inner-keyed by the sealed announcement CONTENT so a distinct announcement
+ * coexists rather than replacing another by the forgeable peer blind id,
+ * PRIV-API-RENDEZVOUS-4); signals are keyed by recipient blind id.  Both maps are
+ * capped + swept.
  */
 export class InMemoryRendezvousStore implements RendezvousStore {
   private readonly records = new Map<string, Map<string, StoredRendezvousRecord>>();
@@ -150,7 +154,15 @@ export class InMemoryRendezvousStore implements RendezvousStore {
       perRoom = new Map();
       this.records.set(record.roomBlindId, perRoom);
     }
-    perRoom.set(record.peerBlindId, record);
+    // Key by the SEALED ANNOUNCEMENT CONTENT, NOT the peer blind id (PRIV-API-RENDEZVOUS-4).  After
+    // the server-side cap removal (PRIV-API-RENDEZVOUS-1) the `peer_blind_id` is derivable by ANY
+    // member from the room key + a device id, so keying the slot on it let a hostile member announce
+    // into an honest device's slot and OVERWRITE its presence with a mismatched record — pollers then
+    // dial the spoof, fail the handshake, and never see the (absent) honest record.  Content-keying
+    // makes a distinct (spoof or re-announced) announcement COEXIST rather than replace: an identical
+    // re-announce is idempotent, the honest record survives, and the §27 sample-poll + the peer-side
+    // membership handshake filter the spoofs.
+    perRoom.set(record.encryptedAnnouncement, record);
     // Cap per room: evict the soonest-expiring once over the limit.
     if (perRoom.size > MAX_RECORDS_PER_ROOM) {
       let oldestKey: string | undefined;

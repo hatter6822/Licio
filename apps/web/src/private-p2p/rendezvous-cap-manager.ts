@@ -58,6 +58,36 @@ export interface CapSyncContext {
  *  legitimate capped peer still surfaces, while a flood's verify cost is bounded per poll. */
 const MAX_CAPS_VERIFIED_PER_POLL = 64;
 
+/** An unbiased random integer in [0, bound) from crypto randomness — rejection sampling avoids the
+ *  modulo bias a raw `% bound` over a 32-bit value would introduce. */
+function randomIntBelow(bound: number): number {
+  if (bound <= 1) return 0;
+  const limit = Math.floor(0x1_0000_0000 / bound) * bound; // drop the biased high tail
+  const buf = new Uint32Array(1);
+  let x: number;
+  do {
+    crypto.getRandomValues(buf);
+    x = buf[0] ?? 0;
+  } while (x >= limit);
+  return x % bound;
+}
+
+/** A uniform random permutation of [0, n) (Fisher–Yates over crypto randomness) — the §27 per-poll
+ *  re-randomization that makes MAX_CAPS_VERIFIED_PER_POLL a FAIR sample of the capped set rather than
+ *  an arrival-order window.  Without it, a hostile member could keep that many decodable-but-invalid
+ *  caps ahead of an honest one in the relay's STABLE poll order and starve it from verification +
+ *  discovery on every poll (PRIV-CAP-4). */
+function shuffledIndices(n: number): number[] {
+  const order = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = randomIntBelow(i + 1);
+    const a = order[i] as number;
+    order[i] = order[j] as number;
+    order[j] = a;
+  }
+  return order;
+}
+
 export class RendezvousCapManager {
   // PRIV-CAP-4: memoize the WHOLE load so two concurrent first calls cannot each generate a distinct
   // `nid` (a racing read-then-write would otherwise install divergent members / persist the loser).
@@ -157,7 +187,12 @@ export class RendezvousCapManager {
           bucket: number;
           value: number;
         }> = [];
-        for (let i = 0; i < caps.length && decoded.length < MAX_CAPS_VERIFIED_PER_POLL; i++) {
+        // SAMPLE the capped set in a fresh random order each poll (PRIV-CAP-4), so the per-poll verify
+        // bound is fair rather than arrival-order-biased — a flooder cannot bury an honest cap behind
+        // MAX_CAPS_VERIFIED_PER_POLL decodable-but-invalid ones.
+        const order = shuffledIndices(caps.length);
+        for (let k = 0; k < order.length && decoded.length < MAX_CAPS_VERIFIED_PER_POLL; k++) {
+          const i = order[k] as number;
           const c = caps[i];
           if (c === undefined) continue;
           let pseudonym: Uint8Array;

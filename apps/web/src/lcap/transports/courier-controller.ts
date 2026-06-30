@@ -913,6 +913,21 @@ export class CourierController {
     // `'public'`.
     const privacyLabel = await requestPrivacyLabel(request);
 
+    // Re-check LIVENESS again: requestPrivacyLabel's await can YIELD while it parses a large push
+    // pack, and a Stop / disclosure revocation / deselection / forced-off mode / peer removal during
+    // that gap must NOT let the already-built request ride the COURIER radio.  The re-check below
+    // only guards the HTTPS anchor, so without this the courier leg would still transmit (#X/#AW
+    // applied to the courier leg too — PUB-COURIER-2).  Release the reservation on every early exit.
+    if (!this.started || !this.isChannelActive(channel, generation)) {
+      this.reservedBytes -= request.byteLength; // release — no send happened
+      return;
+    }
+    if (!mayExchangeWithEndpoint(this.controls, endpointId)) {
+      this.reservedBytes -= request.byteLength; // release — no send happened
+      this.emit(channel, endpointId, null, null, 'not_allowed_peer');
+      return;
+    }
+
     let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null =
       null;
     try {

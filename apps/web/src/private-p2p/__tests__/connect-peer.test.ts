@@ -1070,4 +1070,66 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     // BOTH candidates were dialed — the OLD carrier committed to candidates[0] only (→ 1).
     expect(rtcCreated).toBeGreaterThanOrEqual(2);
   }, 15_000);
+
+  it('KEEPS POLLING after a failed dial round instead of bailing (PRIV-CARRIER-3-POLL)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-keep-polling',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const timeBucket = p2p.rendezvousTimeBucket(Date.now());
+    const sig = p2p.toBase64Url((await p2p.generateX25519KeyPair()).publicKey);
+    const inner = inMemoryRendezvous();
+    let pollCount = 0;
+    const rendezvous = {
+      ...inner,
+      poll: (roomBlindId: string) => {
+        pollCount += 1;
+        return inner.poll(roomBlindId);
+      },
+    };
+    // ONE registered-but-unreachable peer: the first dial fails fast (fresh unpaired FakeLink).
+    await rendezvous.announce(
+      await p2p.buildRendezvousRecord({
+        rendezvousKey,
+        epoch,
+        timeBucket,
+        deviceId: 'device-bad',
+        announcement: {
+          schema: 'licio.private.rendezvous_announcement.v1',
+          peer_device_id: 'device-bad',
+          signaling_public_key: sig,
+          transport_hints: [],
+        },
+        nowMs: Date.now(),
+      }),
+    );
+    await expect(
+      connectPrivatePeer({
+        p2p,
+        rendezvous,
+        roomIdCommitment: created.roomIdCommitment,
+        epoch,
+        rendezvousKey,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: (id: string) =>
+          id === 'device-bad' ? { signingPublicKey: sig, activeAtEpoch: true } : undefined,
+        transportMode: 'direct_allowed',
+        nowMs: () => Date.now(),
+        pollIntervalMs: 30,
+        timeoutMs: 600,
+        candidateDialTimeoutMs: 60,
+        rtcFactory: () => new FakePeer(new FakeLink()),
+      }),
+    ).rejects.toThrow();
+    // The OLD carrier threw the dial error after the FIRST failed round (≈1 poll); the fix keeps
+    // polling until the deadline (a fresh peer / a cooldown expiry may yet arrive) — ≈600/30 ≈ 20
+    // polls — so a reachable peer announced AFTER the first round is not silently abandoned.
+    expect(pollCount).toBeGreaterThan(5);
+  }, 15_000);
 });

@@ -221,10 +221,14 @@ export interface BuildRendezvousRecordParams {
 /**
  * Build a `BlindRendezvousRecord` for the current `(epoch, time_bucket)`: derive the room + peer
  * blind ids, seal the announcement under the announce key (AAD-bound to the record), and set a
- * clamped short TTL.  The `peer_blind_id` is ALWAYS the deterministic per-`(device, epoch, bucket)`
- * derived id — which already gives one server slot per device per bucket (a re-announce REPLACES it)
- * — and the per-announcer cap rides SEALED inside the announcement for peer-side verification
- * (PRIV-API-RENDEZVOUS-1: no top-level cap; the server runs the §27 Tier-1 sample-poll).
+ * clamped short TTL.  The `peer_blind_id` is the deterministic per-`(device, epoch, bucket)` derived
+ * id used to ADDRESS §15.4 signaling — but it is NOT an unforgeable storage slot: any member can
+ * derive another device's id from the room key, so the server stores presence keyed by the SEALED
+ * ANNOUNCEMENT CONTENT (PRIV-API-RENDEZVOUS-4) — a distinct (spoof or re-announced) announcement
+ * coexists rather than overwriting another peer's, an identical re-announce is idempotent, and the
+ * per-announcer cap rides SEALED inside the announcement for peer-side verification
+ * (PRIV-API-RENDEZVOUS-1: no top-level cap; the server runs the §27 Tier-1 sample-poll over all of
+ * a room's live records, and the §15.5 membership handshake filters spoofs).
  */
 export async function buildRendezvousRecord(
   params: BuildRendezvousRecordParams,

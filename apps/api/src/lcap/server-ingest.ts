@@ -273,6 +273,14 @@ export class LcapIngestServer {
       }
       case 'block': {
         for (const recordCid of await this.store.recordsReferencing(cid, 'block')) {
+          // A block carries no visibility of its own — it is authorized by a record that REFERENCES
+          // it.  The referencing record must be BOTH public AND ACCEPTED (validated + committed):
+          // `ingestPackFrames` records the block→record edge BEFORE `commitBatch` proves the
+          // contribution, so without the acceptance check an attacker who knows an in-room block CID
+          // could upload a schema-valid but INVALID/REJECTED `public` contribution referencing it and
+          // make `/blocks/:cid` (and exchange responses) serve the private plaintext.  The acceptance
+          // log only records a contribution that passed validate→guard→commit (PUB-API-BLOCK-OWNER-1).
+          if (!(await this.store.isAccepted(recordCid))) continue;
           const rec = await this.store.getObject(recordCid);
           if (rec?.kind === 'record' && LcapIngestServer.recordIsPublic(rec.bytes)) return true;
         }
@@ -333,6 +341,14 @@ export class LcapIngestServer {
     relation: RecordEdgeRelation,
   ): Promise<void> {
     return this.store.indexRecordEdge(recordCid, relatedCid, relation);
+  }
+
+  /** Append `cid` to a room's acceptance log (idempotent), marking the contribution ACCEPTED.  The
+   *  public-block serve gate (`isPublicServable`) authorizes a block only via an ACCEPTED owner
+   *  (PUB-API-BLOCK-OWNER-1); this passthrough lets a direct-store setup mark that acceptance without
+   *  driving the full validate→guard→commit path. */
+  appendAcceptance(roomId: string, cid: string): Promise<number> {
+    return this.store.appendAcceptance(roomId, cid);
   }
 
   /**

@@ -502,7 +502,15 @@ export async function connectPrivatePeer(
   const failedPeers = new Map<string, number>(); // signaling_public_key → cooldown-until (ms)
   let lastDialError: unknown;
   for (;;) {
-    throwIfAborted();
+    // The whole discovery loop is deadline/abort-bounded.  An explicit abort ends it with the
+    // `aborted` error; when the DEADLINE runs out, surface the typed DIAL failure if we attempted one
+    // (more actionable than a generic `timeout`), else the timeout itself.  Crucially we keep polling
+    // UNTIL that deadline — we do NOT bail after the first failed dial round (PRIV-CARRIER-3-POLL).
+    if (params.signal?.aborted) throwIfAborted();
+    if (nowMs() >= deadline) {
+      if (lastDialError !== undefined) throw lastDialError;
+      throwIfAborted();
+    }
     const records = await rendezvous.poll(roomBlindId);
     const opened: Candidate[] = [];
     for (const record of records) {
@@ -537,10 +545,11 @@ export async function connectPrivatePeer(
     const triable = candidates.filter((c) => !failedPeers.has(c.ann.signaling_public_key));
 
     if (triable.length === 0) {
-      // Nothing fresh to dial this round.  If we already tried + exhausted candidates this connect,
-      // surface that typed failure rather than waiting the deadline out into a generic `timeout`;
-      // otherwise keep WAITING for a peer to appear (the original discovery wait, deadline-bounded).
-      if (lastDialError !== undefined) throw lastDialError;
+      // Nothing FRESH to dial this round — but do NOT bail.  A reachable peer may announce shortly, or
+      // a cooled-down candidate's cooldown may expire (we prune expired cooldowns above), both within
+      // the deadline.  Keep polling; the deadline check at the top surfaces `lastDialError` only when
+      // time actually runs out, so a stale-presence-then-live-peer room still converges
+      // (PRIV-CARRIER-3-POLL).
       await sleep(pollIntervalMs);
       continue;
     }
