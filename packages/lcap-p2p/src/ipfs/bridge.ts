@@ -198,20 +198,34 @@ export class IpfsBridge {
   async fetchBlock(blockCid: string): Promise<FetchOutcome> {
     const ipfsCid = this.toIpfsCid(blockCid);
     if (ipfsCid === undefined) return { ok: false, reason: 'bad_cid' };
-    let response: Response;
+    // ONE deadline spans the header fetch AND the body read.  A gateway that returns headers then
+    // STALLS (or dribbles bytes below `maxBlockBytes`) the body would otherwise hang here forever:
+    // `readBounded` has no deadline of its own, so clearing the timer the instant `fetch` resolves
+    // (the old `fetchWithTimeout`) left the read unbounded.  Keeping the timer ARMED through the read
+    // means its `abort()` cancels the fetch's body stream, so a stalled `reader.read()` rejects and we
+    // fail closed (PUB-IPFS-TIMEOUT-2).  The timer is cleared only after the read completes.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      response = await this.fetchWithTimeout(`${this.config.gatewayUrl}/ipfs/${ipfsCid}`);
-    } catch {
-      return { ok: false, reason: 'gateway_error' }; // network error OR the timeout abort
+      let response: Response;
+      try {
+        response = await this.fetchFn(`${this.config.gatewayUrl}/ipfs/${ipfsCid}`, {
+          signal: controller.signal,
+        });
+      } catch {
+        return { ok: false, reason: 'gateway_error' }; // network error OR the timeout abort
+      }
+      if (response.status === 404) return { ok: false, reason: 'not_found' };
+      if (!response.ok) return { ok: false, reason: 'gateway_error' };
+      const bytes = await this.readBounded(response);
+      if (bytes === 'oversize') return { ok: false, reason: 'oversize' };
+      if (bytes === null) return { ok: false, reason: 'gateway_error' }; // read error OR the timeout abort
+      // The non-negotiable re-verification: the gateway is untrusted.
+      if (!(await verifyCid(blockCid, bytes))) return { ok: false, reason: 'cid_mismatch' };
+      return { ok: true, bytes };
+    } finally {
+      clearTimeout(timer);
     }
-    if (response.status === 404) return { ok: false, reason: 'not_found' };
-    if (!response.ok) return { ok: false, reason: 'gateway_error' };
-    const bytes = await this.readBounded(response);
-    if (bytes === 'oversize') return { ok: false, reason: 'oversize' };
-    if (bytes === null) return { ok: false, reason: 'gateway_error' };
-    // The non-negotiable re-verification: the gateway is untrusted.
-    if (!(await verifyCid(blockCid, bytes))) return { ok: false, reason: 'cid_mismatch' };
-    return { ok: true, bytes };
   }
 
   /**

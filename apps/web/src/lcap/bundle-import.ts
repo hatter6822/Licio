@@ -29,7 +29,6 @@ import type {
   ParsedPack,
   ReaderCaps,
 } from '@licio/lcap';
-import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import { LCAP_STORE } from './db.js';
 import {
   bytesToHex,
@@ -414,8 +413,8 @@ export async function commitImportedBundle(
         // re-quarantine re-derives only BLOCK deps, so without this an over-cap RECORD fan-out (parents
         // OR a singular prev/replaces/target/thread_root ref) with truncated table deps would commit
         // without its prerequisites (#2/#3b).  Counts are O(1) — never spread (#3).
-        const { cids: blockDeps } = cappedBodyBlockCids(decodedForDeps, maxBodyRefs);
-        if (isOverCapContribution(decodedForDeps, maxBodyRefs)) {
+        const { cids: blockDeps } = lcapCodec.cappedBodyBlockCids(decodedForDeps, maxBodyRefs);
+        if (lcapCodec.isOverCapContribution(decodedForDeps, maxBodyRefs)) {
           overCapRecord = true;
           overCapRecords.add(cid);
           // Mark it DROPPED so a dependent record (whose table deps name this CID) re-quarantines too:

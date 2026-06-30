@@ -5,7 +5,7 @@
 // (200 held / 404 not-held / 400 malformed CID), and verifies the mount through
 // the full app (global security/CSRF middleware lets GETs through).
 
-import { cidFor } from '@licio/lcap';
+import { cidFor, encodeContributionEvent } from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import { createLcapRoutes } from '../lcap/routes.js';
@@ -33,14 +33,22 @@ beforeAll(async () => {
   recordCid = fx.publicRecordCid;
   await server.putObject(recordCid, 'record', recordBody);
 
-  // A block referenced by the PUBLIC record → public-servable.  The owning record must be ACCEPTED
-  // (validated + committed) for its block to be authorized for the public surface
-  // (PUB-API-BLOCK-OWNER-1) — mark it accepted, as the real validate→guard→commit path would.
+  // A block public-servable iff its owner is (1) ACCEPTED (PUB-API-BLOCK-OWNER-1), (2) PUBLIC, and
+  // (3) NAMES the block in its SIGNED body (PUB-API-BLOCK-OWNER-2 — not just the unauthenticated
+  // pack-table edge).  Build a PUBLIC contribution whose `body_block_cid` IS the block, accept it.
   const publicBlockBytes = enc.encode('public-media-block');
   publicBlockCid = await cidFor('block', publicBlockBytes);
+  const ownerBody = encodeContributionEvent({
+    ...fx.publicContribution,
+    body_block_cid: publicBlockCid,
+    device_seq: 5,
+    client_nonce: new Uint8Array([2, 2, 2, 2]),
+  });
+  const ownerCid = await cidFor('record', ownerBody);
+  await server.putObject(ownerCid, 'record', ownerBody);
   await server.putObject(publicBlockCid, 'block', publicBlockBytes);
-  await server.indexRecordEdge(recordCid, publicBlockCid, 'block');
-  await server.appendAcceptance('room', recordCid);
+  await server.indexRecordEdge(ownerCid, publicBlockCid, 'block');
+  await server.appendAcceptance('room', ownerCid);
 
   // The in_room record + a block referenced ONLY by it → withheld over the public surface.
   await server.putObject(fx.recordCid, 'record', fx.body);
@@ -127,22 +135,51 @@ describe('createLcapRoutes — §29 public-serve confidentiality gate (PUB-API-C
     expect(res.status).toBe(200);
   });
 
-  it('NEVER serves a block whose only public referencing record is NOT accepted (PUB-API-BLOCK-OWNER-1)', async () => {
-    // An attacker who knows an in_room block CID uploads a schema-valid `public` contribution that
-    // references it but is invalid/rejected (never committed) — `ingestPackFrames` records the edge
-    // BEFORE commit.  The block must STAY withheld: an UNACCEPTED public owner cannot authorize it.
+  it('NEVER serves a block named ONLY in an accepted public owner’s pack-table deps, not its SIGNED body (PUB-API-BLOCK-OWNER-2)', async () => {
+    // The exploit: an attacker uploads a VALID public contribution that names a known PRIVATE block
+    // CID ONLY in its pack-table `deps` (which `ingestPackFrames` indexes as a record→block edge),
+    // NOT in the signed body.  Even with the owner accepted + public, that UNAUTHENTICATED table edge
+    // must NOT authorize serving — only the author's SIGNED body attests ownership.
     const fresh = new LcapIngestServer('net');
-    await fresh.putObject(recordCid, 'record', recordBody); // a PUBLIC record …
-    const blk = enc.encode('attacker-targeted-block');
+    const ownerBody = encodeContributionEvent({
+      ...fx.publicContribution, // a plain public post — its signed body references NO block
+      device_seq: 9,
+      client_nonce: new Uint8Array([3, 3, 3, 3]),
+    });
+    const ownerCid = await cidFor('record', ownerBody);
+    await fresh.putObject(ownerCid, 'record', ownerBody);
+    const blk = enc.encode('attacker-targeted-private-block');
     const blkCid = await cidFor('block', blk);
     await fresh.putObject(blkCid, 'block', blk);
-    await fresh.indexRecordEdge(recordCid, blkCid, 'block'); // … referencing the block …
-    // … but NEVER accepted (no appendAcceptance / commit).
+    await fresh.indexRecordEdge(ownerCid, blkCid, 'block'); // ONLY a pack-table edge, not a body ref
+    await fresh.appendAcceptance('room', ownerCid); // accepted + public — but the edge is forged
     expect(await createLcapRoutes(fresh).request(`/blocks/${blkCid}`)).toMatchObject({
       status: 404,
     });
-    // Once the owner is accepted, the SAME block becomes servable — proving acceptance is the gate.
-    await fresh.appendAcceptance('room', recordCid);
+  });
+
+  it('serves a SIGNED-body block only once its owner is ACCEPTED (PUB-API-BLOCK-OWNER-1)', async () => {
+    // The owner genuinely names the block in its SIGNED body, but is invalid/rejected (never
+    // committed) — `ingestPackFrames` records the edge BEFORE commit, so acceptance is the gate.
+    const fresh = new LcapIngestServer('net');
+    const blk = enc.encode('owned-but-unaccepted-block');
+    const blkCid = await cidFor('block', blk);
+    const ownerBody = encodeContributionEvent({
+      ...fx.publicContribution,
+      body_block_cid: blkCid,
+      device_seq: 11,
+      client_nonce: new Uint8Array([4, 4, 4, 4]),
+    });
+    const ownerCid = await cidFor('record', ownerBody);
+    await fresh.putObject(ownerCid, 'record', ownerBody);
+    await fresh.putObject(blkCid, 'block', blk);
+    await fresh.indexRecordEdge(ownerCid, blkCid, 'block');
+    // NOT accepted ⇒ withheld.
+    expect(await createLcapRoutes(fresh).request(`/blocks/${blkCid}`)).toMatchObject({
+      status: 404,
+    });
+    // Accepted ⇒ the SAME signed-body block becomes servable.
+    await fresh.appendAcceptance('room', ownerCid);
     expect(await createLcapRoutes(fresh).request(`/blocks/${blkCid}`)).toMatchObject({
       status: 200,
     });

@@ -207,6 +207,32 @@ describe('gateway bridge — no transport trust (§22.7)', () => {
     });
     expect(await bridge.fetchBlock(blockCid)).toEqual({ ok: false, reason: 'gateway_error' });
   });
+
+  it('aborts a STALLED body within the deadline — the timeout spans the READ, not just the fetch (PUB-IPFS-TIMEOUT-2)', async () => {
+    const blockCid = await cidFor('block', new TextEncoder().encode('stalled'));
+    let bodyAborted = false;
+    const bridge = new IpfsBridge({
+      gatewayUrl: 'https://gw.test',
+      timeoutMs: 20,
+      // Headers arrive immediately, but the body STALLS (never enqueues, never closes).  A real
+      // gateway's body stream errors when its fetch is aborted — wire that, so the test exercises the
+      // deadline reaching the body READ.  WITHOUT the fix (timer cleared the instant `fetch` resolved),
+      // the read would hang forever and this test would TIME OUT.
+      fetchFn: async (_input, init) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => {
+              bodyAborted = true;
+              controller.error(new Error('aborted'));
+            });
+          },
+        });
+        return new Response(body, { status: 200 });
+      },
+    });
+    expect(await bridge.fetchBlock(blockCid)).toEqual({ ok: false, reason: 'gateway_error' });
+    expect(bodyAborted).toBe(true); // the deadline reached + aborted the BODY read, not just the fetch
+  });
 });
 
 describe('gateway bridge — publish enforces the gate', () => {

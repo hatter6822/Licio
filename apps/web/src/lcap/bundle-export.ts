@@ -20,7 +20,6 @@ import type {
   PackHeaderV2,
   PackObject,
 } from '@licio/lcap';
-import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import { getLcapDb, LCAP_STORE } from './db.js';
 import {
   forEachByCursor,
@@ -92,7 +91,8 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
   //    source-snapshot CIDs), NOT `record.deps`, which can be unauthenticated pack-table metadata a
   //    crafted record copied from an imported bundle to point at another room's held block (#HH).  A
   //    dep that resolves to a held block descriptor is included; one we don't hold is omitted.
-  const { decodeAndRouteRecord, SERVER_CAPS } = await import('@licio/lcap');
+  const { cappedBodyBlockCids, decodeAndRouteRecord, isOverCapContribution, SERVER_CAPS } =
+    await import('@licio/lcap');
   const depCids = new Set<string>();
   // The exported table `deps` per record — derived from the SIGNED body (record refs + block refs),
   // the SAME closure derivation, NOT the stored `record.deps` (which may carry a stale/unauthenticated

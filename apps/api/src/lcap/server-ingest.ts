@@ -25,6 +25,7 @@ import {
   type CheckpointFrontierV2,
   type ConsensusInput,
   type CryptoSuiteId,
+  cappedBodyBlockCids,
   checkCap,
   checkDependencyGraph,
   cidFor,
@@ -235,6 +236,26 @@ export class LcapIngestServer {
   }
 
   /**
+   * Whether `blockCid` is a block reference of contribution `bytes`'s SIGNED body — the author's
+   * attestation of which blocks it owns — re-derived via the SHARED `cappedBodyBlockCids` (the exact
+   * client derivation), NOT the unauthenticated pack-table edge `recordsReferencing` indexes.  This
+   * is the §29 serve gate's defence against PUB-API-BLOCK-OWNER-2: a valid public contribution that
+   * names a PRIVATE block CID only in its pack-table `deps` must NOT make that block public.  The
+   * fan-out scan is §27.1-bounded (an accepted body is already within the cap; the bound is
+   * defence-in-depth), never O(n) over `source_snapshot_cids`.
+   */
+  private recordOwnsBlockBySignedBody(bytes: Uint8Array, blockCid: string): boolean {
+    let record: ReturnType<typeof decodeAndRouteRecord>;
+    try {
+      record = decodeAndRouteRecord(bytes);
+    } catch {
+      return false;
+    }
+    if (record.kind !== 'contribution_event') return false;
+    return cappedBodyBlockCids(record, this.caps.maxFanOut).cids.includes(blockCid);
+  }
+
+  /**
    * Whether `cid` may be served over the PUBLIC §29 read/exchange surface (the GET content routes +
    * the pulse/exchange repack).  This is the SERVER counterpart of the client's PUBLIC-ONLY
    * responder (`collectShareableCids`) and closes PUB-API-CORE-1: a non-public (`room_only`) record,
@@ -273,16 +294,22 @@ export class LcapIngestServer {
       }
       case 'block': {
         for (const recordCid of await this.store.recordsReferencing(cid, 'block')) {
-          // A block carries no visibility of its own — it is authorized by a record that REFERENCES
-          // it.  The referencing record must be BOTH public AND ACCEPTED (validated + committed):
-          // `ingestPackFrames` records the block→record edge BEFORE `commitBatch` proves the
-          // contribution, so without the acceptance check an attacker who knows an in-room block CID
-          // could upload a schema-valid but INVALID/REJECTED `public` contribution referencing it and
-          // make `/blocks/:cid` (and exchange responses) serve the private plaintext.  The acceptance
-          // log only records a contribution that passed validate→guard→commit (PUB-API-BLOCK-OWNER-1).
+          // A block carries no visibility of its own — it is authorized by a record that references
+          // it.  THREE conditions must ALL hold; any one alone is exploitable:
+          //   1. ACCEPTED — `ingestPackFrames` records the block→record edge BEFORE `commitBatch`
+          //      proves the contribution, so an INVALID/REJECTED public record must not authorize a
+          //      block (PUB-API-BLOCK-OWNER-1); the acceptance log records only validate→guard→commit.
+          //   2. PUBLIC — the owner's own `visibility_scope` (a non-public owner never serves a block).
+          //   3. SIGNED-BODY OWNERSHIP — the block CID must be a ref of the owner's SIGNED body, NOT
+          //      the UNAUTHENTICATED pack-table edge `recordsReferencing` indexes.  Otherwise an
+          //      attacker uploads a VALID public contribution that names a known PRIVATE block CID
+          //      ONLY in the pack-table `deps`, and the table edge would disclose that block.  The
+          //      signed body is the author's attestation of which blocks the contribution owns
+          //      (PUB-API-BLOCK-OWNER-2) — re-derived via the SHARED `cappedBodyBlockCids`.
           if (!(await this.store.isAccepted(recordCid))) continue;
           const rec = await this.store.getObject(recordCid);
-          if (rec?.kind === 'record' && LcapIngestServer.recordIsPublic(rec.bytes)) return true;
+          if (rec?.kind !== 'record' || !LcapIngestServer.recordIsPublic(rec.bytes)) continue;
+          if (this.recordOwnsBlockBySignedBody(rec.bytes, cid)) return true;
         }
         return false;
       }

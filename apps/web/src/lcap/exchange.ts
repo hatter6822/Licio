@@ -20,7 +20,6 @@
 // trust projection (§8.3).  The heavy `@licio/lcap` codec is loaded by DYNAMIC import (like
 // `bundle-import`), so this module stays off the initial bundle.
 
-import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import {
   type CommitCounts,
   commitImportedBundle,
@@ -96,7 +95,7 @@ async function collectShareableCids(
     // arrays into the pack table — O(n) work / an oversized response for an invalid record (#4).
     if (
       decoded.kind === 'contribution_event' &&
-      isOverCapContribution(decoded, lcap.SERVER_CAPS.maxFanOut)
+      lcap.isOverCapContribution(decoded, lcap.SERVER_CAPS.maxFanOut)
     ) {
       return false;
     }
@@ -135,7 +134,7 @@ async function collectShareableCids(
       // §27.1 fan-out cap (the SHARED helper — never spreads source_snapshot_cids): bound the body's
       // block refs BEFORE the per-element readBlockDescriptor query, so a stray over-cap public body
       // can never drive O(n) awaited store reads at share/push time (#3 defense-in-depth + symmetry).
-      for (const dep of cappedBodyBlockCids(decoded, lcap.SERVER_CAPS.maxFanOut).cids) {
+      for (const dep of lcap.cappedBodyBlockCids(decoded, lcap.SERVER_CAPS.maxFanOut).cids) {
         // Collect every HELD body block dep; the §16.5 priority/media floor is enforced UNIFORMLY at
         // repack (repackHeldObjects' priorityFloor/allowMedia), the same place the response path
         // applies it — so the partial attachment-only skip here would be both redundant and

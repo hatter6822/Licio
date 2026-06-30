@@ -15,6 +15,7 @@ import {
   DEFAULT_BUDGET,
   type DeviceKeyPair,
   decodeWithSchema,
+  encodeContributionEvent,
   encodeWithSchema,
   generateDeviceKey,
   pulseResponseV2Schema,
@@ -43,18 +44,26 @@ beforeAll(async () => {
   fx = await buildLcapFixtures();
 });
 
-/** Stage a block as PUBLIC-servable: an ACCEPTED public record references it (the §29 public-serve
- *  gate resolves the block → its owning public record, which must be accepted —
- *  PUB-API-BLOCK-OWNER-1).  Without this a held block is withheld. */
+/** Stage a block as PUBLIC-servable: an ACCEPTED public contribution whose SIGNED body NAMES the
+ *  block owns it (the §29 gate authenticates the block against the body — PUB-API-BLOCK-OWNER-1/2 —
+ *  not the unauthenticated pack-table edge).  A distinct block ⇒ a distinct owner (its body_block_cid
+ *  differs), so repeated stages never collide. */
 async function stagePublicBlock(
   srv: LcapIngestServer,
   blockCid: string,
   blockBytes: Uint8Array,
 ): Promise<void> {
-  await srv.putObject(fx.publicRecordCid, 'record', fx.publicBody);
+  const ownerBody = encodeContributionEvent({
+    ...fx.publicContribution,
+    body_block_cid: blockCid,
+    device_seq: 7,
+    client_nonce: new Uint8Array([7, 7, 7, 7]),
+  });
+  const ownerCid = await cidFor('record', ownerBody);
+  await srv.putObject(ownerCid, 'record', ownerBody);
   await srv.putObject(blockCid, 'block', blockBytes);
-  await srv.indexRecordEdge(fx.publicRecordCid, blockCid, 'block');
-  await srv.appendAcceptance('room', fx.publicRecordCid);
+  await srv.indexRecordEdge(ownerCid, blockCid, 'block');
+  await srv.appendAcceptance('room', ownerCid);
 }
 
 const accepted: ValidationResult = { state: 'authorized_provisional', missingCids: [], facts: {} };
