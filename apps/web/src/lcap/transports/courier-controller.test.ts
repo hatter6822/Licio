@@ -11,6 +11,15 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { type CourierChannelPlugin, CourierController } from './courier-controller.js';
 import type { CourierRadioControls } from './courier-native.js';
 
+// Wrap @licio/lcap's `readPack` (the ONLY async call inside `requestPrivacyLabel`) as a passthrough
+// spy — so the PUB-COURIER-2 test can stop the courier DURING the privacy-label parse, the exact gap
+// the post-label liveness re-check guards.  All other exports are the originals; tests using a
+// pure-pull request never reach `readPack`, so they are unaffected.
+vi.mock('@licio/lcap', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('@licio/lcap')>();
+  return { ...orig, readPack: vi.fn(orig.readPack) };
+});
+
 const ON: CourierRadioControls = { advertisingEnabled: true, discoveryEnabled: true };
 
 // The §22.5 radio-metadata disclosure is now a structural precondition in `decideCourierStart`,
@@ -30,6 +39,9 @@ let REQUEST_BYTES: Uint8Array;
 let RESPONSE_BYTES: Uint8Array;
 let RESPONSE_B64: string;
 let REQUEST_B64: string;
+// A request carrying a `push_pack` — so `requestPrivacyLabel` reaches its `await readPack(...)` (the
+// gap PUB-COURIER-2 guards).  A pure pull returns `'public'` synchronously and never awaits.
+let REQUEST_WITH_PUSH: Uint8Array;
 
 function toB64(bytes: Uint8Array): string {
   let s = '';
@@ -62,6 +74,10 @@ beforeAll(async () => {
   );
   RESPONSE_B64 = toB64(RESPONSE_BYTES);
   REQUEST_B64 = toB64(REQUEST_BYTES);
+  REQUEST_WITH_PUSH = lcap.encodeWithSchema(lcap.exchangeRequestV2Schema, {
+    ...lcap.buildExchangeRequest({ pulse, interests: [] }),
+    push_pack: new Uint8Array([1, 2, 3]), // opaque; the spy intercepts readPack before it parses
+  });
 });
 
 interface FakeListener {
@@ -525,6 +541,33 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does NOT transmit over the courier when STOPPED during the privacy-label parse (PUB-COURIER-2)', async () => {
+    const lcap = await import('@licio/lcap');
+    const f = fakePlugin();
+    const controller = makeController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_WITH_PUSH, // a request WITH a push_pack ⇒ requestPrivacyLabel awaits readPack
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    await controller.start();
+    // Stop the courier INSIDE `readPack` — i.e. AFTER the post-build liveness check (check 1) but
+    // BEFORE the courier leg.  The faked read result is PUBLIC, so absent the new post-label re-check
+    // (check 2) the public-only courier WOULD carry this request; `f.sent` therefore ISOLATES check 2
+    // (a mutation that removes it makes this test fail).
+    vi.mocked(lcap.readPack).mockImplementationOnce(async () => {
+      await controller.stop();
+      return { ok: true, pack: { header: { privacy_label: 'public' } } } as unknown as Awaited<
+        ReturnType<typeof lcap.readPack>
+      >;
+    });
+    f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+    await vi.waitFor(() => expect(vi.mocked(lcap.readPack)).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20)); // let driveExchange settle past the re-check
+    expect(f.sent).toHaveLength(0); // the courier leg NEVER transmitted
   });
 
   it('answers a peer’s inbound exchange REQUEST via the responder seam', async () => {

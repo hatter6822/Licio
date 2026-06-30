@@ -11,6 +11,8 @@ import {
   type CapIssuanceOpBody,
   RendezvousCapManager,
   type RendezvousCapStorage,
+  randomIntBelow,
+  shuffledIndices,
 } from '../rendezvous-cap-manager.js';
 
 const EPOCH = 3;
@@ -164,5 +166,52 @@ describe('RendezvousCapManager (carrier orchestration)', () => {
     await b.sync(ctxFor(engine, 'dev', false)); // commitment already present ⇒ no re-publish
     expect(engine.commitments).toHaveLength(1);
     expect(engine.commitments[0]?.commitmentWithProof).toBe(firstCommitment);
+  });
+});
+
+describe('order-fair cap sampling (PRIV-CAP-4)', () => {
+  it('shuffledIndices returns a valid permutation of [0, n)', () => {
+    for (const n of [0, 1, 2, 64, 100]) {
+      const order = shuffledIndices(n);
+      expect(order).toHaveLength(n);
+      expect([...order].sort((a, b) => a - b)).toEqual(Array.from({ length: n }, (_, i) => i));
+    }
+  });
+
+  it('samples the verify window UNIFORMLY — an honest cap at the BACK of a flood is not starved', () => {
+    // Model the §6.8 per-poll verify bound: of N capped records only the first MAX (after the shuffle)
+    // are BBS-verified.  The OLD arrival-order code would NEVER verify index N-1 when a flooder keeps
+    // MAX decodable-but-invalid records ahead of it; the shuffle gives the honest cap ≈ MAX/N each
+    // poll, so over a few polls it surfaces + is dialed.
+    const N = 100;
+    const MAX = 64;
+    const BACK = N - 1; // the honest cap a flooder pinned to the back of the relay's stable order
+    const POLLS = 3000;
+    let inWindow = 0;
+    for (let p = 0; p < POLLS; p++) {
+      if (shuffledIndices(N).indexOf(BACK) < MAX) inWindow += 1;
+    }
+    const rate = inWindow / POLLS;
+    // ≈ MAX/N = 0.64 (the OLD slice gave 0); loose bounds (≈3.5σ) so the statistical test never flakes.
+    expect(rate).toBeGreaterThan(0.55);
+    expect(rate).toBeLessThan(0.73);
+  });
+
+  it('randomIntBelow stays in range, handles the degenerate bound, and is roughly uniform', () => {
+    expect(randomIntBelow(0)).toBe(0);
+    expect(randomIntBelow(1)).toBe(0);
+    const counts = new Array(8).fill(0);
+    const N = 16_000;
+    for (let i = 0; i < N; i++) {
+      const v = randomIntBelow(8);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThan(8);
+      counts[v] += 1;
+    }
+    // Each of 8 buckets ≈ N/8 = 2000; loose ±35% so the crypto-RNG draw never flakes.
+    for (const c of counts) {
+      expect(c).toBeGreaterThan(1300);
+      expect(c).toBeLessThan(2700);
+    }
   });
 });

@@ -59,8 +59,9 @@ export interface CapSyncContext {
 const MAX_CAPS_VERIFIED_PER_POLL = 64;
 
 /** An unbiased random integer in [0, bound) from crypto randomness — rejection sampling avoids the
- *  modulo bias a raw `% bound` over a 32-bit value would introduce. */
-function randomIntBelow(bound: number): number {
+ *  modulo bias a raw `% bound` over a 32-bit value would introduce.  Exported for the PRIV-CAP-4
+ *  fairness test. */
+export function randomIntBelow(bound: number): number {
   if (bound <= 1) return 0;
   const limit = Math.floor(0x1_0000_0000 / bound) * bound; // drop the biased high tail
   const buf = new Uint32Array(1);
@@ -76,8 +77,8 @@ function randomIntBelow(bound: number): number {
  *  re-randomization that makes MAX_CAPS_VERIFIED_PER_POLL a FAIR sample of the capped set rather than
  *  an arrival-order window.  Without it, a hostile member could keep that many decodable-but-invalid
  *  caps ahead of an honest one in the relay's STABLE poll order and starve it from verification +
- *  discovery on every poll (PRIV-CAP-4). */
-function shuffledIndices(n: number): number[] {
+ *  discovery on every poll (PRIV-CAP-4).  Exported for the fairness test. */
+export function shuffledIndices(n: number): number[] {
   const order = Array.from({ length: n }, (_, i) => i);
   for (let i = n - 1; i > 0; i--) {
     const j = randomIntBelow(i + 1);
