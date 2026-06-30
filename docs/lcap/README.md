@@ -75,7 +75,21 @@ R.11.2); the §23.3 C0-first sync orchestration (`sync-triggers.ts`, R.11.4); an
 §21.4 privacy-aware replication gate (`replication.ts` — private content is default-deny
 unless encrypted + permitted + user-selected, R.11.5).  The **WS-R.12.4 §29 HTTP API
 is shipped** (`apps/api/src/lcap/routes.ts`), all with the §22.1.1 status mapping and
-mounted through the global security middleware:
+mounted through the global security middleware.
+
+> **§29 public-serve confidentiality gate (PUB-API-CORE-1).** The serve/read surface is
+> **PUBLIC-ONLY**, symmetric with the client responder (`apps/web/src/lcap/exchange.ts`
+> `collectShareableCids`): the GET content reads, the `/exchange` `response_pack`, and the
+> `/pulse` `critical_pack` serve a record only when it is public (a non-public
+> `room_only` record, its proofs, and its body/media **blocks** are withheld, resolved via
+> the `lcap_record_closure` reverse edge), returning **404** (not 403 — no existence
+> oracle) for an in_room CID. **Chunks are never served** over this surface (a chunk
+> carries no visibility and the server cannot resolve it to its owning record); authorized
+> chunked-media serving is the separate **§29.4 "if authorized"** path (a tracked
+> enhancement). The capability-authorized §29.8 **bundle export** is exempt — it carries a
+> room's full in_room closure by design. Request bodies are bounded on the **stream**
+> (`hono/body-limit`, PUB-API-CORE-2) and the content-read GETs are **rate-limited**
+> (PUB-API-CORE-3).
 
 - the content-READ endpoints `GET /api/lcap/v2/{records,proofs,blocks}/:cid` (RFC 7233
   resumable range/206 + 416 reads);

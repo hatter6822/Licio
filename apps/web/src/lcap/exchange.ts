@@ -20,7 +20,6 @@
 // trust projection (§8.3).  The heavy `@licio/lcap` codec is loaded by DYNAMIC import (like
 // `bundle-import`), so this module stays off the initial bundle.
 
-import { cappedBodyBlockCids, isOverCapContribution } from './body-deps.js';
 import {
   type CommitCounts,
   commitImportedBundle,
@@ -69,8 +68,13 @@ async function collectShareableCids(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
   scope: ExchangeScope | undefined,
+  /** The §16.5 SELECTION floor a minimal/stealth PUSH advertises: here it tightens only the RECORD
+   *  priority cap (so an over-floor record's CID + deps are never even collected).  The block-level
+   *  priority/media floor is enforced at repack (buildPushPack → repackHeldObjects), symmetric with
+   *  the response path (PUB-EXCHANGE-1).  Omitted ⇒ no extra constraint (the responder). */
+  floor?: { readonly maxPriority: number; readonly allowMedia: boolean },
 ): Promise<string[]> {
-  const maxPriority = scope?.maxPriorityClass ?? 4;
+  const maxPriority = Math.min(scope?.maxPriorityClass ?? 4, floor?.maxPriority ?? 4);
   // A record is shareable iff it decodes, is PUBLIC, and is within the priority cap.  The room
   // filter is applied by the index walk in collectShareableRecordRows (so the cap counts in-scope
   // SHAREABLE rows, never just the first N raw rows of the store).
@@ -91,7 +95,7 @@ async function collectShareableCids(
     // arrays into the pack table — O(n) work / an oversized response for an invalid record (#4).
     if (
       decoded.kind === 'contribution_event' &&
-      isOverCapContribution(decoded, lcap.SERVER_CAPS.maxFanOut)
+      lcap.isOverCapContribution(decoded, lcap.SERVER_CAPS.maxFanOut)
     ) {
       return false;
     }
@@ -130,7 +134,11 @@ async function collectShareableCids(
       // §27.1 fan-out cap (the SHARED helper — never spreads source_snapshot_cids): bound the body's
       // block refs BEFORE the per-element readBlockDescriptor query, so a stray over-cap public body
       // can never drive O(n) awaited store reads at share/push time (#3 defense-in-depth + symmetry).
-      for (const dep of cappedBodyBlockCids(decoded, lcap.SERVER_CAPS.maxFanOut).cids) {
+      for (const dep of lcap.cappedBodyBlockCids(decoded, lcap.SERVER_CAPS.maxFanOut).cids) {
+        // Collect every HELD body block dep; the §16.5 priority/media floor is enforced UNIFORMLY at
+        // repack (repackHeldObjects' priorityFloor/allowMedia), the same place the response path
+        // applies it — so the partial attachment-only skip here would be both redundant and
+        // incomplete (a B4 body/source-snapshot block is equally over-floor) (PUB-EXCHANGE-1).
         if (await readBlockDescriptor(db, dep)) add(dep);
       }
     }
@@ -148,10 +156,21 @@ async function buildPushPack(
   lcap: typeof import('@licio/lcap'),
   budget: number,
   scope: ExchangeScope | undefined,
+  floor?: { readonly maxPriority: number; readonly allowMedia: boolean },
 ): Promise<Uint8Array | undefined> {
-  const cids = await collectShareableCids(db, lcap, scope);
+  const cids = await collectShareableCids(db, lcap, scope, floor);
   if (cids.length === 0) return undefined;
-  const repacked = await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), cids, budget);
+  // Apply the advertised floor at REPACK — SYMMETRIC with the response path (which passes the peer's
+  // `priority_floor`/`allow_media` to repackHeldObjects).  A body/source-snapshot/attachment block is
+  // class B4 (priority 4): a minimal/stealth floor (`priorityFloor` < 4) withholds ALL of them, and
+  // `allowMedia: false` withholds every block — so the push can never carry over-floor block bytes
+  // while advertising a constrained floor (PUB-EXCHANGE-1).
+  const repacked = await lcap.repackHeldObjects(
+    (cid) => getHeldObject(db, cid),
+    cids,
+    budget,
+    floor ? { priorityFloor: floor.maxPriority, allowMedia: floor.allowMedia } : undefined,
+  );
   return repacked.pack;
 }
 
@@ -300,8 +319,15 @@ export async function buildClientExchangeRequest(
   const baseBytes = encode(want, undefined).length;
   const pushBudget = maxRequestBytes - baseBytes;
   // PUSH our shareable content too (gossip-out) — scope-filtered (public-only, room-allowlisted,
-  // priority-capped), bounded by the budget left AFTER the pulse + wants.
-  let pushPack = pushBudget > 256 ? await buildPushPack(db, lcap, pushBudget, scope) : undefined;
+  // priority-capped), bounded by the budget left AFTER the pulse + wants.  The push also honors the
+  // ADVERTISED §16.5 selection floor (priority ceiling + media): in minimal/stealth mode it cannot
+  // seed P2–P4 / media while claiming priority_floor=1 / allow_media=false (PUB-EXCHANGE-1).
+  const selectionFloor = {
+    maxPriority: pulse.budgets.priority_floor,
+    allowMedia: pulse.budgets.allow_media,
+  };
+  let pushPack =
+    pushBudget > 256 ? await buildPushPack(db, lcap, pushBudget, scope, selectionFloor) : undefined;
   let encoded = encode(want, pushPack);
   // Drop the (optional) push if its wrapper still tips the request over budget — the wants are essential.
   if (encoded.length > maxRequestBytes && pushPack !== undefined) {

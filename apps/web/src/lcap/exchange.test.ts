@@ -348,6 +348,66 @@ describe('client §16 exchange engine', () => {
     expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes);
   });
 
+  it('a minimal PUSH pack honors the priority floor — excludes over-floor records (PUB-EXCHANGE-2)', async () => {
+    const lcap = await import('@licio/lcap');
+    // peerA holds two shareable PUBLIC records: a P0 (within the minimal floor) + a P3 (over it).
+    const p0 = await putPublicRecord(peerA, lcap, 'public', { priority: 0 });
+    const p3 = await putPublicRecord(peerA, lcap, 'public', { priority: 3 });
+
+    // MINIMAL (stealth) request: priority_floor 1 ⇒ the gossip-out push carries P0 but NOT P3.
+    const minReq = lcap.decodeWithSchema(
+      lcap.exchangeRequestV2Schema,
+      await buildClientExchangeRequest(peerA, 'courier', undefined, true),
+    );
+    expect(minReq.push_pack).toBeDefined();
+    const minRead = await lcap.readPack(minReq.push_pack as Uint8Array);
+    if (!minRead.ok) throw new Error('minimal push pack unreadable');
+    expect(minRead.pack.frames.has(p0)).toBe(true);
+    expect(minRead.pack.frames.has(p3)).toBe(false); // over the floor ⇒ excluded (PUB-EXCHANGE-1)
+
+    // FULL request: the push carries BOTH (no selection floor).
+    const fullReq = lcap.decodeWithSchema(
+      lcap.exchangeRequestV2Schema,
+      await buildClientExchangeRequest(peerA, 'courier'),
+    );
+    const fullRead = await lcap.readPack(fullReq.push_pack as Uint8Array);
+    if (!fullRead.ok) throw new Error('full push pack unreadable');
+    expect(fullRead.pack.frames.has(p3)).toBe(true);
+  });
+
+  it('a minimal PUSH pack WITHHOLDS a within-floor record’s B4 body block (PUB-EXCHANGE-1)', async () => {
+    const lcap = await import('@licio/lcap');
+    // A P0 record (WITHIN the minimal floor) whose SIGNED body references a body block.  A block is
+    // class B4 (priority 4) — OVER a priority_floor of 1 — so the minimal push must carry the record
+    // but NOT the block (the bug: the record's deps were seeded regardless of the advertised floor).
+    const blockBytes = new Uint8Array([4, 4, 4, 4]);
+    const blockCid = await lcap.cidFor('block', blockBytes);
+    await putBlock(peerA, { blockCid, state: 'integrity_verified', size: blockBytes.length }, [
+      blockBytes,
+    ]);
+    const p0 = await putPublicRecord(peerA, lcap, 'public', { priority: 0, deps: [blockCid] });
+
+    // MINIMAL (stealth) push: priority_floor 1 ⇒ the P0 RECORD is carried, its B4 block is withheld.
+    const minReq = lcap.decodeWithSchema(
+      lcap.exchangeRequestV2Schema,
+      await buildClientExchangeRequest(peerA, 'courier', undefined, true),
+    );
+    const minRead = await lcap.readPack(minReq.push_pack as Uint8Array);
+    if (!minRead.ok) throw new Error('minimal push pack unreadable');
+    expect(minRead.pack.frames.has(p0)).toBe(true); // within the floor
+    expect(minRead.pack.frames.has(blockCid)).toBe(false); // B4 ⇒ over the floor ⇒ withheld
+
+    // FULL push: no selection floor ⇒ the record AND its block are both carried.
+    const fullReq = lcap.decodeWithSchema(
+      lcap.exchangeRequestV2Schema,
+      await buildClientExchangeRequest(peerA, 'courier'),
+    );
+    const fullRead = await lcap.readPack(fullReq.push_pack as Uint8Array);
+    if (!fullRead.ok) throw new Error('full push pack unreadable');
+    expect(fullRead.pack.frames.has(p0)).toBe(true);
+    expect(fullRead.pack.frames.has(blockCid)).toBe(true);
+  });
+
   it('SECURITY: a scoped INGEST does not admit a block matching an UNRELATED room’s gap (#UU)', async () => {
     const roomA = 'aaaaaaaaaaaaaaaa';
     const roomB = 'bbbbbbbbbbbbbbbb';

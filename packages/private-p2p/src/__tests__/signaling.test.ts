@@ -14,6 +14,7 @@ import {
   iceCandidateType,
   openSignal,
   type SignalingPayload,
+  scrubRelatedAddress,
   sealSignal,
   signalingPayloadSchema,
 } from '../sync/signaling.js';
@@ -57,10 +58,18 @@ describe('seal/open round-trip (§15.4)', () => {
     await expect(openSignal(signal, randomBytes(32))).rejects.toThrow();
   });
 
-  it('fails to open if an AAD-bound routing field is tampered', async () => {
+  it('fails to open if ANY AAD-bound routing field is tampered (PRIV-SYNC-4)', async () => {
     const signal = await sealSignal(offer, channelKey, routing);
-    const tampered: EncryptedSignal = { ...signal, recipient_blind_id: 'b3RoZXI' };
-    await expect(openSignal(tampered, channelKey)).rejects.toThrow();
+    // EVERY routing field is AAD-bound, so tampering ANY of them must fail the open (not just one).
+    const mutations: Array<Partial<EncryptedSignal>> = [
+      { room_blind_id: 'b3RoZXItcm9vbQ' },
+      { sender_blind_id: 'b3RoZXItc2VuZGVy' },
+      { recipient_blind_id: 'b3RoZXItcmVjaXBpZW50' },
+      { expires_at: signal.expires_at + 1 },
+    ];
+    for (const mutation of mutations) {
+      await expect(openSignal({ ...signal, ...mutation }, channelKey)).rejects.toThrow();
+    }
   });
 
   it('round-trips an ICE candidate and a bye', async () => {
@@ -120,11 +129,26 @@ describe('relay-only ICE suppression (§15.4)', () => {
   });
 
   it('filters a candidate list per mode (IP-revealing types dropped in relay-only)', () => {
-    expect(filterIceCandidatesForMode('relay_only', [host, srflx, relay])).toStrictEqual([relay]);
+    // In relay-only the surviving relay candidate ALSO has its raddr/rport scrubbed (PRIV-SYNC-3).
+    const relayScrubbed =
+      'candidate:3 1 udp 41885439 203.0.113.5 60000 typ relay raddr 0.0.0.0 rport 0';
+    expect(filterIceCandidatesForMode('relay_only', [host, srflx, relay])).toStrictEqual([
+      relayScrubbed,
+    ]);
+    // direct mode passes everything verbatim (no scrub).
     expect(filterIceCandidatesForMode('direct_allowed', [host, srflx, relay])).toStrictEqual([
       host,
       srflx,
       relay,
     ]);
+  });
+
+  it('scrubs the raddr/rport related-address on a relay candidate (PRIV-SYNC-3)', () => {
+    const scrubbed = scrubRelatedAddress(relay);
+    expect(scrubbed).toContain('typ relay');
+    expect(scrubbed).toContain('raddr 0.0.0.0');
+    expect(scrubbed).toContain('rport 0');
+    expect(scrubbed).not.toContain('198.51.100.1'); // the host's related address is gone
+    expect(scrubbed).not.toContain('rport 50000');
   });
 });

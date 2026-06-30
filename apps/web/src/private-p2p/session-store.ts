@@ -14,7 +14,59 @@
 // room manager (which dynamic-imports the schema).
 
 import type { PersistedSnapshotBase } from '@licio/private-p2p';
+import { z } from 'zod';
 import { openPrivateP2pDb, promisify, ROOM_SESSION_STORE, txDone } from './storage.js';
+
+/** A structured-clone byte field: a `Uint8Array`, an `ArrayBuffer`, or a typed-array view. */
+const bytesLikeSchema = z.custom<ArrayBufferView | ArrayBuffer>(
+  (v) => v instanceof Uint8Array || v instanceof ArrayBuffer || ArrayBuffer.isView(v),
+);
+/** A non-extractable `CryptoKey` — validated only for PRESENCE (its internals never serialize). */
+const cryptoKeySchema = z.custom<CryptoKey>((v) => typeof v === 'object' && v !== null);
+
+/**
+ * The READ-side validator for a persisted session (PRIV-WEB-SESSION-5).  Validates the structural
+ * (non-CryptoKey) contract — ids, the epoch list, bootstrap devices, byte-field presence — so a
+ * corrupt/foreign row is discarded rather than cast-asserted into the engine.  The opaque `manifest`
+ * / `snapshotBase` are re-validated downstream by the manager; CryptoKeys are presence-checked only.
+ */
+const storedRoomSessionSchema = z
+  .object({
+    roomId: z.string().min(1),
+    roomIdCommitment: bytesLikeSchema,
+    memberId: z.string().min(1),
+    deviceId: z.string().min(1),
+    signingPrivateKey: cryptoKeySchema,
+    signingPublicKey: z.string().min(1),
+    hpkePrivateKey: cryptoKeySchema,
+    hpkePublicKey: bytesLikeSchema,
+    mlsGroupState: bytesLikeSchema,
+    epochs: z.array(
+      z.object({
+        epoch: z.number().int().nonnegative(),
+        roomEpochSecret: bytesLikeSchema,
+        contentWrapKey: bytesLikeSchema,
+      }),
+    ),
+    manifest: z.unknown(),
+    manifestCommitment: bytesLikeSchema,
+    snapshotBase: z.unknown().optional(),
+    bootstrapDevices: z.array(
+      z.object({ deviceId: z.string().min(1), signingPublicKey: z.string().min(1) }),
+    ),
+    createdAtBucket: z.string().min(1),
+  })
+  .passthrough();
+
+/** Validate (discard on failure) + normalize a row read from IndexedDB. */
+function readStoredSession(raw: unknown): StoredRoomSession | undefined {
+  if (!storedRoomSessionSchema.safeParse(raw).success) return undefined;
+  try {
+    return normalizeSession(raw as StoredRoomSession);
+  } catch {
+    return undefined; // a byte field that is not byte-shaped after all
+  }
+}
 
 /**
  * Normalize a stored value back to a same-realm `Uint8Array`.  A structured-clone
@@ -103,10 +155,8 @@ export async function getRoomSession(roomId: string): Promise<StoredRoomSession 
   const db = await openPrivateP2pDb();
   try {
     const tx = db.transaction(ROOM_SESSION_STORE, 'readonly');
-    const row = (await promisify(tx.objectStore(ROOM_SESSION_STORE).get(roomId))) as
-      | StoredRoomSession
-      | undefined;
-    return row ? normalizeSession(row) : undefined;
+    const row = await promisify(tx.objectStore(ROOM_SESSION_STORE).get(roomId));
+    return row === undefined ? undefined : readStoredSession(row);
   } finally {
     db.close();
   }
@@ -117,12 +167,10 @@ export async function listRoomSessions(): Promise<StoredRoomSession[]> {
   const db = await openPrivateP2pDb();
   try {
     const tx = db.transaction(ROOM_SESSION_STORE, 'readonly');
-    const rows = (await promisify(
-      tx.objectStore(ROOM_SESSION_STORE).getAll(),
-    )) as StoredRoomSession[];
-    // Honor the StoredRoomSession contract: byte fields are real `Uint8Array`s
-    // (a structured-clone round-trip can otherwise hand back ArrayBuffers).
-    return rows.map(normalizeSession);
+    const rows = (await promisify(tx.objectStore(ROOM_SESSION_STORE).getAll())) as unknown[];
+    // Validate + normalize each row (PRIV-WEB-SESSION-5): a malformed/foreign row is DISCARDED rather
+    // than cast-asserted, and byte fields are re-hydrated to real `Uint8Array`s.
+    return rows.map(readStoredSession).filter((s): s is StoredRoomSession => s !== undefined);
   } finally {
     db.close();
   }

@@ -11,6 +11,15 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { type CourierChannelPlugin, CourierController } from './courier-controller.js';
 import type { CourierRadioControls } from './courier-native.js';
 
+// Wrap @licio/lcap's `readPack` (the ONLY async call inside `requestPrivacyLabel`) as a passthrough
+// spy — so the PUB-COURIER-2 test can stop the courier DURING the privacy-label parse, the exact gap
+// the post-label liveness re-check guards.  All other exports are the originals; tests using a
+// pure-pull request never reach `readPack`, so they are unaffected.
+vi.mock('@licio/lcap', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('@licio/lcap')>();
+  return { ...orig, readPack: vi.fn(orig.readPack) };
+});
+
 const ON: CourierRadioControls = { advertisingEnabled: true, discoveryEnabled: true };
 
 // The §22.5 radio-metadata disclosure is now a structural precondition in `decideCourierStart`,
@@ -30,6 +39,9 @@ let REQUEST_BYTES: Uint8Array;
 let RESPONSE_BYTES: Uint8Array;
 let RESPONSE_B64: string;
 let REQUEST_B64: string;
+// A request carrying a `push_pack` — so `requestPrivacyLabel` reaches its `await readPack(...)` (the
+// gap PUB-COURIER-2 guards).  A pure pull returns `'public'` synchronously and never awaits.
+let REQUEST_WITH_PUSH: Uint8Array;
 
 function toB64(bytes: Uint8Array): string {
   let s = '';
@@ -62,6 +74,10 @@ beforeAll(async () => {
   );
   RESPONSE_B64 = toB64(RESPONSE_BYTES);
   REQUEST_B64 = toB64(REQUEST_BYTES);
+  REQUEST_WITH_PUSH = lcap.encodeWithSchema(lcap.exchangeRequestV2Schema, {
+    ...lcap.buildExchangeRequest({ pulse, interests: [] }),
+    push_pack: new Uint8Array([1, 2, 3]), // opaque; the spy intercepts readPack before it parses
+  });
 });
 
 interface FakeListener {
@@ -122,12 +138,27 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: { advertisingEnabled: false, discoveryEnabled: false },
       mode: 'standard',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
     });
     const decision = await controller.start();
     expect(decision.blockedReason).toBe('disabled');
     expect(controller.isRunning()).toBe(false);
     expect(f.calls).toEqual([]); // no radios, no listeners
+  });
+
+  it('is BLOCKED (no radio calls) when the §22.5 disclosure is unacknowledged (PUB-COURIER-6)', async () => {
+    const f = fakePlugin();
+    const controller = makeController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      disclosureAcknowledged: () => false, // the user has NOT acknowledged the radio-metadata disclosure
+    });
+    const decision = await controller.start();
+    expect(decision.blockedReason).toBe('disclosure_unacknowledged');
+    expect(controller.isRunning()).toBe(false);
+    expect(f.calls).toEqual([]); // a proximity radio must NEVER start before acknowledgment
   });
 
   it('FORCES off in Stealth/Emergency regardless of the controls (§33.5)', async () => {
@@ -137,7 +168,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
         plugin: f.plugin,
         controls: ON,
         mode,
-        buildRequest: () => new Uint8Array([1]),
+        buildRequest: () => REQUEST_BYTES,
       });
       const decision = await controller.start();
       expect(decision.blockedReason).toBe('forced_off_in_mode');
@@ -155,7 +186,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
     });
     const decision = await controller.start();
     // NOT a false "running": the decision is blocked with the honest typed reason, and the
@@ -177,7 +208,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       onDecisionChange: (d) => decisionChanges.push(d),
     });
     await controller.start();
@@ -214,7 +245,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
     });
     const decision = await controller.start();
     // Discovery was NOT started on the torn-down channel.
@@ -242,7 +273,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       ],
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
     });
 
     const decision = await controller.start();
@@ -270,7 +301,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       ],
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       onDecisionChange: (d) => changes.push(d),
     });
 
@@ -289,7 +320,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       onDecisionChange: (d) => changes.push(d),
     });
     await controller.start();
@@ -310,7 +341,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       httpsConfig: { fetchFn: REJECTING_FETCH },
       onOutcome: (o) => outcomes.push({ skippedReason: o.skippedReason }),
     });
@@ -367,7 +398,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       ],
       controls: { ...ON, enabledChannels: ['nearby', 'bluetooth'] },
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
     });
     await controller.start();
     expect(controller.activeChannels()).toEqual(['nearby', 'bluetooth']);
@@ -388,7 +419,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
     });
     await controller.start();
     expect(f.plugin.startAdvertising).toHaveBeenCalledTimes(1);
@@ -411,7 +442,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       controls: { ...ON, batteryFloor: 0.5 },
       mode: 'courier',
       power: { level: 0.9, charging: false }, // healthy at Start
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       onDecisionChange: (d) => changes.push(d),
     });
     await controller.start();
@@ -443,7 +474,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       onDecisionChange: (d) => changes.push(d),
     });
 
@@ -512,6 +543,33 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     }
   });
 
+  it('does NOT transmit over the courier when STOPPED during the privacy-label parse (PUB-COURIER-2)', async () => {
+    const lcap = await import('@licio/lcap');
+    const f = fakePlugin();
+    const controller = makeController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_WITH_PUSH, // a request WITH a push_pack ⇒ requestPrivacyLabel awaits readPack
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    await controller.start();
+    // Stop the courier INSIDE `readPack` — i.e. AFTER the post-build liveness check (check 1) but
+    // BEFORE the courier leg.  The faked read result is PUBLIC, so absent the new post-label re-check
+    // (check 2) the public-only courier WOULD carry this request; `f.sent` therefore ISOLATES check 2
+    // (a mutation that removes it makes this test fail).
+    vi.mocked(lcap.readPack).mockImplementationOnce(async () => {
+      await controller.stop();
+      return { ok: true, pack: { header: { privacy_label: 'public' } } } as unknown as Awaited<
+        ReturnType<typeof lcap.readPack>
+      >;
+    });
+    f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+    await vi.waitFor(() => expect(vi.mocked(lcap.readPack)).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20)); // let driveExchange settle past the re-check
+    expect(f.sent).toHaveLength(0); // the courier leg NEVER transmitted
+  });
+
   it('answers a peer’s inbound exchange REQUEST via the responder seam', async () => {
     const f = fakePlugin();
     const requestsServed: number[] = [];
@@ -534,6 +592,31 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // The response was ferried back to the peer (base64 of our response bytes).
     expect(f.sent[0]?.endpointId).toBe('ep-1');
     expect(f.sent[0]?.message).toBe(toB64(RESPONSE_BYTES));
+  });
+
+  it('rate-limits a peer flooding inbound REQUESTS (PUB-COURIER-6/PUB-COURIER-3)', async () => {
+    const f = fakePlugin();
+    let served = 0;
+    const controller = makeController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      buildResponse: () => {
+        served += 1;
+        return RESPONSE_BYTES;
+      },
+    });
+    await controller.start();
+    // ONE endpoint floods 100 inbound requests; the per-endpoint responder admission cap bounds the
+    // expensive builds far below the flood (a few in-flight + a per-connection cumulative ceiling).
+    for (let i = 0; i < 100; i++) {
+      f.emit('payloadReceived', { endpointId: 'flooder', message: REQUEST_B64 });
+    }
+    await vi.waitFor(() => expect(served).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 50)); // let the async respondToRequest builds settle
+    expect(served).toBeGreaterThanOrEqual(1);
+    expect(served).toBeLessThanOrEqual(64); // ≤ MAX_SERVED_RESPONSES_PER_ENDPOINT — never the full 100
   });
 
   it('clears per-channel exchanged marks on teardown so a reconnect re-exchanges (key delimiter)', async () => {
@@ -591,11 +674,13 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
         f.sent.push(o); // NO echo back
       });
       const outcomes: Array<{ endpointId: string; skippedReason: string }> = [];
+      // Budget = exactly ONE request's bytes: the first (public) ferry fits + is charged; a second
+      // would need another full request's bytes and exceeds.
       const controller = makeController({
         plugin: f.plugin,
-        controls: { ...ON, storageBudgetBytes: 8 },
+        controls: { ...ON, storageBudgetBytes: REQUEST_BYTES.byteLength },
         mode: 'courier',
-        buildRequest: () => new Uint8Array([1, 2, 3, 4, 5]), // 5 bytes ferried per attempt
+        buildRequest: () => REQUEST_BYTES, // a full, decodable public pull ferried per attempt
         httpsConfig: { fetchFn: REJECTING_FETCH },
         onOutcome: (o) =>
           outcomes.push({ endpointId: o.endpointId, skippedReason: o.skippedReason }),
@@ -610,8 +695,8 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       expect(outcomes[0]?.skippedReason).toBe('exchange_failed');
       expect(f.sent).toHaveLength(1); // the request WAS ferried to the peer
 
-      // A second peer's 5-byte request now exceeds the 8-byte budget BECAUSE the first failed
-      // ferry's bytes were charged — without the fix sharedBytes would still be 0 and this proceeds.
+      // A second peer's request now exceeds the budget BECAUSE the first failed ferry's bytes were
+      // charged — without the fix sharedBytes would still be 0 and this would proceed.
       f.emit('connectionResult', { endpointId: 'ep-2', connected: true });
       await vi.advanceTimersByTimeAsync(1);
       expect(outcomes).toHaveLength(2);
@@ -624,7 +709,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ endpointId: string; channel: string; carriedBy: string | null }> = [];
-    const request = new Uint8Array([9, 8, 7]);
+    const request = REQUEST_BYTES; // a real, decodable §16 pure pull (public ⇒ carried by the courier)
     const controller = makeController({
       plugin: f.plugin,
       controls: ON,
@@ -665,7 +750,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       channels,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([5, 6]),
+      buildRequest: () => REQUEST_BYTES,
       httpsConfig: { fetchFn: REJECTING_FETCH },
       onOutcome: (o) => outcomes.push({ channel: o.channel, carriedBy: o.carriedBy }),
     });
@@ -699,7 +784,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       httpsConfig: { fetchFn: REJECTING_FETCH },
       onOutcome: (o) => outcomes.push(o),
     });
@@ -717,7 +802,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: { ...ON, exchangePeers: 'known_only', allowedEndpointIds: ['ep-allowed'] },
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       httpsConfig: { fetchFn: REJECTING_FETCH },
       onOutcome: (o) => outcomes.push({ skippedReason: o.skippedReason }),
     });
@@ -735,7 +820,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: { ...ON, storageBudgetBytes: 2 },
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1, 2, 3, 4, 5]), // 5 bytes > 2-byte budget
+      buildRequest: () => REQUEST_BYTES, // a full request's bytes > the 2-byte budget
       httpsConfig: { fetchFn: REJECTING_FETCH },
       onOutcome: (o) => outcomes.push({ skippedReason: o.skippedReason }),
     });
@@ -769,7 +854,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       httpsConfig: { fetchFn: REJECTING_FETCH },
     });
     await controller.start();
@@ -785,7 +870,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
       httpsConfig: { fetchFn: REJECTING_FETCH },
     });
     await controller.start();
@@ -802,7 +887,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       controls: { ...ON, batteryFloor: 0.5 },
       mode: 'courier',
       power: { level: 0.2, charging: false },
-      buildRequest: () => new Uint8Array([1]),
+      buildRequest: () => REQUEST_BYTES,
     });
     const decision = await controller.start();
     expect(decision.blockedReason).toBe('below_battery_floor');

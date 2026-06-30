@@ -126,9 +126,11 @@ export class LcapRelay {
       return { stored: false, cid: input.cid, refused: 'rejected_bad_cid' };
     }
 
-    // 2) Private-content refusal: a relay MUST NOT store private content unless it is
-    // encrypted AND room-policy-permitted (§22.4).
-    if (input.visibility === 'private' && !(input.encrypted && input.permitted)) {
+    // 2) Non-public-content refusal: a relay MUST NOT store ANY non-public object — `in_room`
+    // (members-only) AS WELL AS `private` — unless it is encrypted AND room-policy-permitted (§22.4).
+    // Treating `in_room` like `private` (PUB-API-CORE-5) keeps members-only bytes off an untrusted
+    // relay in the clear; only a `may_share_with_relay`-permitted ciphertext object is admitted.
+    if (input.visibility !== 'public' && !(input.encrypted && input.permitted)) {
       this.noteObserved(input.peerId, true);
       return { stored: false, cid: input.cid, refused: 'private_content_refused' };
     }

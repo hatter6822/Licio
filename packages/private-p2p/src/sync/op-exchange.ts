@@ -62,7 +62,18 @@ export const mlsCommitMessageSchema = z
     commit: ciphertextBase64Schema,
     epoch: z.number().int().nonnegative(),
   })
-  .strict();
+  .strict()
+  // PRIV-SYNC-1: enforce the declared §27 DoS bound.  Bound the BASE64URL char length (4 chars per 3
+  // decoded bytes) so an over-cap commit is rejected BEFORE any base64 decode — a huge string never
+  // reaches `decodeCommit`/`applyCommit`.
+  .superRefine((msg, ctx) => {
+    if (msg.commit.length > Math.ceil((MAX_MLS_COMMIT_BYTES * 4) / 3)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `MLS commit exceeds the ${MAX_MLS_COMMIT_BYTES}-byte cap`,
+      });
+    }
+  });
 export type MlsCommitMessage = z.infer<typeof mlsCommitMessageSchema>;
 
 /**

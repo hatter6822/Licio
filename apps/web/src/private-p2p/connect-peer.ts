@@ -119,6 +119,7 @@ export type ConnectPrivatePeerReason =
   | 'aborted'
   | 'peer_not_found'
   | 'peer_device_id_mismatch'
+  | 'candidate_dial_timeout'
   | `handshake_${string}`;
 
 export class ConnectPrivatePeerError extends Error {
@@ -142,25 +143,25 @@ export type DeviceResolver = (
 ) => { readonly signingPublicKey: string; readonly activeAtEpoch: boolean } | undefined;
 
 /**
- * Tier-2 cap hooks, bound to a device's `RendezvousMember` + the room issuer key by the
- * carrier (the room manager constructs these from the lazily-loaded `rendezvous-cap`
- * subpath). `build` returns the cap (sealed INSIDE the announcement for a member-only verifier
- * AND carried at the top level so the server/relay Tier-2 path can verify it) — or `null` if the
- * device is not enrolled ⇒ Tier-1; `filterVerified` is the §6.8 serverless cap
- * (`filterVerifiedPresence`) over the OPENED capped candidates.  `issuerPubKey` is the per-epoch
- * issuer public key (base64url) the top-level cap carries so a key-less verifier can check it.
+ * Tier-2 cap hooks, bound to a device's `RendezvousMember` + the room issuer key by the carrier
+ * (the room manager constructs these from the lazily-loaded `rendezvous-cap` subpath).  `build`
+ * returns the cap to seal INSIDE the announcement (member-only verification — there is NO top-level,
+ * server-visible cap; PRIV-API-RENDEZVOUS-1), or `null` if the device is not enrolled ⇒ Tier-1;
+ * `filterVerified` is the §6.8 serverless cap (`filterVerifiedPresence`) over the OPENED capped
+ * candidates (defensive-decoded + per-poll-bounded against a flood, PR3b).
  */
 export interface RendezvousCapHooks {
   build(
     roomBlindId: string,
     epoch: number,
     bucket: number,
-  ): { proof: string; pseudonym: string; issuerPubKey: string } | null;
+  ): { proof: string; pseudonym: string } | null;
   /**
    * Verify + DEDUP a batch of opened announcement caps under the room's per-epoch issuer key.
    * Returns the INDICES of `caps` whose proof verifies, deduped by the verified pseudonym
    * (one slot per device per `(epoch, bucket)`) — so a fake-cap flooder is dropped and a
-   * device cannot occupy two verified slots, all WITHOUT trusting the relay.
+   * device cannot occupy two verified slots, all WITHOUT trusting the relay.  Undecodable caps are
+   * SKIPPED (never crash the batch) and the per-poll verify count is bounded (PR3b).
    */
   filterVerified(
     caps: ReadonlyArray<{ proof: string; pseudonym: string }>,
@@ -216,6 +217,13 @@ export interface ConnectPrivatePeerParams {
    *  connection does not hammer the rendezvous; the loop polls fast again for a short window
    *  whenever a renegotiation is in flight.  Default 2000ms. */
   readonly maintenancePollMs?: number;
+  /** Per-CANDIDATE dial+handshake deadline (PRIV-CARRIER-3): a single stale/stuck candidate cannot
+   *  consume the whole `timeoutMs` budget — it is abandoned after this so the NEXT discovered
+   *  candidate is tried.  Bounded by the overall deadline.  Default 12000ms. */
+  readonly candidateDialTimeoutMs?: number;
+  /** How long a candidate that FAILED to dial this connect is skipped before being retried, so a
+   *  re-poll does not immediately re-pick a known-bad peer (PRIV-CARRIER-3).  Default 15000ms. */
+  readonly failedPeerCooldownMs?: number;
   readonly rtcFactory?: RtcPeerConnectionFactory;
   readonly signal?: AbortSignal;
   /** A sleep primitive (injectable so tests can pump a fake clock). */
@@ -251,6 +259,8 @@ export async function connectPrivatePeer(
   const { p2p, rendezvous, roomIdCommitment, epoch, rendezvousKey, selfDeviceId, nowMs } = params;
   const timeoutMs = params.timeoutMs ?? 30_000;
   const pollIntervalMs = params.pollIntervalMs ?? 250;
+  const candidateDialTimeoutMs = params.candidateDialTimeoutMs ?? 12_000;
+  const failedPeerCooldownMs = params.failedPeerCooldownMs ?? 15_000;
   const sleep = params.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const deadline = nowMs() + timeoutMs;
   const factory = params.rtcFactory ?? defaultRtcFactory;
@@ -278,10 +288,18 @@ export async function connectPrivatePeer(
   //    cap pseudonym IS our peer_blind_id — the §15.3.1 dedup key (one presence slot per device
   //    per (epoch, bucket)); a ZK proof reveals nothing beyond that pseudonym.
   const ephemeral = await p2p.generateX25519KeyPair();
+  // The per-announcer cap rides SEALED INSIDE the announcement only (PRIV-API-RENDEZVOUS-1: the
+  // server-visible top-level cap was removed because the server-held issuer key is a cross-bucket
+  // linking handle).  A member-only verifier opens it from the polled announcement and
+  // `filterVerified`s by the verified pseudonym; the server sees only the per-device derived blind id
+  // (one slot per device per bucket) and runs the §27 Tier-1 sample-poll.
   const cap = params.rendezvousCap?.build(roomBlindId, epoch, timeBucket) ?? undefined;
-  const selfPeerBlindId = cap
-    ? cap.pseudonym
-    : await p2p.derivePeerBlindId(rendezvousKey, selfDeviceId, epoch, timeBucket);
+  const selfPeerBlindId = await p2p.derivePeerBlindId(
+    rendezvousKey,
+    selfDeviceId,
+    epoch,
+    timeBucket,
+  );
   await rendezvous.announce(
     await p2p.buildRendezvousRecord({
       rendezvousKey,
@@ -293,20 +311,10 @@ export async function connectPrivatePeer(
         peer_device_id: selfDeviceId,
         signaling_public_key: p2p.toBase64Url(ephemeral.publicKey),
         transport_hints: [],
+        // SEALED-inside cap (member-only) — the peer-side anti-flood input.
         ...(cap ? { cap: { proof: cap.proof, pseudonym: cap.pseudonym } } : {}),
       },
       nowMs: nowMs(),
-      ...(cap
-        ? {
-            cap: {
-              proof: cap.proof,
-              issuer_pubkey: cap.issuerPubKey,
-              epoch: String(epoch),
-              bucket: timeBucket,
-            },
-            capPseudonym: cap.pseudonym,
-          }
-        : {}),
     }),
   );
 
@@ -317,11 +325,194 @@ export async function connectPrivatePeer(
   //    before any dial; nothing here trusts the relay.
   type OpenedAnn = Awaited<ReturnType<typeof p2p.openRendezvousAnnouncement>>;
   type PolledRecord = Awaited<ReturnType<typeof rendezvous.poll>>[number];
-  let peer: DiscoveredPeer | undefined;
-  while (!peer) {
-    throwIfAborted();
+  type Candidate = { record: PolledRecord; ann: OpenedAnn };
+
+  // Dial ONE discovered candidate to a live, membership-proven channel.  Resolves to the channel on
+  // success; on ANY failure it tears down its OWN pc + signaling loop and throws (the caller cools
+  // the peer down + tries the next candidate).  A per-CANDIDATE deadline bounds a stale/stuck peer so
+  // it cannot consume the whole connect budget; AFTER the handshake the live connection is governed by
+  // `params.signal` alone (this candidate deadline no longer applies).
+  const dialCandidate = async (
+    peer: DiscoveredPeer,
+  ): Promise<{ channel: PeerChannel; peerDeviceId: string }> => {
+    // 3. Derive the pairwise signaling channel key (transcript-bound; both peers agree).  This uses
+    //    the STABLE signaling-transcript version, NOT the wire `HANDSHAKE_PROTOCOL_VERSION`, so a
+    //    version-skewed peer can still exchange SDP/ICE and open the channel — the wire-version check
+    //    is the handshake's job (it fails fast + typed rather than timing out the signaling).
+    const channelKey = await p2p.deriveChannelKey(
+      ephemeral.privateKey,
+      peer.peerSignalingPublicKey,
+      {
+        protocolVersion: SIGNALING_TRANSCRIPT_VERSION,
+        roomIdCommitment,
+        epoch,
+        ephemeralPublicKeyA: ephemeral.publicKey,
+        ephemeralPublicKeyB: peer.peerSignalingPublicKey,
+      },
+      p2p.CHANNEL_LABEL_SIGNALING,
+    );
+
+    // Deterministic role: the bytewise-smaller peer blind id offers (a stable tiebreak).
+    const isOfferer = selfPeerBlindId < peer.peerBlindId;
+    const pc = factory({
+      ...(params.iceServers ? { iceServers: params.iceServers } : {}),
+      // relay-only ⇒ the browser gathers ONLY TURN candidates (never learns/leaks a host IP).
+      ...(relayOnly ? { iceTransportPolicy: 'relay' as const } : {}),
+    });
+
+    let cleanedUp = false;
+    let signalingController: SignalingController | undefined;
+    const cleanup = (): void => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      signalingController?.stop(); // halt the maintenance signaling loop
+      try {
+        pc.onconnectionstatechange = null;
+        pc.oniceconnectionstatechange = null;
+      } catch {
+        /* not settable on this pc */
+      }
+      try {
+        pc.close();
+      } catch {
+        /* already closed */
+      }
+    };
+
+    // The per-candidate deadline applies to the dial + handshake ONLY (never the live connection), and
+    // never exceeds the overall connect deadline.
+    const candidateDeadline = Math.min(deadline, nowMs() + candidateDialTimeoutMs);
+    const dialThrowIfAborted = (): void => {
+      if (params.signal?.aborted) throw new ConnectPrivatePeerError('aborted', 'connect aborted');
+      if (nowMs() >= deadline) throw new ConnectPrivatePeerError('timeout', 'connect timed out');
+      if (nowMs() >= candidateDeadline) {
+        throw new ConnectPrivatePeerError(
+          'candidate_dial_timeout',
+          'dial to a candidate timed out (trying the next)',
+        );
+      }
+    };
+
+    try {
+      const established = await establishDataChannel({
+        p2p,
+        pc,
+        rendezvous,
+        channelKey,
+        transportMode: params.transportMode,
+        routing: {
+          roomBlindId,
+          senderBlindId: selfPeerBlindId,
+          recipientBlindId: peer.peerBlindId,
+        },
+        selfBlindId: selfPeerBlindId,
+        isOfferer,
+        nowMs,
+        ttlMs: SIGNAL_TTL_MS,
+        pollIntervalMs,
+        maintenancePollMs: params.maintenancePollMs ?? 2_000,
+        sleep,
+        // The dial + handshake honor the PER-CANDIDATE deadline so a stuck candidate is abandoned…
+        throwIfAborted: dialThrowIfAborted,
+        // …but the POST-open maintenance loop (ICE-restart for the channel's whole lifetime) lives on
+        // the OUTER abort only, NOT this candidate deadline.
+        isAborted: () => params.signal?.aborted === true,
+      });
+      const { dc, inbox } = established;
+      signalingController = established.signaling;
+
+      // 4. §15.5 membership-proving handshake over the open data channel.  Any op frames a faster
+      //    peer sends before we finish are stashed (returned) for the channel.
+      const {
+        opStash,
+        sessionKey,
+        peerDeviceId: provenPeerDeviceId,
+      } = await runHandshake({
+        p2p,
+        dc,
+        inbox,
+        roomIdCommitment,
+        epoch,
+        selfDeviceId,
+        selfSigningKey: params.selfSigningKey,
+        resolveDevice: params.resolveDevice,
+        throwIfAborted: dialThrowIfAborted,
+        sleep,
+      });
+      // The rendezvous announcement's `peer_device_id` is UNAUTHENTICATED (sealed under the room-wide
+      // rendezvous key, so any current-epoch member can claim any id).  If it does not match the
+      // §15.5 handshake-PROVEN device id, the dialed peer lied about who it is — refuse the connection
+      // rather than attributing the channel to a spoofed id.
+      if (peer.peerDeviceId !== provenPeerDeviceId) {
+        throw new ConnectPrivatePeerError(
+          'peer_device_id_mismatch',
+          'rendezvous-claimed device id does not match the handshake-proven device id',
+        );
+      }
+
+      // 4b. §15.4 ICE-restart recovery (post-handshake).  The sealed signaling channel stays live, so
+      //     a TRANSIENT path failure (NAT rebinding, a Wi-Fi↔cellular handover) is recovered IN PLACE
+      //     — the offerer re-offers with `iceRestart`, the answerer reacts — keeping the SAME data
+      //     channel + the membership-proven session key, never re-running the handshake.  A `failed`
+      //     (hard) drop instead closes the channel → `maintainConnection` re-dials.  The offerer
+      //     initiates (avoiding offer glare); the answerer only polls fast on a blip so it applies the
+      //     re-offer promptly.
+      installIceRestartWatcher({
+        pc,
+        isOfferer,
+        signaling: signalingController,
+        sleep,
+        enabled: params.enableIceRestart ?? true,
+        graceMs: params.iceRestartGraceMs ?? 3_000,
+        maxRestarts: params.maxIceRestarts ?? 3,
+        isCleanedUp: () => cleanedUp,
+        // On exhaustion, tear the connection down so the channel's `onclose` fires and
+        // `maintainConnection`/`maintainMesh` re-dial — never leak the pump + pc on a
+        // `disconnected`-that-never-`failed` path.
+        onExhausted: cleanup,
+      });
+
+      // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the §15.5
+      //    step-4 session key; the handshake used strings).
+      return {
+        channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey, isOfferer),
+        peerDeviceId: provenPeerDeviceId, // the handshake-PROVEN id, not the rendezvous claim
+      };
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+  };
+
+  // 2. Discover + dial.  Poll the rendezvous, open every candidate announcement (skipping self /
+  //    unopenable / an already-connected / a recently-FAILED peer), Tier-2-filter the capped ones,
+  //    then try EACH surviving candidate in turn (PRIV-CARRIER-3): the first that connects wins, so a
+  //    stale `candidates[0]` no longer fails the whole connect.  A peer that fails to dial is cooled
+  //    down so a re-poll does not immediately re-pick it; when no FRESH candidate remains we surface
+  //    the last dial failure (a typed error) rather than silently burning the deadline into a generic
+  //    `timeout`.  The whole loop is bounded by the overall `deadline`/abort via `throwIfAborted`.
+  // Failed-dial cooldown keyed by the announcement's EPHEMERAL signaling public key — NOT the claimed
+  // device id / blind id.  Both of those are derivable from a device id by ANY room member (the blind
+  // id is `derivePeerBlindId(device id)`), so keying on them lets a hostile member announce under an
+  // honest device's id, fail/time-out, and then PERSISTENTLY suppress the honest member's real
+  // candidate (same stable id) for the cooldown window.  The per-announcement ephemeral key is not
+  // forgeable that way: a hostile announcement carries its OWN key (cooling only itself), and the
+  // worst case — copying the honest member's CURRENT ephemeral key — yields only TRANSIENT suppression
+  // that the honest member's next re-announce (a fresh ephemeral) clears.  (PRIV-CARRIER-3-COOLDOWN.)
+  const failedPeers = new Map<string, number>(); // signaling_public_key → cooldown-until (ms)
+  let lastDialError: unknown;
+  for (;;) {
+    // The whole discovery loop is deadline/abort-bounded.  An explicit abort ends it with the
+    // `aborted` error; when the DEADLINE runs out, surface the typed DIAL failure if we attempted one
+    // (more actionable than a generic `timeout`), else the timeout itself.  Crucially we keep polling
+    // UNTIL that deadline — we do NOT bail after the first failed dial round (PRIV-CARRIER-3-POLL).
+    if (params.signal?.aborted) throwIfAborted();
+    if (nowMs() >= deadline) {
+      if (lastDialError !== undefined) throw lastDialError;
+      throwIfAborted();
+    }
     const records = await rendezvous.poll(roomBlindId);
-    const opened: { record: PolledRecord; ann: OpenedAnn }[] = [];
+    const opened: Candidate[] = [];
     for (const record of records) {
       if (record.peer_blind_id === selfPeerBlindId) continue;
       try {
@@ -333,7 +524,7 @@ export async function connectPrivatePeer(
         // A §15.3.2 cover record or a record sealed for a different key: skip it.
       }
     }
-    let candidates = opened;
+    let candidates: Candidate[] = opened;
     if (params.rendezvousCap) {
       const capped = opened.filter((o) => o.ann.cap !== undefined);
       const uncapped = opened.filter((o) => o.ann.cap === undefined);
@@ -344,154 +535,44 @@ export async function connectPrivatePeer(
         timeBucket,
         nowMs(),
       );
-      candidates = [
-        ...survivors.map((i) => capped[i] as { record: PolledRecord; ann: OpenedAnn }),
-        ...uncapped,
-      ];
+      candidates = [...survivors.map((i) => capped[i] as Candidate), ...uncapped];
     }
-    const chosen = candidates[0];
-    if (chosen) {
-      peer = {
-        peerBlindId: chosen.record.peer_blind_id,
-        peerDeviceId: chosen.ann.peer_device_id,
-        peerSignalingPublicKey: p2p.fromBase64Url(chosen.ann.signaling_public_key),
+
+    // Drop peers still in their failure cooldown (pruning expired cooldowns so a peer can be retried
+    // later if the deadline still allows).
+    const now = nowMs();
+    for (const [id, until] of failedPeers) if (until <= now) failedPeers.delete(id);
+    const triable = candidates.filter((c) => !failedPeers.has(c.ann.signaling_public_key));
+
+    if (triable.length === 0) {
+      // Nothing FRESH to dial this round — but do NOT bail.  A reachable peer may announce shortly, or
+      // a cooled-down candidate's cooldown may expire (we prune expired cooldowns above), both within
+      // the deadline.  Keep polling; the deadline check at the top surfaces `lastDialError` only when
+      // time actually runs out, so a stale-presence-then-live-peer room still converges
+      // (PRIV-CARRIER-3-POLL).
+      await sleep(pollIntervalMs);
+      continue;
+    }
+
+    for (const candidate of triable) {
+      throwIfAborted();
+      const peer: DiscoveredPeer = {
+        peerBlindId: candidate.record.peer_blind_id,
+        peerDeviceId: candidate.ann.peer_device_id,
+        peerSignalingPublicKey: p2p.fromBase64Url(candidate.ann.signaling_public_key),
       };
-      break;
+      try {
+        return await dialCandidate(peer);
+      } catch (error) {
+        // An overall abort/deadline propagates (the whole connect is cancelled); otherwise THIS peer
+        // just failed — remember the typed error, cool the peer down, and try the next candidate.
+        throwIfAborted();
+        lastDialError = error;
+        failedPeers.set(candidate.ann.signaling_public_key, nowMs() + failedPeerCooldownMs);
+      }
     }
-    await sleep(pollIntervalMs);
-  }
-
-  // 3. Derive the pairwise signaling channel key (transcript-bound; both peers agree).  This
-  //    uses the STABLE signaling-transcript version, NOT the wire `HANDSHAKE_PROTOCOL_VERSION`,
-  //    so a version-skewed peer can still exchange SDP/ICE and open the channel — the wire-version
-  //    check is the handshake's job (it fails fast + typed rather than timing out the signaling).
-  const channelKey = await p2p.deriveChannelKey(
-    ephemeral.privateKey,
-    peer.peerSignalingPublicKey,
-    {
-      protocolVersion: SIGNALING_TRANSCRIPT_VERSION,
-      roomIdCommitment,
-      epoch,
-      ephemeralPublicKeyA: ephemeral.publicKey,
-      ephemeralPublicKeyB: peer.peerSignalingPublicKey,
-    },
-    p2p.CHANNEL_LABEL_SIGNALING,
-  );
-
-  // Deterministic role: the bytewise-smaller peer blind id offers (a stable tiebreak).
-  const isOfferer = selfPeerBlindId < peer.peerBlindId;
-  const pc = factory({
-    ...(params.iceServers ? { iceServers: params.iceServers } : {}),
-    // relay-only ⇒ the browser gathers ONLY TURN candidates (never learns/leaks a host IP).
-    ...(relayOnly ? { iceTransportPolicy: 'relay' as const } : {}),
-  });
-
-  let cleanedUp = false;
-  let signalingController: SignalingController | undefined;
-  const cleanup = (): void => {
-    if (cleanedUp) return;
-    cleanedUp = true;
-    signalingController?.stop(); // halt the maintenance signaling loop
-    try {
-      pc.onconnectionstatechange = null;
-      pc.oniceconnectionstatechange = null;
-    } catch {
-      /* not settable on this pc */
-    }
-    try {
-      pc.close();
-    } catch {
-      /* already closed */
-    }
-  };
-
-  try {
-    const established = await establishDataChannel({
-      p2p,
-      pc,
-      rendezvous,
-      channelKey,
-      transportMode: params.transportMode,
-      routing: {
-        roomBlindId,
-        senderBlindId: selfPeerBlindId,
-        recipientBlindId: peer.peerBlindId,
-      },
-      selfBlindId: selfPeerBlindId,
-      isOfferer,
-      nowMs,
-      ttlMs: SIGNAL_TTL_MS,
-      pollIntervalMs,
-      maintenancePollMs: params.maintenancePollMs ?? 2_000,
-      sleep,
-      throwIfAborted,
-      // Post-open the pump must NOT die at the connect DEADLINE (it carries ICE-restart for
-      // the channel's whole lifetime); it ends only on abort or cleanup.
-      isAborted: () => params.signal?.aborted === true,
-    });
-    const { dc, inbox } = established;
-    signalingController = established.signaling;
-
-    // 4. §15.5 membership-proving handshake over the open data channel.  Any op frames
-    //    a faster peer sends before we finish are stashed (returned) for the channel.
-    const {
-      opStash,
-      sessionKey,
-      peerDeviceId: provenPeerDeviceId,
-    } = await runHandshake({
-      p2p,
-      dc,
-      inbox,
-      roomIdCommitment,
-      epoch,
-      selfDeviceId,
-      selfSigningKey: params.selfSigningKey,
-      resolveDevice: params.resolveDevice,
-      throwIfAborted,
-      sleep,
-    });
-    // The rendezvous announcement's `peer_device_id` is UNAUTHENTICATED (sealed under the
-    // room-wide rendezvous key, so any current-epoch member can claim any id).  If it does
-    // not match the §15.5 handshake-PROVEN device id, the dialed peer lied about who it is —
-    // refuse the connection rather than attributing the channel to a spoofed id.
-    if (peer.peerDeviceId !== provenPeerDeviceId) {
-      throw new ConnectPrivatePeerError(
-        'peer_device_id_mismatch',
-        'rendezvous-claimed device id does not match the handshake-proven device id',
-      );
-    }
-
-    // 4b. §15.4 ICE-restart recovery (post-handshake).  The sealed signaling channel stays
-    //     live, so a TRANSIENT path failure (NAT rebinding, a Wi-Fi↔cellular handover) is
-    //     recovered IN PLACE — the offerer re-offers with `iceRestart`, the answerer reacts —
-    //     keeping the SAME data channel + the membership-proven session key, never re-running
-    //     the handshake.  A `failed` (hard) drop instead closes the channel → `maintainConnection`
-    //     re-dials.  The offerer initiates (avoiding offer glare); the answerer only polls fast
-    //     on a blip so it applies the re-offer promptly.
-    installIceRestartWatcher({
-      pc,
-      isOfferer,
-      signaling: signalingController,
-      sleep,
-      enabled: params.enableIceRestart ?? true,
-      graceMs: params.iceRestartGraceMs ?? 3_000,
-      maxRestarts: params.maxIceRestarts ?? 3,
-      isCleanedUp: () => cleanedUp,
-      // On exhaustion, tear the connection down so the channel's `onclose` fires and
-      // `maintainConnection`/`maintainMesh` re-dial — never leak the pump + pc on a
-      // `disconnected`-that-never-`failed` path.
-      onExhausted: cleanup,
-    });
-
-    // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the
-    //    §15.5 step-4 session key; the handshake used strings).
-    return {
-      channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey, isOfferer),
-      peerDeviceId: provenPeerDeviceId, // the handshake-PROVEN id, not the rendezvous claim
-    };
-  } catch (error) {
-    cleanup();
-    throw error;
+    // Tried every fresh candidate this round; loop to re-poll (a new peer may appear, or all are now
+    // cooled down → the `triable.length === 0` branch above surfaces `lastDialError`).
   }
 }
 
@@ -704,9 +785,13 @@ async function establishDataChannel(
     const cand = event.candidate;
     const line = cand?.candidate;
     if (!line) return; // end-of-candidates
-    // §15.4 relay-only IP suppression applied BEFORE a candidate leaves this device.
+    // §15.4 relay-only IP suppression applied BEFORE a candidate leaves this device.  The filter both
+    // DROPS IP-revealing candidate types AND scrubs the raddr/rport related-address on a surviving
+    // relay candidate (PRIV-SYNC-3), so the candidate that goes ON THE WIRE is the FILTERED one
+    // (`allowed[0]`) — NOT the original `line`, which would still carry the host's related address.
     const allowed = p2p.filterIceCandidatesForMode(p.transportMode, [line]);
-    if (allowed.length === 0) return;
+    const candidateLine = allowed[0];
+    if (candidateLine === undefined) return;
     // Carry sdpMid/sdpMLineIndex: a real addIceCandidate rejects a candidate with neither
     // (the line alone does not identify the m-line), silently dropping every candidate.
     // A dropped trickle candidate is non-fatal (ICE retries / the other candidates cover it),
@@ -715,7 +800,7 @@ async function establishDataChannel(
     void sendSignal({
       schema: 'licio.private.signaling_payload.v1',
       kind: 'ice',
-      ice_candidate: line,
+      ice_candidate: candidateLine,
       sdp_mid: cand?.sdpMid ?? null,
       sdp_mline_index: cand?.sdpMLineIndex ?? null,
     }).catch((error) => devWarn('ICE trickle signal send failed', error));
@@ -853,6 +938,12 @@ async function establishDataChannel(
   // ICE-restart renegotiation: it outlives the connect deadline and ends only on abort or
   // `stop()`, polling at the slow cadence when quiescent and the fast cadence in a renegotiation
   // window (so a recovery completes quickly without hammering the rendezvous when idle).
+  // PRIV-CARRIER-1: the rendezvous server is UNTRUSTED, so enforce signal expiry + replay dedup on
+  // the CLIENT.  `aeadSeal` uses a fresh random nonce, so a replayed signal is byte-identical — its
+  // ciphertext string is a stable dedup key.  The map is keyed ciphertext→expires_at and pruned by
+  // expiry so it stays bounded across the long-lived maintenance loop.
+  const seenSignalCiphertexts = new Map<string, number>();
+  const SIGNAL_SKEW_GRACE_MS = 5_000;
   const pumpSignals = async (): Promise<void> => {
     while (!stopped) {
       if (channelOpen) {
@@ -875,7 +966,14 @@ async function establishDataChannel(
         signals = []; // a transient poll failure → retry next loop, but surface it in dev
         devWarn('rendezvous signal poll failed', error);
       }
+      const nowMs = p.nowMs();
       for (const signal of signals) {
+        // Drop a clearly-EXPIRED signal (with a small clock-skew grace) — it must not be applied,
+        // and it should not enter the dedup set (PRIV-CARRIER-1).
+        if (signal.expires_at + SIGNAL_SKEW_GRACE_MS < nowMs) continue;
+        // Reject an in-window REPLAY (a byte-identical re-delivery of an already-seen signal).
+        if (seenSignalCiphertexts.has(signal.ciphertext)) continue;
+        seenSignalCiphertexts.set(signal.ciphertext, signal.expires_at);
         try {
           await applyPayload(await p2p.openSignal(signal, p.channelKey));
         } catch (error) {
@@ -883,6 +981,10 @@ async function establishDataChannel(
           // dev: a persistent failure here is a real bug (bad key/codec), not just a probe.
           devWarn('skipped a signal that failed to open or apply', error);
         }
+      }
+      // Prune expired dedup entries so the set stays bounded over the long-lived loop.
+      for (const [ct, exp] of seenSignalCiphertexts) {
+        if (exp + SIGNAL_SKEW_GRACE_MS < nowMs) seenSignalCiphertexts.delete(ct);
       }
       if (stopped) return;
       const cadence =
@@ -1215,10 +1317,20 @@ function wrapDataChannel(
   // not leak past the connection.  An in-place ICE-restart does NOT close the data channel
   // (the SCTP/DTLS association survives), so this fires only on a genuine, unrecoverable drop;
   // the session's onClose then drives `maintainConnection` to re-dial.
-  dc.onclose = (): void => {
+  let channelClosed = false;
+  const handleClose = (): void => {
+    if (channelClosed) return; // fire the session notify + cleanup AT MOST ONCE
+    channelClosed = true;
     closeListener?.();
     cleanup();
   };
+  dc.onclose = handleClose;
+  // If the channel ALREADY closed/closing by the time we wrap it (it dropped during the handshake),
+  // `onclose` may never fire — notify the session + tear down on a microtask so it can re-dial,
+  // mirroring armChannel's already-open handling (PRIV-CARRIER-2).
+  if (dc.readyState === 'closed' || dc.readyState === 'closing') {
+    queueMicrotask(handleClose);
+  }
 
   return {
     async send(frame: Uint8Array): Promise<void> {

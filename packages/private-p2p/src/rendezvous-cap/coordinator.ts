@@ -56,9 +56,29 @@ export function buildIssuanceOpBody(
 }
 
 /**
- * DEVICE: install this device's credential for `epoch` from the accepted `rendezvous.issue`
- * op bodies (the LATEST matching one wins, so a re-issuance supersedes). Returns whether a
- * credential was installed.
+ * The CANONICAL Tier-2 issuer key for `epoch` (PRIV-CAP-3): the `issuer_public_key` of the EARLIEST
+ * (first-reduced / lowest-Lamport) `rendezvous.issue` op for that epoch.  The op log reduces
+ * byte-identically on every device, so ALL devices agree on ONE issuer key per `(room, epoch)`.
+ * `issuances` MUST be in reduced (Lamport) order — the engine's `rendezvousIssuances()` is.  Returns
+ * `undefined` when no issuance for the epoch exists yet (the device rides Tier-1).
+ */
+export function canonicalIssuerKey(
+  epoch: number,
+  issuances: readonly IssuanceOpBody[],
+): string | undefined {
+  return issuances.find((i) => i.target_epoch === epoch)?.issuer_public_key;
+}
+
+/**
+ * DEVICE: install this device's credential for `epoch` from the accepted `rendezvous.issue` op
+ * bodies, CONVERGING on the canonical issuer key (PRIV-CAP-3).  Without convergence a multi-admin or
+ * seed-regenerated room fragments into per-issuer keys — a legit peer's cap would then fail to verify
+ * at a peer that installed a DIFFERENT admin's key, silently DENYING capped discovery instead of
+ * riding Tier-1.  So: install ONLY a credential issued under the canonical key; re-install when the
+ * already-enrolled key differs from canonical (e.g. a credential installed earlier under a
+ * later-superseded key, or out-of-order op delivery); and drop a stale enrollment that has no
+ * canonical-key credential so this device never announces under a key peers will reject.  Returns
+ * whether a canonical credential is now installed.
  */
 export function installFromIssuances(
   member: RendezvousMember,
@@ -66,23 +86,33 @@ export function installFromIssuances(
   epoch: number,
   issuances: readonly IssuanceOpBody[],
 ): boolean {
-  if (member.isEnrolled(String(epoch))) return true; // idempotent: verified once, then cached
+  const epochStr = String(epoch);
+  const canonical = canonicalIssuerKey(epoch, issuances);
+  if (canonical === undefined) {
+    member.forgetEpoch(epochStr); // no issuance for this epoch yet ⇒ drop any stale enroll, ride Tier-1
+    return false;
+  }
+  // Idempotent ONLY when already enrolled under the CANONICAL key.
+  const enrolledKey = member.issuerKey(epochStr);
+  if (enrolledKey !== null && toBase64Url(enrolledKey) === canonical) return true;
+  // (Re)install this device's credential, but ONLY from an issuance under the canonical key (the
+  // LATEST canonical-key issuance wins, so an incremental re-issuance supersedes).
   for (let i = issuances.length - 1; i >= 0; i--) {
     const issuance = issuances[i];
     if (issuance === undefined || issuance.target_epoch !== epoch) continue;
+    if (issuance.issuer_public_key !== canonical) continue; // ignore a non-canonical issuer's op
     const cred = issuance.credentials.find((c) => c.device_id === deviceId);
     if (cred === undefined) continue;
     try {
-      member.installCredential(
-        String(epoch),
-        fromBase64Url(cred.signature),
-        fromBase64Url(issuance.issuer_public_key),
-      );
+      member.installCredential(epochStr, fromBase64Url(cred.signature), fromBase64Url(canonical));
       return true;
     } catch {
-      // a malformed/stale credential (fails verification) ⇒ try an EARLIER issuance; if none
-      // verify for this device's current nid, stay unenrolled (ride Tier-1).
+      // a malformed/stale credential (fails verification for this device's nid) ⇒ try an EARLIER
+      // canonical-key issuance.
     }
   }
+  // No canonical-key credential for this device — drop any stale (non-canonical) enrollment so it
+  // does NOT announce under a key peers will reject; it rides Tier-1 instead.
+  member.forgetEpoch(epochStr);
   return false;
 }

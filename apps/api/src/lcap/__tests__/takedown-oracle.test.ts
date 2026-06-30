@@ -37,8 +37,21 @@ import {
 } from '../takedown-oracle.js';
 
 const enc = new TextEncoder();
-const STORY: ProvenanceTarget = { targetType: 'story', targetId: 'story-1' };
-const SOURCE: ProvenanceTarget = { targetType: 'source', targetId: 'src-1' };
+const STORY: ProvenanceTarget = {
+  targetType: 'story',
+  targetId: '11111111-1111-4111-8111-111111111111',
+};
+const SOURCE: ProvenanceTarget = {
+  targetType: 'source',
+  targetId: '22222222-2222-4222-8222-222222222222',
+};
+/** A public-gateway-eligible signal set for the (re)publish eligibility re-check (PUB-API-PUBLISH-2). */
+const PUBLIC_ELIG = {
+  visibility: 'public',
+  encrypted: false,
+  takenDown: false,
+  privateRoomCid: false,
+} as const;
 
 /** A review store with every supplied target pre-approved (the common "clean" case). */
 function approvedReviewStore(...targets: readonly ProvenanceTarget[]): BlockPublishReviewStore {
@@ -179,6 +192,32 @@ describe('Gate-19 — LcapPublicPublisher (review + takedown gates, no longer de
     expect(pinned).toBe(true);
   });
 
+  it('reports a THROWN oracle as takedown_recheck_unreadable, distinctly from a takedown (PUB-API-PUBLISH-4)', async () => {
+    let pinned = false;
+    const payload = enc.encode('oracle-unreadable public');
+    const blockCid = await cidFor('block', payload);
+    const pub = makePublisher(
+      () => {
+        throw new Error('takedown store unreadable');
+      },
+      () => {
+        pinned = true;
+      },
+    );
+    const res = await pub.publish({
+      blockCid,
+      bytes: payload,
+      visibility: 'public',
+      encrypted: false,
+      privateRoomCid: false,
+      targets: [STORY],
+    });
+    // Fail-closed (no pin), but reported as UNREADABLE so the steward audit maps it to a distinct
+    // takedownVerdict 'unreadable' rather than a genuine 'halt'.
+    expect(res.outcome).toEqual({ ok: false, reason: 'takedown_recheck_unreadable' });
+    expect(pinned).toBe(false);
+  });
+
   it('REFUSES an unreviewed block (review_required) before any takedown re-check or pin', async () => {
     let pinned = false;
     const payload = enc.encode('unreviewed public');
@@ -315,7 +354,7 @@ describe('Gate-19 — LcapPublicPublisher (review + takedown gates, no longer de
         halted = true;
       },
     );
-    expect((await haltPub.republish(blockCid, payload, [STORY])).outcome).toEqual({
+    expect((await haltPub.republish(blockCid, payload, [STORY], PUBLIC_ELIG)).outcome).toEqual({
       ok: false,
       reason: 'takedown_recheck_halt',
     });
@@ -328,7 +367,9 @@ describe('Gate-19 — LcapPublicPublisher (review + takedown gates, no longer de
         pinned = true;
       },
     );
-    expect((await cleanPub.republish(blockCid, payload, [STORY])).outcome.ok).toBe(true);
+    expect((await cleanPub.republish(blockCid, payload, [STORY], PUBLIC_ELIG)).outcome.ok).toBe(
+      true,
+    );
     expect(pinned).toBe(true);
   });
 
@@ -343,7 +384,7 @@ describe('Gate-19 — LcapPublicPublisher (review + takedown gates, no longer de
       },
       new InMemoryBlockPublishReviewStore(), // STORY not approved
     );
-    expect((await pub.republish(blockCid, payload, [STORY])).outcome).toEqual({
+    expect((await pub.republish(blockCid, payload, [STORY], PUBLIC_ELIG)).outcome).toEqual({
       ok: false,
       reason: 'review_required',
     });
@@ -373,6 +414,7 @@ describe('Gate-19 — LcapPublicPublisher (review + takedown gates, no longer de
       [a, b],
       (cid) => bytesOf.get(cid),
       (cid) => targetsOf.get(cid) ?? [],
+      () => PUBLIC_ELIG,
     );
     expect(set.eligible).toEqual([a]); // b is taken down → excluded fail-closed
     expect(set.excluded).toEqual([{ blockCid: b, eligible: false, reason: 'taken_down' }]);
@@ -427,7 +469,9 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
         visibility: 'public',
         encrypted: false,
         private_room_cid: false,
-        content_targets: [{ target_type: 'story', target_id: 'story-1' }],
+        content_targets: [
+          { target_type: 'story', target_id: '11111111-1111-4111-8111-111111111111' },
+        ],
       }),
     });
 
@@ -448,7 +492,9 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
         visibility: 'public',
         encrypted: false,
         private_room_cid: false,
-        content_targets: [{ target_type: 'story', target_id: 'story-1' }],
+        content_targets: [
+          { target_type: 'story', target_id: '11111111-1111-4111-8111-111111111111' },
+        ],
       }),
     });
     expect(res.status).toBe(401);
@@ -603,7 +649,11 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
     const recorded = await app.request('/public-bridge/review', {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie: steward.cookie },
-      body: JSON.stringify({ target_type: 'story', target_id: 'story-1', state: 'approved' }),
+      body: JSON.stringify({
+        target_type: 'story',
+        target_id: '11111111-1111-4111-8111-111111111111',
+        state: 'approved',
+      }),
     });
     expect(recorded.status).toBe(200);
     // 3) Now the same block publishes.
@@ -679,7 +729,11 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
     const res = await app.request('/public-bridge/review', {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie: regular.cookie },
-      body: JSON.stringify({ target_type: 'story', target_id: 'story-1', state: 'approved' }),
+      body: JSON.stringify({
+        target_type: 'story',
+        target_id: '11111111-1111-4111-8111-111111111111',
+        state: 'approved',
+      }),
     });
     expect(res.status).toBe(403);
   });

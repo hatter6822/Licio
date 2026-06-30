@@ -14,10 +14,17 @@ export interface ImageDataLike {
   readonly height: number;
 }
 
+import { QR_MAX_PAYLOAD_BYTES } from './qr-encode.js';
+
 /** Decode the byte payload of a QR in `image`, or `null` if none is found. */
 export async function decodeQr(image: ImageDataLike): Promise<Uint8Array | null> {
   const { default: jsQR } = await import('jsqr');
   const result = jsQR(image.data, image.width, image.height);
   if (!result || !Array.isArray(result.binaryData)) return null;
-  return Uint8Array.from(result.binaryData);
+  const bytes = Uint8Array.from(result.binaryData);
+  // §22.3 — a micro-bundle QR carries only tiny control material.  A larger payload (a higher-version
+  // QR the camera happened to catch, or a crafted image) is rejected so the "tiny" invariant is
+  // structural on decode too, not only on encode (PUB-QR-3).
+  if (bytes.length > QR_MAX_PAYLOAD_BYTES) return null;
+  return bytes;
 }

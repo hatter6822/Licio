@@ -15,6 +15,7 @@ import {
   DEFAULT_BUDGET,
   type DeviceKeyPair,
   decodeWithSchema,
+  encodeContributionEvent,
   encodeWithSchema,
   generateDeviceKey,
   pulseResponseV2Schema,
@@ -25,15 +26,45 @@ import {
   syncPulseV2Schema,
   type ValidationResult,
 } from '@licio/lcap';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import { createLcapRoutes } from '../lcap/routes.js';
 import { LcapIngestServer } from '../lcap/server-ingest.js';
 import { setLcapIngestServer } from '../lcap/service.js';
+import { buildLcapFixtures, type LcapFixtures } from './lcap-fixtures.js';
 
 const enc = new TextEncoder();
 const NET = 'net';
 const ROOM = 'room-1';
+
+// A real PUBLIC contribution record — so a critical_want block can be made PUBLIC-servable (the §29
+// gate, PUB-API-CORE-1, only serves a block referenced by a public record).
+let fx: LcapFixtures;
+beforeAll(async () => {
+  fx = await buildLcapFixtures();
+});
+
+/** Stage a block as PUBLIC-servable: an ACCEPTED public contribution whose SIGNED body NAMES the
+ *  block owns it (the §29 gate authenticates the block against the body — PUB-API-BLOCK-OWNER-1/2 —
+ *  not the unauthenticated pack-table edge).  A distinct block ⇒ a distinct owner (its body_block_cid
+ *  differs), so repeated stages never collide. */
+async function stagePublicBlock(
+  srv: LcapIngestServer,
+  blockCid: string,
+  blockBytes: Uint8Array,
+): Promise<void> {
+  const ownerBody = encodeContributionEvent({
+    ...fx.publicContribution,
+    body_block_cid: blockCid,
+    device_seq: 7,
+    client_nonce: new Uint8Array([7, 7, 7, 7]),
+  });
+  const ownerCid = await cidFor('record', ownerBody);
+  await srv.putObject(ownerCid, 'record', ownerBody);
+  await srv.putObject(blockCid, 'block', blockBytes);
+  await srv.indexRecordEdge(ownerCid, blockCid, 'block');
+  await srv.appendAcceptance('room', ownerCid);
+}
 
 const accepted: ValidationResult = { state: 'authorized_provisional', missingCids: [], facts: {} };
 
@@ -228,7 +259,7 @@ describe('POST /pulse — §29.1 critical_pack (C0 server-push)', () => {
     const srv = new LcapIngestServer(NET);
     const blockBytes = enc.encode('c0-critical-block');
     const blockCid = await cidFor('block', blockBytes);
-    await srv.putObject(blockCid, 'block', blockBytes);
+    await stagePublicBlock(srv, blockCid, blockBytes);
 
     const res = await createLcapRoutes(srv).request('/pulse', {
       method: 'POST',
@@ -245,11 +276,32 @@ describe('POST /pulse — §29.1 critical_pack (C0 server-push)', () => {
     if (read.ok) expect(read.pack.frames.has(blockCid)).toBe(true);
   });
 
+  it('NEVER bundles a non-public block into the critical_pack (PUB-API-CORE-1)', async () => {
+    const srv = new LcapIngestServer(NET);
+    const blockBytes = enc.encode('in-room-media-block');
+    const blockCid = await cidFor('block', blockBytes);
+    // Held + referenced ONLY by the in_room contribution → not public-servable.
+    await srv.putObject(fx.recordCid, 'record', fx.body);
+    await srv.putObject(blockCid, 'block', blockBytes);
+    await srv.indexRecordEdge(fx.recordCid, blockCid, 'block');
+
+    const res = await createLcapRoutes(srv).request('/pulse', {
+      method: 'POST',
+      body: pulseWantingBytes([blockCid]),
+    });
+    const decoded = decodeWithSchema(
+      pulseResponseV2Schema,
+      new Uint8Array(await res.arrayBuffer()),
+    );
+    // The in_room block is filtered before repack ⇒ no critical_pack.
+    expect('critical_pack' in decoded).toBe(false);
+  });
+
   it('clamps the critical_pack to the client-advertised budget, not the 64KB C0 max', async () => {
     const srv = new LcapIngestServer(NET);
     const blockBytes = enc.encode('a small C0 block — fits the 64KB cap but not a 1-byte budget');
     const blockCid = await cidFor('block', blockBytes);
-    await srv.putObject(blockCid, 'block', blockBytes);
+    await stagePublicBlock(srv, blockCid, blockBytes); // public-servable, so the BUDGET (not the gate) is under test
     // A tiny advertised response budget: with the clamp, the held block (which would fit
     // the 64KB C0 cap) does NOT fit this budget, so no critical_pack is returned (it stays
     // fetchable via the GET routes) — proving the server honours the peer's budget.
@@ -289,6 +341,35 @@ describe('POST /pulse — §29.1 critical_pack (C0 server-push)', () => {
       new Uint8Array(await res.arrayBuffer()),
     );
     expect('critical_pack' in decoded).toBe(false);
+  });
+
+  it('rejects a CHUNKED (no Content-Length) over-limit body with 413, never buffering it (PUB-API-CORE-2)', async () => {
+    const srv = new LcapIngestServer(NET);
+    // A STREAMED body with NO Content-Length header — the case `declaredLengthExceeds` cannot catch.
+    // It emits far more than the 256 KiB pulse cap; `bodyLimit` must abort it at 413 BEFORE the
+    // handler materializes the whole stream (no unbounded buffer, no 500).
+    const chunk = new Uint8Array(64 * 1024);
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= 32 * 1024 * 1024) {
+          controller.close(); // a fully-drained stream would reach 32 MiB
+          return;
+        }
+        controller.enqueue(chunk);
+        sent += chunk.length;
+      },
+    });
+    const res = await createLcapRoutes(srv).request('/pulse', {
+      method: 'POST',
+      body,
+      // `duplex` is required by the Fetch spec when the body is a stream.
+      duplex: 'half',
+    });
+    expect(res.status).toBe(413);
+    // The defining property: bodyLimit aborted EARLY — it did NOT drain the 32 MiB stream into memory
+    // before rejecting (the chunked-DoS the old Content-Length-only guard could not stop).
+    expect(sent).toBeLessThan(2 * 1024 * 1024);
   });
 });
 

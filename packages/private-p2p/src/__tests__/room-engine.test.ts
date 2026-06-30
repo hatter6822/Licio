@@ -18,6 +18,8 @@ import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../
 import {
   decodeSyncMessage,
   encodeSyncMessage,
+  MAX_MLS_COMMIT_BYTES,
+  mlsCommitMessageSchema,
   type OpRequest,
   type OpResponse,
 } from '../sync/op-exchange.js';
@@ -623,5 +625,25 @@ describe('PrivateRoomEngine — §15.7 op-exchange convergence (two engines, liv
     };
     const decoded = decodeSyncMessage(encodeSyncMessage(ann));
     expect(decoded).toStrictEqual(ann);
+  });
+});
+
+describe('mlsCommitMessageSchema §27 DoS bound (PRIV-SYNC-1)', () => {
+  it('accepts a small commit and rejects one over MAX_MLS_COMMIT_BYTES', () => {
+    const small = {
+      schema: 'licio.private.mls_commit.v1',
+      commit: toBase64Url(randomBytes(64)),
+      epoch: 1,
+    };
+    expect(mlsCommitMessageSchema.safeParse(small).success).toBe(true);
+    // A base64url string whose decoded length exceeds the cap is rejected at the schema boundary,
+    // BEFORE any decode — so a huge commit never reaches decodeCommit/applyCommit.
+    const overChars = Math.ceil((MAX_MLS_COMMIT_BYTES * 4) / 3) + 4;
+    const huge = {
+      schema: 'licio.private.mls_commit.v1',
+      commit: 'A'.repeat(overChars),
+      epoch: 1,
+    };
+    expect(mlsCommitMessageSchema.safeParse(huge).success).toBe(false);
   });
 });

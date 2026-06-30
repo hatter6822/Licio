@@ -77,6 +77,13 @@ function versionSpec(version: number): VersionSpec {
   return VERSIONS[version] as VersionSpec;
 }
 
+/**
+ * The largest byte payload a v1–4 byte-mode QR carries (matching `chooseVersion`'s 2-codeword
+ * headroom) — the §22.3 "tiny control material only" ceiling, enforced on BOTH encode (here, via
+ * `chooseVersion`) and decode (`qr-decode.ts`) so the invariant is structural in both directions.
+ */
+export const QR_MAX_PAYLOAD_BYTES = versionSpec(4).dataCodewords - 2;
+
 /** The smallest v1–4 that fits `byteLen` bytes in byte mode (4-bit mode + 8-bit count). */
 function chooseVersion(byteLen: number): number {
   for (const v of [1, 2, 3, 4]) {
@@ -240,8 +247,13 @@ function writeFormat(m: Matrix, maskIndex: number): void {
   tl.forEach(([r, c], i) => {
     mset(m, r, c, bits[i] as number);
   });
-  for (let i = 0; i <= 7; i++) mset(m, size - 1 - i, 8, bits[i] as number);
-  for (let i = 8; i <= 14; i++) mset(m, 8, size - 15 + i, bits[i] as number);
+  // Copy 2 (§8.9): bits 0–6 down the bottom-left finder column (rows size-1..size-7), bits 7–14
+  // along the top-right finder row (cols size-8..size-1).  The first loop stops at i<7 so it leaves
+  // the ALWAYS-DARK module at (size-8, 8) — set in `reserveFormat` (line 174) — intact, and the
+  // second loop starts at i=7 so f7 is written at (8, size-8) (PUB-QR-1: the old `i<=7` / `i=8`
+  // bounds clobbered the dark module and dropped f7).
+  for (let i = 0; i < 7; i++) mset(m, size - 1 - i, 8, bits[i] as number);
+  for (let i = 7; i <= 14; i++) mset(m, 8, size - 15 + i, bits[i] as number);
 }
 
 /** Apply `maskIndex` to every NON-function module of a fresh copy. */

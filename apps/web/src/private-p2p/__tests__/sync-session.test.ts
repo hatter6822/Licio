@@ -244,3 +244,66 @@ describe('WS-S.4.3 PrivateSyncSession orchestration', () => {
     expect(stats.delivered).toBeLessThan(20);
   });
 });
+
+describe('PrivateSyncSession terminal teardown (PRIV-WEB-SESSION-1)', () => {
+  function closableChannel(): { channel: PeerChannel; drop: () => void } {
+    let onClose: (() => void) | null = null;
+    const channel: PeerChannel = {
+      send: () => {},
+      onMessage: () => {},
+      onClose: (l) => {
+        onClose = l;
+      },
+      close: () => {},
+    };
+    return { channel, drop: () => onClose?.() };
+  }
+
+  it('fires onTerminate exactly once on a local close() (which suppresses onClose)', () => {
+    const { channel } = closableChannel();
+    let terminated = 0;
+    let onCloseCalls = 0;
+    const s = new PrivateSyncSession(new FakeEngine(), channel, fakeCodec, {
+      onClose: () => {
+        onCloseCalls += 1;
+      },
+      onTerminate: () => {
+        terminated += 1;
+      },
+    });
+    s.start();
+    s.close();
+    s.close(); // idempotent
+    expect(terminated).toBe(1);
+    expect(onCloseCalls).toBe(0); // a local close() deliberately does NOT fire onClose
+    expect(s.isClosed()).toBe(true);
+  });
+
+  it('fires onTerminate exactly once on an external channel drop', () => {
+    const { channel, drop } = closableChannel();
+    let terminated = 0;
+    const s = new PrivateSyncSession(new FakeEngine(), channel, fakeCodec, {
+      onTerminate: () => {
+        terminated += 1;
+      },
+    });
+    s.start();
+    drop();
+    drop(); // a second drop event must not double-fire
+    expect(terminated).toBe(1);
+  });
+
+  it('fires onTerminate exactly once even when close() AND a later drop both occur', () => {
+    const { channel, drop } = closableChannel();
+    let terminated = 0;
+    const s = new PrivateSyncSession(new FakeEngine(), channel, fakeCodec, {
+      onTerminate: () => {
+        terminated += 1;
+      },
+    });
+    s.start();
+    s.close();
+    drop();
+    expect(terminated).toBe(1);
+  });
+});

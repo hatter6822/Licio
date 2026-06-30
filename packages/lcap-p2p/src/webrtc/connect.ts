@@ -178,9 +178,13 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
   // (addIceCandidate before setRemoteDescription throws).
   let remoteDescriptionSet = false;
   const pendingIce: RtcIceCandidateInit[] = [];
+  // Cap the pre-description buffer: a real negotiation needs only a handful, so an ICE-only flood
+  // (a peer trickling candidates before the offer/answer lands) cannot grow memory — drop past the
+  // cap (ICE retries / the other candidates cover it) (PUB-WEBRTC-6).
+  const MAX_PENDING_ICE = 256;
   const addCandidate = async (init: RtcIceCandidateInit): Promise<void> => {
     if (!remoteDescriptionSet) {
-      pendingIce.push(init);
+      if (pendingIce.length < MAX_PENDING_ICE) pendingIce.push(init);
       return;
     }
     try {

@@ -152,8 +152,7 @@ describe('sealed announcement round-trip (§15.3)', () => {
     expect(await openRendezvousAnnouncement(record, key)).toStrictEqual(announcement);
   });
 
-  it('Tier-2: carries the top-level cap + uses the pseudonym as peer_blind_id (and still opens)', async () => {
-    const cap = { proof: 'cHJvb2Y', issuer_pubkey: 'aXNzdWVy', epoch: '3', bucket: 100 };
+  it('always uses the per-device derived peer_blind_id + carries NO top-level cap (PRIV-API-RENDEZVOUS-1)', async () => {
     const record = await buildRendezvousRecord({
       rendezvousKey: key,
       epoch: 3,
@@ -161,30 +160,32 @@ describe('sealed announcement round-trip (§15.3)', () => {
       deviceId: 'device-alpha',
       announcement,
       nowMs: 1_000_000,
-      cap,
-      capPseudonym: 'cHNldWRvbnlt',
     });
-    // The verifier-visible cap is carried, and peer_blind_id IS the pseudonym (the §15.3.1 dedup
-    // key the server caps by) — NOT the per-device derived id.
-    expect(record.cap).toStrictEqual(cap);
-    expect(record.peer_blind_id).toBe('cHNldWRvbnlt');
-    expect(record.peer_blind_id).not.toBe(await derivePeerBlindId(key, 'device-alpha', 3, 100));
-    // The AAD binds that pseudonym peer_blind_id, so it still opens for a member.
-    expect(await openRendezvousAnnouncement(record, key)).toStrictEqual(announcement);
+    // peer_blind_id is ALWAYS the deterministic per-(device, epoch, bucket) derived id — which gives
+    // one server slot per device per bucket on its own — and the record exposes NO top-level cap
+    // (the server-side Tier-2 cap was removed; the cap rides SEALED inside the announcement).
+    expect(record.peer_blind_id).toBe(await derivePeerBlindId(key, 'device-alpha', 3, 100));
+    expect('cap' in record).toBe(false);
   });
 
-  it('Tier-2: rejects a cap without a pseudonym (peer_blind_id binding would be ambiguous)', async () => {
-    await expect(
-      buildRendezvousRecord({
-        rendezvousKey: key,
-        epoch: 3,
-        timeBucket: 100,
-        deviceId: 'device-alpha',
-        announcement,
-        nowMs: 1_000_000,
-        cap: { proof: 'cHJvb2Y', issuer_pubkey: 'aXNzdWVy', epoch: '3', bucket: 100 },
-      }),
-    ).rejects.toThrow(/capPseudonym/);
+  it('carries a SEALED-inside cap (the peer-side anti-flood input) that round-trips on member open', async () => {
+    const cappedAnnouncement = {
+      ...announcement,
+      cap: { proof: 'cHJvb2Y', pseudonym: 'cHNldWRvbnlt' },
+    };
+    const record = await buildRendezvousRecord({
+      rendezvousKey: key,
+      epoch: 3,
+      timeBucket: 100,
+      deviceId: 'device-alpha',
+      announcement: cappedAnnouncement,
+      nowMs: 1_000_000,
+    });
+    // Never exposed at the top level (the server is blind to it); peer_blind_id stays the derived id.
+    expect('cap' in record).toBe(false);
+    expect(record.peer_blind_id).toBe(await derivePeerBlindId(key, 'device-alpha', 3, 100));
+    // A member (holding the rendezvous key) recovers the sealed cap — the §6.8 peer-side verify input.
+    expect(await openRendezvousAnnouncement(record, key)).toStrictEqual(cappedAnnouncement);
   });
 
   it('honors a clamped TTL', async () => {

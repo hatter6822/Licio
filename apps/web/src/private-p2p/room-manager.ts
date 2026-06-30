@@ -318,9 +318,29 @@ export class PrivateRoomSession {
   ) {}
 
   /** Live sync sessions (so a §10.9 membership change can broadcast its MLS commit to
-   *  every currently-connected member).  Closed sessions no-op on send; they are pruned
-   *  lazily on the next broadcast. */
+   *  every currently-connected member).  Closed sessions are pruned promptly via `onTerminate`
+   *  and defensively during the next broadcast. */
   private readonly activeSessions = new Set<PrivateSyncSession>();
+
+  /**
+   * Serializes EVERY MLS-group / epoch-key / engine-state mutation (PRIV-WEB-SESSION-2).  A peer's
+   * incoming `mls_commit` is handled asynchronously off the sync session, so without this it could
+   * interleave with a local `authorOp` / `admitJoinRequest` / `removeMember` / `ingest`: two
+   * read-modify-writes of `this.session` (the MLS group + epoch keys) and the shared, non-re-entrant
+   * engine state would race — a lost `removeMember` (an evicted device keeps reading → weakened
+   * forward secrecy), a divergent epoch, or a corrupted fold.  Tail-chained: each critical section
+   * runs after the prior SETTLES; a rejection is swallowed in the chain so it cannot wedge the lock,
+   * while the CALLER of the failing op still receives its rejection.
+   */
+  private opLock: Promise<void> = Promise.resolve();
+  private runExclusive<T>(critical: () => Promise<T>): Promise<T> {
+    const result = this.opLock.then(() => critical());
+    this.opLock = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 
   get roomId(): string {
     return this.session.roomId;
@@ -415,11 +435,17 @@ export class PrivateRoomSession {
       encodeSyncMessage: this.p2p.encodeSyncMessage,
       decodeSyncMessage: this.p2p.decodeSyncMessage,
     };
-    const sync = new PrivateSyncSession(this.engine, channel, codec, {
+    let sync: PrivateSyncSession;
+    sync = new PrivateSyncSession(this.engine, channel, codec, {
       ...(options ?? {}),
       // The manager owns §10.9 commit application (it holds the MLS group); a peer's
       // commit advances THIS device's epoch + re-opens the pending content.
       onMlsCommit: (commit, epoch) => this.applyIncomingCommit(commit, epoch),
+      // Prune the session from `activeSessions` the moment it ends by ANY path — an external
+      // channel drop OR a controller/UI `close()` (PRIV-WEB-SESSION-1: the set would otherwise grow
+      // unbounded across every reconnect).  Fires once; the closure captures `sync` (assigned below,
+      // before any terminate can fire).
+      onTerminate: () => this.activeSessions.delete(sync),
     });
     this.activeSessions.add(sync);
     sync.start();
@@ -433,9 +459,24 @@ export class PrivateRoomSession {
    * sync session then re-announces + walks the newly-decryptable frontier.  Fail-closed:
    * a bad commit throws (applyCommit), leaving the group/keys untouched.
    */
-  private async applyIncomingCommit(commit: Uint8Array, epoch: number): Promise<void> {
+  private applyIncomingCommit(commit: Uint8Array, epoch: number): Promise<void> {
+    return this.runExclusive(() => this.applyIncomingCommitImpl(commit, epoch));
+  }
+
+  private async applyIncomingCommitImpl(commit: Uint8Array, epoch: number): Promise<void> {
     const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
-    const advanced = await this.p2p.applyCommit(group, this.p2p.decodeCommit(commit));
+    // §11.3 AUTHORITY GATE (PRIV-CRYPTO-1): an MLS commit only advances THIS device's epoch when its
+    // committer is a current, non-removed device whose member holds the `admin` capability in the
+    // converged reduced state.  RFC 9420 has no admin role — without this, any handshake-authenticated
+    // member could commit an Add of a ghost reader device (which would then derive the new
+    // content_wrap_key) or a Remove of an honest admin, and we would blindly install the new epoch
+    // keys.  A rejected commit throws (below), leaving the group/keys untouched (fail-closed).
+    const advanced = await this.p2p.applyCommit(
+      group,
+      this.p2p.decodeCommit(commit),
+      (committerDeviceId) =>
+        this.p2p.deviceMayManageMembership(this.engine.state(), committerDeviceId),
+    );
     const newEpochState = await this.p2p.deriveEpochState(
       advanced,
       this.session.roomIdCommitment,
@@ -467,7 +508,15 @@ export class PrivateRoomSession {
   /** Broadcast a §10.9 MLS commit to every currently-connected member (so existing
    *  members advance to the new epoch), pruning any closed sessions. */
   private broadcastCommit(commit: Uint8Array, epoch: number): void {
-    for (const session of this.activeSessions) session.sendMlsCommit(commit, epoch);
+    for (const session of this.activeSessions) {
+      // Defence-in-depth prune (PRIV-WEB-SESSION-1): drop any already-closed session encountered
+      // here too, so the set self-heals even if a teardown path ever bypassed `onTerminate`.
+      if (session.isClosed()) {
+        this.activeSessions.delete(session);
+        continue;
+      }
+      session.sendMlsCommit(commit, epoch);
+    }
   }
 
   /**
@@ -476,8 +525,11 @@ export class PrivateRoomSession {
    * quarantined so a UI can surface sync/quarantine status.
    */
   async ingest(envelopes: readonly PrivateEncryptedEnvelope[]): Promise<IngestReport> {
-    const report = await this.engine.ingest(envelopes);
-    // Advance the Tier-2 cap (publish/install/issue) after new ops land; fail-open to Tier-1.
+    // The engine-state mutation is serialized with applyIncomingCommit / authorOp (PRIV-WEB-SESSION-2).
+    const report = await this.runExclusive(() => this.engine.ingest(envelopes));
+    // Advance the Tier-2 cap (publish/install/issue) after new ops land; fail-open to Tier-1.  This
+    // runs OUTSIDE the op-lock — `syncCap` calls `authorOp`, which acquires the lock ITSELF, so
+    // holding it here would re-entrantly deadlock.
     await this.syncCap().catch(() => {});
     return report;
   }
@@ -838,7 +890,11 @@ export class PrivateRoomSession {
    * causal metadata from the local DAG.  The reducer's §11.3 capability check
    * decides whether this member may apply it.
    */
-  async authorOp(body: PrivateOpBodyInput): Promise<void> {
+  authorOp(body: PrivateOpBodyInput): Promise<void> {
+    return this.runExclusive(() => this.authorOpImpl(body));
+  }
+
+  private async authorOpImpl(body: PrivateOpBodyInput): Promise<void> {
     const epoch = this.currentEpoch();
     const keys = await this.p2p.deriveRoomEpochKeys(
       epoch.roomEpochSecret,
@@ -1054,7 +1110,15 @@ export class PrivateRoomSession {
    * verdict.  On any rejection (expired/exhausted/invite-id/proof/key-package) the
    * verdict's `reason` is surfaced verbatim and NO state changes.
    */
-  async admitJoinRequest(
+  admitJoinRequest(
+    invite: InviteSecret,
+    request: JoinRequest,
+    options?: { readonly usesSoFar?: number; readonly now?: Date },
+  ): Promise<AdmitResult> {
+    return this.runExclusive(() => this.admitJoinRequestImpl(invite, request, options));
+  }
+
+  private async admitJoinRequestImpl(
     invite: InviteSecret,
     request: JoinRequest,
     options?: { readonly usesSoFar?: number; readonly now?: Date },
@@ -1261,7 +1325,15 @@ export class PrivateRoomSession {
    * `deviceId` is resolved to the MLS leaf via `utf8(deviceId)` (the device-id invariant).
    * Throws if the device is not in the MLS group.
    */
-  async removeMember(params: {
+  removeMember(params: {
+    readonly memberId: string;
+    readonly deviceId: string;
+    readonly reason?: string;
+  }): Promise<void> {
+    return this.runExclusive(() => this.removeMemberImpl(params));
+  }
+
+  private async removeMemberImpl(params: {
     readonly memberId: string;
     readonly deviceId: string;
     readonly reason?: string;

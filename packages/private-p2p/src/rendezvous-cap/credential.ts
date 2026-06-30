@@ -48,12 +48,12 @@ const NID_INDEX = 0;
 export const PER_EPOCH_BUCKET = -1;
 
 /**
- * The cap time-bucket width — the SSOT for the announcer, the server verifier, and the client
- * poll-filter. ALL THREE must agree, or a valid announce lands out-of-window. It is PINNED to
- * the §15.3.2 rendezvous discovery bucket (`RENDEZVOUS_DEFAULT_BUCKET_MS`) BY CONSTRUCTION,
- * because the carrier derives the cap bucket AND the `room_blind_id` bucket from the same
- * `rendezvousTimeBucket(now)` — so the cap bucket IS the discovery bucket, not a second clock.
- * (`apps/api`'s `DEFAULT_RENDEZVOUS_CONFIG.bucketWidthMs` mirrors this value.)
+ * The cap time-bucket width — the SSOT for the announcer AND the client poll-filter (both peer-side).
+ * They must agree, or a valid announce lands out-of-window. It is PINNED to the §15.3.2 rendezvous
+ * discovery bucket (`RENDEZVOUS_DEFAULT_BUCKET_MS`) BY CONSTRUCTION, because the carrier derives the
+ * cap bucket AND the `room_blind_id` bucket from the same `rendezvousTimeBucket(now)` — so the cap
+ * bucket IS the discovery bucket, not a second clock. (The cap is enforced PEER-SIDE only — the
+ * server is blind to it, PRIV-API-RENDEZVOUS-1 — so there is no third server clock to agree with.)
  */
 export const DEFAULT_BUCKET_WIDTH_MS = RENDEZVOUS_DEFAULT_BUCKET_MS;
 

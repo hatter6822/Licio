@@ -58,6 +58,7 @@ import {
 } from '@licio/lcap';
 import type { BlockVisibility } from '@licio/lcap-p2p';
 import { Hono, type MiddlewareHandler } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { isSteward } from '../identity/rbac.js';
 import { rateLimit } from '../lib/rate-limit.js';
@@ -119,6 +120,25 @@ function declaredLengthExceeds(
   return Number.isFinite(len) && len > max;
 }
 
+/**
+ * A per-route request-body bound that is enforced on the STREAM, not a (forgeable, omittable)
+ * `Content-Length` header (PUB-API-CORE-2).  `declaredLengthExceeds` is only a cheap up-front 413 for
+ * a present, oversized length; a CHUNKED or absent-length request slips past it and would otherwise
+ * buffer an unbounded body in `c.req.arrayBuffer()` BEFORE any §27.1 cap.  `bodyLimit` wraps the body
+ * stream and aborts the instant `maxSize` is exceeded, surfacing as a 413 (never a 500) — so the
+ * whole-body materialization the LCAP POST handlers do is bounded regardless of the headers.
+ */
+function lcapBodyLimit(maxSize: number): MiddlewareHandler {
+  return bodyLimit({ maxSize, onError: (c) => c.json({ error: 'oversized_request' }, 413) });
+}
+
+/** The §19.1 identity-free read budget for the §29 content/proof GET routes (PUB-API-CORE-3).  Reads
+ *  are cheaper + more frequent than writes, so the budget is larger than the POST budgets, but it is
+ *  still a global fixed window (no per-client keying) so a read flood is bounded. */
+function readRateLimit(): MiddlewareHandler {
+  return rateLimit({ limit: 600, windowMs: 60_000 });
+}
+
 /** Parse a single RFC 7233 `bytes=` range against `size`; `null` ⇒ serve full. */
 function parseRange(
   header: string,
@@ -159,6 +179,14 @@ async function serveObject(
   }
   const obj = await server.getObject(cid);
   if (!obj || obj.kind !== kind) {
+    return json(404, { error: 'not_found' });
+  }
+  // §29 public-serve confidentiality gate (PUB-API-CORE-1): a non-public (`room_only`) record, its
+  // proofs, and its body/media blocks are NEVER served by CID over this unauthenticated surface, and
+  // a chunk is never public-servable here — mirroring the client's PUBLIC-ONLY responder.  A held
+  // but non-public CID returns 404 (not 403), indistinguishable from an absent one, so the read
+  // route is not an existence oracle for in_room content.
+  if (!(await server.isPublicServable(cid))) {
     return json(404, { error: 'not_found' });
   }
   const bytes = obj.bytes;
@@ -503,7 +531,9 @@ async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<
   // max_response_bytes), so the server cannot return a critical_pack over the receiver's
   // budget.
   let criticalPack: Uint8Array | undefined;
-  const criticalWant = parsed.data.critical_want ?? [];
+  // §29 public-serve confidentiality gate (PUB-API-CORE-1): only PUBLIC-servable critical wants are
+  // bundled into the C0 critical_pack — a non-public record / proof / block is never served here.
+  const criticalWant = await server.filterPublicServable(parsed.data.critical_want ?? []);
   if (criticalWant.length > 0) {
     const criticalBudget = Math.min(
       MAX_CRITICAL_PACK_BYTES,
@@ -634,22 +664,22 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   let status: 'ok' | 'partial' = 'ok';
   if (request.want !== undefined && request.want.length > 0) {
     const b = request.pulse.budgets;
+    // §29 public-serve confidentiality gate (PUB-API-CORE-1): intersect the peer's wants with the
+    // PUBLIC shareable closure BEFORE repack, so a non-public record / its proofs / its body+media
+    // blocks (and chunks) are never assembled into a served response_pack — symmetric with the
+    // client's public-only responder.
+    const publicWant = await server.filterPublicServable(request.want.map((w) => w.cid));
     // Honor the FULL advertised budget (#BH), not just the byte cap: the selection floor
     // (priority_floor / allow_media) AND the per-kind / table-entry count caps — so a constrained
     // (minimal/low-storage) client is never served over-priority, media, or over-count objects that
     // merely fit the byte cap.  A full budget passes the maxima, so a normal client gets all it wants.
-    const repacked = await repackHeldObjects(
-      server,
-      request.want.map((w) => w.cid),
-      b.max_response_bytes,
-      {
-        priorityFloor: b.priority_floor,
-        allowMedia: b.allow_media,
-        maxRecords: b.max_records,
-        maxBlocks: b.max_blocks,
-        maxObjects: b.max_pack_table_entries,
-      },
-    );
+    const repacked = await repackHeldObjects(server, publicWant, b.max_response_bytes, {
+      priorityFloor: b.priority_floor,
+      allowMedia: b.allow_media,
+      maxRecords: b.max_records,
+      maxBlocks: b.max_blocks,
+      maxObjects: b.max_pack_table_entries,
+    });
     if (repacked.pack !== undefined) responsePack = repacked.pack;
     if (repacked.truncated) status = 'partial';
   }
@@ -835,10 +865,15 @@ const publishRequestSchema = z.object({
     .array(
       z.object({
         target_type: z.enum(['story', 'source', 'evidence']),
-        target_id: z.string().min(1),
+        // The story/source/evidence primary keys are uuid columns, so a non-uuid is a phantom id:
+        // reject it at the boundary (caps length AND fail-fast-rejects garbage) (PUB-API-PUBLISH-3).
+        target_id: z.string().uuid(),
       }),
     )
-    .min(1),
+    .min(1)
+    // Bound the per-request target fan-out — a block is derived from a handful of entities, never
+    // thousands (each target is a provenance-link DB write) (PUB-API-PUBLISH-3).
+    .max(32),
 });
 const republishRequestSchema = z.object({ block_cid: z.string().min(1) });
 
@@ -885,9 +920,16 @@ async function handleReview(
  * Map a `ReviewedPublishOutcome` to the audit record's review/takedown verdicts.  The §22.7
  * review verdict is `approved` / `review_required` / `skipped` (an earlier eligibility refusal
  * never reached the gate).  The takedown verdict is read from the bridge outcome: a
- * `takedown_recheck_halt` reason is a `halt`; a successful pin or any non-takedown refusal is
- * `clear` (the §22.7 gate / eligibility refused before the oracle ran, so it never reports
- * `unreadable` here — the bridge maps a thrown oracle to `takedown_recheck_halt`).
+ * `takedown_recheck_halt` reason is a genuine `halt`, a `takedown_recheck_unreadable` reason is an
+ * `unreadable` oracle (it threw — a halt the steward should see distinctly, PUB-API-PUBLISH-4).
+ *
+ * The takedown oracle runs ONLY AFTER an APPROVED review — a `review_required` (or `skipped`)
+ * refusal returns from the publisher BEFORE the oracle ever runs.  So `clear` must mean "the
+ * oracle ran and cleared the block": it is reported only when `review.approved === true` (the
+ * pin path, or a post-oracle non-takedown failure where the takedown check itself still passed).
+ * A pre-oracle refusal is `not_checked`, NEVER a misleading `clear` — so a steward can tell
+ * "oracle cleared" from "oracle never ran", mirroring the eligibility-refusal handling
+ * (PUB-API-PUBLISH-5).
  */
 function auditVerdicts(reviewed: ReviewedPublishOutcome): {
   review: PublishAuditInput['reviewVerdict'];
@@ -899,8 +941,15 @@ function auditVerdicts(reviewed: ReviewedPublishOutcome): {
       : reviewed.review.approved
         ? 'approved'
         : 'review_required';
+  const reason = !reviewed.outcome.ok ? reviewed.outcome.reason : '';
   const takedown: PublishAuditInput['takedownVerdict'] =
-    !reviewed.outcome.ok && reviewed.outcome.reason === 'takedown_recheck_halt' ? 'halt' : 'clear';
+    reason === 'takedown_recheck_unreadable'
+      ? 'unreadable'
+      : reason === 'takedown_recheck_halt'
+        ? 'halt'
+        : reviewed.review.approved === true
+          ? 'clear'
+          : 'not_checked';
   return { review, takedown };
 }
 
@@ -968,6 +1017,27 @@ async function handlePublish(
   const derived = resolveEligibility
     ? aggregateEligibility(await Promise.all(targets.map((t) => resolveEligibility(t))))
     : { publishable: false, visibility: 'in_room' as const, privateRoomCid: true };
+  // Gate on the computed guarantee BEFORE calling the publisher, symmetric with handleRepublish
+  // (PUB-API-PUBLISH-1): a non-publishable derivation is refused here with the RESOLVER-SPECIFIC
+  // reason (e.g. `room_only` / `p2p_room`) preserved in the audit — the publisher's internal guard
+  // would still refuse, but only with a generic `not_public`, losing audit fidelity.
+  if (!derived.publishable) {
+    const reason = 'reason' in derived && derived.reason ? derived.reason : 'not_public';
+    const audited = await writePublishAudit(audit, {
+      action: 'publish',
+      blockCid: parsed.data.block_cid,
+      target: targets[0] ?? null,
+      actorUserId,
+      reviewVerdict: 'skipped',
+      // The oracle never ran (refused on review/eligibility first) — not a clean takedown CLEAR.
+      takedownVerdict: 'not_checked',
+      published: false,
+      outcomeReason: reason,
+      ipfsCid: null,
+    });
+    if (!audited) return json(500, { error: 'audit_unavailable' });
+    return json(200, { ok: false, reason });
+  }
   const reviewed = await publisher.publish({
     blockCid: parsed.data.block_cid,
     bytes: obj.bytes,
@@ -1037,7 +1107,8 @@ async function handleRepublish(
       target: targets[0] ?? null,
       actorUserId,
       reviewVerdict: 'skipped',
-      takedownVerdict: 'clear',
+      // The oracle never ran (refused on review/eligibility first) — not a clean takedown CLEAR.
+      takedownVerdict: 'not_checked',
       published: false,
       outcomeReason: reason,
       ipfsCid: null,
@@ -1045,7 +1116,14 @@ async function handleRepublish(
     if (!audited) return json(500, { error: 'audit_unavailable' });
     return json(200, { ok: false, reason });
   }
-  const reviewed = await publisher.republish(parsed.data.block_cid, obj.bytes, targets);
+  // Forward the SAME derived signals to the bridge's structural eligibility re-check (PUB-API-PUBLISH-2):
+  // the route already refused a non-public `derived` above, and the bridge re-asserts it independently.
+  const reviewed = await publisher.republish(parsed.data.block_cid, obj.bytes, targets, {
+    visibility: derived.visibility satisfies BlockVisibility,
+    encrypted: false,
+    takenDown: false,
+    privateRoomCid: derived.privateRoomCid,
+  });
   const { review, takedown } = auditVerdicts(reviewed);
   const audited = await writePublishAudit(audit, {
     action: 'republish',
@@ -1107,54 +1185,82 @@ export function createLcapRoutes(
     (kind: ContentKind) =>
     (c: { req: { param: (k: string) => string; header: (k: string) => string | undefined } }) =>
       serveObject(server(), kind, c.req.param('cid'), c.req.header('range'));
-  app.get('/records/:cid', read('record'));
-  app.get('/proofs/:cid', read('proof'));
-  app.get('/blocks/:cid', read('block'));
-  // Media chunks are stored, repacked, and advertised as `chunk` wants, so they need a
-  // resumable read route too — else a chunk dropped from a budget-limited response_pack
-  // could never be fetched to clear the want (§29.4-6).
-  app.get('/chunks/:cid', read('chunk'));
-  // §29.7 room checkpoint / inclusion / consistency reads (GETs → CSRF passes).
-  app.get('/rooms/:roomId/checkpoint', (c) =>
+  app.get('/records/:cid', readRateLimit(), read('record'));
+  app.get('/proofs/:cid', readRateLimit(), read('proof'));
+  app.get('/blocks/:cid', readRateLimit(), read('block'));
+  // The chunk read route exists for the resumable-fetch shape, but the §29 public-serve gate
+  // (PUB-API-CORE-1) withholds EVERY chunk over this unauthenticated surface: a chunk carries no
+  // visibility and the server cannot resolve it to its owning record, so — mirroring the client
+  // responder, which never serves chunks — it fails closed (an in_room video chunk can never be
+  // exfiltrated by CID).  Authorized chunked-media serving is the separate §29.4 path (a tracked
+  // enhancement, docs/lcap/README.md).
+  app.get('/chunks/:cid', readRateLimit(), read('chunk'));
+  // §29.7 room checkpoint / inclusion / consistency reads (GETs → CSRF passes), rate-limited.
+  app.get('/rooms/:roomId/checkpoint', readRateLimit(), (c) =>
     handleRoomCheckpoint(server(), c.req.param('roomId')),
   );
-  app.get('/rooms/:roomId/proofs/inclusion', (c) =>
+  app.get('/rooms/:roomId/proofs/inclusion', readRateLimit(), (c) =>
     handleRoomInclusion(server(), c.req.param('roomId'), c.req.query('record_cid')),
   );
-  app.get('/rooms/:roomId/proofs/consistency', (c) =>
+  app.get('/rooms/:roomId/proofs/consistency', readRateLimit(), (c) =>
     handleRoomConsistency(server(), c.req.param('roomId'), c.req.query('old'), c.req.query('new')),
   );
   // §29.8 bundle export: a room's content closure as a pack, GATED by a device-signed
   // `may_export_bundle` capability (review #5).  A POST (it carries the signed export
   // request), CSRF-exempt + rate-limited like the other device-authenticated LCAP routes.
-  app.post('/bundles/export', rateLimit({ limit: 30, windowMs: 60_000 }), async (c) => {
-    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
-      return json(413, { error: 'oversized_request' });
-    return handleExport(server(), new Uint8Array(await c.req.arrayBuffer()));
-  });
-  app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
-    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
-      return json(413, { error: 'oversized_request' });
-    return ingestPack(server(), new Uint8Array(await c.req.arrayBuffer()));
-  });
+  app.post(
+    '/bundles/export',
+    rateLimit({ limit: 30, windowMs: 60_000 }),
+    lcapBodyLimit(SERVER_CAPS.maxPackBytes),
+    async (c) => {
+      if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
+        return json(413, { error: 'oversized_request' });
+      return handleExport(server(), new Uint8Array(await c.req.arrayBuffer()));
+    },
+  );
+  app.post(
+    '/packs',
+    rateLimit({ limit: 60, windowMs: 60_000 }),
+    lcapBodyLimit(SERVER_CAPS.maxPackBytes),
+    async (c) => {
+      if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
+        return json(413, { error: 'oversized_request' });
+      return ingestPack(server(), new Uint8Array(await c.req.arrayBuffer()));
+    },
+  );
   // §29.8 bundle import: the web-UI alias of /packs (same validator; CSRF-protected
   // — it is NOT in the CSRF-exempt set, so a session-bearing browser flow keeps the
   // double-submit token).
-  app.post('/bundles/import', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
-    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
-      return json(413, { error: 'oversized_request' });
-    return ingestPack(server(), new Uint8Array(await c.req.arrayBuffer()));
-  });
-  app.post('/pulse', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) => {
-    if (declaredLengthExceeds(c, MAX_PULSE_REQUEST_BYTES))
-      return json(413, { error: 'oversized_request' });
-    return handlePulse(server(), new Uint8Array(await c.req.arrayBuffer()));
-  });
-  app.post('/exchange', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
-    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
-      return json(413, { error: 'oversized_request' });
-    return handleExchange(server(), new Uint8Array(await c.req.arrayBuffer()));
-  });
+  app.post(
+    '/bundles/import',
+    rateLimit({ limit: 60, windowMs: 60_000 }),
+    lcapBodyLimit(SERVER_CAPS.maxPackBytes),
+    async (c) => {
+      if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
+        return json(413, { error: 'oversized_request' });
+      return ingestPack(server(), new Uint8Array(await c.req.arrayBuffer()));
+    },
+  );
+  app.post(
+    '/pulse',
+    rateLimit({ limit: 120, windowMs: 60_000 }),
+    lcapBodyLimit(MAX_PULSE_REQUEST_BYTES),
+    async (c) => {
+      if (declaredLengthExceeds(c, MAX_PULSE_REQUEST_BYTES))
+        return json(413, { error: 'oversized_request' });
+      return handlePulse(server(), new Uint8Array(await c.req.arrayBuffer()));
+    },
+  );
+  app.post(
+    '/exchange',
+    rateLimit({ limit: 60, windowMs: 60_000 }),
+    lcapBodyLimit(MAX_EXCHANGE_REQUEST_BYTES),
+    async (c) => {
+      if (declaredLengthExceeds(c, MAX_EXCHANGE_REQUEST_BYTES))
+        return json(413, { error: 'oversized_request' });
+      return handleExchange(server(), new Uint8Array(await c.req.arrayBuffer()));
+    },
+  );
   // Gate-19 (WS-R.15.7 / WS-S.4.4) — the REAL public-block bridge (re)publish entry points.
   // STEWARD-AUTHORIZED + MFA-verified (finding #39): the session middleware runs FIRST, then
   // the steward gate, then the rate limiter; the POST is NOT in the CSRF-exempt set (a
@@ -1227,9 +1333,10 @@ export function createLcapRoutes(
     },
   );
   // §29 WebRTC server-blind signaling rendezvous (WS-R.15.6a): route an OPAQUE sealed
-  // blob to an opaque recipient key. The body is never decoded here (server-blindness);
-  // session-bound + CSRF-protected (NOT in the CSRF-exempt set) — a browser P2P flow
-  // keeps the double-submit token.
+  // blob to an opaque recipient key. The body is never decoded here (server-blindness).
+  // CSRF-EXEMPT (in csrf.ts EXEMPT_PATHS, like the native sync routes) — it is SESSIONLESS, so
+  // there is no session token to bind; the access-control model is the OPAQUE PEER KEY as a bearer
+  // (only a party that already holds the recipient key can address it), bounded by the rate limit.
   app.post('/p2p/signal', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) => {
     const result = getSignalMailbox().post(
       c.req.query('to'),
@@ -1238,9 +1345,9 @@ export function createLcapRoutes(
     );
     return new Response(null, { status: result.ok ? 202 : result.status });
   });
-  // The drain DELETES the peer's queued blobs, so it is a state-changing POST (CSRF-
-  // protected, like the post above — NOT a GET, which would bypass CSRF + the session and
-  // let any unauthenticated party that learns a peer key consume another peer's queue).
+  // The drain DELETES the peer's queued blobs (a state-changing POST, never a GET).  ALSO
+  // CSRF-EXEMPT + sessionless: the bearer credential is the opaque `peer` key — only a party that
+  // already holds it can consume that peer's queue.  (A holder-of-key proof would harden it further.)
   app.post('/p2p/signal/poll', rateLimit({ limit: 240, windowMs: 60_000 }), (c) => {
     const blobs = getSignalMailbox().drain(c.req.query('peer'), Date.now());
     return new Response(new Uint8Array(frameBlobs(blobs)), {

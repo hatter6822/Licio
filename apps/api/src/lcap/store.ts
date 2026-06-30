@@ -120,6 +120,13 @@ export interface LcapServerStore {
   ): Promise<void>;
   /** The CIDs related to `recordCid` by `relation` (its proofs or its referenced blocks). */
   recordEdges(recordCid: string, relation: RecordEdgeRelation): Promise<readonly string[]>;
+  /**
+   * The REVERSE edge: every record that references `relatedCid` under `relation` (the inverse of
+   * {@link recordEdges}).  The §29 public-serve gate uses it to resolve a block/proof CID to its
+   * owning record(s) — a block is public-servable iff SOME owning record is public — so a non-public
+   * record's body/media block can never be served by CID over the public read/exchange surface.
+   */
+  recordsReferencing(relatedCid: string, relation: RecordEdgeRelation): Promise<readonly string[]>;
 }
 
 /**
@@ -141,6 +148,8 @@ export class InMemoryLcapServerStore implements LcapServerStore {
   private readonly forkEvidence: ForkEvidence[] = [];
   // Record-export closure edges, keyed by `${relation} ${recordCid}`.
   private readonly recordClosure = new Map<string, Set<string>>();
+  // The REVERSE of `recordClosure`, keyed by `${relation} ${relatedCid}` → owning record CIDs.
+  private readonly recordClosureReverse = new Map<string, Set<string>>();
 
   private static deviceKey(keyId: string, seq: number): string {
     return `${keyId} ${seq}`;
@@ -277,11 +286,26 @@ export class InMemoryLcapServerStore implements LcapServerStore {
       this.recordClosure.set(key, set);
     }
     set.add(relatedCid);
+    // Maintain the reverse index for the §29 public-serve visibility resolution.
+    const rkey = InMemoryLcapServerStore.edgeKey(relation, relatedCid);
+    let rset = this.recordClosureReverse.get(rkey);
+    if (!rset) {
+      rset = new Set();
+      this.recordClosureReverse.set(rkey, rset);
+    }
+    rset.add(recordCid);
     return Promise.resolve();
   }
 
   recordEdges(recordCid: string, relation: RecordEdgeRelation): Promise<readonly string[]> {
     const set = this.recordClosure.get(InMemoryLcapServerStore.edgeKey(relation, recordCid));
+    return Promise.resolve(set ? [...set] : []);
+  }
+
+  recordsReferencing(relatedCid: string, relation: RecordEdgeRelation): Promise<readonly string[]> {
+    const set = this.recordClosureReverse.get(
+      InMemoryLcapServerStore.edgeKey(relation, relatedCid),
+    );
     return Promise.resolve(set ? [...set] : []);
   }
 }

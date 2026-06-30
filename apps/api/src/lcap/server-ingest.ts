@@ -25,12 +25,14 @@ import {
   type CheckpointFrontierV2,
   type ConsensusInput,
   type CryptoSuiteId,
+  cappedBodyBlockCids,
   checkCap,
   checkDependencyGraph,
   cidFor,
   DEFAULT_BUDGET,
   type DetachedProofV2,
   decodeAndRouteRecord,
+  decodeProof,
   detachedProofV2Schema,
   type ExportAuthorizationResult,
   type ExportRequestV2,
@@ -44,6 +46,7 @@ import {
   type IngestionReceiptType,
   importPublicKeyCose,
   ingestRecord,
+  isPublicControlRecord,
   type ObjectStatusV2,
   type PulseResponseV2,
   parseCid,
@@ -208,6 +211,122 @@ export class LcapIngestServer {
   }
 
   /**
+   * Whether a contribution/identity record's BYTES are eligible for the PUBLIC serve surface.
+   * Mirrors the client responder (apps/web/src/lcap/exchange.ts `collectShareableCids`): ONLY a
+   * record carrying a NON-PUBLIC `visibility_scope` is withheld; identity records (device
+   * certificate / revocation / account authority) carry no visibility_scope and are public
+   * validation material.
+   *
+   * A `room_checkpoint` is the one CONTROL record that reaches this gate: `issueCheckpoint` stores
+   * it as a `record`, and `checkpointFrontier` advertises its CID (`latest_checkpoint_cid`), so a
+   * peer fetches it (and its detached proof) over the public §29 surface.  `decodeAndRouteRecord`
+   * rejects it by design (it is not a routed contribution/identity record), so without special
+   * handling the gate would withhold a CID it advertises — `isPublicControlRecord` recognizes the
+   * well-formed checkpoint as public transparency material (PUB-API-CHECKPOINT-1).  Any OTHER
+   * undecodable / unrouted record is never served (fail-closed).
+   */
+  private static recordIsPublic(bytes: Uint8Array): boolean {
+    let record: ReturnType<typeof decodeAndRouteRecord>;
+    try {
+      record = decodeAndRouteRecord(bytes);
+    } catch {
+      return isPublicControlRecord(bytes);
+    }
+    return !('visibility_scope' in record) || record.visibility_scope === 'public';
+  }
+
+  /**
+   * Whether `blockCid` is a block reference of contribution `bytes`'s SIGNED body — the author's
+   * attestation of which blocks it owns — re-derived via the SHARED `cappedBodyBlockCids` (the exact
+   * client derivation), NOT the unauthenticated pack-table edge `recordsReferencing` indexes.  This
+   * is the §29 serve gate's defence against PUB-API-BLOCK-OWNER-2: a valid public contribution that
+   * names a PRIVATE block CID only in its pack-table `deps` must NOT make that block public.  The
+   * fan-out scan is §27.1-bounded (an accepted body is already within the cap; the bound is
+   * defence-in-depth), never O(n) over `source_snapshot_cids`.
+   */
+  private recordOwnsBlockBySignedBody(bytes: Uint8Array, blockCid: string): boolean {
+    let record: ReturnType<typeof decodeAndRouteRecord>;
+    try {
+      record = decodeAndRouteRecord(bytes);
+    } catch {
+      return false;
+    }
+    if (record.kind !== 'contribution_event') return false;
+    return cappedBodyBlockCids(record, this.caps.maxFanOut).cids.includes(blockCid);
+  }
+
+  /**
+   * Whether `cid` may be served over the PUBLIC §29 read/exchange surface (the GET content routes +
+   * the pulse/exchange repack).  This is the SERVER counterpart of the client's PUBLIC-ONLY
+   * responder (`collectShareableCids`) and closes PUB-API-CORE-1: a non-public (`room_only`) record,
+   * its proofs, and its body/media BLOCKS are NEVER served by CID over the unauthenticated surface,
+   * so a caller that learns an in_room CID (e.g. a removed member) cannot exfiltrate the plaintext.
+   *
+   *   • record → public iff its own `visibility_scope` is public (or it is identity material);
+   *   • proof  → public iff the record it attests is public;
+   *   • block  → public iff SOME record that references it (body / thumbnail / image / manifest /
+   *              source-snapshot edge) is public — resolved via the reverse closure edge;
+   *   • chunk  → NEVER public here.  A `chunk` carries no visibility and the server cannot resolve
+   *              it to its owning record (a block CID addresses raw bytes; the descriptor that lists
+   *              `chunk_cids` is not stored under a server-decodable key), so — exactly like the
+   *              client responder, which also never serves chunks — a chunk is withheld over the
+   *              public surface (fail-closed).  Authorized chunked-media serving is the separate
+   *              §29.4 "if authorized" path (a tracked enhancement), never this public one.
+   *
+   * The capability-authorized §29.8 room export is a SEPARATE path and is intentionally NOT gated
+   * here (an authorized export carries the room's full in_room closure by design).
+   */
+  async isPublicServable(cid: string): Promise<boolean> {
+    const obj = await this.store.getObject(cid);
+    if (!obj) return false;
+    switch (obj.kind) {
+      case 'record':
+        return LcapIngestServer.recordIsPublic(obj.bytes);
+      case 'proof': {
+        let recordCid: string;
+        try {
+          recordCid = decodeProof(obj.bytes).record_cid;
+        } catch {
+          return false;
+        }
+        const rec = await this.store.getObject(recordCid);
+        return rec?.kind === 'record' && LcapIngestServer.recordIsPublic(rec.bytes);
+      }
+      case 'block': {
+        for (const recordCid of await this.store.recordsReferencing(cid, 'block')) {
+          // A block carries no visibility of its own — it is authorized by a record that references
+          // it.  THREE conditions must ALL hold; any one alone is exploitable:
+          //   1. ACCEPTED — `ingestPackFrames` records the block→record edge BEFORE `commitBatch`
+          //      proves the contribution, so an INVALID/REJECTED public record must not authorize a
+          //      block (PUB-API-BLOCK-OWNER-1); the acceptance log records only validate→guard→commit.
+          //   2. PUBLIC — the owner's own `visibility_scope` (a non-public owner never serves a block).
+          //   3. SIGNED-BODY OWNERSHIP — the block CID must be a ref of the owner's SIGNED body, NOT
+          //      the UNAUTHENTICATED pack-table edge `recordsReferencing` indexes.  Otherwise an
+          //      attacker uploads a VALID public contribution that names a known PRIVATE block CID
+          //      ONLY in the pack-table `deps`, and the table edge would disclose that block.  The
+          //      signed body is the author's attestation of which blocks the contribution owns
+          //      (PUB-API-BLOCK-OWNER-2) — re-derived via the SHARED `cappedBodyBlockCids`.
+          if (!(await this.store.isAccepted(recordCid))) continue;
+          const rec = await this.store.getObject(recordCid);
+          if (rec?.kind !== 'record' || !LcapIngestServer.recordIsPublic(rec.bytes)) continue;
+          if (this.recordOwnsBlockBySignedBody(rec.bytes, cid)) return true;
+        }
+        return false;
+      }
+      case 'chunk':
+        return false;
+    }
+  }
+
+  /** The PUBLIC-servable subset of `cids`, preserving order — the want filter the pulse/exchange
+   *  responder applies BEFORE repack so a non-public want is never assembled into a served pack. */
+  async filterPublicServable(cids: readonly string[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const cid of cids) if (await this.isPublicServable(cid)) out.push(cid);
+    return out;
+  }
+
+  /**
    * The canonical `room_id_hash` for a record's bytes — `roomIdHash(networkId, roomId)` over the
    * record's signed room id (`home_room_id` / `room_id`).  The repack stamps it onto a served
    * record (the room is NOT in the body it could re-derive from), so the receiver lands the record
@@ -249,6 +368,14 @@ export class LcapIngestServer {
     relation: RecordEdgeRelation,
   ): Promise<void> {
     return this.store.indexRecordEdge(recordCid, relatedCid, relation);
+  }
+
+  /** Append `cid` to a room's acceptance log (idempotent), marking the contribution ACCEPTED.  The
+   *  public-block serve gate (`isPublicServable`) authorizes a block only via an ACCEPTED owner
+   *  (PUB-API-BLOCK-OWNER-1); this passthrough lets a direct-store setup mark that acceptance without
+   *  driving the full validate→guard→commit path. */
+  appendAcceptance(roomId: string, cid: string): Promise<number> {
+    return this.store.appendAcceptance(roomId, cid);
   }
 
   /**

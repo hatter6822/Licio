@@ -124,6 +124,31 @@ class FakePeer implements RtcPeerConnectionLike {
   }
 }
 
+/** A peer that trickles BOTH an IP-revealing host candidate AND a relay candidate carrying a
+ *  related address — so the relay-only filter must DROP the host and SCRUB the relay's raddr/rport
+ *  before the candidate leaves the device (PRIV-CARRIER-6 / PRIV-SYNC-3). */
+class RelayEmittingPeer extends FakePeer {
+  override async setLocalDescription(): Promise<void> {
+    queueMicrotask(() => {
+      this.onicecandidate?.({
+        candidate: {
+          candidate: 'candidate:1 1 udp 1 1.2.3.4 9 typ host',
+          sdpMid: '0',
+          sdpMLineIndex: 0,
+        },
+      });
+      this.onicecandidate?.({
+        candidate: {
+          candidate: 'candidate:2 1 udp 2 5.6.7.8 3478 typ relay raddr 1.2.3.4 rport 9',
+          sdpMid: '0',
+          sdpMLineIndex: 0,
+        },
+      });
+      this.onicecandidate?.({ candidate: null });
+    });
+  }
+}
+
 // --- an in-memory server-blind rendezvous (poll never an existence oracle) ----------
 
 function inMemoryRendezvous(): RendezvousTransport {
@@ -690,6 +715,171 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     ).rejects.toThrow(/requires a TURN server/);
   });
 
+  it('DROPS a peer’s OWN reflected op frame (wrong-direction AAD) while the peer opens it (PRIV-CARRIER-5)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-reflect',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const devB = await p2p.generateDeviceSigningKeyPair();
+    const devBPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(devB.publicKey));
+    const devAPub = p2p.toBase64Url(
+      await p2p.exportPublicKeyRaw(created.founder.signingKeyPair.publicKey),
+    );
+    const resolve = (id: string) =>
+      id === 'device-b'
+        ? { signingPublicKey: devBPub, activeAtEpoch: true }
+        : id === 'founder-dev'
+          ? { signingPublicKey: devAPub, activeAtEpoch: true }
+          : undefined;
+    const rendezvous = inMemoryRendezvous();
+    const link = new FakeLink();
+    const base = {
+      p2p,
+      rendezvous,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey: created.epochState.keys.rendezvousKey,
+      transportMode: 'direct_allowed' as const,
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 3_000,
+      rtcFactory: () => new FakePeer(link),
+    } satisfies Partial<ConnectPrivatePeerParams>;
+    const [{ channel: chAlice }, { channel: chBob }] = await Promise.all([
+      connectPrivatePeer({
+        ...base,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: resolve,
+      }),
+      connectPrivatePeer({
+        ...base,
+        selfDeviceId: 'device-b',
+        selfSigningKey: devB.privateKey,
+        resolveDevice: resolve,
+      }),
+    ]);
+
+    // Capture the SEALED binary op frames each underlying datachannel puts on the wire.
+    const sent: Array<{ ch: 'offerer' | 'answerer'; bytes: Uint8Array }> = [];
+    for (const [name, ch] of [
+      ['offerer', link.offererChannel],
+      ['answerer', link.answererChannel],
+    ] as const) {
+      if (!ch) continue;
+      const orig = ch.send.bind(ch);
+      ch.send = (data: string | ArrayBuffer | ArrayBufferView): void => {
+        if (typeof data !== 'string') {
+          const b =
+            data instanceof ArrayBuffer
+              ? new Uint8Array(data.slice(0))
+              : new Uint8Array(
+                  data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+                );
+          sent.push({ ch: name, bytes: b });
+        }
+        orig(data);
+      };
+    }
+
+    let aliceGot: Uint8Array | undefined;
+    let bobGot: Uint8Array | undefined;
+    chAlice.onMessage((f) => {
+      aliceGot = f;
+    });
+    chBob.onMessage((f) => {
+      bobGot = f;
+    });
+
+    // Alice authors an op frame: it is AEAD-sealed under her SEND direction (offerer→answerer or
+    // vice-versa) and the PEER opens it under the matching RECV direction.
+    chAlice.send(new Uint8Array([9, 8, 7]));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bobGot).toEqual(new Uint8Array([9, 8, 7])); // the peer opens it (correct direction)
+
+    // REFLECT alice's OWN sealed frame back into alice's OWN inbox.  Her open uses the OPPOSITE
+    // (recv) direction AAD, so her own send fails to open and is dropped — no self-reflection.
+    const aliceFrame = sent.at(-1);
+    expect(aliceFrame).toBeDefined();
+    if (!aliceFrame) throw new Error('no captured frame');
+    const aliceChannel = aliceFrame.ch === 'offerer' ? link.offererChannel : link.answererChannel;
+    aliceChannel?.onmessage?.({ data: aliceFrame.bytes.buffer });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(aliceGot).toBeUndefined(); // dropped — the wrong-direction AAD fails the AEAD open
+
+    chAlice.close();
+    chBob.close();
+  });
+
+  it('relay_only DROPS host candidates + SCRUBS the relay related-address (PRIV-CARRIER-6/PRIV-SYNC-3)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-relay-ice',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const devB = await p2p.generateDeviceSigningKeyPair();
+    const devBPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(devB.publicKey));
+    const devAPub = p2p.toBase64Url(
+      await p2p.exportPublicKeyRaw(created.founder.signingKeyPair.publicKey),
+    );
+    const resolve = (id: string) =>
+      id === 'device-b'
+        ? { signingPublicKey: devBPub, activeAtEpoch: true }
+        : id === 'founder-dev'
+          ? { signingPublicKey: devAPub, activeAtEpoch: true }
+          : undefined;
+    const rendezvous = inMemoryRendezvous();
+    const link = new FakeLink();
+    receivedIceCandidates.length = 0; // reset (this fixture has no beforeEach)
+    const base = {
+      p2p,
+      rendezvous,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey: created.epochState.keys.rendezvousKey,
+      transportMode: 'relay_only' as const,
+      iceServers: [{ urls: 'turn:turn.test:3478' }], // relay_only requires a TURN server
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 3_000,
+      rtcFactory: () => new RelayEmittingPeer(link),
+    } satisfies Partial<ConnectPrivatePeerParams>;
+    const [{ channel: ca }, { channel: cb }] = await Promise.all([
+      connectPrivatePeer({
+        ...base,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: resolve,
+      }),
+      connectPrivatePeer({
+        ...base,
+        selfDeviceId: 'device-b',
+        selfSigningKey: devB.privateKey,
+        resolveDevice: resolve,
+      }),
+    ]);
+    // A relay candidate reached the peer; NONE of the IP-revealing types survived the filter.
+    expect(receivedIceCandidates.length).toBeGreaterThan(0);
+    expect(receivedIceCandidates.every((c) => /\btyp relay\b/.test(c.candidate ?? ''))).toBe(true);
+    expect(
+      receivedIceCandidates.some((c) => /\btyp (host|srflx|prflx)\b/.test(c.candidate ?? '')),
+    ).toBe(false);
+    // The relay's related-address was neutralized: the host IP (1.2.3.4) rides NO candidate.
+    expect(receivedIceCandidates.some((c) => (c.candidate ?? '').includes('1.2.3.4'))).toBe(false);
+    expect(
+      receivedIceCandidates.every((c) => /raddr 0\.0\.0\.0 rport 0/.test(c.candidate ?? '')),
+    ).toBe(true);
+    ca.close();
+    cb.close();
+  });
+
   it('Tier-2 cap SKIPS a flood of fake-cap announcements (no dial is ever attempted)', async () => {
     const p2p = await import('@licio/private-p2p');
     const cap = await import('@licio/private-p2p/rendezvous-cap');
@@ -819,4 +1009,127 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     // Real BBS verification over a 20-announcement flood, polled across the timeout window, is
     // legitimately CPU-heavy — give it ample headroom over the 5s default so slower CI isn't flaky.
   }, 30_000);
+
+  it('ITERATES to the next candidate when the first dial fails (PRIV-CARRIER-3)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-iterate',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const timeBucket = p2p.rendezvousTimeBucket(Date.now());
+    const sig = p2p.toBase64Url((await p2p.generateX25519KeyPair()).publicKey);
+    const rendezvous = inMemoryRendezvous();
+    // Two registered but UNREACHABLE peers: each rtcFactory hands back a FakePeer with a FRESH,
+    // unpaired FakeLink, so no counterparty ever answers and the data channel never opens — each
+    // dial hits the (small) per-candidate deadline.
+    for (const deviceId of ['device-bad-1', 'device-bad-2']) {
+      await rendezvous.announce(
+        await p2p.buildRendezvousRecord({
+          rendezvousKey,
+          epoch,
+          timeBucket,
+          deviceId,
+          announcement: {
+            schema: 'licio.private.rendezvous_announcement.v1',
+            peer_device_id: deviceId,
+            signaling_public_key: sig,
+            transport_hints: [],
+          },
+          nowMs: Date.now(),
+        }),
+      );
+    }
+    let rtcCreated = 0;
+    await expect(
+      connectPrivatePeer({
+        p2p,
+        rendezvous,
+        roomIdCommitment: created.roomIdCommitment,
+        epoch,
+        rendezvousKey,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: (id: string) =>
+          id.startsWith('device-bad-') ? { signingPublicKey: sig, activeAtEpoch: true } : undefined,
+        transportMode: 'direct_allowed',
+        nowMs: () => Date.now(),
+        pollIntervalMs: 1,
+        timeoutMs: 800,
+        // Abandon each unreachable dial quickly so the NEXT candidate is tried within the budget.
+        candidateDialTimeoutMs: 80,
+        rtcFactory: () => {
+          rtcCreated++;
+          return new FakePeer(new FakeLink());
+        },
+      }),
+    ).rejects.toThrow();
+    // BOTH candidates were dialed — the OLD carrier committed to candidates[0] only (→ 1).
+    expect(rtcCreated).toBeGreaterThanOrEqual(2);
+  }, 15_000);
+
+  it('KEEPS POLLING after a failed dial round instead of bailing (PRIV-CARRIER-3-POLL)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-keep-polling',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const timeBucket = p2p.rendezvousTimeBucket(Date.now());
+    const sig = p2p.toBase64Url((await p2p.generateX25519KeyPair()).publicKey);
+    const inner = inMemoryRendezvous();
+    let pollCount = 0;
+    const rendezvous = {
+      ...inner,
+      poll: (roomBlindId: string) => {
+        pollCount += 1;
+        return inner.poll(roomBlindId);
+      },
+    };
+    // ONE registered-but-unreachable peer: the first dial fails fast (fresh unpaired FakeLink).
+    await rendezvous.announce(
+      await p2p.buildRendezvousRecord({
+        rendezvousKey,
+        epoch,
+        timeBucket,
+        deviceId: 'device-bad',
+        announcement: {
+          schema: 'licio.private.rendezvous_announcement.v1',
+          peer_device_id: 'device-bad',
+          signaling_public_key: sig,
+          transport_hints: [],
+        },
+        nowMs: Date.now(),
+      }),
+    );
+    await expect(
+      connectPrivatePeer({
+        p2p,
+        rendezvous,
+        roomIdCommitment: created.roomIdCommitment,
+        epoch,
+        rendezvousKey,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: (id: string) =>
+          id === 'device-bad' ? { signingPublicKey: sig, activeAtEpoch: true } : undefined,
+        transportMode: 'direct_allowed',
+        nowMs: () => Date.now(),
+        pollIntervalMs: 30,
+        timeoutMs: 600,
+        candidateDialTimeoutMs: 60,
+        rtcFactory: () => new FakePeer(new FakeLink()),
+      }),
+    ).rejects.toThrow();
+    // The OLD carrier threw the dial error after the FIRST failed round (≈1 poll); the fix keeps
+    // polling until the deadline (a fresh peer / a cooldown expiry may yet arrive) — ≈600/30 ≈ 20
+    // polls — so a reachable peer announced AFTER the first round is not silently abandoned.
+    expect(pollCount).toBeGreaterThan(5);
+  }, 15_000);
 });

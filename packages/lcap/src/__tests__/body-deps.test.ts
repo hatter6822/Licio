@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// The §27.1 fan-out cap helper shared by the commit / share / export paths (#3): it must bound a
-// body's block references WITHOUT ever spreading/iterating the full source_snapshot_cids array past
-// the cap, and report `overCap` on the server's exact criterion (body + attachment + snapshots).
+// The §27.1 fan-out cap helper shared by the client commit / share / export paths AND the server's
+// public-serve authorization gate (#3 / PUB-API-BLOCK-OWNER-2): it must bound a body's block
+// references WITHOUT ever spreading/iterating the full source_snapshot_cids array past the cap, and
+// report `overCap` on the server's exact criterion (body + attachment + snapshots).
 
 import { describe, expect, it } from 'vitest';
-import { cappedBodyBlockCids } from './body-deps.js';
+import { cappedBodyBlockCids } from '../records/body-deps.js';
 
 describe('cappedBodyBlockCids (§27.1 fan-out helper, #3)', () => {
   it('returns all refs in order for a within-cap body, overCap=false', () => {

@@ -26,6 +26,9 @@ import { DEFAULT_RENDEZVOUS_CONFIG, RendezvousService } from '../private-rendezv
 import {
   announceRequestSchema,
   InMemoryRendezvousStore,
+  MAX_SIGNALS_PER_PEER,
+  MAX_SIGNALS_PER_SENDER,
+  type RendezvousStore,
   type StoredRendezvousRecord,
   signalRequestSchema,
 } from '../private-rendezvous/stores.js';
@@ -85,14 +88,16 @@ describe('WS-S.11 — stored-record opacity (§15.3.1)', () => {
     expect(records).toHaveLength(1);
     const record = records[0];
     if (!record) throw new Error('expected a record');
-    // EXACT key set — nothing else may be returned.
+    // EXACT key set — nothing else may be returned.  `room_blind_id` is ECHOED back (it equals the
+    // poll KEY the caller already supplied, and the client rebuilds the §15.3 announcement AEAD AAD
+    // from it to decrypt): an opaque, per-(epoch,bucket) blind id, so it adds NO linkability the
+    // poller did not already hold — every returned key is still an opaque blind id / ciphertext / TTL.
     expect(Object.keys(record).sort()).toStrictEqual([
       'encrypted_announcement',
       'expires_at',
       'peer_blind_id',
+      'room_blind_id',
     ]);
-    // The room blind id is the poll KEY, not echoed in the record (un-linkable).
-    expect(Object.keys(record)).not.toContain('room_blind_id');
     for (const key of Object.keys(record)) {
       expect(leaksIdentity(key), `record key "${key}" must not leak identity`).toBe(false);
     }
@@ -111,9 +116,12 @@ describe('WS-S.11 — stored-record opacity (§15.3.1)', () => {
     expect(signals).toHaveLength(1);
     const signal = signals[0];
     if (!signal) throw new Error('expected a signal');
+    // `recipient_blind_id` is ECHOED back (it equals the drain KEY = the caller's own blind id, and
+    // the client rebuilds the §15.4 signal AEAD AAD from it to decrypt): opaque, adds no linkability.
     expect(Object.keys(signal).sort()).toStrictEqual([
       'ciphertext',
       'expires_at',
+      'recipient_blind_id',
       'room_blind_id',
       'sender_blind_id',
     ]);
@@ -304,6 +312,129 @@ describe.skipIf(!DB_URL)(
         .from(privateRendezvousRecords)
         .where(eq(privateRendezvousRecords.roomBlindId, roomBlind));
       expect(stillOne).toHaveLength(1);
+    });
+  },
+);
+
+describe('PRIV-API-RENDEZVOUS-3 — fair signal eviction', () => {
+  it('a fresh sender displaces an over-represented flooder rather than being drop-newest', async () => {
+    const store = new InMemoryRendezvousStore();
+    const recipient = 'recipient-blind-id';
+    const ttl = 1_000_000;
+    // Fill the per-peer queue to capacity with flooders, each at the per-sender cap (so no ONE
+    // sender_blind_id exceeds its bound, but together they fill the queue via varied ids).
+    let n = 0;
+    const flooders = MAX_SIGNALS_PER_PEER / MAX_SIGNALS_PER_SENDER;
+    for (let f = 0; f < flooders; f++) {
+      for (let i = 0; i < MAX_SIGNALS_PER_SENDER; i++) {
+        await store.putSignal({
+          roomBlindId: ROOM_BLIND,
+          senderBlindId: `flooder-${f}`,
+          recipientBlindId: recipient,
+          ciphertext: `flood-${n++}`,
+          expiresAt: ttl,
+        });
+      }
+    }
+    // A FRESH honest sender's bootstrap offer must get IN (evicting one over-represented flooder
+    // slot), not be drop-newest rejected.
+    await store.putSignal({
+      roomBlindId: ROOM_BLIND,
+      senderBlindId: 'honest-peer',
+      recipientBlindId: recipient,
+      ciphertext: 'honest-offer',
+      expiresAt: ttl,
+    });
+    const drained = await store.drainSignals(recipient, 0, MAX_SIGNALS_PER_PEER);
+    expect(drained.some((s) => s.ciphertext === 'honest-offer')).toBe(true);
+    expect(drained.length).toBeLessThanOrEqual(MAX_SIGNALS_PER_PEER);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PRIV-API-RENDEZVOUS-4 — the poll/sweep boundary contract over BOTH store impls
+// (the in-memory default always; the gated Drizzle store under DATABASE_URL), so the
+// strict-`gt` expiry boundary + the sweep cannot diverge between them.
+// ---------------------------------------------------------------------------
+
+function rec(room: string, peer: string, expiresAt: number): StoredRendezvousRecord {
+  // Distinct sealed content per peer: the store keys presence by CONTENT (PRIV-API-RENDEZVOUS-4), and
+  // distinct announcements carry distinct ciphertext, so co-resident records occupy separate slots.
+  return {
+    roomBlindId: room,
+    peerBlindId: peer,
+    encryptedAnnouncement: `${ANNOUNCEMENT}-${peer}`,
+    expiresAt,
+  };
+}
+
+async function runRendezvousStoreContract(
+  store: RendezvousStore,
+  tag: string,
+  track: (room: string) => void,
+): Promise<void> {
+  // (a) an EXPIRED record is excluded from poll; a live one is returned.
+  const room1 = `${tag}-exp`;
+  track(room1);
+  await store.announce(rec(room1, 'p', 100));
+  expect(await store.poll(room1, 50, 10)).toHaveLength(1); // 100 > 50 ⇒ live
+  expect(await store.poll(room1, 200, 10)).toHaveLength(0); // 100 ≤ 200 ⇒ expired
+
+  // (b) a record EXACTLY at nowMs is expired (strict gt, NOT lte).
+  const room2 = `${tag}-bound`;
+  track(room2);
+  await store.announce(rec(room2, 'p', 100));
+  expect(await store.poll(room2, 100, 10)).toHaveLength(0); // expiresAt == nowMs ⇒ NOT live
+  expect(await store.poll(room2, 99, 10)).toHaveLength(1); // one ms earlier ⇒ live
+
+  // (c) sweepExpired removes the dead row, keeps the live one.
+  const room3 = `${tag}-sweep`;
+  track(room3);
+  await store.announce(rec(room3, 'live', 1_000_000));
+  await store.announce(rec(room3, 'dead', 100));
+  expect(await store.sweepExpired(200)).toBeGreaterThanOrEqual(1);
+  expect((await store.poll(room3, 200, 10)).map((r) => r.peerBlindId)).toEqual(['live']);
+}
+
+describe('RendezvousStore poll/sweep contract — in-memory (PRIV-API-RENDEZVOUS-4)', () => {
+  it('honors the expiry/boundary/sweep contract', async () => {
+    await runRendezvousStoreContract(new InMemoryRendezvousStore(), 'mem', () => {});
+  });
+});
+
+const STORE_DB_URL = process.env['DATABASE_URL'];
+describe.skipIf(!STORE_DB_URL)(
+  'RendezvousStore poll/sweep contract — Drizzle/Postgres (PRIV-API-RENDEZVOUS-4)',
+  () => {
+    let db: Awaited<ReturnType<typeof import('@licio/db')['createDbClient']>>;
+    const usedRooms: string[] = [];
+
+    beforeAll(async () => {
+      const { createDbClient, migrationsFolder } = await import('@licio/db');
+      const { migrate } = await import('drizzle-orm/postgres-js/migrator');
+      db = createDbClient(STORE_DB_URL as string);
+      await migrate(db, { migrationsFolder: migrationsFolder() });
+    });
+
+    afterAll(async () => {
+      if (!db) return;
+      const { privateRendezvousRecords } = await import('@licio/db');
+      const { inArray } = await import('drizzle-orm');
+      if (usedRooms.length > 0) {
+        await db
+          .delete(privateRendezvousRecords)
+          .where(inArray(privateRendezvousRecords.roomBlindId, usedRooms));
+      }
+      const client = (db as unknown as { $client: { end: () => Promise<void> } }).$client;
+      await client.end();
+    });
+
+    it('honors the SAME expiry/boundary/sweep contract as the in-memory store', async () => {
+      const { DrizzleRendezvousStore } = await import('../private-rendezvous/drizzle-store.js');
+      const tag = `drz-${Date.now().toString(36)}`;
+      await runRendezvousStoreContract(new DrizzleRendezvousStore(db), tag, (r) =>
+        usedRooms.push(r),
+      );
     });
   },
 );

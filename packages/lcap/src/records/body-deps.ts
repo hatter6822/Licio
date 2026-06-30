@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // The §27.1 fan-out cap on a contribution's SIGNED-body BLOCK references, applied IDENTICALLY on
-// every client path that derives those refs from a decoded body — the commit path (bundle-import),
-// the share/push path (exchange.collectShareableCids), and the export path (bundle-export).  The
+// every path — CLIENT and SERVER — that derives those refs from a decoded body: the client commit
+// (bundle-import), share/push (exchange.collectShareableCids), and export (bundle-export) paths, AND
+// the server's PUBLIC-serve authorization gate (`LcapIngestServer.isPublicServable` — the block CID
+// it serves must be a SIGNED-body ref of an accepted public owner, NOT an unauthenticated pack-table
+// edge, PUB-API-BLOCK-OWNER-2).  It is the ONE shared, authenticated derivation, so the two planes
+// can never disagree on which blocks a contribution owns.  The
 // `source_snapshot_cids` array carries NO schema `.max()`, so a malicious body can name thousands of
 // CIDs; a naive `[...source_snapshot_cids]` spread would then drive O(n) work — a spread, an awaited
 // per-element store query, or an oversized quarantine row — a §27 DoS the unauthenticated table-dep

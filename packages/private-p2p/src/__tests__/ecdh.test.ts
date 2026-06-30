@@ -58,4 +58,13 @@ describe('x25519SharedSecret — the agreement property', () => {
     const a = await generateX25519KeyPair();
     await expect(x25519SharedSecret(a.privateKey, new Uint8Array(31))).rejects.toThrow();
   });
+
+  it('rejects an all-zero (non-contributory) shared secret from a low-order point (PRIV-CRYPTO-4)', async () => {
+    const a = await generateX25519KeyPair();
+    // The all-zero (32-byte) public key is a low-order point: a contributory X25519 against it yields
+    // an all-zero shared secret, which RFC 7748 §6.1 mandates rejecting.  Compliant WebCrypto rejects
+    // it at deriveBits; the wrapper's explicit all-zero check is the belt-and-suspenders for any impl
+    // that does not.  EITHER way the non-contributory agreement is REJECTED, never returned.
+    await expect(x25519SharedSecret(a.privateKey, new Uint8Array(32))).rejects.toThrow();
+  });
 });

@@ -287,4 +287,21 @@ export class DrizzleLcapServerStore implements LcapServerStore {
       .orderBy(asc(lcapRecordClosure.relatedCid));
     return rows.map((r) => r.relatedCid);
   }
+
+  async recordsReferencing(
+    relatedCid: string,
+    relation: RecordEdgeRelation,
+  ): Promise<readonly string[]> {
+    // The reverse of recordEdges — drives the §29 public-serve visibility resolution.  The
+    // `lcap_record_closure(related_cid, relation)` index (migration 0050) keeps this lookup cheap
+    // on the serve hot path rather than a full-table scan.
+    const rows = await this.#db
+      .select({ recordCid: lcapRecordClosure.recordCid })
+      .from(lcapRecordClosure)
+      .where(
+        and(eq(lcapRecordClosure.relatedCid, relatedCid), eq(lcapRecordClosure.relation, relation)),
+      )
+      .orderBy(asc(lcapRecordClosure.recordCid));
+    return rows.map((r) => r.recordCid);
+  }
 }

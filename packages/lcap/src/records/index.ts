@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 export {
+  type BodyBlockRefs,
+  blockRefFanOut,
+  type CappedBodyBlockCids,
+  cappedBodyBlockCids,
+  isOverCapContribution,
+  type RecordRefs,
+  recordRefFanOut,
+} from './body-deps.js';
+export {
   encodeContributionEvent,
   mapLcapVisibilityToStory,
   mapStoryVisibilityToLcap,

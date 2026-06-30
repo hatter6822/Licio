@@ -44,11 +44,17 @@ let fx: LcapFixtures;
 let pushPack: Uint8Array;
 let proofBytes: Uint8Array;
 let proofCid: string;
+// The PUBLIC record's proof — the §29 public-serve gate (PUB-API-CORE-1) serves these while
+// withholding the in_room record/proof.
+let publicProofBytes: Uint8Array;
+let publicProofCid: string;
 
 beforeAll(async () => {
   fx = await buildLcapFixtures();
   proofBytes = encodeWithSchema(detachedProofV2Schema, fx.proof);
   proofCid = await cidFor('proof', proofBytes);
+  publicProofBytes = encodeWithSchema(detachedProofV2Schema, fx.publicProof);
+  publicProofCid = await cidFor('proof', publicProofBytes);
   pushPack = writePack({
     objects: [
       {
@@ -236,8 +242,41 @@ describe('POST /exchange — §29.2 bidirectional sync', () => {
 });
 
 describe('POST /exchange — §29.2 response_pack (server-push of client wants)', () => {
-  it('serves a response_pack of the client wants the server holds, readable back', async () => {
+  it('serves a response_pack of the PUBLIC client wants the server holds, readable back', async () => {
     const srv = new LcapIngestServer(NET, () => NOW);
+    await srv.putObject(fx.publicRecordCid, 'record', fx.publicBody);
+    await srv.putObject(publicProofCid, 'proof', publicProofBytes);
+
+    const res = await createLcapRoutes(srv).request('/exchange', {
+      method: 'POST',
+      body: exchangeBytes({
+        pulse: clientPulse(),
+        interests: [],
+        want: [
+          { cid: fx.publicRecordCid, cid_kind: 'record', reason: 'explicit_user_request' },
+          { cid: publicProofCid, cid_kind: 'proof', reason: 'explicit_user_request' },
+        ],
+      }),
+    });
+    const decoded = decodeWithSchema(
+      exchangeResponseV2Schema,
+      new Uint8Array(await res.arrayBuffer()),
+    );
+    expect(decoded.status).toBe('ok');
+    expect(decoded.response_pack).toBeDefined();
+    const read = await readPack(decoded.response_pack as Uint8Array);
+    expect(read.ok).toBe(true);
+    if (read.ok) {
+      expect([...read.pack.frames.keys()].sort()).toEqual(
+        [fx.publicRecordCid, publicProofCid].sort(),
+      );
+    }
+  });
+
+  it('NEVER serves a non-public (in_room) record OR its proof over /exchange (PUB-API-CORE-1)', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    // The in_room record + its proof are HELD (e.g. server-stored room content), but a caller that
+    // learns their CIDs must not be able to exfiltrate the plaintext over the public exchange.
     await srv.putObject(fx.recordCid, 'record', fx.body);
     await srv.putObject(proofCid, 'proof', proofBytes);
 
@@ -256,19 +295,16 @@ describe('POST /exchange — §29.2 response_pack (server-push of client wants)'
       exchangeResponseV2Schema,
       new Uint8Array(await res.arrayBuffer()),
     );
-    expect(decoded.status).toBe('ok');
-    expect(decoded.response_pack).toBeDefined();
-    const read = await readPack(decoded.response_pack as Uint8Array);
-    expect(read.ok).toBe(true);
-    if (read.ok) {
-      expect([...read.pack.frames.keys()].sort()).toEqual([fx.recordCid, proofCid].sort());
-    }
+    // Nothing public to serve ⇒ no response_pack at all (the in_room want is filtered before repack).
+    expect(decoded.response_pack).toBeUndefined();
   });
 
   it('marks the exchange partial when a held want is dropped for the response budget', async () => {
     const srv = new LcapIngestServer(NET, () => NOW);
-    await srv.putObject(fx.recordCid, 'record', fx.body);
-    await srv.putObject(proofCid, 'proof', proofBytes);
+    // PUBLIC content (the public-serve gate withholds the in_room record), so the budget — not the
+    // visibility gate — is what drops the second want.
+    await srv.putObject(fx.publicRecordCid, 'record', fx.publicBody);
+    await srv.putObject(publicProofCid, 'proof', publicProofBytes);
 
     // Measure the REAL serialized size of a one-record response (header + table + CIDs + deps, not a
     // payload estimate — #VV) by serving JUST the record under a generous budget.
@@ -277,7 +313,7 @@ describe('POST /exchange — §29.2 response_pack (server-push of client wants)'
       body: exchangeBytes({
         pulse: { ...clientPulse(), budgets: { ...DEFAULT_BUDGET, max_response_bytes: 1_000_000 } },
         interests: [],
-        want: [{ cid: fx.recordCid, cid_kind: 'record', reason: 'explicit_user_request' }],
+        want: [{ cid: fx.publicRecordCid, cid_kind: 'record', reason: 'explicit_user_request' }],
       }),
     });
     const oneRecordBytes = (
@@ -298,8 +334,8 @@ describe('POST /exchange — §29.2 response_pack (server-push of client wants)'
         pulse: tightPulse,
         interests: [],
         want: [
-          { cid: fx.recordCid, cid_kind: 'record', reason: 'explicit_user_request' },
-          { cid: proofCid, cid_kind: 'proof', reason: 'explicit_user_request' },
+          { cid: fx.publicRecordCid, cid_kind: 'record', reason: 'explicit_user_request' },
+          { cid: publicProofCid, cid_kind: 'proof', reason: 'explicit_user_request' },
         ],
       }),
     });

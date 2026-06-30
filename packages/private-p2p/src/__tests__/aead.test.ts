@@ -6,6 +6,7 @@
 // §25.4 padding + §10.6 pad-not-compress rules.
 import { describe, expect, it } from 'vitest';
 import {
+  aeadOpen,
   assertCompressionAllowed,
   type BodyAadInput,
   buildBodyAad,
@@ -96,6 +97,20 @@ describe('object-body AEAD (§10.5)', () => {
         openBody(sealed.objectKey, sealed.nonce, sealed.ciphertext, mutate(aad)),
       ).rejects.toMatchObject({ reason: 'aead_open_failed' });
     }
+  });
+
+  it('rejects a wrong-length key with a typed PrivateAeadError (PRIV-CRYPTO-2)', async () => {
+    const aad = baseBodyAad();
+    const sealed = await sealBody(utf8('body'), aad, 'small-op-4k');
+    // A 31-byte (or any non-32) key must surface as the documented typed error, not a raw WebCrypto throw.
+    const shortKey = sealed.objectKey.subarray(0, 31);
+    await expect(openBody(shortKey, sealed.nonce, sealed.ciphertext, aad)).rejects.toMatchObject({
+      name: 'PrivateAeadError',
+      reason: 'object_key_wrong_length',
+    });
+    await expect(aeadOpen(new Uint8Array(16), new Uint8Array(40))).rejects.toMatchObject({
+      reason: 'object_key_wrong_length',
+    });
   });
 
   it('treats parent_op_ids as an unordered set (sorted canonically)', async () => {

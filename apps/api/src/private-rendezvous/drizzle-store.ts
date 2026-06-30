@@ -5,8 +5,9 @@
 // §8.2-allowed opaque columns of `private_rendezvous_records` are written (blind
 // ids + ciphertext + expiry); there is NO room/account reference (§15.3.1).  All
 // access is Drizzle's parameterized builder (no string-SQL).  A re-announce is a
-// delete-then-insert (the table has no (room,peer) unique constraint by design —
-// it stores no stable identity).  Covered by the gated store-contract test.
+// delete-then-insert deduped by the sealed-announcement CONTENT (NOT the forgeable
+// peer blind id, PRIV-API-RENDEZVOUS-4); the table has no unique constraint by
+// design — it stores no stable identity.  Covered by the gated store-contract test.
 //
 // Signals (§15.4) are TRANSIENT and never persisted — they ride an in-memory
 // mailbox even here (process-local, the same limitation as the WS-R LCAP signal
@@ -29,22 +30,25 @@ export class DrizzleRendezvousStore implements RendezvousStore {
   constructor(private readonly db: DbExecutor) {}
 
   async announce(record: StoredRendezvousRecord): Promise<void> {
-    // Re-announce REPLACES the peer's prior record (no stable identity column,
-    // §15.3.1).  The delete-then-insert must be atomic: two concurrent re-announces
-    // for the same (room, peer) could both delete before either inserts, leaving
-    // duplicate live rows a retrying client uses to consume multiple poll slots.
-    // A transaction-scoped advisory lock keyed on (room, peer) serializes them
-    // without adding a unique constraint (auto-released on commit/rollback).
+    // Dedup by the sealed-announcement CONTENT, NOT the forgeable `peer_blind_id`
+    // (PRIV-API-RENDEZVOUS-4): after the server cap removal any member can derive
+    // another device's peer blind id, so keying the slot on it let a hostile member
+    // OVERWRITE an honest peer's presence.  An IDENTICAL re-announce is idempotent
+    // (delete-then-insert by content); a DISTINCT announcement (spoof or a fresh
+    // ephemeral) COEXISTS.  The delete-then-insert must be atomic: two concurrent
+    // identical re-announces could both delete before either inserts, leaving
+    // duplicate live rows.  A transaction-scoped advisory lock keyed on (room,
+    // content) serializes them without a unique constraint (auto-released on commit).
     await this.db.transaction(async (tx) => {
       await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtext(${record.roomBlindId}), hashtext(${record.peerBlindId}))`,
+        sql`SELECT pg_advisory_xact_lock(hashtext(${record.roomBlindId}), hashtext(${record.encryptedAnnouncement}))`,
       );
       await tx
         .delete(privateRendezvousRecords)
         .where(
           and(
             eq(privateRendezvousRecords.roomBlindId, record.roomBlindId),
-            eq(privateRendezvousRecords.peerBlindId, record.peerBlindId),
+            eq(privateRendezvousRecords.encryptedAnnouncement, record.encryptedAnnouncement),
           ),
         );
       await tx.insert(privateRendezvousRecords).values({

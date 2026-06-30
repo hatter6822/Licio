@@ -1,22 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// The runtime consumer that turns the (previously caller-less) live WebRTC carrier into a
-// real LCAP sync round (OFFLINE_SPEC §16, §22.6, WS-R.15.6).  Until now `connectLcapWebrtc`
-// + the `@licio/lcap-p2p` `WebrtcTransport` + the registry's `offlineExchange` all existed
-// but had NO runtime caller, so a live data channel was never actually driven by an
-// exchange.  `syncRoomOverP2p` closes that gap:
+// The runtime consumer that drives the live WebRTC carrier through a real LCAP sync round
+// (OFFLINE_SPEC §16, §22.6, WS-R.15.6).  `syncRoomOverP2p`:
 //
 //   1. derive the PUBLIC signaling key deterministically from the public `room_id_hash`
 //      (`derivePublicSignalKeyBytes`) — see `signal-key.ts` for why this is safe for
 //      public content (signaling secrecy is not LCAP's trust root; content-addressing +
 //      COSE signatures are);
-//   2. establish a live `WebrtcTransport` to the peer over the server-blind rendezvous
-//      (`connectLcapWebrtc`, which loads `@licio/lcap-p2p` by DYNAMIC import only, so the
+//   2. establish a live data CHANNEL to the peer over the server-blind rendezvous
+//      (`connectLcapWebrtcChannel`, which loads `@licio/lcap-p2p` by DYNAMIC import only, so the
 //      protocol/crypto core stays out of the initial bundle — `check:lcap-p2p-split`);
-//   3. assemble the transport set (the live WebRTC peer transport AHEAD of the always-
-//      correct HTTPS anchor) and run ONE §16 exchange through `offlineExchange`, which
-//      uses the seam's `selectTransports` (server-mediated transports forced LAST) so the
-//      anchor-last policy is NEVER bypassed, and the public-only carriage gate is applied.
+//   3. run ONE fully BIDIRECTIONAL §16 exchange over that channel
+//      (`runWebrtcBidirectionalExchange` — both peers serve public wants AND ingest), then
+//   4. back-stop with the always-correct HTTPS anchor through the registry's `offlineExchange`,
+//      whose `selectTransports` forces server-mediated transports LAST (anchor-last is never
+//      bypassed) and whose carriage gate fails closed off public-only transports for non-public
+//      packs (the WebRTC leg is itself public-only via the responder's `collectShareableCids`).
 //
 // If the WebRTC channel cannot be established (off-by-default, mode force-off, peer
 // unreachable, timeout) the establishment rejects; the consumer falls back to exchanging
@@ -155,9 +154,10 @@ export async function syncRoomOverP2p(
     }
   }
 
-  // If the user CANCELLED while the WebRTC leg was failing, do NOT fall through to the anchor: the
-  // HTTPS transport does not thread the AbortSignal into fetch, so a cancelled sync could otherwise
-  // still upload the request + push_pack to the server.
+  // If the user CANCELLED while the WebRTC leg was failing, do NOT fall through to the anchor.  The
+  // anchor leg DOES thread `params.signal` into fetch (https.ts `open(signal)` → send), but abort
+  // propagation races request start — this explicit pre-check ensures a cancel that landed during the
+  // WebRTC leg never even BEGINS the anchor upload of the request + push_pack.
   if (params.signal?.aborted) return null;
 
   // 2) Anchor back-stop: a requester-only exchange against the always-correct server, then INGEST
@@ -174,9 +174,9 @@ export async function syncRoomOverP2p(
   if (!anchor) {
     return webrtcIngested !== null ? { transport: 'webrtc', ingested: webrtcIngested } : null;
   }
-  // The HTTPS transport does not thread the AbortSignal into fetch, so the anchor request can still
-  // COMPLETE after a Cancel/unmount fired mid-flight — re-check before COMMITTING its response, so a
-  // cancelled sync never mutates the local store after the UI owner is gone (#JJ).
+  // The anchor leg threads the signal, but a fetch already IN FLIGHT can still COMPLETE before the
+  // abort propagates — re-check before COMMITTING its response, so a cancelled sync never mutates the
+  // local store after the UI owner is gone (#JJ).
   if (params.signal?.aborted) return null;
   // Room-scoped on the fallback too: the server serves explicit wants by CID with no room scope, so
   // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).  The

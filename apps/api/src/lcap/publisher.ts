@@ -32,6 +32,7 @@ import {
   type BlockVisibility,
   decideBlockPublish,
   IpfsBridge,
+  type PublicGatewayEligibilityInput,
   type PublishOutcome,
   type RepublicationSet,
   republicationSet,
@@ -194,12 +195,15 @@ export class LcapPublicPublisher {
     blockCid: string,
     bytes: Uint8Array,
     targets: readonly ProvenanceTarget[],
+    eligibility: PublicGatewayEligibilityInput,
   ): Promise<ReviewedPublishOutcome> {
     const review = await this.#reviewGate(targets);
     if (!review.approved) {
       return { outcome: { ok: false, reason: review.reason }, review };
     }
-    const outcome = await this.#bridge.republish(blockCid, bytes);
+    // The bridge re-runs the WS-S.4.4 eligibility guard over these signals (PUB-API-PUBLISH-2), so a
+    // block whose content was NARROWED to non-public since first publish is refused before re-pin.
+    const outcome = await this.#bridge.republish(blockCid, bytes, eligibility);
     return { outcome, review };
   }
 
@@ -218,6 +222,11 @@ export class LcapPublicPublisher {
     targetsOf: (
       blockCid: string,
     ) => Promise<readonly ProvenanceTarget[]> | readonly ProvenanceTarget[],
+    /** Re-derive each CID's CURRENT public-gateway eligibility (visibility/encryption/private-room),
+     *  so a block NARROWED to non-public since first publish is refused on re-pin (PUB-API-PUBLISH-2). */
+    eligibilityOf: (
+      blockCid: string,
+    ) => Promise<PublicGatewayEligibilityInput> | PublicGatewayEligibilityInput,
   ): Promise<{
     readonly set: RepublicationSet;
     readonly outcomes: ReadonlyMap<string, ReviewedPublishOutcome | 'no_bytes'>;
@@ -231,7 +240,8 @@ export class LcapPublicPublisher {
         continue;
       }
       const targets = await targetsOf(blockCid);
-      outcomes.set(blockCid, await this.republish(blockCid, bytes, targets));
+      const eligibility = await eligibilityOf(blockCid);
+      outcomes.set(blockCid, await this.republish(blockCid, bytes, targets, eligibility));
     }
     return { set, outcomes };
   }
