@@ -421,6 +421,12 @@ async function ingestPackFrames(
           ...(record.source_snapshot_cids !== undefined
             ? { sourceSnapshotCids: record.source_snapshot_cids }
             : {}),
+          // The target snapshot is a SEPARATE signed-body block edge (#1): index it too so a block
+          // referenced ONLY via `target_source_snapshot_cid` is reverse-indexed (servable) and joins
+          // the §29.8 export closure — matching the shared `cappedBodyBlockCids` ownership derivation.
+          ...(record.target_source_snapshot_cid !== undefined
+            ? { targetSourceSnapshotCid: record.target_source_snapshot_cid }
+            : {}),
         });
         if (!indexed) {
           statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });

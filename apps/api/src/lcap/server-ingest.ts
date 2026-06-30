@@ -380,14 +380,23 @@ export class LcapIngestServer {
 
   /**
    * Index a contribution's SIGNED-BODY-declared media block references (its `block` edges:
-   * `body_block_cid` / `attachment_manifest_cid` / `source_snapshot_cids`) under the §27.1
-   * reference cap (`maxFanOut`).  These refs are NOT part of the §27.2-guarded table DAG, so
-   * without a bound a record naming thousands of `source_snapshot_cids` would drive an
+   * `body_block_cid` / `attachment_manifest_cid` / `source_snapshot_cids` / `target_source_snapshot_cid`)
+   * under the §27.1 reference cap (`maxFanOut`).  These refs are NOT part of the §27.2-guarded table
+   * DAG, so without a bound a record naming thousands of `source_snapshot_cids` would drive an
    * unbounded (awaited) index-write loop here BEFORE signature validation — a §27 DoS,
    * amplified on the durable store.  The DECLARED count is bounded FIRST (before any parse),
    * so an over-cap record costs O(1): it indexes NOTHING and returns `false` (the caller
    * rejects it `rejected_resource_limit`).  Within the cap, each block-kind ref is indexed
    * (the store de-duplicates, so a block named in both the body and the table is one edge).
+   *
+   * The `target_source_snapshot_cid` is a SEPARATE block edge (NOT part of the fan-out-capped
+   * body/attachment/source-snapshot set), so — EXACTLY as the shared `cappedBodyBlockCids`
+   * includes it unconditionally in a contribution's owned-block set — it is indexed here without
+   * competing for a cap slot.  Otherwise a block referenced ONLY via the signed-body target
+   * snapshot would never appear in the reverse `recordsReferencing` / forward `recordEdges`
+   * index, so `isPublicServable` (the §29 serve gate) and `exportRoomClosureCids` (the §29.8
+   * room export) would silently omit a legitimately PUBLIC block whose accepted owner attests
+   * ownership in its SIGNED body (#1 — the serve gate's signed-body check already accepts it).
    */
   async indexBodyBlockEdges(
     recordCid: string,
@@ -395,18 +404,24 @@ export class LcapIngestServer {
       readonly bodyBlockCid?: string;
       readonly attachmentManifestCid?: string;
       readonly sourceSnapshotCids?: readonly string[];
+      readonly targetSourceSnapshotCid?: string;
     },
   ): Promise<boolean> {
     const snapshots = refs.sourceSnapshotCids ?? [];
     const singles = (refs.bodyBlockCid ? 1 : 0) + (refs.attachmentManifestCid ? 1 : 0);
     // Bound the DECLARED count via `.length` FIRST — before materializing or spreading the
     // (possibly huge) `source_snapshot_cids` array — so an over-cap record costs O(1) and a
-    // large spread can never even be attempted.
+    // large spread can never even be attempted.  The target snapshot is a separate edge (a single
+    // bounded ref) and is intentionally NOT part of this fan-out count (mirrors `cappedBodyBlockCids`).
     if (singles + snapshots.length > this.caps.maxFanOut) return false;
     const candidates: string[] = [];
     if (refs.bodyBlockCid !== undefined) candidates.push(refs.bodyBlockCid);
     if (refs.attachmentManifestCid !== undefined) candidates.push(refs.attachmentManifestCid);
     for (const snapshot of snapshots) candidates.push(snapshot); // ≤ maxFanOut here
+    // The target snapshot is a SEPARATE block edge — included unconditionally (it must not lose a
+    // cap slot), matching `cappedBodyBlockCids`, so the block it points at is reverse-indexed and
+    // therefore servable/exportable when its accepted public owner attests it in the signed body.
+    if (refs.targetSourceSnapshotCid !== undefined) candidates.push(refs.targetSourceSnapshotCid);
     for (const ref of candidates) {
       try {
         if (parseCid(ref).kind === 'block')

@@ -349,6 +349,38 @@ describe('PRIV-API-RENDEZVOUS-3 — fair signal eviction', () => {
     expect(drained.some((s) => s.ciphertext === 'honest-offer')).toBe(true);
     expect(drained.length).toBeLessThanOrEqual(MAX_SIGNALS_PER_PEER);
   });
+
+  it('a one-signal forged-id flood NEVER evicts an already-queued singleton offer (PRIV-API-RENDEZVOUS-5)', async () => {
+    const store = new InMemoryRendezvousStore();
+    const recipient = 'recipient-blind-id';
+    const ttl = 1_000_000;
+    // The honest bootstrap offer is queued FIRST — a single signal under one (real) id.
+    await store.putSignal({
+      roomBlindId: ROOM_BLIND,
+      senderBlindId: 'honest-peer',
+      recipientBlindId: recipient,
+      ciphertext: 'honest-offer',
+      expiresAt: ttl,
+    });
+    // A many-id flood, each id a SINGLETON (one signal — the per-sender cap never bites, so the
+    // per-sender back-pressure is irrelevant).  With the old `fromSender` threshold every fresh
+    // forged singleton (count 0) evicted an EXISTING one-slot sender, and the earliest singleton —
+    // the honest offer — was the first victim.  The fixed `fromSender + 1` threshold makes each
+    // forged singleton drop-newest (no sender is strictly over-represented), so the honest offer
+    // queued first survives the entire flood.
+    for (let i = 0; i < MAX_SIGNALS_PER_PEER * 2; i++) {
+      await store.putSignal({
+        roomBlindId: ROOM_BLIND,
+        senderBlindId: `forged-${i}`,
+        recipientBlindId: recipient,
+        ciphertext: `forged-${i}`,
+        expiresAt: ttl,
+      });
+    }
+    const drained = await store.drainSignals(recipient, 0, MAX_SIGNALS_PER_PEER);
+    expect(drained.some((s) => s.ciphertext === 'honest-offer')).toBe(true);
+    expect(drained.length).toBeLessThanOrEqual(MAX_SIGNALS_PER_PEER);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -180,6 +180,7 @@ import {
   type ReconnectController,
   type ReconnectStatus,
   type SyncCodec,
+  type SyncEngineSurface,
 } from './sync-session.js';
 
 type P2pModule = typeof import('@licio/private-p2p');
@@ -436,7 +437,14 @@ export class PrivateRoomSession {
       decodeSyncMessage: this.p2p.decodeSyncMessage,
     };
     let sync: PrivateSyncSession;
-    sync = new PrivateSyncSession(this.engine, channel, codec, {
+    // PRIV-WEB-SESSION-3: the session must drive the engine through the manager's `runExclusive`
+    // lock, NOT the raw engine.  A `PrivateSyncSession` has its OWN per-session message queue, but
+    // that only orders messages WITHIN one session — it does NOT serialize a peer's `ingest` /
+    // `importArchive` / `ingestBlocks` against a local `authorOp` / `removeMember` /
+    // `admitJoinRequest` / an incoming MLS commit (each on the manager's `opLock`) OR against
+    // ANOTHER active session in a mesh.  Passing the raw engine left those engine-state mutations
+    // interleaving on the non-re-entrant engine (a corrupted fold / lost remove / divergent epoch).
+    sync = new PrivateSyncSession(this.lockedEngineSurface(), channel, codec, {
       ...(options ?? {}),
       // The manager owns §10.9 commit application (it holds the MLS group); a peer's
       // commit advances THIS device's epoch + re-opens the pending content.
@@ -450,6 +458,36 @@ export class PrivateRoomSession {
     this.activeSessions.add(sync);
     sync.start();
     return sync;
+  }
+
+  /**
+   * The §15.6/§15.7 engine surface a live `PrivateSyncSession` drives, with EVERY async (await-
+   * crossing) engine call routed through the manager's `runExclusive` lock (PRIV-WEB-SESSION-3).
+   * The MUTATING calls (`ingest` for `op_response`, `importArchive` for a snapshot response,
+   * `ingestBlocks` for a block response) are the integrity hazard — without the lock they
+   * interleave with a local `authorOp` / `removeMember` / `admitJoinRequest` / an incoming MLS
+   * commit (and with other mesh sessions) on the non-re-entrant engine.  The async SERVE reads
+   * (`serveOps` / `serveBlocks` / `snapshotArchive` / `wantedBlockCids`) are serialized too so a
+   * serve never reads a half-applied fold.  The four SYNCHRONOUS reads (`headAnnouncement` /
+   * `wantedFrom` / `missingDependencies` / `latestSnapshotId`) run to completion with no await, so
+   * no mutation can interleave mid-call — they pass through unlocked.  Each session handler makes at
+   * most ONE async engine call, so there is no nested-lock acquisition (the lock is non-re-entrant).
+   */
+  private lockedEngineSurface(): SyncEngineSurface {
+    const engine = this.engine;
+    return {
+      headAnnouncement: (latestSnapshotId) => engine.headAnnouncement(latestSnapshotId),
+      wantedFrom: (announcement) => engine.wantedFrom(announcement),
+      missingDependencies: () => engine.missingDependencies(),
+      latestSnapshotId: () => engine.latestSnapshotId(),
+      serveOps: (opIds) => this.runExclusive(() => engine.serveOps(opIds)),
+      ingest: (envelopes) => this.runExclusive(() => engine.ingest(envelopes)),
+      wantedBlockCids: () => this.runExclusive(() => engine.wantedBlockCids()),
+      serveBlocks: (cids, maxBytes) => this.runExclusive(() => engine.serveBlocks(cids, maxBytes)),
+      ingestBlocks: (blocks) => this.runExclusive(() => engine.ingestBlocks(blocks)),
+      snapshotArchive: () => this.runExclusive(() => engine.snapshotArchive()),
+      importArchive: (bytes) => this.runExclusive(() => engine.importArchive(bytes)),
+    };
   }
 
   /**
@@ -552,7 +590,10 @@ export class PrivateRoomSession {
    * no trust).  Returns the accepted/quarantined report.
    */
   async importArchive(bytes: Uint8Array): Promise<IngestReport> {
-    return this.engine.importArchive(bytes);
+    // Serialized on the manager's op-lock, symmetric with `ingest` (PRIV-WEB-SESSION-2/3): an
+    // out-of-band archive import is an engine-state mutation and must not interleave with a local
+    // authoring op, an incoming MLS commit, or a live sync session's fold on the non-re-entrant engine.
+    return this.runExclusive(() => this.engine.importArchive(bytes));
   }
 
   /** Map the manifest's §13.1 transport mode to the carrier's binary mode

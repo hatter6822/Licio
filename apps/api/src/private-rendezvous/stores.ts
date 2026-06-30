@@ -207,21 +207,28 @@ export class InMemoryRendezvousStore implements RendezvousStore {
     for (const s of queue) if (s.senderBlindId === signal.senderBlindId) fromSender += 1;
     if (fromSender >= MAX_SIGNALS_PER_SENDER) return Promise.resolve(); // back-pressure the sender
     if (queue.length >= MAX_SIGNALS_PER_PEER) {
-      // FAIR eviction (PRIV-API-RENDEZVOUS-3): instead of drop-newest, make room by evicting the
-      // OLDEST signal from the sender holding STRICTLY MORE slots than this sender — so a fresh /
-      // under-represented sender's offer always displaces an over-represented flooder.  If THIS
-      // sender is already the heaviest, drop-newest (it must not displace a fairer peer).
+      // FAIR eviction (PRIV-API-RENDEZVOUS-3/5): instead of drop-newest, make room by evicting the
+      // OLDEST signal from the sender holding STRICTLY MORE slots than THIS sender will hold AFTER
+      // inserting (`fromSender + 1`) — so an under-represented sender displaces an over-represented
+      // flooder, but a SINGLETON can NEVER evict another SINGLETON.  The threshold MUST be
+      // `fromSender + 1`, not `fromSender`: `sender_blind_id` is unauthenticated (no Tier-2), so a
+      // flooder fills the queue with one-signal forged ids; with a `fromSender` (=0 for a fresh id)
+      // threshold each new forged singleton would evict an EXISTING one-slot sender — and the FIRST
+      // such victim is the honest bootstrap offer queued earliest, starving the WebRTC dial despite
+      // the per-sender cap (PRIV-API-RENDEZVOUS-5).  Requiring a victim STRICTLY heavier than this
+      // sender's post-insert count protects every already-queued singleton: when no sender is
+      // over-represented (all at parity), the NEW signal is drop-newest, never an honest one.
       const counts = new Map<string, number>();
       for (const s of queue) counts.set(s.senderBlindId, (counts.get(s.senderBlindId) ?? 0) + 1);
       let victim: string | undefined;
-      let victimCount = fromSender;
+      let victimCount = fromSender + 1;
       for (const [sender, count] of counts) {
         if (count > victimCount) {
           victimCount = count;
           victim = sender;
         }
       }
-      if (victim === undefined) return Promise.resolve(); // this sender is heaviest ⇒ drop-newest
+      if (victim === undefined) return Promise.resolve(); // no over-represented sender ⇒ drop-newest
       const evictIdx = queue.findIndex((s) => s.senderBlindId === victim);
       if (evictIdx < 0) return Promise.resolve(); // unreachable; fail safe
       queue.splice(evictIdx, 1);
