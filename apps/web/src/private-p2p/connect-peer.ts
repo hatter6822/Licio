@@ -491,7 +491,15 @@ export async function connectPrivatePeer(
   //    down so a re-poll does not immediately re-pick it; when no FRESH candidate remains we surface
   //    the last dial failure (a typed error) rather than silently burning the deadline into a generic
   //    `timeout`.  The whole loop is bounded by the overall `deadline`/abort via `throwIfAborted`.
-  const failedPeers = new Map<string, number>(); // peerDeviceId → cooldown-until (ms)
+  // Failed-dial cooldown keyed by the announcement's EPHEMERAL signaling public key — NOT the claimed
+  // device id / blind id.  Both of those are derivable from a device id by ANY room member (the blind
+  // id is `derivePeerBlindId(device id)`), so keying on them lets a hostile member announce under an
+  // honest device's id, fail/time-out, and then PERSISTENTLY suppress the honest member's real
+  // candidate (same stable id) for the cooldown window.  The per-announcement ephemeral key is not
+  // forgeable that way: a hostile announcement carries its OWN key (cooling only itself), and the
+  // worst case — copying the honest member's CURRENT ephemeral key — yields only TRANSIENT suppression
+  // that the honest member's next re-announce (a fresh ephemeral) clears.  (PRIV-CARRIER-3-COOLDOWN.)
+  const failedPeers = new Map<string, number>(); // signaling_public_key → cooldown-until (ms)
   let lastDialError: unknown;
   for (;;) {
     throwIfAborted();
@@ -526,7 +534,7 @@ export async function connectPrivatePeer(
     // later if the deadline still allows).
     const now = nowMs();
     for (const [id, until] of failedPeers) if (until <= now) failedPeers.delete(id);
-    const triable = candidates.filter((c) => !failedPeers.has(c.ann.peer_device_id));
+    const triable = candidates.filter((c) => !failedPeers.has(c.ann.signaling_public_key));
 
     if (triable.length === 0) {
       // Nothing fresh to dial this round.  If we already tried + exhausted candidates this connect,
@@ -551,7 +559,7 @@ export async function connectPrivatePeer(
         // just failed — remember the typed error, cool the peer down, and try the next candidate.
         throwIfAborted();
         lastDialError = error;
-        failedPeers.set(peer.peerDeviceId, nowMs() + failedPeerCooldownMs);
+        failedPeers.set(candidate.ann.signaling_public_key, nowMs() + failedPeerCooldownMs);
       }
     }
     // Tried every fresh candidate this round; loop to re-poll (a new peer may appear, or all are now

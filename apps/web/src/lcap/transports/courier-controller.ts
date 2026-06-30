@@ -140,12 +140,15 @@ async function requestPrivacyLabel(request: Uint8Array): Promise<PackHeaderV2['p
     try {
       return decodeWithSchema(exchangeRequestV2Schema, request);
     } catch {
-      // Not a decodable §16 request (a stub / corrupted blob): it carries no READABLE non-public
-      // content, so let carriage proceed — the receiver's `publicOnly` ingest refuses anything odd.
       return null;
     }
   })();
-  if (!decoded?.push_pack) return 'public'; // undecodable, or a pure pull (no push)
+  // NOT a decodable §16 request (a stub / corrupted / custom blob).  We cannot PROVE it is a pure
+  // public pull, so fail CLOSED: a non-public label SKIPS the public-only courier and the
+  // always-correct HTTPS anchor carries it instead.  `public` is reserved for a SUCCESSFULLY decoded
+  // pure pull — an opaque blob can never earn it (PUB-COURIER-1).
+  if (decoded === null) return 'contains_in_room_metadata';
+  if (!decoded.push_pack) return 'public'; // a decoded pure pull (no push) is public
   const read = await readPack(decoded.push_pack);
   // A decodable request whose push pack is unreadable is suspicious — fail closed (skip the courier).
   return read.ok ? read.pack.header.privacy_label : 'contains_in_room_metadata';

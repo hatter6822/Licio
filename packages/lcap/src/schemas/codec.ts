@@ -12,6 +12,7 @@ import { decode } from '../cbor/decode.js';
 import { encode } from '../cbor/encode.js';
 import type { LdcDecodeLimits, LdcMap, LdcValue } from '../cbor/types.js';
 import { isUint8Array } from '../runtime.js';
+import { roomCheckpointRecordV2Schema } from './checkpoint.js';
 import { type DetachedProofV2Record, detachedProofV2Schema } from './proof.js';
 import {
   type CapabilityRecordV2,
@@ -164,4 +165,25 @@ export function decodeProof(bytes: Uint8Array): DetachedProofV2Record {
   const plain = asPlainObject(bytes);
   if (plain['proof_version'] !== 2) throw new RecordSchemaError('unsupported_proof_version');
   return detachedProofV2Schema.parse(plain);
+}
+
+/**
+ * Whether `bytes` are a well-formed PUBLIC control record — currently the room checkpoint, the one
+ * control record a node advertises (§17.2 `latest_checkpoint_cid`) and serves over the public §29
+ * surface.  `decodeAndRouteRecord` rejects control records BY DESIGN (a checkpoint never travels as
+ * a `record_body` frame through `validate()`'s contribution/identity trust projection), so a
+ * public-serve gate that classifies a record's visibility cannot rely on it for checkpoints — it
+ * uses THIS predicate instead.  A checkpoint carries no `visibility_scope`: it is public
+ * transparency material (a Merkle-tree head a peer fetches by its advertised CID), so a well-formed
+ * one is public-servable.  Returns false for any non-checkpoint / malformed body (fail-closed).
+ */
+export function isPublicControlRecord(bytes: Uint8Array): boolean {
+  let plain: Record<string, unknown>;
+  try {
+    plain = asPlainObject(bytes);
+  } catch {
+    return false;
+  }
+  if (plain['kind'] !== 'room_checkpoint') return false;
+  return roomCheckpointRecordV2Schema.safeParse(plain).success;
 }

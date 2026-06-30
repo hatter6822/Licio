@@ -921,8 +921,15 @@ async function handleReview(
  * review verdict is `approved` / `review_required` / `skipped` (an earlier eligibility refusal
  * never reached the gate).  The takedown verdict is read from the bridge outcome: a
  * `takedown_recheck_halt` reason is a genuine `halt`, a `takedown_recheck_unreadable` reason is an
- * `unreadable` oracle (it threw — a halt the steward should see distinctly, PUB-API-PUBLISH-4), and a
- * successful pin or any non-takedown refusal is `clear`.
+ * `unreadable` oracle (it threw — a halt the steward should see distinctly, PUB-API-PUBLISH-4).
+ *
+ * The takedown oracle runs ONLY AFTER an APPROVED review — a `review_required` (or `skipped`)
+ * refusal returns from the publisher BEFORE the oracle ever runs.  So `clear` must mean "the
+ * oracle ran and cleared the block": it is reported only when `review.approved === true` (the
+ * pin path, or a post-oracle non-takedown failure where the takedown check itself still passed).
+ * A pre-oracle refusal is `not_checked`, NEVER a misleading `clear` — so a steward can tell
+ * "oracle cleared" from "oracle never ran", mirroring the eligibility-refusal handling
+ * (PUB-API-PUBLISH-5).
  */
 function auditVerdicts(reviewed: ReviewedPublishOutcome): {
   review: PublishAuditInput['reviewVerdict'];
@@ -940,7 +947,9 @@ function auditVerdicts(reviewed: ReviewedPublishOutcome): {
       ? 'unreadable'
       : reason === 'takedown_recheck_halt'
         ? 'halt'
-        : 'clear';
+        : reviewed.review.approved === true
+          ? 'clear'
+          : 'not_checked';
   return { review, takedown };
 }
 

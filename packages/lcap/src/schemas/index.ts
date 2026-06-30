@@ -16,6 +16,7 @@ export {
   decodeProof,
   decodeWithSchema,
   encodeWithSchema,
+  isPublicControlRecord,
   type LcapRecordV2,
   ldcToPlain,
   plainToLdc,

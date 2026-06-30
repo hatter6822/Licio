@@ -69,9 +69,10 @@ async function collectShareableCids(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
   scope: ExchangeScope | undefined,
-  /** The §16.5 SELECTION floor a minimal/stealth PUSH advertises (priority ceiling + media): the
-   *  push must not seed content beyond what it claims, so the floor tightens both the priority cap
-   *  and the media-block inclusion (PUB-EXCHANGE-1).  Omitted ⇒ no extra constraint (the responder). */
+  /** The §16.5 SELECTION floor a minimal/stealth PUSH advertises: here it tightens only the RECORD
+   *  priority cap (so an over-floor record's CID + deps are never even collected).  The block-level
+   *  priority/media floor is enforced at repack (buildPushPack → repackHeldObjects), symmetric with
+   *  the response path (PUB-EXCHANGE-1).  Omitted ⇒ no extra constraint (the responder). */
   floor?: { readonly maxPriority: number; readonly allowMedia: boolean },
 ): Promise<string[]> {
   const maxPriority = Math.min(scope?.maxPriorityClass ?? 4, floor?.maxPriority ?? 4);
@@ -135,9 +136,10 @@ async function collectShareableCids(
       // block refs BEFORE the per-element readBlockDescriptor query, so a stray over-cap public body
       // can never drive O(n) awaited store reads at share/push time (#3 defense-in-depth + symmetry).
       for (const dep of cappedBodyBlockCids(decoded, lcap.SERVER_CAPS.maxFanOut).cids) {
-        // §16.5 media floor: a minimal/stealth push (allow_media=false) must NOT seed the media
-        // attachment block, so it never carries media while advertising allow_media=false (PUB-EXCHANGE-1).
-        if (floor?.allowMedia === false && dep === decoded.attachment_manifest_cid) continue;
+        // Collect every HELD body block dep; the §16.5 priority/media floor is enforced UNIFORMLY at
+        // repack (repackHeldObjects' priorityFloor/allowMedia), the same place the response path
+        // applies it — so the partial attachment-only skip here would be both redundant and
+        // incomplete (a B4 body/source-snapshot block is equally over-floor) (PUB-EXCHANGE-1).
         if (await readBlockDescriptor(db, dep)) add(dep);
       }
     }
@@ -159,7 +161,17 @@ async function buildPushPack(
 ): Promise<Uint8Array | undefined> {
   const cids = await collectShareableCids(db, lcap, scope, floor);
   if (cids.length === 0) return undefined;
-  const repacked = await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), cids, budget);
+  // Apply the advertised floor at REPACK — SYMMETRIC with the response path (which passes the peer's
+  // `priority_floor`/`allow_media` to repackHeldObjects).  A body/source-snapshot/attachment block is
+  // class B4 (priority 4): a minimal/stealth floor (`priorityFloor` < 4) withholds ALL of them, and
+  // `allowMedia: false` withholds every block — so the push can never carry over-floor block bytes
+  // while advertising a constrained floor (PUB-EXCHANGE-1).
+  const repacked = await lcap.repackHeldObjects(
+    (cid) => getHeldObject(db, cid),
+    cids,
+    budget,
+    floor ? { priorityFloor: floor.maxPriority, allowMedia: floor.allowMedia } : undefined,
+  );
   return repacked.pack;
 }
 

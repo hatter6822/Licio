@@ -14,6 +14,7 @@ import {
   FRAGMENT_HEADER_BYTES,
   fragmentMessage,
   importSignalKey,
+  MAX_REASSEMBLY_BYTES,
   openSignal,
   sealSignal,
   signalEnvelopeV2Schema,
@@ -190,6 +191,20 @@ describe('WebRTC data-channel transport (§22.6)', () => {
     const pending = t.receive();
     ch.fireClose();
     expect(await pending).toBeNull();
+  });
+
+  it('DISCARDS the buffered inbox on an over-cap flood teardown — no leak to the exchange (PUB-WEBRTC-4)', async () => {
+    const ch = fakeChannel();
+    const t = new WebrtcTransport(ch);
+    // Two COMPLETE messages whose combined size exceeds the inbox byte cap, delivered before any
+    // receive() drains them: the second push trips `inboxBytes > MAX_REASSEMBLY_BYTES` and aborts.
+    // Each is ≤ the per-message cap, so both reassemble; together they overflow the un-consumed queue.
+    const size = Math.floor(MAX_REASSEMBLY_BYTES * 0.6);
+    ch.deliver(new Uint8Array(size)); // buffered (inbox ≈ 0.6× cap)
+    ch.deliver(new Uint8Array(size)); // inbox ≈ 1.2× cap > cap ⇒ fail-closed abort clears the inbox
+    // The teardown DISCARDED the queued (untrusted) messages: receive() must hand NOTHING to the
+    // exchange — without the inbox clear it would shift the first 0.6×-cap message and return it.
+    expect(await t.receive()).toBeNull();
   });
 
   it('resolves receive() with null immediately for an ALREADY-aborted signal (PUB-WEBRTC-1)', async () => {

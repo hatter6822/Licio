@@ -186,6 +186,13 @@ export class WebrtcTransport implements LcapTransport {
   /** Fail-closed teardown: mark closed, wake any waiter with `null`, close the channel. */
   private abort(): void {
     this.closed = true;
+    // Fail-closed teardown (a malformed/over-cap fragment OR an over-cap flood of complete messages):
+    // the buffered messages came from a peer that JUST violated the framing/byte cap, so DISCARD
+    // them.  `receive()` shifts `inbox` BEFORE it checks `closed`, so without this a queued message
+    // would still be handed to `fallbackExchange` AFTER the teardown — defeating the PUB-WEBRTC-4
+    // guard.  Clearing the inbox makes a subsequent `receive()` fall through to `closed → null`.
+    this.inbox.length = 0;
+    this.inboxBytes = 0;
     this.drainWaiterWithNull();
     this.wakeDrainWaiters();
     if (this.channel.readyState !== 'closed') this.channel.close();

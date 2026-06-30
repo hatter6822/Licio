@@ -24,9 +24,11 @@ import {
   detachedProofV2Schema,
   deviceCertificateRecordV2Schema,
   encodeWithSchema,
+  isPublicControlRecord,
   plainToLdc,
   RecordSchemaError,
   revocationRecordV2Schema,
+  roomCheckpointRecordV2Schema,
 } from '../schemas/index.js';
 
 function roundTrip<T>(schema: z.ZodType<T>, value: T): void {
@@ -192,6 +194,49 @@ describe('version + kind routing (WS-R.0.7)', () => {
 
   it('rejects a non-map record body', () => {
     expect(() => decodeAndRouteRecord(encode([1, 2, 3]))).toThrow(RecordSchemaError);
+  });
+});
+
+describe('isPublicControlRecord — checkpoint serving (PUB-API-CHECKPOINT-1)', () => {
+  const checkpoint = {
+    record_version: 2 as const,
+    kind: 'room_checkpoint' as const,
+    room_id: 'room-1',
+    tree_algorithm: 'RFC9162_SHA256' as const,
+    tree_size: 4,
+    merkle_root: new Uint8Array(32).fill(7),
+    policy_epoch: 0,
+    revocation_epoch: 0,
+    issued_at_ms: 1_700_000_000_000,
+    signer_authority_id: 'auth-1',
+  };
+
+  it('recognizes a well-formed room_checkpoint that decodeAndRouteRecord rejects by design', () => {
+    const bytes = encodeWithSchema(roomCheckpointRecordV2Schema, checkpoint);
+    // A checkpoint is control material — decodeAndRouteRecord (the contribution/identity router) MUST
+    // reject it, which is exactly why the §29 public-serve gate needs a separate predicate for it.
+    expect(() => decodeAndRouteRecord(bytes)).toThrow(RecordSchemaError);
+    // The advertised (latest_checkpoint_cid) checkpoint IS public transparency material ⇒ servable.
+    expect(isPublicControlRecord(bytes)).toBe(true);
+  });
+
+  it('does NOT treat a routed contribution/identity record as a public control record', () => {
+    // A capability is a routed record, not a control record; recordIsPublic handles it via its
+    // visibility_scope, so isPublicControlRecord (the decode-failure fallback) must say false.
+    expect(isPublicControlRecord(encodeWithSchema(capabilityRecordV2Schema, capability))).toBe(
+      false,
+    );
+  });
+
+  it('fails closed on a kind-only / malformed checkpoint and on non-map garbage', () => {
+    const kindOnly = encode(
+      new Map<LdcKey, LdcValue>([
+        ['record_version', 2],
+        ['kind', 'room_checkpoint'], // claims the kind but is missing every required field
+      ]),
+    );
+    expect(isPublicControlRecord(kindOnly)).toBe(false);
+    expect(isPublicControlRecord(encode([1, 2, 3]))).toBe(false); // not an LDC map
   });
 });
 

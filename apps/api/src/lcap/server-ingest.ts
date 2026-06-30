@@ -45,6 +45,7 @@ import {
   type IngestionReceiptType,
   importPublicKeyCose,
   ingestRecord,
+  isPublicControlRecord,
   type ObjectStatusV2,
   type PulseResponseV2,
   parseCid,
@@ -213,14 +214,22 @@ export class LcapIngestServer {
    * Mirrors the client responder (apps/web/src/lcap/exchange.ts `collectShareableCids`): ONLY a
    * record carrying a NON-PUBLIC `visibility_scope` is withheld; identity records (device
    * certificate / revocation / account authority) carry no visibility_scope and are public
-   * validation material.  An undecodable record is never served.
+   * validation material.
+   *
+   * A `room_checkpoint` is the one CONTROL record that reaches this gate: `issueCheckpoint` stores
+   * it as a `record`, and `checkpointFrontier` advertises its CID (`latest_checkpoint_cid`), so a
+   * peer fetches it (and its detached proof) over the public §29 surface.  `decodeAndRouteRecord`
+   * rejects it by design (it is not a routed contribution/identity record), so without special
+   * handling the gate would withhold a CID it advertises — `isPublicControlRecord` recognizes the
+   * well-formed checkpoint as public transparency material (PUB-API-CHECKPOINT-1).  Any OTHER
+   * undecodable / unrouted record is never served (fail-closed).
    */
   private static recordIsPublic(bytes: Uint8Array): boolean {
     let record: ReturnType<typeof decodeAndRouteRecord>;
     try {
       record = decodeAndRouteRecord(bytes);
     } catch {
-      return false;
+      return isPublicControlRecord(bytes);
     }
     return !('visibility_scope' in record) || record.visibility_scope === 'public';
   }
