@@ -19,6 +19,7 @@ import {
 } from '../../../lcap/transport-catalog.js';
 import { cn } from '../../../lib/cn.js';
 import { Badge } from '../../ui/Badge/index.js';
+import { Icon, type IconName } from '../../ui/Icon/index.js';
 
 const TRANSPORT_NAME: Readonly<Record<TransportSummary['id'], { key: string; text: string }>> = {
   https: { key: 'lcap.transport.https', text: 'Licio server (HTTPS)' },
@@ -26,6 +27,15 @@ const TRANSPORT_NAME: Readonly<Record<TransportSummary['id'], { key: string; tex
   webrtc: { key: 'lcap.transport.webrtc', text: 'Direct peer (WebRTC)' },
   courier: { key: 'lcap.transport.courier', text: 'Courier ferry (file / nearby)' },
   qr: { key: 'lcap.transport.qr', text: 'QR micro-bundle' },
+};
+
+/** A decorative leading icon per carrier (aria-hidden via Icon; text carries the meaning). */
+const TRANSPORT_ICON: Readonly<Record<TransportSummary['id'], IconName>> = {
+  https: 'globe',
+  webtransport: 'globe',
+  webrtc: 'bridge',
+  courier: 'wifi-off',
+  qr: 'grid',
 };
 
 const LATENCY_LABEL: Readonly<Record<LcapLatencyClass, { key: string; text: string }>> = {
@@ -67,6 +77,7 @@ export function TransportStatus({ mode, className }: TransportStatusProps): Reac
             className="flex flex-col gap-1 rounded-lg border border-line bg-canvas p-3"
           >
             <span className="flex flex-wrap items-center gap-2">
+              <Icon name={TRANSPORT_ICON[transport.id]} className="size-4 text-ink-muted" />
               <span className="font-medium text-ink">
                 {t(TRANSPORT_NAME[transport.id].key, TRANSPORT_NAME[transport.id].text)}
               </span>
