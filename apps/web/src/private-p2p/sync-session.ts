@@ -93,8 +93,10 @@ export interface SyncEngineSurface {
   latestSnapshotId?(): string | undefined;
   /** How many envelopes are held PENDING (awaiting an epoch key / a device cert that lives in a
    *  pruned prefix).  A non-zero count with no missing dependency is the "stuck on a compacted peer,
-   *  needs the §14.5 snapshot" signal (PRIV-SESSION-SNAPSHOT-STUCK).  Absent on a mock ⇒ treated as 0. */
-  pendingCount?(): number;
+   *  needs the §14.5 snapshot" signal (PRIV-SESSION-SNAPSHOT-STUCK).  REQUIRED — a surface that omits
+   *  it silently defeats that stuck-detection (the real `lockedEngineSurface` once did), so the
+   *  contract is total: any implementer that forgets to wire it is a compile-time error. */
+  pendingCount(): number;
 }
 
 export interface PrivateSyncSessionOptions {
@@ -409,7 +411,7 @@ export class PrivateSyncSession {
   /** Whether the engine cannot make progress on its own: it still lacks a dependency, or holds ops
    *  PENDING behind material (an epoch key / a device cert) that lives in a pruned prefix. */
   private isStuck(): boolean {
-    return this.engine.missingDependencies().length > 0 || (this.engine.pendingCount?.() ?? 0) > 0;
+    return this.engine.missingDependencies().length > 0 || this.engine.pendingCount() > 0;
   }
 
   /**

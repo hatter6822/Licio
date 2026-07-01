@@ -19,6 +19,7 @@ import {
   type RtcIceCandidateInit,
   type RtcPeerConnectionLike,
   type RtcSessionDescriptionInit,
+  selectFreshestCandidates,
 } from '../connect-peer.js';
 import type { PresenceRecord, RendezvousTransport, WireSignal } from '../rendezvous-client.js';
 
@@ -497,4 +498,44 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
     },
     TEST_TIMEOUT_MS,
   );
+});
+
+// --- PRIV-CARRIER-FRESHEST-NOSPOOF: candidate dedup must not trust the claimed device id ----------
+describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
+  const cand = (ephemeral: string, deviceId: string, expiresAt: number) => ({
+    record: { expires_at: expiresAt },
+    ann: { signaling_public_key: ephemeral, peer_device_id: deviceId },
+  });
+
+  it('does NOT let a spoof claiming the honest peer’s device id evict the honest candidate', () => {
+    // Honest device "bob" announces ephemeral E_h; a hostile member seals a SPOOF claiming the SAME
+    // `peer_device_id` ("bob") with a DISTINCT ephemeral E_s and a LATER expires_at.  Deduping by the
+    // claimed device id would drop the honest record (max-expires wins), leaving "bob" unreachable.
+    const honest = cand('E_h', 'bob', 100);
+    const spoof = cand('E_s', 'bob', 500); // later expiry, forged claim of bob's id
+    const out = selectFreshestCandidates([honest, spoof]);
+    // BOTH distinct ephemerals survive — the honest one is never dropped by the unproven claim.
+    expect(out.map((c) => c.ann.signaling_public_key).sort()).toEqual(['E_h', 'E_s']);
+    // Sorted freshest-first: the spoof (later expiry) is tried first (where the §15.5 mismatch check
+    // rejects it), then the honest candidate is dialed in the SAME round.
+    expect(out[0]?.ann.signaling_public_key).toBe('E_s');
+    expect(out[1]?.ann.signaling_public_key).toBe('E_h');
+  });
+
+  it('collapses a genuine re-announcement of the SAME ephemeral to the fresher record', () => {
+    const stale = cand('E', 'bob', 100);
+    const fresh = cand('E', 'bob', 400); // same dial re-announced with a longer TTL
+    const out = selectFreshestCandidates([stale, fresh]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.record.expires_at).toBe(400); // kept the freshest, dropped the stale duplicate
+  });
+
+  it('keeps every distinct ephemeral and orders them freshest-first', () => {
+    const out = selectFreshestCandidates([
+      cand('E1', 'x', 200),
+      cand('E2', 'y', 900),
+      cand('E3', 'z', 500),
+    ]);
+    expect(out.map((c) => c.ann.signaling_public_key)).toEqual(['E2', 'E3', 'E1']);
+  });
 });

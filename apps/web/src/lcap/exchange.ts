@@ -470,7 +470,18 @@ export async function responsePrivacyLabel(
   const lcap = await import('@licio/lcap');
   const decoded = ((): import('@licio/lcap').ExchangeResponseV2 | null => {
     try {
-      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes);
+      // Decode under the RESPONSE build ceiling, not the default 1 MiB LDC cap: a peer that
+      // advertises a larger budget lets `respondToClientExchange` build a public pack up to
+      // MAX_EXCHANGE_RESPONSE_BYTES (16 MiB — the same reassembly / single-object bound the WebRTC
+      // fragmenter + IPFS bridge + repack clamp enforce), so the decode cap must equal the build cap
+      // or a legit >1 MiB public response spuriously fails to decode (PUB-RESPONSE-DECODE-CEILING) —
+      // dropping it here (non-public label) or losing it at ingest.  maxDepth/maxItems stay sourced
+      // from DEFAULT_DECODE_LIMITS so they cannot drift.  (The REQUEST decodes keep the default cap:
+      // a conformant request is ≤ 256 KiB, so an over-1-MiB request is abuse that SHOULD fail closed.)
+      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes, {
+        ...lcap.DEFAULT_DECODE_LIMITS,
+        maxBytes: MAX_EXCHANGE_RESPONSE_BYTES,
+      });
     } catch {
       return null;
     }
@@ -529,7 +540,18 @@ export async function ingestClientExchangeResponse(
   const lcap = await import('@licio/lcap');
   const response = ((): import('@licio/lcap').ExchangeResponseV2 | null => {
     try {
-      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes);
+      // Decode under the RESPONSE build ceiling, not the default 1 MiB LDC cap: a peer that
+      // advertises a larger budget lets `respondToClientExchange` build a public pack up to
+      // MAX_EXCHANGE_RESPONSE_BYTES (16 MiB — the same reassembly / single-object bound the WebRTC
+      // fragmenter + IPFS bridge + repack clamp enforce), so the decode cap must equal the build cap
+      // or a legit >1 MiB public response spuriously fails to decode (PUB-RESPONSE-DECODE-CEILING) —
+      // dropping it here (non-public label) or losing it at ingest.  maxDepth/maxItems stay sourced
+      // from DEFAULT_DECODE_LIMITS so they cannot drift.  (The REQUEST decodes keep the default cap:
+      // a conformant request is ≤ 256 KiB, so an over-1-MiB request is abuse that SHOULD fail closed.)
+      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes, {
+        ...lcap.DEFAULT_DECODE_LIMITS,
+        maxBytes: MAX_EXCHANGE_RESPONSE_BYTES,
+      });
     } catch {
       return null;
     }

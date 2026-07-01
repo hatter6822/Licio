@@ -959,12 +959,24 @@ export class PrivateRoomEngine {
       return; // body did not open (tampered / wrong epoch) → do not adopt
     }
     const candidate = deserializeReducerState(bundle.serializedState);
-    // MONOTONIC re-base (PRIV-ENGINE-REBASE): a member that ALREADY holds a base adopts this snapshot
-    // ONLY when it is STRICTLY NEWER — a higher Lamport ceiling ⇒ it covers ops beyond our base — so a
-    // lagging member catches up to a compacted admin's newer snapshot, while an equal/older snapshot is
-    // a no-op (never regress the base).  A FRESH engine (no covered prefix) always adopts.
     const incomingMax = BigInt(bundle.maxLamport);
-    if (this.coveredOpLamports.size > 0 && incomingMax <= this.baseMaxLamport) return;
+    // SUPERSET re-base (PRIV-ENGINE-REBASE): a member that ALREADY holds a base adopts an incoming
+    // snapshot ONLY when it is a STRICT SUPERSET of our current base — it covers EVERY op our base has
+    // already compacted (and pruned), plus more.  A higher Lamport CEILING alone does NOT prove
+    // containment: two peers can compact DIVERGENT prefixes, and adopting a higher-max-but-non-covering
+    // snapshot would overwrite `baseState` while our covered envelopes are already pruned, permanently
+    // DROPPING content that existed only in our base.  So reject any snapshot that omits an op our base
+    // covers (keep ours — divergent bases still converge via the op-walk / each side serving its own
+    // snapshot, never by discarding data); an exactly-equal covered set is a no-op; only a strict
+    // superset is adopted — precisely the lagging-member catch-up to a compacted admin's newer snapshot.
+    // A FRESH engine (no covered prefix) always adopts.
+    if (this.coveredOpLamports.size > 0) {
+      const incomingIds = new Set(bundle.coveredOps.map(([id]) => id));
+      for (const id of this.coveredOpLamports.keys()) {
+        if (!incomingIds.has(id)) return; // divergent prefix — NOT a superset of our base; keep ours
+      }
+      if (incomingIds.size === this.coveredOpLamports.size) return; // identical base → no-op
+    }
     if (!(await this.verifySnapshotCommit(sealed, bundle, candidate, envelopes))) return;
     this.baseState = candidate;
     this.baseHeads = [...bundle.coveredHeads];

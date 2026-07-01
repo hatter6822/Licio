@@ -66,9 +66,12 @@ export default defineConfig({
       },
     },
     // The Vite dev server serves /src + workspace packages as ES modules (so `page.evaluate` can
-    // dynamically import the REAL carrier + `@licio/private-p2p`), and proxies `/v1` → :3001.
+    // dynamically import the REAL carrier + `@licio/private-p2p`), and proxies `/v1` + `/api` → :3001
+    // (the dev-server `server.proxy` is always-on in dev — no E2E_API_PROXY needed).  Use the WEB-ONLY
+    // dev command, NOT root `pnpm dev` (which also starts `api` on 3001 in parallel and would collide
+    // with — or tear down — the in-memory API this config already launches on 3001 above).
     {
-      command: 'pnpm dev',
+      command: 'pnpm --filter web dev',
       port: 5173,
       reuseExistingServer: !isCI,
       timeout: 120_000,

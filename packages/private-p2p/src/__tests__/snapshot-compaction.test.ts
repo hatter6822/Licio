@@ -382,3 +382,77 @@ describe('§14.5 in-band snapshot.commit + §25.6 compaction', () => {
     expect(fresh.state().members.size).toBe(0); // genesis was pruned + not in the archive
   });
 });
+
+// --- PRIV-ENGINE-REBASE: a re-base must be a SUPERSET of the current base ---------------------------
+describe('§14.5 snapshot re-base (superset guard)', () => {
+  const archiveOpts = {
+    kind: 'encrypted_member_backup',
+    createdAtBucket: '2026-06-22T00',
+  } as const;
+
+  it('does NOT adopt a DIVERGENT higher-Lamport snapshot that omits an op our base covers — no data loss', async () => {
+    const room = await founded();
+    // E1: genesis + s1('Hello'), then compact → base covers {genesis, s1} (maxLamport 2).
+    const e1 = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await e1.applyLocalOp(room.genesisOp, room.sealParams);
+    await author(e1, room, 's1', story);
+    await commitSnapshot(e1, room, 'snap-e1', 'snap-e1');
+    expect(e1.state().stories.get('s1')?.title).toBe('Hello');
+
+    // E2: the SAME room keys, genesis + a DIVERGENT story s2 at a HIGHER Lamport, then compact → base
+    // covers {genesis, s2} (maxLamport 5), which does NOT cover s1 (a divergent compaction / fork).
+    const e2 = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await e2.applyLocalOp(room.genesisOp, room.sealParams);
+    await author(
+      e2,
+      room,
+      's2',
+      { ...story, story_id: 's2', thread_id: 't2', title: 'OnlyInE2' },
+      { lamport: '5' },
+    );
+    await commitSnapshot(e2, room, 'snap-e2', 'snap-e2');
+    const e2archive = await e2.exportArchive(archiveOpts);
+
+    // E1 imports E2's HIGHER-Lamport but NON-COVERING snapshot.  A Lamport-ceiling rebase would
+    // overwrite E1's base and permanently DROP s1; the superset check REJECTS it and keeps E1's base.
+    await e1.importArchive(e2archive);
+    expect(e1.state().stories.get('s1')?.title).toBe('Hello'); // s1 preserved — NOT dropped
+    expect(e1.state().stories.has('s2')).toBe(false); // the divergent snapshot was not adopted
+  });
+
+  it('DOES adopt a strict-SUPERSET snapshot so a lagging member catches up', async () => {
+    const room = await founded();
+    // E_lag: genesis + s1, then compact → base {genesis, s1}.  Capture s1's envelope to SHARE it (so
+    // E_full folds the SAME op — no device fork — and its base is a genuine superset).
+    const lagStorage = new InMemoryPrivateRoomStorage();
+    const eLag = await PrivateRoomEngine.load({ ...room.engineParams, storage: lagStorage });
+    await eLag.applyLocalOp(room.genesisOp, room.sealParams);
+    await author(eLag, room, 's1', story);
+    const s1Env = (await lagStorage.listEnvelopes()).find((e) => e.opId === 's1')?.envelope;
+    if (!s1Env) throw new Error('expected s1 envelope');
+    await commitSnapshot(eLag, room, 'snap-lag', 'snap-lag');
+
+    // E_full: genesis + the SAME s1 (ingested) + s3, then compact → base {genesis, s1, s3} (a STRICT
+    // superset of E_lag's base, higher Lamport).
+    const eFull = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await eFull.applyLocalOp(room.genesisOp, room.sealParams);
+    await eFull.ingest([s1Env]);
+    await author(eFull, room, 's3', { ...story, story_id: 's3', thread_id: 't3', title: 'Newer' });
+    await commitSnapshot(eFull, room, 'snap-full', 'snap-full');
+    const fullArchive = await eFull.exportArchive(archiveOpts);
+
+    // E_lag adopts the strict superset → catches up to s3 while keeping s1 (the mesh catch-up path).
+    await eLag.importArchive(fullArchive);
+    expect(eLag.state().stories.get('s1')?.title).toBe('Hello'); // kept
+    expect(eLag.state().stories.get('s3')?.title).toBe('Newer'); // caught up
+  });
+});

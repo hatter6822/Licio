@@ -468,10 +468,11 @@ export class PrivateRoomSession {
    * interleave with a local `authorOp` / `removeMember` / `admitJoinRequest` / an incoming MLS
    * commit (and with other mesh sessions) on the non-re-entrant engine.  The async SERVE reads
    * (`serveOps` / `serveBlocks` / `snapshotArchive` / `wantedBlockCids`) are serialized too so a
-   * serve never reads a half-applied fold.  The four SYNCHRONOUS reads (`headAnnouncement` /
-   * `wantedFrom` / `missingDependencies` / `latestSnapshotId`) run to completion with no await, so
-   * no mutation can interleave mid-call — they pass through unlocked.  Each session handler makes at
-   * most ONE async engine call, so there is no nested-lock acquisition (the lock is non-re-entrant).
+   * serve never reads a half-applied fold.  The five SYNCHRONOUS reads (`headAnnouncement` /
+   * `wantedFrom` / `missingDependencies` / `latestSnapshotId` / `pendingCount`) run to completion with
+   * no await, so no mutation can interleave mid-call — they pass through unlocked.  Each session
+   * handler makes at most ONE async engine call, so there is no nested-lock acquisition (the lock is
+   * non-re-entrant).
    */
   private lockedEngineSurface(): SyncEngineSurface {
     const engine = this.engine;
@@ -480,6 +481,10 @@ export class PrivateRoomSession {
       wantedFrom: (announcement) => engine.wantedFrom(announcement),
       missingDependencies: () => engine.missingDependencies(),
       latestSnapshotId: () => engine.latestSnapshotId(),
+      // §14.5 stuck-detection (PRIV-SESSION-SNAPSHOT-STUCK): a pure Map-size read, so it joins the
+      // synchronous-reads group (no await ⇒ no mutation interleaves).  Omitting it silently disabled
+      // the snapshot bootstrap for a compacted-prefix peer — now REQUIRED on the surface.
+      pendingCount: () => engine.pendingCount(),
       serveOps: (opIds) => this.runExclusive(() => engine.serveOps(opIds)),
       ingest: (envelopes) => this.runExclusive(() => engine.ingest(envelopes)),
       wantedBlockCids: () => this.runExclusive(() => engine.wantedBlockCids()),

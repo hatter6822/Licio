@@ -30,6 +30,7 @@ import {
   aeadOpen,
   aeadSeal,
   PADDING_BUCKET_4K,
+  PADDING_BUCKET_16K,
   padBody,
   selectPaddingPolicy,
   unpadBody,
@@ -175,6 +176,21 @@ export async function deriveSignalAddress(
 
 // --- sealed announcement (§15.3) --------------------------------------------
 
+/** A base64url value bounded to `max` chars.  The shared `base64UrlSchema`'s 16,384 cap is too loose
+ *  for the fixed-size announcement fields: with all of them at that cap a valid announcement's
+ *  canonical plaintext would exceed the §25.4 16 KiB padding bucket → the 'custom' bucket → a sealed
+ *  record too large for the wire cap (PRIV-RENDEZVOUS-PADCAP).  Bounding each field to its realistic
+ *  size (generously vs. the measured values — a 32-byte X25519 key is 43 chars, a Tier-2 BBS proof
+ *  ~448, its 48-byte G1 pseudonym 64) keeps EVERY schema-valid announcement inside the 16 KiB bucket,
+ *  so `RENDEZVOUS_SEALED_MAX_CHARS` always holds its sealed record and `buildRendezvousRecord` can
+ *  never throw on a valid input. */
+const boundedBase64Url = (max: number): z.ZodString =>
+  z
+    .string()
+    .min(1)
+    .max(max)
+    .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
+
 /**
  * The plaintext a `BlindRendezvousRecord` carries, sealed under the
  * `rendezvous_key`: enough to bootstrap the §15.4 encrypted signaling channel.
@@ -186,15 +202,20 @@ export const rendezvousAnnouncementSchema = z
   .object({
     schema: z.literal('licio.private.rendezvous_announcement.v1'),
     peer_device_id: privateIdSchema,
-    signaling_public_key: base64UrlSchema,
+    // A 32-byte X25519 ephemeral public key base64url-encodes to 43 chars; 128 is generous headroom.
+    signaling_public_key: boundedBase64Url(128),
     transport_hints: z.array(z.string().min(1).max(256)).max(16).default([]),
     /**
      * Tier-2 rendezvous cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md §6.8) — the OPTIONAL
      * anonymous-credential proof, sealed INSIDE the announcement (only a member who can open
      * it sees the cap; the relay never does). A polling member verifies it under the room's
      * per-epoch issuer key and dedups by the pseudonym — the serverless cap. Absent ⇒ Tier-1.
+     * Bounded well above the measured BBS proof (~448 chars) + 48-byte G1 pseudonym (64 chars).
      */
-    cap: z.object({ proof: base64UrlSchema, pseudonym: base64UrlSchema }).strict().optional(),
+    cap: z
+      .object({ proof: boundedBase64Url(1024), pseudonym: boundedBase64Url(96) })
+      .strict()
+      .optional(),
   })
   .strict();
 export type RendezvousAnnouncement = z.infer<typeof rendezvousAnnouncementSchema>;
@@ -238,6 +259,16 @@ function serializeAnnouncement(a: RendezvousAnnouncement): CanonicalValue {
 // verified + deduped by `filterVerifiedPresence` (a member already holds the issuer key, so it leaks
 // nothing).  The top-level cap field + its schema are therefore gone.
 
+/** The wire cap for a sealed announcement: a record padded to the §25.4 16 KiB bucket seals to
+ *  `AES_GCM_NONCE_LENGTH + PADDING_BUCKET_16K + AES_GCM_TAG_LENGTH` = 16,412 bytes → ⌈·4/3⌉ = 21,883
+ *  base64url chars, ABOVE the small-field 16,384 cap.  The announcement's tightened subfield bounds
+ *  keep its plaintext inside the 16 KiB bucket, so a valid sealed record never exceeds this — while
+ *  the field stays DoS-bounded (the server holds up to MAX_RECORDS_PER_ROOM of these), unlike reusing
+ *  the 1.4 MiB inline-op-ciphertext cap (PRIV-RENDEZVOUS-PADCAP). */
+export const RENDEZVOUS_SEALED_MAX_CHARS = Math.ceil(
+  ((AES_GCM_NONCE_LENGTH + PADDING_BUCKET_16K + AES_GCM_TAG_LENGTH) * 4) / 3,
+);
+
 /** §15.3 — the only thing the server stores for an unlisted/detached room: two opaque blind ids,
  *  the sealed announcement, and a short expiry.  The per-announcer cap rides SEALED inside the
  *  announcement (member-only) — the server never sees a cap and runs the §27 Tier-1 sample-poll. */
@@ -245,7 +276,7 @@ export const blindRendezvousRecordSchema = z
   .object({
     room_blind_id: base64UrlSchema,
     peer_blind_id: base64UrlSchema,
-    encrypted_announcement: base64UrlSchema,
+    encrypted_announcement: boundedBase64Url(RENDEZVOUS_SEALED_MAX_CHARS),
     expires_at: z.number().int().nonnegative(),
   })
   .strict();

@@ -253,6 +253,43 @@ interface DiscoveredPeer {
 }
 
 /**
+ * Reduce the opened rendezvous candidates to the set worth dialing, freshest-first.
+ *
+ * A peer re-announces a FRESH ephemeral each dial while its PRIOR announcements linger under TTL, so
+ * `opened` can hold several records for ONE device (stale + current), and dialing a STALE one first
+ * burns a candidate deadline on a dead/already-resolved channel before the peer's live dial is ever
+ * reached (PRIV-CARRIER-FRESHEST).  So dedup on the ACTUAL dialed identity — the per-announcement
+ * EPHEMERAL `signaling_public_key` — and NOT the claimed `peer_device_id`: that field is
+ * UNAUTHENTICATED here (the announcement is sealed under the room-wide rendezvous key, so any
+ * current-epoch member can seal one claiming ANOTHER device's id — exactly what the §15.5 handshake
+ * mismatch check re-verifies).  Keying the dedup on the claimed device id would let a spoof sealed with
+ * a LATER `expires_at` EVICT the honest device's DISTINCT candidate before it is ever dialed, so
+ * repeated polls keep selecting only the spoof and the targeted peer stays unreachable — a persistent
+ * targeted DoS (PRIV-CARRIER-FRESHEST-NOSPOOF).  Keying on the ephemeral only merges a genuine
+ * re-announcement of the SAME dial (keep the fresher record); two DISTINCT ephemerals — one device's
+ * stale-vs-current OR an honest live dial vs. a spoof under the same claimed id — are ALWAYS kept as
+ * separate candidates, then sorted freshest-first so the live dial is reached before any stale one
+ * WITHOUT an unproven id ever dropping an honest candidate (the spoof, being newer, is dialed first,
+ * where the §15.5 mismatch check rejects it + the ephemeral-keyed cooldown suppresses it, and the
+ * honest candidate is dialed in the SAME round).  Flood amplification stays bounded by the orthogonal
+ * Tier-2 cap + Tier-1 sample-poll, never by this dedup.
+ */
+export function selectFreshestCandidates<
+  C extends { record: { expires_at: number }; ann: { signaling_public_key: string } },
+>(opened: readonly C[]): C[] {
+  const freshestByEphemeral = new Map<string, C>();
+  for (const c of opened) {
+    const prev = freshestByEphemeral.get(c.ann.signaling_public_key);
+    if (prev === undefined || c.record.expires_at > prev.record.expires_at) {
+      freshestByEphemeral.set(c.ann.signaling_public_key, c);
+    }
+  }
+  return [...freshestByEphemeral.values()].sort(
+    (a, b) => b.record.expires_at - a.record.expires_at,
+  );
+}
+
+/**
  * Establish a live, membership-proven `PeerChannel` to another member of the room.
  * Resolves once the WebRTC data channel is open AND the §15.5 handshake has verified
  * the remote device; rejects (tearing the connection down) on timeout, abort, or a
@@ -581,20 +618,11 @@ export async function connectPrivatePeer(
         // A §15.3.2 cover record or a record sealed for a different key: skip it.
       }
     }
-    // A peer re-announces a FRESH ephemeral each dial while its PRIOR announcements linger under TTL,
-    // so `opened` can hold several records for ONE device (stale + current).  Dialing a stale one burns
-    // the whole candidate deadline — its ephemeral's channel is dead / that dial already resolved and no
-    // longer drains — so KEEP ONLY THE FRESHEST (max `expires_at`) per device: the peer's current,
-    // actively-draining dial (PRIV-CARRIER-FRESHEST).  Without this a mesh member can exhaust its dial
-    // window cooling down stale announcements before ever reaching the peer's live one.
-    const freshestByDevice = new Map<string, Candidate>();
-    for (const c of opened) {
-      const prev = freshestByDevice.get(c.ann.peer_device_id);
-      if (prev === undefined || c.record.expires_at > prev.record.expires_at) {
-        freshestByDevice.set(c.ann.peer_device_id, c);
-      }
-    }
-    let candidates: Candidate[] = [...freshestByDevice.values()];
+    // Dedup by the ACTUAL dialed identity (the per-announcement ephemeral `signaling_public_key`) and
+    // sort freshest-first — NEVER by the unauthenticated claimed `peer_device_id`; see
+    // `selectFreshestCandidates` for why keying on the claimed id would let a spoof evict an honest peer
+    // (PRIV-CARRIER-FRESHEST / -NOSPOOF).
+    let candidates: Candidate[] = selectFreshestCandidates(opened);
     if (params.rendezvousCap) {
       const capped = candidates.filter((o) => o.ann.cap !== undefined);
       const uncapped = candidates.filter((o) => o.ann.cap === undefined);

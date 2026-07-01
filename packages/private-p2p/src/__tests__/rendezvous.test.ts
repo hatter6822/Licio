@@ -26,6 +26,7 @@ import {
   RENDEZVOUS_DISCOVERY_MODES,
   RENDEZVOUS_MAX_TTL_MS,
   RENDEZVOUS_MIN_TTL_MS,
+  RENDEZVOUS_SEALED_MAX_CHARS,
   type RendezvousAnnouncement,
   rendezvousTimeBucket,
 } from '../sync/rendezvous.js';
@@ -224,6 +225,32 @@ describe('sealed announcement round-trip (§15.3)', () => {
     expect(record.peer_blind_id).toBe(await derivePeerBlindId(key, 'device-alpha', 3, 100));
     // A member (holding the rendezvous key) recovers the sealed cap — the §6.8 peer-side verify input.
     expect(await openRendezvousAnnouncement(record, key)).toStrictEqual(cappedAnnouncement);
+  });
+
+  it('builds + round-trips a MAX-size announcement without exceeding the wire cap (PRIV-RENDEZVOUS-PADCAP)', async () => {
+    // Max transport hints (16 × 256 chars) + a Tier-2 cap push the canonical plaintext past the 4 KiB
+    // §25.4 bucket → the 16 KiB bucket → a sealed record whose base64url runs to ~21,883 chars, ABOVE
+    // the old 16,384 `base64UrlSchema` cap that made `buildRendezvousRecord` THROW on a valid input.
+    const large: RendezvousAnnouncement = {
+      schema: 'licio.private.rendezvous_announcement.v1',
+      peer_device_id: 'device-alpha',
+      signaling_public_key: 'A'.repeat(43), // a 32-byte X25519 key
+      transport_hints: Array.from({ length: 16 }, (_, i) => `${i}`.padEnd(256, 'h')),
+      cap: { proof: 'A'.repeat(1024), pseudonym: 'A'.repeat(96) },
+    };
+    const record = await buildRendezvousRecord({
+      rendezvousKey: key,
+      epoch: 3,
+      timeBucket: 100,
+      deviceId: 'device-alpha',
+      announcement: large,
+      nowMs: 1_000_000,
+    });
+    // The sealed record is larger than the old 16 KiB small-field cap (would have thrown) yet stays
+    // within the derived wire bound, and re-opens to the exact announcement.
+    expect(record.encrypted_announcement.length).toBeGreaterThan(16_384);
+    expect(record.encrypted_announcement.length).toBeLessThanOrEqual(RENDEZVOUS_SEALED_MAX_CHARS);
+    expect(await openRendezvousAnnouncement(record, key)).toStrictEqual(large);
   });
 
   it('honors a clamped TTL', async () => {

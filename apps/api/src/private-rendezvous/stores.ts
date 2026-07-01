@@ -20,8 +20,12 @@ const blindIdSchema = z
   .max(256)
   .regex(/^[A-Za-z0-9_-]+$/, 'expected a base64url blind id');
 
-/** An opaque sealed announcement (the server never decodes it) — bounded ≤ 16 KiB. */
-const announcementCiphertextSchema = z.string().min(1).max(16_384);
+/** An opaque sealed announcement (the server never decodes it) — bounded to hold the §25.4 16 KiB
+ *  padding-bucket record.  A 16 KiB-bucket announcement seals to 12 + 16384 + 16 = 16,412 bytes →
+ *  ⌈·4/3⌉ = 21,883 base64url chars (above the old 16,384 cap, which rejected a valid large record —
+ *  the client mirrors this in `private-p2p` rendezvous `RENDEZVOUS_SEALED_MAX_CHARS`).  Kept modest
+ *  (≪ the 64 KiB signal cap) so MAX_RECORDS_PER_ROOM × this stays a bounded per-room footprint. */
+const announcementCiphertextSchema = z.string().min(1).max(22_528);
 
 /** An opaque sealed signaling blob (SDP/ICE, E2E-encrypted) — bounded ≤ 64 KiB. */
 const signalCiphertextSchema = z.string().min(1).max(65_536);

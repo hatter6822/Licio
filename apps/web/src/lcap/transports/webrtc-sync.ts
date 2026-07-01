@@ -79,12 +79,44 @@ export async function runWebrtcBidirectionalExchange(
     if (graceTimer !== undefined) clearTimeout(graceTimer);
     resolveResult({ ingested, served });
   };
-  // Settle once BOTH directions have run; else open a grace window after the first completes.
+  // Finalize a round the responder/requester driver has decided is COMPLETE: drain any queued
+  // responder reply to the datachannel BEFORE marking the exchange settled, THEN settle
+  // (PUB-RESPONDER-FLUSH-BEFORE-SETTLE).  `sendMessage` only ENQUEUES onto `sendChain` and returns
+  // before the fragments are written, and the send guard drops any pending send once `settled` is
+  // set — so if we handle a peer REQUEST in the SAME turn we had already ingested our own response
+  // (`gotResponse && served` becomes true right after `sendMessage(out.reply)` is queued), settling
+  // synchronously would drop that reply: the peer is marked `served` locally yet NEVER receives our
+  // served content, stalling mesh convergence.  Draining `sendChain` to a bounded fixed point flushes
+  // the reply first.  It is a no-op when nothing was queued (the reply was non-public / there was
+  // nothing to serve — the `carriesPrivate` gate) and is bounded by the §22.6 backpressure cap, so it
+  // can never deadlock.  Abort/timeout/close still call `settle` directly (hard teardown — the channel
+  // is going away, so there is nothing to flush).
+  let finalizing = false;
+  const finalize = async (): Promise<void> => {
+    if (finalizing || settled) return;
+    finalizing = true;
+    // Drain to a fixed point: re-await while a fresh reply was enqueued during the previous await
+    // (a second peer request arriving mid-drain), bounded so an adversarial request stream cannot
+    // defer settlement indefinitely.  `sendChain` is `.catch`-terminated in `sendMessage`, so these
+    // awaits never reject; the try/catch is purely defensive.
+    let last = sendChain;
+    for (let i = 0; i < 4; i++) {
+      try {
+        await last;
+      } catch {
+        /* the failing send already surfaced via devWarn in sendMessage */
+      }
+      if (sendChain === last) break;
+      last = sendChain;
+    }
+    settle(ingestedResult);
+  };
+  // Settle once BOTH directions have run; else open a grace window after the first completes.  Both
+  // paths route through `finalize` so the queued responder reply is flushed before we settle.
   const maybeSettle = (): void => {
-    if (settled) return;
-    if (gotResponse && served) settle(ingestedResult);
-    else if (graceTimer === undefined)
-      graceTimer = setTimeout(() => settle(ingestedResult), GRACE_MS);
+    if (settled || finalizing) return;
+    if (gotResponse && served) void finalize();
+    else if (graceTimer === undefined) graceTimer = setTimeout(() => void finalize(), GRACE_MS);
   };
 
   const aborted = (): boolean => params.signal?.aborted ?? false;

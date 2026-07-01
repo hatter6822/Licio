@@ -66,6 +66,11 @@ class FakeEngine implements SyncEngineSurface {
     }
     return [...missing].sort();
   }
+  /** Held-pending envelope count (settable by tests to drive PRIV-SESSION-SNAPSHOT-STUCK). */
+  pending = 0;
+  pendingCount(): number {
+    return this.pending;
+  }
 }
 
 /** A block-capable fake engine: `blockWants` are the CIDs it wants, and it ALWAYS refuses to
@@ -80,6 +85,14 @@ class FakeBlockEngine extends FakeEngine {
   }
   async ingestBlocks(): Promise<{ accepted: string[]; rejected: string[] }> {
     return { accepted: [], rejected: [] }; // never reached in these refusal tests
+  }
+}
+
+/** A fake that CAN import a snapshot archive (so `maybeRequestSnapshot` does not bail on the
+ *  `!importArchive` guard) — used to drive the held-pending → snapshot-request stuck path. */
+class FakeStuckEngine extends FakeEngine {
+  async importArchive() {
+    return { accepted: [] as string[], quarantined: [] };
   }
 }
 
@@ -242,6 +255,54 @@ describe('WS-S.4.3 PrivateSyncSession orchestration', () => {
     // A spin would never quiesce (settle would cap at 200 rounds with deliveries still climbing);
     // the fix bounds it to a tiny handshake.
     expect(stats.delivered).toBeLessThan(20);
+  });
+
+  it('requests the peer §14.5 snapshot when ops are held PENDING behind a pruned prefix (PRIV-SESSION-SNAPSHOT-STUCK)', async () => {
+    // A compacted peer serves its retained post-snapshot ops but omits the PRUNED ancestors, so an op
+    // stays held PENDING (missingDependencies() is empty, pendingCount() > 0).  `isStuck()` must read
+    // the real pending count — the surface exposes `pendingCount` (once omitted, defeating this) — so
+    // the session bootstraps via the peer's snapshot instead of quiescing incomplete.
+    const engine = new FakeStuckEngine();
+    engine.seed('op-1'); // already held ⇒ wantedFrom({heads:['op-1']}) is empty ⇒ requestedFresh 0
+    engine.pending = 1; // an op awaiting a key/cert that lives in the peer's pruned prefix
+    const sent: import('@licio/private-p2p').SyncMessage[] = [];
+    const ref: { handler: ((f: Uint8Array) => void) | null } = { handler: null };
+    const channel: PeerChannel = {
+      send: (frame) => {
+        sent.push(fakeCodec.decodeSyncMessage(frame.slice()));
+      },
+      onMessage: (l) => {
+        ref.handler = l;
+      },
+      onClose: () => {},
+      close: () => {},
+    };
+    new PrivateSyncSession(engine, channel, fakeCodec).start();
+    // The peer announces it HOLDS a §14.5 snapshot we lack.
+    ref.handler?.(
+      fakeCodec.encodeSyncMessage({
+        schema: 'licio.private.head_announcement.v1',
+        heads: ['op-1'],
+        op_count_bucket: 0,
+        latest_snapshot_id: 'snap-x',
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    // A NON-empty op_response that yields NO new op and NO fresh want (so requestedFresh === 0) while
+    // the engine is still stuck (pending 1) ⇒ the session must request the peer's snapshot.
+    ref.handler?.(
+      fakeCodec.encodeSyncMessage({
+        schema: 'licio.private.op_response.v1',
+        envelopes: [
+          {
+            __opId: 'op-1',
+            __parents: [],
+          } as unknown as import('@licio/private-p2p').PrivateEncryptedEnvelope,
+        ],
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sent.some((m) => m.schema === 'licio.private.snapshot_request.v1')).toBe(true);
   });
 });
 

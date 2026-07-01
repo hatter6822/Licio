@@ -1025,8 +1025,11 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     const rendezvous = inMemoryRendezvous();
     // Two registered but UNREACHABLE peers: each rtcFactory hands back a FakePeer with a FRESH,
     // unpaired FakeLink, so no counterparty ever answers and the data channel never opens — each
-    // dial hits the (small) per-candidate deadline.
+    // dial hits the (small) per-candidate deadline.  Each device announces a DISTINCT ephemeral (as
+    // real devices do); the candidate dedup keys on the ephemeral `signaling_public_key`, so two
+    // distinct devices stay two separate dial targets (never collapsed by the claimed device id).
     for (const deviceId of ['device-bad-1', 'device-bad-2']) {
+      const deviceSig = p2p.toBase64Url((await p2p.generateX25519KeyPair()).publicKey);
       await rendezvous.announce(
         await p2p.buildRendezvousRecord({
           rendezvousKey,
@@ -1036,7 +1039,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
           announcement: {
             schema: 'licio.private.rendezvous_announcement.v1',
             peer_device_id: deviceId,
-            signaling_public_key: sig,
+            signaling_public_key: deviceSig,
             transport_hints: [],
           },
           nowMs: Date.now(),

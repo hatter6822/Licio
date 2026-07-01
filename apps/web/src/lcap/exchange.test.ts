@@ -961,4 +961,43 @@ describe('requestHasUnfilledWants — post-round anchor decision (#1/#BK)', () =
   it('fails OPEN (true) for an undecodable request — back off to the authoritative anchor', async () => {
     expect(await requestHasUnfilledWants(peerA, new Uint8Array([0, 1, 2, 3]))).toBe(true);
   });
+
+  it('decodes a >1 MiB PUBLIC response under the 16 MiB ceiling (PUB-RESPONSE-DECODE-CEILING)', async () => {
+    const lcap = await import('@licio/lcap');
+    // Seed enough public blocks (each ≤ the 256 KiB frame cap) that B's served response exceeds the
+    // default 1 MiB LDC decode cap — the case a larger-budget peer legitimately triggers.
+    const blockCids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const bytes = new Uint8Array(180_000).fill(i + 1);
+      const cid = await cidFor('block', bytes);
+      await putBlock(peerB, { blockCid: cid, state: 'integrity_verified', size: bytes.length }, [
+        bytes,
+      ]);
+      await putPublicRecord(peerB, lcap, 'public', { deps: [cid] });
+      blockCids.push(cid);
+    }
+    await quarantineMissing(peerA, 'big-parent', blockCids);
+
+    // A's request, re-encoded to advertise a >1 MiB response budget (a peer MAY, per the wire schema).
+    const baseReq = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, baseReq);
+    const bigBudgetReq = lcap.encodeWithSchema(lcap.exchangeRequestV2Schema, {
+      ...decoded,
+      pulse: {
+        ...decoded.pulse,
+        budgets: { ...decoded.pulse.budgets, max_response_bytes: 2 * 1024 * 1024 },
+      },
+    });
+
+    const resp = await respondToClientExchange(peerB, bigBudgetReq);
+    expect(resp).not.toBeNull();
+    expect((resp as Uint8Array).length).toBeGreaterThan(1_048_576); // exceeds the default 1 MiB cap
+
+    // With the fix both response decodes use the 16 MiB ceiling: the responder-leg privacy gate
+    // classifies it PUBLIC (would fail-closed to a non-public label under the old cap, DROPPING the
+    // reply), and the requester ingests all served blocks (would return null under the old cap).
+    expect(await responsePrivacyLabel(resp as Uint8Array)).toBe('public');
+    const counts = await ingestClientExchangeResponse(peerA, resp as Uint8Array);
+    expect(counts?.blocks).toBe(blockCids.length);
+  });
 });
