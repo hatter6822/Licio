@@ -1076,6 +1076,12 @@ async function establishDataChannel(
   // signal fails to open and applyPayload is idempotent for offer/answer/ICE), never mis-applied.
   const seenSignalKeys = new Map<string, number>(); // dedup key (ciphertext prefix) → clamped expiry
   const SIGNAL_SKEW_GRACE_MS = 5_000;
+  // The future-expiry acceptance window MUST match the server's rendezvous clock-skew tolerance
+  // (`clockSkewToleranceMs` = 5 min): the server ACCEPTS + stores an AAD-bound signal whose `expires_at`
+  // is up to that far ahead (a sender stamps expiry off its OWN clock).  Rejecting a legitimately
+  // skewed signal here with the tight 5 s grace would silently drop valid offer/answer/ICE from a
+  // clock-ahead mobile device and block WebRTC setup, so use the SAME window (PRIV-CARRIER-SKEW).
+  const SIGNAL_CLOCK_SKEW_MS = 5 * 60 * 1000;
   const MAX_SEEN_SIGNALS = 4_096;
   const SIGNAL_DEDUP_KEY_LEN = 64; // base64 chars past the 12-byte AEAD nonce ⇒ unique per seal
   const pumpSignals = async (): Promise<void> => {
@@ -1102,8 +1108,9 @@ async function establishDataChannel(
       }
       const nowMs = p.nowMs();
       // The furthest-future expiry a LEGITIMATE signal can claim: a sender stamps exactly `p.ttlMs`
-      // ahead of its own clock, plus a skew grace.  Anything beyond this is an untrusted-server forgery.
-      const maxExpiry = nowMs + p.ttlMs + SIGNAL_SKEW_GRACE_MS;
+      // ahead of its own clock, plus the server's clock-skew window.  Anything beyond this is an
+      // untrusted-server forgery (still bounded by MAX_SEEN_SIGNALS regardless).
+      const maxExpiry = nowMs + p.ttlMs + SIGNAL_CLOCK_SKEW_MS;
       for (const signal of signals) {
         // Drop a clearly-EXPIRED signal (with a small clock-skew grace) — it must not be applied,
         // and it should not enter the dedup set (PRIV-CARRIER-1).

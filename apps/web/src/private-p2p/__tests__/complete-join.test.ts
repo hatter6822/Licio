@@ -10,6 +10,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { PrivateRoomSession } from '../room-manager.js';
+import type { PeerChannel } from '../sync-session.js';
 
 const FUTURE = '2099-01-01T00:00:00Z';
 
@@ -128,5 +129,51 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
     const afterArchive = await founder.exportArchive();
     await joiner.importArchive(afterArchive);
     expect(joiner.state().contributions.has(secretId)).toBe(false);
+  });
+
+  it('closes the EVICTED device’s live session on removeMember (no post-removal serving) (PRIV-WEB-SESSION-EVICT)', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Quiet Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { request } = await prep.complete(fragment);
+    const { grant } = await founder.admitJoinRequest(invite, request);
+    if (!grant) throw new Error('expected a grant');
+
+    // Open a live founder→joiner session over an OBSERVABLE fake channel.
+    let channelClosed = false;
+    const channel: PeerChannel = {
+      send: () => {},
+      onMessage: () => {},
+      onClose: () => {},
+      close: () => {
+        channelClosed = true;
+      },
+    };
+    const session = founder.connectPeer(channel, { peerDeviceId: grant.assignedDeviceId });
+    expect(session.isClosed()).toBe(false);
+
+    // Evicting that device must tear its session down BEFORE any post-removal re-announce, so the
+    // evicted peer can no longer request (or be served) post-removal ops over its still-open channel.
+    await founder.removeMember({
+      memberId: grant.assignedMemberId,
+      deviceId: grant.assignedDeviceId,
+    });
+    expect(session.isClosed()).toBe(true); // the session ended synchronously on eviction
+    await new Promise((r) => setTimeout(r, 0)); // the graceful bye flushes, then the channel closes
+    expect(channelClosed).toBe(true);
   });
 });

@@ -438,6 +438,79 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
   );
 
   it(
+    'ACCEPTS a signal skewed within the server clock-skew window, not the tight 5s grace (PRIV-CARRIER-SKEW)',
+    async () => {
+      const h = await setupOffererHarness();
+      const ctx = h.ctx;
+      const ac = new AbortController();
+      const connectP = connectPrivatePeer({
+        ...h.base,
+        rtcFactory: h.makeRtcFactory(),
+        signal: ac.signal,
+      }).catch(() => undefined);
+
+      await waitUntil(() => h.rendezvous.presence.length >= 2, 'alice announced');
+      const aliceRecord = h.rendezvous.presence.find((r) => r.peer_blind_id === ctx.aliceBlind);
+      if (!aliceRecord) throw new Error('alice record not found');
+      const aliceAnn = await ctx.p2p.openRendezvousAnnouncement(aliceRecord, ctx.rendezvousKey);
+      const aliceEphPub = ctx.p2p.fromBase64Url(aliceAnn.signaling_public_key);
+      const channelKey = await deriveAliceChannelKey(ctx, aliceEphPub);
+      const routingBase = {
+        roomBlindId: ctx.roomBlindId,
+        senderBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          ctx.advEphemeral.publicKey,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
+        recipientBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          aliceEphPub,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
+      };
+      // The answer (normal expiry ⇒ always accepted) applies the remote description so a following ICE
+      // flushes into addIceCandidate.
+      h.rendezvous.enqueueSignal(
+        await ctx.p2p.sealSignal(
+          {
+            schema: 'licio.private.signaling_payload.v1',
+            kind: 'answer',
+            sdp: 'v=0\r\nadv-answer',
+          },
+          channelKey,
+          { ...routingBase, expiresAt: Date.now() + 5 * 60_000 },
+        ),
+      );
+      // An ICE candidate stamped 9 min ahead — BEYOND the tight 5 s grace but WITHIN the server's 5-min
+      // clock-skew tolerance (ttl 5 min + a 4-min skew).  A clock-ahead mobile sender stamps exactly
+      // this; the recipient MUST accept it (the server already stored it) rather than drop it as
+      // far-future, or WebRTC setup silently fails for skewed devices.
+      h.rendezvous.enqueueSignal(
+        await ctx.p2p.sealSignal(
+          {
+            schema: 'licio.private.signaling_payload.v1',
+            kind: 'ice',
+            ice_candidate: 'candidate:0 1 udp 1 1.2.3.4 9 typ host',
+            sdp_mid: '0',
+            sdp_mline_index: 0,
+          },
+          channelKey,
+          { ...routingBase, expiresAt: Date.now() + 9 * 60_000 },
+        ),
+      );
+
+      await waitUntil(() => (h.peer()?.iceApplied.length ?? 0) > 0, 'skewed ICE applied');
+      expect(h.peer()?.iceApplied.length).toBe(1); // the skewed candidate was accepted, not dropped
+
+      ac.abort();
+      await connectP;
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'survives a >1 MiB pre-handshake binary flood (opStash bounded) and STILL completes (PRIV-CARRIER-7)',
     async () => {
       const h = await setupOffererHarness();

@@ -276,6 +276,11 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
       await flushPendingIce();
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      // The awaits above (setRemoteDescription / flushPendingIce / createAnswer / setLocalDescription)
+      // can outlast a mid-batch abort/timeout; re-check BEFORE posting the answer so a cancelled
+      // responder never emits post-teardown signaling egress — the answer-path counterpart of the
+      // initiator's offer guard + the ICE-trickle guard (PUB-WEBRTC-ABORT-BATCH).
+      if (controller.signal.aborted) return;
       await sendSignal({ kind: 'answer', sdp: answer.sdp ?? '' });
     } else if (message.kind === 'answer') {
       if (!params.initiator) return;

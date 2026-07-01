@@ -322,6 +322,11 @@ export class PrivateRoomSession {
    *  every currently-connected member).  Closed sessions are pruned promptly via `onTerminate`
    *  and defensively during the next broadcast. */
   private readonly activeSessions = new Set<PrivateSyncSession>();
+  /** The handshake-PROVEN remote device id of each live session (when known — a live WebRTC carrier),
+   *  so `removeMember` can tear down an EVICTED device's session BEFORE re-announcing post-removal
+   *  heads to it (else the evicted peer keeps requesting + being served post-removal ciphertext +
+   *  metadata over its still-open channel until it happens to drop, PRIV-WEB-SESSION-EVICT). */
+  private readonly sessionPeerDevice = new WeakMap<PrivateSyncSession, string>();
 
   /**
    * Serializes EVERY MLS-group / epoch-key / engine-state mutation (PRIV-WEB-SESSION-2).  A peer's
@@ -430,6 +435,10 @@ export class PrivateRoomSession {
       readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
       readonly onError?: (error: unknown) => void;
       readonly onClose?: (graceful: boolean) => void;
+      /** The handshake-PROVEN remote device id (a live WebRTC carrier), so an eviction can tear this
+       *  session down before re-announcing to it (PRIV-WEB-SESSION-EVICT).  Omitted for a carrier with
+       *  no device identity (an offline-archive relay / a test loopback). */
+      readonly peerDeviceId?: string;
     },
   ): PrivateSyncSession {
     const codec: SyncCodec = {
@@ -437,6 +446,7 @@ export class PrivateRoomSession {
       decodeSyncMessage: this.p2p.decodeSyncMessage,
       chunkOpResponse: this.p2p.chunkOpResponseEnvelopes,
     };
+    const { peerDeviceId, ...sessionOptions } = options ?? {};
     let sync: PrivateSyncSession;
     // PRIV-WEB-SESSION-3: the session must drive the engine through the manager's `runExclusive`
     // lock, NOT the raw engine.  A `PrivateSyncSession` has its OWN per-session message queue, but
@@ -446,19 +456,35 @@ export class PrivateRoomSession {
     // ANOTHER active session in a mesh.  Passing the raw engine left those engine-state mutations
     // interleaving on the non-re-entrant engine (a corrupted fold / lost remove / divergent epoch).
     sync = new PrivateSyncSession(this.lockedEngineSurface(), channel, codec, {
-      ...(options ?? {}),
+      ...sessionOptions,
       // The manager owns §10.9 commit application (it holds the MLS group); a peer's
       // commit advances THIS device's epoch + re-opens the pending content.
       onMlsCommit: (commit, epoch) => this.applyIncomingCommit(commit, epoch),
-      // Prune the session from `activeSessions` the moment it ends by ANY path — an external
-      // channel drop OR a controller/UI `close()` (PRIV-WEB-SESSION-1: the set would otherwise grow
-      // unbounded across every reconnect).  Fires once; the closure captures `sync` (assigned below,
-      // before any terminate can fire).
-      onTerminate: () => this.activeSessions.delete(sync),
+      // Prune the session from `activeSessions` (+ its device mapping) the moment it ends by ANY path —
+      // an external channel drop OR a controller/UI `close()` (PRIV-WEB-SESSION-1: the set would
+      // otherwise grow unbounded across every reconnect).  Fires once; the closure captures `sync`
+      // (assigned below, before any terminate can fire).
+      onTerminate: () => {
+        this.activeSessions.delete(sync);
+        this.sessionPeerDevice.delete(sync);
+      },
     });
     this.activeSessions.add(sync);
+    if (peerDeviceId !== undefined) this.sessionPeerDevice.set(sync, peerDeviceId);
     sync.start();
     return sync;
+  }
+
+  /**
+   * Tear down every live session whose handshake-proven remote device id is `deviceId` (an EVICTED
+   * device): `close()` stops its message pump so it can no longer request or be served ops, and closes
+   * the underlying channel.  Called by `removeMember` BEFORE re-announcing so post-removal heads /
+   * content never reach the evicted peer (PRIV-WEB-SESSION-EVICT).
+   */
+  private closeSessionsForDevice(deviceId: string): void {
+    for (const session of [...this.activeSessions]) {
+      if (this.sessionPeerDevice.get(session) === deviceId) session.close();
+    }
   }
 
   /**
@@ -656,7 +682,7 @@ export class PrivateRoomSession {
     // Advance enrollment, then fetch the Tier-2 cap hooks (undefined ⇒ ride Tier-1).
     await this.syncCap().catch(() => {});
     const rendezvousCap = await this.capHooks(epoch.epoch).catch(() => undefined);
-    const { channel } = await connectPrivatePeer({
+    const { channel, peerDeviceId } = await connectPrivatePeer({
       p2p: this.p2p,
       rendezvous: httpRendezvousTransport(fetchImpl),
       roomIdCommitment: this.session.roomIdCommitment,
@@ -683,6 +709,7 @@ export class PrivateRoomSession {
       ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
       ...(options?.onError ? { onError: options.onError } : {}),
       ...(options?.onClose ? { onClose: options.onClose } : {}),
+      peerDeviceId, // the handshake-proven id, so an eviction tears this session down (PRIV-WEB-SESSION-EVICT)
     });
   }
 
@@ -784,6 +811,7 @@ export class PrivateRoomSession {
         ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
         ...(options?.onError ? { onError: options.onError } : {}),
         onClose: (graceful) => onDrop(result.peerDeviceId, graceful),
+        peerDeviceId: result.peerDeviceId, // so an eviction tears this mesh session down (PRIV-WEB-SESSION-EVICT)
       });
       return { peerId: result.peerDeviceId, session };
     };
@@ -1456,6 +1484,10 @@ export class PrivateRoomSession {
       ],
     };
     await putRoomSession(this.session);
+    // Tear down the EVICTED device's live session BEFORE any post-removal broadcast, so its still-open
+    // channel can no longer request or be served post-removal ops (ciphertext + metadata) — the
+    // broadcast + re-announce below then reach only the REMAINING members (PRIV-WEB-SESSION-EVICT).
+    this.closeSessionsForDevice(params.deviceId);
     this.broadcastCommit(this.p2p.encodeCommit(removed.commit), epoch);
     // …then re-announce so remaining members PULL the `device.remove` op (PRIV-WEB-SESSION-NUDGE).
     this.nudgeActiveSessions();
