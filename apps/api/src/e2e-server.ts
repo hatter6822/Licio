@@ -43,9 +43,14 @@ import {
   registerInvariantConsumers,
   setInvariantServices,
 } from './invariants/services.js';
+import { LcapIngestServer } from './lcap/server-ingest.js';
+import { setLcapIngestServer } from './lcap/service.js';
+import { InMemoryLcapServerStore } from './lcap/store.js';
 import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import { RendezvousService, setRendezvousService } from './private-rendezvous/service.js';
+import { InMemoryRendezvousStore } from './private-rendezvous/stores.js';
 import {
   createInMemoryRankingServices,
   registerRankingConsumers,
@@ -157,6 +162,24 @@ aiGovernanceServices.forum = forumServices;
 await aiGovernanceServices.reloadConfig();
 setAiGovernanceServices(aiGovernanceServices);
 registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+
+// WS-S.6.6 — force the IN-MEMORY server-blind rendezvous store.  The harness sets a DUMMY
+// DATABASE_URL to satisfy the env validator, but `getRendezvousService()`'s `buildStore()` keys off
+// DATABASE_URL and would otherwise pick the Drizzle adapter and try to reach the non-existent DB host
+// (500s on the first announce).  Overriding here keeps the rendezvous truly in-memory, like every
+// other harness service, so the two-browser private-room E2E signals over a working endpoint.
+setRendezvousService(new RendezvousService(new InMemoryRendezvousStore()));
+
+// WS-R.12 — same dummy-DATABASE_URL hazard for the LCAP ingestion server: `getLcapIngestServer()`
+// would otherwise bind the Drizzle store and 500 on the service worker's background C0-sync `/pulse`.
+// Force the in-memory adapter so the LCAP surfaces work in the harness too.
+setLcapIngestServer(
+  new LcapIngestServer(
+    process.env['LCAP_NETWORK_ID'] ?? 'licio',
+    () => Date.now(),
+    new InMemoryLcapServerStore(),
+  ),
+);
 
 await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
 await seedAiGovernance(aiGovernanceServices);

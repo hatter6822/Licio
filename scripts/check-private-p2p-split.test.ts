@@ -32,6 +32,30 @@ describe('findStaticPrivateP2pImports (WS-S.2.1 code-split gate)', () => {
     expect(findStaticPrivateP2pImports('a.ts', `import { x } from '@licio/lcap';`)).toEqual([]);
   });
 
+  it('flags a named static re-export (export { X } from) — a bundler-static edge', () => {
+    const issues = findStaticPrivateP2pImports(
+      'barrel.ts',
+      `export { PrivateRoomEngine, sealOp } from '@licio/private-p2p';`,
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toContain('static re-export');
+  });
+
+  it('flags a wildcard static re-export (export * from)', () => {
+    const issues = findStaticPrivateP2pImports('barrel.ts', `export * from '@licio/private-p2p';`);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toContain('static re-export');
+  });
+
+  it('allows a type-only re-export (erased at build)', () => {
+    expect(
+      findStaticPrivateP2pImports(
+        'barrel.ts',
+        `export type { PrivateRoomStorage } from '@licio/private-p2p';`,
+      ),
+    ).toEqual([]);
+  });
+
   it('does not let the word "import" in a comment falsely pair with a real type import', () => {
     // A regression for the comment-crossing match: the bare word "import" in a
     // doc comment must not pair with the later type import's `from '…'`.

@@ -14,7 +14,9 @@ import {
   ingestClientExchangeResponse,
   ingestPackIntoStore,
   requestHasUnfilledWants,
+  reservedResponsePackBudget,
   respondToClientExchange,
+  responsePrivacyLabel,
 } from './exchange.js';
 import type { RecordRow } from './store.js';
 import {
@@ -25,6 +27,7 @@ import {
   readBlockBytes,
   roomHashToBytes,
 } from './store.js';
+import { classifyExchangeMessage } from './transports/courier-controller.js';
 
 /** The AUTHENTIC room key for a roomId — `hex(roomIdHash('licio', roomId))` — matching the client's
  *  #BG derivation (default networkId 'licio'), so a fixture's stored room hash is the one a record's
@@ -767,6 +770,41 @@ describe('client §16 exchange engine', () => {
     expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
   });
 
+  it('SECURITY: responsePrivacyLabel gates the RESPONDER leg fail-closed (PUB-RESPONDER-PUBLIC-ONLY)', async () => {
+    const lcap = await import('@licio/lcap');
+    // (a) UNDECODABLE bytes → a non-public label, so a carriesPrivate:false carrier DROPS the reply.
+    expect(await responsePrivacyLabel(new Uint8Array([1, 2, 3, 4]))).not.toBe('public');
+
+    // (b) a REAL public response (B serves a held public block) → 'public'.
+    const bytes = new Uint8Array([9, 8, 7, 6]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecord(peerB, lcap, 'public', { deps: [blockCid] });
+    await quarantineMissing(peerA, 'parent-cid', [blockCid]);
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const publicResponse = (await respondToClientExchange(peerB, request)) as Uint8Array;
+    expect(await responsePrivacyLabel(publicResponse)).toBe('public');
+
+    // (c) a response carrying a NON-PUBLIC pack → the pack's own non-public label (fail closed).
+    // Reuse the real response's valid pulse and swap in a non-public served pack.
+    const decoded = lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, publicResponse);
+    const nonPublicPack = lcap.writePack({
+      objects: [],
+      transportProfile: 'relay',
+      privacyLabel: 'contains_in_room_metadata',
+      maxUncompressedBytes: 1_000_000,
+    });
+    const nonPublicResponse = lcap.encodeWithSchema(
+      lcap.exchangeResponseV2Schema,
+      lcap.buildExchangeResponse({
+        pulse: decoded.pulse,
+        status: 'ok',
+        responsePack: nonPublicPack,
+      }),
+    );
+    expect(await responsePrivacyLabel(nonPublicResponse)).toBe('contains_in_room_metadata');
+  });
+
   it('PUSH (gossip-out): a request includes a push_pack of our PUBLIC content', async () => {
     const lcap = await import('@licio/lcap');
     await putPublicRecord(peerA, lcap, 'public');
@@ -924,5 +962,62 @@ describe('requestHasUnfilledWants — post-round anchor decision (#1/#BK)', () =
 
   it('fails OPEN (true) for an undecodable request — back off to the authoritative anchor', async () => {
     expect(await requestHasUnfilledWants(peerA, new Uint8Array([0, 1, 2, 3]))).toBe(true);
+  });
+
+  it('decodes a >1 MiB PUBLIC response under the 16 MiB ceiling (PUB-RESPONSE-DECODE-CEILING)', async () => {
+    const lcap = await import('@licio/lcap');
+    // Seed enough public blocks (each ≤ the 256 KiB frame cap) that B's served response exceeds the
+    // default 1 MiB LDC decode cap — the case a larger-budget peer legitimately triggers.
+    const blockCids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const bytes = new Uint8Array(180_000).fill(i + 1);
+      const cid = await cidFor('block', bytes);
+      await putBlock(peerB, { blockCid: cid, state: 'integrity_verified', size: bytes.length }, [
+        bytes,
+      ]);
+      await putPublicRecord(peerB, lcap, 'public', { deps: [cid] });
+      blockCids.push(cid);
+    }
+    await quarantineMissing(peerA, 'big-parent', blockCids);
+
+    // A's request, re-encoded to advertise a >1 MiB response budget (a peer MAY, per the wire schema).
+    const baseReq = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, baseReq);
+    const bigBudgetReq = lcap.encodeWithSchema(lcap.exchangeRequestV2Schema, {
+      ...decoded,
+      pulse: {
+        ...decoded.pulse,
+        budgets: { ...decoded.pulse.budgets, max_response_bytes: 2 * 1024 * 1024 },
+      },
+    });
+
+    const resp = await respondToClientExchange(peerB, bigBudgetReq);
+    expect(resp).not.toBeNull();
+    expect((resp as Uint8Array).length).toBeGreaterThan(1_048_576); // exceeds the default 1 MiB cap
+
+    // With the fix all THREE response decode legs use the 16 MiB ceiling: the responder-leg privacy
+    // gate classifies it PUBLIC (would fail-closed to a non-public label under the old cap), the
+    // requester ingests all served blocks (would return null), AND the courier's inbound classifier
+    // recognises it as a 'response' (would return 'unknown' → drop the peer's answer) — all under the
+    // old 1 MiB cap.
+    expect(await responsePrivacyLabel(resp as Uint8Array)).toBe('public');
+    expect(classifyExchangeMessage(resp as Uint8Array)).toBe('response');
+    const counts = await ingestClientExchangeResponse(peerA, resp as Uint8Array);
+    expect(counts?.blocks).toBe(blockCids.length);
+  });
+
+  it('reserves wrapper bytes so pack + wrapper never exceeds the response ceiling (PUB-RESPONSE-WRAPPER)', () => {
+    const MAX = 16 * 1024 * 1024;
+    // A modest advertised budget is honored unchanged (the reserve only bites near the ceiling).
+    expect(reservedResponsePackBudget(1024, 5000)).toBe(1024);
+    // A near-ceiling budget is CLAMPED below the ceiling by the measured wrapper (+ framing margin), so
+    // the WHOLE response — pack + pulse/status/framing — stays within MAX (the ceiling the responder-leg
+    // decode AND the WebRTC fragmenter enforce on the entire message, not just the pack).
+    const wrapper = 5000;
+    const budget = reservedResponsePackBudget(MAX, wrapper);
+    expect(budget).toBeLessThan(MAX);
+    expect(budget + wrapper).toBeLessThanOrEqual(MAX);
+    // Never negative even if the wrapper alone exceeds the ceiling (serve nothing, don't overflow).
+    expect(reservedResponsePackBudget(MAX, MAX + 1)).toBe(0);
   });
 });

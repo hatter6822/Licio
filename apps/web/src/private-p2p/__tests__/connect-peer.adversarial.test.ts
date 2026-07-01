@@ -19,6 +19,7 @@ import {
   type RtcIceCandidateInit,
   type RtcPeerConnectionLike,
   type RtcSessionDescriptionInit,
+  selectFreshestCandidates,
 } from '../connect-peer.js';
 import type { PresenceRecord, RendezvousTransport, WireSignal } from '../rendezvous-client.js';
 
@@ -371,10 +372,24 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
       const aliceEphPub = ctx.p2p.fromBase64Url(aliceAnn.signaling_public_key);
       const channelKey = await deriveAliceChannelKey(ctx, aliceEphPub);
 
+      // The carrier now drains the PER-RECIPIENT §15.4 signal queue (keyed on the RECIPIENT's ephemeral
+      // signaling key, NOT the device-level blind id), so a mesh's concurrent dials never steal each
+      // other's deliver-once signals.  Address the flood to alice's inbound queue (recipient = alice's
+      // ephemeral); the sender field is the adversary's own inbound queue (recipient = its ephemeral).
       const routing = {
         roomBlindId: ctx.roomBlindId,
-        senderBlindId: ctx.adversaryBlind,
-        recipientBlindId: ctx.aliceBlind,
+        senderBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          ctx.advEphemeral.publicKey,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
+        recipientBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          aliceEphPub,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
         expiresAt: Date.now() + 5 * 60_000,
       };
 
@@ -415,6 +430,79 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
       await new Promise((r) => setTimeout(r, 20)); // let any further flush settle
       // EXACTLY 64 of the 100 flooded candidates were buffered + applied — 36 dropped past the cap.
       expect(h.peer()?.iceApplied.length).toBe(64);
+
+      ac.abort();
+      await connectP;
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'ACCEPTS a signal skewed within the server clock-skew window, not the tight 5s grace (PRIV-CARRIER-SKEW)',
+    async () => {
+      const h = await setupOffererHarness();
+      const ctx = h.ctx;
+      const ac = new AbortController();
+      const connectP = connectPrivatePeer({
+        ...h.base,
+        rtcFactory: h.makeRtcFactory(),
+        signal: ac.signal,
+      }).catch(() => undefined);
+
+      await waitUntil(() => h.rendezvous.presence.length >= 2, 'alice announced');
+      const aliceRecord = h.rendezvous.presence.find((r) => r.peer_blind_id === ctx.aliceBlind);
+      if (!aliceRecord) throw new Error('alice record not found');
+      const aliceAnn = await ctx.p2p.openRendezvousAnnouncement(aliceRecord, ctx.rendezvousKey);
+      const aliceEphPub = ctx.p2p.fromBase64Url(aliceAnn.signaling_public_key);
+      const channelKey = await deriveAliceChannelKey(ctx, aliceEphPub);
+      const routingBase = {
+        roomBlindId: ctx.roomBlindId,
+        senderBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          ctx.advEphemeral.publicKey,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
+        recipientBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          aliceEphPub,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
+      };
+      // The answer (normal expiry ⇒ always accepted) applies the remote description so a following ICE
+      // flushes into addIceCandidate.
+      h.rendezvous.enqueueSignal(
+        await ctx.p2p.sealSignal(
+          {
+            schema: 'licio.private.signaling_payload.v1',
+            kind: 'answer',
+            sdp: 'v=0\r\nadv-answer',
+          },
+          channelKey,
+          { ...routingBase, expiresAt: Date.now() + 5 * 60_000 },
+        ),
+      );
+      // An ICE candidate stamped 9 min ahead — BEYOND the tight 5 s grace but WITHIN the server's 5-min
+      // clock-skew tolerance (ttl 5 min + a 4-min skew).  A clock-ahead mobile sender stamps exactly
+      // this; the recipient MUST accept it (the server already stored it) rather than drop it as
+      // far-future, or WebRTC setup silently fails for skewed devices.
+      h.rendezvous.enqueueSignal(
+        await ctx.p2p.sealSignal(
+          {
+            schema: 'licio.private.signaling_payload.v1',
+            kind: 'ice',
+            ice_candidate: 'candidate:0 1 udp 1 1.2.3.4 9 typ host',
+            sdp_mid: '0',
+            sdp_mline_index: 0,
+          },
+          channelKey,
+          { ...routingBase, expiresAt: Date.now() + 9 * 60_000 },
+        ),
+      );
+
+      await waitUntil(() => (h.peer()?.iceApplied.length ?? 0) > 0, 'skewed ICE applied');
+      expect(h.peer()?.iceApplied.length).toBe(1); // the skewed candidate was accepted, not dropped
 
       ac.abort();
       await connectP;
@@ -483,4 +571,44 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
     },
     TEST_TIMEOUT_MS,
   );
+});
+
+// --- PRIV-CARRIER-FRESHEST-NOSPOOF: candidate dedup must not trust the claimed device id ----------
+describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
+  const cand = (ephemeral: string, deviceId: string, expiresAt: number) => ({
+    record: { expires_at: expiresAt },
+    ann: { signaling_public_key: ephemeral, peer_device_id: deviceId },
+  });
+
+  it('does NOT let a spoof claiming the honest peer’s device id evict the honest candidate', () => {
+    // Honest device "bob" announces ephemeral E_h; a hostile member seals a SPOOF claiming the SAME
+    // `peer_device_id` ("bob") with a DISTINCT ephemeral E_s and a LATER expires_at.  Deduping by the
+    // claimed device id would drop the honest record (max-expires wins), leaving "bob" unreachable.
+    const honest = cand('E_h', 'bob', 100);
+    const spoof = cand('E_s', 'bob', 500); // later expiry, forged claim of bob's id
+    const out = selectFreshestCandidates([honest, spoof]);
+    // BOTH distinct ephemerals survive — the honest one is never dropped by the unproven claim.
+    expect(out.map((c) => c.ann.signaling_public_key).sort()).toEqual(['E_h', 'E_s']);
+    // Sorted freshest-first: the spoof (later expiry) is tried first (where the §15.5 mismatch check
+    // rejects it), then the honest candidate is dialed in the SAME round.
+    expect(out[0]?.ann.signaling_public_key).toBe('E_s');
+    expect(out[1]?.ann.signaling_public_key).toBe('E_h');
+  });
+
+  it('collapses a genuine re-announcement of the SAME ephemeral to the fresher record', () => {
+    const stale = cand('E', 'bob', 100);
+    const fresh = cand('E', 'bob', 400); // same dial re-announced with a longer TTL
+    const out = selectFreshestCandidates([stale, fresh]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.record.expires_at).toBe(400); // kept the freshest, dropped the stale duplicate
+  });
+
+  it('keeps every distinct ephemeral and orders them freshest-first', () => {
+    const out = selectFreshestCandidates([
+      cand('E1', 'x', 200),
+      cand('E2', 'y', 900),
+      cand('E3', 'z', 500),
+    ]);
+    expect(out.map((c) => c.ann.signaling_public_key)).toEqual(['E2', 'E3', 'E1']);
+  });
 });

@@ -87,14 +87,27 @@ const LCAP_FORBIDDEN_TOKENS = [
   ...FORBIDDEN_SCHEMA_TOKENS,
   'ip_address',
   'ipAddress',
+  'ipaddr',
   'remote_addr',
   'remoteAddr',
+  'remote_address',
   'remoteAddress',
   'x_forwarded',
+  'xForwarded',
   'geoip',
   'geolocation',
+  'geo_location',
   'latitude',
   'longitude',
+  'lat_lng',
+  // These bring the private plane's network/location denylist up to check-lcap-schema-egress's
+  // strength (that gate never scans the private trees; PRIV-EGRESS-PARITY).  `coordinates` is
+  // DELIBERATELY excluded here: this gate scans the CRYPTO trees (packages/lcap/src/cose,
+  // packages/private-p2p/src/crypto) where "coordinates" legitimately names an EC key's
+  // x/y coordinates.  Geolocation field names are already covered by geo_location/lat_lng/
+  // latitude/longitude above, and `coordinates` is enforced against the SCHEMA surfaces (which
+  // carry no EC-key code) by check-lcap-schema-egress, whose SCHEMA_DIRS now include the private
+  // schemas.
 ];
 
 /** Strip block + line comments so doctrine prose can mention forbidden constructs. */

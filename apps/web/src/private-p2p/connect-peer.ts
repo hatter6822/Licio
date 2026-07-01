@@ -45,6 +45,11 @@ export interface RtcDataChannelLike {
   onopen: (() => void) | null;
   onmessage: ((event: { data: unknown }) => void) | null;
   onclose: (() => void) | null;
+  /** SCTP send-buffer backpressure (present on a real RTCDataChannel; a fake may omit it — the
+   *  carrier then sends without waiting).  Used to pause fragment sends before the buffer overruns. */
+  bufferedAmount?: number;
+  bufferedAmountLowThreshold?: number;
+  onbufferedamountlow?: (() => void) | null;
   send(data: string | ArrayBuffer | ArrayBufferView): void;
   close(): void;
 }
@@ -248,6 +253,43 @@ interface DiscoveredPeer {
 }
 
 /**
+ * Reduce the opened rendezvous candidates to the set worth dialing, freshest-first.
+ *
+ * A peer re-announces a FRESH ephemeral each dial while its PRIOR announcements linger under TTL, so
+ * `opened` can hold several records for ONE device (stale + current), and dialing a STALE one first
+ * burns a candidate deadline on a dead/already-resolved channel before the peer's live dial is ever
+ * reached (PRIV-CARRIER-FRESHEST).  So dedup on the ACTUAL dialed identity — the per-announcement
+ * EPHEMERAL `signaling_public_key` — and NOT the claimed `peer_device_id`: that field is
+ * UNAUTHENTICATED here (the announcement is sealed under the room-wide rendezvous key, so any
+ * current-epoch member can seal one claiming ANOTHER device's id — exactly what the §15.5 handshake
+ * mismatch check re-verifies).  Keying the dedup on the claimed device id would let a spoof sealed with
+ * a LATER `expires_at` EVICT the honest device's DISTINCT candidate before it is ever dialed, so
+ * repeated polls keep selecting only the spoof and the targeted peer stays unreachable — a persistent
+ * targeted DoS (PRIV-CARRIER-FRESHEST-NOSPOOF).  Keying on the ephemeral only merges a genuine
+ * re-announcement of the SAME dial (keep the fresher record); two DISTINCT ephemerals — one device's
+ * stale-vs-current OR an honest live dial vs. a spoof under the same claimed id — are ALWAYS kept as
+ * separate candidates, then sorted freshest-first so the live dial is reached before any stale one
+ * WITHOUT an unproven id ever dropping an honest candidate (the spoof, being newer, is dialed first,
+ * where the §15.5 mismatch check rejects it + the ephemeral-keyed cooldown suppresses it, and the
+ * honest candidate is dialed in the SAME round).  Flood amplification stays bounded by the orthogonal
+ * Tier-2 cap + Tier-1 sample-poll, never by this dedup.
+ */
+export function selectFreshestCandidates<
+  C extends { record: { expires_at: number }; ann: { signaling_public_key: string } },
+>(opened: readonly C[]): C[] {
+  const freshestByEphemeral = new Map<string, C>();
+  for (const c of opened) {
+    const prev = freshestByEphemeral.get(c.ann.signaling_public_key);
+    if (prev === undefined || c.record.expires_at > prev.record.expires_at) {
+      freshestByEphemeral.set(c.ann.signaling_public_key, c);
+    }
+  }
+  return [...freshestByEphemeral.values()].sort(
+    (a, b) => b.record.expires_at - a.record.expires_at,
+  );
+}
+
+/**
  * Establish a live, membership-proven `PeerChannel` to another member of the room.
  * Resolves once the WebRTC data channel is open AND the §15.5 handshake has verified
  * the remote device; rejects (tearing the connection down) on timeout, abort, or a
@@ -283,10 +325,12 @@ export async function connectPrivatePeer(
 
   // 1. Announce our presence with an ephemeral X25519 signaling key. Build the Tier-2 cap FIRST
   //    (if a hook is configured and this device is enrolled): the cap proof is sealed INSIDE the
-  //    announcement (a member-only, anti-strip verifier path) AND carried at the TOP LEVEL so the
-  //    server/relay Tier-2 path can verify + dedup it WITHOUT the rendezvous key. When capped, the
-  //    cap pseudonym IS our peer_blind_id — the §15.3.1 dedup key (one presence slot per device
-  //    per (epoch, bucket)); a ZK proof reveals nothing beyond that pseudonym.
+  //    announcement ONLY (a member-only verifier path; there is NO top-level, server-visible cap —
+  //    PRIV-API-RENDEZVOUS-1: a server-held per-(room, epoch) issuer key would be a stable cross-bucket
+  //    linking handle that breaks §15.3 unlinkability, so the server never verifies the cap and runs
+  //    the §27 Tier-1 sample-poll).  The cap's BBS `pseudonym` is DISTINCT from `peer_blind_id` (the
+  //    latter is the HMAC-derived per-(device, epoch, bucket) id); a polling MEMBER opens the sealed
+  //    cap and dedups by the verified pseudonym.
   const ephemeral = await p2p.generateX25519KeyPair();
   // The per-announcer cap rides SEALED INSIDE the announcement only (PRIV-API-RENDEZVOUS-1: the
   // server-visible top-level cap was removed because the server-held issuer key is a cross-bucket
@@ -352,6 +396,28 @@ export async function connectPrivatePeer(
       p2p.CHANNEL_LABEL_SIGNALING,
     );
 
+    // Per-RECIPIENT §15.4 signaling addresses (keyed on the RECIPIENT's ephemeral signaling key, NOT
+    // the device-level `selfPeerBlindId`).  The rendezvous signal drain is deliver-once, so a
+    // device-level queue shared by every dial would let one session's pump consume — and drop as
+    // un-openable — a signal meant for another session's channel; that stalls the 2nd+ dial of a mesh.
+    // Each dial mints a fresh ephemeral ⇒ its own inbound queue (`selfSignalAddr`, derivable from our
+    // OWN ephemeral so we drain it from the START — before we have discovered the peer — so a first
+    // offer is never lost to a not-yet-draining answerer).  We send to the peer's inbound queue
+    // (`peerSignalAddr`, from its announced ephemeral).  The two directions use distinct ephemerals, so
+    // a peer never drains a signal it itself sent — no mutual-discovery round-trip.
+    const selfSignalAddr = await p2p.deriveSignalAddress(
+      rendezvousKey,
+      ephemeral.publicKey,
+      epoch,
+      timeBucket,
+    );
+    const peerSignalAddr = await p2p.deriveSignalAddress(
+      rendezvousKey,
+      peer.peerSignalingPublicKey,
+      epoch,
+      timeBucket,
+    );
+
     // Deterministic role: the bytewise-smaller peer blind id offers (a stable tiebreak).
     const isOfferer = selfPeerBlindId < peer.peerBlindId;
     const pc = factory({
@@ -362,6 +428,14 @@ export async function connectPrivatePeer(
 
     let cleanedUp = false;
     let signalingController: SignalingController | undefined;
+    // The session's close-notification (wrapDataChannel's `handleClose`), registered once the channel
+    // is exposed.  cleanup() fires it DIRECTLY (PRIV-CARRIER-TEARDOWN) rather than relying on
+    // pc.close() to fire dc.onclose — the W3C spec does NOT dispatch a `close` event on a data channel
+    // whose OWNING connection is closed by close(), so on a real browser an ICE-restart exhaustion /
+    // answerer give-up teardown would otherwise never notify the session (no re-dial, leaked session +
+    // mesh slot).  Null before the channel is exposed (a pre-handshake failure rejects the connect
+    // instead), so the `?.()` is a no-op then.
+    const closeNotifier: { fire: (() => void) | null } = { fire: null };
     const cleanup = (): void => {
       if (cleanedUp) return;
       cleanedUp = true;
@@ -377,6 +451,9 @@ export async function connectPrivatePeer(
       } catch {
         /* already closed */
       }
+      // DETERMINISTICALLY notify the session of the drop (idempotent via handleClose's own guard), so
+      // maintainConnection/maintainMesh re-dial + prune even when pc.close() does not fire dc.onclose.
+      closeNotifier.fire?.();
     };
 
     // The per-candidate deadline applies to the dial + handshake ONLY (never the live connection), and
@@ -402,10 +479,10 @@ export async function connectPrivatePeer(
         transportMode: params.transportMode,
         routing: {
           roomBlindId,
-          senderBlindId: selfPeerBlindId,
-          recipientBlindId: peer.peerBlindId,
+          senderBlindId: selfSignalAddr,
+          recipientBlindId: peerSignalAddr,
         },
-        selfBlindId: selfPeerBlindId,
+        selfBlindId: selfSignalAddr,
         isOfferer,
         nowMs,
         ttlMs: SIGNAL_TTL_MS,
@@ -475,7 +552,16 @@ export async function connectPrivatePeer(
       // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the §15.5
       //    step-4 session key; the handshake used strings).
       return {
-        channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey, isOfferer),
+        channel: wrapDataChannel(
+          dc,
+          inbox,
+          opStash,
+          cleanup,
+          p2p,
+          sessionKey,
+          isOfferer,
+          closeNotifier,
+        ),
         peerDeviceId: provenPeerDeviceId, // the handshake-PROVEN id, not the rendezvous claim
       };
     } catch (error) {
@@ -501,6 +587,14 @@ export async function connectPrivatePeer(
   // that the honest member's next re-announce (a fresh ephemeral) clears.  (PRIV-CARRIER-3-COOLDOWN.)
   const failedPeers = new Map<string, number>(); // signaling_public_key → cooldown-until (ms)
   let lastDialError: unknown;
+  // §15.2 discovery-poll backoff (PRIV-CARRIER-POLL-BACKOFF): start responsive (`pollIntervalMs`) but
+  // RAMP the empty-poll wait toward a cap, so a member that is under `maxPeers` in a SMALL room (the
+  // common case — a mesh dial perpetually seeks a peer that is not there) does not hammer the
+  // GLOBAL-rate-limited rendezvous `/poll` at 1/`pollIntervalMs` for the entire dial window (which
+  // trips the server's coarse fixed-window budget once a few members mesh, starving discovery).  Reset
+  // the instant a FRESH candidate appears, so discovery stays fast when there is someone to dial.
+  const maxDiscoveryPollBackoffMs = Math.max(pollIntervalMs, 4_000);
+  let discoveryPollBackoffMs = pollIntervalMs;
   for (;;) {
     // The whole discovery loop is deadline/abort-bounded.  An explicit abort ends it with the
     // `aborted` error; when the DEADLINE runs out, surface the typed DIAL failure if we attempted one
@@ -524,10 +618,14 @@ export async function connectPrivatePeer(
         // A §15.3.2 cover record or a record sealed for a different key: skip it.
       }
     }
-    let candidates: Candidate[] = opened;
+    // Dedup by the ACTUAL dialed identity (the per-announcement ephemeral `signaling_public_key`) and
+    // sort freshest-first — NEVER by the unauthenticated claimed `peer_device_id`; see
+    // `selectFreshestCandidates` for why keying on the claimed id would let a spoof evict an honest peer
+    // (PRIV-CARRIER-FRESHEST / -NOSPOOF).
+    let candidates: Candidate[] = selectFreshestCandidates(opened);
     if (params.rendezvousCap) {
-      const capped = opened.filter((o) => o.ann.cap !== undefined);
-      const uncapped = opened.filter((o) => o.ann.cap === undefined);
+      const capped = candidates.filter((o) => o.ann.cap !== undefined);
+      const uncapped = candidates.filter((o) => o.ann.cap === undefined);
       const survivors = params.rendezvousCap.filterVerified(
         capped.map((o) => o.ann.cap as { proof: string; pseudonym: string }),
         roomBlindId,
@@ -535,6 +633,16 @@ export async function connectPrivatePeer(
         timeBucket,
         nowMs(),
       );
+      // A present-but-UNVERIFIABLE cap is DROPPED (in neither set) — the cap's whole PURPOSE is to
+      // keep a flooder's caps off the dial budget (TIER2 §1), and §6.8 sanctions the poller ignoring
+      // unverifiable ones.  This does NOT violate the §6.10 invariant-4 "never lock an honest member
+      // out": that fail-open is an ANNOUNCE-side property (a member that cannot build a VERIFIABLE cap
+      // omits it and rides Tier-1 as `uncapped`, above), and a genuine per-device issuer-key divergence
+      // is a PRE-first-sync transient the op-log/snapshot converges (`coordinator.ts` canonicalIssuerKey)
+      // while local_mdns / member / manual discovery (§15.2) bridge the interim — the cap is a
+      // prioritization/anti-flood layer, not the sole discovery path.  Degrading unverifiable caps to
+      // Tier-1 here would instead hand the dial budget straight back to the flood (the exact attack the
+      // cap exists to bound), so it is deliberately NOT done (PRIV-CAP-DROP-UNVERIFIED).
       candidates = [...survivors.map((i) => capped[i] as Candidate), ...uncapped];
     }
 
@@ -549,10 +657,14 @@ export async function connectPrivatePeer(
       // a cooled-down candidate's cooldown may expire (we prune expired cooldowns above), both within
       // the deadline.  Keep polling; the deadline check at the top surfaces `lastDialError` only when
       // time actually runs out, so a stale-presence-then-live-peer room still converges
-      // (PRIV-CARRIER-3-POLL).
-      await sleep(pollIntervalMs);
+      // (PRIV-CARRIER-3-POLL).  Back off the empty-poll cadence so an under-filled room does not flood
+      // the rendezvous (PRIV-CARRIER-POLL-BACKOFF).
+      await sleep(discoveryPollBackoffMs);
+      discoveryPollBackoffMs = Math.min(discoveryPollBackoffMs * 2, maxDiscoveryPollBackoffMs);
       continue;
     }
+    // A fresh candidate appeared — return to the responsive discovery cadence.
+    discoveryPollBackoffMs = pollIntervalMs;
 
     for (const candidate of triable) {
       throwIfAborted();
@@ -594,14 +706,16 @@ interface IceRestartWatcherParams {
 
 /**
  * Observe the live `RTCPeerConnection`'s connection/ICE state and recover a transient path
- * failure by ICE-restart, before it escalates to a hard drop.  Only the OFFERER re-offers
- * (the answerer reacts to the re-offer via the still-live sealed signaling); the answerer
- * still arms the watcher purely to poll the rendezvous fast on a blip.  The recovery is a
- * SELF-DRIVING loop (it re-checks after each attempt rather than waiting for the ICE state to
- * re-fire, which a stuck `disconnected` path may never do): attempts are bounded per episode
- * and reset once the connection returns to `connected`/`completed`; on exhaustion it calls
- * `onExhausted` to tear the connection down so the caller re-dials (never leaving a dead
- * connection — and its signaling pump — to leak).
+ * failure by ICE-restart, before it escalates to a hard drop.  Only the OFFERER re-offers (avoiding
+ * offer glare); the ANSWERER reacts to the re-offer via the still-live sealed signaling.  BOTH roles,
+ * however, run the SELF-DRIVING bounded loop (it re-checks after each attempt rather than waiting for
+ * the ICE state to re-fire, which a stuck `disconnected` path may never do): attempts are bounded per
+ * episode and reset once the connection returns to `connected`/`completed`; on exhaustion it calls
+ * `onExhausted` to tear the connection down so the caller re-dials.  The ANSWERER's loop is what
+ * closes PRIV-CARRIER-ANSWERER: when the offerer VANISHES (a hard drop / tab kill fires no DTLS
+ * close_notify, so `dc.onclose` never fires and no recovery re-offer ever arrives), the answerer would
+ * otherwise strand its session + occupy a mesh fan-out slot forever — instead its give-up tears the
+ * connection down so maintainConnection/maintainMesh re-dial + prune.
  */
 function installIceRestartWatcher(p: IceRestartWatcherParams): void {
   if (!p.enabled) return;
@@ -644,15 +758,23 @@ function installIceRestartWatcher(p: IceRestartWatcherParams): void {
         return;
       }
       if (attempts >= p.maxRestarts) {
-        // Exhausted on a still-bad path: hand off to teardown so the caller re-dials.
+        // Exhausted on a still-bad path: hand off to teardown so the caller re-dials.  BOTH roles reach
+        // here — the OFFERER after its re-offers failed to heal the path, the ANSWERER after no recovery
+        // re-offer arrived from a vanished offerer (PRIV-CARRIER-ANSWERER).
         recovering = false;
         p.onExhausted();
         return;
       }
       attempts += 1;
-      await p.signaling.triggerIceRestart().catch(() => {
-        /* a failed re-offer just leaves the path bad; the next re-check escalates */
-      });
+      p.signaling.noteActivity(); // keep polling fast so a recovery re-offer/answer lands promptly
+      // Only the OFFERER re-offers (avoids offer glare); the ANSWERER just waits for the offerer's
+      // re-offer to heal the path, counting down the SAME bounded give-up so a vanished offerer is
+      // never waited on forever.
+      if (p.isOfferer) {
+        await p.signaling.triggerIceRestart().catch(() => {
+          /* a failed re-offer just leaves the path bad; the next re-check escalates */
+        });
+      }
       // Self-drive the next re-check whether or not the ICE state re-fires `disconnected`.
       if (!p.isCleanedUp() && recovering) driveRecovery(p.graceMs);
     });
@@ -667,7 +789,7 @@ function installIceRestartWatcher(p: IceRestartWatcherParams): void {
       generation += 1; // cancel any pending re-check — the path recovered on its own
       return;
     }
-    if (!p.isOfferer || recovering) return; // the answerer only fast-polls; one chain at a time
+    if (recovering) return; // one recovery/give-up chain at a time (both roles)
     if (isFailed()) {
       recovering = true;
       driveRecovery(0);
@@ -939,11 +1061,29 @@ async function establishDataChannel(
   // `stop()`, polling at the slow cadence when quiescent and the fast cadence in a renegotiation
   // window (so a recovery completes quickly without hammering the rendezvous when idle).
   // PRIV-CARRIER-1: the rendezvous server is UNTRUSTED, so enforce signal expiry + replay dedup on
-  // the CLIENT.  `aeadSeal` uses a fresh random nonce, so a replayed signal is byte-identical — its
-  // ciphertext string is a stable dedup key.  The map is keyed ciphertext→expires_at and pruned by
-  // expiry so it stays bounded across the long-lived maintenance loop.
-  const seenSignalCiphertexts = new Map<string, number>();
+  // the CLIENT.  `aeadSeal` uses a fresh random nonce, so a replayed signal is byte-identical — a
+  // stable prefix of its ciphertext (past the random nonce) is the dedup key.  The map is bounded
+  // THREE ways so a malicious server cannot grow it without limit (PRIV-CARRIER-DEDUP-BOUND):
+  //   • a signal whose `expires_at` exceeds the legit bound (a sender stamps exactly `ttlMs`, plus a
+  //     clock-skew grace) is REJECTED — the untrusted server cannot set a FAR-FUTURE expiry to pin a
+  //     dedup entry past the prune (the old code trusted the server-supplied expiry it was meant to
+  //     defend against, so an entry with `expires_at = 1e18` was NEVER pruned → unbounded growth);
+  //   • the stored expiry is therefore ≤ `now + ttlMs + grace`, so pruning ALWAYS fires within ~5 min;
+  //   • the map is keyed on a COMPACT ciphertext prefix and HARD-CAPPED at `MAX_SEEN_SIGNALS` with
+  //     oldest-first eviction — bounding BOTH the entry count AND the per-entry size regardless of the
+  //     flood rate or the server's claims.
+  // An evicted-then-replayed signal is merely re-processed (`openSignal` is the real gate — a garbage
+  // signal fails to open and applyPayload is idempotent for offer/answer/ICE), never mis-applied.
+  const seenSignalKeys = new Map<string, number>(); // dedup key (ciphertext prefix) → clamped expiry
   const SIGNAL_SKEW_GRACE_MS = 5_000;
+  // The future-expiry acceptance window MUST match the server's rendezvous clock-skew tolerance
+  // (`clockSkewToleranceMs` = 5 min): the server ACCEPTS + stores an AAD-bound signal whose `expires_at`
+  // is up to that far ahead (a sender stamps expiry off its OWN clock).  Rejecting a legitimately
+  // skewed signal here with the tight 5 s grace would silently drop valid offer/answer/ICE from a
+  // clock-ahead mobile device and block WebRTC setup, so use the SAME window (PRIV-CARRIER-SKEW).
+  const SIGNAL_CLOCK_SKEW_MS = 5 * 60 * 1000;
+  const MAX_SEEN_SIGNALS = 4_096;
+  const SIGNAL_DEDUP_KEY_LEN = 64; // base64 chars past the 12-byte AEAD nonce ⇒ unique per seal
   const pumpSignals = async (): Promise<void> => {
     while (!stopped) {
       if (channelOpen) {
@@ -967,13 +1107,26 @@ async function establishDataChannel(
         devWarn('rendezvous signal poll failed', error);
       }
       const nowMs = p.nowMs();
+      // The furthest-future expiry a LEGITIMATE signal can claim: a sender stamps exactly `p.ttlMs`
+      // ahead of its own clock, plus the server's clock-skew window.  Anything beyond this is an
+      // untrusted-server forgery (still bounded by MAX_SEEN_SIGNALS regardless).
+      const maxExpiry = nowMs + p.ttlMs + SIGNAL_CLOCK_SKEW_MS;
       for (const signal of signals) {
         // Drop a clearly-EXPIRED signal (with a small clock-skew grace) — it must not be applied,
         // and it should not enter the dedup set (PRIV-CARRIER-1).
         if (signal.expires_at + SIGNAL_SKEW_GRACE_MS < nowMs) continue;
+        // Drop a signal claiming an expiry BEYOND what a legit sender ever stamps: the untrusted
+        // server cannot use a far-future `expires_at` to defeat expiry-based pruning of the dedup set.
+        if (signal.expires_at > maxExpiry) continue;
+        const dedupKey = signal.ciphertext.slice(0, SIGNAL_DEDUP_KEY_LEN);
         // Reject an in-window REPLAY (a byte-identical re-delivery of an already-seen signal).
-        if (seenSignalCiphertexts.has(signal.ciphertext)) continue;
-        seenSignalCiphertexts.set(signal.ciphertext, signal.expires_at);
+        if (seenSignalKeys.has(dedupKey)) continue;
+        // Hard-cap the dedup set (oldest-first eviction) so it stays bounded regardless of flood rate.
+        if (seenSignalKeys.size >= MAX_SEEN_SIGNALS) {
+          const oldest = seenSignalKeys.keys().next().value;
+          if (oldest !== undefined) seenSignalKeys.delete(oldest);
+        }
+        seenSignalKeys.set(dedupKey, signal.expires_at); // ≤ maxExpiry ⇒ prunes within ~5 min
         try {
           await applyPayload(await p2p.openSignal(signal, p.channelKey));
         } catch (error) {
@@ -983,8 +1136,8 @@ async function establishDataChannel(
         }
       }
       // Prune expired dedup entries so the set stays bounded over the long-lived loop.
-      for (const [ct, exp] of seenSignalCiphertexts) {
-        if (exp + SIGNAL_SKEW_GRACE_MS < nowMs) seenSignalCiphertexts.delete(ct);
+      for (const [k, exp] of seenSignalKeys) {
+        if (exp + SIGNAL_SKEW_GRACE_MS < nowMs) seenSignalKeys.delete(k);
       }
       if (stopped) return;
       const cadence =
@@ -1268,11 +1421,14 @@ function toUint8(data: ArrayBuffer | ArrayBufferView): Uint8Array {
  * peer's own frame back cannot open it, and the two directions are cryptographically
  * distinguished — not merely non-colliding by random nonce.  Both peers agree on the mapping
  * via the deterministic `isOfferer` (the bytewise-smaller blind id offers).  This is a
- * `HANDSHAKE_PROTOCOL_VERSION`-2 wire format; a version skew is rejected at the handshake (see
- * the constant), so within a live session both peers are always on the same op-frame format.
+ * `HANDSHAKE_PROTOCOL_VERSION`-3 wire format (v3 added datachannel FRAGMENTATION of the sealed frame
+ * — see `wrapDataChannel` — so a large media/snapshot sync message can cross a finite SCTP message
+ * limit; a v2 peer sent whole frames and is incompatible, so the AAD is bumped in lockstep with the
+ * version).  A version skew is rejected at the handshake (see the constant), so within a live session
+ * both peers are always on the same op-frame format.
  */
-const OP_FRAME_AAD_O2A = new TextEncoder().encode('licio.private.op-frame.v2.o2a');
-const OP_FRAME_AAD_A2O = new TextEncoder().encode('licio.private.op-frame.v2.a2o');
+const OP_FRAME_AAD_O2A = new TextEncoder().encode('licio.private.op-frame.v3.o2a');
+const OP_FRAME_AAD_A2O = new TextEncoder().encode('licio.private.op-frame.v3.a2o');
 
 function wrapDataChannel(
   dc: RtcDataChannelLike,
@@ -1282,6 +1438,9 @@ function wrapDataChannel(
   p2p: ConnectPrivatePeerParams['p2p'],
   sessionKey: Uint8Array,
   isOfferer: boolean,
+  /** Registered with `handleClose` so the dialer's `cleanup()` can DETERMINISTICALLY drive the
+   *  session's onClose without relying on pc.close() firing dc.onclose (PRIV-CARRIER-TEARDOWN). */
+  closeNotifier: { fire: (() => void) | null },
 ): PeerChannel {
   // Seal with our send direction; open only the peer's send (= our receive) direction.
   const sendAad = isOfferer ? OP_FRAME_AAD_O2A : OP_FRAME_AAD_A2O;
@@ -1290,10 +1449,60 @@ function wrapDataChannel(
   let listener: ((frame: Uint8Array) => void) | null = null;
   let closeListener: (() => void) | null = null;
 
+  // --- SCTP backpressure (PRIV-SYNC-FRAGMENT): a large sealed sync message is FRAGMENTED (below), so
+  // sending its hundreds of fragments back-to-back would overrun the SCTP send buffer and `dc.send`
+  // would throw mid-stream, truncating the message the peer's reassembler then rejects.  Pause sends
+  // once `bufferedAmount` exceeds the high-water mark until `onbufferedamountlow` (or a safety timeout).
+  const DRAIN_HIGH_WATER = 8 * 1024 * 1024;
+  const DRAIN_LOW_WATER = 1 * 1024 * 1024;
+  const MAX_DRAIN_WAITS = 30; // ≈60 s before declaring the channel stuck
+  let drainWaiters: Array<() => void> = [];
+  const wakeDrainWaiters = (): void => {
+    const waiters = drainWaiters;
+    drainWaiters = [];
+    for (const wake of waiters) wake();
+  };
+  if ('bufferedAmountLowThreshold' in dc) {
+    dc.bufferedAmountLowThreshold = DRAIN_LOW_WATER;
+    dc.onbufferedamountlow = () => wakeDrainWaiters();
+  }
+  const awaitDrain = async (): Promise<void> => {
+    if (typeof dc.bufferedAmount !== 'number') return; // a fake/non-buffering channel
+    let waits = 0;
+    while (dc.readyState === 'open' && (dc.bufferedAmount ?? 0) > DRAIN_HIGH_WATER) {
+      if (++waits > MAX_DRAIN_WAITS) return; // stuck — stop waiting; the send below fails on the full channel
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, 2_000);
+        drainWaiters.push(finish);
+      });
+    }
+  };
+
+  // A remote drop (the data channel closes underneath us) both notifies the session AND runs
+  // cleanup — closing the pc + halting the long-lived maintenance signaling loop so it does
+  // not leak past the connection.  An in-place ICE-restart does NOT close the data channel
+  // (the SCTP/DTLS association survives), so this fires only on a genuine, unrecoverable drop;
+  // the session's onClose then drives `maintainConnection` to re-dial.
+  let channelClosed = false;
+  const handleClose = (): void => {
+    if (channelClosed) return; // fire the session notify + cleanup AT MOST ONCE
+    channelClosed = true;
+    wakeDrainWaiters(); // unblock any send parked on backpressure so it observes the close
+    closeListener?.();
+    cleanup();
+  };
+
   // Open a sealed frame under the §15.5 step-4 session key, then deliver the plaintext.
   // A frame that does not open (tampered, or not sealed by the session-key holder) is
   // DROPPED fail-closed — a DTLS-terminating relay cannot inject or read op frames.
-  const deliver = (sealed: Uint8Array): void => {
+  const openAndDeliver = (sealed: Uint8Array): void => {
     void p2p
       .aeadOpen(sessionKey, sealed, recvAad)
       .then((frame) => {
@@ -1305,26 +1514,36 @@ function wrapDataChannel(
       });
   };
 
-  // The op frames a faster peer sent during our handshake are ALSO sealed (it sealed them
-  // after ITS handshake) — open them under the same session key.
-  for (const sealed of opStash) deliver(sealed);
+  // Inbound datachannel messages are FRAGMENTS of a sealed sync frame (v3): reassemble, then open the
+  // whole sealed message.  A framing violation (reorder / over-cap / a fragment disagreeing with the
+  // in-flight message) is fail-closed — DROP the corrupt message + RESET the reassembler (recreate it)
+  // so the channel survives and the op-exchange re-requests what was lost, rather than tearing the
+  // whole connection down on a single bad/dropped fragment (an ordered+reliable channel only sees this
+  // under active tampering or the pre-handshake stash cap, both of which the §15.7 walk recovers from).
+  let reassembler = new p2p.PrivateFragmentReassembler();
+  const acceptFragment = (fragment: Uint8Array): void => {
+    let complete: Uint8Array | null;
+    try {
+      complete = reassembler.accept(fragment);
+    } catch {
+      reassembler = new p2p.PrivateFragmentReassembler(); // reset; the message is dropped fail-closed
+      return;
+    }
+    if (complete) openAndDeliver(complete);
+  };
+
+  // The fragments a faster peer sent during our handshake (stashed as binary frames) come FIRST, in
+  // order, through the SAME reassembler as the live fragments (the datachannel is ordered).
+  for (const fragment of opStash) acceptFragment(fragment);
   inbox.consume((data): void => {
     if (typeof data === 'string') return; // no string frames post-handshake
-    deliver(toUint8(data as ArrayBuffer | ArrayBufferView));
+    acceptFragment(toUint8(data as ArrayBuffer | ArrayBufferView));
   });
-  // A remote drop (the data channel closes underneath us) both notifies the session AND runs
-  // cleanup — closing the pc + halting the long-lived maintenance signaling loop so it does
-  // not leak past the connection.  An in-place ICE-restart does NOT close the data channel
-  // (the SCTP/DTLS association survives), so this fires only on a genuine, unrecoverable drop;
-  // the session's onClose then drives `maintainConnection` to re-dial.
-  let channelClosed = false;
-  const handleClose = (): void => {
-    if (channelClosed) return; // fire the session notify + cleanup AT MOST ONCE
-    channelClosed = true;
-    closeListener?.();
-    cleanup();
-  };
   dc.onclose = handleClose;
+  // Let the dialer's cleanup() drive this same close-notification (idempotent via the guard above), so
+  // an ICE-restart exhaustion / answerer give-up teardown notifies the session even on a real browser
+  // where pc.close() does NOT dispatch dc.onclose (PRIV-CARRIER-TEARDOWN).
+  closeNotifier.fire = handleClose;
   // If the channel ALREADY closed/closing by the time we wrap it (it dropped during the handshake),
   // `onclose` may never fire — notify the session + tear down on a microtask so it can re-dial,
   // mirroring armChannel's already-open handling (PRIV-CARRIER-2).
@@ -1332,11 +1551,31 @@ function wrapDataChannel(
     queueMicrotask(handleClose);
   }
 
+  // Single-flight sends (a per-channel chain) so two messages' fragments never interleave on the one
+  // ordered datachannel (the receiver reassembles ONE message at a time), and each fragment waits for
+  // the SCTP buffer to drain first.  A monotonically-increasing message id lets the receiver detect a
+  // message boundary.
+  let sendChain: Promise<void> = Promise.resolve();
+  let nextMessageId = 0;
+
   return {
-    async send(frame: Uint8Array): Promise<void> {
-      const sealed = await p2p.aeadSeal(sessionKey, frame, sendAad);
-      // Copy into a standalone ArrayBuffer (the channel must own the bytes).
-      dc.send(sealed.slice().buffer);
+    send(frame: Uint8Array): Promise<void> {
+      const run = sendChain.then(async () => {
+        const sealed = await p2p.aeadSeal(sessionKey, frame, sendAad);
+        const id = nextMessageId;
+        nextMessageId = (nextMessageId + 1) >>> 0; // wrap as u32; ids need not be unique forever
+        for (const fragment of p2p.fragmentPrivateMessage(sealed, id)) {
+          await awaitDrain();
+          if (dc.readyState !== 'open') return; // channel closed mid-send → stop (fail closed)
+          // A fresh, exactly-sized frame — send its own buffer (the channel owns the bytes).
+          dc.send(fragment.slice().buffer);
+        }
+      });
+      sendChain = run.then(
+        () => undefined,
+        () => undefined, // a failed send must not wedge later sends (each caller still sees its own error)
+      );
+      return run;
     },
     onMessage(fn: (frame: Uint8Array) => void): void {
       listener = fn;

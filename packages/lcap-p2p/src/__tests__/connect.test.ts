@@ -299,6 +299,80 @@ describe('WS-R.15.6a connectWebrtc', () => {
     ).rejects.toThrow(/disallowed/);
   });
 
+  it('fails closed with ZERO egress on an already-aborted caller signal (PUB-WEBRTC-ABORT)', async () => {
+    const relay = makeRelay();
+    const key = await importSignalKey(KEY_BYTES);
+    const controller = new AbortController();
+    controller.abort(); // aborted BEFORE the dial — addEventListener('abort') would never fire
+    let pcConstructed = false;
+    await expect(
+      connectWebrtc({
+        decision: await allow(),
+        signalKey: key,
+        roomIdHash: ROOM,
+        selfPeerKey: 'a',
+        remotePeerKey: 'b',
+        initiator: true,
+        postSignal: relay.postSignal,
+        pollSignal: relay.pollSignal,
+        signal: controller.signal,
+        rtcFactory: (config) => {
+          pcConstructed = true;
+          return new FakePeer(new FakeLink(), 'initiator', config);
+        },
+      }),
+    ).rejects.toThrow(/aborted/);
+    // No RTCPeerConnection is constructed and NOTHING is sealed + POSTed to the relay: an
+    // already-aborted dial produces no offer/ICE signaling egress at all.
+    expect(pcConstructed).toBe(false);
+    expect(relay.postsTo('b')).toBe(0);
+  });
+
+  it('a responder aborted DURING offer handling posts NO answer (PUB-WEBRTC-ABORT-BATCH)', async () => {
+    const link = new FakeLink();
+    const relay = makeRelay();
+    const key = await importSignalKey(KEY_BYTES);
+    const decision = await allow();
+    const controller = new AbortController();
+    const common = {
+      decision,
+      signalKey: key,
+      roomIdHash: ROOM,
+      postSignal: relay.postSignal,
+      pollSignal: relay.pollSignal,
+      pollIntervalMs: 1,
+      timeoutMs: 300,
+    };
+    // The responder aborts MID-offer-handling — inside `createAnswer`, after `setRemoteDescription`
+    // and before the answer is posted — so the offer-branch guard must suppress the answer egress
+    // (the async awaits between the batch-abort check and the post let the abort slip through before).
+    class AbortingResponder extends FakePeer {
+      override async createAnswer(): Promise<RtcSessionDescriptionInit> {
+        controller.abort();
+        return super.createAnswer();
+      }
+    }
+    await Promise.allSettled([
+      connectWebrtc({
+        ...common,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        rtcFactory: (config) => new FakePeer(link, 'initiator', config),
+      }),
+      connectWebrtc({
+        ...common,
+        selfPeerKey: 'bob',
+        remotePeerKey: 'alice',
+        initiator: false,
+        signal: controller.signal,
+        rtcFactory: (config) => new AbortingResponder(link, 'responder', config),
+      }),
+    ]);
+    // The aborted responder sealed + POSTed NOTHING back to the initiator — no answer, no ICE.
+    expect(relay.postsTo('alice')).toBe(0);
+  });
+
   it('applies relay-only iceTransportPolicy to the RTCConfiguration', async () => {
     const relay = makeRelay();
     const key = await importSignalKey(KEY_BYTES);

@@ -78,8 +78,17 @@ async function readJsonBounded(c: Context, maxBytes: number): Promise<unknown | 
 export function createPrivateRendezvousRoutes() {
   const app = new Hono();
 
+  // The GLOBAL fixed-window budgets below are a §19.1 COARSE BACKSTOP only — the spec delegates
+  // per-client flood fairness to the edge/gateway.  The in-memory E2E harness (`LICIO_E2E=1`, refused
+  // under production) runs WITHOUT that edge, so several real browser contexts meshing at once (each
+  // announcing + polling the server-blind rendezvous) trip the bare global cap that a real deployment
+  // never would.  Relax the cap for the harness ONLY (never production) so the multi-peer mesh E2E
+  // exercises the REAL endpoints; production keeps the tight backstop.
+  const e2e = process.env['LICIO_E2E'] === '1' && process.env['NODE_ENV'] !== 'production';
+  const cap = (limit: number): number => (e2e ? limit * 50 : limit);
+
   // §15.3 announce — store a presence record (over-long/expired TTL rejected).
-  app.post('/announce', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) => {
+  app.post('/announce', rateLimit({ limit: cap(120), windowMs: 60_000 }), async (c) => {
     const body = await readJsonBounded(c, MAX_BODY_BYTES);
     if (body === TOO_LARGE) return c.json({ error: 'oversized_request' }, 413);
     const parsed = announceRequestSchema.safeParse(body);
@@ -92,7 +101,7 @@ export function createPrivateRendezvousRoutes() {
 
   // §15.3 poll — read presence records for a room blind id.  ALWAYS 200 + a
   // (possibly empty) bounded list: no existence oracle (§15.3.1).
-  app.post('/poll', rateLimit({ limit: 240, windowMs: 60_000 }), async (c) => {
+  app.post('/poll', rateLimit({ limit: cap(240), windowMs: 60_000 }), async (c) => {
     const body = await readJsonBounded(c, MAX_BODY_BYTES);
     if (body === TOO_LARGE) return c.json({ error: 'oversized_request' }, 413);
     const parsed = pollRequestSchema.safeParse(body);
@@ -101,7 +110,7 @@ export function createPrivateRendezvousRoutes() {
   });
 
   // §15.4 signal — queue an opaque E2E-encrypted signaling blob for a recipient.
-  app.post('/signal', rateLimit({ limit: 240, windowMs: 60_000 }), async (c) => {
+  app.post('/signal', rateLimit({ limit: cap(240), windowMs: 60_000 }), async (c) => {
     const body = await readJsonBounded(c, MAX_BODY_BYTES);
     if (body === TOO_LARGE) return c.json({ error: 'oversized_request' }, 413);
     const parsed = signalRequestSchema.safeParse(body);
@@ -112,7 +121,7 @@ export function createPrivateRendezvousRoutes() {
 
   // §15.4 signal drain — return + DELETE the caller's queued signals (a state-
   // changing POST, like the LCAP signal drain).
-  app.post('/signal/poll', rateLimit({ limit: 480, windowMs: 60_000 }), async (c) => {
+  app.post('/signal/poll', rateLimit({ limit: cap(480), windowMs: 60_000 }), async (c) => {
     const body = await readJsonBounded(c, MAX_BODY_BYTES);
     if (body === TOO_LARGE) return c.json({ error: 'oversized_request' }, 413);
     const parsed = signalPollRequestSchema.safeParse(body);

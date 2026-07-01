@@ -44,6 +44,34 @@ export type { CommitCounts };
 /** Cap on how many local records the share-closure enumerates (bounded device CPU + wire). */
 const MAX_SHARE_RECORDS = 256;
 
+/** The §27 per-exchange RESPONSE ceiling (16 MiB): the max bytes one served exchange reply may carry,
+ *  matching the WebRTC reassembly cap (`MAX_REASSEMBLY_BYTES`) + the IPFS single-object bound.  Clamps a
+ *  peer's untrusted `max_response_bytes` so the responder never repacks more than a carrier can move. */
+export const MAX_EXCHANGE_RESPONSE_BYTES = 16 * 1024 * 1024;
+
+/** The CBOR framing a `response_pack` field adds to an encoded response beyond the measured pack-less
+ *  wrapper — the field's map key + byte-string length header — reserved (with margin) so the WHOLE
+ *  encoded response stays within {@link MAX_EXCHANGE_RESPONSE_BYTES} (PUB-RESPONSE-WRAPPER). */
+const RESPONSE_PACK_FRAMING_MARGIN = 256;
+
+/**
+ * The pack-size budget for a §16 response: the peer's advertised `maxResponseBytes` CLAMPED so the
+ * WHOLE encoded response — the served pack PLUS the `wrapperBytes`-measured pulse/status/framing PLUS
+ * the response_pack field header — stays within {@link MAX_EXCHANGE_RESPONSE_BYTES}.  That ceiling
+ * bounds the ENTIRE message (the responder-leg privacy decode AND the WebRTC fragmenter both enforce
+ * it on the whole response), not just the pack, so reserving the wrapper here keeps a legitimately
+ * large public reply carriable instead of overflowing into an undecodable / fragmenter-dropped frame
+ * (PUB-RESPONSE-WRAPPER).  Never negative (serve nothing rather than overflow if the wrapper alone
+ * already fills the ceiling).
+ */
+export function reservedResponsePackBudget(maxResponseBytes: number, wrapperBytes: number): number {
+  const ceiling = Math.max(
+    0,
+    MAX_EXCHANGE_RESPONSE_BYTES - wrapperBytes - RESPONSE_PACK_FRAMING_MARGIN,
+  );
+  return Math.min(maxResponseBytes, ceiling);
+}
+
 /**
  * The §22.5 sharing scope — WHAT this device may serve/push over the public P2P plane.  Narrows
  * (never widens) public content: an optional room allowlist (opaque hashes) + a priority cap.
@@ -420,7 +448,25 @@ export async function respondToClientExchange(
   const shareable = new Set(await collectShareableCids(db, lcap, scope));
   const wantCids = (request.want ?? []).map((w) => w.cid).filter((cid) => shareable.has(cid));
   const budgets = request.pulse.budgets;
-  const budget = budgets.max_response_bytes;
+  // CLAMP the peer-advertised response budget to the §27 per-exchange ceiling (PUB-WEB-CARRIERS-BUDGET):
+  // `max_response_bytes` is an untrusted uint (validated only as non-negative), so a peer could ask for
+  // an arbitrarily large repack.  A single exchange message can carry at most `MAX_EXCHANGE_RESPONSE_BYTES`
+  // — the reassembly / single-object DoS bound the WebRTC fragmenter and the IPFS bridge also enforce —
+  // so never build a reply larger than that (the server pulse C0 path clamps identically).
+  // Build the pulse FIRST so we can RESERVE the response wrapper (pulse + status + CBOR framing) out of
+  // the pack budget: MAX_EXCHANGE_RESPONSE_BYTES bounds the ENTIRE encoded response — which the
+  // responder-leg privacy decode AND the WebRTC fragmenter both enforce on the whole message — not just
+  // the `response_pack` (PUB-RESPONSE-WRAPPER).  Without the reserve, a peer advertising a ~16 MiB budget
+  // gets a pack near 16 MiB whose wrapper tips the whole response over the ceiling, so the reply decodes
+  // to a non-public label / is dropped by the fragmenter.  Measuring the pack-LESS response (with the
+  // longer `partial` status) is an exact upper bound on the wrapper; RESPONSE_PACK_FRAMING_MARGIN covers
+  // the response_pack field's added key + byte-string length header.
+  const pulse = await publicPulse(lcap, 'courier');
+  const wrapperBytes = lcap.encodeWithSchema(
+    lcap.exchangeResponseV2Schema,
+    lcap.buildExchangeResponse({ pulse, status: 'partial' }),
+  ).length;
+  const budget = reservedResponsePackBudget(budgets.max_response_bytes, wrapperBytes);
   // Honor the peer's advertised SELECTION floor (priority_floor / allow_media) — a peer that advertises
   // a stealth/minimal budget is not served over-priority/media objects even if a stale want lists them;
   // a DEFAULT (full) courier/relay budget allows everything, so it always fetches its explicit wants (#BF).
@@ -435,13 +481,50 @@ export async function respondToClientExchange(
         })
       : { served: [], truncated: false, pack: undefined };
 
-  const pulse = await publicPulse(lcap, 'courier');
   const response = lcap.buildExchangeResponse({
     pulse,
     status: repacked.truncated ? 'partial' : 'ok',
     ...(repacked.pack !== undefined ? { responsePack: repacked.pack } : {}),
   });
   return lcap.encodeWithSchema(lcap.exchangeResponseV2Schema, response);
+}
+
+/**
+ * Derive the carriage privacy label of a §16 exchange RESPONSE from its embedded `response_pack`
+ * header — the RESPONDER-leg counterpart of the courier's request-leg `requestPrivacyLabel`.  A
+ * response with no served pack is `'public'` (it carries no content); otherwise the label is the
+ * served pack's own `privacy_label`.  Fails CLOSED: an undecodable response, or a served pack that
+ * cannot be read, resolves to a NON-public label so a `carriesPrivate: false` carrier (the courier
+ * radio / the WebRTC datachannel) DROPS the reply STRUCTURALLY (PUB-RESPONDER-PUBLIC-ONLY) — making
+ * the public-only-response guarantee independent of the correctness of `collectShareableCids` and of
+ * any alternative `buildResponse` seam, symmetric with the request leg's gate.
+ */
+export async function responsePrivacyLabel(
+  responseBytes: Uint8Array,
+): Promise<import('@licio/lcap').PackHeaderV2['privacy_label']> {
+  const lcap = await import('@licio/lcap');
+  const decoded = ((): import('@licio/lcap').ExchangeResponseV2 | null => {
+    try {
+      // Decode under the RESPONSE build ceiling, not the default 1 MiB LDC cap: a peer that
+      // advertises a larger budget lets `respondToClientExchange` build a public pack up to
+      // MAX_EXCHANGE_RESPONSE_BYTES (16 MiB — the same reassembly / single-object bound the WebRTC
+      // fragmenter + IPFS bridge + repack clamp enforce), so the decode cap must equal the build cap
+      // or a legit >1 MiB public response spuriously fails to decode (PUB-RESPONSE-DECODE-CEILING) —
+      // dropping it here (non-public label) or losing it at ingest.  maxDepth/maxItems stay sourced
+      // from DEFAULT_DECODE_LIMITS so they cannot drift.  (The REQUEST decodes keep the default cap:
+      // a conformant request is ≤ 256 KiB, so an over-1-MiB request is abuse that SHOULD fail closed.)
+      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes, {
+        ...lcap.DEFAULT_DECODE_LIMITS,
+        maxBytes: MAX_EXCHANGE_RESPONSE_BYTES,
+      });
+    } catch {
+      return null;
+    }
+  })();
+  if (decoded === null) return 'contains_in_room_metadata'; // undecodable → fail closed (non-public)
+  if (decoded.response_pack === undefined) return 'public'; // no served pack ⇒ carries no content
+  const read = await lcap.readPack(decoded.response_pack);
+  return read.ok ? read.pack.header.privacy_label : 'contains_in_room_metadata';
 }
 
 /** The outcome of handling one inbound exchange message over a duplex channel. */
@@ -492,7 +575,18 @@ export async function ingestClientExchangeResponse(
   const lcap = await import('@licio/lcap');
   const response = ((): import('@licio/lcap').ExchangeResponseV2 | null => {
     try {
-      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes);
+      // Decode under the RESPONSE build ceiling, not the default 1 MiB LDC cap: a peer that
+      // advertises a larger budget lets `respondToClientExchange` build a public pack up to
+      // MAX_EXCHANGE_RESPONSE_BYTES (16 MiB — the same reassembly / single-object bound the WebRTC
+      // fragmenter + IPFS bridge + repack clamp enforce), so the decode cap must equal the build cap
+      // or a legit >1 MiB public response spuriously fails to decode (PUB-RESPONSE-DECODE-CEILING) —
+      // dropping it here (non-public label) or losing it at ingest.  maxDepth/maxItems stay sourced
+      // from DEFAULT_DECODE_LIMITS so they cannot drift.  (The REQUEST decodes keep the default cap:
+      // a conformant request is ≤ 256 KiB, so an over-1-MiB request is abuse that SHOULD fail closed.)
+      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes, {
+        ...lcap.DEFAULT_DECODE_LIMITS,
+        maxBytes: MAX_EXCHANGE_RESPONSE_BYTES,
+      });
     } catch {
       return null;
     }

@@ -200,4 +200,71 @@ describe('runWebrtcBidirectionalExchange', () => {
     expect(await readBlockBytes(peerA, xCid)).toEqual(x); // A got X
     expect(await readBlockBytes(peerB, yCid)).toEqual(y); // B got Y
   });
+
+  it('transmits the responder reply even when our own response is ingested FIRST (#reply-flush)', async () => {
+    // The race the `finalize` drain closes: A ingests ITS response (gotResponse=true), THEN handles
+    // the peer's request (served=true + a reply queued onto the async send chain).  A naive settle in
+    // that same turn sets `settled` before the queued reply flushes, and the send guard then DROPS the
+    // reply — the peer is marked served locally but never receives our served content.
+    const x = new Uint8Array([9, 9, 9, 9]);
+    const y = new Uint8Array([7, 7, 7, 7]);
+    const xCid = await cidFor('block', x);
+    const yCid = await cidFor('block', y);
+    await putBlock(peerB, { blockCid: xCid, state: 'integrity_verified', size: x.length }, [x]);
+    await putPublicRecordWithBlock(peerB, xCid);
+    await putBlock(peerA, { blockCid: yCid, state: 'integrity_verified', size: y.length }, [y]);
+    await putPublicRecordWithBlock(peerA, yCid);
+    await quarantineMissing(peerA, [xCid]);
+    await quarantineMissing(peerB, [yCid]);
+
+    // Precompute the exact frames so we can DELIVER them to A in a controlled order.
+    const aReq = await buildClientExchangeRequest(peerA, 'relay');
+    const bRespToA = await respondToClientExchange(peerB, aReq); // B serves X → A ingests (gotResponse)
+    const bReq = await buildClientExchangeRequest(peerB, 'relay'); // B wants Y → A serves it (a reply)
+    expect(bRespToA).not.toBeNull();
+
+    // A manual channel: capture A's OUTBOUND frames; inject inbound frames by hand.
+    const sentFrames: Uint8Array[] = [];
+    const channel = {
+      readyState: 'open' as const,
+      onmessage: null as ((event: { data: unknown }) => void) | null,
+      onclose: null as (() => void) | null,
+      send: (data: Uint8Array) => {
+        sentFrames.push(data.slice());
+      },
+      close: () => {},
+    } as unknown as DataChannelLike;
+
+    const p2p = await import('@licio/lcap-p2p');
+    const run = runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 2000 });
+    await new Promise((r) => setTimeout(r, 20)); // A sends its own request
+    const inject = (msg: Uint8Array): void => {
+      const withOnmessage = channel as unknown as {
+        onmessage: ((e: { data: unknown }) => void) | null;
+      };
+      for (const f of p2p.fragmentMessage(msg, 0)) withOnmessage.onmessage?.({ data: f });
+    };
+    inject(bRespToA as Uint8Array); // deliver our RESPONSE first → gotResponse = true
+    await new Promise((r) => setTimeout(r, 20));
+    inject(bReq); // THEN the peer's REQUEST → served = true + a reply queued
+    const result = await run;
+
+    expect(result.served).toBe(true);
+    // A must have actually TRANSMITTED a §16 RESPONSE serving Y — not just its own request.
+    const lcap = await import('@licio/lcap');
+    const reasm = new p2p.FragmentReassembler();
+    const outbound: Uint8Array[] = [];
+    for (const f of sentFrames) {
+      const m = reasm.accept(f);
+      if (m) outbound.push(m);
+    }
+    const sentAReply = outbound.some((m) => {
+      try {
+        return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, m).response_pack !== undefined;
+      } catch {
+        return false;
+      }
+    });
+    expect(sentAReply).toBe(true); // the reply flushed before settle (dropped without the fix)
+  });
 });

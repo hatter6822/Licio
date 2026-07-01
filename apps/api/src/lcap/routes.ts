@@ -77,7 +77,7 @@ import {
   getLcapPublishAuditStore,
   getPublishEligibilityResolver,
 } from './service.js';
-import { frameBlobs, getSignalMailbox } from './signaling.js';
+import { DEFAULT_SIGNAL_CONFIG, frameBlobs, getSignalMailbox } from './signaling.js';
 import type { BlockProvenanceStore, ProvenanceTarget } from './takedown-oracle.js';
 
 type ContentKind = 'record' | 'proof' | 'block' | 'chunk';
@@ -1353,14 +1353,25 @@ export function createLcapRoutes(
   // CSRF-EXEMPT (in csrf.ts EXEMPT_PATHS, like the native sync routes) — it is SESSIONLESS, so
   // there is no session token to bind; the access-control model is the OPAQUE PEER KEY as a bearer
   // (only a party that already holds the recipient key can address it), bounded by the rate limit.
-  app.post('/p2p/signal', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) => {
-    const result = getSignalMailbox().post(
-      c.req.query('to'),
-      new Uint8Array(await c.req.arrayBuffer()),
-      Date.now(),
-    );
-    return new Response(null, { status: result.ok ? 202 : result.status });
-  });
+  app.post(
+    '/p2p/signal',
+    rateLimit({ limit: 120, windowMs: 60_000 }),
+    // Bound the body on the STREAM (PUB-SIGNAL-BODYLIMIT): without this, a chunked/absent-length
+    // request would buffer an unbounded body in `c.req.arrayBuffer()` BEFORE `SignalMailbox.post`
+    // could reject it at `maxBlobBytes` — the exact hazard `lcapBodyLimit` documents, left unguarded
+    // on this one (unauthenticated, CSRF-exempt) route while every sibling POST above wraps it.
+    lcapBodyLimit(DEFAULT_SIGNAL_CONFIG.maxBlobBytes),
+    async (c) => {
+      if (declaredLengthExceeds(c, DEFAULT_SIGNAL_CONFIG.maxBlobBytes))
+        return json(413, { error: 'oversized_request' });
+      const result = getSignalMailbox().post(
+        c.req.query('to'),
+        new Uint8Array(await c.req.arrayBuffer()),
+        Date.now(),
+      );
+      return new Response(null, { status: result.ok ? 202 : result.status });
+    },
+  );
   // The drain DELETES the peer's queued blobs (a state-changing POST, never a GET).  ALSO
   // CSRF-EXEMPT + sessionless: the bearer credential is the opaque `peer` key — only a party that
   // already holds it can consume that peer's queue.  (A holder-of-key proof would harden it further.)

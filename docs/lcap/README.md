@@ -435,6 +435,39 @@ contributes 0 at accept and is otherwise bounded by the §27.1 block caps and th
 contribution's capability (a block→capability reverse index) is the remaining refinement,
 tracked here.
 
+### Transport-layer audit round (2026-06)
+
+A dedicated deep audit of the public transport plane (the seam, the `@licio/lcap-p2p`
+WebRTC + IPFS carriers, the client carriers/exchange/courier, and the server relay +
+signaling).  Fixed + tested:
+
+- **`/api/lcap/v2/p2p/signal` unbounded body (DoS, HIGH).**  It was the only LCAP POST
+  route without a stream body cap, buffering a chunked/absent-length request whole before
+  the 32 KiB blob check on an unauthenticated route.  Now wrapped with
+  `lcapBodyLimit(DEFAULT_SIGNAL_CONFIG.maxBlobBytes)` + the declared-length fast-path,
+  matching every sibling POST.
+- **Responder-leg public-only carriage gate.**  The courier + WebRTC responders enqueued a
+  reply with no `transportMayCarry`/label check (asymmetric with the request-leg fix).  A
+  shared `responsePrivacyLabel` gate (fail-closed on undecodable/non-public) now guards both
+  responder legs, and the peer-advertised response budget is clamped to the §27 per-exchange
+  ceiling.
+- **Live WebRTC send backpressure.**  `runWebrtcBidirectionalExchange` now applies the same
+  SCTP `awaitDrain` + single-flight the (previously-only-`WebrtcTransport`) send path had, so
+  a multi-MiB reply does not overrun the SCTP buffer mid-stream.
+- **`connectWebrtc` already-aborted signal + `connectLcapWebrtcChannel` default.**  An
+  already-aborted caller signal now fails closed with ZERO signaling egress (mirroring
+  `receive()`'s PUB-WEBRTC-1), and the synthesized §26.4 fallback defaults `userEnabled:false`
+  (off by default) so a caller supplying neither a decision nor privacy options never opens an
+  IP-revealing peer connection.
+- **Code-split gates + egress parity.**  `check:{lcap,private}-p2p-split` now also catch
+  static `export … from` re-export barrels; the network/location egress denylist is unified so
+  the private plane gets the LCAP gate's stronger token set.
+
+The LCAP P2P transports are opt-in (off by default per §26.4); the fixes ship with the plane,
+and the pay-to-rank firewall + fail-closed crypto were unaffected.  The private-plane
+counterpart audit — the launch-blocking WS-S rooms — is recorded in
+`docs/private-p2p/SECURITY-REVIEW.md`.
+
 ## Acceptance gates (OFFLINE_SPEC §36 — WS-R.18.6)
 
 §36 enumerates the gates that must hold before LCAP v0.2 is production-ready for

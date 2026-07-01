@@ -281,7 +281,21 @@ slice is closed on the convergence side:
     and `decryptAttachment`s them (re-verifying every CID before storing).
   - **§14.5 live snapshot fetch** — a compacted/lagging member that cannot fetch the
     pruned prefix op-by-op requests the peer's snapshot archive over
-    `snapshot_request`/`snapshot_response` and bootstraps from it.
+    `snapshot_request`/`snapshot_response` and bootstraps from it; the request now fires
+    whenever the walk is STUCK (a compacted peer's PARTIAL serve, or ops held pending behind
+    a pruned prefix), not only on a fully-empty response.  A snapshot too large for one live
+    message is declined gracefully (→ the §15.9 offline CAR path) rather than stalling.
+  - **Datachannel fragmentation (`HANDSHAKE_PROTOCOL_VERSION` 3, `sync/fragment.ts`)** — a
+    large sealed sync message (a media `block_response`, a `snapshot_response`) is split into
+    ≤16 KiB fragments and reassembled fail-closed (a 16 MiB §27 reassembly cap, SCTP
+    backpressure + single-flight sends), so media/snapshot at realistic sizes actually cross
+    the carrier instead of silently failing the SCTP message limit.  The sync-message decode
+    cap is a coherent 16 MiB; a version skew is rejected at the handshake.
+  - **Deterministic teardown + both-role give-up** — `cleanup()` fires the session
+    close-notification directly (never relying on `pc.close()`→`dc.onclose`, which browsers do
+    not guarantee), and BOTH roles run the bounded ICE-restart give-up loop (only the offerer
+    re-offers), so a VANISHED offerer no longer strands the answerer's session + mesh slot —
+    `maintainConnection`/`maintainMesh` re-dial + prune on every drop.
 - **Tracked residuals (closure target: physical-radio field confirmation).**
   - **Real-browser carrier convergence** (WP-9 / finding 13) is **shipped**:
     `apps/web/e2e/private-carrier.realwebrtc.spec.ts` runs the REAL `connectPrivatePeer`
@@ -292,10 +306,18 @@ slice is closed on the convergence side:
     parity); and a real **§15.4 ICE-restart** re-offer keeps the channel alive (a frame still
     flows afterwards — the data channel + session key survived).  It earlier surfaced + fixed a
     live-ICE bug (the signaling payload dropped `sdpMid`/`sdpMLineIndex`, which a real
-    `addIceCandidate` rejects).  What REMAINS: the full TWO-CONTEXT
-    `create→invite→join→connect→converge` over the live BFF rendezvous endpoint
-    (`POST /v1/private-rendezvous/*`) — the current spec uses an in-page rendezvous bridge and
-    shares epoch keys directly (the §12.3 join is proven separately).
+    `addIceCandidate` rejects).
+  - **Full two-browser join+converge over the LIVE rendezvous** (WS-S launch gate) is now
+    **shipped**: `apps/web/e2e/private-room-bff.realwebrtc.spec.ts` runs the ACTUAL
+    `PrivateRoomSession` manager across TWO independent browser CONTEXTS (isolated IndexedDB ⇒ two
+    genuinely-distinct devices) — founder A mints an HPKE-sealed §10.3 invite, joiner B opens it +
+    builds a §12.3 join request, A admits it (MLS Add → the §14.5 grant), B `completeJoin`s, then
+    BOTH `connect()` over the REAL server-blind rendezvous endpoint (`POST /v1/private-rendezvous/*`,
+    dev-proxied to the in-memory API — no in-page bridge, no shared epoch keys) and a real Chromium
+    `RTCPeerConnection`, complete the §15.5 handshake, and converge to **byte-identical**
+    `roomStateCommitment` after each authors a story.  The realwebrtc config now boots the
+    in-memory API alongside the Vite dev server, and the harness (`e2e-room-harness.ts`) re-exports
+    the real manager.  Stable across repeats + the whole realwebrtc suite.
   - **Carrier resilience** (§15.4) is **shipped**: ICE-restart recovers a TRANSIENT path
     failure IN PLACE on the live `RTCPeerConnection` — a connection/ICE-state watcher debounces
     a `disconnected` blip (and restarts immediately on `failed`), the OFFERER re-offers with

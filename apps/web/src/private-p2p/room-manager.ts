@@ -322,6 +322,11 @@ export class PrivateRoomSession {
    *  every currently-connected member).  Closed sessions are pruned promptly via `onTerminate`
    *  and defensively during the next broadcast. */
   private readonly activeSessions = new Set<PrivateSyncSession>();
+  /** The handshake-PROVEN remote device id of each live session (when known — a live WebRTC carrier),
+   *  so `removeMember` can tear down an EVICTED device's session BEFORE re-announcing post-removal
+   *  heads to it (else the evicted peer keeps requesting + being served post-removal ciphertext +
+   *  metadata over its still-open channel until it happens to drop, PRIV-WEB-SESSION-EVICT). */
+  private readonly sessionPeerDevice = new WeakMap<PrivateSyncSession, string>();
 
   /**
    * Serializes EVERY MLS-group / epoch-key / engine-state mutation (PRIV-WEB-SESSION-2).  A peer's
@@ -430,12 +435,18 @@ export class PrivateRoomSession {
       readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
       readonly onError?: (error: unknown) => void;
       readonly onClose?: (graceful: boolean) => void;
+      /** The handshake-PROVEN remote device id (a live WebRTC carrier), so an eviction can tear this
+       *  session down before re-announcing to it (PRIV-WEB-SESSION-EVICT).  Omitted for a carrier with
+       *  no device identity (an offline-archive relay / a test loopback). */
+      readonly peerDeviceId?: string;
     },
   ): PrivateSyncSession {
     const codec: SyncCodec = {
       encodeSyncMessage: this.p2p.encodeSyncMessage,
       decodeSyncMessage: this.p2p.decodeSyncMessage,
+      chunkOpResponse: this.p2p.chunkOpResponseEnvelopes,
     };
+    const { peerDeviceId, ...sessionOptions } = options ?? {};
     let sync: PrivateSyncSession;
     // PRIV-WEB-SESSION-3: the session must drive the engine through the manager's `runExclusive`
     // lock, NOT the raw engine.  A `PrivateSyncSession` has its OWN per-session message queue, but
@@ -445,19 +456,35 @@ export class PrivateRoomSession {
     // ANOTHER active session in a mesh.  Passing the raw engine left those engine-state mutations
     // interleaving on the non-re-entrant engine (a corrupted fold / lost remove / divergent epoch).
     sync = new PrivateSyncSession(this.lockedEngineSurface(), channel, codec, {
-      ...(options ?? {}),
+      ...sessionOptions,
       // The manager owns §10.9 commit application (it holds the MLS group); a peer's
       // commit advances THIS device's epoch + re-opens the pending content.
       onMlsCommit: (commit, epoch) => this.applyIncomingCommit(commit, epoch),
-      // Prune the session from `activeSessions` the moment it ends by ANY path — an external
-      // channel drop OR a controller/UI `close()` (PRIV-WEB-SESSION-1: the set would otherwise grow
-      // unbounded across every reconnect).  Fires once; the closure captures `sync` (assigned below,
-      // before any terminate can fire).
-      onTerminate: () => this.activeSessions.delete(sync),
+      // Prune the session from `activeSessions` (+ its device mapping) the moment it ends by ANY path —
+      // an external channel drop OR a controller/UI `close()` (PRIV-WEB-SESSION-1: the set would
+      // otherwise grow unbounded across every reconnect).  Fires once; the closure captures `sync`
+      // (assigned below, before any terminate can fire).
+      onTerminate: () => {
+        this.activeSessions.delete(sync);
+        this.sessionPeerDevice.delete(sync);
+      },
     });
     this.activeSessions.add(sync);
+    if (peerDeviceId !== undefined) this.sessionPeerDevice.set(sync, peerDeviceId);
     sync.start();
     return sync;
+  }
+
+  /**
+   * Tear down every live session whose handshake-proven remote device id is `deviceId` (an EVICTED
+   * device): `close()` stops its message pump so it can no longer request or be served ops, and closes
+   * the underlying channel.  Called by `removeMember` BEFORE re-announcing so post-removal heads /
+   * content never reach the evicted peer (PRIV-WEB-SESSION-EVICT).
+   */
+  private closeSessionsForDevice(deviceId: string): void {
+    for (const session of [...this.activeSessions]) {
+      if (this.sessionPeerDevice.get(session) === deviceId) session.close();
+    }
   }
 
   /**
@@ -468,10 +495,11 @@ export class PrivateRoomSession {
    * interleave with a local `authorOp` / `removeMember` / `admitJoinRequest` / an incoming MLS
    * commit (and with other mesh sessions) on the non-re-entrant engine.  The async SERVE reads
    * (`serveOps` / `serveBlocks` / `snapshotArchive` / `wantedBlockCids`) are serialized too so a
-   * serve never reads a half-applied fold.  The four SYNCHRONOUS reads (`headAnnouncement` /
-   * `wantedFrom` / `missingDependencies` / `latestSnapshotId`) run to completion with no await, so
-   * no mutation can interleave mid-call — they pass through unlocked.  Each session handler makes at
-   * most ONE async engine call, so there is no nested-lock acquisition (the lock is non-re-entrant).
+   * serve never reads a half-applied fold.  The five SYNCHRONOUS reads (`headAnnouncement` /
+   * `wantedFrom` / `missingDependencies` / `latestSnapshotId` / `pendingCount`) run to completion with
+   * no await, so no mutation can interleave mid-call — they pass through unlocked.  Each session
+   * handler makes at most ONE async engine call, so there is no nested-lock acquisition (the lock is
+   * non-re-entrant).
    */
   private lockedEngineSurface(): SyncEngineSurface {
     const engine = this.engine;
@@ -480,14 +508,40 @@ export class PrivateRoomSession {
       wantedFrom: (announcement) => engine.wantedFrom(announcement),
       missingDependencies: () => engine.missingDependencies(),
       latestSnapshotId: () => engine.latestSnapshotId(),
+      // §14.5 stuck-detection (PRIV-SESSION-SNAPSHOT-STUCK): a pure Map-size read, so it joins the
+      // synchronous-reads group (no await ⇒ no mutation interleaves).  Omitting it silently disabled
+      // the snapshot bootstrap for a compacted-prefix peer — now REQUIRED on the surface.
+      pendingCount: () => engine.pendingCount(),
       serveOps: (opIds) => this.runExclusive(() => engine.serveOps(opIds)),
       ingest: (envelopes) => this.runExclusive(() => engine.ingest(envelopes)),
       wantedBlockCids: () => this.runExclusive(() => engine.wantedBlockCids()),
       serveBlocks: (cids, maxBytes) => this.runExclusive(() => engine.serveBlocks(cids, maxBytes)),
       ingestBlocks: (blocks) => this.runExclusive(() => engine.ingestBlocks(blocks)),
       snapshotArchive: () => this.runExclusive(() => engine.snapshotArchive()),
-      importArchive: (bytes) => this.runExclusive(() => engine.importArchive(bytes)),
+      importArchive: (bytes) => this.runExclusive(() => this.importArchiveImpl(bytes)),
     };
+  }
+
+  /**
+   * Run `importArchive` on the engine and PERSIST the resulting base.  A live sync-session snapshot
+   * ADOPTION (§14.5 rebase) — or an offline-archive import — rebases the engine's `sealedSnapshot` in
+   * memory, but a reload re-seeds the engine from `StoredRoomSession.snapshotBase`, which the manager
+   * updates after local compaction/admission but NOT after an import.  Without persisting, an app
+   * restart before the next local compaction falls back to the OLD base while the ops the peer snapshot
+   * summarizes may already be pruned, so the room LOSES the catch-up and re-strands on the same
+   * compacted prefix (PRIV-WEB-SNAPSHOT-PERSIST).  `exportBase()` returns the engine's CURRENT base, so
+   * persisting it is correct whether the import adopted a newer snapshot, kept ours, or added only ops.
+   * Runs under the op-lock (called from within `runExclusive`, like `ingest`), so the persisted base
+   * reflects the imported state atomically.
+   */
+  private async importArchiveImpl(bytes: Uint8Array): Promise<IngestReport> {
+    const report = await this.engine.importArchive(bytes);
+    const base = this.engine.exportBase();
+    if (base !== undefined) {
+      this.session = { ...this.session, snapshotBase: base };
+      await putRoomSession(this.session);
+    }
+    return report;
   }
 
   /**
@@ -557,6 +611,21 @@ export class PrivateRoomSession {
     }
   }
 
+  /** §15.6 — after a LOCAL author (a new op / an admitted or removed member), nudge every live
+   *  session to re-announce its heads so each connected peer PULLS the new ops.  Without this a live
+   *  session (1:1 or mesh) converges only the state that existed at connect time — a subsequently
+   *  authored op (a story, a `member.add`/`member.remove`, a cap op) would never propagate until a
+   *  reconnect.  Self-heals the set on a stale/closed session, mirroring `broadcastCommit`. */
+  private nudgeActiveSessions(): void {
+    for (const session of this.activeSessions) {
+      if (session.isClosed()) {
+        this.activeSessions.delete(session);
+        continue;
+      }
+      session.reannounce();
+    }
+  }
+
   /**
    * Ingest envelopes delivered out-of-band (a peer push, an imported archive) through
    * the engine's verify-before-use path (§8.3).  Returns what was accepted vs.
@@ -593,7 +662,8 @@ export class PrivateRoomSession {
     // Serialized on the manager's op-lock, symmetric with `ingest` (PRIV-WEB-SESSION-2/3): an
     // out-of-band archive import is an engine-state mutation and must not interleave with a local
     // authoring op, an incoming MLS commit, or a live sync session's fold on the non-re-entrant engine.
-    return this.runExclusive(() => this.engine.importArchive(bytes));
+    // Persists the resulting snapshot base so a reload keeps the catch-up (PRIV-WEB-SNAPSHOT-PERSIST).
+    return this.runExclusive(() => this.importArchiveImpl(bytes));
   }
 
   /** Map the manifest's §13.1 transport mode to the carrier's binary mode
@@ -635,7 +705,7 @@ export class PrivateRoomSession {
     // Advance enrollment, then fetch the Tier-2 cap hooks (undefined ⇒ ride Tier-1).
     await this.syncCap().catch(() => {});
     const rendezvousCap = await this.capHooks(epoch.epoch).catch(() => undefined);
-    const { channel } = await connectPrivatePeer({
+    const { channel, peerDeviceId } = await connectPrivatePeer({
       p2p: this.p2p,
       rendezvous: httpRendezvousTransport(fetchImpl),
       roomIdCommitment: this.session.roomIdCommitment,
@@ -662,6 +732,7 @@ export class PrivateRoomSession {
       ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
       ...(options?.onError ? { onError: options.onError } : {}),
       ...(options?.onClose ? { onClose: options.onClose } : {}),
+      peerDeviceId, // the handshake-proven id, so an eviction tears this session down (PRIV-WEB-SESSION-EVICT)
     });
   }
 
@@ -763,6 +834,7 @@ export class PrivateRoomSession {
         ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
         ...(options?.onError ? { onError: options.onError } : {}),
         onClose: (graceful) => onDrop(result.peerDeviceId, graceful),
+        peerDeviceId: result.peerDeviceId, // so an eviction tears this mesh session down (PRIV-WEB-SESSION-EVICT)
       });
       return { peerId: result.peerDeviceId, session };
     };
@@ -965,6 +1037,9 @@ export class PrivateRoomSession {
     );
     await this.engine.applyLocalOp(op, sealParams);
     await this.persistCompactionIfDue();
+    // Push the freshly-authored head to every live peer (mesh or 1:1) — a quiescent session does not
+    // otherwise learn about locally-authored ops (PRIV-WEB-SESSION-NUDGE).
+    this.nudgeActiveSessions();
   }
 
   /**
@@ -1266,6 +1341,14 @@ export class PrivateRoomSession {
       this.session = { ...this.session, snapshotBase };
       await putRoomSession(this.session);
     }
+    // …NOW re-announce (AFTER the commit + the grant snapshot).  This must follow `commitSnapshot`,
+    // not precede it: `commitSnapshot` compacts A's log — dropping the just-authored `member.add` — so
+    // announcing BEFORE it would advertise a head the peer can no longer pull (A would serve 0), and
+    // the peer would strand on the missing prefix.  Announcing AFTER advertises the SNAPSHOT head +
+    // `latest_snapshot_id`, so a connected member that already advanced the epoch (via the commit
+    // above) bootstraps the new member/device/content over the §14.5 snapshot archive
+    // (PRIV-WEB-SESSION-NUDGE).
+    this.nudgeActiveSessions();
     const archive = await this.engine.exportArchive({
       kind: 'encrypted_member_backup',
       createdAtBucket: coarseBucket(),
@@ -1424,7 +1507,13 @@ export class PrivateRoomSession {
       ],
     };
     await putRoomSession(this.session);
+    // Tear down the EVICTED device's live session BEFORE any post-removal broadcast, so its still-open
+    // channel can no longer request or be served post-removal ops (ciphertext + metadata) — the
+    // broadcast + re-announce below then reach only the REMAINING members (PRIV-WEB-SESSION-EVICT).
+    this.closeSessionsForDevice(params.deviceId);
     this.broadcastCommit(this.p2p.encodeCommit(removed.commit), epoch);
+    // …then re-announce so remaining members PULL the `device.remove` op (PRIV-WEB-SESSION-NUDGE).
+    this.nudgeActiveSessions();
   }
 
   /**

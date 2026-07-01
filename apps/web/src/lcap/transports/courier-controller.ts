@@ -35,6 +35,7 @@
 // code-split P2P chunk (`check:lcap-p2p-split`).
 
 import {
+  DEFAULT_DECODE_LIMITS,
   decodeWithSchema,
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
@@ -43,6 +44,7 @@ import {
   readPack,
 } from '@licio/lcap';
 import { devWarn } from '../../lib/dev-log.js';
+import { MAX_EXCHANGE_RESPONSE_BYTES, responsePrivacyLabel } from '../exchange.js';
 import type { CourierMedium } from './courier.js';
 import { CourierTransport } from './courier.js';
 import { type CourierChannel, NativeChannelMedium } from './courier-channels.js';
@@ -154,9 +156,16 @@ async function requestPrivacyLabel(request: Uint8Array): Promise<PackHeaderV2['p
   return read.ok ? read.pack.header.privacy_label : 'contains_in_room_metadata';
 }
 
-function classifyExchangeMessage(bytes: Uint8Array): 'request' | 'response' | 'unknown' {
+export function classifyExchangeMessage(bytes: Uint8Array): 'request' | 'response' | 'unknown' {
   try {
-    decodeWithSchema(exchangeResponseV2Schema, bytes);
+    // Decode the RESPONSE under the build ceiling (16 MiB), not the default 1 MiB LDC cap: a
+    // larger-budget peer's valid public response over 1 MiB would otherwise classify as `unknown`
+    // and the courier would DROP the peer's answer, stalling the sync — symmetric with the WebRTC
+    // ingest / privacy-label decode legs (PUB-RESPONSE-DECODE-CEILING).
+    decodeWithSchema(exchangeResponseV2Schema, bytes, {
+      ...DEFAULT_DECODE_LIMITS,
+      maxBytes: MAX_EXCHANGE_RESPONSE_BYTES,
+    });
     return 'response';
   } catch {
     /* not a response — try a request */
@@ -730,6 +739,15 @@ export class CourierController {
         mayExchangeWithEndpoint(this.controls, endpointId);
       const response = await this.config.buildResponse(request, endpointId, stillLive);
       if (!response) return;
+      // Structural public-only carriage gate on the RESPONDER leg (PUB-RESPONDER-PUBLIC-ONLY): the
+      // courier radio is carriesPrivate:false, so NEVER enqueue a non-public reply — symmetric with the
+      // request-leg `requestPrivacyLabel` gate.  Fail closed: an undecodable response / unreadable served
+      // pack / any non-public label is DROPPED, so the structural "never carries a non-public pack"
+      // doctrine holds on BOTH directions regardless of `buildResponse`'s content selection.
+      if ((await responsePrivacyLabel(response)) !== 'public') {
+        devWarn(`dropped a non-public courier response for '${channel}' (public-only carriage)`);
+        return;
+      }
       // Re-check LIVENESS after the async build: a Stop / disclosure revocation / forced-off mode /
       // channel deselection may have torn this channel down WHILE buildResponse awaited — a stopped
       // courier must never serve a response even if the native endpoint is not fully torn down yet.
