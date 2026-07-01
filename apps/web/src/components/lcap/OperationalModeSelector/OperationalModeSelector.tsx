@@ -21,7 +21,7 @@
 // protection).  This is an always-available surface that mirrors the mode state locally
 // (no `@licio/lcap` codec import), keeping it off the lazy bundle-codec chunk.
 
-import { type KeyboardEvent, useCallback, useRef, useState } from 'react';
+import { type KeyboardEvent, useCallback, useId, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { getOperationalMode, setOperationalMode } from '../../../lcap/mode-state.js';
 import {
@@ -257,6 +257,8 @@ export function OperationalModeSelector({
   const [mode, setMode] = useState<OperationalMode>(() => getOperationalMode());
   // One ref per radio (flat index) so arrow navigation can move DOM focus (APG roving tabindex).
   const buttonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // A stable id base so each intent subgroup's label can name its `role="group"`.
+  const groupIdBase = useId();
 
   const choose = useCallback(
     (next: OperationalMode) => {
@@ -313,70 +315,81 @@ export function OperationalModeSelector({
         aria-label={t('lcap.mode.groupLabel', 'Connection mode')}
         className="flex flex-col gap-4"
       >
-        {MODE_GROUPS.map((group) => (
-          <div key={group.id} className="flex flex-col gap-2">
-            {/* Decorative intent label — the radios below carry the full accessible name,
-                so this is hidden from assistive tech to avoid a redundant announcement. */}
-            <p
-              aria-hidden="true"
-              className="px-1 text-xs font-semibold uppercase tracking-wide text-ink-muted"
+        {MODE_GROUPS.map((group) => {
+          const groupLabelId = `${groupIdBase}-${group.id}`;
+          return (
+            <div
+              key={group.id}
+              role="group"
+              aria-labelledby={groupLabelId}
+              className="flex flex-col gap-2"
             >
-              {t(group.labelKey, group.label)}
-            </p>
-            {group.modes.map((key) => {
-              const copy = MODE_COPY[key];
-              const config = operationalMode(key);
-              const selected = key === mode;
-              const flatIndex = FLAT_MODES.indexOf(key);
-              return (
-                <button
-                  key={key}
-                  ref={(node) => {
-                    buttonRefs.current[flatIndex] = node;
-                  }}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  tabIndex={flatIndex === tabbableIndex ? 0 : -1}
-                  onClick={() => choose(key)}
-                  onKeyDown={(event) => handleKeyDown(event, flatIndex)}
-                  className={cn(
-                    'flex w-full flex-col gap-2 rounded-lg border p-3 text-start',
-                    'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-                    selected ? 'border-primary bg-surface-sunken' : 'border-line bg-canvas',
-                  )}
-                >
-                  <span className="flex items-center gap-2">
-                    {/* A real radio indicator (ring + filled dot), never a help-looking icon. */}
-                    <span
-                      aria-hidden="true"
-                      className={cn(
-                        'flex size-5 shrink-0 items-center justify-center rounded-full border',
-                        selected ? 'border-primary text-primary' : 'border-line-strong',
-                      )}
-                    >
-                      {selected ? <span className="size-2.5 rounded-full bg-current" /> : null}
-                    </span>
-                    <span className="font-medium text-ink">{t(copy.labelKey, copy.label)}</span>
-                    {/* A calm "read the caveat" cue — never the alarming "High-risk", which
+              {/* The intent label names this subgroup for assistive tech too (role="group" +
+                  aria-labelledby), so a screen-reader user gets the same Everyday / Carry for
+                  others / Low profile organization as a sighted user — not one flat list. */}
+              <p
+                id={groupLabelId}
+                className="px-1 text-xs font-semibold uppercase tracking-wide text-ink-muted"
+              >
+                {t(group.labelKey, group.label)}
+              </p>
+              {group.modes.map((key) => {
+                const copy = MODE_COPY[key];
+                const config = operationalMode(key);
+                const selected = key === mode;
+                const flatIndex = FLAT_MODES.indexOf(key);
+                return (
+                  <button
+                    key={key}
+                    ref={(node) => {
+                      buttonRefs.current[flatIndex] = node;
+                    }}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    tabIndex={flatIndex === tabbableIndex ? 0 : -1}
+                    onClick={() => choose(key)}
+                    onKeyDown={(event) => handleKeyDown(event, flatIndex)}
+                    className={cn(
+                      'flex w-full flex-col gap-2 rounded-lg border p-3 text-start',
+                      'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+                      selected ? 'border-primary bg-surface-sunken' : 'border-line bg-canvas',
+                    )}
+                  >
+                    <span className="flex items-center gap-2">
+                      {/* A real radio indicator (ring + filled dot), never a help-looking icon. */}
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          'flex size-5 shrink-0 items-center justify-center rounded-full border',
+                          selected ? 'border-primary text-primary' : 'border-line-strong',
+                        )}
+                      >
+                        {selected ? <span className="size-2.5 rounded-full bg-current" /> : null}
+                      </span>
+                      <span className="font-medium text-ink">{t(copy.labelKey, copy.label)}</span>
+                      {/* A calm "read the caveat" cue — never the alarming "High-risk", which
                         overstates a sharing mode's (battery/storage) cost. */}
-                    {config.showTrustWarning ? (
-                      <Badge tone="warning">{t('lcap.mode.readFirst', 'Read before use')}</Badge>
-                    ) : null}
-                  </span>
-                  <span className="text-sm text-ink-muted">{t(copy.summaryKey, copy.summary)}</span>
-                  <span className="flex flex-wrap gap-1.5">
-                    {cardChips(key, t).map((chip) => (
-                      <Badge key={chip.text} tone="neutral" icon={chip.icon}>
-                        {chip.text}
-                      </Badge>
-                    ))}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        ))}
+                      {config.showTrustWarning ? (
+                        <Badge tone="warning">{t('lcap.mode.readFirst', 'Read before use')}</Badge>
+                      ) : null}
+                    </span>
+                    <span className="text-sm text-ink-muted">
+                      {t(copy.summaryKey, copy.summary)}
+                    </span>
+                    <span className="flex flex-wrap gap-1.5">
+                      {cardChips(key, t).map((chip) => (
+                        <Badge key={chip.text} tone="neutral" icon={chip.icon}>
+                          {chip.text}
+                        </Badge>
+                      ))}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
 
       {/* The PROMINENT caveat for the active mode, matched to its real risk class (§26.3).

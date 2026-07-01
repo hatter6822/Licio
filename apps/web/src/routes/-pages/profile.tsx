@@ -535,7 +535,7 @@ export function PrivacyPage(): React.ReactElement {
             <p className="text-sm text-ink-muted">
               {t(
                 'privacy.level.desc',
-                'Standard keeps the usual coarse attention aggregates. Reduced and Minimum keep progressively less about what you read, in exchange for recommendations that fit you less closely. Your choice is enforced on the server, not just this device.',
+                'This controls how identifiable your stored attention aggregates are. The strongest option, Minimum, replaces your account id with a coarse bucket so the aggregates can’t be linked back to you. Whichever you choose is enforced on the server, not just this device.',
               )}
             </p>
           </Section>
