@@ -47,7 +47,7 @@ const MAX_SHARE_RECORDS = 256;
 /** The §27 per-exchange RESPONSE ceiling (16 MiB): the max bytes one served exchange reply may carry,
  *  matching the WebRTC reassembly cap (`MAX_REASSEMBLY_BYTES`) + the IPFS single-object bound.  Clamps a
  *  peer's untrusted `max_response_bytes` so the responder never repacks more than a carrier can move. */
-const MAX_EXCHANGE_RESPONSE_BYTES = 16 * 1024 * 1024;
+export const MAX_EXCHANGE_RESPONSE_BYTES = 16 * 1024 * 1024;
 
 /** The CBOR framing a `response_pack` field adds to an encoded response beyond the measured pack-less
  *  wrapper — the field's map key + byte-string length header — reserved (with margin) so the WHOLE

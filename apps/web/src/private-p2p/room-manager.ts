@@ -518,8 +518,30 @@ export class PrivateRoomSession {
       serveBlocks: (cids, maxBytes) => this.runExclusive(() => engine.serveBlocks(cids, maxBytes)),
       ingestBlocks: (blocks) => this.runExclusive(() => engine.ingestBlocks(blocks)),
       snapshotArchive: () => this.runExclusive(() => engine.snapshotArchive()),
-      importArchive: (bytes) => this.runExclusive(() => engine.importArchive(bytes)),
+      importArchive: (bytes) => this.runExclusive(() => this.importArchiveImpl(bytes)),
     };
+  }
+
+  /**
+   * Run `importArchive` on the engine and PERSIST the resulting base.  A live sync-session snapshot
+   * ADOPTION (§14.5 rebase) — or an offline-archive import — rebases the engine's `sealedSnapshot` in
+   * memory, but a reload re-seeds the engine from `StoredRoomSession.snapshotBase`, which the manager
+   * updates after local compaction/admission but NOT after an import.  Without persisting, an app
+   * restart before the next local compaction falls back to the OLD base while the ops the peer snapshot
+   * summarizes may already be pruned, so the room LOSES the catch-up and re-strands on the same
+   * compacted prefix (PRIV-WEB-SNAPSHOT-PERSIST).  `exportBase()` returns the engine's CURRENT base, so
+   * persisting it is correct whether the import adopted a newer snapshot, kept ours, or added only ops.
+   * Runs under the op-lock (called from within `runExclusive`, like `ingest`), so the persisted base
+   * reflects the imported state atomically.
+   */
+  private async importArchiveImpl(bytes: Uint8Array): Promise<IngestReport> {
+    const report = await this.engine.importArchive(bytes);
+    const base = this.engine.exportBase();
+    if (base !== undefined) {
+      this.session = { ...this.session, snapshotBase: base };
+      await putRoomSession(this.session);
+    }
+    return report;
   }
 
   /**
@@ -640,7 +662,8 @@ export class PrivateRoomSession {
     // Serialized on the manager's op-lock, symmetric with `ingest` (PRIV-WEB-SESSION-2/3): an
     // out-of-band archive import is an engine-state mutation and must not interleave with a local
     // authoring op, an incoming MLS commit, or a live sync session's fold on the non-re-entrant engine.
-    return this.runExclusive(() => this.engine.importArchive(bytes));
+    // Persists the resulting snapshot base so a reload keeps the catch-up (PRIV-WEB-SNAPSHOT-PERSIST).
+    return this.runExclusive(() => this.importArchiveImpl(bytes));
   }
 
   /** Map the manifest's §13.1 transport mode to the carrier's binary mode

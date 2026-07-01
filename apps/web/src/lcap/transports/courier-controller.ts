@@ -35,6 +35,7 @@
 // code-split P2P chunk (`check:lcap-p2p-split`).
 
 import {
+  DEFAULT_DECODE_LIMITS,
   decodeWithSchema,
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
@@ -43,7 +44,7 @@ import {
   readPack,
 } from '@licio/lcap';
 import { devWarn } from '../../lib/dev-log.js';
-import { responsePrivacyLabel } from '../exchange.js';
+import { MAX_EXCHANGE_RESPONSE_BYTES, responsePrivacyLabel } from '../exchange.js';
 import type { CourierMedium } from './courier.js';
 import { CourierTransport } from './courier.js';
 import { type CourierChannel, NativeChannelMedium } from './courier-channels.js';
@@ -155,9 +156,16 @@ async function requestPrivacyLabel(request: Uint8Array): Promise<PackHeaderV2['p
   return read.ok ? read.pack.header.privacy_label : 'contains_in_room_metadata';
 }
 
-function classifyExchangeMessage(bytes: Uint8Array): 'request' | 'response' | 'unknown' {
+export function classifyExchangeMessage(bytes: Uint8Array): 'request' | 'response' | 'unknown' {
   try {
-    decodeWithSchema(exchangeResponseV2Schema, bytes);
+    // Decode the RESPONSE under the build ceiling (16 MiB), not the default 1 MiB LDC cap: a
+    // larger-budget peer's valid public response over 1 MiB would otherwise classify as `unknown`
+    // and the courier would DROP the peer's answer, stalling the sync — symmetric with the WebRTC
+    // ingest / privacy-label decode legs (PUB-RESPONSE-DECODE-CEILING).
+    decodeWithSchema(exchangeResponseV2Schema, bytes, {
+      ...DEFAULT_DECODE_LIMITS,
+      maxBytes: MAX_EXCHANGE_RESPONSE_BYTES,
+    });
     return 'response';
   } catch {
     /* not a response — try a request */

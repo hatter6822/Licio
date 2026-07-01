@@ -27,6 +27,7 @@ import {
   readBlockBytes,
   roomHashToBytes,
 } from './store.js';
+import { classifyExchangeMessage } from './transports/courier-controller.js';
 
 /** The AUTHENTIC room key for a roomId — `hex(roomIdHash('licio', roomId))` — matching the client's
  *  #BG derivation (default networkId 'licio'), so a fixture's stored room hash is the one a record's
@@ -994,10 +995,13 @@ describe('requestHasUnfilledWants — post-round anchor decision (#1/#BK)', () =
     expect(resp).not.toBeNull();
     expect((resp as Uint8Array).length).toBeGreaterThan(1_048_576); // exceeds the default 1 MiB cap
 
-    // With the fix both response decodes use the 16 MiB ceiling: the responder-leg privacy gate
-    // classifies it PUBLIC (would fail-closed to a non-public label under the old cap, DROPPING the
-    // reply), and the requester ingests all served blocks (would return null under the old cap).
+    // With the fix all THREE response decode legs use the 16 MiB ceiling: the responder-leg privacy
+    // gate classifies it PUBLIC (would fail-closed to a non-public label under the old cap), the
+    // requester ingests all served blocks (would return null), AND the courier's inbound classifier
+    // recognises it as a 'response' (would return 'unknown' → drop the peer's answer) — all under the
+    // old 1 MiB cap.
     expect(await responsePrivacyLabel(resp as Uint8Array)).toBe('public');
+    expect(classifyExchangeMessage(resp as Uint8Array)).toBe('response');
     const counts = await ingestClientExchangeResponse(peerA, resp as Uint8Array);
     expect(counts?.blocks).toBe(blockCids.length);
   });

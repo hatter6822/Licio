@@ -8,8 +8,9 @@
 // Then both sides converge over an offline archive exchange.
 
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrivateRoomSession } from '../room-manager.js';
+import * as sessionStore from '../session-store.js';
 import type { PeerChannel } from '../sync-session.js';
 
 const FUTURE = '2099-01-01T00:00:00Z';
@@ -175,5 +176,45 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
     expect(session.isClosed()).toBe(true); // the session ended synchronously on eviction
     await new Promise((r) => setTimeout(r, 0)); // the graceful bye flushes, then the channel closes
     expect(channelClosed).toBe(true);
+  });
+
+  it('PERSISTS the snapshot base after importArchive so a reload keeps the catch-up (PRIV-WEB-SNAPSHOT-PERSIST)', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Quiet Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    await founder.postStory({ title: 'Story', threadId: 't1' });
+    // Admit a joiner — its GRANT carries a §14.5 snapshot, so the joiner's engine holds a base.
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { request } = await prep.complete(fragment);
+    const { grant } = await founder.admitJoinRequest(invite, request);
+    if (!grant) throw new Error('expected a grant');
+    const joiner = await prep.completeJoin(grant);
+
+    // A valid same-room archive to import (the founder's current content closure).
+    const archive = await founder.exportArchive();
+
+    // Importing over a live session must PERSIST the resulting base: the manager updated
+    // `snapshotBase` after compaction/admission but NOT after importArchive, so a reload before the
+    // next local compaction re-seeded from the OLD base and lost the catch-up.
+    const putSpy = vi.spyOn(sessionStore, 'putRoomSession');
+    await joiner.importArchive(archive);
+    expect(putSpy).toHaveBeenCalled(); // the import path persisted (would NOT be called without the fix)
+    // What a reload will re-seed the engine from — the engine's current base, not the stale one.
+    const persisted = putSpy.mock.calls.at(-1)?.[0];
+    expect(persisted?.snapshotBase).toBeDefined();
+    putSpy.mockRestore();
   });
 });
