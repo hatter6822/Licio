@@ -139,6 +139,7 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     const codec: SyncCodec = {
       encodeSyncMessage: p2p.encodeSyncMessage,
       decodeSyncMessage: p2p.decodeSyncMessage,
+      chunkOpResponse: p2p.chunkOpResponseEnvelopes,
     };
     const { a, b, stats } = pairedChannels();
     const aliceSession = new PrivateSyncSession(alice, a, codec);
@@ -230,6 +231,7 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     const codec: SyncCodec = {
       encodeSyncMessage: p2p.encodeSyncMessage,
       decodeSyncMessage: p2p.decodeSyncMessage,
+      chunkOpResponse: p2p.chunkOpResponseEnvelopes,
     };
     const { a, b, stats } = pairedChannels();
     const sa = new PrivateSyncSession(alice, a, codec);
@@ -314,6 +316,7 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     const codec: SyncCodec = {
       encodeSyncMessage: p2p.encodeSyncMessage,
       decodeSyncMessage: p2p.decodeSyncMessage,
+      chunkOpResponse: p2p.chunkOpResponseEnvelopes,
     };
     const { a, b, stats } = pairedChannels();
     const sa = new PrivateSyncSession(alice, a, codec);
@@ -403,6 +406,7 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     const codec: SyncCodec = {
       encodeSyncMessage: p2p.encodeSyncMessage,
       decodeSyncMessage: p2p.decodeSyncMessage,
+      chunkOpResponse: p2p.chunkOpResponseEnvelopes,
     };
     const { a, b, stats } = pairedChannels();
     const sa = new PrivateSyncSession(alice, a, codec);

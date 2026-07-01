@@ -62,6 +62,12 @@ export interface PeerChannel {
 export interface SyncCodec {
   encodeSyncMessage(message: SyncMessage): Uint8Array;
   decodeSyncMessage(bytes: Uint8Array): SyncMessage;
+  /** Split served op envelopes into `op_response` batches each within the §27 sync frame cap, so a
+   *  large retained-op set is delivered across SEVERAL frames instead of one oversized frame that
+   *  `fragmentPrivateMessage`/decode would drop, stalling convergence (PRIV-OP-RESPONSE-FRAME-BOUND).
+   *  Wired to the package's `chunkOpResponseEnvelopes`; REQUIRED so a codec cannot silently omit the
+   *  frame bound (the `op_response` count cap alone does not bound its encoded bytes). */
+  chunkOpResponse(envelopes: readonly PrivateEncryptedEnvelope[]): PrivateEncryptedEnvelope[][];
 }
 
 /** The slice of `PrivateRoomEngine` the session drives (so it is mockable).  The §13.6
@@ -372,7 +378,13 @@ export class PrivateSyncSession {
 
   private async onRequest(request: OpRequest): Promise<void> {
     const envelopes = await this.engine.serveOps(request.op_ids);
-    this.sendMessage({ schema: 'licio.private.op_response.v1', envelopes });
+    // Deliver ALL served envelopes across frame-bounded `op_response` batches: a large retained-op set
+    // would otherwise encode above the §27 sync frame cap and be dropped at fragment/decode, leaving
+    // the peer unable to converge (PRIV-OP-RESPONSE-FRAME-BOUND).  Each batch fits the cap; the walk
+    // ingests every batch, so no envelope is lost and convergence never relies on a re-request.
+    for (const batch of this.codec.chunkOpResponse(envelopes)) {
+      this.sendMessage({ schema: 'licio.private.op_response.v1', envelopes: batch });
+    }
   }
 
   private async onResponse(response: OpResponse): Promise<void> {

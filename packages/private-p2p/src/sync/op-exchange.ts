@@ -25,7 +25,10 @@ import {
   decodeCanonical,
 } from '../crypto/canonical.js';
 import { ciphertextBase64Schema, privateIdSchema } from '../schemas/common.js';
-import { privateEncryptedEnvelopeSchema } from '../schemas/envelope.js';
+import {
+  type PrivateEncryptedEnvelope,
+  privateEncryptedEnvelopeSchema,
+} from '../schemas/envelope.js';
 import { blockRequestSchema, blockResponseSchema, headAnnouncementSchema } from './head-sync.js';
 
 /**
@@ -80,6 +83,52 @@ export const opResponseSchema = z
   })
   .strict();
 export type OpResponse = z.infer<typeof opResponseSchema>;
+
+/** The fixed non-envelope framing of an encoded `op_response` — the CBOR map header, the `schema`
+ *  key + literal, the `envelopes` key, and the array header — plus a safety margin, reserved from the
+ *  frame budget so a chunk's FULL encoded size never exceeds {@link MAX_SYNC_MESSAGE_BYTES}. */
+const OP_RESPONSE_FRAME_OVERHEAD = 256;
+
+/**
+ * Split served op envelopes into `op_response` batches, each of which encodes within the §27 sync
+ * frame cap ({@link MAX_SYNC_MESSAGE_BYTES}) AND the {@link MAX_ENVELOPES_PER_RESPONSE} count cap — so
+ * a large retained-op set (many §25.4-padded envelopes, a normal request in a big room) is delivered
+ * across SEVERAL frames instead of one oversized frame that `fragmentPrivateMessage`/decode would drop,
+ * stalling convergence (PRIV-OP-RESPONSE-FRAME-BOUND).  Canonical CBOR encodes each envelope
+ * independently, so the sum of per-envelope encoded sizes plus the fixed framing overhead equals the
+ * encoded response size (no O(n²) re-encoding).  Returns a single EMPTY batch for no envelopes
+ * (preserving the empty-response "peer may need a §14.5 snapshot" signal), and never splits below one
+ * envelope per batch (a single padded envelope is far under the cap).  ALL served envelopes are emitted
+ * across the batches, so convergence never depends on the peer re-requesting a dropped op.
+ *
+ * `maxBytes` is the per-frame ceiling (defaults to the §27 {@link MAX_SYNC_MESSAGE_BYTES}); a caller on
+ * a tighter transport may pass a smaller one.
+ */
+export function chunkOpResponseEnvelopes(
+  envelopes: readonly PrivateEncryptedEnvelope[],
+  maxBytes: number = MAX_SYNC_MESSAGE_BYTES,
+): PrivateEncryptedEnvelope[][] {
+  if (envelopes.length === 0) return [[]];
+  const budget = maxBytes - OP_RESPONSE_FRAME_OVERHEAD;
+  const batches: PrivateEncryptedEnvelope[][] = [];
+  let current: PrivateEncryptedEnvelope[] = [];
+  let used = 0;
+  for (const envelope of envelopes) {
+    const size = canonical(privateEncryptedEnvelopeSchema.parse(envelope) as CanonicalValue).length;
+    if (
+      current.length > 0 &&
+      (used + size > budget || current.length >= MAX_ENVELOPES_PER_RESPONSE)
+    ) {
+      batches.push(current);
+      current = [];
+      used = 0;
+    }
+    current.push(envelope);
+    used += size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
 
 /** The largest serialized MLS commit a peer will carry (a §27 DoS bound; an MLS
  *  handshake message for a small room is well under this). */

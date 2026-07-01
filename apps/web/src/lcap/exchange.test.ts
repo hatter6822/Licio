@@ -14,6 +14,7 @@ import {
   ingestClientExchangeResponse,
   ingestPackIntoStore,
   requestHasUnfilledWants,
+  reservedResponsePackBudget,
   respondToClientExchange,
   responsePrivacyLabel,
 } from './exchange.js';
@@ -999,5 +1000,20 @@ describe('requestHasUnfilledWants — post-round anchor decision (#1/#BK)', () =
     expect(await responsePrivacyLabel(resp as Uint8Array)).toBe('public');
     const counts = await ingestClientExchangeResponse(peerA, resp as Uint8Array);
     expect(counts?.blocks).toBe(blockCids.length);
+  });
+
+  it('reserves wrapper bytes so pack + wrapper never exceeds the response ceiling (PUB-RESPONSE-WRAPPER)', () => {
+    const MAX = 16 * 1024 * 1024;
+    // A modest advertised budget is honored unchanged (the reserve only bites near the ceiling).
+    expect(reservedResponsePackBudget(1024, 5000)).toBe(1024);
+    // A near-ceiling budget is CLAMPED below the ceiling by the measured wrapper (+ framing margin), so
+    // the WHOLE response — pack + pulse/status/framing — stays within MAX (the ceiling the responder-leg
+    // decode AND the WebRTC fragmenter enforce on the entire message, not just the pack).
+    const wrapper = 5000;
+    const budget = reservedResponsePackBudget(MAX, wrapper);
+    expect(budget).toBeLessThan(MAX);
+    expect(budget + wrapper).toBeLessThanOrEqual(MAX);
+    // Never negative even if the wrapper alone exceeds the ceiling (serve nothing, don't overflow).
+    expect(reservedResponsePackBudget(MAX, MAX + 1)).toBe(0);
   });
 });

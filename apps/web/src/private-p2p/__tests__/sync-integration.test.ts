@@ -76,6 +76,7 @@ describe('WS-S.4.3 PrivateSyncSession × real engine × real codec', () => {
     const codec: SyncCodec = {
       encodeSyncMessage: p2p.encodeSyncMessage,
       decodeSyncMessage: p2p.decodeSyncMessage,
+      chunkOpResponse: p2p.chunkOpResponseEnvelopes,
     };
 
     // Alice: genesis (founder self-add) + a story + a comment.

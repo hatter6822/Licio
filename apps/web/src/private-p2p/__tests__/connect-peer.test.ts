@@ -292,6 +292,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     const codec: SyncCodec = {
       encodeSyncMessage: p2p.encodeSyncMessage,
       decodeSyncMessage: p2p.decodeSyncMessage,
+      chunkOpResponse: p2p.chunkOpResponseEnvelopes,
     };
     let aDelivered = 0;
     let bDelivered = 0;

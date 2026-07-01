@@ -101,6 +101,9 @@ const fakeCodec: SyncCodec = {
   encodeSyncMessage: (m) => new TextEncoder().encode(JSON.stringify(m)),
   decodeSyncMessage: (b) =>
     JSON.parse(new TextDecoder().decode(b)) as import('@licio/private-p2p').SyncMessage,
+  // Tests drive tiny envelope sets, so a single batch suffices (the real chunker's byte budget is
+  // exercised by the package unit test); a copy keeps the return type mutable.
+  chunkOpResponse: (envelopes) => [[...envelopes]],
 };
 
 // --- an in-memory paired channel with a delivery counter ---------------------------

@@ -435,6 +435,7 @@ export class PrivateRoomSession {
     const codec: SyncCodec = {
       encodeSyncMessage: this.p2p.encodeSyncMessage,
       decodeSyncMessage: this.p2p.decodeSyncMessage,
+      chunkOpResponse: this.p2p.chunkOpResponseEnvelopes,
     };
     let sync: PrivateSyncSession;
     // PRIV-WEB-SESSION-3: the session must drive the engine through the manager's `runExclusive`

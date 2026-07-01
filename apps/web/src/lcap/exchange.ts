@@ -49,6 +49,29 @@ const MAX_SHARE_RECORDS = 256;
  *  peer's untrusted `max_response_bytes` so the responder never repacks more than a carrier can move. */
 const MAX_EXCHANGE_RESPONSE_BYTES = 16 * 1024 * 1024;
 
+/** The CBOR framing a `response_pack` field adds to an encoded response beyond the measured pack-less
+ *  wrapper — the field's map key + byte-string length header — reserved (with margin) so the WHOLE
+ *  encoded response stays within {@link MAX_EXCHANGE_RESPONSE_BYTES} (PUB-RESPONSE-WRAPPER). */
+const RESPONSE_PACK_FRAMING_MARGIN = 256;
+
+/**
+ * The pack-size budget for a §16 response: the peer's advertised `maxResponseBytes` CLAMPED so the
+ * WHOLE encoded response — the served pack PLUS the `wrapperBytes`-measured pulse/status/framing PLUS
+ * the response_pack field header — stays within {@link MAX_EXCHANGE_RESPONSE_BYTES}.  That ceiling
+ * bounds the ENTIRE message (the responder-leg privacy decode AND the WebRTC fragmenter both enforce
+ * it on the whole response), not just the pack, so reserving the wrapper here keeps a legitimately
+ * large public reply carriable instead of overflowing into an undecodable / fragmenter-dropped frame
+ * (PUB-RESPONSE-WRAPPER).  Never negative (serve nothing rather than overflow if the wrapper alone
+ * already fills the ceiling).
+ */
+export function reservedResponsePackBudget(maxResponseBytes: number, wrapperBytes: number): number {
+  const ceiling = Math.max(
+    0,
+    MAX_EXCHANGE_RESPONSE_BYTES - wrapperBytes - RESPONSE_PACK_FRAMING_MARGIN,
+  );
+  return Math.min(maxResponseBytes, ceiling);
+}
+
 /**
  * The §22.5 sharing scope — WHAT this device may serve/push over the public P2P plane.  Narrows
  * (never widens) public content: an optional room allowlist (opaque hashes) + a priority cap.
@@ -430,7 +453,20 @@ export async function respondToClientExchange(
   // an arbitrarily large repack.  A single exchange message can carry at most `MAX_EXCHANGE_RESPONSE_BYTES`
   // — the reassembly / single-object DoS bound the WebRTC fragmenter and the IPFS bridge also enforce —
   // so never build a reply larger than that (the server pulse C0 path clamps identically).
-  const budget = Math.min(budgets.max_response_bytes, MAX_EXCHANGE_RESPONSE_BYTES);
+  // Build the pulse FIRST so we can RESERVE the response wrapper (pulse + status + CBOR framing) out of
+  // the pack budget: MAX_EXCHANGE_RESPONSE_BYTES bounds the ENTIRE encoded response — which the
+  // responder-leg privacy decode AND the WebRTC fragmenter both enforce on the whole message — not just
+  // the `response_pack` (PUB-RESPONSE-WRAPPER).  Without the reserve, a peer advertising a ~16 MiB budget
+  // gets a pack near 16 MiB whose wrapper tips the whole response over the ceiling, so the reply decodes
+  // to a non-public label / is dropped by the fragmenter.  Measuring the pack-LESS response (with the
+  // longer `partial` status) is an exact upper bound on the wrapper; RESPONSE_PACK_FRAMING_MARGIN covers
+  // the response_pack field's added key + byte-string length header.
+  const pulse = await publicPulse(lcap, 'courier');
+  const wrapperBytes = lcap.encodeWithSchema(
+    lcap.exchangeResponseV2Schema,
+    lcap.buildExchangeResponse({ pulse, status: 'partial' }),
+  ).length;
+  const budget = reservedResponsePackBudget(budgets.max_response_bytes, wrapperBytes);
   // Honor the peer's advertised SELECTION floor (priority_floor / allow_media) — a peer that advertises
   // a stealth/minimal budget is not served over-priority/media objects even if a stale want lists them;
   // a DEFAULT (full) courier/relay budget allows everything, so it always fetches its explicit wants (#BF).
@@ -445,7 +481,6 @@ export async function respondToClientExchange(
         })
       : { served: [], truncated: false, pack: undefined };
 
-  const pulse = await publicPulse(lcap, 'courier');
   const response = lcap.buildExchangeResponse({
     pulse,
     status: repacked.truncated ? 'partial' : 'ok',
