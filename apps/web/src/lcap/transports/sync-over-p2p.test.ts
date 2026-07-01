@@ -775,6 +775,43 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     expect(await readBlockBytes(initiatorDb, blockCid)).toEqual(bytes); // ingested from the anchor
   });
 
+  it('fails CLOSED to the anchor when NEITHER privacy nor decision is supplied (PUB-WEBRTC-DEFAULT-OFF)', async () => {
+    // §26.4 WebRTC is off by default: a caller that omits BOTH `privacy` and `decision` must NOT
+    // get an IP-revealing peer connection synthesized for it — the decision defaults to blocked, so
+    // the exchange rides the HTTPS anchor.  (Regression: the synthesized fallback used to default
+    // `userEnabled: true`, silently opening WebRTC with no consent.)
+    const bytes = new Uint8Array([2, 7, 1, 8, 2, 8]);
+    const blockCid = await cidFor('block', bytes);
+    await quarantineMissing(initiatorDb, [blockCid]);
+    const anchorBody = await anchorResponseServing(new Map([[blockCid, bytes]]), [blockCid]);
+    let rtcFactoryCalled = false;
+
+    const httpsFetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/exchange')) return new Response(anchorBody as BodyInit, { status: 200 });
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await syncRoomOverP2p({
+      db: initiatorDb,
+      roomIdHash: ROOM,
+      selfPeerKey: 'alice',
+      remotePeerKey: 'bob',
+      initiator: true,
+      // NEITHER privacy NOR decision — the fail-closed default must block WebRTC.
+      httpsConfig: { fetchFn: httpsFetch },
+      rtcFactory: () => {
+        rtcFactoryCalled = true;
+        return new FakePeer(new FakeLink(), 'initiator');
+      },
+      timeoutMs: 50,
+    });
+    expect(rtcFactoryCalled).toBe(false); // no RTCPeerConnection ever constructed
+    expect(result?.transport).toBe('https');
+    expect(result?.ingested?.blocks).toBe(1);
+    expect(await readBlockBytes(initiatorDb, blockCid)).toEqual(bytes);
+  });
+
   it('does NOT upload to the HTTPS anchor after the sync is CANCELLED (#6)', async () => {
     const controller = new AbortController();
     controller.abort(); // the user cancelled before/while the WebRTC leg failed

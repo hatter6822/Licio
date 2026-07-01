@@ -138,6 +138,12 @@ class FakePeer implements RtcPeerConnectionLike {
         const ch = new FakeChannel();
         this.link.answererChannel = ch;
         queueMicrotask(() => this.ondatachannel?.({ channel: ch }));
+      } else if (this.healOnRestart && description.sdp?.includes('restart')) {
+        // A RE-offer (ICE restart): the ANSWERER's path recovers IN PLACE too — a successful ICE
+        // restart re-establishes connectivity on BOTH ends — so its watcher sees `connected` and does
+        // not fire its bounded give-up (which exists only for a VANISHED offerer that never re-offers).
+        this.iceConnectionState = 'connected';
+        this.setConnectionState('connected');
       }
     } else if (description.type === 'answer') {
       this.link.answerExchanged = true;
@@ -332,6 +338,29 @@ describe('WS-S.4.3 connectPrivatePeer — §15.4 ICE-restart recovery', () => {
     b.channel.close();
   });
 
+  it('carries a LARGE multi-fragment sync message byte-identically over the carrier (PRIV-SYNC-FRAGMENT)', async () => {
+    // 200 KiB is far past the ≤16 KiB SCTP fragment size — the UNfragmented carrier could not send
+    // it at all (a single dc.send would exceed the message limit).  The v3 carrier fragments the
+    // sealed frame and the peer reassembles it, so a real §13.6 media / §14.5 snapshot payload moves.
+    const { a, b } = await connectPair();
+    const msg = new Uint8Array(200 * 1024);
+    for (let i = 0; i < msg.length; i++) msg[i] = (i * 17 + 3) & 0xff;
+    let received: Uint8Array | null = null;
+    b.channel.onMessage((f) => {
+      received = f;
+    });
+    await Promise.resolve(a.channel.send(msg));
+    await waitFor(() => received !== null, 'the large multi-fragment message');
+    const got = received as unknown as Uint8Array;
+    expect(got.length).toBe(msg.length);
+    let equal = true;
+    for (let i = 0; equal && i < msg.length; i++) if (got[i] !== msg[i]) equal = false;
+    expect(equal).toBe(true);
+
+    a.channel.close();
+    b.channel.close();
+  });
+
   it('bounds restart attempts AND tears the connection down on exhaustion (→ re-dial)', async () => {
     const { a, b, offerer } = await connectPair({ maxIceRestarts: 2, iceRestartGraceMs: 2 });
     const off = offerer();
@@ -370,15 +399,53 @@ describe('WS-S.4.3 connectPrivatePeer — §15.4 ICE-restart recovery', () => {
   });
 
   it('only the OFFERER initiates the restart (the answerer never re-offers)', async () => {
-    const { a, b, peers, offerer } = await connectPair();
+    // A generous grace + retry budget so the offerer's re-offer heals the answerer's path IN PLACE
+    // before the answerer's own bounded give-up (PRIV-CARRIER-ANSWERER) could fire — the give-up is
+    // exercised separately (the vanished-offerer test below); here BOTH sides recover.
+    const { a, b, peers, offerer } = await connectPair({
+      iceRestartGraceMs: 25,
+      maxIceRestarts: 50,
+    });
     const off = offerer();
     const answerer = peers.find((pc) => !pc.isOfferer) as FakePeer;
     // Force BOTH sides to observe the blip; only the offerer should re-offer.
     answerer.setConnectionState('disconnected');
     off.setConnectionState('disconnected');
     await waitFor(() => off.iceRestartOffers > 0, 'offerer re-offers');
-    // The answerer must not have created an iceRestart offer of its own.
+    // The answerer heals via the offerer's re-offer and must never create an iceRestart offer itself.
+    await waitFor(
+      () => answerer.connectionState === 'connected',
+      'answerer heals via the re-offer',
+    );
     expect(answerer.iceRestartOffers).toBe(0);
+    expect(answerer.closed).toBe(false); // it recovered, so it did NOT give up + tear down
+
+    a.channel.close();
+    b.channel.close();
+  });
+
+  it('the ANSWERER tears down on a persistent failure with no recovery re-offer (→ re-dial)', async () => {
+    // PRIV-CARRIER-ANSWERER: when the offerer VANISHES (a hard drop / tab kill fires no DTLS
+    // close_notify, so `dc.onclose` never fires and no recovery re-offer ever arrives), the
+    // answerer's ICE consent-freshness flips it to `failed`.  It must NOT strand — its bounded
+    // give-up tears the connection down so the channel `onClose` fires and the caller re-dials.
+    const { a, b, peers } = await connectPair({ maxIceRestarts: 2, iceRestartGraceMs: 2 });
+    const answerer = peers.find((pc) => !pc.isOfferer) as FakePeer;
+    // The channel `onClose` is the re-dial signal; register on both results (the answerer's pc.close
+    // drops the shared link, closing both ends).
+    let anyChannelClosed = false;
+    expect(a.channel.onClose).toBeDefined();
+    a.channel.onClose?.(() => {
+      anyChannelClosed = true;
+    });
+    b.channel.onClose?.(() => {
+      anyChannelClosed = true;
+    });
+    // The offerer vanishes: only the answerer's path goes permanently `failed`, and no re-offer comes.
+    answerer.setConnectionState('failed');
+    await waitFor(() => answerer.closed, 'answerer tore down after its bounded give-up');
+    await waitFor(() => anyChannelClosed, 'channel onClose fired (the re-dial signal)');
+    expect(answerer.iceRestartOffers).toBe(0); // the answerer NEVER re-offers (no glare)
 
     a.channel.close();
     b.channel.close();

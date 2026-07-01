@@ -47,8 +47,16 @@ export async function connectLcapWebrtcChannel(
   params: ConnectLcapWebrtcParams,
 ): Promise<DataChannelLike> {
   const p2p = await import('@licio/lcap-p2p');
+  // §26.4 WebRTC is OFF BY DEFAULT — the user must opt in.  When a caller supplies NEITHER a
+  // precomputed decision NOR privacy options, the synthesized fallback must fail CLOSED
+  // (`userEnabled: false`), NOT enabled (PUB-WEBRTC-DEFAULT-OFF): a synthesized `userEnabled: true`
+  // would open an IP-revealing peer connection with no consent, no §26.4 disclosure, and no
+  // Stealth/Emergency force-off (`mode:'standard'` bypasses it).  A blocked decision makes
+  // `connectWebrtc` reject, so the registry/`syncRoomOverP2p` falls back to the HTTPS anchor —
+  // the correct off-by-default outcome.  The real opt-in call site passes `userEnabled: true`
+  // explicitly.
   const decision =
-    params.decision ?? p2p.decideWebrtc(params.privacy ?? { mode: 'standard', userEnabled: true });
+    params.decision ?? p2p.decideWebrtc(params.privacy ?? { mode: 'standard', userEnabled: false });
   const signalKey = await p2p.importSignalKey(params.signalKeyBytes);
   const { postSignal, pollSignal } = createSignalClient({
     ...(params.apiBase !== undefined ? { apiBase: params.apiBase } : {}),

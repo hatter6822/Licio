@@ -28,10 +28,19 @@ export function findStaticP2pImports(filename: string, rawContent: string): stri
   // Match `import … from '@licio/lcap-p2p'` and side-effect `import '@licio/lcap-p2p'`.
   const staticFrom = new RegExp(`\\bimport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');
   const sideEffect = new RegExp(`\\bimport\\s*['"]${SPECIFIER}['"]`, 'g');
+  // An aggregating re-export (`export { X } from '…'` / `export * from '…'`) is a STATIC binding
+  // edge the bundler resolves synchronously exactly like `import`, so it must be caught too (a
+  // re-export barrel would otherwise bypass the gate).  `export type …` is erased and permitted.
+  const exportFrom = new RegExp(`\\bexport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');
   for (const match of content.matchAll(staticFrom)) {
     // `import type …` is erased at build (no runtime weight) and is permitted.
     if (!/^\s*type\b/.test(match[1] ?? '')) {
       issues.push(`${filename}: static value import of ${SPECIFIER} (use a dynamic import())`);
+    }
+  }
+  for (const match of content.matchAll(exportFrom)) {
+    if (!/^\s*type\b/.test(match[1] ?? '')) {
+      issues.push(`${filename}: static re-export of ${SPECIFIER} (use a dynamic import())`);
     }
   }
   if (sideEffect.test(content)) {

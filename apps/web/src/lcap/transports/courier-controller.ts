@@ -43,6 +43,7 @@ import {
   readPack,
 } from '@licio/lcap';
 import { devWarn } from '../../lib/dev-log.js';
+import { responsePrivacyLabel } from '../exchange.js';
 import type { CourierMedium } from './courier.js';
 import { CourierTransport } from './courier.js';
 import { type CourierChannel, NativeChannelMedium } from './courier-channels.js';
@@ -730,6 +731,15 @@ export class CourierController {
         mayExchangeWithEndpoint(this.controls, endpointId);
       const response = await this.config.buildResponse(request, endpointId, stillLive);
       if (!response) return;
+      // Structural public-only carriage gate on the RESPONDER leg (PUB-RESPONDER-PUBLIC-ONLY): the
+      // courier radio is carriesPrivate:false, so NEVER enqueue a non-public reply — symmetric with the
+      // request-leg `requestPrivacyLabel` gate.  Fail closed: an undecodable response / unreadable served
+      // pack / any non-public label is DROPPED, so the structural "never carries a non-public pack"
+      // doctrine holds on BOTH directions regardless of `buildResponse`'s content selection.
+      if ((await responsePrivacyLabel(response)) !== 'public') {
+        devWarn(`dropped a non-public courier response for '${channel}' (public-only carriage)`);
+        return;
+      }
       // Re-check LIVENESS after the async build: a Stop / disclosure revocation / forced-off mode /
       // channel deselection may have torn this channel down WHILE buildResponse awaited — a stopped
       // courier must never serve a response even if the native endpoint is not fully torn down yet.

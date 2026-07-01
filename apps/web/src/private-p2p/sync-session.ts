@@ -91,6 +91,10 @@ export interface SyncEngineSurface {
   importArchive?(bytes: Uint8Array): Promise<IngestReport>;
   /** The latest §14.5 snapshot id this engine holds (to detect a peer is ahead). */
   latestSnapshotId?(): string | undefined;
+  /** How many envelopes are held PENDING (awaiting an epoch key / a device cert that lives in a
+   *  pruned prefix).  A non-zero count with no missing dependency is the "stuck on a compacted peer,
+   *  needs the §14.5 snapshot" signal (PRIV-SESSION-SNAPSHOT-STUCK).  Absent on a mock ⇒ treated as 0. */
+  pendingCount?(): number;
 }
 
 export interface PrivateSyncSessionOptions {
@@ -124,11 +128,34 @@ export interface PrivateSyncSessionOptions {
 /** The §15.7 op-id request cap (mirrors `MAX_OP_IDS_PER_REQUEST` in the package). */
 const DEFAULT_MAX_OP_IDS_PER_REQUEST = 4_096;
 
+/** Cap on the per-session request-tracking sets (`requested` / `requestedBlocks`) — a §27 memory
+ *  bound mirroring the engine's own MAX_PENDING_ENVELOPES.  A malicious member can stream
+ *  `head_announcement` floods of 4096 fresh random op ids per frame; without a cap each frame would
+ *  permanently grow `requested` (the ids are never served, so they never clear) → renderer OOM.  An
+ *  evicted-but-still-wanted id is simply re-requested by a later reconciliation walk, so the cap
+ *  loses no content (PRIV-SESSION-REQ-BOUND). */
+const MAX_TRACKED_IDS = 8_192;
+
+/** Add `id` to a request-tracking set, evicting the oldest entry (insertion order) once at the cap. */
+function boundedAdd(set: Set<string>, id: string): void {
+  if (!set.has(id) && set.size >= MAX_TRACKED_IDS) {
+    const oldest = set.keys().next().value;
+    if (oldest !== undefined) set.delete(oldest);
+  }
+  set.add(id);
+}
+
 /** The §13.6 block-request CID cap (mirrors `MAX_CIDS_PER_BLOCK_REQUEST` in the package — a value
  *  import would breach the `check:private-p2p-split` dynamic-only boundary).  A `block_request`
  *  rejects > this many CIDs at the zod boundary, so the media-want loop chunks by THIS, not the
  *  larger op-id cap — otherwise an attachment with > 1024 missing chunks throws before sending. */
 const MAX_CIDS_PER_BLOCK_REQUEST = 1_024;
+
+/** The largest §14.5 snapshot archive (raw bytes) the LIVE carrier serves in one `snapshot_response`
+ *  (mirrors `MAX_LIVE_SNAPSHOT_ARCHIVE_BYTES` in the package — a value import would breach the
+ *  `check:private-p2p-split` dynamic-only boundary).  A larger snapshot is declined here (the peer
+ *  bootstraps via the §15.9 offline CAR archive instead) rather than emitting an unsendable frame. */
+const MAX_LIVE_SNAPSHOT_ARCHIVE_BYTES = 11 * 1024 * 1024;
 
 export class PrivateSyncSession {
   private peerAnnouncement: HeadAnnouncement | null = null;
@@ -199,10 +226,26 @@ export class PrivateSyncSession {
    */
   close(graceful = true): void {
     if (this.closed) return;
-    if (graceful) this.sendMessage({ schema: 'licio.private.bye.v1' });
     this.selfClosed = true;
     this.closed = true;
-    this.channel.close();
+    if (graceful) {
+      // AWAIT the bye's seal+send before closing the channel (PRIV-SESSION-BYE).  Over the real
+      // carrier `channel.send` is async (it `await`s the AEAD seal before `dc.send`), so a synchronous
+      // `channel.close()` here would run BEFORE the seal resolves — `dc.send` would then throw on the
+      // already-closing channel and the §15.4 `bye` would never reach the peer, making EVERY deliberate
+      // leave look like a network drop (the peer re-dials the leaver, churning maintainMesh's
+      // gracefulCooldown).  Awaiting enqueues the bye into the SCTP buffer, which the WebRTC close()
+      // procedure then flushes.  (`sendMessage` is not usable here — it no-ops once `closed` is set.)
+      void Promise.resolve(
+        this.channel.send(this.codec.encodeSyncMessage({ schema: 'licio.private.bye.v1' })),
+      )
+        .catch(() => {
+          /* the peer will observe the drop regardless — best-effort graceful leave */
+        })
+        .finally(() => this.channel.close());
+    } else {
+      this.channel.close();
+    }
     this.fireTerminate(); // a local close() also prunes the owner's live set (onClose is suppressed)
   }
 
@@ -221,18 +264,32 @@ export class PrivateSyncSession {
     this.sendMessage(this.engine.headAnnouncement());
   }
 
-  private requestOps(opIds: readonly string[]): void {
-    // Drop op ids we have already requested this session (the livelock guard): each is
-    // asked for at most once, so a served-but-unopenable op never ping-pongs.
+  /**
+   * §15.6 — re-announce our heads to the peer after LOCAL progress (the owner authored an op /
+   * admitted or removed a member).  Without this, a live session goes quiescent after its initial
+   * convergence and a subsequently-authored op NEVER reaches the connected peer (the peer only
+   * pulls when we announce, and we otherwise announce only on RECEIVED progress).  Idempotent + a
+   * no-op once closed (via `sendMessage`); the peer pulls the new heads, converges, and quiesces
+   * again — each local author is finite progress, so this cannot livelock.
+   */
+  reannounce(): void {
+    this.announce();
+  }
+
+  /** Request the FRESH op ids (never re-requesting one already asked for this session — the §15.7
+   *  livelock guard).  Returns how many fresh ids were requested (0 ⇒ we asked for nothing new,
+   *  the "stuck?" signal onResponse uses to fall back to the §14.5 snapshot). */
+  private requestOps(opIds: readonly string[]): number {
     const fresh = [...new Set(opIds)].filter((id) => !this.requested.has(id)).sort();
-    if (fresh.length === 0) return;
-    for (const id of fresh) this.requested.add(id);
+    if (fresh.length === 0) return 0;
+    for (const id of fresh) boundedAdd(this.requested, id); // §27-bounded (PRIV-SESSION-REQ-BOUND)
     for (let i = 0; i < fresh.length; i += this.maxOpIds) {
       this.sendMessage({
         schema: 'licio.private.op_request.v1',
         op_ids: fresh.slice(i, i + this.maxOpIds),
       });
     }
+    return fresh.length;
   }
 
   /**
@@ -295,6 +352,7 @@ export class PrivateSyncSession {
     // not be traversed until now).
     this.requested.clear();
     this.requestedBlocks.clear(); // a new epoch may open a manifest revealing chunk CIDs
+    this.snapshotRequested = false; // a new epoch is genuinely new state — a snapshot may now be needed
     this.announce();
     const next = [
       ...this.engine.missingDependencies(),
@@ -331,12 +389,27 @@ export class PrivateSyncSession {
       ...this.engine.missingDependencies(),
       ...(this.peerAnnouncement ? this.engine.wantedFrom(this.peerAnnouncement) : []),
     ];
-    this.requestOps(next);
+    const requestedFresh = this.requestOps(next);
     // Newly-accepted attachment.add ops may want blocks (the §15.8 lazy media fetch).
     await this.requestBlocks();
     // Re-announce ONLY on genuine progress, so the peer can pull our new heads and the
     // protocol still terminates (no progress ⇒ no re-announce ⇒ quiescence).
     if (report.accepted.length > 0) this.announce();
+    // STUCK on a pruned prefix (PRIV-SESSION-SNAPSHOT-STUCK): a compacted peer serves its retained
+    // post-snapshot ops (a NON-empty response, so the empty-response branch above never fires) but
+    // OMITS the pruned ancestors.  If this round requested NOTHING new (every remaining want is
+    // already guarded) yet we are still missing material — an unmet dependency, OR ops held pending
+    // because their author certs live in the pruned prefix (missingDependencies() empty but
+    // pendingCount() > 0) — bootstrap via the peer's §14.5 snapshot instead of quiescing incomplete.
+    if (requestedFresh === 0 && this.isStuck()) {
+      await this.maybeRequestSnapshot();
+    }
+  }
+
+  /** Whether the engine cannot make progress on its own: it still lacks a dependency, or holds ops
+   *  PENDING behind material (an epoch key / a device cert) that lives in a pruned prefix. */
+  private isStuck(): boolean {
+    return this.engine.missingDependencies().length > 0 || (this.engine.pendingCount?.() ?? 0) > 0;
   }
 
   /**
@@ -350,7 +423,7 @@ export class PrivateSyncSession {
     const cids = await this.engine.wantedBlockCids();
     const fresh = [...new Set(cids)].filter((c) => !this.requestedBlocks.has(c)).sort();
     if (fresh.length === 0) return;
-    for (const c of fresh) this.requestedBlocks.add(c);
+    for (const c of fresh) boundedAdd(this.requestedBlocks, c); // §27-bounded (PRIV-SESSION-REQ-BOUND)
     for (let i = 0; i < fresh.length; i += MAX_CIDS_PER_BLOCK_REQUEST) {
       this.sendMessage({
         schema: 'licio.private.block_request.v1',
@@ -401,11 +474,12 @@ export class PrivateSyncSession {
    */
   private async maybeRequestSnapshot(): Promise<void> {
     if (this.closed || this.snapshotRequested || !this.engine.importArchive) return;
-    // STUCK: we still have unmet deps the peer did not serve (it likely pruned them), and
-    // the peer announced a §14.5 snapshot.  Request its archive to bootstrap the prefix.
-    // (We cannot gate on `latestSnapshotId === peerSnapshot`: holding the snapshot.commit
-    // OP — which the op walk fetches — does NOT mean we hold the snapshot BASE/state.)
-    if (this.engine.missingDependencies().length === 0) return;
+    // STUCK: we lack material the peer did not serve (it likely pruned it) — an unmet dependency OR
+    // ops held pending behind a key/cert in the pruned prefix — and the peer announced a §14.5
+    // snapshot.  Request its archive to bootstrap the prefix.  (We cannot gate on
+    // `latestSnapshotId === peerSnapshot`: holding the snapshot.commit OP — which the op walk fetches
+    // — does NOT mean we hold the snapshot BASE/state.)
+    if (!this.isStuck()) return;
     if (this.peerAnnouncement?.latest_snapshot_id === undefined) return;
     this.snapshotRequested = true;
     this.sendMessage({ schema: 'licio.private.snapshot_request.v1' });
@@ -415,6 +489,16 @@ export class PrivateSyncSession {
     if (!this.engine.snapshotArchive) return;
     const archive = await this.engine.snapshotArchive();
     if (!archive) return; // nothing retained to serve
+    // A snapshot too large for ONE live sync message cannot cross the carrier (it would exceed the
+    // fragmenter's reassembly cap / the decode budget), and encoding it would THROW at the schema cap
+    // — a silent stall.  DECLINE gracefully instead (PRIV-SYNC-FRAGMENT): the requester stays op-by-op
+    // or bootstraps via the §15.9 offline CAR archive, whose decode budget is larger.
+    if (archive.length > MAX_LIVE_SNAPSHOT_ARCHIVE_BYTES) {
+      devWarn(
+        `snapshot archive of ${archive.length} bytes exceeds the live-carrier cap; declining (use the offline archive)`,
+      );
+      return;
+    }
     this.sendMessage({
       schema: 'licio.private.snapshot_response.v1',
       archive: bytesToBase64Url(archive),

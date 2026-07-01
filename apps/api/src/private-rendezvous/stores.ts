@@ -207,37 +207,29 @@ export class InMemoryRendezvousStore implements RendezvousStore {
     for (const s of queue) if (s.senderBlindId === signal.senderBlindId) fromSender += 1;
     if (fromSender >= MAX_SIGNALS_PER_SENDER) return Promise.resolve(); // back-pressure the sender
     if (queue.length >= MAX_SIGNALS_PER_PEER) {
-      // FAIR eviction (PRIV-API-RENDEZVOUS-3/5/6).  `sender_blind_id` is unauthenticated (no Tier-2),
+      // FAIR eviction (PRIV-API-RENDEZVOUS-3/5/6/7).  `sender_blind_id` is unauthenticated (no Tier-2),
       // so a flooder saturates the queue with one-signal forged ids — and NEITHER deterministic policy
-      // is safe: evicting the OLDEST singleton lets a forged flood evict an already-queued honest offer
-      // (RENDEZVOUS-3), while dropping the NEWEST blocks a fresh honest offer arriving into a saturated
-      // queue (RENDEZVOUS-5).  So we ALWAYS admit, and choose the victim thus:
-      //   • if some sender is OVER-REPRESENTED — strictly heavier than this sender's post-insert count
-      //     (`fromSender + 1`) — evict that hog's OLDEST signal (a sender using FEWER ids to take MORE
-      //     slots loses first, deterministically); else
-      //   • evict a UNIFORMLY RANDOM existing signal — the TIMING-INDEPENDENT choice that denies a
-      //     forged singleton flood any DETERMINISTIC power to evict OR to block a specific honest
-      //     signal (the same §27 sample-poll fairness `poll` uses; index clamped so an injected RNG
-      //     returning 1 cannot read past the array).
-      // The per-sender cap above still bounds each id to MAX_SIGNALS_PER_SENDER.  The residual
-      // PROBABILISTIC degradation under a SUSTAINED flood is fundamental without the Tier-2
-      // anonymous-credential cap (the documented closure target); WebRTC retransmission + the §27
-      // sample-poll philosophy carry an honest signal through over repeated attempts.
-      const counts = new Map<string, number>();
-      for (const s of queue) counts.set(s.senderBlindId, (counts.get(s.senderBlindId) ?? 0) + 1);
-      let victim: string | undefined;
-      let victimCount = fromSender + 1;
-      for (const [sender, count] of counts) {
-        if (count > victimCount) {
-          victimCount = count;
-          victim = sender;
-        }
-      }
-      const evictIdx =
-        victim !== undefined
-          ? queue.findIndex((s) => s.senderBlindId === victim) // the over-represented hog's OLDEST
-          : Math.min(queue.length - 1, Math.floor(this.random() * queue.length)); // else uniform random
-      if (evictIdx >= 0) queue.splice(evictIdx, 1); // findIndex < 0 is unreachable; fail safe
+      // is safe: evicting the OLDEST lets a forged flood evict an already-queued honest offer
+      // (RENDEZVOUS-3), dropping the NEWEST blocks a fresh honest offer arriving into a saturated queue
+      // (RENDEZVOUS-5), and — the flaw this replaces (RENDEZVOUS-7) — evicting the BIGGEST sender
+      // deterministically TARGETS an honest peer: a real offerer sends its SDP offer PLUS every trickled
+      // ICE candidate under ONE stable `sender_blind_id`, so under a FRAGMENTED forged flood (fresh
+      // singleton id per signal) the honest peer is the heaviest sender and its OLDEST signal (the
+      // bootstrap offer) is evicted every forged insert.  A "hog" threshold cannot fix this: a
+      // legitimate offer+ICE burst can reach the per-sender cap (MAX_SIGNALS_PER_SENDER), so "biggest
+      // single sender" is indistinguishable from "genuine hog".
+      //
+      // So we ALWAYS admit and evict a UNIFORMLY RANDOM existing signal — the TIMING- AND
+      // IDENTITY-INDEPENDENT choice that denies a forged flood any DETERMINISTIC power to evict OR block
+      // a specific honest signal (the same §27 sample-poll fairness `poll` uses; index clamped so an
+      // injected RNG returning exactly 1 cannot read past the array).  Random drop still penalizes a
+      // genuine hog PROPORTIONALLY (a sender holding k of N slots loses one with probability k/N per
+      // eviction).  The per-sender cap above still bounds each id to MAX_SIGNALS_PER_SENDER; the
+      // residual PROBABILISTIC degradation under a SUSTAINED flood is fundamental without the Tier-2
+      // anonymous-credential cap (the documented closure target) and is carried through by WebRTC
+      // retransmission + repeated polls.
+      const evictIdx = Math.min(queue.length - 1, Math.floor(this.random() * queue.length));
+      queue.splice(evictIdx, 1);
     }
     queue.push(signal);
     this.signals.set(signal.recipientBlindId, queue);

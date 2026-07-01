@@ -299,6 +299,35 @@ describe('WS-R.15.6a connectWebrtc', () => {
     ).rejects.toThrow(/disallowed/);
   });
 
+  it('fails closed with ZERO egress on an already-aborted caller signal (PUB-WEBRTC-ABORT)', async () => {
+    const relay = makeRelay();
+    const key = await importSignalKey(KEY_BYTES);
+    const controller = new AbortController();
+    controller.abort(); // aborted BEFORE the dial — addEventListener('abort') would never fire
+    let pcConstructed = false;
+    await expect(
+      connectWebrtc({
+        decision: await allow(),
+        signalKey: key,
+        roomIdHash: ROOM,
+        selfPeerKey: 'a',
+        remotePeerKey: 'b',
+        initiator: true,
+        postSignal: relay.postSignal,
+        pollSignal: relay.pollSignal,
+        signal: controller.signal,
+        rtcFactory: (config) => {
+          pcConstructed = true;
+          return new FakePeer(new FakeLink(), 'initiator', config);
+        },
+      }),
+    ).rejects.toThrow(/aborted/);
+    // No RTCPeerConnection is constructed and NOTHING is sealed + POSTed to the relay: an
+    // already-aborted dial produces no offer/ICE signaling egress at all.
+    expect(pcConstructed).toBe(false);
+    expect(relay.postsTo('b')).toBe(0);
+  });
+
   it('applies relay-only iceTransportPolicy to the RTCConfiguration', async () => {
     const relay = makeRelay();
     const key = await importSignalKey(KEY_BYTES);

@@ -557,6 +557,21 @@ export class PrivateRoomSession {
     }
   }
 
+  /** §15.6 — after a LOCAL author (a new op / an admitted or removed member), nudge every live
+   *  session to re-announce its heads so each connected peer PULLS the new ops.  Without this a live
+   *  session (1:1 or mesh) converges only the state that existed at connect time — a subsequently
+   *  authored op (a story, a `member.add`/`member.remove`, a cap op) would never propagate until a
+   *  reconnect.  Self-heals the set on a stale/closed session, mirroring `broadcastCommit`. */
+  private nudgeActiveSessions(): void {
+    for (const session of this.activeSessions) {
+      if (session.isClosed()) {
+        this.activeSessions.delete(session);
+        continue;
+      }
+      session.reannounce();
+    }
+  }
+
   /**
    * Ingest envelopes delivered out-of-band (a peer push, an imported archive) through
    * the engine's verify-before-use path (§8.3).  Returns what was accepted vs.
@@ -965,6 +980,9 @@ export class PrivateRoomSession {
     );
     await this.engine.applyLocalOp(op, sealParams);
     await this.persistCompactionIfDue();
+    // Push the freshly-authored head to every live peer (mesh or 1:1) — a quiescent session does not
+    // otherwise learn about locally-authored ops (PRIV-WEB-SESSION-NUDGE).
+    this.nudgeActiveSessions();
   }
 
   /**
@@ -1266,6 +1284,14 @@ export class PrivateRoomSession {
       this.session = { ...this.session, snapshotBase };
       await putRoomSession(this.session);
     }
+    // …NOW re-announce (AFTER the commit + the grant snapshot).  This must follow `commitSnapshot`,
+    // not precede it: `commitSnapshot` compacts A's log — dropping the just-authored `member.add` — so
+    // announcing BEFORE it would advertise a head the peer can no longer pull (A would serve 0), and
+    // the peer would strand on the missing prefix.  Announcing AFTER advertises the SNAPSHOT head +
+    // `latest_snapshot_id`, so a connected member that already advanced the epoch (via the commit
+    // above) bootstraps the new member/device/content over the §14.5 snapshot archive
+    // (PRIV-WEB-SESSION-NUDGE).
+    this.nudgeActiveSessions();
     const archive = await this.engine.exportArchive({
       kind: 'encrypted_member_backup',
       createdAtBucket: coarseBucket(),
@@ -1425,6 +1451,8 @@ export class PrivateRoomSession {
     };
     await putRoomSession(this.session);
     this.broadcastCommit(this.p2p.encodeCommit(removed.commit), epoch);
+    // …then re-announce so remaining members PULL the `device.remove` op (PRIV-WEB-SESSION-NUDGE).
+    this.nudgeActiveSessions();
   }
 
   /**

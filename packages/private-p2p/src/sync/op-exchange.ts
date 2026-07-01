@@ -17,10 +17,48 @@
 // bounded for §27 DoS.
 
 import { z } from 'zod';
-import { type CanonicalValue, canonical, decodeCanonical } from '../crypto/canonical.js';
+import {
+  type CanonicalDecodeLimits,
+  type CanonicalValue,
+  canonical,
+  DEFAULT_CANONICAL_DECODE_LIMITS,
+  decodeCanonical,
+} from '../crypto/canonical.js';
 import { ciphertextBase64Schema, privateIdSchema } from '../schemas/common.js';
 import { privateEncryptedEnvelopeSchema } from '../schemas/envelope.js';
 import { blockRequestSchema, blockResponseSchema, headAnnouncementSchema } from './head-sync.js';
+
+/**
+ * The §27 per-message DoS ceiling on ONE decoded sync frame (16 MiB) — larger than the default
+ * canonical cap (4 MiB) because a full `op_response`/`block_response` (media chunks) legitimately
+ * exceeds 4 MiB after base64 expansion, and the carrier now FRAGMENTS a message this large across
+ * datachannel messages (`PrivateFragmentReassembler`, whose reassembly cap matches this).  Bounding
+ * the two together means any message that reassembles also decodes — and vice versa — so a fully
+ * budgeted response is never SILENTLY dropped at decode (the media-sync stall PRIV-SYNC-FRAGMENT
+ * closes), while a genuinely oversized frame still fails closed.
+ */
+export const MAX_SYNC_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+const SYNC_DECODE_LIMITS: CanonicalDecodeLimits = {
+  ...DEFAULT_CANONICAL_DECODE_LIMITS,
+  maxBytes: MAX_SYNC_MESSAGE_BYTES,
+};
+
+/**
+ * The largest §14.5 snapshot archive (raw bytes) the LIVE carrier will serve in one
+ * `snapshot_response`: bounded so the whole base64-encoded sync message stays within
+ * {@link MAX_SYNC_MESSAGE_BYTES} (base64 expands 4/3, plus framing).  A room whose snapshot exceeds
+ * this bootstraps a lagging member via the §15.9 OFFLINE CAR archive path instead (whose own decode
+ * budget is larger); `onSnapshotRequest` declines gracefully rather than emitting an unsendable frame.
+ */
+export const MAX_LIVE_SNAPSHOT_ARCHIVE_BYTES = 11 * 1024 * 1024;
+
+/** base64url of a live snapshot archive, bounded so the sync message fits {@link MAX_SYNC_MESSAGE_BYTES}. */
+const liveSnapshotArchiveSchema = z
+  .string()
+  .min(1)
+  .max(Math.ceil((MAX_LIVE_SNAPSHOT_ARCHIVE_BYTES * 4) / 3))
+  .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
 
 /** The most op ids one §15.7 request may ask for (a DoS bound, like the head cap). */
 export const MAX_OP_IDS_PER_REQUEST = 4_096;
@@ -94,7 +132,10 @@ export type SnapshotRequest = z.infer<typeof snapshotRequestSchema>;
 export const snapshotResponseSchema = z
   .object({
     schema: z.literal('licio.private.snapshot_response.v1'),
-    archive: ciphertextBase64Schema,
+    // A §14.5 archive is far larger than an inline op body (it is the full reduced state + retained
+    // envelopes), so it uses the live-snapshot bound (fits one fragmented sync message), NOT the
+    // small inline-ciphertext cap that silently rejected any real snapshot at encode (PRIV-SYNC-FRAGMENT).
+    archive: liveSnapshotArchiveSchema,
   })
   .strict();
 export type SnapshotResponse = z.infer<typeof snapshotResponseSchema>;
@@ -126,7 +167,9 @@ export function encodeSyncMessage(message: SyncMessage): Uint8Array {
   return canonical(syncMessageSchema.parse(message) as CanonicalValue);
 }
 
-/** Decode + strict-validate a sync message fail-closed (any malformed frame throws). */
+/** Decode + strict-validate a sync message fail-closed (any malformed frame throws).  Decodes under
+ *  the raised {@link MAX_SYNC_MESSAGE_BYTES} cap so a fully-budgeted `op_response`/`block_response`/
+ *  `snapshot_response` — which the carrier fragments — is not rejected at the default 4 MiB limit. */
 export function decodeSyncMessage(bytes: Uint8Array): SyncMessage {
-  return syncMessageSchema.parse(decodeCanonical(bytes));
+  return syncMessageSchema.parse(decodeCanonical(bytes, SYNC_DECODE_LIMITS));
 }

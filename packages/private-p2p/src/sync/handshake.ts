@@ -29,13 +29,16 @@ import {
  * peers must agree on: the handshake transcript AND the post-handshake op-frame AEAD.  It is
  * bound into the proof transcript and `verifyPeerHandshake` rejects a mismatch
  * (`protocol_version_mismatch`), so it is the single negotiated value that lets two peers
- * detect an incompatible build.  v2 introduced the direction-separated op-frame AAD (the
- * carrier's `op-frame.v2.{o2a,a2o}`); because a skew fails the handshake cleanly, a peer still
- * on a v1 build during a staggered PWA update is refused (and retries once both update) rather
- * than completing the handshake and then silently dropping every op frame across the format
- * change.  This is the SOLE source of truth — the carrier reads it (never a local duplicate).
+ * detect an incompatible build.  v2 introduced the direction-separated op-frame AAD; v3 added
+ * datachannel FRAGMENTATION of the sealed op frame (the carrier's `op-frame.v3.{o2a,a2o}` +
+ * `PrivateFragmentReassembler`) so a large §13.6 media / §14.5 snapshot sync message can cross a
+ * finite SCTP message limit — a v2 peer sent whole frames and cannot parse v3 fragment headers, so
+ * the two are incompatible.  Because a skew fails the handshake cleanly, a peer still on an older
+ * build during a staggered PWA update is refused (and retries once both update) rather than
+ * completing the handshake and then silently mis-framing every op frame across the format change.
+ * This is the SOLE source of truth — the carrier reads it (never a local duplicate).
  */
-export const HANDSHAKE_PROTOCOL_VERSION = 2;
+export const HANDSHAKE_PROTOCOL_VERSION = 3;
 
 /** The opening message each peer sends: version + ephemeral key + a fresh nonce. */
 export const handshakeHelloSchema = z

@@ -24,7 +24,16 @@
 // residual.
 
 import { z } from 'zod';
-import { aeadOpen, aeadSeal } from '../crypto/aead.js';
+import {
+  AES_GCM_NONCE_LENGTH,
+  AES_GCM_TAG_LENGTH,
+  aeadOpen,
+  aeadSeal,
+  PADDING_BUCKET_4K,
+  padBody,
+  selectPaddingPolicy,
+  unpadBody,
+} from '../crypto/aead.js';
 import { type CanonicalValue, canonical, decodeCanonical } from '../crypto/canonical.js';
 import { hkdfExpandLabel } from '../crypto/hkdf.js';
 import { fromBase64Url, hmacSha256, randomBytes, toBase64Url } from '../crypto/runtime.js';
@@ -127,6 +136,41 @@ export async function derivePeerBlindId(
   timeBucket: number,
 ): Promise<string> {
   return toBase64Url(await blindId(rendezvousKey, ['peer', deviceId, epoch, timeBucket]));
+}
+
+/**
+ * A per-RECIPIENT §15.4 signaling-queue address, keyed on the RECIPIENT's ephemeral signaling key:
+ * `HMAC-SHA256(rendezvous_key, canonical(["signal", recipient_ephemeral, epoch, time_bucket]))`,
+ * base64url-encoded.
+ *
+ * WHY (not `derivePeerBlindId`): the rendezvous `signal/poll` drain is DELIVER-ONCE, so if two live
+ * sessions on ONE device drained the SAME (device-level) address, the first pump to poll would
+ * consume — and drop as un-openable — a signal meant for the OTHER session's channel key.  A mesh
+ * (`connectMesh`) runs a fresh `connectPrivatePeer` per dial, each with its OWN ephemeral, so keying
+ * the queue on the recipient's ephemeral gives every pairwise channel its own queue → no cross-dial
+ * theft.
+ *
+ * WHY the RECIPIENT's key ALONE (not both ephemerals): a peer must be able to derive — and start
+ * draining — its OWN inbound queue from its own ephemeral BEFORE it has discovered the sender, so an
+ * offer sent the instant the offerer discovers it is not lost to a not-yet-draining answerer.  The
+ * two directions use DIFFERENT recipient ephemerals (A drains `addr(eA)`, C drains `addr(eC)`), so a
+ * peer never drains a signal it itself sent — directionality falls out of the distinct keys, with no
+ * mutual-discovery round-trip.
+ */
+export async function deriveSignalAddress(
+  rendezvousKey: Uint8Array,
+  recipientSignalingPublicKey: Uint8Array,
+  epoch: number,
+  timeBucket: number,
+): Promise<string> {
+  return toBase64Url(
+    await blindId(rendezvousKey, [
+      'signal',
+      toBase64Url(recipientSignalingPublicKey),
+      epoch,
+      timeBucket,
+    ]),
+  );
 }
 
 // --- sealed announcement (§15.3) --------------------------------------------
@@ -247,9 +291,18 @@ export async function buildRendezvousRecord(
   );
   const expiresAt = params.nowMs + clampRendezvousTtl(params.ttlMs ?? RENDEZVOUS_MAX_TTL_MS);
   const announceKey = await deriveAnnounceKey(params.rendezvousKey);
+  // §15.3.2/§25.4 LENGTH-HIDING (PRIV-RENDEZVOUS-PAD): pad the announcement to a fixed §25.4 bucket
+  // BEFORE sealing, so every real record's `encrypted_announcement` is a CONSTANT length regardless of
+  // the device id / number of transport hints / presence of the Tier-2 cap.  Without this the sealed
+  // length tracked the content, letting an honest-but-curious server (a) distinguish real records from
+  // the fixed-length §15.3.2 cover records (defeating the size-inference mitigation) and (b) read a
+  // per-device metadata bit (has-hints / has-cap).  A realistic announcement is well under 4 KiB → the
+  // 4 KiB bucket (which `buildCoverRecord` matches); a rare oversized one uses a larger bucket (a
+  // documented honest residual).
+  const plaintext = canonical(serializeAnnouncement(announcement));
   const sealed = await aeadSeal(
     announceKey,
-    canonical(serializeAnnouncement(announcement)),
+    padBody(plaintext, selectPaddingPolicy(plaintext.length)),
     announcementAad(roomBlindId, peerBlindId, expiresAt),
   );
   return blindRendezvousRecordSchema.parse({
@@ -271,12 +324,14 @@ export async function openRendezvousAnnouncement(
   rendezvousKey: Uint8Array,
 ): Promise<RendezvousAnnouncement> {
   const announceKey = await deriveAnnounceKey(rendezvousKey);
-  const plaintext = await aeadOpen(
+  const padded = await aeadOpen(
     announceKey,
     fromBase64Url(record.encrypted_announcement),
     announcementAad(record.room_blind_id, record.peer_blind_id, record.expires_at),
   );
-  return rendezvousAnnouncementSchema.parse(decodeCanonical(plaintext));
+  // Reverse the §25.4 padding applied in `buildRendezvousRecord` (the length prefix is INSIDE the
+  // AEAD, so unpadding is exact) before decoding the canonical announcement.
+  return rendezvousAnnouncementSchema.parse(decodeCanonical(unpadBody(padded)));
 }
 
 /** Whether a record has expired at `nowMs` (the client filters these; the server
@@ -305,20 +360,42 @@ export function jitteredAnnounceTime(nowMs: number, maxJitterMs: number, random0
   return Math.floor(nowMs + clamped * maxJitterMs);
 }
 
+export interface BuildCoverRecordParams {
+  /** The room's per-epoch §10.2 rendezvous key — so the cover lands under the room's REAL blind id. */
+  readonly rendezvousKey: Uint8Array;
+  readonly epoch: number;
+  readonly timeBucket: number;
+  readonly nowMs: number;
+  readonly ttlMs?: number;
+}
+
+/** The sealed length of a real 4 KiB-bucket-padded announcement: nonce ‖ padded ciphertext ‖ tag.
+ *  A cover's `encrypted_announcement` is random bytes of EXACTLY this length so it is byte-length
+ *  indistinguishable from a genuine (padded) record (PRIV-RENDEZVOUS-PAD). */
+const COVER_SEALED_BYTES = AES_GCM_NONCE_LENGTH + PADDING_BUCKET_4K + AES_GCM_TAG_LENGTH;
+
 /**
- * A §15.3.2 cover record: random blind ids + random-looking sealed bytes,
- * structurally indistinguishable from a genuine announcement to the server, so a
- * high-risk room can publish decoys that blunt size inference.  It opens for NO
- * member (the bytes are random, not a real seal — `openRendezvousAnnouncement`
- * fails closed), and carries the same TTL shape as a real record.
+ * A §15.3.2 cover record: it lands under the room's REAL `room_blind_id` (derived from the rendezvous
+ * key — PRIV-RENDEZVOUS-COVER), with a random `peer_blind_id` (a phantom device) and random-looking
+ * sealed bytes of the SAME length a real padded announcement produces, so a server grouping by
+ * `room_blind_id` cannot tell it from a genuine online device — the decoys inflate the SPECIFIC
+ * per-room concurrent-size count §15.3.2 targets (a random-room cover, by contrast, would form a
+ * useless phantom room and leave the real room's count untouched).  It opens for NO member (the bytes
+ * are random, not a real seal — `openRendezvousAnnouncement` fails closed), and carries a real TTL.
  */
-export function buildCoverRecord(nowMs: number, ttlMs?: number): BlindRendezvousRecord {
-  const expiresAt = nowMs + clampRendezvousTtl(ttlMs ?? RENDEZVOUS_MAX_TTL_MS);
+export async function buildCoverRecord(
+  params: BuildCoverRecordParams,
+): Promise<BlindRendezvousRecord> {
+  const roomBlindId = await deriveRoomBlindId(
+    params.rendezvousKey,
+    params.epoch,
+    params.timeBucket,
+  );
+  const expiresAt = params.nowMs + clampRendezvousTtl(params.ttlMs ?? RENDEZVOUS_MAX_TTL_MS);
   return blindRendezvousRecordSchema.parse({
-    room_blind_id: toBase64Url(randomBytes(32)),
+    room_blind_id: roomBlindId,
     peer_blind_id: toBase64Url(randomBytes(32)),
-    // nonce(12) + a plausible small-announcement ciphertext+tag length.
-    encrypted_announcement: toBase64Url(randomBytes(96)),
+    encrypted_announcement: toBase64Url(randomBytes(COVER_SEALED_BYTES)),
     expires_at: expiresAt,
   });
 }

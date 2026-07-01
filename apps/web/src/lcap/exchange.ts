@@ -44,6 +44,11 @@ export type { CommitCounts };
 /** Cap on how many local records the share-closure enumerates (bounded device CPU + wire). */
 const MAX_SHARE_RECORDS = 256;
 
+/** The §27 per-exchange RESPONSE ceiling (16 MiB): the max bytes one served exchange reply may carry,
+ *  matching the WebRTC reassembly cap (`MAX_REASSEMBLY_BYTES`) + the IPFS single-object bound.  Clamps a
+ *  peer's untrusted `max_response_bytes` so the responder never repacks more than a carrier can move. */
+const MAX_EXCHANGE_RESPONSE_BYTES = 16 * 1024 * 1024;
+
 /**
  * The §22.5 sharing scope — WHAT this device may serve/push over the public P2P plane.  Narrows
  * (never widens) public content: an optional room allowlist (opaque hashes) + a priority cap.
@@ -420,7 +425,12 @@ export async function respondToClientExchange(
   const shareable = new Set(await collectShareableCids(db, lcap, scope));
   const wantCids = (request.want ?? []).map((w) => w.cid).filter((cid) => shareable.has(cid));
   const budgets = request.pulse.budgets;
-  const budget = budgets.max_response_bytes;
+  // CLAMP the peer-advertised response budget to the §27 per-exchange ceiling (PUB-WEB-CARRIERS-BUDGET):
+  // `max_response_bytes` is an untrusted uint (validated only as non-negative), so a peer could ask for
+  // an arbitrarily large repack.  A single exchange message can carry at most `MAX_EXCHANGE_RESPONSE_BYTES`
+  // — the reassembly / single-object DoS bound the WebRTC fragmenter and the IPFS bridge also enforce —
+  // so never build a reply larger than that (the server pulse C0 path clamps identically).
+  const budget = Math.min(budgets.max_response_bytes, MAX_EXCHANGE_RESPONSE_BYTES);
   // Honor the peer's advertised SELECTION floor (priority_floor / allow_media) — a peer that advertises
   // a stealth/minimal budget is not served over-priority/media objects even if a stale want lists them;
   // a DEFAULT (full) courier/relay budget allows everything, so it always fetches its explicit wants (#BF).
@@ -442,6 +452,33 @@ export async function respondToClientExchange(
     ...(repacked.pack !== undefined ? { responsePack: repacked.pack } : {}),
   });
   return lcap.encodeWithSchema(lcap.exchangeResponseV2Schema, response);
+}
+
+/**
+ * Derive the carriage privacy label of a §16 exchange RESPONSE from its embedded `response_pack`
+ * header — the RESPONDER-leg counterpart of the courier's request-leg `requestPrivacyLabel`.  A
+ * response with no served pack is `'public'` (it carries no content); otherwise the label is the
+ * served pack's own `privacy_label`.  Fails CLOSED: an undecodable response, or a served pack that
+ * cannot be read, resolves to a NON-public label so a `carriesPrivate: false` carrier (the courier
+ * radio / the WebRTC datachannel) DROPS the reply STRUCTURALLY (PUB-RESPONDER-PUBLIC-ONLY) — making
+ * the public-only-response guarantee independent of the correctness of `collectShareableCids` and of
+ * any alternative `buildResponse` seam, symmetric with the request leg's gate.
+ */
+export async function responsePrivacyLabel(
+  responseBytes: Uint8Array,
+): Promise<import('@licio/lcap').PackHeaderV2['privacy_label']> {
+  const lcap = await import('@licio/lcap');
+  const decoded = ((): import('@licio/lcap').ExchangeResponseV2 | null => {
+    try {
+      return lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, responseBytes);
+    } catch {
+      return null;
+    }
+  })();
+  if (decoded === null) return 'contains_in_room_metadata'; // undecodable → fail closed (non-public)
+  if (decoded.response_pack === undefined) return 'public'; // no served pack ⇒ carries no content
+  const read = await lcap.readPack(decoded.response_pack);
+  return read.ok ? read.pack.header.privacy_label : 'contains_in_room_metadata';
 }
 
 /** The outcome of handling one inbound exchange message over a duplex channel. */

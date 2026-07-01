@@ -22,6 +22,12 @@ const SCHEMA_DIRS = [
   // schema the courier defines (radio metadata is a live-connection property only,
   // §26.4); the generated android/ build output is skipped by SKIP_DIRS below.
   resolve(ROOT, 'apps/courier'),
+  // The WS-S Private P2P SCHEMA surface (PRIV-EGRESS-PARITY): the private plane's unlinkability
+  // is the crown jewel, so its wire schemas get the FULL strong network/location denylist —
+  // including `coordinates`, which the broad check-no-raw-egress scan cannot enforce over the
+  // private CRYPTO trees (EC-key "coordinates").  Scoped to `schemas/` (no EC-key code lives
+  // there), so the strong list applies exactly where a geolocation field would ever appear.
+  resolve(ROOT, 'packages/private-p2p/src/schemas'),
 ];
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
 

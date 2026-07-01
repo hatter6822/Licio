@@ -15,6 +15,7 @@ import {
   ingestPackIntoStore,
   requestHasUnfilledWants,
   respondToClientExchange,
+  responsePrivacyLabel,
 } from './exchange.js';
 import type { RecordRow } from './store.js';
 import {
@@ -765,6 +766,41 @@ describe('client §16 exchange engine', () => {
     expect(response).not.toBeNull();
     // A valid response with no response_pack ⇒ nothing to ingest.
     expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
+  });
+
+  it('SECURITY: responsePrivacyLabel gates the RESPONDER leg fail-closed (PUB-RESPONDER-PUBLIC-ONLY)', async () => {
+    const lcap = await import('@licio/lcap');
+    // (a) UNDECODABLE bytes → a non-public label, so a carriesPrivate:false carrier DROPS the reply.
+    expect(await responsePrivacyLabel(new Uint8Array([1, 2, 3, 4]))).not.toBe('public');
+
+    // (b) a REAL public response (B serves a held public block) → 'public'.
+    const bytes = new Uint8Array([9, 8, 7, 6]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecord(peerB, lcap, 'public', { deps: [blockCid] });
+    await quarantineMissing(peerA, 'parent-cid', [blockCid]);
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const publicResponse = (await respondToClientExchange(peerB, request)) as Uint8Array;
+    expect(await responsePrivacyLabel(publicResponse)).toBe('public');
+
+    // (c) a response carrying a NON-PUBLIC pack → the pack's own non-public label (fail closed).
+    // Reuse the real response's valid pulse and swap in a non-public served pack.
+    const decoded = lcap.decodeWithSchema(lcap.exchangeResponseV2Schema, publicResponse);
+    const nonPublicPack = lcap.writePack({
+      objects: [],
+      transportProfile: 'relay',
+      privacyLabel: 'contains_in_room_metadata',
+      maxUncompressedBytes: 1_000_000,
+    });
+    const nonPublicResponse = lcap.encodeWithSchema(
+      lcap.exchangeResponseV2Schema,
+      lcap.buildExchangeResponse({
+        pulse: decoded.pulse,
+        status: 'ok',
+        responsePack: nonPublicPack,
+      }),
+    );
+    expect(await responsePrivacyLabel(nonPublicResponse)).toBe('contains_in_room_metadata');
   });
 
   it('PUSH (gossip-out): a request includes a push_pack of our PUBLIC content', async () => {

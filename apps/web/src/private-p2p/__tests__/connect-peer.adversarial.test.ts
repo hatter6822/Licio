@@ -371,10 +371,24 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
       const aliceEphPub = ctx.p2p.fromBase64Url(aliceAnn.signaling_public_key);
       const channelKey = await deriveAliceChannelKey(ctx, aliceEphPub);
 
+      // The carrier now drains the PER-RECIPIENT §15.4 signal queue (keyed on the RECIPIENT's ephemeral
+      // signaling key, NOT the device-level blind id), so a mesh's concurrent dials never steal each
+      // other's deliver-once signals.  Address the flood to alice's inbound queue (recipient = alice's
+      // ephemeral); the sender field is the adversary's own inbound queue (recipient = its ephemeral).
       const routing = {
         roomBlindId: ctx.roomBlindId,
-        senderBlindId: ctx.adversaryBlind,
-        recipientBlindId: ctx.aliceBlind,
+        senderBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          ctx.advEphemeral.publicKey,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
+        recipientBlindId: await ctx.p2p.deriveSignalAddress(
+          ctx.rendezvousKey,
+          aliceEphPub,
+          ctx.epoch,
+          ctx.timeBucket,
+        ),
         expiresAt: Date.now() + 5 * 60_000,
       };
 

@@ -148,6 +148,15 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
       `webrtc disallowed: ${params.decision.blockedReason || 'unknown'}`,
     );
   }
+  // Fail CLOSED on an ALREADY-aborted caller signal with ZERO egress (PUB-WEBRTC-ABORT):
+  // `addEventListener('abort')` below does NOT fire for a signal aborted before this call, so
+  // without this check the dial would construct a pc, seal + POST the offer to the relay (waking
+  // the remote for a cancelled connection), and hang until `timeoutMs`.  This mirrors
+  // `WebrtcTransport.receive`'s PUB-WEBRTC-1 guard and keeps the abort behaviour symmetric across
+  // the send/receive paths (the fix lives in the implementation, not at the call site).
+  if (params.signal?.aborted) {
+    throw new TransportUnavailableError('webrtc', 'connection aborted before dialing');
+  }
   const factory = params.rtcFactory ?? defaultRtcFactory;
   const pc = factory({
     iceServers: params.decision.iceServers.map((s) => ({
@@ -292,6 +301,11 @@ export async function connectWebrtc(params: ConnectWebrtcParams): Promise<DataCh
         frames = [];
       }
       for (const frame of frames) {
+        // A batch already fetched from the mailbox must not keep being applied AFTER a mid-batch
+        // abort/timeout: `handleMessage('offer')` would otherwise createAnswer + seal + POST an
+        // answer for a connection this side is tearing down — post-cancel signaling egress, the
+        // answer-path counterpart of the offer/ICE-trickle guards (PUB-WEBRTC-ABORT-BATCH).
+        if (controller.signal.aborted) break;
         let env: ReturnType<typeof decodeSignalEnvelope>;
         try {
           env = decodeSignalEnvelope(frame);

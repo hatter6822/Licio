@@ -29,10 +29,20 @@ export function findStaticPrivateP2pImports(filename: string, rawContent: string
   const issues: string[] = [];
   const staticFrom = new RegExp(`\\bimport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');
   const sideEffect = new RegExp(`\\bimport\\s*['"]${SPECIFIER}['"]`, 'g');
+  // An aggregating re-export (`export { X } from '…'` / `export * from '…'`) is a STATIC binding
+  // edge: the bundler resolves it synchronously onto the initial path exactly like `import`, so it
+  // must be caught too (a re-export barrel would otherwise bypass the gate).  `export type …` is
+  // erased at build and is permitted, mirroring the `import type` allowance.
+  const exportFrom = new RegExp(`\\bexport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');
   for (const match of content.matchAll(staticFrom)) {
     // `import type …` is erased at build (no runtime weight) and is permitted.
     if (!/^\s*type\b/.test(match[1] ?? '')) {
       issues.push(`${filename}: static value import of ${SPECIFIER} (use a dynamic import())`);
+    }
+  }
+  for (const match of content.matchAll(exportFrom)) {
+    if (!/^\s*type\b/.test(match[1] ?? '')) {
+      issues.push(`${filename}: static re-export of ${SPECIFIER} (use a dynamic import())`);
     }
   }
   if (sideEffect.test(content)) {

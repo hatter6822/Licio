@@ -9,7 +9,7 @@
 // §15.3.2 mitigations (risk-tier discovery steering, announce jitter, cover
 // records the server cannot distinguish and no member can open).
 import { describe, expect, it } from 'vitest';
-import { randomBytes } from '../crypto/runtime.js';
+import { randomBytes, toBase64Url } from '../crypto/runtime.js';
 import {
   allowedDiscoveryModes,
   type BlindRendezvousRecord,
@@ -18,6 +18,7 @@ import {
   clampRendezvousTtl,
   derivePeerBlindId,
   deriveRoomBlindId,
+  deriveSignalAddress,
   isRendezvousRecordExpired,
   jitteredAnnounceTime,
   openRendezvousAnnouncement,
@@ -111,6 +112,43 @@ describe('blind-id derivation (§15.2)', () => {
     );
     // The "room" vs "peer" domain tag keeps the two id spaces disjoint.
     expect(room).not.toBe(await derivePeerBlindId(key, 'd1', 3, 100));
+  });
+});
+
+describe('§15.4 per-recipient signal address (deriveSignalAddress — mesh de-collision)', () => {
+  const key = randomBytes(32);
+  const eA = randomBytes(32); // one device's ephemeral signaling key (one dial)
+  const eB = randomBytes(32); // a peer's ephemeral signaling key
+  const eC = randomBytes(32); // a THIRD ephemeral (a concurrent mesh dial on the same device)
+
+  it('is deterministic for (key, recipient, epoch, bucket)', async () => {
+    expect(await deriveSignalAddress(key, eA, 3, 100)).toBe(
+      await deriveSignalAddress(key, eA, 3, 100),
+    );
+  });
+
+  it('is DIRECTIONAL via distinct ephemerals — A drains addr(eA), C drains addr(eC) (no self-drain)', async () => {
+    // A→C is sent to addr(eC) (C's inbound); C→A is sent to addr(eA) (A's inbound).  Different keys ⇒
+    // a peer never drains the copy of a signal it itself sent.
+    expect(await deriveSignalAddress(key, eA, 3, 100)).not.toBe(
+      await deriveSignalAddress(key, eC, 3, 100),
+    );
+  });
+
+  it('is PER-DIAL — a device running two concurrent dials (fresh ephemeral each) gets distinct queues', async () => {
+    // A's live eA-dial and its concurrent eB-dial must drain DIFFERENT queues so the live pump cannot
+    // consume — and drop — the other dial's deliver-once handshake signals.
+    expect(await deriveSignalAddress(key, eA, 3, 100)).not.toBe(
+      await deriveSignalAddress(key, eB, 3, 100),
+    );
+  });
+
+  it('rotates with the epoch and the time bucket, and is domain-separated from peer/room ids', async () => {
+    const at = await deriveSignalAddress(key, eA, 3, 100);
+    expect(await deriveSignalAddress(key, eA, 4, 100)).not.toBe(at);
+    expect(await deriveSignalAddress(key, eA, 3, 101)).not.toBe(at);
+    expect(at).not.toBe(await deriveRoomBlindId(key, 3, 100));
+    expect(at).not.toBe(await derivePeerBlindId(key, 'd1', 3, 100));
   });
 });
 
@@ -260,14 +298,73 @@ describe('§15.3.2 metadata mitigations', () => {
     expect(() => jitteredAnnounceTime(1000, -1, 0.5)).toThrow();
   });
 
-  it('cover records are valid, distinct per call, and open for no member', async () => {
-    const a = buildCoverRecord(1000);
-    const b = buildCoverRecord(1000);
+  it('pads real records to a CONSTANT sealed length regardless of content (PRIV-RENDEZVOUS-PAD)', async () => {
+    const key = randomBytes(32);
+    // Two very different announcements — minimal vs. many hints + a Tier-2 cap — must seal to the
+    // SAME `encrypted_announcement` length (the §25.4 4 KiB bucket), so the length leaks no content.
+    const minimal = await buildRendezvousRecord({
+      rendezvousKey: key,
+      epoch: 3,
+      timeBucket: 100,
+      deviceId: 'd1',
+      announcement: {
+        schema: 'licio.private.rendezvous_announcement.v1',
+        peer_device_id: 'd1',
+        signaling_public_key: toBase64Url(randomBytes(32)),
+        transport_hints: [],
+      },
+      nowMs: 1000,
+    });
+    const heavy = await buildRendezvousRecord({
+      rendezvousKey: key,
+      epoch: 3,
+      timeBucket: 100,
+      deviceId: 'd2',
+      announcement: {
+        schema: 'licio.private.rendezvous_announcement.v1',
+        peer_device_id: 'd2',
+        signaling_public_key: toBase64Url(randomBytes(32)),
+        transport_hints: ['relay:aaaaaaaa', 'relay:bbbbbbbb', 'relay:cccccccc'],
+        cap: { proof: toBase64Url(randomBytes(112)), pseudonym: toBase64Url(randomBytes(32)) },
+      },
+      nowMs: 1000,
+    });
+    expect(minimal.encrypted_announcement.length).toBe(heavy.encrypted_announcement.length);
+  });
+
+  it('cover records join the room cluster + are byte-length indistinguishable from real records', async () => {
+    const key = randomBytes(32);
+    const a = await buildCoverRecord({
+      rendezvousKey: key,
+      epoch: 3,
+      timeBucket: 100,
+      nowMs: 1000,
+    });
+    const b = await buildCoverRecord({
+      rendezvousKey: key,
+      epoch: 3,
+      timeBucket: 100,
+      nowMs: 1000,
+    });
     expect(a.expires_at).toBe(1000 + RENDEZVOUS_MAX_TTL_MS);
-    // Random blind ids ⇒ each cover record is distinct (no linkable handle).
-    expect(a.room_blind_id).not.toBe(b.room_blind_id);
+    // Covers land under the room's REAL blind id (§15.3.2 — they inflate the room's OWN cluster, so
+    // they actually blunt the per-room concurrent-size leak; a random-room cover could not).
+    expect(a.room_blind_id).toBe(await deriveRoomBlindId(key, 3, 100));
+    expect(a.room_blind_id).toBe(b.room_blind_id);
+    // Distinct phantom-device ids ⇒ each cover adds a distinct "device" to the count (no linkable handle).
     expect(a.peer_blind_id).not.toBe(b.peer_blind_id);
+    // A cover's sealed length EXACTLY matches a real (padded) record's, so the server cannot drop it by
+    // length to recover the real count (the PRIV-RENDEZVOUS-PAD indistinguishability).
+    const real = await buildRendezvousRecord({
+      rendezvousKey: key,
+      epoch: 3,
+      timeBucket: 100,
+      deviceId: 'real',
+      announcement,
+      nowMs: 1000,
+    });
+    expect(a.encrypted_announcement.length).toBe(real.encrypted_announcement.length);
     // A cover record is not a real seal; opening it fails closed.
-    await expect(openRendezvousAnnouncement(a, randomBytes(32))).rejects.toThrow();
+    await expect(openRendezvousAnnouncement(a, key)).rejects.toThrow();
   });
 });

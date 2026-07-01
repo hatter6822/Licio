@@ -89,9 +89,21 @@ export function buildBlockArchive(params: BuildArchiveParams): PrivateBlockArchi
   });
 }
 
-/** Canonical-encode an archive to its single byte representation (for sharing). */
+/** Canonical-encode an archive to its single byte representation (for sharing).  A built archive
+ *  MUST be re-importable: `decodeBlockArchive` caps at `ARCHIVE_DECODE_LIMITS.maxBytes`, so an encode
+ *  that exceeds it would produce a container the app itself wrote but could never restore (a silent
+ *  un-importable backup — the envelope-COUNT cap alone is insufficient because per-envelope size
+ *  varies ~4×).  Reject a typed error at build so a too-large export is split / streamed via the
+ *  cross-plane `.licio-bundle` carrier instead (PRIV-ARCHIVE-ENCODE-BOUND). */
 export function encodeBlockArchive(archive: PrivateBlockArchive): Uint8Array {
-  return canonicalizeRecord(privateBlockArchiveSchema.parse(archive));
+  const bytes = canonicalizeRecord(privateBlockArchiveSchema.parse(archive));
+  if (bytes.length > ARCHIVE_DECODE_LIMITS.maxBytes) {
+    throw new Error(
+      `encodeBlockArchive: archive of ${bytes.length} bytes exceeds the ` +
+        `${ARCHIVE_DECODE_LIMITS.maxBytes}-byte re-import cap (split the export or use the streaming carrier)`,
+    );
+  }
+  return bytes;
 }
 
 /** §27 import caps for an eager archive decode (bounded against a decode bomb). */

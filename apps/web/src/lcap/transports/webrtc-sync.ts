@@ -18,6 +18,7 @@ import {
   type CommitCounts,
   type ExchangeScope,
   handleInboundExchangeMessage,
+  responsePrivacyLabel,
 } from '../exchange.js';
 
 /** Coerce a datachannel payload (ArrayBuffer | Uint8Array | string) to bytes. */
@@ -87,12 +88,70 @@ export async function runWebrtcBidirectionalExchange(
   };
 
   const aborted = (): boolean => params.signal?.aborted ?? false;
-  const sendMessage = (bytes: Uint8Array): void => {
-    if (settled || aborted()) return; // never transmit after a cancel/settle
-    for (const fragment of p2p.fragmentMessage(bytes, messageId++)) {
-      if (params.channel.readyState !== 'open') return;
-      params.channel.send(fragment);
+
+  // SCTP backpressure (§22.6, PUB-WEB-CARRIERS-BACKPRESSURE): the LIVE bidirectional carrier drives
+  // the RAW DataChannelLike (not the requester-only `WebrtcTransport`), so it must apply the same
+  // backpressure `WebrtcTransport.sendSerial` does — sending a multi-MiB reply as hundreds of
+  // back-to-back fragments overruns the SCTP send buffer and `channel.send` throws OperationError
+  // mid-stream, truncating the message the peer's reassembler then (correctly) rejects.
+  const DRAIN_HIGH_WATER = 8 * 1024 * 1024;
+  const DRAIN_LOW_WATER = 1 * 1024 * 1024;
+  const MAX_DRAIN_WAITS = 30; // ≈60 s of 2 s waits before declaring the channel stuck
+  let drainWaiters: Array<() => void> = [];
+  const wakeDrainWaiters = (): void => {
+    const waiters = drainWaiters;
+    drainWaiters = [];
+    for (const wake of waiters) wake();
+  };
+  const channelWithDrain = params.channel as DataChannelLike & {
+    bufferedAmount?: number;
+    bufferedAmountLowThreshold?: number;
+    onbufferedamountlow?: (() => void) | null;
+  };
+  if ('bufferedAmountLowThreshold' in channelWithDrain) {
+    channelWithDrain.bufferedAmountLowThreshold = DRAIN_LOW_WATER;
+    channelWithDrain.onbufferedamountlow = () => wakeDrainWaiters();
+  }
+  const waitForDrainEvent = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let done2 = false;
+      const finish = (): void => {
+        if (done2) return;
+        done2 = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, 2_000); // safety timeout: never hang if the event is missed
+      drainWaiters.push(finish);
+    });
+  const awaitDrain = async (): Promise<void> => {
+    if (typeof channelWithDrain.bufferedAmount !== 'number') return; // a fake/non-buffering channel
+    let waits = 0;
+    while (
+      channelWithDrain.readyState === 'open' &&
+      (channelWithDrain.bufferedAmount ?? 0) > DRAIN_HIGH_WATER
+    ) {
+      if (++waits > MAX_DRAIN_WAITS) return; // stuck — stop waiting; the send below fails on the full/closed channel
+      await waitForDrainEvent();
     }
+  };
+
+  // Single-flight + backpressured: a concurrent send awaits the in-flight one so two messages'
+  // fragments never interleave on the one ordered datachannel (which the receiver — one in-flight
+  // message at a time — would reject), and each fragment waits for the SCTP buffer to drain first.
+  let sendChain: Promise<void> = Promise.resolve();
+  const sendMessage = (bytes: Uint8Array): void => {
+    sendChain = sendChain
+      .then(async () => {
+        if (settled || aborted()) return; // never transmit after a cancel/settle
+        const id = messageId++;
+        for (const fragment of p2p.fragmentMessage(bytes, id)) {
+          await awaitDrain();
+          if (settled || aborted() || params.channel.readyState !== 'open') return;
+          params.channel.send(fragment);
+        }
+      })
+      .catch((error) => devWarn('WebRTC fragment send failed', error));
   };
 
   params.channel.onmessage = (event): void => {
@@ -118,11 +177,16 @@ export async function runWebrtcBidirectionalExchange(
       params.scope,
       () => !settled && !aborted(),
     )
-      .then((out) => {
+      .then(async (out) => {
         if (settled || aborted()) return; // settled WHILE ingesting — don't reply / count the result
         if (out.wasRequest) {
-          served = true;
-          if (out.reply) sendMessage(out.reply); // serve the peer
+          served = true; // we handled the peer's request (whether or not the reply is carriable)
+          if (out.reply) {
+            // Structural public-only carriage gate on the RESPONDER leg (PUB-RESPONDER-PUBLIC-ONLY):
+            // WEBRTC is carriesPrivate:false, so NEVER ferry a non-public reply back over the
+            // datachannel — symmetric with the courier + the request-leg gate.  Fail closed (drop).
+            if ((await responsePrivacyLabel(out.reply)) === 'public') sendMessage(out.reply);
+          }
         } else {
           gotResponse = true; // the peer's response to OUR request — ingested
           ingestedResult = out.ingested;
@@ -138,7 +202,10 @@ export async function runWebrtcBidirectionalExchange(
       });
   };
 
-  params.channel.onclose = (): void => settle(ingestedResult);
+  params.channel.onclose = (): void => {
+    wakeDrainWaiters(); // unblock any send parked on SCTP backpressure so it observes the close
+    settle(ingestedResult);
+  };
   // A NAMED handler so it is removed when the round settles by ANY path — otherwise a `{ once: true }`
   // listener that never fires (the round completed normally) accumulates on a reused session-scoped
   // signal across many rounds (PUB-WEB-CARRIERS-5).

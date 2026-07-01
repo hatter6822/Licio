@@ -419,6 +419,53 @@ describe('PRIV-API-RENDEZVOUS-3 — fair signal eviction', () => {
     expect(hiDrained.some((s) => s.ciphertext === `c-${MAX_SIGNALS_PER_PEER - 1}`)).toBe(false);
     expect(hiDrained.some((s) => s.ciphertext === 'c-0')).toBe(true); // oldest survives a different RNG
   });
+
+  it('does NOT deterministically evict an HONEST multi-signal peer under a fragmented forged flood (PRIV-API-RENDEZVOUS-7)', async () => {
+    // A real offerer sends its SDP offer PLUS every trickled ICE candidate under ONE stable
+    // sender_blind_id, so it is the heaviest single sender.  The OLD "evict the biggest sender"
+    // policy therefore deterministically targeted the honest peer's OLDEST signal (its offer) on
+    // every forged insert.  With uniform-random eviction the victim is the RNG's choice, NOT the
+    // honest peer's identity: RNG→~1 evicts the NEWEST slot, so the honest peer's early signals
+    // survive.  (Under the old policy this same RNG was ignored and the honest offer was evicted.)
+    const recipient = 'recipient-blind-id';
+    const ttl = 1_000_000;
+    const store = new InMemoryRendezvousStore(() => 0.999_999); // RNG→~1 ⇒ evict the newest
+    // Honest peer: offer + 5 trickled ICE, all under ONE sender_blind_id, sent FIRST (indices 0..5).
+    for (let i = 0; i < 6; i++) {
+      await store.putSignal({
+        roomBlindId: ROOM_BLIND,
+        senderBlindId: 'honest-peer',
+        recipientBlindId: recipient,
+        ciphertext: i === 0 ? 'honest-offer' : `honest-ice-${i}`,
+        expiresAt: ttl,
+      });
+    }
+    // Fill the remaining slots with distinct one-signal forged ids.
+    for (let i = 0; i < MAX_SIGNALS_PER_PEER - 6; i++) {
+      await store.putSignal({
+        roomBlindId: ROOM_BLIND,
+        senderBlindId: `forged-${i}`,
+        recipientBlindId: recipient,
+        ciphertext: `forged-${i}`,
+        expiresAt: ttl,
+      });
+    }
+    // A fresh forged singleton arrives into the now-full queue.
+    await store.putSignal({
+      roomBlindId: ROOM_BLIND,
+      senderBlindId: 'forged-late',
+      recipientBlindId: recipient,
+      ciphertext: 'forged-late',
+      expiresAt: ttl,
+    });
+    const drained = await store.drainSignals(recipient, 0, MAX_SIGNALS_PER_PEER + 1_000);
+    // The honest peer's bootstrap offer (and its whole early burst) survive: eviction targeted the
+    // newest slot (the forged flood), never the honest peer just because it is the heaviest sender.
+    expect(drained.some((s) => s.ciphertext === 'honest-offer')).toBe(true);
+    for (let i = 1; i < 6; i++) {
+      expect(drained.some((s) => s.ciphertext === `honest-ice-${i}`)).toBe(true);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

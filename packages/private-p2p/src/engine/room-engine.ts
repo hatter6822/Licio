@@ -797,7 +797,12 @@ export class PrivateRoomEngine {
     // pruned prefix op-by-op) — adopt it ONLY if it verifies against its in-band commit;
     // any already-accepted ops re-fold onto the new base.  A device that ALREADY has a
     // base keeps it (it already holds a covered prefix).
-    if (archive.sealed_snapshot && !this.sealedSnapshot && this.coveredOpLamports.size === 0) {
+    if (archive.sealed_snapshot) {
+      // Adopt the archive's snapshot as the fold base for a FRESH engine (no base yet) OR for a LAGGING
+      // member whose base is OLDER than this one.  `bootstrapFromSnapshot` is MONOTONIC — it re-bases
+      // only onto a STRICTLY-NEWER snapshot (a higher Lamport ceiling) and never regresses — so a member
+      // that was connected while an admin compacted after a §10.9 membership change catches up over the
+      // §14.5 snapshot instead of stranding on the pruned prefix op-by-op (PRIV-ENGINE-REBASE).
       await this.bootstrapFromSnapshot(archive.sealed_snapshot, archive.envelopes);
     }
     return this.ingest(archive.envelopes);
@@ -954,12 +959,23 @@ export class PrivateRoomEngine {
       return; // body did not open (tampered / wrong epoch) → do not adopt
     }
     const candidate = deserializeReducerState(bundle.serializedState);
+    // MONOTONIC re-base (PRIV-ENGINE-REBASE): a member that ALREADY holds a base adopts this snapshot
+    // ONLY when it is STRICTLY NEWER — a higher Lamport ceiling ⇒ it covers ops beyond our base — so a
+    // lagging member catches up to a compacted admin's newer snapshot, while an equal/older snapshot is
+    // a no-op (never regress the base).  A FRESH engine (no covered prefix) always adopts.
+    const incomingMax = BigInt(bundle.maxLamport);
+    if (this.coveredOpLamports.size > 0 && incomingMax <= this.baseMaxLamport) return;
     if (!(await this.verifySnapshotCommit(sealed, bundle, candidate, envelopes))) return;
     this.baseState = candidate;
     this.baseHeads = [...bundle.coveredHeads];
     for (const [id, lamport] of bundle.coveredOps) this.coveredOpLamports.set(id, lamport);
-    this.baseMaxLamport = BigInt(bundle.maxLamport);
-    for (const [device, seq] of bundle.authorSeq) this.baseAuthorSeq.set(device, seq);
+    if (incomingMax > this.baseMaxLamport) this.baseMaxLamport = incomingMax;
+    // Max-merge the author-seq floor: keep the higher of our floor and the snapshot's for each device
+    // (a re-base must never LOWER a floor we already enforce, which would re-admit a replayed op).
+    for (const [device, seq] of bundle.authorSeq) {
+      const prev = this.baseAuthorSeq.get(device);
+      if (prev === undefined || seq > prev) this.baseAuthorSeq.set(device, seq);
+    }
     this.sealedSnapshot = sealed;
     // Re-fold any ALREADY-accepted ops onto the new base (not just `reduceRoom([], base)`):
     // a lagging member that walked some post-snapshot ops before adopting the snapshot
