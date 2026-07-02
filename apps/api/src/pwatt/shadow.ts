@@ -12,9 +12,41 @@
 // row-level `shadow_mode: false` check in ranking/features.ts, the WS-H
 // promotion gate for every penalty/constraint, and the WS-I.3 neutrality
 // suite. Reverting the lift remains a CODE change, never a config flip.
+import { PWATT_V0_SHADOW_MODE } from '@licio/invariants';
 import type { InvariantOutputRecord } from '../events/stores.js';
 
 export class RankingBoundaryViolation extends Error {}
+
+/** A usable (non-degraded) output: fallback rows with hard failure reason
+ *  codes and zero-coverage rows are ABSENT for ranking (WS-H.1.2c). Every stage
+ *  that reads a stored invariant output applies this identical rule. */
+export function usable(row: InvariantOutputRecord | null): InvariantOutputRecord | null {
+  if (row === null) return null;
+  if (row.reasonCodes.includes('TIMEOUT') || row.reasonCodes.includes('COMPUTE_ERROR')) {
+    return null;
+  }
+  if (row.reasonCodes.includes('INSUFFICIENT_COVERAGE')) return null;
+  return row;
+}
+
+/**
+ * The §30.5 bounded-input gate for a stored PWAtt row, applied IDENTICALLY at
+ * EVERY stage that consumes a PWAtt row for a SERVED value (the feature join,
+ * the retrieval-side eligibility read, AND the harassment-freeze component pin).
+ * A row is serving ONLY when the code-level lift holds (`PWATT_V0_SHADOW_MODE
+ * === false`), the row itself was written post-lift (`shadowMode === false`),
+ * and it is not degraded (`usable`). Otherwise ABSENT — a §30.5 revert, a
+ * pre-lift shadow row, or a degraded compute uniformly withholds PWAtt, so no
+ * non-serving value can be laundered into a served component anywhere.
+ */
+export function pwattRowForRanking(
+  row: InvariantOutputRecord | null,
+): InvariantOutputRecord | null {
+  if ((PWATT_V0_SHADOW_MODE as boolean) !== false) return null;
+  const ok = usable(row);
+  if (ok === null || ok.shadowMode !== false) return null;
+  return ok;
+}
 
 /** True when the output must not influence ranking or distribution. */
 export function isShadowOutput(

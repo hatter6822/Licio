@@ -19,11 +19,16 @@ import { useCallback, useEffect, useRef } from 'react';
 import { getSignalProcessor } from '../signals/runtime.js';
 
 /**
- * Sustained-visibility dwell before a context view is committed. Kept at/above
- * the OpenTracker's context minimum (2s) so the open→close pair the commit
- * emits is accepted rather than discarded as churn.
+ * Sustained-visibility dwell before a context view is committed. Kept EXACTLY
+ * EQUAL to the OpenTracker's context minimum (2s), which is load-bearing: the
+ * commit closes at this dwell (elapsed ≈ 2s ⇒ the OpenTracker ACCEPTS it), while
+ * a discard on leaving the viewport can only happen BEFORE this dwell (elapsed
+ * < 2s ⇒ the OpenTracker REJECTS it). If this exceeded the minimum, a leave in
+ * the gap [min, dwell) would close an open the OpenTracker still accepts —
+ * committing a view that failed the hook's own threshold. Equal thresholds close
+ * that gap: a view that fails the dwell never commits.
  */
-const CONTEXT_VIEW_DWELL_MS = 2_500;
+const CONTEXT_VIEW_DWELL_MS = 2_000;
 /** Fraction of the section that must be visible to arm the dwell timer. */
 const CONTEXT_VIEW_RATIO = 0.5;
 

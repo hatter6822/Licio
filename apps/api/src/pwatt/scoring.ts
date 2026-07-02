@@ -54,6 +54,7 @@ import {
   detectHarassmentCascade,
 } from './anti-signals.js';
 import { loadPwattRuntimeConfig, type PwattRuntimeConfig } from './config.js';
+import { pwattRowForRanking } from './shadow.js';
 
 /** How many trailing windows condition the base rate (WS-E.2.2a, SPEC §8). */
 const BASE_RATE_TRAILING_WINDOWS = 6;
@@ -149,10 +150,14 @@ async function freezeItem(
   const latestScore = latestV0?.scoreVector['score'];
   // Pin the SERVED components at their PRE-cascade level (§5.3 freeze growth):
   // freeze runs BEFORE this window's row is stored, so `latest` is the last
-  // pre-cascade good state (v1 preferred — the served source — then v0). A
-  // brand-new item whose first window is a cascade has no prior level ⇒ null
-  // (pinned to 0 by applySafetyStateToComponents).
-  const componentRow = (await events.invariantStore.latest('PWAtt_v1', itemId)) ?? latestV0;
+  // pre-cascade good state (v1 preferred — the served source — then v0). Read it
+  // through the SAME §30.5 serving-row gate ranking uses, so a shadow / degraded
+  // / pre-lift row is NEVER laundered into a served frozen component (it counts
+  // as ABSENT). No serving row (or a brand-new first-window cascade) ⇒ null ⇒
+  // pinned to 0 by applySafetyStateToComponents.
+  const componentRow =
+    pwattRowForRanking(await events.invariantStore.latest('PWAtt_v1', itemId)) ??
+    pwattRowForRanking(latestV0);
   const numberOrNull = (value: unknown): number | null =>
     typeof value === 'number' && Number.isFinite(value) ? value : null;
   await events.safetyStore.set({
@@ -225,7 +230,19 @@ export async function runPwattWindow(
   // versionMetadata) VARIES with the applied weights/attenuation/trust — replay
   // and audit can then tell which config produced a stored component (WS-I.2.1c).
   const configHash = createHash('sha256')
-    .update(JSON.stringify({ v0: config.v0, v1: config.v1, trustWeights: config.trustWeights }))
+    .update(
+      JSON.stringify({
+        v0: config.v0,
+        v1: config.v1,
+        trustWeights: config.trustWeights,
+        // The anti-signal DETECTOR configs are part of the scoring identity too:
+        // they decide whether a burst/cascade fires, which changes v0 dampening,
+        // the v1 anti_signal_factor, the served components, and the freeze — so
+        // tuning either must change the replay/audit hash (WS-I.2.1c).
+        burst: config.burst,
+        cascade: config.cascade,
+      }),
+    )
     .digest('hex')
     .slice(0, 16);
   const aggregation: WindowAggregationResult = await computeAggregationWindow(
