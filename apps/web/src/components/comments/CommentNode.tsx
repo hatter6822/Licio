@@ -13,7 +13,7 @@
 // into the dedicated page re-rooted at that comment instead of nesting further.
 import type { CommentItem as CommentItemType } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { UgcBody } from '../ugc/UgcBody.js';
@@ -69,18 +69,44 @@ export function CommentNode({
   maxDepthInView,
 }: CommentNodeProps): React.ReactElement {
   const [replying, setReplying] = useState(false);
-  // Record the ABSOLUTE reply depth for attention bucketing (WS-H PHI input) —
-  // the in-view depth is presentational only.
-  useEffect(() => {
-    getSignalProcessor().recordReplyDepth(storyId, comment.depth);
-  }, [storyId, comment.depth]);
+
+  // Record the ABSOLUTE reply depth for attention bucketing (WS-H PHI / §5.3
+  // traversal input) ONLY once this comment is actually SEEN. The story page
+  // renders its comment section BELOW THE FOLD, so recording on mount would
+  // credit thread traversal the reader never performed (a scored ActiveAttention
+  // dimension). A ref-callback IntersectionObserver records on first
+  // intersection, then disconnects (the React-19 ref cleanup tears it down on
+  // detach). Where IntersectionObserver is unavailable (older engines / jsdom),
+  // fall back to recording on attach so the signal degrades gracefully.
+  const depth = comment.depth;
+  const recordDepthWhenVisible = useCallback(
+    (node: HTMLElement | null) => {
+      if (node === null) return undefined;
+      if (typeof IntersectionObserver === 'undefined') {
+        getSignalProcessor().recordReplyDepth(storyId, depth);
+        return undefined;
+      }
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          getSignalProcessor().recordReplyDepth(storyId, depth);
+          observer.disconnect();
+        }
+      });
+      observer.observe(node);
+      return () => observer.disconnect();
+    },
+    [storyId, depth],
+  );
 
   const canNestDeeper = depthInView < maxDepthInView;
   const replyCount = comment.reply_count;
   const replyWord = replyCount === 1 ? 'reply' : 'replies';
 
   return (
-    <article className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}>
+    <article
+      ref={recordDepthWhenVisible}
+      className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}
+    >
       <CommentHeader comment={comment} />
       {comment.body.length > 0 ? <UgcBody markdown={comment.body} compact /> : null}
       <CommentMedia comment={comment} />

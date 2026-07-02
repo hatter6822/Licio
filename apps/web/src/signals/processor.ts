@@ -133,8 +133,15 @@ export class SignalProcessor {
    * the outgoing item's final dwell is accrued and its §22.1 aggregate is snapshot
    * (so per-item attention is buffered on navigation, not only at session end), then
    * the new item — if any — records a (possibly returning) visit.
+   *
+   * `recordVisit: false` sets the active item for dwell/traversal capture WITHOUT
+   * recording a return visit — for a WITHIN-STORY subroute hop (e.g. the story
+   * page → its dedicated comments page). Those surfaces are one continuous
+   * session, so a hop after a long dwell must not be misread by the return
+   * tracker (which counts a revisit ≥30 min after the last visit) as a genuine
+   * return from time away and inflate `return_visit_count_bucket`.
    */
-  setActiveStory(storyId: string | null): void {
+  setActiveStory(storyId: string | null, options?: { recordVisit?: boolean }): void {
     if (storyId === this.currentItemId) return;
     this.captureCurrent();
     this.currentItemId = storyId;
@@ -142,7 +149,10 @@ export class SignalProcessor {
     this.lastDwellMs = 0;
     // Personalization gates the return tracker too (WS-C.4.1d): no visit is
     // recorded — or persisted — while collection is off.
-    if (storyId && this.policy.collect) this.returns.visit(storyId, this.wallClock());
+    const recordVisit = options?.recordVisit ?? true;
+    if (storyId && this.policy.collect && recordVisit) {
+      this.returns.visit(storyId, this.wallClock());
+    }
   }
 
   recordSourceOpen(openId: string, storyId: string): void {

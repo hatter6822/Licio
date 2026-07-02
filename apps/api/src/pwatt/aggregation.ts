@@ -239,7 +239,14 @@ export async function computeAggregationWindow(
         actor.dwellBucket !== 'none' ||
         actor.sawMeaningfulSourceOpen ||
         actor.contextOpened ||
-        actor.returnVisitBucket !== 'none';
+        actor.returnVisitBucket !== 'none' ||
+        // A §5.3 save is now a scored participation signal, so a save-only reader
+        // IS an active participant — count them here so this durable unique tally
+        // matches the realtime HLL (which `recordSave` adds each saver to), and
+        // the hourly reconciliation does not flag save-only windows as
+        // discrepancies. `uniqueActiveUsers` is a monitoring/reconciliation stat
+        // only (never a PWAtt scoring input), so this shifts no ranking.
+        actor.saved;
       if (hasAttention) uniqueActiveUsers += 1;
       if (actor.sawMeaningfulSourceOpen) sourceOpens += 1;
       if (actor.contextOpened) contextOpens += 1;

@@ -165,8 +165,9 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
     render(<StoryCommentsPage />);
     // Without this, the story route cleared the active item before this page
     // mounted, so captureCurrent() would emit no aggregate and traversal would
-    // be dropped from the now-scored ActiveAttention dimension.
-    expect(setActiveStory).toHaveBeenCalledWith(STORY_ID);
+    // be dropped from the now-scored ActiveAttention dimension. `recordVisit:
+    // false` — a within-story hop must not be scored as a return from time away.
+    expect(setActiveStory).toHaveBeenCalledWith(STORY_ID, { recordVisit: false });
   });
 
   it('renders the focused anchor with breadcrumbs when rooted', () => {

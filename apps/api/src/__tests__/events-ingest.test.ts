@@ -316,6 +316,11 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
     expect(all).toHaveLength(1);
     expect(all[0]?.ownerUserId).toBeNull();
     expect(all[0]?.payload['user_id']).toBe(PSEUDONYMOUS_USER_ID);
+    // The stored payload carries the SERVER-ENFORCED level, not the `standard`
+    // claim: `actorKeyOfPayload` keys on `privacy_level`, so it must read
+    // `minimum` here or the row would fold under the synthetic UUID instead of
+    // `privacy-bucket` and split this reader into two actors.
+    expect(all[0]?.payload['privacy_level']).toBe('minimum');
     const aggregates = await fixture.events.attentionStore.listByUser(PRIVACY_BUCKET);
     expect(aggregates).toHaveLength(1);
     expect(aggregates[0]?.privacy_level).toBe('minimum');

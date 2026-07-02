@@ -201,9 +201,17 @@ export async function ingestAttentionEvents(
     const level = effectivePrivacyLevel(event.privacy_level, decision.identificationFloor);
     const pseudonymous = level === 'minimum';
     const purgeAfter = attentionPurgeAfterIso(decision.preference, eventMs, now);
-    const storedPayload = asRecord(
-      pseudonymous ? { ...eventForStorage, user_id: PSEUDONYMOUS_USER_ID } : eventForStorage,
-    );
+    // Stamp the SERVER-ENFORCED effective level on the stored payload (never the
+    // raw claim): downstream folding keys the actor on `privacy_level`
+    // (`actorKeyOfPayload`), so a stale/malicious client claiming `standard` for
+    // a `minimum`-floor user must not fold that row under the synthetic UUID
+    // instead of `privacy-bucket` — that would split one reader into two actors
+    // and leak the floor. The floor can only ever STRENGTHEN the claim.
+    const storedPayload = asRecord({
+      ...eventForStorage,
+      privacy_level: level,
+      ...(pseudonymous ? { user_id: PSEUDONYMOUS_USER_ID } : {}),
+    });
     const registryEntry = TOPIC_REGISTRY[event.event_type];
     storeIndexByEventId.set(event.event_id, outcomes.length);
     toStore.push({
