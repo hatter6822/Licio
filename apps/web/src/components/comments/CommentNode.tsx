@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-T.7.3 recursive comment renderer shared by the inline story-page section
-// (`maxDepthInView: 1`) and the dedicated comment page (`maxDepthInView: 2`).
+// and the dedicated comment page.  It renders up to `maxDepthInView` nested reply
+// layers — 2 for the inline section and the unrooted page, 1 for a focused
+// re-rooted view — and links onward (re-rooted) when a thread continues deeper.
 //
 // Density: a top-level comment is a COMPACT raised tile (`neu-raised-sm`, an 8px
 // halo that is safe at gap-3); its replies render as FLAT left-rail threads — no

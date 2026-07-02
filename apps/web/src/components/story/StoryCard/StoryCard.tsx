@@ -60,6 +60,13 @@ export function StoryCard({
   warnIfScoreLike(distributionReason);
 
   const origin = ORIGIN_KEYS[story.origin];
+  // Exposure nonredundancy (WS-B.2.1c): the MERI "Independent source" exposure
+  // label (section 3) already says — more richly — that this is an independent
+  // source, so the plain "Independent" origin badge is a redundant echo. Suppress
+  // the origin badge in exactly that collision; every other origin still shows it.
+  const showOriginBadge = !(
+    story.origin === 'independent' && exposureLabel === 'independent_source'
+  );
   const readingEstimate = formatReadingEstimate(story.readingMinutes, locale, (m) =>
     t('reading.estimate', '{minutes} min read', { minutes: m }),
   );
@@ -90,9 +97,11 @@ export function StoryCard({
           items in a room feed; public items carry no chip) */}
       <p className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
         <span>{story.source}</span>
-        <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink">
-          {t(origin.key, origin.text)}
-        </span>
+        {showOriginBadge ? (
+          <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink">
+            {t(origin.key, origin.text)}
+          </span>
+        ) : null}
         {inRoom ? (
           <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink-muted">
             {t('storycard.inRoom', 'In room')}

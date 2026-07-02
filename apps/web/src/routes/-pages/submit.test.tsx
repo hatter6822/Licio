@@ -51,7 +51,7 @@ describe('SubmitPage story-only submission (WS-T.8.3a)', () => {
   it('renders the story composer and not the retired contribution composer', async () => {
     renderSubmitPage();
     expect(await screen.findByText('Commons')).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /a link/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /^link$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Add contribution/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Ask/i })).not.toBeInTheDocument();
   });

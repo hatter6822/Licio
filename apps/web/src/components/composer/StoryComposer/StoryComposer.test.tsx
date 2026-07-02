@@ -85,9 +85,32 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
     renderComposer();
     expect(await screen.findByText('Commons')).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /a link/i })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /an image/i })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /a video/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /^link$/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /^text$/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /^image$/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /^video$/i })).toBeInTheDocument();
+  });
+
+  it('submits a Text post through the Markdown editor as an original_brief', async () => {
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    createStory.mockResolvedValue({
+      story_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      lifecycle_state: 'gathering_attention',
+    });
+    const user = userEvent.setup();
+    renderComposer();
+    await screen.findByText('Commons');
+    await user.click(screen.getByRole('radio', { name: /^text$/i }));
+    await user.type(screen.getByLabelText(/^title/i), 'A field note');
+    // The body is the Markdown editor (labelled "Text"), not a bare input.
+    await user.type(screen.getByRole('textbox', { name: /^text/i }), 'Some **observed** context.');
+    await user.click(screen.getByRole('button', { name: /post/i }));
+    await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
+    expect(createStory.mock.calls[0]?.[0]).toMatchObject({
+      submission_type: 'original_brief',
+      body: 'Some **observed** context.',
+      room_id: COMMONS_ROOM_ID,
+    });
   });
 
   it('locks visibility to in-room for a private room (derived value shown)', async () => {
@@ -110,7 +133,7 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     const user = userEvent.setup();
     renderComposer();
     await screen.findByText('Commons');
-    await user.click(screen.getByRole('radio', { name: /an image/i }));
+    await user.click(screen.getByRole('radio', { name: /^image$/i }));
     await user.type(screen.getByLabelText(/^title/i), 'A photo');
     const file = new File([new Uint8Array([1, 2, 3])], 'p.jpg', { type: 'image/jpeg' });
     await user.upload(screen.getByLabelText(/image file/i), file);
@@ -124,7 +147,7 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     const user = userEvent.setup();
     renderComposer();
     await screen.findByText('Commons');
-    await user.click(screen.getByRole('radio', { name: /a video/i }));
+    await user.click(screen.getByRole('radio', { name: /^video$/i }));
     await user.type(screen.getByLabelText(/^title/i), 'A clip');
     const big = new File([new Uint8Array([1])], 'big.mp4', { type: 'video/mp4' });
     Object.defineProperty(big, 'size', { value: MAX_VIDEO_BYTES + 1 });
@@ -167,7 +190,7 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     await screen.findByText('Commons');
     expect(await checkA11y(container)).toHaveNoViolations();
     // The video mode adds the captions/poster controls — exercise them too.
-    await user.click(screen.getByRole('radio', { name: /a video/i }));
+    await user.click(screen.getByRole('radio', { name: /^video$/i }));
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 
@@ -181,7 +204,7 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
       const user = userEvent.setup();
       const { unmount } = renderComposer();
       await screen.findByText('Commons');
-      await user.click(screen.getByRole('radio', { name: /an image/i }));
+      await user.click(screen.getByRole('radio', { name: /^image$/i }));
       const file = new File([new Uint8Array([1, 2, 3])], 'p.jpg', { type: 'image/jpeg' });
       await user.upload(screen.getByLabelText(/image file/i), file);
       // The blob-scheme guard accepted the object URL and it reached the <img>.
@@ -236,7 +259,7 @@ describe('StoryComposer video captions (WS-Q.5.2b)', () => {
     const user = userEvent.setup();
     renderComposer();
     await screen.findByText('Commons');
-    await user.click(screen.getByRole('radio', { name: /a video/i }));
+    await user.click(screen.getByRole('radio', { name: /^video$/i }));
     await user.type(screen.getByLabelText(/^title/i), 'A clip');
     const video = new File([new Uint8Array([1])], 'c.mp4', { type: 'video/mp4' });
     await user.upload(screen.getByLabelText(/video file/i), video);
@@ -260,9 +283,9 @@ describe('StoryComposer flag gating (WS-Q.6.2)', () => {
     fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
     renderComposer();
     await screen.findByText('Commons');
-    expect(screen.getByRole('radio', { name: /a link/i })).toBeInTheDocument();
-    expect(screen.queryByRole('radio', { name: /an image/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('radio', { name: /a video/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /^link$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /^image$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /^video$/i })).not.toBeInTheDocument();
   });
 
   it('hides the visibility control when content.in_room_visibility_enabled is off', async () => {

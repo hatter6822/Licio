@@ -7,6 +7,7 @@
 import type { RoomDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
+import { ProgressiveDisclosure } from '../../components/cognitive/ProgressiveDisclosure/index.js';
 import { GovernedByPanel } from '../../components/governance/GovernedByPanel.js';
 import { StewardModelManager } from '../../components/governance/StewardModelManager.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
@@ -14,12 +15,19 @@ import { RoomMembership } from '../../components/rooms/RoomMembership/index.js';
 import { RoomSettingsForm } from '../../components/rooms/RoomSettingsForm/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { Button } from '../../components/ui/Button/index.js';
+import { Dialog } from '../../components/ui/Dialog/index.js';
 import { Icon } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
-import { useRoomFeedQuery, useRoomQuery, useRoomsQuery } from '../../lib/queries.js';
+import {
+  useGovernedByQuery,
+  useRoomFeedQuery,
+  useRoomQuery,
+  useRoomsQuery,
+} from '../../lib/queries.js';
 import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { track } from '../../lib/telemetry.js';
 import { isValidUuidParam } from '../../routing/guards.js';
@@ -40,37 +48,25 @@ export function RoomsPage(): React.ReactElement {
   const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
   const [showCreate, setShowCreate] = useState(false);
   return (
-    <PageScaffold
-      title={t('nav.rooms', 'Rooms')}
-      actions={
-        binaryVisibilityUi ? (
-          <Button variant="secondary" onClick={() => setShowCreate((v) => !v)}>
-            {showCreate
-              ? t('rooms.create.cancel', 'Cancel')
-              : t('rooms.create.open', 'Create a room')}
-          </Button>
-        ) : undefined
-      }
-      query={rooms}
-      isEmpty={(data) => data.items.length === 0}
-      emptyTitle={t('rooms.empty.title', 'No rooms yet')}
-      emptyDescription={t(
-        'rooms.empty.description',
-        'Topic rooms and community lenses appear here.',
-      )}
-    >
-      {(data) => (
-        <div className="flex flex-col gap-4">
-          {showCreate && binaryVisibilityUi ? (
-            <div className="rounded-lg border border-line p-4">
-              <RoomCreateForm
-                onCreated={(roomId) => {
-                  setShowCreate(false);
-                  void navigate({ to: '/rooms/$roomId', params: { roomId } });
-                }}
-              />
-            </div>
-          ) : null}
+    <>
+      <PageScaffold
+        title={t('nav.rooms', 'Rooms')}
+        actions={
+          binaryVisibilityUi ? (
+            <Button variant="secondary" onClick={() => setShowCreate(true)}>
+              {t('rooms.create.open', 'Create a room')}
+            </Button>
+          ) : undefined
+        }
+        query={rooms}
+        isEmpty={(data) => data.items.length === 0}
+        emptyTitle={t('rooms.empty.title', 'No rooms yet')}
+        emptyDescription={t(
+          'rooms.empty.description',
+          'Topic rooms and community lenses appear here.',
+        )}
+      >
+        {(data) => (
           <ul className="flex flex-col gap-4">
             {data.items.map((room) => (
               <li key={room.room_id}>
@@ -98,9 +94,26 @@ export function RoomsPage(): React.ReactElement {
               </li>
             ))}
           </ul>
-        </div>
-      )}
-    </PageScaffold>
+        )}
+      </PageScaffold>
+      {/* Create-a-room lives in a modal (portaled to <body>) so it opens from the
+          header action over ANY list state — including the empty state, where the
+          scaffold renders its EmptyState instead of children. */}
+      {binaryVisibilityUi ? (
+        <Dialog
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          title={t('rooms.create.title', 'Create a room')}
+        >
+          <RoomCreateForm
+            onCreated={(roomId) => {
+              setShowCreate(false);
+              void navigate({ to: '/rooms/$roomId', params: { roomId } });
+            }}
+          />
+        </Dialog>
+      ) : null}
+    </>
   );
 }
 
@@ -109,6 +122,10 @@ export function RoomDetailPage(): React.ReactElement {
   const { roomId } = useParams({ from: '/rooms_/$roomId' });
   usePageFocus(t('room.title', 'Room'));
   const room = useRoomQuery(roomId);
+  const navigate = useNavigate();
+  // Return to wherever the room was opened from (the rooms list, a link, a
+  // profile); a cold-loaded deep link falls back to the rooms list.
+  const goBack = useGoBack(() => void navigate({ to: '/rooms' }));
 
   if (!isValidUuidParam(roomId)) {
     return (
@@ -125,7 +142,7 @@ export function RoomDetailPage(): React.ReactElement {
   }
 
   return (
-    <PageScaffold title={room.data?.name ?? t('room.title', 'Room')} query={room}>
+    <PageScaffold title={room.data?.name ?? t('room.title', 'Room')} onBack={goBack} query={room}>
       {(data) => <RoomDetailBody roomId={roomId} room={data} />}
     </PageScaffold>
   );
@@ -151,6 +168,11 @@ export function RoomDetailBody({
   const feed = useRoomFeedQuery(roomId, contentVisible);
   // WS-Q.6.2 — the steward settings UI is part of the flag-gated room controls.
   const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
+  // WS-U §24.6 — shares GovernedByPanel's cached query (same key) purely to keep
+  // at-a-glance transparency in the collapsed disclosure's summary: when an AI
+  // agent governs the room, the summary says so even before it is expanded.
+  const governedBy = useGovernedByQuery(roomId, contentVisible);
+  const agentActive = governedBy.data?.active === true;
 
   return (
     <div className="flex flex-col gap-4">
@@ -185,30 +207,8 @@ export function RoomDetailBody({
         </Link>
       ) : null}
 
-      {/* WS-Q.5.3c — steward-only room settings (join/posting) + the audited
-          public⇄private visibility cascade (gated by the rollout flag). */}
-      {room.is_steward && binaryVisibilityUi ? (
-        <RoomSettingsForm roomId={roomId} room={room} />
-      ) : null}
-
-      {/* WS-U §24.6 — the in-room "governed by" transparency view (active agent,
-          granted powers, recent actions, member-downloadable model). */}
-      {contentVisible ? <GovernedByPanel roomId={roomId} /> : null}
-
-      {/* WS-U §16.6 — the elected steward's two powers (propose a model + prompt;
-          record the community's ratified decision) + the proposal registry. The
-          member ratification vote is gated on membership: an active subscription
-          (`joined`) OR a room steward role (`is_steward`), matching the backend
-          `isRoomMember` gate so an unsubscribed room steward can still vote. */}
-      {contentVisible ? (
-        <StewardModelManager
-          roomId={roomId}
-          joined={room.joined}
-          isRoomSteward={room.is_steward === true}
-        />
-      ) : null}
-
-      {/* Tier two: the room feed (in-room chip on every room_only item). */}
+      {/* Tier two: the room feed is the PRIMARY content, so it leads (in-room chip
+          on every room_only item). The governance/steward chrome collapses below. */}
       {contentVisible ? (
         feed.isPending ? (
           <p className="text-ink-muted text-sm">{t('room.feed.loading', 'Loading room…')}</p>
@@ -223,6 +223,50 @@ export function RoomDetailBody({
             {t('room.feed.empty', 'No posts in this room yet.')}
           </p>
         )
+      ) : null}
+
+      {/* WS-U §24.6/§16.6 — governance, transparency & steward controls. Collapsed
+          by default (WS-B.2.13 progressive disclosure) so the room's CONTENT leads;
+          the "governed by" transparency view, the steward's model powers, and the
+          steward-only settings are all one tap away. The summary keeps at-a-glance
+          transparency: when an AI agent governs the room, it says so unexpanded. */}
+      {contentVisible ? (
+        <ProgressiveDisclosure
+          summary={
+            <span className="inline-flex flex-wrap items-center gap-2">
+              {t('room.governance.disclosure', 'Governance, transparency & settings')}
+              {agentActive ? (
+                <span className="inline-flex items-center rounded-full bg-info-soft px-2 py-0.5 font-medium text-info-on-soft text-xs">
+                  {t('room.governance.agentActive', 'AI agent active')}
+                </span>
+              ) : null}
+            </span>
+          }
+        >
+          <div className="flex flex-col gap-4">
+            {/* WS-Q.5.3c — steward-only room settings (join/posting) + the audited
+                public⇄private visibility cascade (gated by the rollout flag). */}
+            {room.is_steward && binaryVisibilityUi ? (
+              <RoomSettingsForm roomId={roomId} room={room} />
+            ) : null}
+
+            {/* WS-U §24.6 — the in-room "governed by" transparency view (active
+                agent, granted powers, recent actions, member-downloadable model). */}
+            <GovernedByPanel roomId={roomId} />
+
+            {/* WS-U §16.6 — the elected steward's two powers (propose a model +
+                prompt; record the community's ratified decision) + the proposal
+                registry. The member ratification vote is gated on membership: an
+                active subscription (`joined`) OR a room steward role (`is_steward`),
+                matching the backend `isRoomMember` gate so an unsubscribed room
+                steward can still vote. */}
+            <StewardModelManager
+              roomId={roomId}
+              joined={room.joined}
+              isRoomSteward={room.is_steward === true}
+            />
+          </div>
+        </ProgressiveDisclosure>
       ) : null}
     </div>
   );

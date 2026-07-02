@@ -10,6 +10,7 @@ import { useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useCreateCommentMutation } from '../../lib/queries.js';
 import { relativeTimeShort } from '../../lib/time.js';
+import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
 import { Button } from '../ui/Button/index.js';
 
 export function authorName(comment: CommentItemType): string {
@@ -122,6 +123,7 @@ export function CommentComposer({
       },
     });
   };
+  const isReply = parentContributionId !== undefined;
   const fieldId = parentContributionId ? `reply-${parentContributionId}` : 'comment-body';
   return (
     <form
@@ -131,24 +133,40 @@ export function CommentComposer({
         submit();
       }}
     >
-      <label className="sr-only" htmlFor={fieldId}>
-        {parentContributionId ? 'Write a reply' : 'Write a comment'}
-      </label>
-      <textarea
-        id={fieldId}
-        value={body}
-        maxLength={5000}
-        onChange={(event) => setBody(event.currentTarget.value)}
-        placeholder={parentContributionId ? 'Reply with context…' : 'Add a comment with context…'}
-        className={cn(
-          'rounded-md border border-line bg-surface p-3 text-base text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-          // Replies open inline inside a thread, so they start shorter; a
-          // top-level comment gets more room to draft.
-          parentContributionId ? 'min-h-20' : 'min-h-28',
-        )}
-      />
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-ink-muted">{trimmed.length}/5000 characters</p>
+      {isReply ? (
+        // Replies open inline inside a thread and can nest deep, so they stay a
+        // plain, short box to keep the reading column dense.
+        <>
+          <label className="sr-only" htmlFor={fieldId}>
+            Write a reply
+          </label>
+          <textarea
+            id={fieldId}
+            value={body}
+            maxLength={5000}
+            onChange={(event) => setBody(event.currentTarget.value)}
+            placeholder="Reply with context…"
+            className="min-h-20 rounded-md border border-line bg-surface p-3 text-base text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          />
+        </>
+      ) : (
+        // The single top-level composer gets the rich Markdown editor — comments
+        // render Markdown-lite through the sanctioned UgcBody sink, so formatting +
+        // Preview here are what the reader will actually see.
+        <MarkdownEditor
+          id={fieldId}
+          label="Write a comment"
+          value={body}
+          onChange={setBody}
+          compact
+          maxLength={5000}
+          placeholder="Add a comment with context…"
+        />
+      )}
+      <div className={cn('flex items-center gap-3', isReply ? 'justify-between' : 'justify-end')}>
+        {isReply ? (
+          <p className="text-sm text-ink-muted">{trimmed.length}/5000 characters</p>
+        ) : null}
         <div className="flex gap-2">
           {onCancel ? (
             <Button type="button" variant="ghost" onClick={onCancel}>
@@ -161,7 +179,7 @@ export function CommentComposer({
             loading={mutation.isPending}
             disabled={trimmed.length === 0}
           >
-            {parentContributionId ? 'Reply' : 'Comment'}
+            {isReply ? 'Reply' : 'Comment'}
           </Button>
         </div>
       </div>

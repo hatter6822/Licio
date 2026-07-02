@@ -245,6 +245,36 @@ export const iconPaths = {
       <path d="M12 7v5l3 2" />
     </>
   ),
+  // ---- Rich-text composer toolbar (WS-Q.5.2a) ----
+  bold: (
+    <>
+      <path d="M7 4h7a4 4 0 0 1 0 8H7z" />
+      <path d="M7 12h8a4 4 0 0 1 0 8H7z" />
+    </>
+  ),
+  italic: (
+    <>
+      <line x1="19" y1="4" x2="10" y2="4" />
+      <line x1="14" y1="20" x2="5" y2="20" />
+      <line x1="15" y1="4" x2="9" y2="20" />
+    </>
+  ),
+  link: (
+    <>
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </>
+  ),
+  list: (
+    <>
+      <line x1="9" y1="6" x2="20" y2="6" />
+      <line x1="9" y1="12" x2="20" y2="12" />
+      <line x1="9" y1="18" x2="20" y2="18" />
+      <line x1="4" y1="6" x2="4.01" y2="6" />
+      <line x1="4" y1="12" x2="4.01" y2="12" />
+      <line x1="4" y1="18" x2="4.01" y2="18" />
+    </>
+  ),
 } satisfies Record<string, ReactElement>;
 
 export type IconName = keyof typeof iconPaths;
