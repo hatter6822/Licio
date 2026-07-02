@@ -67,8 +67,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const openId = useRef(`source-${storyId}`);
   const navigate = useNavigate();
   // Return to wherever the story was opened from (front page, topic, room); a
-  // cold-loaded deep link falls back to the front page.
-  const goBack = useGoBack(() => void navigate({ to: '/' }));
+  // cold-loaded deep link falls back (replacing) to the front page.
+  const goBack = useGoBack(() => void navigate({ to: '/', replace: true }));
   const setFeedMode = useUIStore((state) => state.setFeedMode);
   const authenticated = useAuthStore((state) => state.status === 'authenticated');
   const updateDurable = useUpdateDurablePrivacyMutation();

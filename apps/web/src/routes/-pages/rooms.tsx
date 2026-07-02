@@ -124,8 +124,8 @@ export function RoomDetailPage(): React.ReactElement {
   const room = useRoomQuery(roomId);
   const navigate = useNavigate();
   // Return to wherever the room was opened from (the rooms list, a link, a
-  // profile); a cold-loaded deep link falls back to the rooms list.
-  const goBack = useGoBack(() => void navigate({ to: '/rooms' }));
+  // profile); a cold-loaded deep link falls back (replacing) to the rooms list.
+  const goBack = useGoBack(() => void navigate({ to: '/rooms', replace: true }));
 
   if (!isValidUuidParam(roomId)) {
     return (

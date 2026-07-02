@@ -402,9 +402,14 @@ export function LoginPage(): React.ReactElement {
   const [deletionPending, setDeletionPending] = useState(false);
   const [tokenHandled, setTokenHandled] = useState(false);
 
-  // Deep-linking to /login while already signed in: bounce to the destination.
+  // Deep-linking to /login while already signed in: bounce to the destination,
+  // REPLACING /login in history.  A push would leave /login as a live back
+  // target, and this effect would re-fire and bounce forward off it on every
+  // Back — trapping the reader at /login↔destination (the requireAuth redirect
+  // already REPLACES the guarded route with /login, so /login sits directly on
+  // the pre-login entry; replacing it here lets Back reach that entry).
   useEffect(() => {
-    if (status === 'authenticated') void navigate({ to: destination });
+    if (status === 'authenticated') void navigate({ to: destination, replace: true });
   }, [status, destination, navigate]);
 
   const onSignedIn = (user: UserContext): void => {
@@ -415,7 +420,10 @@ export function LoginPage(): React.ReactElement {
       return;
     }
     setAuthenticated(user);
-    void navigate({ to: destination });
+    // REPLACE (not push) so the consumed /login entry is removed: Back from the
+    // destination returns to where the reader was before signing in, never onto
+    // /login (which would immediately bounce forward again).
+    void navigate({ to: destination, replace: true });
   };
 
   const showCancelToken = Boolean(cancel_token) && !tokenHandled;

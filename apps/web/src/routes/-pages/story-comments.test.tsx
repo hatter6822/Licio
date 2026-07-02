@@ -4,12 +4,13 @@
 // focused (rooted) anchor whose replies nest INSIDE its article, drill-down
 // breadcrumbs, and the page-header upper-left back button to the story.
 import type { CommentItem } from '@licio/shared';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const navigate = vi.fn();
 const recordReplyDepth = vi.fn();
+let canGoBack: boolean;
 let search: { root?: string };
 let storyState: { data?: { title: string; thread_id: string | null } };
 let commentsState: {
@@ -19,10 +20,15 @@ let commentsState: {
   hasMore?: boolean;
 };
 
+const historyBack = vi.fn();
 vi.mock('@tanstack/react-router', () => ({
   useParams: () => ({ storyId: STORY_ID }),
   useSearch: () => search,
   useNavigate: () => navigate,
+  // useGoBack (the page-header back button) retraces history; expose a stub
+  // router + a canGoBack flag so the hook resolves in the mocked module graph.
+  useCanGoBack: () => canGoBack,
+  useRouter: () => ({ history: { back: historyBack } }),
   Link: ({
     children,
     to,
@@ -104,6 +110,8 @@ function node(id: string, overrides: Partial<CommentItem> = {}): CommentItem {
 beforeEach(() => {
   navigate.mockReset();
   recordReplyDepth.mockReset();
+  historyBack.mockReset();
+  canGoBack = true;
   search = {};
   storyState = { data: { title: 'Regional water board dataset', thread_id: THREAD_ID } };
   commentsState = { data: { comments: [], anchor: null, next_cursor: null } };
@@ -202,5 +210,32 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
     commentsState = { isError: true };
     render(<StoryCommentsPage />);
     expect(screen.getByRole('heading', { name: 'Conversation unavailable' })).toBeInTheDocument();
+  });
+
+  // Regression: the header back button must RETRACE history, not hard-navigate
+  // (push) to the story.  A push-back to the story ping-pongs with the story
+  // page's own history-back button (the reported loop).
+  it('retraces history from the header back button (no hard navigate)', () => {
+    canGoBack = true;
+    render(<StoryCommentsPage />);
+    fireEvent.click(screen.getByRole('button', { name: /go back/i }));
+    expect(historyBack).toHaveBeenCalledTimes(1);
+    // It must NOT push a new story entry — that is what created the loop.
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the story comment section (replacing) only on a cold load', () => {
+    canGoBack = false;
+    render(<StoryCommentsPage />);
+    fireEvent.click(screen.getByRole('button', { name: /go back/i }));
+    expect(historyBack).not.toHaveBeenCalled();
+    // The cold-load fallback REPLACES (never pushes) so the synthetic story
+    // parent cannot become a forward-loopable child.
+    expect(navigate).toHaveBeenCalledWith({
+      to: '/stories/$storyId',
+      params: { storyId: STORY_ID },
+      hash: 'comments',
+      replace: true,
+    });
   });
 });

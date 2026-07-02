@@ -3,11 +3,15 @@
 // WS-T.7.2 dedicated comment-centric page (`/stories/$storyId/comments`).  This
 // surface contains ONLY comments — no story body, media, or sidebars — so the
 // reading area is maximal.  It renders up to TWO nested reply layers and lets a
-// reader drill arbitrarily deep by re-rooting at any comment (`?root=`); the
-// page header's upper-left back button returns them to the story-page comment
-// section, and an up-one-level breadcrumb walks back through the drill-down.  In
-// the focused (rooted) view the anchor's replies nest INSIDE its article for a
-// tighter, more space-efficient reading column.
+// reader drill arbitrarily deep by re-rooting at any comment (`?root=`).  The
+// page header's upper-left back button RETRACES history (`useGoBack`), so it
+// returns the reader to exactly where they came from — the story page if they
+// opened a thread from it, or the previous drill-down level if they walked
+// deeper here — never a fixed hard-navigate that would ping-pong with the story
+// page's own history-back button.  Structural jumps stay one tap away: the
+// "Up one level" / "All comments" breadcrumbs re-root the drill-down, and the
+// story-title line links straight to the story.  In the focused (rooted) view
+// the anchor's replies nest INSIDE its article for a tighter reading column.
 import type { CommentItem } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useState } from 'react';
@@ -25,6 +29,7 @@ import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { Icon } from '../../components/ui/Icon/index.js';
 import { LoadingState } from '../../components/ui/LoadingState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
@@ -88,8 +93,9 @@ function AnchorComment({
 }
 
 /** Drill-down breadcrumbs for the focused (rooted) view: "All comments" and,
- *  for a reply, "Up one level".  Returning to the story is the page header's
- *  upper-left back button, so it is intentionally NOT duplicated here.  The
+ *  for a reply, "Up one level" — the structural jumps between drill-down levels.
+ *  Jumping straight to the story is the story-title line's link below, and the
+ *  page-header back button retraces history, so neither is duplicated here.  The
  *  unrooted view has no drill-down, so this renders nothing. */
 function Breadcrumbs({
   storyId,
@@ -145,9 +151,18 @@ function StoryCommentsContent({
     isRooted ? { root, depth: FOCUSED_DEPTH } : { depth: ALL_COMMENTS_DEPTH },
   );
 
-  const backToStory = (): void => {
-    void navigate({ to: '/stories/$storyId', params: { storyId }, hash: 'comments' });
-  };
+  // Retrace history so the back button returns the reader to exactly where they
+  // came from (the story page, or the previous drill-down level); a cold-loaded
+  // deep link falls back (replacing) to the story's comment section.
+  const goBack = useGoBack(
+    () =>
+      void navigate({
+        to: '/stories/$storyId',
+        params: { storyId },
+        hash: 'comments',
+        replace: true,
+      }),
+  );
 
   const anchor = comments.data?.anchor ?? null;
   const list = comments.data?.comments ?? [];
@@ -198,7 +213,7 @@ function StoryCommentsContent({
 
   return (
     <>
-      <PageHeader title={t('comments.title', 'Comments')} onBack={backToStory} />
+      <PageHeader title={t('comments.title', 'Comments')} onBack={goBack} />
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4">
         <Breadcrumbs storyId={storyId} anchor={anchor} />
         {storyTitle ? (
