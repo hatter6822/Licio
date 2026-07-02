@@ -72,6 +72,32 @@ function contributionRow(
   };
 }
 
+/** A stored `content.saved` event (§5.3 Save-for-later signal). */
+function savedRow(storyId: string, userId: string, timestamp: string = IN_WINDOW): NewStoredEvent {
+  return {
+    eventId: randomUUID(),
+    eventType: 'content.saved',
+    topic: 'content.saved',
+    timestamp,
+    privacyClassification: 'aggregated',
+    retentionTier: 'attention_aggregated',
+    payload: {
+      event_id: randomUUID(),
+      event_type: 'content.saved',
+      timestamp,
+      schema_version: '1',
+      nonce: randomUUID(),
+      user_id: userId,
+      privacy_level: 'standard',
+      story_id: storyId,
+      privacy_classification: 'aggregated',
+      retention_tier: 'attention_aggregated',
+    },
+    ownerUserId: userId,
+    purgeAfter: null,
+  };
+}
+
 async function ingestAttention(
   userId: string,
   storyId: string,
@@ -132,6 +158,56 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
     expect(row?.contextOpens).toBe(1);
     expect(row?.returnVisits).toBe(1);
     expect(row?.contributionCounts).toEqual({ question: 1, evidence: 1, low_info_reply: 1 });
+  });
+
+  it('folds the §5.3 "Save for later" signal, deduped per (actor, item)', async () => {
+    const a = await seedUserWithSession(fixture.identity, { handle: 'saverone' });
+    const b = await seedUserWithSession(fixture.identity, { handle: 'savertwo' });
+    const storyId = randomUUID();
+    await fixture.events.eventStore.insertMany([
+      savedRow(storyId, a.userId),
+      savedRow(storyId, a.userId), // same user's repeat save…
+      savedRow(storyId, b.userId),
+    ]);
+    const result = await computeAggregationWindow(fixture.events, T0, '1h');
+    const actors = result.items.get(storyId)?.actors;
+    // …counts ONCE per actor (booleans OR), never inflates.
+    expect(actors?.get(a.userId)?.saved).toBe(true);
+    expect(actors?.get(b.userId)?.saved).toBe(true);
+    expect(actors?.size).toBe(2);
+  });
+
+  it('a saved item earns MORE participation than an unsaved one (§5.3 low weight)', async () => {
+    // Two stories, one attended reader each with identical attention; one ALSO
+    // saves. The save lifts the saved story's participation component.
+    const saver = await seedUserWithSession(fixture.identity, { handle: 'keeps' });
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'reads' });
+    const savedStory = randomUUID();
+    const plainStory = randomUUID();
+    for (const [user, story] of [
+      [saver, savedStory],
+      [reader, plainStory],
+    ] as const) {
+      await ingestAttention(user.userId, story, {
+        items: [
+          {
+            story_id: story,
+            active_dwell_bucket: 'long',
+            source_opened: true,
+            context_opened: false,
+            reply_depth_bucket: 'shallow',
+            return_visit_count_bucket: 'few',
+          },
+        ],
+      });
+    }
+    await fixture.events.eventStore.insertMany([savedRow(savedStory, saver.userId)]);
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    const saved = await fixture.events.invariantStore.latest('PWAtt_v1', savedStory);
+    const plain = await fixture.events.invariantStore.latest('PWAtt_v1', plainStory);
+    expect(asNumber(saved?.scoreVector['participation'], 0)).toBeGreaterThan(
+      asNumber(plain?.scoreVector['participation'], Number.POSITIVE_INFINITY),
+    );
   });
 
   it('is idempotent: recomputing a window produces identical results', async () => {

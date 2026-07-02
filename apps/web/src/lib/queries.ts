@@ -26,6 +26,7 @@ import {
   saveStory,
   unsaveStory,
 } from '../offline/read-through.js';
+import { selectCollectionUserId, useAuthStore } from '../stores/auth.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
 import * as governanceApi from './governance-api.js';
@@ -40,10 +41,19 @@ import { queryKeys } from './query-keys.js';
 
 // --- Reads ----------------------------------------------------------------
 
+/**
+ * The ranked front-page/topic feed as an INFINITE query over the server's
+ * seen-aware `nextCursor` (each page is a replayable decision linking its
+ * parent, WS-I.2.5). Continuation is an EXPLICIT reader choice — the UI mounts
+ * the DiminishingReturnsPrompt at the page boundary and calls `fetchNextPage`;
+ * nothing loads from scrolling (§13.6 / WS-B.2.8b).
+ */
 export function useFeedQuery(mode?: FeedMode) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: queryKeys.feed(mode),
-    queryFn: () => api.fetchFeed(mode),
+    queryFn: ({ pageParam }) => api.fetchFeed(mode, pageParam ?? undefined),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
     ...cachePolicy.feed,
   });
 }
@@ -225,10 +235,12 @@ export function useCastBallotMutation(roomId: string) {
 /** WS-Q.5.3b — the room feed (gated by the WS-G content bar; `enabled` lets the
  *  caller defer the fetch until the reader has passed the tier-two bar). */
 export function useRoomFeedQuery(roomId: string, enabled = true) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: queryKeys.roomFeed(roomId),
-    queryFn: () => api.fetchRoomFeed(roomId),
+    queryFn: ({ pageParam }) => api.fetchRoomFeed(roomId, pageParam ?? undefined),
     enabled,
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
     ...cachePolicy.feed,
   });
 }
@@ -417,9 +429,22 @@ export type SaveStoryInput =
  */
 export function useToggleSavedStoryMutation() {
   const queryClient = useQueryClient();
+  // The session user id iff genuinely authenticated (null otherwise) — the
+  // attention pipeline never attributes a signal to a non-authenticated session.
+  const collectionUserId = useAuthStore(selectCollectionUserId);
   return useMutation({
     mutationFn: (input: SaveStoryInput) =>
       input.action === 'save' ? saveStory(input.story) : unsaveStory(input.storyId),
+    onSuccess: (_data, input) => {
+      // §5.3 "Save for later": emit the low-weight save SIGNAL only after the
+      // local save succeeded, only when authenticated, and only on SAVE (never
+      // unsave). Best-effort — the private local save is the source of truth and
+      // never depends on the signal reaching the server (which itself discards
+      // it when personalization is off, §19.2).
+      if (input.action === 'save' && collectionUserId !== null) {
+        void api.emitContentSaved(input.story.story_id, collectionUserId).catch(() => {});
+      }
+    },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.savedStories() });
     },

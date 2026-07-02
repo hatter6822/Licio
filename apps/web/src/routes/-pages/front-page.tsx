@@ -3,8 +3,9 @@
 // Front Page (WS-C.1.1a landing route, eager). Ranked feed of stories/discussions
 // with the no-applause feed-mode switcher (WS-B.2.9) wired to the UI store and a
 // shareable `?mode=` search param. Each card links to the story detail.
-import type { FeedMode } from '@licio/shared';
+import type { FeedItem, FeedMode } from '@licio/shared';
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
+import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { BrandLogo } from '../../components/ui/BrandLogo/index.js';
@@ -35,6 +36,14 @@ export function FrontPage(): React.ReactElement {
   // The URL wins when present (shareable); otherwise the reader's saved mode.
   const mode = search.mode ?? savedMode;
   const feed = useFeedQuery(mode);
+  // Flatten the infinite pages; adapt to the PageScaffold's single-query shape.
+  const items: FeedItem[] = feed.data?.pages.flatMap((page) => page.items) ?? [];
+  const feedQuery = {
+    data: feed.data === undefined ? undefined : items,
+    isLoading: feed.isLoading,
+    isError: feed.isError,
+    refetch: feed.refetch,
+  };
 
   const authenticated = useAuthStore((state) => state.status === 'authenticated');
   const updateDurable = useUpdateDurablePrivacyMutation();
@@ -64,8 +73,8 @@ export function FrontPage(): React.ReactElement {
       <PageScaffold
         title={t('nav.frontPage', 'Front Page')}
         actions={<FeedModeSwitcher value={mode} onValueChange={onModeChange} />}
-        query={feed}
-        isEmpty={(data) => data.items.length === 0}
+        query={feedQuery}
+        isEmpty={(data) => data.length === 0}
         emptyTitle={t('feed.empty.title', 'No stories yet')}
         emptyDescription={t('feed.empty.description', FRONT_PAGE_EMPTY_DESCRIPTION)}
       >
@@ -74,9 +83,24 @@ export function FrontPage(): React.ReactElement {
             <li>
               <p className="text-ink-muted text-sm">{t('feed.framing', FRONT_PAGE_FRAMING)}</p>
             </li>
-            {data.items.map((item) => (
+            {data.map((item) => (
               <StoryFeedLink key={item.story_id} item={item} />
             ))}
+            {/* WS-B.2.8b — continuation is an EXPLICIT reader choice: the next
+                page (lower-confidence / more-repetitive by ranking order) loads
+                ONLY on pressing the prompt, never from scrolling (§13.6). */}
+            {feed.hasNextPage ? (
+              <li>
+                <DiminishingReturnsPrompt
+                  onContinue={() => {
+                    if (!feed.isFetchingNextPage) void feed.fetchNextPage();
+                  }}
+                  {...(feed.isFetchingNextPage
+                    ? { continueLabel: t('feed.loadingMore', 'Loading…') }
+                    : {})}
+                />
+              </li>
+            ) : null}
           </ul>
         )}
       </PageScaffold>

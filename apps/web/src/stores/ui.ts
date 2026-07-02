@@ -8,7 +8,7 @@
 import { type FeedMode, feedModeSchema } from '@licio/shared';
 import { z } from 'zod';
 import { create } from 'zustand';
-import { applyMotion, applyTheme } from './dom-sync.js';
+import { applyFocusMode, applyMotion, applyTheme } from './dom-sync.js';
 import { loadPersisted, type PersistConfig, savePersisted } from './persist.js';
 
 export type ThemePreference = 'system' | 'light' | 'dark';
@@ -79,11 +79,14 @@ export const useUIStore = create<UIState>((set, get) => ({
     persistSlice(get());
   },
   setFocusMode: (focusMode) => {
+    applyFocusMode(focusMode);
     set({ focusMode });
     persistSlice(get());
   },
   toggleFocusMode: () => {
-    set((state) => ({ focusMode: !state.focusMode }));
+    const next = !get().focusMode;
+    applyFocusMode(next);
+    set({ focusMode: next });
     persistSlice(get());
   },
   openSheet: (id) => set({ sheet: { open: true, id } }),
@@ -98,4 +101,5 @@ export function initUIStore(): void {
   const state = useUIStore.getState();
   applyTheme(state.theme);
   applyMotion(state.reducedMotion);
+  applyFocusMode(state.focusMode);
 }

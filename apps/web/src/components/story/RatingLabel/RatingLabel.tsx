@@ -10,6 +10,7 @@ import { cn } from '../../../lib/cn.js';
 import { Icon, type IconName } from '../../ui/Icon/index.js';
 
 export type RatingLabelKind =
+  | 'new'
   | 'getting-attention'
   | 'deepening'
   | 'well-sourced'
@@ -27,6 +28,15 @@ interface RatingLabelDescriptor {
 }
 
 export const ratingLabels: Record<RatingLabelKind, RatingLabelDescriptor> = {
+  // The neutral floor (§5.6): a story with no active-reading signal yet. Plain
+  // ink-on-surface (no hue), so it reads as "nothing to claim yet", never a
+  // score or a warning.
+  new: {
+    classes: 'bg-surface text-ink',
+    icon: 'circle-info',
+    messageKey: 'rating.new',
+    defaultText: 'New',
+  },
   'getting-attention': {
     classes: 'bg-info-soft text-info-on-soft',
     icon: 'trending-up',

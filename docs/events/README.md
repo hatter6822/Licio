@@ -458,15 +458,16 @@ REDIS_URL=redis://localhost:6379 pnpm test
 - **Burst-conditioning covariates** — base rates condition on the item's own
   trailing windows; time-of-day/topic/community covariates consume the
   WS-F/WS-G metadata (now present) and land with WS-H's MFCI.
-- **§5.3 "Save for later" signal (tracked debt).** Saves are currently
-  client-local (IndexedDB, private-by-default) and never leave the browser, so
-  the `saves` participation dimension is pinned to the 1% floor (its share
-  redistributed to `returns`, keeping `contributions` dominant). Scoring saves
-  needs a privacy-reviewed `content.saved` topic + client emitter (a save
-  reveals what a reader kept, §19.2) — a deliberate design decision, not a
-  mechanical wiring, so the dimension seam is preserved at the floor until that
-  review lands. `savedForLater` and the `saves` dimension are the integration
-  points.
+- **§5.3 "Save for later" signal (CLOSED).** The `content.saved` core topic
+  (16 core topics) is a discrete, deduped, privacy-leveled save signal that
+  rides the SAME attention-ingestion pipeline (`POST /v1/events/attention`):
+  ownership, replay nonce, the privacy gate (a personalization-off user's save
+  is DISCARDED), and minimum-privacy pseudonymization. The client emits it
+  best-effort after a local save (`emitContentSaved`, gated on an authenticated
+  session); the user's saved COLLECTION stays client-local (IndexedDB) and never
+  reaches the server. The window fold folds it into `savedForLater` (deduped
+  per actor), and the `saves` participation dimension carries the §5.3 LOW rank
+  weight (10%) while `contributions` stays dominant.
 - **Cross-instance streaming** — the router is in-process over the durable
   Postgres log, with real per-consumer checkpoints and startup replay; a
   Redis Streams/broker binding can replace delivery behind the same

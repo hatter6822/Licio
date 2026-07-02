@@ -80,11 +80,11 @@ export const V0_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, num
 };
 
 export const DEFAULT_PARTICIPATION_CONFIG: ParticipationConfig = {
-  // `savePct` sits at the 1% floor (never 0 — the validator requires >= 1)
-  // until a privacy-reviewed save-signal pipeline exists (saves are
-  // client-local + private, §5.3/§19.2); its share is redistributed to
-  // `returnPct` so P normalizes honestly while contribution stays dominant.
-  weights: { returnPct: 49, savePct: 1, contributionPct: 50 },
+  // `savePct` carries the §5.3 "Save for later" LOW rank weight now that the
+  // privacy-respecting `content.saved` signal flows (the save aggregate rides
+  // the attention privacy pipeline; the saved COLLECTION stays client-local,
+  // §19.2). Contribution stays dominant (the platform rewards depth).
+  weights: { returnPct: 40, savePct: 10, contributionPct: 50 },
   contribSaturation: 3,
   rapidThreshold: 5,
   rapidDampening: 0.3,

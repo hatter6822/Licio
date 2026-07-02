@@ -30,6 +30,7 @@ const SPEC_21_3_CORE_TOPICS = [
   'content.normalized',
   'content.visibility.changed',
   'source.opened.aggregate',
+  'content.saved',
   'attention.aggregate',
   'contribution.created',
   'evidence.added',

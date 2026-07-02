@@ -19,8 +19,12 @@ export const FEED_MODES = [
 export type FeedMode = (typeof FEED_MODES)[number];
 export const feedModeSchema = z.enum(FEED_MODES);
 
-/** Rating labels describe conversation STATE, never popularity (WS-B.2.3). */
+/** Rating labels describe conversation STATE, never popularity (WS-B.2.3).
+ *  `new` is the neutral floor (SPEC §5.6): a story with no active-reading signal
+ *  yet — so the default never falsely claims "Getting Attention" (reading is
+ *  increasing) for a story nobody has read. */
 export const RATING_LABEL_KINDS = [
+  'new',
   'getting-attention',
   'deepening',
   'well-sourced',

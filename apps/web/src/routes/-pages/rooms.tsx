@@ -8,6 +8,7 @@ import type { RoomDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { ProgressiveDisclosure } from '../../components/cognitive/ProgressiveDisclosure/index.js';
+import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
 import { GovernedByPanel } from '../../components/governance/GovernedByPanel.js';
 import { StewardModelManager } from '../../components/governance/StewardModelManager.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
@@ -166,6 +167,7 @@ export function RoomDetailBody({
   // show that steward the join UI and never load the feed.
   const contentVisible = !isPrivate || room.joined || room.is_steward === true;
   const feed = useRoomFeedQuery(roomId, contentVisible);
+  const roomFeedItems = feed.data?.pages.flatMap((page) => page.items) ?? [];
   // WS-Q.6.2 — the steward settings UI is part of the flag-gated room controls.
   const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
   // WS-U §24.6 — shares GovernedByPanel's cached query (same key) purely to keep
@@ -212,11 +214,24 @@ export function RoomDetailBody({
       {contentVisible ? (
         feed.isPending ? (
           <p className="text-ink-muted text-sm">{t('room.feed.loading', 'Loading room…')}</p>
-        ) : feed.data && feed.data.items.length > 0 ? (
+        ) : roomFeedItems.length > 0 ? (
           <ul className="flex flex-col gap-3">
-            {feed.data.items.map((item) => (
+            {roomFeedItems.map((item) => (
               <StoryFeedLink key={item.story_id} item={item} />
             ))}
+            {/* Explicit continuation gate (never scroll-triggered, §13.6). */}
+            {feed.hasNextPage ? (
+              <li>
+                <DiminishingReturnsPrompt
+                  onContinue={() => {
+                    if (!feed.isFetchingNextPage) void feed.fetchNextPage();
+                  }}
+                  {...(feed.isFetchingNextPage
+                    ? { continueLabel: t('feed.loadingMore', 'Loading…') }
+                    : {})}
+                />
+              </li>
+            ) : null}
           </ul>
         ) : (
           <p className="text-ink-muted text-sm">

@@ -55,7 +55,7 @@ auth E2E (needs a BFF-in-the-loop harness; WS-P) — the WS-E and WS-G
 injected hooks are all closed.
 WS-E ships the event pipeline and PWAtt scoring engine
 (`docs/events/README.md`): strict event schemas + a single topic registry
-(15 core + 18 flagged Knomosis topics in a separate bounded context), the
+(16 core + 18 flagged Knomosis topics in a separate bounded context), the
 hardened attention-ingestion boundary (auth, ownership, two-layer replay
 protection, fail-closed sliding-window rate limits, server-side privacy
 enforcement), a retention-tier-partitioned Postgres event store with
@@ -882,7 +882,7 @@ licio/
 │   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
 │   │       │   ├── audit.ts             --   audit event taxonomy
 │   │       │   └── events/              --   WS-E event schemas (envelope, retention
-│   │       │                                 tiers, 15 core topic schemas, topic
+│   │       │                                 tiers, 16 core topic schemas, topic
 │   │       │                                 registry SSOT, knomosis/ bounded context)
 │   │       ├── ugc/                     --   WS-G.4 UGC pipeline: Markdown-lite AST
 │   │       │                                 (no raw-HTML node), constrained serializer,

@@ -417,7 +417,9 @@ describe('POST /v1/stories — emission + sync near-duplicate (WS-F.1.3c)', () =
     expect(read.status).toBe(200);
     const detail = (await read.json()) as { thread_id: string; rating_label: string };
     expect(detail.thread_id).toBe(thread_id);
-    expect(detail.rating_label).toBe('getting-attention');
+    // A freshly-ingested story has no active-reading signal yet ⇒ the neutral
+    // "New" floor (§5.6), never a false "Getting Attention".
+    expect(detail.rating_label).toBe('new');
     // The thread shell serves through the thread contract too.
     const thread = await app().request(new Request(`http://localhost/v1/threads/${thread_id}`));
     expect(thread.status).toBe(200);

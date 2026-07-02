@@ -146,13 +146,22 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
   it('renders the feed with the in-room chip on room_only items for a member', () => {
     roomFeed.mockReturnValue({
       isPending: false,
+      // Infinite-query shape (pages), with the explicit-continuation controls.
       data: {
-        items: [
-          feedItem({ story_id: 's-pub', title: 'Public item', visibility: 'public' }),
-          feedItem({ story_id: 's-room', title: 'In-room item', visibility: 'room_only' }),
+        pages: [
+          {
+            items: [
+              feedItem({ story_id: 's-pub', title: 'Public item', visibility: 'public' }),
+              feedItem({ story_id: 's-room', title: 'In-room item', visibility: 'room_only' }),
+            ],
+            nextCursor: null,
+          },
         ],
-        nextCursor: null,
+        pageParams: [null],
       },
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
     });
     renderBody(baseRoom({ visibility: 'private', joined: true }));
     expect(roomFeed).toHaveBeenCalledWith(true); // content bar passed
@@ -172,9 +181,19 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     roomFeed.mockReturnValue({
       isPending: false,
       data: {
-        items: [feedItem({ story_id: 's-room', title: 'In-room item', visibility: 'room_only' })],
-        nextCursor: null,
+        pages: [
+          {
+            items: [
+              feedItem({ story_id: 's-room', title: 'In-room item', visibility: 'room_only' }),
+            ],
+            nextCursor: null,
+          },
+        ],
+        pageParams: [null],
       },
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
     });
     const feed = renderBody(baseRoom({ visibility: 'private', joined: true }));
     expect(await checkA11y(feed.container)).toHaveNoViolations();

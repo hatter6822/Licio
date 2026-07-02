@@ -25,6 +25,7 @@ import {
   type AttentionAggregate,
   type AttentionAggregateEvent,
   attentionAggregateEventSchema,
+  type ContentSavedAggregateEvent,
   coherentAttentionItem,
   type PrivacySettings,
   type SourceOpenedAggregateEvent,
@@ -69,7 +70,10 @@ export const OFFLINE_SYNC_ACCEPTANCE: AcceptancePolicy = {
   maxFutureMs: 30_000,
 };
 
-export type AttentionIngestEvent = AttentionAggregateEvent | SourceOpenedAggregateEvent;
+export type AttentionIngestEvent =
+  | AttentionAggregateEvent
+  | SourceOpenedAggregateEvent
+  | ContentSavedAggregateEvent;
 
 export type IngestOutcome =
   | 'accepted'

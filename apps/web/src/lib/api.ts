@@ -20,6 +20,7 @@ import {
   type ContributionCreateResponse,
   type ContributionWriteCreate,
   type CreateReportRequest,
+  contentSavedAggregateEventSchema,
   contributionCreateResponseSchema,
   type FeatureFlags,
   type FeedMode,
@@ -217,8 +218,10 @@ export async function parseResponse<T>(response: Response, schema: z.ZodType<T>)
 
 // --- Typed endpoint functions ---------------------------------------------
 
-export async function fetchFeed(mode?: FeedMode): Promise<FeedResponse> {
-  const response = await client.v1.feed.$get({ query: mode ? { mode } : {} });
+export async function fetchFeed(mode?: FeedMode, cursor?: string): Promise<FeedResponse> {
+  const response = await client.v1.feed.$get({
+    query: { ...(mode ? { mode } : {}), ...(cursor ? { cursor } : {}) },
+  });
   return parseResponse(response, feedResponseSchema);
 }
 
@@ -401,6 +404,36 @@ export async function uploadAttentionAggregates(
     accepted += ack.accepted;
   }
   return attentionIngestAckSchema.parse({ accepted });
+}
+
+/**
+ * Emit the §5.3 "Save for later" attention signal (`content.saved`) for one
+ * story on behalf of the authenticated session user. Rides the SAME
+ * attention-ingestion privacy pipeline (`POST /v1/events/attention`): the server
+ * verifies ownership against the session, applies the user's identification
+ * floor + retention preference, and DISCARDS the event entirely when
+ * personalization is off (§19.2). The saved COLLECTION never leaves the browser
+ * — only this one deduped, privacy-leveled signal does. Best-effort by contract:
+ * the caller fires it after the local save succeeds and never blocks on it.
+ */
+export async function emitContentSaved(storyId: string, userId: string): Promise<void> {
+  const now = Date.now();
+  const event = contentSavedAggregateEventSchema.parse({
+    event_id: crypto.randomUUID(),
+    event_type: 'content.saved',
+    timestamp: new Date(now).toISOString(),
+    schema_version: '1',
+    nonce: crypto.randomUUID(),
+    user_id: userId,
+    // The client claims `standard`; the server strengthens it to the user's
+    // durable identification floor (never weaker). A minimum-privacy user's
+    // save is stored pseudonymously, exactly like their attention.
+    privacy_level: 'standard',
+    story_id: storyId,
+    privacy_classification: 'aggregated',
+    retention_tier: 'attention_aggregated',
+  });
+  await client.v1.events.attention.$post({ json: event });
 }
 
 export async function fetchVapidPublicKey(): Promise<string> {

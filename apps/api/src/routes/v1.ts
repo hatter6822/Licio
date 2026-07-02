@@ -138,6 +138,9 @@ interface StoryReadSignals {
   /** Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate). */
   evidenceCount: number;
   meriExposure: ReturnType<typeof exposureLabelForGain>;
+  /** Served ActiveAttention component (§5.4), or undefined when uncovered —
+   *  keeps the §5.6 default label truthful (Getting Attention vs New). */
+  activeAttention: number | undefined;
 }
 
 /**
@@ -160,12 +163,18 @@ async function assembleStoryReadSignals(
   // Invariants are a SOFT dependency: when the platform is not wired, MFCI risk
   // and the SCOI threshold are simply absent (the read still serves).
   const invariants = tryGetInvariantServices();
-  const [safeties, mfciRisk, scoiLatest, gains] = await Promise.all([
+  const [safeties, mfciRisk, scoiLatest, gains, pwattV1, pwattV0] = await Promise.all([
     events.safetyStore.getMany([story.storyId]),
     invariants ? invariants.mfciRiskStates.get(story.storyId) : Promise.resolve(null),
     events.invariantStore.latest('SCOI', story.storyId),
     latestMeriGains(events),
+    events.invariantStore.latest('PWAtt_v1', story.storyId),
+    events.invariantStore.latest('PWAtt_v0', story.storyId),
   ]);
+  // Served ActiveAttention (v1 preferred, v0 fallback) for the §5.6 default-label
+  // truthfulness gate; absent when no PWAtt run has covered the story yet.
+  const pwattAttention = (pwattV1 ?? pwattV0)?.scoreVector['active_attention'];
+  const activeAttention = typeof pwattAttention === 'number' ? pwattAttention : undefined;
   const safetyState = deriveStorySafetyState({
     frozen: safeties.get(story.storyId)?.safetyState === 'frozen',
     mfciRiskState: mfciRisk?.state,
@@ -203,6 +212,7 @@ async function assembleStoryReadSignals(
     interpretationsDiverge,
     evidenceCount: verifiedGroups.size + ungroupedVerified,
     meriExposure: exposureLabelForGain(gains[story.storyId] ?? null),
+    activeAttention,
   };
 }
 
@@ -234,6 +244,9 @@ function realStoryToDetail(
       interpretationsDiverge: signals.interpretationsDiverge,
       evidenceCount: signals.evidenceCount,
       meriExposure: signals.meriExposure,
+      ...(signals.activeAttention !== undefined
+        ? { activeAttention: signals.activeAttention }
+        : {}),
     }),
     distribution_reason: 'Recently submitted to Licio',
     context_chips: [],

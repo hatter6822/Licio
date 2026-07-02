@@ -36,12 +36,14 @@ function wrapper() {
 }
 
 describe('read hooks', () => {
-  it('useFeedQuery fetches and validates the feed', async () => {
+  it('useFeedQuery fetches and validates the feed as an infinite query', async () => {
     const { result } = renderHook(() => queries.useFeedQuery('chronological'), {
       wrapper: wrapper(),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual({ items: [], nextCursor: null });
+    // Infinite query: pages of validated FeedResponse. No next page for [].
+    expect(result.current.data?.pages).toEqual([{ items: [], nextCursor: null }]);
+    expect(result.current.hasNextPage).toBe(false);
   });
 
   it('detail + collection hooks all resolve', async () => {

@@ -7,7 +7,11 @@
 // discriminated union rejects unknown or forged `event_type` values at the
 // boundary rather than silently routing them.
 import { z } from 'zod';
-import { attentionAggregateEventSchema, sourceOpenedAggregateEventSchema } from './attention.js';
+import {
+  attentionAggregateEventSchema,
+  contentSavedAggregateEventSchema,
+  sourceOpenedAggregateEventSchema,
+} from './attention.js';
 import {
   contentNormalizedEventSchema,
   contentSubmittedEventSchema,
@@ -37,13 +41,15 @@ import {
   threadStateChangedEventSchema,
 } from './system.js';
 
-/** The fifteen core (non-Knomosis) topics (SPEC §21.3; WS-Q.1.7a added
- *  `content.visibility.changed`). */
+/** The sixteen core (non-Knomosis) topics (SPEC §21.3; WS-Q.1.7a added
+ *  `content.visibility.changed`; the §5.3 "Save for later" signal added
+ *  `content.saved`). */
 export const CORE_EVENT_SCHEMAS = {
   'content.submitted': contentSubmittedEventSchema,
   'content.normalized': contentNormalizedEventSchema,
   'content.visibility.changed': contentVisibilityChangedEventSchema,
   'source.opened.aggregate': sourceOpenedAggregateEventSchema,
+  'content.saved': contentSavedAggregateEventSchema,
   'attention.aggregate': attentionAggregateEventSchema,
   'contribution.created': contributionCreatedEventSchema,
   'evidence.added': evidenceAddedEventSchema,
@@ -73,6 +79,7 @@ export const licioEventSchema = z.discriminatedUnion('event_type', [
   contentNormalizedEventSchema,
   contentVisibilityChangedEventSchema,
   sourceOpenedAggregateEventSchema,
+  contentSavedAggregateEventSchema,
   attentionAggregateEventSchema,
   contributionCreatedEventSchema,
   evidenceAddedEventSchema,
@@ -151,6 +158,12 @@ export const TOPIC_REGISTRY: Readonly<Record<EventTopic, TopicRegistryEntry>> = 
   ),
   'source.opened.aggregate': entry(
     sourceOpenedAggregateEventSchema,
+    'aggregated',
+    'attention_aggregated',
+    false,
+  ),
+  'content.saved': entry(
+    contentSavedAggregateEventSchema,
     'aggregated',
     'attention_aggregated',
     false,

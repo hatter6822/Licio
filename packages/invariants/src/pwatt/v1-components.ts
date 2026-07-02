@@ -137,14 +137,12 @@ export const DEFAULT_PWATT_V1_COMPONENTS_CONFIG: PwattV1ComponentsConfig = {
     context: { weightPct: 20, curve: LOG_CURVE_DEFAULT },
     traversal: { weightPct: 15, curve: LOG_CURVE_DEFAULT },
   },
-  // The `saves` dimension is pinned to the 1% floor (never 0 — the dominance
-  // validator requires every share >= 1) until a privacy-reviewed save-signal
-  // pipeline exists (saves are client-local + private by default, §5.3/§19.2).
-  // Its 9% is redistributed to `returns` so the participation normalization is
-  // honest (P can reach ~1) while `contributions` stays the dominant share.
+  // The `saves` dimension carries the §5.3 "Save for later" LOW rank weight now
+  // that the privacy-respecting `content.saved` signal flows (the save rides the
+  // attention privacy pipeline; the saved collection stays client-local, §19.2).
   participationDimensions: {
-    returns: { weightPct: 49, curve: LOG_CURVE_DEFAULT },
-    saves: { weightPct: 1, curve: LOG_CURVE_DEFAULT },
+    returns: { weightPct: 40, curve: LOG_CURVE_DEFAULT },
+    saves: { weightPct: 10, curve: LOG_CURVE_DEFAULT },
     contributions: { weightPct: 50, curve: LOG_CURVE_DEFAULT },
   },
   accusationDownweight: 0.25,

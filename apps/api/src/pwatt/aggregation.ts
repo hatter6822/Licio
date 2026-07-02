@@ -15,6 +15,7 @@
 import type { ActorItemSummary } from '@licio/invariants';
 import {
   type AttentionAggregateEvent,
+  type ContentSavedAggregateEvent,
   DWELL_BUCKETS,
   type DwellBucket,
   type EventContributionType,
@@ -70,6 +71,8 @@ interface ActorFold {
   /** Bounce-adjacent evidence only: bounce=true, or a `brief` source dwell. */
   sawBounceAdjacentOpen: boolean;
   contextOpened: boolean;
+  /** The actor saved this item for later (§5.3 SIG-ATT-SAVE; deduped by OR). */
+  saved: boolean;
   contributions: Partial<Record<EventContributionType, number>>;
   uncitedAccusationsByType: Partial<Record<EventContributionType, number>>;
 }
@@ -90,6 +93,7 @@ export interface WindowAggregationResult {
 export const SCORING_TOPICS = [
   'attention.aggregate',
   'source.opened.aggregate',
+  'content.saved',
   'contribution.created',
   'evidence.added',
   'integrity.signal.detected',
@@ -103,6 +107,7 @@ function emptyActor(): ActorFold {
     sawMeaningfulSourceOpen: false,
     sawBounceAdjacentOpen: false,
     contextOpened: false,
+    saved: false,
     contributions: {},
     uncitedAccusationsByType: {},
   };
@@ -173,6 +178,14 @@ export async function computeAggregationWindow(
       // a moderate/extended non-bounce visit is a meaningful open.
       if (event.bounce || event.dwell_bucket === 'brief') actor.sawBounceAdjacentOpen = true;
       else actor.sawMeaningfulSourceOpen = true;
+    } else if (row.topic === 'content.saved') {
+      // §5.3 "Save for later": a discrete, deduped low-weight interest signal.
+      // Booleans join by OR, so one user's repeated save counts once (the
+      // structural refresh-loop defense, WS-E.2.1a).
+      const event = row.payload as unknown as ContentSavedAggregateEvent;
+      const item = itemOf(event.story_id);
+      item.eventCount += 1;
+      actorOf(item, actorKeyOfPayload(row.payload)).saved = true;
     } else if (row.topic === 'contribution.created') {
       const payload = row.payload as {
         thread_id: string;
@@ -278,7 +291,10 @@ export function toActorSummary(
     replyDepthBucket: fold.branchDepthBucket,
     contributions: fold.contributions,
     uncitedAccusationsByType: fold.uncitedAccusationsByType,
-    savedForLater: 0,
+    // §5.3 "Save for later" (SIG-ATT-SAVE): 1 when the actor saved the item in
+    // the window, else 0. Private by default (the saved COLLECTION never leaves
+    // the browser); only this deduped, privacy-leveled boolean is scored.
+    savedForLater: fold.saved ? 1 : 0,
     trustWeight,
   };
 }

@@ -10,15 +10,18 @@ import { savedStories, signalLedger } from '../offline/store.js';
 
 // Simulate offline for the network reads under test; the offline read-through
 // should serve the IndexedDB snapshot instead of surfacing the error.
+const emitContentSaved = vi.hoisted(() => vi.fn());
 vi.mock('./api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api.js')>();
   return {
     ...actual,
     fetchSignalLedger: vi.fn().mockRejectedValue(new Error('offline')),
+    emitContentSaved,
   };
 });
 
 const queries = await import('./queries.js');
+const { useAuthStore } = await import('../stores/auth.js');
 
 const ENTRY: SignalLedgerEntry = {
   item_id: '22222222-2222-4222-8222-222222222222',
@@ -80,5 +83,36 @@ describe('offline read-through hooks', () => {
     const { result } = renderHook(() => queries.useSavedStoriesQuery(), { wrapper: wrapper() });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.[0]?.storyId).toBe(SAVED_STORY.story_id);
+  });
+
+  it('emits the §5.3 content.saved signal on SAVE when authenticated, never on unsave', async () => {
+    emitContentSaved.mockReset().mockResolvedValue(undefined);
+    useAuthStore.setState({
+      status: 'authenticated',
+      user: { id: 'user-1', account_state: 'active' } as never,
+    });
+    const { result } = renderHook(() => queries.useToggleSavedStoryMutation(), {
+      wrapper: wrapper(),
+    });
+    result.current.mutate({ action: 'save', story: SAVED_STORY });
+    await waitFor(() =>
+      expect(emitContentSaved).toHaveBeenCalledWith(SAVED_STORY.story_id, 'user-1'),
+    );
+    // Unsave never emits the signal.
+    emitContentSaved.mockClear();
+    result.current.mutate({ action: 'unsave', storyId: SAVED_STORY.story_id });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(emitContentSaved).not.toHaveBeenCalled();
+  });
+
+  it('does NOT emit the save signal when the session is not authenticated', async () => {
+    emitContentSaved.mockReset().mockResolvedValue(undefined);
+    useAuthStore.setState({ status: 'unauthenticated', user: null });
+    const { result } = renderHook(() => queries.useToggleSavedStoryMutation(), {
+      wrapper: wrapper(),
+    });
+    result.current.mutate({ action: 'save', story: SAVED_STORY });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(emitContentSaved).not.toHaveBeenCalled(); // private local save only
   });
 });

@@ -5,6 +5,7 @@ async function freshUI(persisted?: Record<string, unknown>) {
   localStorage.clear();
   document.documentElement.removeAttribute('data-theme');
   document.documentElement.removeAttribute('data-motion');
+  document.documentElement.removeAttribute('data-focus');
   if (persisted) {
     localStorage.setItem('licio:ui', JSON.stringify({ version: 1, state: persisted }));
   }
@@ -16,6 +17,7 @@ beforeEach(() => {
   localStorage.clear();
   document.documentElement.removeAttribute('data-theme');
   document.documentElement.removeAttribute('data-motion');
+  document.documentElement.removeAttribute('data-focus');
 });
 
 afterEach(() => {
@@ -64,6 +66,8 @@ describe('ui store theme + motion application', () => {
     initUIStore();
     expect(document.documentElement.getAttribute('data-theme')).toBe('light');
     expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    // Focus mode is applied on boot so the calmer layout persists across reloads.
+    expect(document.documentElement.getAttribute('data-focus')).toBe('on');
   });
 });
 
@@ -76,11 +80,21 @@ describe('ui store feed mode, focus mode, sheet', () => {
     expect(raw.state.feedMode).toBe('source-diverse');
   });
 
-  it('toggles focus mode', async () => {
+  it('toggles focus mode and reflects it onto <html data-focus>', async () => {
     const { useUIStore } = await freshUI();
     expect(useUIStore.getState().focusMode).toBe(false);
+    expect(document.documentElement.hasAttribute('data-focus')).toBe(false);
     useUIStore.getState().toggleFocusMode();
     expect(useUIStore.getState().focusMode).toBe(true);
+    expect(document.documentElement.getAttribute('data-focus')).toBe('on');
+    // Toggling off removes the override (the CSS furniture returns).
+    useUIStore.getState().toggleFocusMode();
+    expect(useUIStore.getState().focusMode).toBe(false);
+    expect(document.documentElement.hasAttribute('data-focus')).toBe(false);
+    // The explicit setter reflects too and persists.
+    useUIStore.getState().setFocusMode(true);
+    expect(document.documentElement.getAttribute('data-focus')).toBe('on');
+    expect(JSON.parse(localStorage.getItem('licio:ui') ?? '{}').state.focusMode).toBe(true);
   });
 
   it('opens and closes a sheet without persisting it', async () => {
