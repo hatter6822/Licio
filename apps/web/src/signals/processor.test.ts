@@ -177,14 +177,19 @@ describe('SignalProcessor return-tracker privacy gate', () => {
     expect(visit).toHaveBeenCalledWith(STORY, expect.any(Number));
   });
 
-  it('does NOT record a return for a within-story subroute hop (recordVisit: false)', () => {
+  it('TOUCHES the outgoing story on leave so an in-story hop is not a return', () => {
     const s = setup();
     const visit = vi.spyOn(s.returnTracker, 'visit');
+    const touch = vi.spyOn(s.returnTracker, 'touch');
     s.processor.setCollectionPolicy(ENABLED);
-    // The story→comments hop must set the active item for capture WITHOUT a
-    // return visit — otherwise a >30-min story dwell scores a spurious return.
-    s.processor.setActiveStory(STORY, { recordVisit: false });
-    expect(visit).not.toHaveBeenCalled();
+    s.processor.setActiveStory(STORY); // enter the story (visit)
+    expect(visit).toHaveBeenCalledTimes(1);
+    // Leaving marks the outgoing story seen-until-now WITHOUT a return, so a
+    // reader who dwelt >30 min then hops to its comments (which re-enters with a
+    // ~0 gap) is never scored a spurious return.
+    s.processor.setActiveStory(null);
+    expect(touch).toHaveBeenCalledWith(STORY, expect.any(Number));
+    expect(visit).toHaveBeenCalledTimes(1); // leaving records no new visit
   });
 
   it('clears local return state when personalization is disabled', () => {

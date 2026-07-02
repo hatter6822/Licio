@@ -37,6 +37,9 @@ describe('useRecordContextView (§5.3 context-open on sustained view)', () => {
     vi.useFakeTimers();
     vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
     FakeIntersectionObserver.last = null;
+    // Active viewing = visible AND focused. jsdom defaults `hasFocus()` to false,
+    // so stub it true for the normal case; the blur test drives it to false.
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     processor = new SignalProcessor({});
     openSpy = vi.spyOn(processor, 'recordContextOpen');
     closeSpy = vi.spyOn(processor, 'recordContextClose');
@@ -47,6 +50,7 @@ describe('useRecordContextView (§5.3 context-open on sustained view)', () => {
     setSignalProcessor(null);
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     // Restore visibility for tests that background the tab (jsdom default).
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
   });
@@ -108,6 +112,20 @@ describe('useRecordContextView (§5.3 context-open on sustained view)', () => {
     expect(closeSpy).toHaveBeenCalledTimes(1);
     // A backgrounded setTimeout would fire (throttled) later; advancing past the
     // dwell must NOT commit, because the timer was cleared on hide.
+    vi.advanceTimersByTime(3_000);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards an in-flight open when the window loses focus (blur) before the dwell', () => {
+    const { result } = renderHook(() => useRecordContextView('story-1', true));
+    result.current(document.createElement('div'));
+    FakeIntersectionObserver.last?.emit(true); // open starts
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(closeSpy).not.toHaveBeenCalled();
+    // Alt-tab: the tab stays visible but the window blurs (not actively viewed).
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    window.dispatchEvent(new Event('blur'));
+    expect(closeSpy).toHaveBeenCalledTimes(1); // discard-close, timer cancelled
     vi.advanceTimersByTime(3_000);
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });

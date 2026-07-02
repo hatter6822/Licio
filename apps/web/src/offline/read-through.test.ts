@@ -42,6 +42,7 @@ const LEDGER_ENTRY: SignalLedgerEntry = {
   context_opened: false,
   reply_depth_bucket: 'moderate',
   return_visit_count_bucket: 'few',
+  saved_for_later: true,
   cap_reached: false,
 };
 

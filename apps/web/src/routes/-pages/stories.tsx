@@ -19,7 +19,6 @@ import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
-import { useRecordContextView } from '../../hooks/useRecordContextView.js';
 import { useT } from '../../i18n/index.js';
 import {
   useSavedStoriesQuery,
@@ -124,12 +123,6 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     void navigate({ to: '/', search: { mode: 'source-diverse' } });
   };
 
-  // §5.3 context-open signal: fires when the "Where interpretations differ"
-  // context surface is genuinely engaged (scrolled into view and dwelled),
-  // populating `context_opened` — a live 20% share of ActiveAttention that had
-  // no client producer before.
-  const contextViewRef = useRecordContextView(storyId, interpretations.data !== undefined);
-
   const openReader = (): void => {
     getSignalProcessor().recordSourceOpen(openId.current, storyId);
     setReaderOpen(true);
@@ -201,9 +194,7 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               />
             ) : null}
             {interpretations.data ? (
-              <div ref={contextViewRef}>
-                <WhereInterpretationsDiffer data={interpretations.data} />
-              </div>
+              <WhereInterpretationsDiffer data={interpretations.data} storyId={storyId} />
             ) : null}
           </article>
         )

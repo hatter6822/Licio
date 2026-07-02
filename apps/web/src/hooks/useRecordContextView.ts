@@ -55,8 +55,8 @@ export function useRecordContextView(
   const committedRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
-  /** The active `visibilitychange` listener (removed on teardown/unmount). */
-  const visibilityHandlerRef = useRef<(() => void) | null>(null);
+  /** Removes the active interrupt listeners (visibilitychange + blur), if any. */
+  const interruptCleanupRef = useRef<(() => void) | null>(null);
 
   const clearTimer = useCallback((): void => {
     if (timerRef.current !== null) {
@@ -75,12 +75,10 @@ export function useRecordContextView(
     }
   }, [clearTimer]);
 
-  /** Remove the current visibilitychange listener, if any. */
-  const detachVisibility = useCallback((): void => {
-    if (visibilityHandlerRef.current !== null && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', visibilityHandlerRef.current);
-      visibilityHandlerRef.current = null;
-    }
+  /** Remove the current interrupt listeners (visibilitychange + blur), if any. */
+  const detachInterrupts = useCallback((): void => {
+    interruptCleanupRef.current?.();
+    interruptCleanupRef.current = null;
   }, []);
 
   const ref = useCallback(
@@ -89,7 +87,7 @@ export function useRecordContextView(
       // storyId change) and discard any open that never committed.
       observerRef.current?.disconnect();
       observerRef.current = null;
-      detachVisibility();
+      detachInterrupts();
       discardOpen();
       if (node === null || !enabled || typeof IntersectionObserver === 'undefined') return;
       // A fresh attach (new node / new storyId — the ref identity changes with
@@ -111,12 +109,16 @@ export function useRecordContextView(
                 timerRef.current = null;
                 const openId = openIdRef.current;
                 if (openId === null || committedRef.current) return;
-                // Defense in depth (the visibilitychange handler below normally
-                // cancels this timer first): if the page is not visible at commit
-                // time, the dwell was not continuous — abandon WITHOUT closing,
-                // since a >= dwell close would be ACCEPTED by the tracker. The
-                // orphaned open never counts and is cleared on the next session.
-                if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+                // Defense in depth (the interrupt handlers below normally cancel
+                // this timer first): active viewing is BOTH visible AND focused,
+                // so if the page is hidden OR unfocused at commit time the dwell
+                // was not continuous — abandon WITHOUT closing, since a >= dwell
+                // close would be ACCEPTED by the tracker. The orphaned open never
+                // counts and is cleared on the next session.
+                if (
+                  typeof document !== 'undefined' &&
+                  (document.visibilityState !== 'visible' || !document.hasFocus())
+                ) {
                   openIdRef.current = null;
                   observer.disconnect();
                   return;
@@ -139,22 +141,28 @@ export function useRecordContextView(
       );
       observer.observe(node);
       observerRef.current = observer;
-      // Cancel an in-flight open when the tab is backgrounded before the dwell.
-      // The commit timer measures WALL-CLOCK, and a backgrounded setTimeout is
-      // throttled to fire (much) later — after the reader stopped looking — which
-      // would close the open above the threshold and count a view that was never
-      // continuously visible. visibilitychange fires SYNCHRONOUSLY at hide-time
-      // (elapsed < the dwell), so discardOpen's close is sub-threshold-rejected
-      // AND it clears the pending commit timer before it can fire.
+      // Cancel an in-flight open when the reader stops ACTIVELY viewing before
+      // the dwell — the tab is backgrounded (visibilitychange → hidden) OR the
+      // window loses focus (blur, e.g. an alt-tab while the tab stays visible).
+      // Either fires SYNCHRONOUSLY (elapsed < the dwell), so discardOpen's close
+      // is sub-threshold-rejected AND it clears the pending commit timer before
+      // it can fire — the commit timer measures WALL-CLOCK, and a backgrounded
+      // setTimeout is throttled to fire (much) later, after the reader stopped
+      // looking, which would otherwise count a view that was never continuous.
       if (typeof document !== 'undefined') {
-        const onVisibility = (): void => {
-          if (document.visibilityState === 'hidden') discardOpen();
+        const onInterrupt = (): void => {
+          if (document.visibilityState === 'hidden' || !document.hasFocus()) discardOpen();
         };
-        document.addEventListener('visibilitychange', onVisibility);
-        visibilityHandlerRef.current = onVisibility;
+        document.addEventListener('visibilitychange', onInterrupt);
+        const target = typeof window !== 'undefined' ? window : undefined;
+        target?.addEventListener('blur', onInterrupt);
+        interruptCleanupRef.current = (): void => {
+          document.removeEventListener('visibilitychange', onInterrupt);
+          target?.removeEventListener('blur', onInterrupt);
+        };
       }
     },
-    [storyId, enabled, discardOpen, detachVisibility],
+    [storyId, enabled, discardOpen, detachInterrupts],
   );
 
   // Unmount cleanup: never leave an in-flight open dangling or a listener leaked.
@@ -162,10 +170,10 @@ export function useRecordContextView(
     return () => {
       observerRef.current?.disconnect();
       observerRef.current = null;
-      detachVisibility();
+      detachInterrupts();
       discardOpen();
     };
-  }, [discardOpen, detachVisibility]);
+  }, [discardOpen, detachInterrupts]);
 
   return ref;
 }

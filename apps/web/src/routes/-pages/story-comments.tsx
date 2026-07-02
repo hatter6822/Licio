@@ -151,15 +151,12 @@ function StoryCommentsContent({
   // recordReplyDepth(storyId, depth), and the §22.1 aggregate — with the max
   // depth reached — is captured on the "done attending" boundary when the reader
   // leaves. Without a current item, captureCurrent() emits nothing, so traversal
-  // (now a scored ActiveAttention dimension) would be dropped here.
-  //
-  // `recordVisit: false` — this is a WITHIN-STORY hop from the story page, not a
-  // return from time away, so it must not add a return visit (a reader who
-  // dwelt >30 min on the story body before opening comments would otherwise be
-  // scored a spurious return).
+  // (now a scored ActiveAttention dimension) would be dropped here. The story ⇄
+  // comments hop is not scored as a return: setActiveStory TOUCHES the outgoing
+  // surface's story, so a continuous in-story session never looks like a return.
   useEffect(() => {
     const processor = getSignalProcessor();
-    processor.setActiveStory(storyId, { recordVisit: false });
+    processor.setActiveStory(storyId);
     return () => {
       processor.setActiveStory(null);
     };

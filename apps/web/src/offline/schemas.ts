@@ -140,6 +140,10 @@ export const signalLedgerRecordSchema = z.object({
   contextOpened: z.boolean(),
   replyDepthBucket: replyDepthBucketSchema,
   returnVisitCountBucket: returnVisitBucketSchema,
+  // §5.3 save signal (optional: pre-save-signal cached rows omit it) — round-
+  // tripped so an offline-rehydrated save-only ledger row still renders its
+  // "saved for later" checklist item instead of reading as "nothing counted".
+  savedForLater: z.boolean().optional(),
   // Optional since WS-E: cap status is client-known only; server-generated
   // ledger entries omit it (loosening only — older cached rows still parse).
   capReached: z.boolean().optional(),

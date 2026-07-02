@@ -82,6 +82,32 @@ describe('ReturnTracker', () => {
     expect(tracker.returnCount('item-1')).toBe(0);
   });
 
+  it('touch keeps an item seen-until-now so an in-story hop is not a return', () => {
+    const tracker = new ReturnTracker();
+    tracker.visit('item-1', 0); // enter the story
+    // Leaving after a >30-min dwell TOUCHES the story (seen-until-now, no return)…
+    tracker.touch('item-1', MIN + 1);
+    // …so re-entering its sibling surface a moment later is NOT a return.
+    tracker.visit('item-1', MIN + 2);
+    expect(tracker.returnCount('item-1')).toBe(0);
+  });
+
+  it('touch still lets a genuine away-and-back count as a return', () => {
+    const tracker = new ReturnTracker();
+    tracker.visit('item-1', 0);
+    tracker.touch('item-1', MIN + 1); // left the story at MIN+1
+    // Away on another surface for >30 min, then back: gap from the touch ≥ MIN.
+    tracker.visit('item-1', 2 * MIN + 2);
+    expect(tracker.returnCount('item-1')).toBe(1);
+  });
+
+  it('touch on a never-visited item is a no-op (no phantom visit)', () => {
+    const tracker = new ReturnTracker();
+    tracker.touch('item-1', 1_000);
+    tracker.visit('item-1', 2_000);
+    expect(tracker.returnCount('item-1')).toBe(0);
+  });
+
   it('dampens a rage loop to zero returns', () => {
     const tracker = new ReturnTracker({ rageWindowMs: 90 * 60_000, rageCount: 3 });
     // Three returns spaced at the minimum threshold, all inside the rage window.

@@ -7,20 +7,32 @@
 // differently" — never false, bad, or banned.
 
 import type { StoryInterpretationsResponse } from '@licio/shared';
+import { useRecordContextView } from '../../../hooks/useRecordContextView.js';
 import { useT } from '../../../i18n/index.js';
 import { Icon } from '../../ui/Icon/index.js';
 
 export interface WhereInterpretationsDifferProps {
   data: StoryInterpretationsResponse;
+  /** Story id for the §5.3 context-open signal (recorded only when the section
+   *  actually renders — see the ref below). */
+  storyId: string;
 }
 
 export function WhereInterpretationsDiffer({
   data,
+  storyId,
 }: WhereInterpretationsDifferProps): React.ReactElement | null {
   const t = useT();
+  // §5.3 context-open signal: the ref is attached to the section ONLY on the
+  // render paths below — when there are interpretations to show. An empty
+  // result returns null before the ref is ever attached, so a reader dwelling
+  // near a story with NO context section can never emit a false `context_opened`
+  // (a zero-height observer target would otherwise report intersecting).
+  const contextViewRef = useRecordContextView(storyId, true);
   if (data.interpretations.length === 0) return null;
   return (
     <section
+      ref={contextViewRef}
       aria-labelledby="interpretations-heading"
       className="rounded-lg border border-line bg-surface p-3"
     >
