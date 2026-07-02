@@ -14,6 +14,7 @@ import { Button } from '../../components/ui/Button/index.js';
 import { Card } from '../../components/ui/Card/index.js';
 import { EmptyState } from '../../components/ui/EmptyState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import type { RoomSummary } from '../../private-p2p/room-manager.js';
 import { PrivateRoomSession } from '../../private-p2p/room-manager.js';
@@ -94,13 +95,13 @@ export function PrivateRoomDetailPage(): React.ReactElement {
   const { roomId } = useParams({ from: '/private_/$roomId' });
   usePageFocus(t('privateRoom.view.title', 'Private room'));
   const navigate = useNavigate();
+  // Retrace history back to wherever this room was opened from (usually the
+  // private-rooms list); a cold-loaded deep link falls back (replacing) to it.
+  const goBack = useGoBack(() => void navigate({ to: '/private', replace: true }));
 
   return (
     <>
-      <PageHeader
-        title={t('privateRoom.view.title', 'Private room')}
-        onBack={() => void navigate({ to: '/private' })}
-      />
+      <PageHeader title={t('privateRoom.view.title', 'Private room')} onBack={goBack} />
       <div className="mx-auto w-full max-w-2xl p-4">
         {isValidUuidParam(roomId) ? (
           <PrivateRoomView roomId={roomId} />
