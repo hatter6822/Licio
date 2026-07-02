@@ -16,7 +16,7 @@ import {
   type SignalLedgerItem,
 } from '../../components/profile/SignalLedger/index.js';
 import { Button } from '../../components/ui/Button/index.js';
-import { Icon } from '../../components/ui/Icon/index.js';
+import { Icon, type IconName } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RadioGroup } from '../../components/ui/RadioGroup/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
@@ -129,16 +129,102 @@ export function ProfilePage(): React.ReactElement {
   const user = useAuthStore((state) => state.user);
   const logout = useAuthStore((state) => state.logout);
 
-  const links: Array<{ to: string; label: string }> = [
-    { to: '/profile/signal-ledger', label: t('profile.signalLedger', 'Signal Ledger') },
-    { to: '/profile/saved', label: t('profile.saved', 'Saved stories') },
-    { to: '/profile/settings', label: t('profile.settings', 'Settings') },
-    { to: '/profile/privacy', label: t('profile.privacy', 'Privacy') },
-    { to: '/profile/security', label: t('profile.security', 'Security') },
-    { to: '/profile/wallet', label: t('profile.wallet', 'Wallet') },
-    { to: '/private', label: t('profile.privateRooms', 'Private rooms') },
-    { to: '/profile/offline', label: t('profile.offline', 'Offline bundles') },
-    { to: '/profile/mode', label: t('profile.mode', 'Connection mode') },
+  // Grouped so the surface reads as a small, scannable set of intents rather than a
+  // flat wall of nine links: what you've done, how the app behaves, your account, and
+  // how this device shares/stores content. Each row leads with an icon + a one-line
+  // description so the destination is understood before tapping.
+  interface ProfileLink {
+    readonly to: string;
+    readonly label: string;
+    readonly description: string;
+    readonly icon: IconName;
+  }
+  const groups: ReadonlyArray<{ heading: string; links: readonly ProfileLink[] }> = [
+    {
+      heading: t('profile.group.activity', 'Your activity'),
+      links: [
+        {
+          to: '/profile/signal-ledger',
+          label: t('profile.signalLedger', 'Signal Ledger'),
+          description: t('profile.signalLedger.desc', 'The private record of your attention.'),
+          icon: 'trending-up',
+        },
+        {
+          to: '/profile/saved',
+          label: t('profile.saved', 'Saved stories'),
+          description: t('profile.saved.desc', 'Stories you kept to read offline.'),
+          icon: 'bookmark',
+        },
+      ],
+    },
+    {
+      heading: t('profile.group.preferences', 'Preferences'),
+      links: [
+        {
+          to: '/profile/settings',
+          label: t('profile.settings', 'Settings'),
+          description: t(
+            'profile.settings.desc',
+            'Appearance, feed, notifications, and wellbeing.',
+          ),
+          icon: 'sliders',
+        },
+        {
+          to: '/profile/privacy',
+          label: t('profile.privacy', 'Privacy'),
+          description: t(
+            'profile.privacy.desc',
+            'Personalization, your data, and account deletion.',
+          ),
+          icon: 'eye',
+        },
+      ],
+    },
+    {
+      heading: t('profile.group.account', 'Account'),
+      links: [
+        {
+          to: '/profile/security',
+          label: t('profile.security', 'Security'),
+          description: t('profile.security.desc', 'Sessions, passkeys, and two-factor.'),
+          icon: 'check-badge',
+        },
+        {
+          to: '/profile/wallet',
+          label: t('profile.wallet', 'Wallet'),
+          description: t('profile.wallet.desc', 'Crypto and wallet features.'),
+          // Not `bridge` — that glyph means P2P transport / re-sharing in the mode
+          // surfaces this index pairs with; `layers` avoids the cross-surface collision.
+          icon: 'layers',
+        },
+      ],
+    },
+    {
+      heading: t('profile.group.connectivity', 'Sharing & offline'),
+      links: [
+        {
+          to: '/private',
+          label: t('profile.privateRooms', 'Private rooms'),
+          description: t(
+            'profile.privateRooms.desc',
+            'End-to-end encrypted rooms, hosted on your devices.',
+          ),
+          icon: 'threads',
+        },
+        {
+          to: '/profile/offline',
+          label: t('profile.offline', 'Offline bundles'),
+          description: t('profile.offline.desc', 'Import and export content as signed files.'),
+          icon: 'wifi-off',
+        },
+        {
+          to: '/profile/mode',
+          label: t('profile.mode', 'Connection mode'),
+          description: t('profile.mode.desc', 'How this device stores and moves content.'),
+          icon: 'globe',
+        },
+      ],
+    },
   ];
 
   return (
@@ -146,23 +232,36 @@ export function ProfilePage(): React.ReactElement {
       <PageHeader title={t('nav.profile', 'Profile')} />
       <div className="mx-auto w-full max-w-2xl p-4">
         {user ? <p className="mb-4 text-ink">{user.display_name}</p> : null}
-        <ul className="flex flex-col gap-4">
-          {links.map((link) => (
-            <li key={link.to}>
-              <Link
-                to={link.to}
-                className={cn(
-                  'flex items-center justify-between gap-3 p-4',
-                  raisedSurface,
-                  raisedInteractive,
-                )}
-              >
-                <span className="font-medium text-ink">{link.label}</span>
-                <Icon name="chevron-right" className="size-5 text-ink-muted" />
-              </Link>
-            </li>
+        <div className="flex flex-col gap-6">
+          {groups.map((group) => (
+            <section key={group.heading} className="flex flex-col gap-3">
+              <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-ink-muted">
+                {group.heading}
+              </h2>
+              <ul className="flex flex-col gap-4">
+                {group.links.map((link) => (
+                  <li key={link.to}>
+                    <Link
+                      to={link.to}
+                      className={cn(
+                        'flex items-center gap-3 p-4',
+                        raisedSurface,
+                        raisedInteractive,
+                      )}
+                    >
+                      <Icon name={link.icon} className="size-5 shrink-0 text-ink-muted" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-medium text-ink">{link.label}</span>
+                        <span className="block text-sm text-ink-muted">{link.description}</span>
+                      </span>
+                      <Icon name="chevron-right" className="size-5 shrink-0 text-ink-muted" />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
         <div className="mt-6">
           <Button
             variant="secondary"
@@ -316,6 +415,12 @@ export function SettingsPage(): React.ReactElement {
           </p>
         </Section>
         <Section title={t('settings.notifications', 'Notifications')}>
+          <p className="text-sm text-ink-muted">
+            {t(
+              'settings.notifications.desc',
+              'Choose how replies and thread updates reach you — grouped, digested, or held during quiet hours.',
+            )}
+          </p>
           <Switch
             label={t('settings.grouping', 'Group notifications')}
             description={t('settings.grouping.desc', 'Collapse multiple updates per thread.')}
@@ -427,6 +532,12 @@ export function PrivacyPage(): React.ReactElement {
                 { value: 'minimum', label: t('privacy.level.minimum', 'Minimum') },
               ]}
             />
+            <p className="text-sm text-ink-muted">
+              {t(
+                'privacy.level.desc',
+                'This controls how identifiable your stored attention aggregates are. The strongest option, Minimum, replaces your account id with a coarse bucket, so those aggregates aren’t directly tied to your account — though they still record coarse context such as which story and a session bucket. Whichever you choose is enforced on the server, not just this device.',
+              )}
+            </p>
           </Section>
           <Section title={t('privacy.data', 'Your data')}>
             <DataRightsSection />

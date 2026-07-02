@@ -649,12 +649,50 @@ function TotpSection({ gate }: { gate: StepUpGate }): React.ReactElement {
 
 // --- Recent security activity (WS-D.1.6c owner view) -----------------------------------
 
+/**
+ * Plain-language labels for the account-security events a user actually sees here.
+ * Any other (steward) event type falls back to the humanized raw name, so the feed
+ * never shows a blank row — and a new event type can never crash this surface.
+ */
+const SECURITY_EVENT_LABELS: Partial<
+  Record<SecurityActivityEntry['event_type'], { key: string; text: string }>
+> = {
+  login_success: { key: 'security.event.login_success', text: 'Signed in' },
+  login_failure: { key: 'security.event.login_failure', text: 'Failed sign-in' },
+  session_create: { key: 'security.event.session_create', text: 'New session started' },
+  session_revoke: { key: 'security.event.session_revoke', text: 'Session signed out' },
+  auth_method_add: { key: 'security.event.auth_method_add', text: 'Sign-in method added' },
+  auth_method_remove: { key: 'security.event.auth_method_remove', text: 'Sign-in method removed' },
+  mfa_enroll: { key: 'security.event.mfa_enroll', text: 'Two-factor set up' },
+  mfa_verify: { key: 'security.event.mfa_verify', text: 'Two-factor verified' },
+  mfa_disable: { key: 'security.event.mfa_disable', text: 'Two-factor disabled' },
+  privacy_setting_change: {
+    key: 'security.event.privacy_setting_change',
+    text: 'Privacy setting changed',
+  },
+  export_request: { key: 'security.event.export_request', text: 'Data export requested' },
+  export_download: { key: 'security.event.export_download', text: 'Data export downloaded' },
+  deletion_request: { key: 'security.event.deletion_request', text: 'Account deletion requested' },
+  deletion_cancel: { key: 'security.event.deletion_cancel', text: 'Account deletion cancelled' },
+  deletion_complete: { key: 'security.event.deletion_complete', text: 'Account deleted' },
+  attention_delete: { key: 'security.event.attention_delete', text: 'Attention history deleted' },
+  wallet_link: { key: 'security.event.wallet_link', text: 'Wallet linked' },
+  wallet_unlink: { key: 'security.event.wallet_unlink', text: 'Wallet unlinked' },
+  role_change: { key: 'security.event.role_change', text: 'Role changed' },
+  suspicious_login: { key: 'security.event.suspicious_login', text: 'Suspicious sign-in flagged' },
+  account_lockout: { key: 'security.event.account_lockout', text: 'Account locked' },
+  authz_denied: { key: 'security.event.authz_denied', text: 'Access denied' },
+};
+
 function ActivitySection(): React.ReactElement {
   const t = useT();
   const { locale } = useI18n();
   const activity = useSecurityActivityQuery();
 
-  const label = (entry: SecurityActivityEntry): string => entry.event_type.replace(/_/g, ' ');
+  const label = (entry: SecurityActivityEntry): string => {
+    const friendly = SECURITY_EVENT_LABELS[entry.event_type];
+    return friendly ? t(friendly.key, friendly.text) : entry.event_type.replace(/_/g, ' ');
+  };
 
   return (
     <Section title={t('security.activity', 'Recent security activity')}>

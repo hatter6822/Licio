@@ -30,12 +30,12 @@ export function OperationalModePage(): React.ReactElement {
         <p className="text-sm text-ink-muted">
           {t(
             'lcap.mode.pageIntro',
-            'Choose how this device stores and moves Licio content offline. The mode controls storage, what is fetched, automatic discovery, and how exports are named.',
+            'One choice sets how this device stores and moves Licio content: how much it caches, what it fetches, whether it finds nearby devices automatically, and how exports are named. Pick a mode below, then see exactly what it does.',
           )}
         </p>
         <section className="flex flex-col gap-3" aria-labelledby="lcap-mode-heading">
           <h2 id="lcap-mode-heading" className="text-base font-semibold text-ink">
-            {t('lcap.mode.selectorHeading', 'Operational mode')}
+            {t('lcap.mode.selectorHeading', 'Choose a mode')}
           </h2>
           <OperationalModeSelector onModeChange={setMode} />
         </section>
