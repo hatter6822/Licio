@@ -109,7 +109,8 @@ describe('offline read-through hooks', () => {
     });
     result.current.mutate({ action: 'save', story: SAVED_STORY });
     await waitFor(() =>
-      expect(emitContentSaved).toHaveBeenCalledWith(SAVED_STORY.story_id, 'user-1'),
+      // The reader's current collection privacy level is stamped on the save.
+      expect(emitContentSaved).toHaveBeenCalledWith(SAVED_STORY.story_id, 'user-1', 'standard'),
     );
     // Unsave never emits the signal.
     emitContentSaved.mockClear();

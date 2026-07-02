@@ -117,6 +117,18 @@ export class SignalProcessor {
   }
 
   /**
+   * The reader's CURRENT collection privacy level. Any OTHER attention emit path
+   * (e.g. the §5.3 save signal) must stamp its event with THIS level so the
+   * server folds it under the SAME actor key as the reader's aggregates — a
+   * minimum-privacy reader's save then buckets under `privacy-bucket` like their
+   * attention, instead of a distinct pseudonymous UUID that would split one
+   * reader into two actors (`actorKeyOfPayload` keys on `privacy_level`).
+   */
+  collectionPrivacyLevel(): CollectionPolicy['privacyLevel'] {
+    return this.policy.privacyLevel;
+  }
+
+  /**
    * The story currently in view. Switching away is the "done attending" boundary:
    * the outgoing item's final dwell is accrued and its §22.1 aggregate is snapshot
    * (so per-item attention is buffered on navigation, not only at session end), then

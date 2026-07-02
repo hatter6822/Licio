@@ -33,6 +33,7 @@ import {
   type NotificationPreferences,
   notificationPreferencesSchema,
   okAckSchema,
+  type PrivacyLevel,
   type PushSubscriptionJson,
   type ReportCreatedResponse,
   type RoomCreateRequest,
@@ -415,8 +416,18 @@ export async function uploadAttentionAggregates(
  * personalization is off (§19.2). The saved COLLECTION never leaves the browser
  * — only this one deduped, privacy-leveled signal does. Best-effort by contract:
  * the caller fires it after the local save succeeds and never blocks on it.
+ *
+ * `privacyLevel` is the reader's CURRENT collection level (from the signal
+ * processor): stamping it here makes the server fold the save under the SAME
+ * actor key as the reader's aggregates (`actorKeyOfPayload` keys on
+ * `privacy_level`), so a minimum-privacy reader is not split into two actors.
+ * The server still strengthens (never weakens) to the durable floor.
  */
-export async function emitContentSaved(storyId: string, userId: string): Promise<void> {
+export async function emitContentSaved(
+  storyId: string,
+  userId: string,
+  privacyLevel: PrivacyLevel,
+): Promise<void> {
   const now = Date.now();
   const event = contentSavedAggregateEventSchema.parse({
     event_id: crypto.randomUUID(),
@@ -425,15 +436,28 @@ export async function emitContentSaved(storyId: string, userId: string): Promise
     schema_version: '1',
     nonce: crypto.randomUUID(),
     user_id: userId,
-    // The client claims `standard`; the server strengthens it to the user's
-    // durable identification floor (never weaker). A minimum-privacy user's
-    // save is stored pseudonymously, exactly like their attention.
-    privacy_level: 'standard',
+    privacy_level: privacyLevel,
     story_id: storyId,
     privacy_classification: 'aggregated',
     retention_tier: 'attention_aggregated',
   });
-  await client.v1.events.attention.$post({ json: event });
+  // Ride the SAME serialized cooldown gate as aggregate uploads: this hits the
+  // same per-account attention endpoint, so honor an armed Retry-After window
+  // and arm/clear it from the response (shared backpressure, §25.5) instead of
+  // hammering the endpoint while it cools down.
+  const run = attentionUploadChain.then(async () => {
+    if (attentionUploadsCoolingDown()) {
+      throw new ApiClientError('rate_limited', 'Attention uploads are cooling down', 429);
+    }
+    const response = await client.v1.events.attention.$post({ json: event });
+    if (response.status === 429) noteAttentionRateLimited(retryAfterSeconds(response));
+    else if (response.ok) noteAttentionUploadOk();
+  });
+  attentionUploadChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  await run;
 }
 
 export async function fetchVapidPublicKey(): Promise<string> {

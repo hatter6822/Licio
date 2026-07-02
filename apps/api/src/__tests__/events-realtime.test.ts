@@ -21,6 +21,7 @@ import { reconcileRealtimeWindow } from '../pwatt/scheduler.js';
 import { runPwattWindow } from '../pwatt/scoring.js';
 import {
   attentionEvent,
+  contentSavedEvent,
   type EventServicesFixture,
   freshEventServices,
   seedUserWithSession,
@@ -79,6 +80,24 @@ describe('real-time counters (WS-E.3.2)', () => {
       sourceOpens: 1,
       eventCount: 1,
     });
+  });
+
+  it('folds a content.saved (§5.3) event into realtime uniques + eventCount', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const storyId = randomUUID();
+    const event = contentSavedEvent(userId, { story_id: storyId });
+    await ingestAttentionEvents(
+      fixture.events,
+      fixture.identity,
+      userId,
+      [event],
+      ONLINE_ACCEPTANCE,
+    );
+    const windowStart = realtimeWindowStart(Date.parse(event.timestamp));
+    const snapshot = await fixture.events.realtime.snapshot(storyId, windowStart);
+    // A save must increment the item's uniques + eventCount so a save-heavy
+    // window can cross the volume trigger before the hourly tick.
+    expect(snapshot).toMatchObject({ uniqueActors: 1, eventCount: 1 });
   });
 
   it('separates bounces from meaningful source opens', async () => {

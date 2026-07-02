@@ -14,7 +14,7 @@
 // the anchor's replies nest INSIDE its article for a tighter reading column.
 import type { CommentItem } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSpaFocus } from '../../components/a11y/index.js';
 import {
   CommentComposer,
@@ -35,6 +35,7 @@ import { cn } from '../../lib/cn.js';
 import { useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { isValidUuidParam } from '../../routing/guards.js';
+import { getSignalProcessor } from '../../signals/runtime.js';
 
 /** Unrooted "all comments" view: two nested reply layers per top-level comment. */
 const ALL_COMMENTS_DEPTH = 2;
@@ -144,6 +145,21 @@ function StoryCommentsContent({
   const t = useT();
   const navigate = useNavigate();
   const story = useStoryQuery(storyId);
+
+  // Mark this story the active item so deep-thread reading on THIS dedicated
+  // page records the §5.3 reply-depth traversal: CommentNode calls
+  // recordReplyDepth(storyId, depth), and the §22.1 aggregate — with the max
+  // depth reached — is captured on the "done attending" boundary when the reader
+  // leaves. Without a current item, captureCurrent() emits nothing, so traversal
+  // (now a scored ActiveAttention dimension) would be dropped here.
+  useEffect(() => {
+    const processor = getSignalProcessor();
+    processor.setActiveStory(storyId);
+    return () => {
+      processor.setActiveStory(null);
+    };
+  }, [storyId]);
+
   const isRooted = root !== undefined;
   const depth = isRooted ? FOCUSED_DEPTH : ALL_COMMENTS_DEPTH;
   const comments = useStoryCommentsQuery(

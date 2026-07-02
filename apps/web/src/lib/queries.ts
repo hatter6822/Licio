@@ -446,12 +446,20 @@ export function useToggleSavedStoryMutation() {
       // boundary (WS-C.4.1d), not merely discarded server-side (§19.2). The
       // private local save is the source of truth and never depends on the
       // signal reaching the server.
-      if (
-        input.action === 'save' &&
-        collectionUserId !== null &&
-        getSignalProcessor().isCollecting()
-      ) {
-        void api.emitContentSaved(input.story.story_id, collectionUserId).catch(() => {});
+      if (input.action === 'save' && collectionUserId !== null) {
+        const processor = getSignalProcessor();
+        if (processor.isCollecting()) {
+          // Stamp the reader's CURRENT collection privacy level so a
+          // minimum-privacy save folds under the same actor key as their
+          // attention (never a distinct pseudonymous UUID).
+          void api
+            .emitContentSaved(
+              input.story.story_id,
+              collectionUserId,
+              processor.collectionPrivacyLevel(),
+            )
+            .catch(() => {});
+        }
       }
     },
     onSettled: () => {

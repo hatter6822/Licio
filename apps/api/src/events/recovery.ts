@@ -85,7 +85,7 @@ export async function recoverEventPipeline(
   //    otherwise report phantom volume until their TTL.
   const currentWindowStart = realtimeWindowStart(now);
   const rows = await events.eventStore.listByTopicsBetween(
-    ['attention.aggregate', 'source.opened.aggregate', 'contribution.created'],
+    ['attention.aggregate', 'source.opened.aggregate', 'contribution.created', 'content.saved'],
     new Date(currentWindowStart - REALTIME_WINDOW_MS).toISOString(),
     new Date(now + 1).toISOString(),
   );
