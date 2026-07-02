@@ -59,14 +59,35 @@ const clamp01 = (value: number): number =>
   Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
 
 /** A usable (non-degraded) output: fallback rows with hard failure reason
- *  codes and zero-coverage rows are ABSENT for ranking (WS-H.1.2c). */
-function usable(row: InvariantOutputRecord | null): InvariantOutputRecord | null {
+ *  codes and zero-coverage rows are ABSENT for ranking (WS-H.1.2c). Exported so
+ *  EVERY pipeline stage that reads a stored invariant output (the feature join
+ *  AND the retrieval-side PWAtt read) applies the identical degraded⇒ABSENT
+ *  rule — a partial gate is worse than none. */
+export function usable(row: InvariantOutputRecord | null): InvariantOutputRecord | null {
   if (row === null) return null;
   if (row.reasonCodes.includes('TIMEOUT') || row.reasonCodes.includes('COMPUTE_ERROR')) {
     return null;
   }
   if (row.reasonCodes.includes('INSUFFICIENT_COVERAGE')) return null;
   return row;
+}
+
+/**
+ * The §30.5 bounded-input gate for a stored PWAtt row, applied IDENTICALLY at
+ * every stage that consumes PWAtt (the feature join and the retrieval-side
+ * eligibility/score read). A row powers ranking ONLY when the code-level lift
+ * holds (`PWATT_V0_SHADOW_MODE === false`), the row itself was written post-lift
+ * (`shadowMode === false`), and it is not degraded (`usable`). Otherwise ABSENT:
+ * a §30.5 revert or a degraded compute uniformly withholds PWAtt everywhere, so
+ * the kill-switch/shadow posture can never leak in through the retrieval leg.
+ */
+export function pwattRowForRanking(
+  row: InvariantOutputRecord | null,
+): InvariantOutputRecord | null {
+  if ((PWATT_V0_SHADOW_MODE as boolean) !== false) return null;
+  const ok = usable(row);
+  if (ok === null || ok.shadowMode !== false) return null;
+  return ok;
 }
 
 function num(value: unknown): number | undefined {
@@ -130,11 +151,10 @@ export async function assembleFeatureVector(
   // from rows stored `shadow_mode: false` (the post-lift artifact) AND only
   // while the code-level lift holds. Rows stored before the lift — and every
   // row again, should PWATT_V0_SHADOW_MODE be reverted — stay powerless.
-  const pwattLifted = (PWATT_V0_SHADOW_MODE as boolean) === false;
-  const pwattV1 = usable(await events.invariantStore.latest('PWAtt_v1', storyId));
-  const pwattV0 = usable(await events.invariantStore.latest('PWAtt_v0', storyId));
+  const pwattV1 = pwattRowForRanking(await events.invariantStore.latest('PWAtt_v1', storyId));
+  const pwattV0 = pwattRowForRanking(await events.invariantStore.latest('PWAtt_v0', storyId));
   const pwatt = pwattV1 ?? pwattV0;
-  if (pwatt !== null && pwattLifted && pwatt.shadowMode === false) {
+  if (pwatt !== null) {
     const attention = num(pwatt.scoreVector['active_attention']);
     const participation = num(pwatt.scoreVector['participation']);
     if (attention !== undefined) vector.active_attention = clamp01(attention);

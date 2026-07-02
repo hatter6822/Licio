@@ -287,7 +287,11 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
       'none') as SignalLedgerEntry['reply_depth_bucket'],
     return_visit_count_bucket: (signals.return_visit_count_bucket ??
       'none') as SignalLedgerEntry['return_visit_count_bucket'],
-    cap_reached: signals.cap_reached ?? false,
+    // OMIT cap status when the server does not know it (the §22.1 wire carries
+    // buckets, not the cap flag): asserting `false` from ignorance would make
+    // the "counting stopped" disclosure permanently unreachable. Only a client-
+    // emitted cap flag ever populates it.
+    ...(signals.cap_reached !== undefined ? { cap_reached: signals.cap_reached } : {}),
     anti_signals: antiSignals,
     pwatt_v0_score: row.pwattScore,
     summary: row.summary,

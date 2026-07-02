@@ -155,6 +155,49 @@ const attentionAggregateWireSchema = z.object({
   created_at: isoTimestampSchema,
 });
 
+// ---------------------------------------------------------------------------
+// Server-side coherence normalization (SPEC §25.5 "client aggregates are hints,
+// never sole truth"). A client (or a bot bypassing the browser pipeline) can
+// upload any bucket combination the schema permits; this pure, STATELESS gate
+// neutralizes the one PROVABLY-IMPOSSIBLE combination so a fabricated aggregate
+// cannot smuggle a signal the genuine client could never produce. It only ever
+// WEAKENS an aggregate (fail-toward-undercounting), so it can never penalize a
+// real reader, and it is applied once at the ingestion boundary before storage.
+//
+// Rule: reply-depth traversal REQUIRES active dwell. `reply_depth_bucket`
+// counts DISTINCT nested comment depths a reader visited — reaching them means
+// scrolling and reading the thread, which necessarily accrues active dwell
+// (`active_dwell_bucket !== 'none'`). Traversal with ZERO active dwell is a
+// client-impossible state, so it is neutralized to `none`. (Source/context
+// opens and return visits are NOT gated: an instant source click or a
+// cross-session return can genuinely occur with zero active dwell this window.)
+// ---------------------------------------------------------------------------
+export interface AttentionItemBuckets {
+  active_dwell_bucket: DwellBucket;
+  reply_depth_bucket: ReplyDepthBucket;
+}
+
+export interface CoherenceResult<T extends AttentionItemBuckets> {
+  item: T;
+  /** Machine-readable names of the neutralized incoherencies (metrics/audit). */
+  neutralized: readonly string[];
+}
+
+/**
+ * Neutralize provably-impossible bucket combinations on a single attention
+ * item. Pure and total: a coherent item is returned unchanged (same reference)
+ * with an empty `neutralized` list.
+ */
+export function coherentAttentionItem<T extends AttentionItemBuckets>(item: T): CoherenceResult<T> {
+  if (item.active_dwell_bucket === 'none' && item.reply_depth_bucket !== 'none') {
+    return {
+      item: { ...item, reply_depth_bucket: 'none' },
+      neutralized: ['reply_depth_without_dwell'],
+    };
+  }
+  return { item, neutralized: [] };
+}
+
 export const attentionAggregateSchema = z.preprocess((value) => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
   const aggregate = value as Record<string, unknown>;

@@ -233,6 +233,31 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
     expect(Math.abs(purgeAfter - expected)).toBeLessThan(5_000);
   });
 
+  it('neutralizes an incoherent aggregate (reply traversal with zero dwell, §25.5)', async () => {
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const event = attentionEvent(userId, {
+      items: [
+        {
+          story_id: '55555555-5555-4555-8555-555555555555',
+          active_dwell_bucket: 'none',
+          source_opened: false,
+          context_opened: false,
+          reply_depth_bucket: 'deep', // client-impossible with zero active dwell
+          return_visit_count_bucket: 'none',
+        },
+      ],
+    });
+    const res = await app().request(post('/v1/events/attention', event, cookie));
+    expect(res.status).toBe(202);
+    // The stored event payload has the fabricated traversal neutralized…
+    const stored = await fixture.events.eventStore.listByOwner(userId);
+    const items = (stored[0]?.payload as { items?: Array<{ reply_depth_bucket?: string }> }).items;
+    expect(items?.[0]?.reply_depth_bucket).toBe('none');
+    // …and so does the durable §22.1 aggregate row.
+    const rows = await fixture.events.attentionStore.listByUser(userId);
+    expect(rows[0]?.reply_depth_bucket).toBe('none');
+  });
+
   it('a mid-session settings change takes effect on the next event', async () => {
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     expect(

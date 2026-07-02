@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   activeDwellBucket,
   attentionAggregateSchema,
+  coherentAttentionItem,
   DWELL_BUCKETS,
   replyDepthBucket,
   returnVisitCountBucket,
@@ -141,5 +142,36 @@ describe('attentionAggregateSchema', () => {
 
   it('rejects a non-uuid story id', () => {
     expect(() => attentionAggregateSchema.parse({ ...valid, story_id: 'not-a-uuid' })).toThrow();
+  });
+});
+
+describe('coherentAttentionItem (§25.5 client-aggregates-are-hints gate)', () => {
+  it('neutralizes reply-depth traversal claimed with zero active dwell', () => {
+    const result = coherentAttentionItem({
+      active_dwell_bucket: 'none',
+      reply_depth_bucket: 'deep',
+      source_opened: false,
+    });
+    expect(result.item.reply_depth_bucket).toBe('none');
+    expect(result.neutralized).toEqual(['reply_depth_without_dwell']);
+    // Fields other than the incoherent one are preserved.
+    expect(result.item.source_opened).toBe(false);
+  });
+
+  it('leaves a coherent item unchanged (same reference, no annotations)', () => {
+    const coherent = { active_dwell_bucket: 'medium', reply_depth_bucket: 'deep' } as const;
+    const result = coherentAttentionItem(coherent);
+    expect(result.item).toBe(coherent);
+    expect(result.neutralized).toEqual([]);
+    // Traversal with SOME dwell is genuine; never neutralized.
+    expect(
+      coherentAttentionItem({ active_dwell_bucket: 'glance', reply_depth_bucket: 'shallow' })
+        .neutralized,
+    ).toEqual([]);
+    // Zero-dwell WITHOUT traversal is coherent (instant source click, etc.).
+    expect(
+      coherentAttentionItem({ active_dwell_bucket: 'none', reply_depth_bucket: 'none' })
+        .neutralized,
+    ).toEqual([]);
   });
 });

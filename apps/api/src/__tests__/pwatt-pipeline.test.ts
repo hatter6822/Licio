@@ -421,6 +421,53 @@ describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
     const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     expect(report.burstsDetected).toBe(1);
   });
+
+  it('a FRESH-account item earns LESS PWAtt score than an AGED one with identical attention', async () => {
+    // Below the burst floor (3 actors < minVolume 10) so anti-signal attenuation
+    // never fires — this isolates the per-actor account-age SCORE scaling: each
+    // fresh account (trust 0.5) contributes half an aged account (trust 1.0).
+    async function attendedStory(prefix: string, accountAgeMs: number): Promise<string> {
+      const storyId = randomUUID();
+      for (let i = 0; i < 3; i += 1) {
+        const { userId } = await seedUserWithSession(fixture.identity, {
+          handle: `${prefix}${i}s`,
+          accountAgeMs,
+        });
+        await ingestAttention(userId, storyId, {
+          items: [
+            {
+              story_id: storyId,
+              active_dwell_bucket: 'extended',
+              source_opened: true,
+              context_opened: true,
+              reply_depth_bucket: 'shallow',
+              return_visit_count_bucket: 'several',
+            },
+          ],
+        });
+        await fixture.events.eventStore.insertMany([
+          contributionRow(storyId, userId, 'evidence', { hasCitation: true }),
+        ]);
+      }
+      return storyId;
+    }
+    const agedStory = await attendedStory('aged', 500 * 86_400_000); // trust 1.0
+    const freshStory = await attendedStory('fresh', 1 * 86_400_000); // trust 0.5
+    const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    expect(report.burstsDetected).toBe(0); // no anti-signal confound
+
+    const aged = await fixture.events.invariantStore.latest('PWAtt_v1', agedStory);
+    const fresh = await fixture.events.invariantStore.latest('PWAtt_v1', freshStory);
+    expect(asNumber(fresh?.scoreVector['active_attention'], 1)).toBeLessThan(
+      asNumber(aged?.scoreVector['active_attention'], 0),
+    );
+    expect(asNumber(fresh?.scoreVector['participation'], 1)).toBeLessThan(
+      asNumber(aged?.scoreVector['participation'], 0),
+    );
+    // The anti-signal factor is 1 for both (no burst) — the difference is trust.
+    expect(fresh?.scoreVector['anti_signal_factor']).toBe(1);
+    expect(aged?.scoreVector['anti_signal_factor']).toBe(1);
+  });
 });
 
 describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
@@ -471,6 +518,19 @@ describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
     const v0 = await fixture.events.invariantStore.latest('PWAtt_v0', storyId);
     expect(v0?.scoreVector['score']).toBe(0); // pinned at the freeze-time score
     expect(v0?.scoreVector['raw_score']).toBeGreaterThan(0); // raw kept for audit
+
+    // WS-E.2.3e freeze binds the SERVED COMPONENTS the ranking feature store
+    // reads (§5.3 "freeze ranking growth"): a frozen item's active_attention /
+    // participation are pinned (0 here — the cascade was the item's first
+    // window, no prior legitimate level), while the RAW components record the
+    // late reader's real attention for audit. Without this, the late reader's
+    // fresh attention would keep growing the frozen item's rank.
+    expect(v0?.scoreVector['active_attention']).toBe(0); // served: pinned
+    expect(v0?.scoreVector['raw_active_attention']).toBeGreaterThan(0); // raw: real
+    const v1 = await fixture.events.invariantStore.latest('PWAtt_v1', storyId);
+    expect(v1?.scoreVector['active_attention']).toBe(0); // served: pinned
+    expect(v1?.scoreVector['participation']).toBe(0); // served: pinned
+    expect(v1?.scoreVector['raw_active_attention']).toBeGreaterThan(0); // raw: real
   });
 
   it('isolated criticism does not trigger a cascade (conservative detector)', async () => {
@@ -677,11 +737,11 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt_v1', evidenceItem);
     const questionV1 = await fixture.events.invariantStore.latest('PWAtt_v1', questionItem);
+    // The served `participation` component (what ranking consumes) reflects the
+    // hierarchy — evidence outranks a bare question. (No composite `total` is
+    // stored: the §5.4 composition is @licio/ranking's, PR7.)
     expect(evidenceV1?.scoreVector['participation']).toBeGreaterThan(
       asNumber(questionV1?.scoreVector['participation'], Number.POSITIVE_INFINITY),
-    );
-    expect(evidenceV1?.scoreVector['total']).toBeGreaterThan(
-      asNumber(questionV1?.scoreVector['total'], Number.POSITIVE_INFINITY),
     );
     // v0 (uniform weights) sees them identically — the control assertion.
     const evidenceV0 = await fixture.events.invariantStore.latest('PWAtt_v0', evidenceItem);
@@ -714,9 +774,10 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
       },
       contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
       attentionDimensions: {
-        dwell: { weightPct: 50, curve },
-        source: { weightPct: 30, curve },
+        dwell: { weightPct: 40, curve },
+        source: { weightPct: 25, curve },
         context: { weightPct: 20, curve },
+        traversal: { weightPct: 15, curve },
       },
       participationDimensions: {
         returns: { weightPct: 45, curve },
@@ -726,6 +787,7 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
       accusationDownweight: 0.25,
       rapidThreshold: 5,
       rapidDampening: 0.3,
+      antiSignalAttenuation: { coordinatedBurstMax: 0.5, harassmentCascade: 0.3 },
     });
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const after = await fixture.events.invariantStore.latest('PWAtt_v1', itemId);

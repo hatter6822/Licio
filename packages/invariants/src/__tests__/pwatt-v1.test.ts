@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyPenalties,
+  applySafetyStateToComponents,
   applySafetyStateToScore,
   applySaturation,
   assertV1HierarchyOrder,
@@ -386,5 +387,36 @@ describe('safety-state constraints (WS-E.2.3e)', () => {
     expect(applySafetyStateToScore({ safetyState: 'frozen', frozenScore: 0.4 }, 0.9)).toBe(0.4);
     expect(applySafetyStateToScore({ safetyState: 'frozen', frozenScore: null }, 0.9)).toBe(0);
     expect(applySafetyStateToScore({ safetyState: 'removed', frozenScore: 0.4 }, 0.9)).toBe(0);
+  });
+
+  it('pins the SERVED COMPONENTS while frozen (§5.3 freeze growth), zeroes removed', () => {
+    const candidate = { activeAttention: 0.9, participation: 0.8 };
+    // normal ⇒ passthrough.
+    expect(
+      applySafetyStateToComponents({ safetyState: 'normal', frozenScore: null }, candidate),
+    ).toEqual(candidate);
+    // frozen ⇒ pinned at the freeze-time level (growth denied).
+    expect(
+      applySafetyStateToComponents(
+        {
+          safetyState: 'frozen',
+          frozenScore: 0.4,
+          frozenActiveAttention: 0.3,
+          frozenParticipation: 0.2,
+        },
+        candidate,
+      ),
+    ).toEqual({ activeAttention: 0.3, participation: 0.2 });
+    // frozen with no captured level ⇒ pinned to 0 (first-window cascade).
+    expect(
+      applySafetyStateToComponents({ safetyState: 'frozen', frozenScore: null }, candidate),
+    ).toEqual({ activeAttention: 0, participation: 0 });
+    // removed ⇒ zeroed regardless of any pinned level.
+    expect(
+      applySafetyStateToComponents(
+        { safetyState: 'removed', frozenScore: null, frozenActiveAttention: 0.5 },
+        candidate,
+      ),
+    ).toEqual({ activeAttention: 0, participation: 0 });
   });
 });

@@ -38,6 +38,10 @@ export interface ItemSafetySnapshot {
   safetyState: ItemSafetyState;
   /** The score pinned at freeze time; null while not frozen. */
   frozenScore: number | null;
+  /** ActiveAttention pinned at freeze time; null when not frozen / unknown. */
+  frozenActiveAttention?: number | null;
+  /** ConstructiveParticipation pinned at freeze time; null when not frozen. */
+  frozenParticipation?: number | null;
 }
 
 /**
@@ -57,5 +61,37 @@ export function applySafetyStateToScore(
       return snapshot.frozenScore ?? 0;
     case 'removed':
       return 0;
+  }
+}
+
+export interface PwattComponentPair {
+  activeAttention: number;
+  participation: number;
+}
+
+/**
+ * Apply the safety-state constraint to the SERVED PWAtt components (§5.3
+ * "freeze ranking growth"). Because the WS-I ranking feature store consumes the
+ * stored `active_attention`/`participation` — NOT the composite `score` — the
+ * freeze must pin the COMPONENTS too, or a frozen item keeps growing from fresh
+ * (cascade-inflated) attention. `frozen` pins each component at its freeze-time
+ * value (0 when unknown — a brand-new item whose first window is a cascade has
+ * no legitimate prior level to preserve); `removed` zeroes both; `normal`
+ * passes the candidate components through unchanged.
+ */
+export function applySafetyStateToComponents(
+  snapshot: ItemSafetySnapshot,
+  candidate: PwattComponentPair,
+): PwattComponentPair {
+  switch (snapshot.safetyState) {
+    case 'normal':
+      return candidate;
+    case 'frozen':
+      return {
+        activeAttention: snapshot.frozenActiveAttention ?? 0,
+        participation: snapshot.frozenParticipation ?? 0,
+      };
+    case 'removed':
+      return { activeAttention: 0, participation: 0 };
   }
 }

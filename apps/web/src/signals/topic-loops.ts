@@ -24,6 +24,23 @@ import {
 
 const STORAGE_KEY = 'licio.topic-sequence.v1';
 const SEQUENCE_CAP = 200;
+/** Per-topic-cluster narrow-loop prompt dismissals for the SESSION (dies with
+ *  it, same as the sequence). Prevents the prompt re-nagging on every story in
+ *  the same loop after the reader has already dismissed it once. */
+const DISMISSED_KEY = 'licio.loop-dismissed.v1';
+
+function readDismissed(storage: Storage): Set<string> {
+  try {
+    const raw = storage.getItem(DISMISSED_KEY);
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((id): id is string => typeof id === 'string'))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
 
 function readSequence(storage: Storage): TopicTransition[] {
   try {
@@ -85,10 +102,32 @@ export class TopicLoopTracker {
     };
   }
 
+  /** Record that the reader dismissed the narrow-loop prompt for this topic
+   *  cluster — session-scoped, so it does not re-nag on the next story in the
+   *  same loop (WS-H.6.1c: a soft, non-repeating intervention). */
+  dismissPrompt(topicClusterId: string): void {
+    if (!topicClusterId) return;
+    const dismissed = readDismissed(this.#storage);
+    dismissed.add(topicClusterId);
+    try {
+      this.#storage.setItem(DISMISSED_KEY, JSON.stringify([...dismissed]));
+    } catch {
+      // Storage full/unavailable: the prompt may re-show (best-effort).
+    }
+  }
+
+  /** Whether the narrow-loop prompt for this topic cluster was dismissed this
+   *  session (empty/absent id ⇒ never dismissed). */
+  isPromptDismissed(topicClusterId: string | null | undefined): boolean {
+    if (!topicClusterId) return false;
+    return readDismissed(this.#storage).has(topicClusterId);
+  }
+
   /** PHI-4: clear the topic-sequence state. Touches nothing else. */
   reset(): void {
     try {
       this.#storage.removeItem(STORAGE_KEY);
+      this.#storage.removeItem(DISMISSED_KEY);
     } catch {
       // Already unavailable — nothing to clear.
     }

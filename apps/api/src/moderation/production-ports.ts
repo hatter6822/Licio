@@ -199,7 +199,13 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
       await deps.safetyStore.set({
         itemId: targetId,
         safetyState: itemSafetyFor(state),
+        // A moderation-driven state carries no captured PWAtt level: a null
+        // freeze pins the served components to 0 (conservative — moderation is
+        // a stronger action than the automatic harassment-cascade freeze, which
+        // pins at the pre-cascade level via the scoring path).
         frozenScore: null,
+        frozenActiveAttention: null,
+        frozenParticipation: null,
         caseId,
         updatedBy: actorRef,
         updatedAt: new Date(deps.now()).toISOString(),

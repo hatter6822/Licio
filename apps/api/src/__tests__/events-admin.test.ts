@@ -121,25 +121,23 @@ describe('pwatt-config writes (config-time rejection, WS-E.2.3a-d)', () => {
     expect(await fixture.events.configStore.get('trigger_threshold')).toEqual({ value: 42 });
   });
 
-  it('rejects an out-of-guardrail ranking profile with 422 (never stored)', async () => {
+  it('rejects the RETIRED ranking-profile/penalty pwatt keys (now WS-I ranking config only)', async () => {
+    // PR7 single-sourced the §5.4 composition config into `ranking.*`; the
+    // pwatt engine no longer holds ranking profiles or penalty coefficients, so
+    // a steward write to either retired key is an unknown-knob 400 (never stored).
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
-    const res = await app().request(
-      request(
-        '/v1/events/admin/pwatt-config',
-        'PUT',
-        {
-          key: 'ranking_profiles',
-          value: {
-            profiles: [{ name: 'bad', weights: { wA: 45, wP: 25, wE: 10, wS: 10, wC: 10 } }],
-          },
-        },
-        steward.cookie,
-      ),
-    );
-    expect(res.status).toBe(422);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toMatch(/guardrail/);
-    expect(await fixture.events.configStore.get('ranking_profiles')).toBeNull();
+    for (const key of ['ranking_profiles', 'penalty_coefficients']) {
+      const res = await app().request(
+        request(
+          '/v1/events/admin/pwatt-config',
+          'PUT',
+          { key, value: { profiles: [] } },
+          steward.cookie,
+        ),
+      );
+      expect(res.status).toBe(400);
+      expect(await fixture.events.configStore.get(key)).toBeNull();
+    }
   });
 
   it('rejects an unknown config key with 400', async () => {

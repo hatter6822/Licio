@@ -23,7 +23,7 @@
 // dampening factor and an annotation (no ranking power either way, §30.5).
 import type { EventContributionType, ReturnVisitBucket } from '@licio/shared';
 import type { ActorItemSummary, ItemAntiSignals } from './types.js';
-import { clamp01, toNonNegative } from './types.js';
+import { actorTrustFactor, clamp01, toNonNegative } from './types.js';
 
 /** Per-actor dimension weights, integer percents summing to 100, each <= 50. */
 export interface ParticipationWeights {
@@ -80,7 +80,11 @@ export const V0_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, num
 };
 
 export const DEFAULT_PARTICIPATION_CONFIG: ParticipationConfig = {
-  weights: { returnPct: 40, savePct: 10, contributionPct: 50 },
+  // `savePct` sits at the 1% floor (never 0 — the validator requires >= 1)
+  // until a privacy-reviewed save-signal pipeline exists (saves are
+  // client-local + private, §5.3/§19.2); its share is redistributed to
+  // `returnPct` so P normalizes honestly while contribution stays dominant.
+  weights: { returnPct: 49, savePct: 1, contributionPct: 50 },
   contribSaturation: 3,
   rapidThreshold: 5,
   rapidDampening: 0.3,
@@ -189,8 +193,11 @@ export function itemParticipation(
   let sum = 0;
   for (const actor of actors) {
     const result = actorParticipation(actor, config);
+    // The per-actor map keeps the UNWEIGHTED value (the user's own honest
+    // ledger record); account-age trust (WS-O.4.5) scales only the ITEM sum so
+    // a fresh-account brigade contributes less distribution power.
     perActor.set(actor.actor, result);
-    sum += result.value;
+    sum += actorTrustFactor(actor) * result.value;
   }
   let value = clamp01(sum / (sum + config.halfSaturationActors));
   const annotations: string[] = [];

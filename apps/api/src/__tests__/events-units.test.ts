@@ -77,21 +77,10 @@ describe('PWAtt runtime config loader (WS-E.2.3a-d fail-closed)', () => {
       volumeMultiplier: 3,
       baseRateFloor: 4,
     });
-    await fixture.events.configStore.set('penalty_coefficients', {
-      pM: 2,
-      pH: 0,
-      pT: 0,
-      pR: 1,
-    });
-    await fixture.events.configStore.set('ranking_profiles', {
-      profiles: [{ name: 'breaking_news', weights: { wA: 25, wP: 30, wE: 15, wS: 15, wC: 15 } }],
-    });
     await fixture.events.configStore.set('trigger_threshold', { value: 50 });
     const config = await loadPwattRuntimeConfig(fixture.events);
     expect(config.burst.minVolume).toBe(20);
     expect(config.cascade.hostileShareThreshold).toBe(0.7);
-    expect(config.penaltyCoefficients.pM).toBe(2);
-    expect(config.profiles).toHaveLength(1);
     expect(config.triggerThreshold).toBe(50);
     expect(rejections).toHaveLength(0);
   });
@@ -99,43 +88,12 @@ describe('PWAtt runtime config loader (WS-E.2.3a-d fail-closed)', () => {
   it('rejects invalid stored values and FAILS CLOSED to the defaults (logged)', async () => {
     await fixture.events.configStore.set('burst', { minVolume: 0 } as never);
     await fixture.events.configStore.set('cascade', { hostileShareThreshold: 2 } as never);
-    await fixture.events.configStore.set('penalty_coefficients', { pM: -1, pH: 0, pT: 0, pR: 0 });
-    await fixture.events.configStore.set('ranking_profiles', {
-      profiles: [{ name: 'bad', weights: { wA: 90, wP: 5, wE: 2, wS: 2, wC: 1 } }],
-    });
     await fixture.events.configStore.set('trigger_threshold', { value: 0 });
     const config = await loadPwattRuntimeConfig(fixture.events);
     expect(config.burst).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.burst);
     expect(config.cascade).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.cascade);
-    expect(config.penaltyCoefficients).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.penaltyCoefficients);
-    expect(config.profiles).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.profiles);
     expect(config.triggerThreshold).toBe(DEFAULT_PWATT_RUNTIME_CONFIG.triggerThreshold);
-    expect(rejections.length).toBe(5);
-  });
-
-  it('rejects a profile set where ANY profile is invalid (all-or-none)', async () => {
-    await fixture.events.configStore.set('ranking_profiles', {
-      profiles: [
-        { name: 'good', weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 } },
-        { name: 'broken', weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 14 } },
-      ],
-    });
-    const config = await loadPwattRuntimeConfig(fixture.events);
-    expect(config.profiles).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.profiles);
-    expect(rejections).toHaveLength(1);
-  });
-
-  it('rejects nonnegative-violating penalty coefficients even when shape-valid', async () => {
-    // Shape allows numbers >= 0; the semantic validator is exercised through
-    // a NaN that passes neither.
-    await fixture.events.configStore.set('penalty_coefficients', {
-      pM: Number.NaN,
-      pH: 0,
-      pT: 0,
-      pR: 0,
-    });
-    const config = await loadPwattRuntimeConfig(fixture.events);
-    expect(config.penaltyCoefficients).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.penaltyCoefficients);
+    expect(rejections.length).toBe(3);
   });
 });
 
@@ -523,11 +481,11 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
   const validCurve = { kind: 'logarithmic', scale: 4, saturationPoint: 25 };
   const validV0 = {
     activeAttention: {
-      weights: { dwellPct: 50, sourcePct: 30, contextPct: 20 },
+      weights: { dwellPct: 40, sourcePct: 25, contextPct: 20, traversalPct: 15 },
       halfSaturationActors: 8,
     },
     participation: {
-      weights: { returnPct: 40, savePct: 10, contributionPct: 50 },
+      weights: { returnPct: 49, savePct: 1, contributionPct: 50 },
       contribSaturation: 3,
       rapidThreshold: 5,
       rapidDampening: 0.3,
@@ -553,18 +511,20 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
     },
     contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
     attentionDimensions: {
-      dwell: { weightPct: 50, curve: validCurve },
-      source: { weightPct: 30, curve: validCurve },
+      dwell: { weightPct: 40, curve: validCurve },
+      source: { weightPct: 25, curve: validCurve },
       context: { weightPct: 20, curve: validCurve },
+      traversal: { weightPct: 15, curve: validCurve },
     },
     participationDimensions: {
-      returns: { weightPct: 40, curve: validCurve },
-      saves: { weightPct: 10, curve: validCurve },
+      returns: { weightPct: 49, curve: validCurve },
+      saves: { weightPct: 1, curve: validCurve },
       contributions: { weightPct: 50, curve: validCurve },
     },
     accusationDownweight: 0.25,
     rapidThreshold: 5,
     rapidDampening: 0.3,
+    antiSignalAttenuation: { coordinatedBurstMax: 0.5, harassmentCascade: 0.3 },
   };
 
   it('accepts a valid value for every key', () => {
@@ -583,15 +543,6 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
         },
       ],
       ['trust_weights', { new: 0.5, recent: 0.7, active: 0.9, established: 1 }],
-      ['penalty_coefficients', { pM: 1, pH: 1, pT: 1, pR: 0.5 }],
-      [
-        'ranking_profiles',
-        {
-          profiles: [
-            { name: 'breaking_news', weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 } },
-          ],
-        },
-      ],
       ['trigger_threshold', { value: 500 }],
     ];
     for (const [key, value] of valid) {
@@ -608,7 +559,7 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
           ...validV0,
           activeAttention: {
             ...validV0.activeAttention,
-            weights: { dwellPct: 50, sourcePct: 30, contextPct: 10 },
+            weights: { dwellPct: 50, sourcePct: 30, contextPct: 10, traversalPct: 5 },
           },
         },
         /sum to exactly 100/,
@@ -626,12 +577,6 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
       ['cascade', { hostileShareThreshold: 2 }, /./],
       // Non-monotone trust weights (new > recent) are rejected.
       ['trust_weights', { new: 1, recent: 0.5, active: 0.9, established: 1 }, /monotone/],
-      ['penalty_coefficients', { pM: -1, pH: 0, pT: 0, pR: 0 }, /./],
-      [
-        'ranking_profiles',
-        { profiles: [{ name: 'bad', weights: { wA: 45, wP: 25, wE: 10, wS: 10, wC: 10 } }] },
-        /guardrail/,
-      ],
       ['trigger_threshold', { value: 0 }, /./],
     ];
     for (const [key, value, pattern] of invalid) {
@@ -645,7 +590,7 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
     await fixture.events.configStore.set('v0', validV0);
     await fixture.events.configStore.set('v1', validV1);
     const applied = await loadPwattRuntimeConfig(fixture.events);
-    expect(applied.v0.participation.weights.returnPct).toBe(40);
+    expect(applied.v0.participation.weights.returnPct).toBe(49);
     expect(applied.v1.contributionWeights.evidence).toBe(1);
     expect(rejections).toHaveLength(0);
 

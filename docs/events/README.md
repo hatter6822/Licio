@@ -413,14 +413,32 @@ REDIS_URL=redis://localhost:6379 pnpm test
   the accusation downweight and the lifecycle activity triggers run on real
   conversation data; user-filed `moderation_concern` contributions carry
   ratified WS-A reason codes into the review queue.
-- **WS-H** — MERI/SCOI/PHI/Hodge providers behind the existing hooks
-  (`hooks.redundancy`, the wE/wS/wC component inputs, pH/pT penalty inputs);
-  MFCI consumes the burst signals already flowing through `hooks.mfci`.
+- **WS-H** — MERI/SCOI/PHI/Hodge feed the served §5.4 composite through the
+  WS-I feature store (the wE/wS/wC terms + the pM/pH/pT/pR penalties), NOT the
+  batch engine: the engine persists only the two CONTENT components it can
+  legitimately compute (`active_attention`, `participation`), and `@licio/ranking`
+  composes the full §5.4 at decision time (the baseline `B` is a per-request
+  quantity the batch cannot know). `hooks.redundancy` still supplies the MERI
+  redundancy input to that composition; MFCI consumes the burst signals flowing
+  through `hooks.mfci`. There is exactly ONE served §5.4 implementation — no
+  partial duplicate is stored (`invariant_outputs` PWAtt_v0/v1 rows are
+  strict-schema-pinned to the content components).
+- **PWAtt anti-abuse (bound to the SERVED path).** A window's own anti-signals
+  and account-age trust are consequential for ranking, not merely logged: a
+  detected coordinated burst / harassment cascade ATTENUATES the served
+  `active_attention`/`participation` (`antiSignalAttenuation`), a harassment
+  freeze PINS those components at their pre-cascade level (`item_safety_states`
+  `frozen_active_attention`/`frozen_participation`), each actor's contribution
+  is scaled by a coarse account-age trust weight (fresh/throwaway accounts count
+  less; the coarse privacy bucket is always full-trust so anonymity is never
+  penalized), and the ingestion boundary neutralizes the one provably-impossible
+  client-aggregate combination (reply traversal with zero active dwell, §25.5).
 - **WS-I** — CLOSED: the ranking pipeline consumes PWAtt components from
-  post-lift rows in its feature store (`docs/ranking/README.md`), the §30.5
-  lift shipped (`PWATT_V0_SHADOW_MODE = false`), the freshness baseline B is
-  computed at decision time, and `selectRankingInputs` is now the SAFE
-  FALLBACK's score-blind boundary.
+  post-lift rows in its feature store (`docs/ranking/README.md`) through the
+  SAME §30.5 gate at BOTH the feature-join AND the retrieval-eligibility read
+  (`pwattRowForRanking`), the §30.5 lift shipped (`PWATT_V0_SHADOW_MODE =
+  false`), the freshness baseline B is computed at decision time, and
+  `selectRankingInputs` is the SAFE FALLBACK's score-blind boundary.
 - **WS-J** — review/safety queues behind `hooks.reviewQueue`/`hooks.safetyQueue`;
   moderation resolution drives `resolveItemSafetyState`.
 - **WS-K** — a reviewed AI classifier behind the `classifyAccusationV0` seam.
@@ -440,6 +458,15 @@ REDIS_URL=redis://localhost:6379 pnpm test
 - **Burst-conditioning covariates** — base rates condition on the item's own
   trailing windows; time-of-day/topic/community covariates consume the
   WS-F/WS-G metadata (now present) and land with WS-H's MFCI.
+- **§5.3 "Save for later" signal (tracked debt).** Saves are currently
+  client-local (IndexedDB, private-by-default) and never leave the browser, so
+  the `saves` participation dimension is pinned to the 1% floor (its share
+  redistributed to `returns`, keeping `contributions` dominant). Scoring saves
+  needs a privacy-reviewed `content.saved` topic + client emitter (a save
+  reveals what a reader kept, §19.2) — a deliberate design decision, not a
+  mechanical wiring, so the dimension seam is preserved at the floor until that
+  review lands. `savedForLater` and the `saves` dimension are the integration
+  points.
 - **Cross-instance streaming** — the router is in-process over the durable
   Postgres log, with real per-consumer checkpoints and startup replay; a
   Redis Streams/broker binding can replace delivery behind the same

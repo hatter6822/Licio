@@ -25,6 +25,7 @@ import {
   type AttentionAggregate,
   type AttentionAggregateEvent,
   attentionAggregateEventSchema,
+  coherentAttentionItem,
   type PrivacySettings,
   type SourceOpenedAggregateEvent,
   TOPIC_REGISTRY,
@@ -165,6 +166,30 @@ export async function ingestAttentionEvents(
       continue;
     }
 
+    // 4b. Coherence normalization (SPEC §25.5 "client aggregates are hints"):
+    //     neutralize the one PROVABLY-impossible bucket combination before
+    //     storage, so a fabricated aggregate can't smuggle a client-impossible
+    //     signal (reply traversal with zero active dwell). Fail-open: only ever
+    //     WEAKENS the aggregate, never rejects it, never touches a real reader.
+    let eventForStorage: AttentionIngestEvent = event;
+    if (event.event_type === 'attention.aggregate') {
+      const neutralized: string[] = [];
+      const items = event.items.map((item) => {
+        const result = coherentAttentionItem(item);
+        if (result.neutralized.length > 0) neutralized.push(...result.neutralized);
+        return result.item;
+      });
+      if (neutralized.length > 0) {
+        eventForStorage = { ...event, items };
+        events.metrics.increment('events_attention_incoherent', 1);
+        events.log('events.attention.incoherent_neutralized', {
+          user_id: sessionUserId,
+          event_id: event.event_id,
+          neutralized: [...new Set(neutralized)],
+        });
+      }
+    }
+
     // 5. Build storage rows. The effective level is the MORE private of the
     //    claim and the user's durable identification floor (WS-E.1.3d): the
     //    claim can only ever STRENGTHEN pseudonymization, and a compromised
@@ -173,7 +198,7 @@ export async function ingestAttentionEvents(
     const pseudonymous = level === 'minimum';
     const purgeAfter = attentionPurgeAfterIso(decision.preference, eventMs, now);
     const storedPayload = asRecord(
-      pseudonymous ? { ...event, user_id: PSEUDONYMOUS_USER_ID } : event,
+      pseudonymous ? { ...eventForStorage, user_id: PSEUDONYMOUS_USER_ID } : eventForStorage,
     );
     const registryEntry = TOPIC_REGISTRY[event.event_type];
     storeIndexByEventId.set(event.event_id, outcomes.length);
@@ -196,15 +221,17 @@ export async function ingestAttentionEvents(
     toPublish.push(storedPayload as unknown as AttentionIngestEvent);
 
     // Durable §22.1 aggregate rows — only when the preference retains them.
-    if (decision.persistDurable && event.event_type === 'attention.aggregate') {
-      for (const item of event.items) {
+    // Built from the coherence-normalized items so a neutralized signal never
+    // reaches the durable store or the DSAR export.
+    if (decision.persistDurable && eventForStorage.event_type === 'attention.aggregate') {
+      for (const item of eventForStorage.items) {
         aggregateRowsByEvent.push({
           eventId: event.event_id,
           row: {
             aggregate_id: randomUUID(),
             user_id_or_privacy_bucket: pseudonymous ? PRIVACY_BUCKET : sessionUserId,
             story_id: item.story_id,
-            session_bucket: event.session_bucket,
+            session_bucket: eventForStorage.session_bucket,
             active_dwell_bucket: item.active_dwell_bucket,
             source_opened: item.source_opened,
             context_opened: item.context_opened,

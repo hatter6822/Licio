@@ -19,6 +19,7 @@ import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
+import { useRecordContextView } from '../../hooks/useRecordContextView.js';
 import { useT } from '../../i18n/index.js';
 import {
   useSavedStoriesQuery,
@@ -98,10 +99,17 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     if (firstTopic) tracker.recordVisit(firstTopic);
     setAssessment(tracker.assess());
   }, [topicIds]);
+  const loopedTopic = assessment.narrowLoop.topicClusterId;
+  // Reflect the PERSISTED per-cluster dismissal whenever the loop cluster
+  // changes: dismissing the prompt on one story suppresses it for every other
+  // story in the SAME loop this session (no per-mount re-nagging), while a
+  // genuinely NEW loop cluster can still surface it.
+  useEffect(() => {
+    setLoopPromptDismissed(getTopicLoopTracker().isPromptDismissed(loopedTopic));
+  }, [loopedTopic]);
   const loopDetected = !loopPromptDismissed && assessment.narrowLoop.detected;
   // Quiet-notification policy (WS-H.6.1c): a flagged topic's pushes show
   // silently for a while — never a buzz that reinforces the loop.
-  const loopedTopic = assessment.narrowLoop.topicClusterId;
   useEffect(() => {
     if (loopedTopic) void markTopicQuiet(loopedTopic);
   }, [loopedTopic]);
@@ -115,6 +123,12 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     }
     void navigate({ to: '/', search: { mode: 'source-diverse' } });
   };
+
+  // §5.3 context-open signal: fires when the "Where interpretations differ"
+  // context surface is genuinely engaged (scrolled into view and dwelled),
+  // populating `context_opened` — a live 20% share of ActiveAttention that had
+  // no client producer before.
+  const contextViewRef = useRecordContextView(storyId, interpretations.data !== undefined);
 
   const openReader = (): void => {
     getSignalProcessor().recordSourceOpen(openId.current, storyId);
@@ -139,7 +153,10 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
             {loopDetected ? (
               <NarrowLoopPrompt
                 onSeeBroader={broadenFeed}
-                onDismiss={() => setLoopPromptDismissed(true)}
+                onDismiss={() => {
+                  if (loopedTopic) getTopicLoopTracker().dismissPrompt(loopedTopic);
+                  setLoopPromptDismissed(true);
+                }}
               />
             ) : null}
             {data.media ? (
@@ -184,7 +201,9 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               />
             ) : null}
             {interpretations.data ? (
-              <WhereInterpretationsDiffer data={interpretations.data} />
+              <div ref={contextViewRef}>
+                <WhereInterpretationsDiffer data={interpretations.data} />
+              </div>
             ) : null}
           </article>
         )

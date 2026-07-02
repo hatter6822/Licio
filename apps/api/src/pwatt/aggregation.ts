@@ -254,8 +254,17 @@ export async function computeAggregationWindow(
   return { windowStart: fromIso, windowSize: size, items };
 }
 
-/** Convert a fold actor into the pure-scoring input shape. */
-export function toActorSummary(actorKey: string, fold: ActorFold): ActorItemSummary {
+/**
+ * Convert a fold actor into the pure-scoring input shape. `trustWeight`
+ * (WS-O.4.5) is the actor's account-age trust factor ∈ [0, 1] — the caller
+ * resolves it (the coarse privacy bucket and any unresolvable actor get 1, so
+ * anonymity is never penalized); absent ⇒ 1 (no effect).
+ */
+export function toActorSummary(
+  actorKey: string,
+  fold: ActorFold,
+  trustWeight = 1,
+): ActorItemSummary {
   return {
     actor: actorKey,
     dwellBucket: fold.dwellBucket,
@@ -263,8 +272,13 @@ export function toActorSummary(actorKey: string, fold: ActorFold): ActorItemSumm
     sourceBounceOnly: fold.sawBounceAdjacentOpen && !fold.sawMeaningfulSourceOpen,
     contextOpened: fold.contextOpened,
     returnVisitBucket: fold.returnVisitBucket,
+    // §5.3 thread traversal (SIG-ATT-TRAVERSE): the deduped max distinct
+    // reply-depth bucket the actor reached — now a scored ActiveAttention
+    // dimension, no longer collected-then-dropped at the fold boundary.
+    replyDepthBucket: fold.branchDepthBucket,
     contributions: fold.contributions,
     uncitedAccusationsByType: fold.uncitedAccusationsByType,
     savedForLater: 0,
+    trustWeight,
   };
 }
