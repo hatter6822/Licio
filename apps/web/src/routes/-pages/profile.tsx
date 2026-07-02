@@ -535,7 +535,7 @@ export function PrivacyPage(): React.ReactElement {
             <p className="text-sm text-ink-muted">
               {t(
                 'privacy.level.desc',
-                'This controls how identifiable your stored attention aggregates are. The strongest option, Minimum, replaces your account id with a coarse bucket so the aggregates can’t be linked back to you. Whichever you choose is enforced on the server, not just this device.',
+                'This controls how identifiable your stored attention aggregates are. The strongest option, Minimum, replaces your account id with a coarse bucket, so those aggregates aren’t directly tied to your account — though they still record coarse context such as which story and a session bucket. Whichever you choose is enforced on the server, not just this device.',
               )}
             </p>
           </Section>

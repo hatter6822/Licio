@@ -235,7 +235,7 @@ function warningBody(mode: OperationalMode, t: Translate): string {
   return warnClass(mode) === 'resource'
     ? t(
         'lcap.mode.warn.resource.body',
-        'This mode carries and re-shares other people’s public content, and uses more battery and storage. It is not anonymity: nearby devices can see this one is sharing. Only public content is ever carried — never members-only rooms or your attention data.',
+        'This mode carries and re-shares other people’s public content for nearby devices, and uses more battery and storage. It is not anonymity: nearby devices can see this one is sharing. The nearby courier only re-shares public content — never members-only rooms or your attention data; your own content still syncs through the server as usual.',
       )
     : t(
         'lcap.mode.warn.exposure.body',
