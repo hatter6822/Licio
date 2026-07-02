@@ -18,6 +18,7 @@ import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import {
   useSavedStoriesQuery,
@@ -65,6 +66,9 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const [loopPromptDismissed, setLoopPromptDismissed] = useState(false);
   const openId = useRef(`source-${storyId}`);
   const navigate = useNavigate();
+  // Return to wherever the story was opened from (front page, topic, room); a
+  // cold-loaded deep link falls back to the front page.
+  const goBack = useGoBack(() => void navigate({ to: '/' }));
   const setFeedMode = useUIStore((state) => state.setFeedMode);
   const authenticated = useAuthStore((state) => state.status === 'authenticated');
   const updateDurable = useUpdateDurablePrivacyMutation();
@@ -122,7 +126,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   };
 
   return (
-    <PageScaffold title={story.data?.title ?? t('story.title', 'Story')} query={story}>
+    <PageScaffold
+      title={story.data?.title ?? t('story.title', 'Story')}
+      onBack={goBack}
+      query={story}
+    >
       {(data) =>
         readerOpen && data.url ? (
           <SourceReader url={data.url} title={data.title} onClose={closeReader} />

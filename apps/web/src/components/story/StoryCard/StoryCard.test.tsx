@@ -143,4 +143,21 @@ describe('MERI exposure label (WS-H.2.3a)', () => {
     expect(screen.queryByText('Independent source')).not.toBeInTheDocument();
     expect(screen.queryByText('Duplicate context')).not.toBeInTheDocument();
   });
+
+  it('suppresses the redundant "Independent" origin badge beside "Independent source"', () => {
+    // origin === 'independent' + the MERI independent_source label would print
+    // "Independent" AND "Independent source" — the plain badge is the redundant
+    // echo, so only the richer exposure label survives.
+    render(<StoryCard {...sample} exposureLabel="independent_source" />);
+    expect(screen.getByText('Independent source')).toBeInTheDocument();
+    expect(screen.queryByText('Independent')).not.toBeInTheDocument();
+  });
+
+  it('keeps the origin badge when the exposure label does not echo it', () => {
+    // An independent-origin story with a DIFFERENT exposure label ("New angle")
+    // has no collision, so the origin badge still shows.
+    render(<StoryCard {...sample} exposureLabel="new_angle" />);
+    expect(screen.getByText('Independent')).toBeInTheDocument();
+    expect(screen.getByText('New angle')).toBeInTheDocument();
+  });
 });

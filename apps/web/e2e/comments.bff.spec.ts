@@ -40,11 +40,9 @@ test.describe('WS-T comment flow (BFF-in-the-loop)', () => {
     const results = await new AxeBuilder({ page }).withTags(A11Y_TAGS).analyze();
     expect(results.violations).toEqual([]);
 
-    // The always-present return control lands back on the story's comment section.
-    await page
-      .getByRole('link', { name: /back to the story/i })
-      .first()
-      .click();
+    // The upper-left page-header back button lands back on the story's comment
+    // section (the duplicate lower "Back to the story" link was removed).
+    await page.getByRole('button', { name: /go back/i }).click();
     await expect(page).toHaveURL(new RegExp(`/stories/${PUBLIC_STORY_ID}#comments$`));
     await expect(page.getByRole('heading', { name: 'Conversation', level: 2 })).toBeVisible();
   });

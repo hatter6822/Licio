@@ -2,11 +2,13 @@
 //
 // WS-T.7 inline story comment section.  Comments render through the sanctioned
 // UGC sink and stay strictly no-applause (no likes, votes, counters-as-reactions,
-// or popularity affordances).  To protect the story's reading area this section
-// shows ONLY ONE nested reply layer; deeper threads — and the full conversation —
-// open in the dedicated comment-centric page (`/stories/$storyId/comments`) via
-// the per-thread "continue" links and the section-level "Show more" entry.
-import { Link } from '@tanstack/react-router';
+// or popularity affordances).  The section shows up to TWO nested reply layers
+// inline (parent → reply → reply-to-reply); a thread that continues deeper — or a
+// comment with more direct replies than are shown — links into the dedicated
+// comment-centric page (`/stories/$storyId/comments`, re-rooted at that comment)
+// via each comment's "Continue this thread" / "Show all replies" link.  More
+// TOP-LEVEL comments load in place ("Load more comments") — there is no separate
+// "show more" jump that duplicated the per-thread continuation.
 import { useMemo, useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useCommentStream } from '../../lib/comment-stream.js';
@@ -26,12 +28,16 @@ export interface CommentSectionProps {
 
 type CommentFilter = 'all' | 'sources' | 'corrections';
 
-/** The inline section renders exactly one nested reply layer. */
-const INLINE_MAX_DEPTH = 1;
+/** The inline section renders up to two nested reply layers (parent → reply →
+ *  reply-to-reply); anything deeper links into the dedicated comment page. */
+const INLINE_MAX_DEPTH = 2;
 
 export function CommentSection({ storyId, threadId }: CommentSectionProps): React.ReactElement {
   const [filter, setFilter] = useState<CommentFilter>('all');
-  const comments = useStoryCommentsQuery(storyId, filter === 'all' ? {} : { filter });
+  const comments = useStoryCommentsQuery(
+    storyId,
+    filter === 'all' ? { depth: INLINE_MAX_DEPTH } : { filter, depth: INLINE_MAX_DEPTH },
+  );
   const stream = useCommentStream(storyId);
   const options = useMemo(
     () => [
@@ -43,18 +49,6 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
   );
 
   const visible = comments.data?.comments ?? [];
-  // There is "more to see" only when something genuinely lies past the single
-  // inline layer — exactly the condition under which a `CommentNode` renders a
-  // "Show all"/"Continue" link: a top-level comment has more direct replies than
-  // are shown (`reply_count > replies.length`), or a SHOWN depth-1 reply itself
-  // has replies (`reply_count > 0`).  A top-level comment whose only reply is
-  // already shown adds nothing, so it must NOT trigger the entry.
-  const hasDeeperThreads = visible.some(
-    (comment) =>
-      comment.reply_count > comment.replies.length ||
-      comment.replies.some((reply) => reply.reply_count > 0),
-  );
-  const showFullConversation = comments.hasMore || hasDeeperThreads;
 
   return (
     <section id="comments" className="mt-6 flex flex-col gap-4" aria-labelledby="comments-heading">
@@ -127,22 +121,18 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
           ))}
         </div>
       )}
-      {/* The "Show more" entry into the comment-centric reading page (WS-T.7.2):
-          comments only, two nested layers, with deeper drill-down. */}
-      {showFullConversation ? (
-        <Link
-          to="/stories/$storyId/comments"
-          params={{ storyId }}
-          search={{}}
-          className={cn(
-            'flex items-center justify-center gap-2 p-3 text-base font-semibold text-primary-on-soft',
-            raisedSurface,
-            raisedInteractive,
-          )}
+      {/* More TOP-LEVEL comments than the first page — appended in place. Deeper
+          replies are reached per-thread via each comment's "Continue" link, so
+          this never duplicates that continuation. */}
+      {comments.hasMore ? (
+        <Button
+          type="button"
+          variant="secondary"
+          loading={comments.isFetchingMore}
+          onClick={() => comments.loadMore()}
         >
-          Show more comments
-          <Icon name="chevron-right" className="size-5" aria-hidden />
-        </Link>
+          Load more comments
+        </Button>
       ) : null}
     </section>
   );

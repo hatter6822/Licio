@@ -37,6 +37,7 @@ import { Input } from '../../ui/Input/index.js';
 import { RadioGroup } from '../../ui/RadioGroup/index.js';
 import { Select } from '../../ui/Select/index.js';
 import { TextArea } from '../../ui/TextArea/index.js';
+import { MarkdownEditor } from '../MarkdownEditor/index.js';
 
 /** The composer modes are exactly the persisted story-draft modes (one SSOT). */
 export type StoryComposerMode = StoryDraftMode;
@@ -304,7 +305,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       next['reason'] = t('storyComposer.err.reason', 'Add a short reason for this link.');
     }
     if (mode === 'original_brief' && body.trim().length === 0) {
-      next['body'] = t('storyComposer.err.body', 'Write a brief before submitting.');
+      next['body'] = t('storyComposer.err.body', 'Add some text before submitting.');
     }
     if (isMedia && file === null) {
       next['file'] = t('storyComposer.err.file', 'Choose a file to upload.');
@@ -486,13 +487,13 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
           setPosterFile(null);
         }}
         options={[
-          { value: 'link', label: t('storyComposer.mode.link', 'A link') },
-          { value: 'original_brief', label: t('storyComposer.mode.brief', 'A brief') },
+          { value: 'link', label: t('storyComposer.mode.link', 'Link') },
+          { value: 'original_brief', label: t('storyComposer.mode.brief', 'Text') },
           // Media modes appear only when the rollout flag is on (WS-Q.6.2).
           ...(content.media_posts_enabled
             ? [
-                { value: 'image_post', label: t('storyComposer.mode.image', 'An image') },
-                { value: 'video_post', label: t('storyComposer.mode.video', 'A video') },
+                { value: 'image_post', label: t('storyComposer.mode.image', 'Image') },
+                { value: 'video_post', label: t('storyComposer.mode.video', 'Video') },
               ]
             : []),
         ]}
@@ -558,11 +559,16 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       ) : null}
 
       {mode === 'original_brief' ? (
-        <TextArea
-          label={t('storyComposer.body.label', 'Your brief')}
+        <MarkdownEditor
+          label={t('storyComposer.body.label', 'Text')}
           value={body}
-          onChange={(e) => setBody(e.target.value)}
+          onChange={setBody}
           required
+          maxLength={20_000}
+          helperText={t(
+            'storyComposer.body.help',
+            'Use the toolbar or Markdown syntax to format. Preview shows exactly how it will read.',
+          )}
           {...(errors['body'] ? { error: errors['body'] } : {})}
         />
       ) : null}

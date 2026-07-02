@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-T.7 story comment reads.  The story-page section materializes ONE nested
-// reply layer (`depth: 1`); the dedicated comment-centric page materializes TWO
-// (`depth: 2`) and can re-root at any comment (`parentId`) so a reader drills as
-// deep as they like one focused view at a time.  Either way the wire tree is
+// WS-T.7 story comment reads.  Both the inline story-page section and the
+// dedicated comment-centric page materialize up to TWO nested reply layers
+// (`depth: 2`); the dedicated page additionally re-roots at any comment
+// (`parentId`) so a reader drills as deep as they like one focused view at a
+// time (a focused re-rooted view materializes `depth: 1`).  Either way the wire tree is
 // assembled server-side from REPLY_PREVIEW-bounded fetches, then projected
 // holistically (one visibility pass, one child-count batch, one author/media
 // batch) so the recursion never fans out into N+1 round-trips.
@@ -37,8 +38,8 @@ export interface CommentPageOptions {
   cursor: string | null;
   order: 'newest' | 'oldest';
   filter?: CommentFilter;
-  /** Nested reply layers to materialize per listed root: 1 for the inline story
-   *  section, 2 for the dedicated comment-centric page. */
+  /** Nested reply layers to materialize per listed root: 2 for the inline story
+   *  section and the unrooted comment page, 1 for a focused re-rooted view. */
   depth: number;
   /** Focused (rooted) mode: list this comment's direct replies instead of the
    *  thread's top-level roots, and return the comment itself as `anchor`. */

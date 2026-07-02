@@ -15,3 +15,4 @@ export {
   VoiceDictation,
   type VoiceDictationProps,
 } from './ComposerAffordances/index.js';
+export { MarkdownEditor, type MarkdownEditorProps } from './MarkdownEditor/index.js';

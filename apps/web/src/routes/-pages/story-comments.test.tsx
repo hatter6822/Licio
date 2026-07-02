@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-T.7.2 dedicated comment-centric page: up to two nested reply layers, a
-// focused (rooted) anchor with breadcrumbs, and an always-present return to the
-// story-page comment section.
+// focused (rooted) anchor whose replies nest INSIDE its article, drill-down
+// breadcrumbs, and the page-header upper-left back button to the story.
 import type { CommentItem } from '@licio/shared';
 import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
@@ -145,8 +145,10 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
     );
     // Unrooted view exposes a top-level composer.
     expect(screen.getByRole('textbox', { name: 'Write a comment' })).toBeInTheDocument();
-    // The return-to-story control is always present.
-    expect(screen.getAllByRole('link', { name: /back to the story/i }).length).toBeGreaterThan(0);
+    // The return-to-story control is the page-header upper-left back button (there
+    // is no longer a duplicate lower "Back to the story" link).
+    expect(screen.getByRole('button', { name: /go back/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /back to the story/i })).not.toBeInTheDocument();
   });
 
   it('renders the focused anchor with breadcrumbs when rooted', () => {

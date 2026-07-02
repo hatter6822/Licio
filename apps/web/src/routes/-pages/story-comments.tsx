@@ -3,9 +3,11 @@
 // WS-T.7.2 dedicated comment-centric page (`/stories/$storyId/comments`).  This
 // surface contains ONLY comments — no story body, media, or sidebars — so the
 // reading area is maximal.  It renders up to TWO nested reply layers and lets a
-// reader drill arbitrarily deep by re-rooting at any comment (`?root=`), while a
-// persistent "Back to the story" control and an up-one-level breadcrumb always
-// return them to the original story-page comment section.
+// reader drill arbitrarily deep by re-rooting at any comment (`?root=`); the
+// page header's upper-left back button returns them to the story-page comment
+// section, and an up-one-level breadcrumb walks back through the drill-down.  In
+// the focused (rooted) view the anchor's replies nest INSIDE its article for a
+// tighter, more space-efficient reading column.
 import type { CommentItem } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useState } from 'react';
@@ -26,7 +28,7 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
-import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
+import { raisedSurface } from '../../lib/surfaces.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 
 /** Unrooted "all comments" view: two nested reply layers per top-level comment. */
@@ -35,21 +37,26 @@ const ALL_COMMENTS_DEPTH = 2;
  *  layers of comments below the anchor). */
 const FOCUSED_DEPTH = 1;
 
-/** The focused comment, rendered as a read-only context header above its replies
- *  (which are the page's comment list).  Replying here adds a direct reply. */
+/** The focused comment: a context header (the "Replying within" tile) whose
+ *  replies — this level's comment list — nest INSIDE its article for a tighter
+ *  reading column (WS-T.7.2), rather than sitting in a separate sibling article.
+ *  Replying on the anchor itself adds a direct reply. */
 function AnchorComment({
   storyId,
   anchor,
+  children,
 }: {
   storyId: string;
   anchor: CommentItem;
+  /** This level's comments (the anchor's replies), nested inside the article. */
+  children: React.ReactNode;
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
   return (
     <article
       // A surface-tinted raised tile (vs. the canvas-filled reply tiles) plus the
       // "Replying within" label sets the focused anchor apart from its replies.
-      className={cn(raisedSurface, 'flex flex-col gap-2 bg-surface p-3')}
+      className={cn(raisedSurface, 'flex flex-col gap-3 bg-surface p-3')}
       aria-label="Focused comment"
     >
       <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">Replying within</p>
@@ -74,28 +81,34 @@ function AnchorComment({
           onCancel={() => setReplying(false)}
         />
       ) : null}
+      {/* This level's comments nest here, inside the anchor's article. */}
+      {children}
     </article>
   );
 }
 
+/** Drill-down breadcrumbs for the focused (rooted) view: "All comments" and,
+ *  for a reply, "Up one level".  Returning to the story is the page header's
+ *  upper-left back button, so it is intentionally NOT duplicated here.  The
+ *  unrooted view has no drill-down, so this renders nothing. */
 function Breadcrumbs({
   storyId,
   anchor,
-  onBackToStory,
 }: {
   storyId: string;
   anchor: CommentItem | null;
-  onBackToStory: () => void;
-}): React.ReactElement {
+}): React.ReactElement | null {
+  if (!anchor) return null;
   const linkClass =
     'inline-flex items-center gap-1 text-sm font-medium text-primary-on-soft underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
   return (
     <nav className="flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="Comment navigation">
-      <button type="button" className={linkClass} onClick={onBackToStory}>
-        <Icon name="arrow-left" className="size-4" aria-hidden />
-        Back to the story
-      </button>
-      {anchor ? (
+      <Link to="/stories/$storyId/comments" params={{ storyId }} search={{}} className={linkClass}>
+        All comments
+      </Link>
+      {/* Only a reply has somewhere to go "up" to; for a top-level anchor,
+          "All comments" above already IS the parent level. */}
+      {anchor.parent_contribution_id ? (
         <>
           <span className="text-ink-muted" aria-hidden>
             ·
@@ -103,29 +116,12 @@ function Breadcrumbs({
           <Link
             to="/stories/$storyId/comments"
             params={{ storyId }}
-            search={{}}
+            search={{ root: anchor.parent_contribution_id }}
             className={linkClass}
           >
-            All comments
+            <Icon name="chevron-up" className="size-4" aria-hidden />
+            Up one level
           </Link>
-          {/* Only a reply has somewhere to go "up" to; for a top-level anchor,
-              "All comments" above already IS the parent level. */}
-          {anchor.parent_contribution_id ? (
-            <>
-              <span className="text-ink-muted" aria-hidden>
-                ·
-              </span>
-              <Link
-                to="/stories/$storyId/comments"
-                params={{ storyId }}
-                search={{ root: anchor.parent_contribution_id }}
-                className={linkClass}
-              >
-                <Icon name="chevron-up" className="size-4" aria-hidden />
-                Up one level
-              </Link>
-            </>
-          ) : null}
         </>
       ) : null}
     </nav>
@@ -158,11 +154,53 @@ function StoryCommentsContent({
   const threadId = story.data?.thread_id ?? anchor?.thread_id ?? list[0]?.thread_id ?? null;
   const storyTitle = story.data?.title ?? null;
 
+  // This level's comments + the load-more control, rendered EITHER nested inside
+  // the focused anchor's article (rooted view) or as the page's top-level list
+  // (unrooted view).
+  const listAndMore = (
+    <>
+      {list.length === 0 ? (
+        <p className="rounded-md border border-line p-4 text-sm text-ink-muted">
+          {isRooted
+            ? t('comments.focused.empty', 'No replies yet. Be the first to respond.')
+            : t(
+                'comments.all.empty',
+                'No comments yet. Start the conversation with context or a source.',
+              )}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {list.map((comment) => (
+            <CommentNode
+              key={comment.contribution_id}
+              storyId={storyId}
+              comment={comment}
+              depthInView={0}
+              maxDepthInView={depth}
+            />
+          ))}
+        </div>
+      )}
+      {comments.hasMore ? (
+        <Button
+          type="button"
+          variant="secondary"
+          loading={comments.isFetchingMore}
+          onClick={() => comments.loadMore()}
+        >
+          {isRooted
+            ? t('comments.loadMoreReplies', 'Load more replies')
+            : t('comments.loadMore', 'Load more comments')}
+        </Button>
+      ) : null}
+    </>
+  );
+
   return (
     <>
       <PageHeader title={t('comments.title', 'Comments')} onBack={backToStory} />
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4">
-        <Breadcrumbs storyId={storyId} anchor={anchor} onBackToStory={backToStory} />
+        <Breadcrumbs storyId={storyId} anchor={anchor} />
         {storyTitle ? (
           <p className="text-sm text-ink-muted">
             {isRooted
@@ -188,65 +226,24 @@ function StoryCommentsContent({
           />
         ) : comments.isLoading ? (
           <LoadingState />
+        ) : isRooted ? (
+          // Focused view: this level's comments nest INSIDE the anchor's article
+          // (a tighter reading column) rather than as separate sibling articles.
+          anchor ? (
+            <AnchorComment storyId={storyId} anchor={anchor}>
+              {listAndMore}
+            </AnchorComment>
+          ) : (
+            listAndMore
+          )
         ) : (
           <>
-            {isRooted && anchor ? <AnchorComment storyId={storyId} anchor={anchor} /> : null}
             {/* A top-level composer for the unrooted view; the focused view's
                 composer lives on the anchor (a reply to it). */}
-            {!isRooted && threadId ? (
-              <CommentComposer storyId={storyId} threadId={threadId} />
-            ) : null}
-            {list.length === 0 ? (
-              <p className="rounded-md border border-line p-4 text-sm text-ink-muted">
-                {isRooted
-                  ? t('comments.focused.empty', 'No replies yet. Be the first to respond.')
-                  : t(
-                      'comments.all.empty',
-                      'No comments yet. Start the conversation with context or a source.',
-                    )}
-              </p>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {list.map((comment) => (
-                  <CommentNode
-                    key={comment.contribution_id}
-                    storyId={storyId}
-                    comment={comment}
-                    depthInView={0}
-                    maxDepthInView={depth}
-                  />
-                ))}
-              </div>
-            )}
-            {comments.hasMore ? (
-              <Button
-                type="button"
-                variant="secondary"
-                loading={comments.isFetchingMore}
-                onClick={() => comments.loadMore()}
-              >
-                {isRooted
-                  ? t('comments.loadMoreReplies', 'Load more replies')
-                  : t('comments.loadMore', 'Load more comments')}
-              </Button>
-            ) : null}
+            {threadId ? <CommentComposer storyId={storyId} threadId={threadId} /> : null}
+            {listAndMore}
           </>
         )}
-
-        {/* The always-available return to the original story-page comment section. */}
-        <Link
-          to="/stories/$storyId"
-          params={{ storyId }}
-          hash="comments"
-          className={cn(
-            'flex items-center justify-center gap-2 p-3 text-sm font-medium text-primary-on-soft',
-            raisedSurface,
-            raisedInteractive,
-          )}
-        >
-          <Icon name="arrow-left" className="size-4" aria-hidden />
-          {t('comments.backToStory', 'Back to the story')}
-        </Link>
       </div>
     </>
   );
