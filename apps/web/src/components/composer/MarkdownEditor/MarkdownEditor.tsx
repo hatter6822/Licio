@@ -246,7 +246,11 @@ export function MarkdownEditor({
     'min-h-touch rounded-md px-3 py-1 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
   return (
-    <div className="flex flex-col gap-1" role="group" aria-labelledby={labelId}>
+    // A plain layout container (no role="group"): the textarea already carries
+    // the field's accessible name via aria-labelledby, and wrapping it in a group
+    // that reuses the SAME label makes two elements answer to one name — which
+    // breaks label-based lookups (getByLabel) and reads redundantly to AT.
+    <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center justify-between gap-2">
         {/* The aria-labelledby target is the inner span holding only the label
             wording: an aria-labelledby reference INCLUDES hidden nodes (accname

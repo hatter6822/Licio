@@ -93,6 +93,16 @@ describe('MarkdownEditor', () => {
     expect(screen.getByText('3 / 200')).toBeInTheDocument();
   });
 
+  it('answers to a single label lookup — the field, with no group duplicate', () => {
+    // The composer wrapper must NOT reuse the field label (a role="group" with
+    // the same aria-labelledby made getByLabel resolve to TWO elements, breaking
+    // the BFF E2E). Exactly one element — the textarea — carries the name.
+    render(<Harness initial="hi" />);
+    const byLabel = screen.getAllByLabelText('Your text');
+    expect(byLabel).toHaveLength(1);
+    expect(byLabel[0]?.tagName).toBe('TEXTAREA');
+  });
+
   it('has no accessibility violations', async () => {
     const { container } = render(<Harness initial="Some **text**." />);
     expect(await checkA11y(container)).toHaveNoViolations();
