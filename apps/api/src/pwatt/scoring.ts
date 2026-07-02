@@ -220,6 +220,14 @@ export async function runPwattWindow(
   preloadedConfig?: PwattRuntimeConfig,
 ): Promise<WindowScoringReport> {
   const config = preloadedConfig ?? (await loadPwattRuntimeConfig(events));
+  // A stable identity of the scoring-relevant runtime config, stamped on every
+  // stored PWAtt row so the ranking feature store's `config_hash` (derived from
+  // versionMetadata) VARIES with the applied weights/attenuation/trust — replay
+  // and audit can then tell which config produced a stored component (WS-I.2.1c).
+  const configHash = createHash('sha256')
+    .update(JSON.stringify({ v0: config.v0, v1: config.v1, trustWeights: config.trustWeights }))
+    .digest('hex')
+    .slice(0, 16);
   const aggregation: WindowAggregationResult = await computeAggregationWindow(
     events,
     startMs,
@@ -237,21 +245,24 @@ export async function runPwattWindow(
     ledgerEntriesWritten: 0,
   };
 
-  // WS-O.4.5 — average account-age trust factor of an actor (memoized across the
-  // window). Anonymous (privacy-bucket) and unresolvable actors are treated as
-  // ESTABLISHED, so anonymity is never penalized; only resolvable fresh accounts
-  // lower the factor. Account age is the coarse, non-financial signal MFCI
-  // already uses; no age ever leaves this function.
+  // WS-O.4.5 — account-age trust factor of an actor (memoized across the window),
+  // used for BOTH the burst-detection threshold AND the per-actor score scaling.
+  // Anonymous (privacy-bucket) and unresolvable actors are treated as FULLY
+  // TRUSTED (literal 1) — NOT the configurable `established` weight, which a
+  // steward may set below 1: anonymity must never be penalized, and a privacy
+  // reader's served PWAtt components must never depend on trust config. Only
+  // RESOLVABLE fresh accounts lower the factor. Account age is the coarse,
+  // non-financial signal MFCI already uses; no age ever leaves this function.
   const nowMs = events.now();
   const trustCache = new Map<string, number>();
   const actorTrust = async (actorKey: string): Promise<number> => {
-    if (actorKey === PRIVACY_BUCKET) return config.trustWeights.established;
+    if (actorKey === PRIVACY_BUCKET) return 1;
     const cached = trustCache.get(actorKey);
     if (cached !== undefined) return cached;
     const user = await identity.store.getUser(actorKey);
     const weight = user
       ? accountTrustWeight((nowMs - Date.parse(user.createdAt)) / 86_400_000, config.trustWeights)
-      : config.trustWeights.established;
+      : 1;
     trustCache.set(actorKey, weight);
     return weight;
   };
@@ -458,7 +469,7 @@ export async function runPwattWindow(
       coverage: 1,
       reasonCodes: [],
       fallbackUsed: false,
-      versionMetadata: null,
+      versionMetadata: { config_hash: configHash },
       shadowMode: PWATT_V0_SHADOW_MODE,
       createdAt: nowIso,
     });
@@ -483,7 +494,7 @@ export async function runPwattWindow(
       coverage: 1,
       reasonCodes: [],
       fallbackUsed: false,
-      versionMetadata: null,
+      versionMetadata: { config_hash: configHash },
       shadowMode: PWATT_V0_SHADOW_MODE,
       createdAt: nowIso,
     });

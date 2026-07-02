@@ -95,6 +95,76 @@ describe('PWAtt runtime config loader (WS-E.2.3a-d fail-closed)', () => {
     expect(config.triggerThreshold).toBe(DEFAULT_PWATT_RUNTIME_CONFIG.triggerThreshold);
     expect(rejections.length).toBe(3);
   });
+
+  it('UPGRADES a legacy v0/v1 row (pre-traversal) instead of discarding its tuning', async () => {
+    // A v0 row from before the `traversal` dimension: old 3-weight attention +
+    // a TUNED participation split. The loader must adopt the new attention
+    // weights (the old split cannot absorb traversal) while PRESERVING the tuned
+    // participation weights, rather than failing closed to all-defaults.
+    await fixture.events.configStore.set('v0', {
+      activeAttention: {
+        weights: { dwellPct: 50, sourcePct: 30, contextPct: 20 },
+        halfSaturationActors: 8,
+      },
+      participation: {
+        weights: { returnPct: 30, savePct: 20, contributionPct: 50 }, // TUNED
+        contribSaturation: 3,
+        rapidThreshold: 5,
+        rapidDampening: 0.3,
+        accusationDownweight: 0.25,
+        burstPlaceholderDampening: 0.9,
+        halfSaturationActors: 5,
+      },
+      confidenceHalfSaturation: 3,
+    });
+    // A v1 row missing the new `traversal` dimension AND `antiSignalAttenuation`,
+    // with a TUNED contribution curve.
+    await fixture.events.configStore.set('v1', {
+      contributionWeights: {
+        question: 0.7,
+        evidence: 1,
+        correction: 0.9,
+        synthesis: 0.8,
+        counterexample: 0.6,
+        explanation: 0.5,
+        experience: 0.5,
+        bridge_comment: 0.85,
+        steward_action: 0.5,
+        flag: 0,
+        low_info_reply: 0,
+      },
+      contributionCurve: { kind: 'logarithmic', scale: 2, saturationPoint: 9 }, // TUNED
+      attentionDimensions: {
+        dwell: { weightPct: 50, curve: { kind: 'logarithmic', scale: 4, saturationPoint: 25 } },
+        source: { weightPct: 30, curve: { kind: 'logarithmic', scale: 4, saturationPoint: 25 } },
+        context: { weightPct: 20, curve: { kind: 'logarithmic', scale: 4, saturationPoint: 25 } },
+      },
+      participationDimensions: {
+        returns: { weightPct: 40, curve: { kind: 'logarithmic', scale: 4, saturationPoint: 25 } },
+        saves: { weightPct: 10, curve: { kind: 'logarithmic', scale: 4, saturationPoint: 25 } },
+        contributions: {
+          weightPct: 50,
+          curve: { kind: 'logarithmic', scale: 4, saturationPoint: 25 },
+        },
+      },
+      accusationDownweight: 0.25,
+      rapidThreshold: 5,
+      rapidDampening: 0.3,
+    });
+    const config = await loadPwattRuntimeConfig(fixture.events);
+    // v0: attention weights upgraded to the new split; tuned participation kept.
+    expect(config.v0.activeAttention.weights.traversalPct).toBe(15);
+    expect(config.v0.participation.weights.returnPct).toBe(30); // preserved
+    // v1: traversal dimension + attenuation backfilled; tuned curve preserved.
+    expect(config.v1.attentionDimensions.traversal.weightPct).toBe(15);
+    expect(config.v1.antiSignalAttenuation.coordinatedBurstMax).toBe(0.5);
+    expect(config.v1.contributionCurve).toEqual({
+      kind: 'logarithmic',
+      scale: 2,
+      saturationPoint: 9,
+    }); // preserved
+    expect(rejections).toHaveLength(0); // upgraded, not discarded
+  });
 });
 
 describe('event-pipeline scheduler (lease-guarded, WS-E.1.4/2.1a)', () => {
@@ -595,12 +665,15 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
     expect(rejections).toHaveLength(0);
 
     await fixture.events.configStore.set('v0', { broken: true });
+    // NEW-shape (has `traversal`, so the legacy upgrade never touches it) but
+    // GENUINELY invalid: dwell 60 breaks the 50% dominance cap ⇒ rejected.
     await fixture.events.configStore.set('v1', {
       ...validV1,
       attentionDimensions: {
         dwell: { weightPct: 60, curve: validCurve },
         source: { weightPct: 20, curve: validCurve },
-        context: { weightPct: 20, curve: validCurve },
+        context: { weightPct: 10, curve: validCurve },
+        traversal: { weightPct: 10, curve: validCurve },
       },
     });
     const fallback = await loadPwattRuntimeConfig(fixture.events);

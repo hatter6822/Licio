@@ -186,6 +186,59 @@ export const PWATT_CONFIG_KEYS = [
 export type PwattConfigKey = (typeof PWATT_CONFIG_KEYS)[number];
 
 /**
+ * Backward-compat upgrade of a STORED v0/v1 config row (WS-E.2.3a). Adding the
+ * `traversal` ActiveAttention dimension + the v1 `antiSignalAttenuation` block
+ * changed the config shape; a row written before that change would otherwise
+ * fail the strict schema and be silently discarded on deploy — losing the
+ * steward's OTHER tuning (contribution weights, curves, participation split, …)
+ * to the reviewed defaults. This fills ONLY the structurally-changed pieces from
+ * the reviewed defaults, preserving everything else. Pure; leaves an already-new
+ * row untouched. (New WRITES still go through the strict `validatePwattConfigValue`.)
+ */
+function upgradeStoredV0Config(raw: Record<string, unknown>): Record<string, unknown> {
+  const attention = raw['activeAttention'];
+  if (
+    typeof attention === 'object' &&
+    attention !== null &&
+    typeof (attention as { weights?: unknown }).weights === 'object' &&
+    (attention as { weights?: Record<string, unknown> }).weights !== null &&
+    !('traversalPct' in (attention as { weights: Record<string, unknown> }).weights)
+  ) {
+    return {
+      ...raw,
+      activeAttention: {
+        ...(attention as Record<string, unknown>),
+        // The old 3-weight split cannot absorb `traversal` without breaking the
+        // sum-to-100 invariant, so adopt the reviewed default weight split
+        // (keeping any tuned halfSaturationActors).
+        weights: { ...DEFAULT_PWATT_V0_CONFIG.activeAttention.weights },
+      },
+    };
+  }
+  return raw;
+}
+
+function upgradeStoredV1Config(raw: Record<string, unknown>): Record<string, unknown> {
+  let next = raw;
+  const dims = raw['attentionDimensions'];
+  if (typeof dims === 'object' && dims !== null && !('traversal' in dims)) {
+    // The old 3-dimension attention set cannot absorb `traversal` without
+    // breaking sum-to-100; adopt the reviewed default dimension set.
+    next = {
+      ...next,
+      attentionDimensions: { ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG.attentionDimensions },
+    };
+  }
+  if (!('antiSignalAttenuation' in next)) {
+    next = {
+      ...next,
+      antiSignalAttenuation: { ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG.antiSignalAttenuation },
+    };
+  }
+  return next;
+}
+
+/**
  * Validate a config value for `key` BEFORE it is written (the steward admin
  * surface, WS-E.2.3c "invalid profiles are rejected at configuration time").
  * Returns the problem message, or null when the value is acceptable. The
@@ -250,7 +303,8 @@ export async function loadPwattRuntimeConfig(
 
   const v0 = await events.configStore.get('v0');
   if (v0) {
-    const parsed = v0Schema.safeParse(v0);
+    // Upgrade a pre-`traversal` row so its OTHER tuning survives (WS-E.2.3a).
+    const parsed = v0Schema.safeParse(upgradeStoredV0Config(v0));
     if (parsed.success) {
       try {
         validatePwattV0Config(parsed.data);
@@ -265,7 +319,8 @@ export async function loadPwattRuntimeConfig(
 
   const v1 = await events.configStore.get('v1');
   if (v1) {
-    const parsed = v1Schema.safeParse(v1);
+    // Upgrade a pre-`traversal`/`antiSignalAttenuation` row (WS-E.2.3a).
+    const parsed = v1Schema.safeParse(upgradeStoredV1Config(v1));
     if (parsed.success) {
       try {
         validatePwattV1ComponentsConfig(parsed.data);

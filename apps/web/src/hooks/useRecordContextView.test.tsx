@@ -19,9 +19,10 @@ class FakeIntersectionObserver {
   constructor(private readonly cb: IntersectionObserverCallback) {
     FakeIntersectionObserver.last = this;
   }
-  emit(isIntersecting: boolean): void {
+  /** Emit an entry with an explicit ratio (default fully visible). */
+  emit(isIntersecting: boolean, ratio = isIntersecting ? 1 : 0): void {
     this.cb(
-      [{ isIntersecting } as IntersectionObserverEntry],
+      [{ isIntersecting, intersectionRatio: ratio } as IntersectionObserverEntry],
       this as unknown as IntersectionObserver,
     );
   }
@@ -48,39 +49,75 @@ describe('useRecordContextView (§5.3 context-open on sustained view)', () => {
     vi.unstubAllGlobals();
   });
 
-  it('records ONE context open after the dwell threshold and closes on unmount', () => {
-    const { result, unmount } = renderHook(() => useRecordContextView('story-1', true));
+  it('opens on sustained visibility and COMMITS (closes) past the dwell threshold', () => {
+    const { result } = renderHook(() => useRecordContextView('story-1', true));
     result.current(document.createElement('div'));
     const io = FakeIntersectionObserver.last;
     expect(io?.observe).toHaveBeenCalledTimes(1);
 
-    io?.emit(true);
-    expect(openSpy).not.toHaveBeenCalled(); // not yet — dwell threshold pending
-    vi.advanceTimersByTime(1_000);
+    io?.emit(true); // fully visible ⇒ open starts immediately
     expect(openSpy).toHaveBeenCalledTimes(1);
     expect(openSpy).toHaveBeenCalledWith(expect.any(String), 'story-1');
+    expect(closeSpy).not.toHaveBeenCalled(); // not committed until the dwell
 
-    unmount();
+    vi.advanceTimersByTime(2_500);
+    // Committed by CLOSING after the dwell, so context_opened flips true even
+    // while the reader is still on the story (before any capture).
     expect(closeSpy).toHaveBeenCalledTimes(1);
+    // Committed once: the observer disconnects, so re-emitting does not re-open.
+    io?.emit(true);
+    expect(openSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('records NOTHING when the surface leaves the viewport before the threshold', () => {
-    const { result, unmount } = renderHook(() => useRecordContextView('story-1', true));
+  it('does NOT arm on a barely-visible sliver below the configured ratio', () => {
+    const { result } = renderHook(() => useRecordContextView('story-1', true));
     result.current(document.createElement('div'));
-    FakeIntersectionObserver.last?.emit(true);
-    vi.advanceTimersByTime(600); // below the 1s threshold…
-    FakeIntersectionObserver.last?.emit(false); // …then scrolled away
-    vi.advanceTimersByTime(1_000);
+    FakeIntersectionObserver.last?.emit(true, 0.2); // intersecting but < 0.5
+    vi.advanceTimersByTime(3_000);
     expect(openSpy).not.toHaveBeenCalled();
-    unmount();
-    expect(closeSpy).not.toHaveBeenCalled(); // no open ⇒ no close
+  });
+
+  it('discards an in-flight open when the surface leaves before the dwell', () => {
+    const { result } = renderHook(() => useRecordContextView('story-1', true));
+    result.current(document.createElement('div'));
+    FakeIntersectionObserver.last?.emit(true); // open starts
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(600); // below the dwell…
+    FakeIntersectionObserver.last?.emit(false); // …scrolled away ⇒ discard-close
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(3_000);
+    // No SECOND close fires from the (cancelled) commit timer.
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    // Re-entering the viewport can open again (not yet committed).
+    FakeIntersectionObserver.last?.emit(true);
+    expect(openSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-tracks afresh when the storyId changes (route reuse without unmount)', () => {
+    const { result, rerender } = renderHook(({ id }) => useRecordContextView(id, true), {
+      initialProps: { id: 'story-1' },
+    });
+    const node = document.createElement('div');
+    result.current(node);
+    FakeIntersectionObserver.last?.emit(true);
+    vi.advanceTimersByTime(2_500); // commit story-1
+    expect(openSpy).toHaveBeenCalledWith(expect.any(String), 'story-1');
+
+    // Navigate to story-2: the ref identity changes; React detaches then
+    // re-attaches. The new story is tracked afresh (committed reset).
+    rerender({ id: 'story-2' });
+    result.current(null); // detach old
+    result.current(node); // attach new
+    FakeIntersectionObserver.last?.emit(true);
+    vi.advanceTimersByTime(2_500);
+    expect(openSpy).toHaveBeenCalledWith(expect.any(String), 'story-2');
   });
 
   it('is a no-op when disabled (surface not shown)', () => {
     const { result } = renderHook(() => useRecordContextView('story-1', false));
     result.current(document.createElement('div'));
     expect(FakeIntersectionObserver.last).toBeNull();
-    vi.advanceTimersByTime(2_000);
+    vi.advanceTimersByTime(3_000);
     expect(openSpy).not.toHaveBeenCalled();
   });
 });
