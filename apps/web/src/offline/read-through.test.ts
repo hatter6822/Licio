@@ -43,6 +43,8 @@ const LEDGER_ENTRY: SignalLedgerEntry = {
   reply_depth_bucket: 'moderate',
   return_visit_count_bucket: 'few',
   saved_for_later: true,
+  anti_signals: ['rapid_repetition', 'coordinated_burst'],
+  summary: 'You read this for a moderate duration and opened the source.',
   cap_reached: false,
 };
 

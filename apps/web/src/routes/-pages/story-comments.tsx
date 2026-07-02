@@ -30,6 +30,7 @@ import { Icon } from '../../components/ui/Icon/index.js';
 import { LoadingState } from '../../components/ui/LoadingState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
+import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
@@ -58,8 +59,13 @@ function AnchorComment({
   children: React.ReactNode;
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
+  // The focused anchor is its OWN article (not a CommentNode), so it records its
+  // depth here — else drilling straight to a deep comment with no rendered
+  // replies would contribute no §5.3 traversal at all (visibility-gated).
+  const recordDepthWhenVisible = useRecordReplyDepth(storyId, anchor.depth);
   return (
     <article
+      ref={recordDepthWhenVisible}
       // A surface-tinted raised tile (vs. the canvas-filled reply tiles) plus the
       // "Replying within" label sets the focused anchor apart from its replies.
       className={cn(raisedSurface, 'flex flex-col gap-3 bg-surface p-3')}

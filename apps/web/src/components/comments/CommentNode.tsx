@@ -13,9 +13,9 @@
 // into the dedicated page re-rooted at that comment instead of nesting further.
 import type { CommentItem as CommentItemType } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
+import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { cn } from '../../lib/cn.js';
-import { getSignalProcessor } from '../../signals/runtime.js';
 import { UgcBody } from '../ugc/UgcBody.js';
 import { Icon } from '../ui/Icon/index.js';
 import {
@@ -70,33 +70,10 @@ export function CommentNode({
 }: CommentNodeProps): React.ReactElement {
   const [replying, setReplying] = useState(false);
 
-  // Record the ABSOLUTE reply depth for attention bucketing (WS-H PHI / §5.3
-  // traversal input) ONLY once this comment is actually SEEN. The story page
-  // renders its comment section BELOW THE FOLD, so recording on mount would
-  // credit thread traversal the reader never performed (a scored ActiveAttention
-  // dimension). A ref-callback IntersectionObserver records on first
-  // intersection, then disconnects (the React-19 ref cleanup tears it down on
-  // detach). Where IntersectionObserver is unavailable (older engines / jsdom),
-  // fall back to recording on attach so the signal degrades gracefully.
-  const depth = comment.depth;
-  const recordDepthWhenVisible = useCallback(
-    (node: HTMLElement | null) => {
-      if (node === null) return undefined;
-      if (typeof IntersectionObserver === 'undefined') {
-        getSignalProcessor().recordReplyDepth(storyId, depth);
-        return undefined;
-      }
-      const observer = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          getSignalProcessor().recordReplyDepth(storyId, depth);
-          observer.disconnect();
-        }
-      });
-      observer.observe(node);
-      return () => observer.disconnect();
-    },
-    [storyId, depth],
-  );
+  // Record the ABSOLUTE reply depth for §5.3 traversal bucketing only once the
+  // comment is actually SEEN (visibility-gated; see the hook). The in-view depth
+  // is presentational only.
+  const recordDepthWhenVisible = useRecordReplyDepth(storyId, comment.depth);
 
   const canNestDeeper = depthInView < maxDepthInView;
   const replyCount = comment.reply_count;

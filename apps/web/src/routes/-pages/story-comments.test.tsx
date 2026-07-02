@@ -201,6 +201,23 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
     );
   });
 
+  it('records the focused anchor depth even with no rendered replies (§5.3)', () => {
+    const anchor = node('77777777-7777-4777-8777-777777777777', {
+      depth: 3,
+      body: 'A deep focused comment with no replies.',
+      reply_count: 0,
+    });
+    search = { root: anchor.contribution_id };
+    commentsState = { data: { comments: [], anchor, next_cursor: null } };
+
+    render(<StoryCommentsPage />);
+
+    // The anchor is its own article (not a CommentNode), so it must record its
+    // own depth — else drilling straight to a deep comment contributes no
+    // traversal. jsdom has no IntersectionObserver, so the hook records on attach.
+    expect(recordReplyDepth).toHaveBeenCalledWith(STORY_ID, 3);
+  });
+
   it('hides the redundant "Up one level" when the anchor is a top-level comment', () => {
     const anchor = node('77777777-7777-4777-8777-777777777777', {
       depth: 0,
