@@ -105,6 +105,18 @@ export class SignalProcessor {
   }
 
   /**
+   * Whether attention collection is currently ON — the SAME live `collect` flag
+   * (`personalization_enabled && authenticated`) every signal path here guards.
+   * The single source of truth for any OTHER emit path (e.g. the §5.3 save
+   * signal) so an opted-out reader's event never crosses the network boundary
+   * (WS-C.4.1d): the server discards it anyway, but the gate belongs here too so
+   * it never consumes the ingest limiter or is visible at the request boundary.
+   */
+  isCollecting(): boolean {
+    return this.policy.collect;
+  }
+
+  /**
    * The story currently in view. Switching away is the "done attending" boundary:
    * the outgoing item's final dwell is accrued and its §22.1 aggregate is snapshot
    * (so per-item attention is buffered on navigation, not only at session end), then

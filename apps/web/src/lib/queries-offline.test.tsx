@@ -22,6 +22,15 @@ vi.mock('./api.js', async (importOriginal) => {
 
 const queries = await import('./queries.js');
 const { useAuthStore } = await import('../stores/auth.js');
+const { getSignalProcessor } = await import('../signals/runtime.js');
+
+/** The collection policy an authenticated, personalization-ON reader has. */
+const COLLECTING_ON = { collect: true, privacyLevel: 'standard' as const, identifier: 'user-1' };
+const COLLECTING_OFF = {
+  collect: false,
+  privacyLevel: 'standard' as const,
+  identifier: 'privacy-bucket',
+};
 
 const ENTRY: SignalLedgerEntry = {
   item_id: '22222222-2222-4222-8222-222222222222',
@@ -63,6 +72,9 @@ function wrapper() {
 
 beforeEach(async () => {
   await Promise.all([signalLedger.clear(), savedStories.clear()]);
+  // Reset the singleton processor's collection policy between tests so save-signal
+  // emission is governed only by what each test sets (the default is collect off).
+  getSignalProcessor().setCollectionPolicy(COLLECTING_OFF);
 });
 
 describe('offline read-through hooks', () => {
@@ -91,6 +103,7 @@ describe('offline read-through hooks', () => {
       status: 'authenticated',
       user: { id: 'user-1', account_state: 'active' } as never,
     });
+    getSignalProcessor().setCollectionPolicy(COLLECTING_ON);
     const { result } = renderHook(() => queries.useToggleSavedStoryMutation(), {
       wrapper: wrapper(),
     });
@@ -114,5 +127,23 @@ describe('offline read-through hooks', () => {
     result.current.mutate({ action: 'save', story: SAVED_STORY });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(emitContentSaved).not.toHaveBeenCalled(); // private local save only
+  });
+
+  it('does NOT emit the save signal when collection/personalization is disabled', async () => {
+    // Authenticated but personalization OFF ⇒ the same client gate the signal
+    // processor uses must suppress the emit, so an opted-out save never crosses
+    // the network boundary (WS-C.4.1d) — not merely gets discarded server-side.
+    emitContentSaved.mockReset().mockResolvedValue(undefined);
+    useAuthStore.setState({
+      status: 'authenticated',
+      user: { id: 'user-1', account_state: 'active' } as never,
+    });
+    getSignalProcessor().setCollectionPolicy(COLLECTING_OFF);
+    const { result } = renderHook(() => queries.useToggleSavedStoryMutation(), {
+      wrapper: wrapper(),
+    });
+    result.current.mutate({ action: 'save', story: SAVED_STORY });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(emitContentSaved).not.toHaveBeenCalled();
   });
 });

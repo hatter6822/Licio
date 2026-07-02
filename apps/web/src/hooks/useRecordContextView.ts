@@ -37,8 +37,9 @@ const CONTEXT_VIEW_RATIO = 0.5;
  * least {@link CONTEXT_VIEW_RATIO} visible continuously for
  * {@link CONTEXT_VIEW_DWELL_MS}, the context open is COMMITTED (the downstream
  * `context_opened` boolean flips true for the session); leaving the viewport
- * before the dwell discards the in-flight open (nothing counted), and it can
- * re-arm on the next sustained view. A committed story is not re-tracked.
+ * OR backgrounding the tab before the dwell discards the in-flight open (nothing
+ * counted), and it can re-arm on the next sustained view. A committed story is
+ * not re-tracked.
  *
  * `enabled = false` (e.g. the surface is not shown) makes the ref a no-op. The
  * hook resets its per-story state whenever `storyId` changes, so a route that
@@ -54,6 +55,8 @@ export function useRecordContextView(
   const committedRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
+  /** The active `visibilitychange` listener (removed on teardown/unmount). */
+  const visibilityHandlerRef = useRef<(() => void) | null>(null);
 
   const clearTimer = useCallback((): void => {
     if (timerRef.current !== null) {
@@ -72,12 +75,21 @@ export function useRecordContextView(
     }
   }, [clearTimer]);
 
+  /** Remove the current visibilitychange listener, if any. */
+  const detachVisibility = useCallback((): void => {
+    if (visibilityHandlerRef.current !== null && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', visibilityHandlerRef.current);
+      visibilityHandlerRef.current = null;
+    }
+  }, []);
+
   const ref = useCallback(
     (node: HTMLElement | null): void => {
       // Tear down any previous observation (ref reattach / conditional unmount /
       // storyId change) and discard any open that never committed.
       observerRef.current?.disconnect();
       observerRef.current = null;
+      detachVisibility();
       discardOpen();
       if (node === null || !enabled || typeof IntersectionObserver === 'undefined') return;
       // A fresh attach (new node / new storyId — the ref identity changes with
@@ -99,6 +111,16 @@ export function useRecordContextView(
                 timerRef.current = null;
                 const openId = openIdRef.current;
                 if (openId === null || committedRef.current) return;
+                // Defense in depth (the visibilitychange handler below normally
+                // cancels this timer first): if the page is not visible at commit
+                // time, the dwell was not continuous — abandon WITHOUT closing,
+                // since a >= dwell close would be ACCEPTED by the tracker. The
+                // orphaned open never counts and is cleared on the next session.
+                if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+                  openIdRef.current = null;
+                  observer.disconnect();
+                  return;
+                }
                 // Commit: the sustained-view dwell (>= the tracker minimum) has
                 // elapsed, so closing now counts the context open — before any
                 // periodic/page-hide capture, which then reports it truthfully.
@@ -117,18 +139,33 @@ export function useRecordContextView(
       );
       observer.observe(node);
       observerRef.current = observer;
+      // Cancel an in-flight open when the tab is backgrounded before the dwell.
+      // The commit timer measures WALL-CLOCK, and a backgrounded setTimeout is
+      // throttled to fire (much) later — after the reader stopped looking — which
+      // would close the open above the threshold and count a view that was never
+      // continuously visible. visibilitychange fires SYNCHRONOUSLY at hide-time
+      // (elapsed < the dwell), so discardOpen's close is sub-threshold-rejected
+      // AND it clears the pending commit timer before it can fire.
+      if (typeof document !== 'undefined') {
+        const onVisibility = (): void => {
+          if (document.visibilityState === 'hidden') discardOpen();
+        };
+        document.addEventListener('visibilitychange', onVisibility);
+        visibilityHandlerRef.current = onVisibility;
+      }
     },
-    [storyId, enabled, discardOpen],
+    [storyId, enabled, discardOpen, detachVisibility],
   );
 
-  // Unmount cleanup: never leave an in-flight open dangling.
+  // Unmount cleanup: never leave an in-flight open dangling or a listener leaked.
   useEffect(() => {
     return () => {
       observerRef.current?.disconnect();
       observerRef.current = null;
+      detachVisibility();
       discardOpen();
     };
-  }, [discardOpen]);
+  }, [discardOpen, detachVisibility]);
 
   return ref;
 }

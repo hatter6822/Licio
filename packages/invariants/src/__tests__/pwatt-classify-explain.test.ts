@@ -55,6 +55,7 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: true,
       sourceBounceOnly: false,
       contextOpened: false,
+      savedForLater: false,
       returnVisitBucket: 'few',
       contributions: { question: 1 },
       annotations: [],
@@ -71,6 +72,7 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: true,
       sourceBounceOnly: true,
       contextOpened: false,
+      savedForLater: false,
       returnVisitBucket: 'none',
       contributions: {},
       annotations: [],
@@ -84,6 +86,7 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: false,
       sourceBounceOnly: false,
       contextOpened: false,
+      savedForLater: false,
       returnVisitBucket: 'none',
       contributions: { correction: 1 },
       annotations: ['source_free_accusation_downweight', 'rapid_repetition_dampened'],
@@ -98,11 +101,27 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: false,
       sourceBounceOnly: false,
       contextOpened: false,
+      savedForLater: false,
       returnVisitBucket: 'none',
       contributions: {},
       annotations: [],
     });
     expect(summary).toBe('No attention signals were counted for this item in this window.');
+  });
+
+  it('surfaces a save-only window (SIG-ATT-SAVE) instead of "nothing counted"', () => {
+    const summary = buildLedgerSummary({
+      dwellBucket: 'none',
+      sourceOpened: false,
+      sourceBounceOnly: false,
+      contextOpened: false,
+      savedForLater: true,
+      returnVisitBucket: 'none',
+      contributions: {},
+      annotations: [],
+    });
+    expect(summary).toBe('You saved it for later.');
+    expect(summary).not.toContain('No attention signals were counted');
   });
 
   it('never emits applause language', () => {
@@ -111,6 +130,7 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: true,
       sourceBounceOnly: false,
       contextOpened: true,
+      savedForLater: false,
       returnVisitBucket: 'many',
       contributions: { evidence: 2, bridge_comment: 1 },
       annotations: [],

@@ -26,6 +26,7 @@ import {
   saveStory,
   unsaveStory,
 } from '../offline/read-through.js';
+import { getSignalProcessor } from '../signals/runtime.js';
 import { selectCollectionUserId, useAuthStore } from '../stores/auth.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
@@ -437,11 +438,19 @@ export function useToggleSavedStoryMutation() {
       input.action === 'save' ? saveStory(input.story) : unsaveStory(input.storyId),
     onSuccess: (_data, input) => {
       // §5.3 "Save for later": emit the low-weight save SIGNAL only after the
-      // local save succeeded, only when authenticated, and only on SAVE (never
-      // unsave). Best-effort — the private local save is the source of truth and
-      // never depends on the signal reaching the server (which itself discards
-      // it when personalization is off, §19.2).
-      if (input.action === 'save' && collectionUserId !== null) {
+      // local save succeeded, only on SAVE (never unsave), and ONLY when
+      // attention collection is actually on. The gate is the SAME live
+      // `isCollecting()` flag (personalization_enabled && authenticated) every
+      // other signal path checks — so an opted-out reader's save never crosses
+      // the network, consumes the ingest limiter, or is visible at the request
+      // boundary (WS-C.4.1d), not merely discarded server-side (§19.2). The
+      // private local save is the source of truth and never depends on the
+      // signal reaching the server.
+      if (
+        input.action === 'save' &&
+        collectionUserId !== null &&
+        getSignalProcessor().isCollecting()
+      ) {
         void api.emitContentSaved(input.story.story_id, collectionUserId).catch(() => {});
       }
     },

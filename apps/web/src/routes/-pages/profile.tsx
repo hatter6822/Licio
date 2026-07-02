@@ -557,6 +557,7 @@ function toLedgerItem(entry: SignalLedgerEntry): SignalLedgerItem {
   if (entry.source_opened) signals.push('source_opened');
   if (entry.context_opened) signals.push('context_opened');
   if (entry.reply_depth_bucket !== 'none') signals.push('thread_traversal');
+  if (entry.saved_for_later) signals.push('saved_for_later');
   if (entry.return_visit_count_bucket !== 'none') signals.push('return_visit');
   return {
     id: entry.item_id,

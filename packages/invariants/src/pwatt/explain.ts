@@ -51,6 +51,8 @@ export interface LedgerSummaryInput {
   sourceOpened: boolean;
   sourceBounceOnly: boolean;
   contextOpened: boolean;
+  /** True when the reader saved the item for later this window (§5.3). */
+  savedForLater: boolean;
   returnVisitBucket: ReturnVisitBucket;
   contributions: Partial<Record<EventContributionType, number>>;
   annotations: readonly string[];
@@ -69,6 +71,7 @@ export function buildLedgerSummary(input: LedgerSummaryInput): string {
     );
   }
   if (input.contextOpened) clauses.push('opened the context card');
+  if (input.savedForLater) clauses.push('saved it for later');
   const returns = RETURN_PHRASES[input.returnVisitBucket];
   if (returns) clauses.push(returns);
 

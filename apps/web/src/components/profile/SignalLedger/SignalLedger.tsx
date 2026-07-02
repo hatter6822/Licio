@@ -19,6 +19,7 @@ export type SignalKind =
   | 'source_opened'
   | 'context_opened'
   | 'thread_traversal'
+  | 'saved_for_later'
   | 'contribution_created'
   | 'return_visit';
 
@@ -69,6 +70,10 @@ const SIGNAL_COPY: Record<SignalKind, { key: string; text: string }> = {
   thread_traversal: {
     key: 'signalLedger.signal.threadTraversal',
     text: 'You read across the discussion',
+  },
+  saved_for_later: {
+    key: 'signalLedger.signal.savedForLater',
+    text: 'You saved this for later',
   },
   contribution_created: {
     key: 'signalLedger.signal.contributionCreated',

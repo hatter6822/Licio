@@ -47,6 +47,8 @@ describe('useRecordContextView (§5.3 context-open on sustained view)', () => {
     setSignalProcessor(null);
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    // Restore visibility for tests that background the tab (jsdom default).
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
   });
 
   it('opens on sustained visibility and COMMITS (closes) past the dwell threshold', () => {
@@ -91,6 +93,36 @@ describe('useRecordContextView (§5.3 context-open on sustained view)', () => {
     // Re-entering the viewport can open again (not yet committed).
     FakeIntersectionObserver.last?.emit(true);
     expect(openSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('discards an in-flight open when the tab is backgrounded before the dwell', () => {
+    const { result } = renderHook(() => useRecordContextView('story-1', true));
+    result.current(document.createElement('div'));
+    FakeIntersectionObserver.last?.emit(true); // open starts
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(closeSpy).not.toHaveBeenCalled();
+    // Background the tab before the 2s dwell: visibilitychange fires synchronously,
+    // so the discard-close runs and the pending commit timer is cancelled.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    // A backgrounded setTimeout would fire (throttled) later; advancing past the
+    // dwell must NOT commit, because the timer was cleared on hide.
+    vi.advanceTimersByTime(3_000);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('abandons WITHOUT counting if the page is hidden when the dwell elapses', () => {
+    const { result } = renderHook(() => useRecordContextView('story-1', true));
+    result.current(document.createElement('div'));
+    FakeIntersectionObserver.last?.emit(true);
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    // Defense-in-depth: the page is hidden at commit time but no visibilitychange
+    // reached us (same-tick race). The commit guard abandons the open WITHOUT a
+    // close, since a >= dwell close would be ACCEPTED by the tracker.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    vi.advanceTimersByTime(2_500);
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 
   it('re-tracks afresh when the storyId changes (route reuse without unmount)', () => {

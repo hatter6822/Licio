@@ -74,6 +74,7 @@ import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
+import { pwattRowForRanking } from '../pwatt/shadow.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
 import { createAiGovernanceAdminRoutes } from './ai-governance-admin.js';
@@ -172,8 +173,13 @@ async function assembleStoryReadSignals(
     events.invariantStore.latest('PWAtt_v0', story.storyId),
   ]);
   // Served ActiveAttention (v1 preferred, v0 fallback) for the §5.6 default-label
-  // truthfulness gate; absent when no PWAtt run has covered the story yet.
-  const pwattAttention = (pwattV1 ?? pwattV0)?.scoreVector['active_attention'];
+  // truthfulness gate; absent when no PWAtt run has covered the story yet. Read
+  // through the SAME §30.5 serving-row gate the feed's feature join uses, so a
+  // pre-lift shadow row, a degraded row, or a code-level revert is ABSENT here
+  // too — otherwise the detail read could label a story `getting-attention`
+  // from a value the feed treats as absent, and the two surfaces would diverge.
+  const servedPwatt = pwattRowForRanking(pwattV1) ?? pwattRowForRanking(pwattV0);
+  const pwattAttention = servedPwatt?.scoreVector['active_attention'];
   const activeAttention = typeof pwattAttention === 'number' ? pwattAttention : undefined;
   const safetyState = deriveStorySafetyState({
     frozen: safeties.get(story.storyId)?.safetyState === 'frozen',
@@ -279,6 +285,7 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
     context_opened?: boolean;
     reply_depth_bucket?: string;
     return_visit_count_bucket?: string;
+    saved_for_later?: boolean;
     cap_reached?: boolean;
   };
   const antiSignals = [
@@ -300,6 +307,7 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
       'none') as SignalLedgerEntry['reply_depth_bucket'],
     return_visit_count_bucket: (signals.return_visit_count_bucket ??
       'none') as SignalLedgerEntry['return_visit_count_bucket'],
+    saved_for_later: signals.saved_for_later ?? false,
     // OMIT cap status when the server does not know it (the §22.1 wire carries
     // buckets, not the cap flag): asserting `false` from ignorance would make
     // the "counting stopped" disclosure permanently unreachable. Only a client-

@@ -576,6 +576,10 @@ export async function runPwattWindow(
           context_opened: summaryInput.contextOpened,
           reply_depth_bucket: fold.branchDepthBucket,
           return_visit_count_bucket: summaryInput.returnVisitBucket,
+          // §5.3 "Save for later": the deduped, scored save boolean, so a
+          // save-only window renders a checklist item instead of "nothing
+          // counted" — mirrors the scored `savedForLater` component.
+          saved_for_later: summaryInput.savedForLater === 1,
           contributions: summaryInput.contributions,
           // Cap status is knowable only on the client (the §22.1 wire carries
           // buckets, whose ceilings ARE the cap expression) — the ledger entry
@@ -588,6 +592,7 @@ export async function runPwattWindow(
           sourceOpened: summaryInput.sourceOpened,
           sourceBounceOnly: summaryInput.sourceBounceOnly,
           contextOpened: summaryInput.contextOpened,
+          savedForLater: summaryInput.savedForLater === 1,
           returnVisitBucket: summaryInput.returnVisitBucket,
           contributions: summaryInput.contributions,
           annotations,
