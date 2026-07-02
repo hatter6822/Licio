@@ -194,19 +194,27 @@ describe('ReturnTracker', () => {
 });
 
 describe('TraversalTracker', () => {
-  it('counts distinct reply-depth levels and ignores repeats', () => {
+  it('counts distinct NESTED reply-depth levels and ignores repeats', () => {
     const tracker = new TraversalTracker();
-    tracker.visitReplyDepth('s1', 0);
+    tracker.visitReplyDepth('s1', 0); // top-level — not traversal, ignored
     tracker.visitReplyDepth('s1', 1);
     tracker.visitReplyDepth('s1', 1); // repeat — no increase
     tracker.visitReplyDepth('s1', 3);
-    expect(tracker.distinctReplyDepthLevels('s1')).toBe(3);
+    // Only the nested depths {1, 3} count — depth 0 is not a traversal.
+    expect(tracker.distinctReplyDepthLevels('s1')).toBe(2);
+  });
+
+  it('does not count reading only top-level comments as traversal', () => {
+    const tracker = new TraversalTracker();
+    tracker.visitReplyDepth('s1', 0);
+    tracker.visitReplyDepth('s1', 0);
+    expect(tracker.distinctReplyDepthLevels('s1')).toBe(0);
   });
 
   it('tracks stories independently and resets between sessions', () => {
     const tracker = new TraversalTracker();
-    tracker.visitReplyDepth('s1', 0);
-    tracker.visitReplyDepth('s2', 0);
+    tracker.visitReplyDepth('s1', 1);
+    tracker.visitReplyDepth('s2', 1);
     expect(tracker.distinctReplyDepthLevels('s1')).toBe(1);
     tracker.resetSession();
     expect(tracker.distinctReplyDepthLevels('s1')).toBe(0);

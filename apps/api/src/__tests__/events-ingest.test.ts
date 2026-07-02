@@ -240,7 +240,7 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
         {
           story_id: '55555555-5555-4555-8555-555555555555',
           active_dwell_bucket: 'none',
-          source_opened: false,
+          source_opened: true, // a real signal, so the item survives normalization
           context_opened: false,
           reply_depth_bucket: 'deep', // client-impossible with zero active dwell
           return_visit_count_bucket: 'none',
@@ -256,6 +256,29 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
     // …and so does the durable §22.1 aggregate row.
     const rows = await fixture.events.attentionStore.listByUser(userId);
     expect(rows[0]?.reply_depth_bucket).toBe('none');
+  });
+
+  it('DISCARDS an aggregate emptied by normalization (no signal-free row, §25.5)', async () => {
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    // The ONLY signal is reply-depth with zero dwell — neutralized to `none`,
+    // which empties the item entirely. It must not be stored (an empty row would
+    // still seed eventCount / a burst actor / read history).
+    const event = attentionEvent(userId, {
+      items: [
+        {
+          story_id: '55555555-5555-4555-8555-555555555555',
+          active_dwell_bucket: 'none',
+          source_opened: false,
+          context_opened: false,
+          reply_depth_bucket: 'deep',
+          return_visit_count_bucket: 'none',
+        },
+      ],
+    });
+    const res = await app().request(post('/v1/events/attention', event, cookie));
+    expect(res.status).toBe(202); // the upload is valid, just empty
+    expect(await fixture.events.eventStore.listByOwner(userId)).toHaveLength(0);
+    expect(await fixture.events.attentionStore.listByUser(userId)).toHaveLength(0);
   });
 
   it('a mid-session settings change takes effect on the next event', async () => {

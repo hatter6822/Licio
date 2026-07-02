@@ -198,6 +198,30 @@ export function coherentAttentionItem<T extends AttentionItemBuckets>(item: T): 
   return { item, neutralized: [] };
 }
 
+/** The five countable §22.1 signals on one attention item. */
+export interface AttentionItemSignalFields extends AttentionItemBuckets {
+  source_opened: boolean;
+  context_opened: boolean;
+  return_visit_count_bucket: ReturnVisitBucket;
+}
+
+/**
+ * True when an attention item still carries at least one countable signal.
+ * Coherence normalization can EMPTY an item (e.g. reply-depth without dwell →
+ * every bucket `none`, no opens); such a signal-free item must be dropped before
+ * storage, or it would still seed an empty §22.1 row, a burst-detection actor,
+ * and read history despite its only signal having been neutralized.
+ */
+export function attentionItemHasSignal(item: AttentionItemSignalFields): boolean {
+  return (
+    item.active_dwell_bucket !== 'none' ||
+    item.source_opened ||
+    item.context_opened ||
+    item.reply_depth_bucket !== 'none' ||
+    item.return_visit_count_bucket !== 'none'
+  );
+}
+
 export const attentionAggregateSchema = z.preprocess((value) => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
   const aggregate = value as Record<string, unknown>;

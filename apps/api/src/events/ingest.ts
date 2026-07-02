@@ -25,6 +25,7 @@ import {
   type AttentionAggregate,
   type AttentionAggregateEvent,
   attentionAggregateEventSchema,
+  attentionItemHasSignal,
   type ContentSavedAggregateEvent,
   coherentAttentionItem,
   type PrivacySettings,
@@ -178,12 +179,28 @@ export async function ingestAttentionEvents(
     let eventForStorage: AttentionIngestEvent = event;
     if (event.event_type === 'attention.aggregate') {
       const neutralized: string[] = [];
-      const items = event.items.map((item) => {
+      const normalized = event.items.map((item) => {
         const result = coherentAttentionItem(item);
         if (result.neutralized.length > 0) neutralized.push(...result.neutralized);
         return result.item;
       });
-      if (neutralized.length > 0) {
+      // Drop any item left signal-free by normalization: an empty item would
+      // still bump realtime/window `eventCount`, seed a burst-detection actor,
+      // and enter read history despite its only signal (e.g. reply-depth without
+      // dwell) having just been neutralized.
+      const items = normalized.filter(attentionItemHasSignal);
+      if (items.length === 0) {
+        // Nothing left to store. Ack the (valid) upload as accepted but persist
+        // and publish nothing — never write a signal-free row.
+        events.metrics.increment('events_attention_empty', 1);
+        events.log('events.attention.empty_after_normalization', {
+          user_id: sessionUserId,
+          event_id: event.event_id,
+        });
+        outcomes.push('accepted');
+        continue;
+      }
+      if (neutralized.length > 0 || items.length !== event.items.length) {
         eventForStorage = { ...event, items };
         events.metrics.increment('events_attention_incoherent', 1);
         events.log('events.attention.incoherent_neutralized', {

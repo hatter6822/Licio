@@ -5,7 +5,12 @@
 // a raw value (there are none) and never uses applause language. Anti-signal
 // annotations are spelled out so the user can understand (and remedy) a
 // downweight, e.g. by adding evidence (WS-E.2.2b transparency).
-import type { DwellBucket, EventContributionType, ReturnVisitBucket } from '@licio/shared';
+import type {
+  DwellBucket,
+  EventContributionType,
+  ReplyDepthBucket,
+  ReturnVisitBucket,
+} from '@licio/shared';
 
 const DWELL_PHRASES: Readonly<Record<DwellBucket, string | null>> = {
   none: null,
@@ -14,6 +19,13 @@ const DWELL_PHRASES: Readonly<Record<DwellBucket, string | null>> = {
   medium: 'You read this for a moderate duration',
   long: 'You read this for a long while',
   extended: 'You read this for an extended period',
+};
+
+const REPLY_DEPTH_PHRASES: Readonly<Record<ReplyDepthBucket, string | null>> = {
+  none: null,
+  shallow: 'read into the replies',
+  moderate: 'read down the reply thread',
+  deep: 'read deep into the discussion',
 };
 
 const RETURN_PHRASES: Readonly<Record<ReturnVisitBucket, string | null>> = {
@@ -53,6 +65,8 @@ export interface LedgerSummaryInput {
   contextOpened: boolean;
   /** True when the reader saved the item for later this window (§5.3). */
   savedForLater: boolean;
+  /** Distinct NESTED reply-depth traversal this window (§5.3 SIG-ATT-TRAVERSE). */
+  replyDepthBucket: ReplyDepthBucket;
   returnVisitBucket: ReturnVisitBucket;
   contributions: Partial<Record<EventContributionType, number>>;
   annotations: readonly string[];
@@ -71,6 +85,8 @@ export function buildLedgerSummary(input: LedgerSummaryInput): string {
     );
   }
   if (input.contextOpened) clauses.push('opened the context card');
+  const traversal = REPLY_DEPTH_PHRASES[input.replyDepthBucket];
+  if (traversal) clauses.push(traversal);
   if (input.savedForLater) clauses.push('saved it for later');
   const returns = RETURN_PHRASES[input.returnVisitBucket];
   if (returns) clauses.push(returns);

@@ -186,9 +186,15 @@ export class ReturnTracker {
 export class TraversalTracker {
   private readonly depthsByStory = new Map<string, Set<number>>();
 
-  /** Record a bounded reply depth. Revisiting the same depth does not raise the count. */
+  /**
+   * Record a bounded reply depth. Revisiting the same depth does not raise the
+   * count. Depth 0 (a top-level comment) is NOT traversal — traversal is reading
+   * into NESTED replies — so only positive depths are counted; a reader who
+   * reaches only ordinary top-level comments earns no reply-depth signal.
+   */
   visitReplyDepth(storyId: string, depth: number): void {
-    const bounded = Math.max(0, Math.min(10, Math.trunc(depth)));
+    const bounded = Math.min(10, Math.trunc(depth));
+    if (bounded < 1) return;
     const set = this.depthsByStory.get(storyId) ?? new Set<number>();
     set.add(bounded);
     this.depthsByStory.set(storyId, set);

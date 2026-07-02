@@ -593,6 +593,7 @@ export async function runPwattWindow(
           sourceBounceOnly: summaryInput.sourceBounceOnly,
           contextOpened: summaryInput.contextOpened,
           savedForLater: summaryInput.savedForLater === 1,
+          replyDepthBucket: fold.branchDepthBucket,
           returnVisitBucket: summaryInput.returnVisitBucket,
           contributions: summaryInput.contributions,
           annotations,

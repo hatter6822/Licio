@@ -325,8 +325,8 @@ describe('shadow scoring + Signal Ledger (WS-E.2.1b-d)', () => {
     const ledger = await fixture.events.ledgerStore.listForUser(userId, 10);
     expect(ledger.entries).toHaveLength(1);
     expect(ledger.entries[0]?.summary).toBe(
-      'You read this for a moderate duration, opened the source, and returned to it. ' +
-        'Your question was counted as constructive participation.',
+      'You read this for a moderate duration, opened the source, read into the replies, ' +
+        'and returned to it. Your question was counted as constructive participation.',
     );
     expect(ledger.entries[0]?.storyTitle).toBe('Water main study');
     expect(ledger.entries[0]?.pwattScore).toBe(v0?.scoreVector['score']);

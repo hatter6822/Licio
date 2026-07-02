@@ -134,14 +134,15 @@ describe('SignalProcessor signal assembly', () => {
     s.processor.recordSourceOpen('o1', STORY);
     s.advanceWall(4_000);
     s.processor.recordSourceClose('o1');
-    s.processor.recordReplyDepth(STORY, 0);
+    s.processor.recordReplyDepth(STORY, 0); // top-level — not traversal, ignored
     s.processor.recordReplyDepth(STORY, 1);
+    s.processor.recordReplyDepth(STORY, 2);
     s.processor.captureAggregate(STORY);
     await s.processor.flush();
     const aggregate = s.lastBatch()[0];
     expect(aggregate?.source_opened).toBe(true);
     expect(aggregate?.context_opened).toBe(false);
-    expect(aggregate?.reply_depth_bucket).toBe('moderate'); // 2 distinct reply depths
+    expect(aggregate?.reply_depth_bucket).toBe('moderate'); // 2 distinct NESTED depths {1,2}
   });
 });
 
