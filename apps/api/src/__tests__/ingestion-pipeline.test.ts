@@ -7,11 +7,15 @@
 // redelivery, deterministic normalized-event ids, the lifecycle/freshness
 // consumers, and the low-activity sweep.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID } from '@licio/shared';
+import { COMMONS_ROOM_ID, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { sweepLowActivity } from '../ingestion/lifecycle.js';
-import { deterministicEventId, retryDueExtractions } from '../ingestion/pipeline.js';
+import {
+  deterministicEventId,
+  processSubmittedStory,
+  retryDueExtractions,
+} from '../ingestion/pipeline.js';
 import { runIngestionTick } from '../ingestion/scheduler.js';
 import { createV1Routes } from '../routes/v1.js';
 import { attentionEvent } from './event-test-helpers.js';
@@ -187,6 +191,72 @@ describe('excerpt folds in the fetched body for the deferred classifier (WS-K §
   });
 });
 
+describe('uploaded video captions drive the §14.2 non-link pipeline (WS-K §24.1)', () => {
+  it('labels + excerpts a caption-only video from its uploaded track, not just topics', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity, { nowMs });
+    const captionsUploadId = randomUUID();
+    // The WebVTT track carries a medical sensitivity term ('symptom') and no
+    // inline captions_text; the title is neutral.
+    await fixture.forum.uploads.put(
+      {
+        uploadId: captionsUploadId,
+        ownerUserId: userId,
+        contentType: 'text/vtt',
+        byteSize: 0,
+        altText: null,
+        storageRef: 'ref',
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      new TextEncoder().encode(
+        'WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nThe patient describes each symptom in detail.',
+      ),
+    );
+    const storyId = randomUUID();
+    const created = await fixture.ingestion.stories.createWithThread(
+      {
+        storyId,
+        canonicalUrl: null,
+        title: 'A short clip',
+        titleHash: `hash-${storyId}`,
+        submittedBy: userId,
+        sourceId: null,
+        roomId: COMMONS_ROOM_ID,
+        visibility: 'public',
+        mediaUploadRef: randomUUID(),
+        canonicalPublicStoryId: null,
+        language: null,
+        topicIds: [UNCLASSIFIED_TOPIC_ID],
+        proposedTopicIds: [],
+        locationScope: null,
+        sensitivityLabels: ['none'],
+        lifecycleState: 'submitted',
+        submissionType: 'video_post',
+        submissionMetadata: {
+          submission_type: 'video_post',
+          upload_id: randomUUID(),
+          captions_upload_id: captionsUploadId,
+        },
+        excerpt: null,
+        publisher: null,
+        author: null,
+        publishedAt: null,
+        mediaType: 'video',
+        extractionState: 'pending',
+        hiddenState: null,
+      },
+      randomUUID(),
+    );
+    expect(created.ok).toBe(true);
+    await processSubmittedStory(fixture.ingestion, fixture.events, { story_id: storyId });
+    const story = await fixture.ingestion.stories.getById(storyId);
+    // The pipeline read the uploaded track: sensitivity labeling + excerpt now
+    // reflect the caption content (not just the deferred WS-K topic validator).
+    expect(story?.sensitivityLabels).toContain('medical');
+    expect(story?.excerpt ?? '').toContain('symptom');
+  });
+});
+
 describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {
   it('keeps the story readable, schedules a backoff retry, and succeeds later', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
@@ -218,7 +288,6 @@ describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {
     const storyId = await submitLink(url, cookie);
     const fetchCount = fixture.fetchedUrls.filter((u) => u === url).length;
     // Redeliver the stored event through the pipeline body directly.
-    const { processSubmittedStory } = await import('../ingestion/pipeline.js');
     await processSubmittedStory(fixture.ingestion, fixture.events, { story_id: storyId });
     expect(fixture.fetchedUrls.filter((u) => u === url).length).toBe(fetchCount); // no refetch
     // And the normalized event id is deterministic — exactly one stored.

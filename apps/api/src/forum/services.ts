@@ -34,6 +34,7 @@ import {
   type UploadStore,
 } from './stores.js';
 import { escalateThreadOnIntegritySignal } from './transitions.js';
+import { captionTextFromVtt } from './video.js';
 
 /** In-process counters (ids and counts only — never UGC text or PII). */
 export class ForumMetrics {
@@ -256,6 +257,13 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
         map.set(room.roomId, room.visibility);
       }
       return map;
+    });
+    // WS-K §24.1 — let the §14.2 pipeline read an uploaded WebVTT caption track's
+    // text (uploads live here, in the forum). A caption-only video then gets its
+    // sensitivity labels / claims / excerpt / freshness, not only its topics.
+    ingestion.setCaptionTextReader(async (uploadId) => {
+      const bytes = await services.uploads.getBytes(uploadId);
+      return bytes === null ? null : captionTextFromVtt(bytes);
     });
   }
 

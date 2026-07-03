@@ -41,6 +41,7 @@ import {
   extractMetadata,
   scanHtml,
 } from '../ingestion/extraction.js';
+import { excerptReservingBody } from '../ingestion/pipeline.js';
 import {
   evaluatePrechecks,
   LocalDenylistUrlSafety,
@@ -170,6 +171,22 @@ describe('sensitivity classification + excerpt bound (WS-F.1.4e/f)', () => {
     expect(excerpt.endsWith('…')).toBe(true);
     expect(boundedExcerpt('short text', 100)).toBe('short text');
     expect(boundedExcerpt('   ', 100)).toBeNull();
+  });
+
+  it('reserves body evidence in the excerpt behind a long description (WS-K §24.1)', () => {
+    // A long generic meta description that would fill the whole bound on its own…
+    const description = 'General overview and background information about the topic. '.repeat(20);
+    const body = 'quantumfluxcapacitor breakthrough detailed in the article body.';
+    const excerpt = excerptReservingBody(description, body, 200) as string;
+    expect(excerpt).not.toBeNull();
+    // …still leaves the distinctive body term for the deferred topic validator.
+    expect(excerpt).toContain('quantumfluxcapacitor');
+    // Total stays within the bound (+ the single joiner space).
+    expect(excerpt.length).toBeLessThanOrEqual(201);
+    // Degenerate inputs fall back to plain bounded text.
+    expect(excerptReservingBody(null, 'just body', 200)).toBe('just body');
+    expect(excerptReservingBody('just desc', '', 200)).toBe('just desc');
+    expect(excerptReservingBody(null, '', 200)).toBeNull();
   });
 });
 

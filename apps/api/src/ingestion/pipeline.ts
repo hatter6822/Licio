@@ -115,6 +115,53 @@ export function submissionText(story: StoryRecord): string {
   return `${story.title} ${submissionBodyText(story)}`;
 }
 
+/**
+ * The UPLOADED caption-track text of a video story (WS-K §24.1), or null when it
+ * does not apply — a non-video, a video with inline `captions_text` (already in
+ * `submissionBodyText`), no `captions_upload_id`, or an unreadable/empty track.
+ * Read through the late-bound forum upload reader so the §14.2 pipeline can label
+ * a caption-only video from its actual content.
+ */
+async function captionTextForStory(
+  ingestion: IngestionServices,
+  story: StoryRecord,
+): Promise<string | null> {
+  const meta = story.submissionMetadata;
+  if (
+    meta.submission_type !== 'video_post' ||
+    meta.captions_upload_id === undefined ||
+    meta.captions_text !== undefined
+  ) {
+    return null;
+  }
+  const text = await ingestion.readCaptionText(meta.captions_upload_id);
+  return text !== null && text.trim().length > 0 ? text : null;
+}
+
+/**
+ * Build a fetched-link excerpt that RESERVES body evidence (SPEC §24.1). The
+ * description leads (best display text) but is capped at half the bound, so the
+ * fetched body always gets the remainder — the deferred topic validator, whose
+ * only view of a link is this excerpt, never loses the article text behind a
+ * long/generic meta description or a small source cap. Falls back to
+ * body-then-description when either is absent. Never exceeds `cap` (+1 joiner).
+ */
+export function excerptReservingBody(
+  description: string | null,
+  bodyText: string,
+  cap: number,
+): string | null {
+  const body = bodyText.trim();
+  const desc = description?.trim() ?? '';
+  if (desc.length === 0 || desc === body) return boundedExcerpt(body, cap);
+  if (body.length === 0) return boundedExcerpt(desc, cap);
+  // Cap the description at half the bound so the body is guaranteed the rest.
+  const descPart = boundedExcerpt(desc, Math.max(1, Math.floor(cap / 2)));
+  const bodyBudget = cap - (descPart?.length ?? 0);
+  const bodyPart = bodyBudget > 0 ? boundedExcerpt(body, bodyBudget) : null;
+  return [descPart, bodyPart].filter((part): part is string => part !== null).join(' ') || null;
+}
+
 /** Exponential retry backoff for extraction failures (minutes): 5, 25, 125. */
 function retryNotBefore(nowMs: number, attempt: number): string {
   const minutes = 5 ** Math.min(attempt, 3);
@@ -245,7 +292,13 @@ export async function processSubmittedStory(
 
   // ----- Non-link types: no fetch; classify the local text. ---------------
   if (story.submissionType !== 'link') {
-    const bodyText = submissionBodyText(story);
+    // WS-K §24.1 — a video whose captions were UPLOADED (a WebVTT track) rather
+    // than typed inline carries no inline text, so `submissionBodyText` is empty.
+    // Read the caption track so sensitivity labeling, claim extraction, the
+    // excerpt, and freshness all see the video's real content (not only the WS-K
+    // topic validator, which reads it separately) — a caption-only crisis/health
+    // video must not normalize label-free.
+    const bodyText = (await captionTextForStory(ingestion, story)) ?? submissionBodyText(story);
     const language = story.language ?? detectLanguage(null, bodyText);
     const classified = classifySensitivity(`${story.title} ${bodyText}`);
     const labels = [...new Set([...story.sensitivityLabels, ...classified])];
@@ -401,18 +454,15 @@ export async function processSubmittedStory(
   // The excerpt is BOTH the display snippet AND the deferred WS-K topic
   // classifier's only view of the article (content.normalized carries no fetched
   // body — SPEC §24.1). Lead with the publisher's curated description (the best
-  // display text) but FOLD IN the fetched body, so a proposed topic supported
-  // ONLY by the article body — not a generic meta description — still validates
-  // instead of being left UNCLASSIFIED. Same copyright bound as before (the
-  // fallback already stored bounded body text); noarchive still stores nothing.
-  const excerptSource =
-    metadata.description !== null && metadata.description !== bodyText
-      ? `${metadata.description} ${bodyText}`
-      : bodyText;
+  // display text) but RESERVE a share of the copyright bound for the fetched
+  // body, so a long/generic description (or a small source excerpt cap) can't
+  // crowd the article text out of the bound and leave a body-only topic
+  // UNCLASSIFIED. Same total bound as before; noarchive still stores nothing.
   const excerpt = metadata.noarchive
     ? null // the publisher said do-not-archive: store NO body text at all
-    : boundedExcerpt(
-        excerptSource,
+    : excerptReservingBody(
+        metadata.description,
+        bodyText,
         Math.min(config.excerptMaxChars, source.displayRestrictions.excerpt_max_chars ?? Infinity),
       );
 
