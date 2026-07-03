@@ -17,6 +17,7 @@ import {
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionRuntimeConfig } from '../ingestion/config.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import type { StoryRecord } from '../ingestion/stores.js';
 import {
   freshIngestionServices,
   type IngestionServicesFixture,
@@ -70,8 +71,23 @@ export async function seedThread(
     title?: string;
     visibility?: 'public' | 'room_only';
     submittedBy?: string;
+    /** Trusted topics (defaults to a random id). */
+    topicIds?: string[];
+    /** Author-proposed topics (defaults to the trusted set / random). */
+    proposedTopicIds?: string[];
+    /** original_brief body text (defaults to 'Seed body.'). */
+    body?: string;
+    /** Excerpt override; pass `null` to model a no-excerpt (link-only) story. */
+    excerpt?: string | null;
+    /** Submission type + payload override (defaults to an original_brief). When
+     *  set, `submissionType` is derived from the metadata's discriminant. */
+    submissionMetadata?: StoryRecord['submissionMetadata'];
   } = {},
 ): Promise<{ storyId: string; threadId: string }> {
+  const submissionMetadata: StoryRecord['submissionMetadata'] = options.submissionMetadata ?? {
+    submission_type: 'original_brief',
+    body: options.body ?? 'Seed body.',
+  };
   const storyId = options.storyId ?? randomUUID();
   const threadId = options.threadId ?? randomUUID();
   const created = await fixture.ingestion.stories.createWithThread(
@@ -88,13 +104,21 @@ export async function seedThread(
       mediaUploadRef: null,
       canonicalPublicStoryId: null,
       language: 'en',
-      topicIds: [randomUUID()],
+      topicIds: options.topicIds ?? [randomUUID()],
+      ...(options.proposedTopicIds !== undefined
+        ? { proposedTopicIds: options.proposedTopicIds }
+        : {}),
       locationScope: null,
       sensitivityLabels: [],
       lifecycleState: 'gathering_attention',
-      submissionType: 'original_brief',
-      submissionMetadata: { submission_type: 'original_brief', body: 'Seed body.' },
-      excerpt: 'Seed body.',
+      submissionType: submissionMetadata.submission_type,
+      submissionMetadata,
+      excerpt:
+        options.excerpt !== undefined
+          ? options.excerpt
+          : submissionMetadata.submission_type === 'original_brief'
+            ? (options.body ?? 'Seed body.')
+            : null,
       publisher: null,
       author: null,
       publishedAt: null,

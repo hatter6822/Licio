@@ -11,6 +11,8 @@ import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { BrandLogo } from '../../components/ui/BrandLogo/index.js';
 import { useT } from '../../i18n/index.js';
 import { useFeedQuery, useUpdateDurablePrivacyMutation } from '../../lib/queries.js';
+import { dampenFeed } from '../../signals/topic-dampening.js';
+import { getTopicLoopTracker } from '../../signals/topic-loops.js';
 import { useAuthStore, useUIStore } from '../../stores/index.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
@@ -38,8 +40,24 @@ export function FrontPage(): React.ReactElement {
   const feed = useFeedQuery(mode);
   // Flatten the infinite pages; adapt to the PageScaffold's single-query shape.
   const items: FeedItem[] = feed.data?.pages.flatMap((page) => page.items) ?? [];
+  // PHI v0 (WS-H.6.1c, SPEC §11.6): quietly show a topic the reader is CIRCLING
+  // less often — down to a non-zero floor, so a pursued topic still surfaces
+  // rarely — instead of interrupting with a prompt. The circling signal is
+  // browser-only (topic ids + timing); this reshapes only what THIS device
+  // renders, never what the server ranks, and it recovers when the reader moves
+  // on. Recomputed each render so it tracks the latest in-session circling.
+  //
+  // Dampening is PERSONALIZATION — skip it in the modes where the reader has
+  // explicitly asked for none: `chronological` (the server already serves the
+  // `user_mode` chronological fallback, a COMPLETE timeline) and
+  // `low-personalization`. Dropping items locally there would also silently skip
+  // them from the server-decision cursor chain on the next page.
+  const personalized = mode !== 'chronological' && mode !== 'low-personalization';
+  const displayItems = personalized
+    ? dampenFeed(items, getTopicLoopTracker().topicMultipliers())
+    : items;
   const feedQuery = {
-    data: feed.data === undefined ? undefined : items,
+    data: feed.data === undefined ? undefined : displayItems,
     isLoading: feed.isLoading,
     isError: feed.isError,
     refetch: feed.refetch,

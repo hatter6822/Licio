@@ -142,8 +142,8 @@ saddles, CID over verified permutation groups, depth-3 path
 signatures); the steward/analyst admin surface; the public
 interpretation/lineage reads; and the client surfaces (exposure
 labels, the independent-sources drawer, "Where interpretations
-differ", the composer context warning, the narrow-loop wellbeing
-prompt, PHI-4 reset/reduce-personalization controls, the per-topic
+differ", the composer context warning, the graduated topic-frequency
+dampener (replaced the narrow-loop prompt), PHI-4 reset/reduce-personalization controls, the per-topic
 repeats preference).
 WS-I ships ranking and distribution (`docs/ranking/README.md`): the
 eight-stage SPEC §13.3 pipeline behind `GET /v1/feed` (front page +
@@ -510,7 +510,7 @@ licio/
 │   │       │   │                           AI-classified/AI-draft/AI-translated + revisions)
 │   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
 │   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
-│   │       │   ├── composer/            -- StoryComposer + shared affordances (Attachment,
+│   │       │   ├── composer/            -- StoryComposer (author topic picker) + shared affordances (Attachment,
 │   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
 │   │       │   ├── comments/            -- Inline CommentSection + comment composer/media (WS-T)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
@@ -531,7 +531,7 @@ licio/
 │   │       │   ├── security/            -- StepUpDialog + step-up retry gate
 │   │       │   ├── i18n/                -- TranslationDisclosure
 │   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget,
-│   │       │                               NarrowLoopPrompt (WS-H.6.1c)
+│   │       │                               QuietHoursSetting
 │   │       ├── stores/                  -- Zustand state (3 stores)
 │   │       │   ├── auth.ts              --   session + cross-tab logout
 │   │       │   ├── ui.ts                --   theme, motion, feed mode, focus
@@ -588,6 +588,7 @@ licio/
 │   │       │   ├── source-tracker.ts    --   source-open tracking
 │   │       │   ├── caps.ts              --   per-item dwell caps
 │   │       │   ├── topic-loops.ts       --   PHI v0 session topic-loop tracker (WS-H)
+│   │       │   ├── topic-dampening.ts   --   PHI v0 client topic-frequency dampener (WS-H.6.1c)
 │   │       │   └── runtime.ts           --   runtime signal management
 │   │       ├── security/
 │   │       │   └── trusted-types.ts     --   TT policies (origin comparison)
@@ -891,7 +892,8 @@ licio/
 │   │       ├── types/                   --   TypeScript type exports
 │   │       ├── enums/                   --   enumeration constants
 │   │       ├── constants/               --   shared constants (incl. the 51 ratified
-│   │       │                                 WS-A moderation reason codes)
+│   │       │                                 WS-A moderation reason codes + the
+│   │       │                                 canonical story-topic catalog)
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
 │   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-K)
@@ -918,7 +920,8 @@ licio/
 │   │       │   │   takedown.ts, embedding.ts,
 │   │       │   │   ingestion-review.ts  --     WS-F content tables (stories, sources,
 │   │       │   │                               claims + dual-dimension evidence cards,
-│   │       │   │                               syndication, takedowns, pgvector, queue)
+│   │       │   │                               syndication, takedowns, pgvector, queue; topic_ids trusted +
+│   │       │   │                               proposed_topic_ids)
 │   │       │   ├── thread.ts            --     WS-G threads (conversation/safety states,
 │   │       │   │                               per-story branch uniqueness)
 │   │       │   ├── contribution.ts      --     WS-G contributions (materialized path JSONB,

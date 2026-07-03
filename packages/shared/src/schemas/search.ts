@@ -8,6 +8,7 @@
 // (no-pay-to-rank, SPEC §13.6), and visibility filtering (safety-hidden /
 // takedown-removed content) is enforced server-side.
 import { z } from 'zod';
+import { isSentinelTopicId } from '../constants/topics.js';
 import { cursorSchema, isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 import { bcp47Schema } from './story.js';
 
@@ -20,7 +21,16 @@ export const searchRequestSchema = z
   .object({
     q: z.string().min(1).max(200),
     type: searchResultTypeSchema.optional(),
-    topic_id: uuidSchema.optional(),
+    // The UNCLASSIFIED sentinel is NOT a subject topic (SPEC §24.1) — it stands
+    // in for "no validated topic". Rejecting it at the boundary stops a caller
+    // filtering `?topic_id=<sentinel>` and getting every unclassified story back
+    // as one pseudo-topic (the in-memory `topicIds.includes` and the Drizzle
+    // `topic_ids @> array[…]` filters both key off this value).
+    topic_id: uuidSchema
+      .refine((value) => !isSentinelTopicId(value), {
+        message: 'topic_id must be a real subject topic, not the unclassified sentinel',
+      })
+      .optional(),
     source_id: uuidSchema.optional(),
     // WS-Q.2.5b — room-scoped search: when present, results are restricted to
     // this room's pool (public + room_only of THIS room). The caller must pass

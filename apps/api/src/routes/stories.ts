@@ -13,6 +13,7 @@ import {
   type ClaimPublic,
   claimEvidenceResponseSchema,
   type EvidenceCardPublic,
+  isSentinelTopicId,
   type SourcePublic,
   type StoryPublic,
   searchRequestSchema,
@@ -98,7 +99,9 @@ export function toStoryPublic(story: StoryRecord, threadId: string | null): Stor
     canonical_public_story_id: story.canonicalPublicStoryId,
     submitted_by: story.submittedBy,
     language: story.language,
-    topic_ids: story.topicIds,
+    // Never surface the UNCLASSIFIED sentinel as a topic on the wire (it is not
+    // a subject topic — no topic chip / repeats control for it).
+    topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)),
     location_scope: story.locationScope,
     sensitivity_labels: story.sensitivityLabels,
     lifecycle_state: story.lifecycleState,

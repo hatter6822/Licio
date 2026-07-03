@@ -56,6 +56,7 @@ import {
   suppressBelowK,
   type TierDeclaration,
 } from '@licio/invariants';
+import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -737,7 +738,12 @@ export class TropicalService extends BaseInvariantService {
     window: InvariantTimeWindow,
   ): Promise<InvariantComputation[]> {
     const recent = await this.deps.ingestion.stories.listRecent(200);
-    const topics = [...new Set(recent.flatMap((s) => s.topicIds))].sort();
+    // Exclude the UNCLASSIFIED sentinel: it is not a real shared topic, so
+    // several unclassified stories must not be analyzed as one synthetic
+    // tropical topic (which could raise a spurious coordination signal).
+    const topics = [
+      ...new Set(recent.flatMap((s) => s.topicIds).filter((id) => !isSentinelTopicId(id))),
+    ].sort();
     const out: InvariantComputation[] = [];
     for (const topicId of topics) {
       const cascade = await assembleTopicCascade(this.deps.ingestion, topicId);
@@ -901,7 +907,7 @@ export class CidService extends BaseInvariantService {
       const freshness = Date.parse(story.createdAt) / nowMs;
       const result = counterfactualInvarianceDefect(
         () => freshness,
-        { topic: story.topicIds[0] ?? 'untagged' },
+        { topic: story.topicIds.find((id) => !isSentinelTopicId(id)) ?? 'untagged' },
         { locale: 'en', age_band: 'adult' },
         group,
       );

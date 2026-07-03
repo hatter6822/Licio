@@ -4,6 +4,7 @@
 // validation, field bounds, BCP 47 acceptance/rejection, sensitivity-label
 // subset enforcement, unknown-key rejection, and the StoryPublic projection.
 import { describe, expect, it } from 'vitest';
+import { topicIdForSlug } from '../constants/topics.js';
 import {
   bcp47Schema,
   canonicalizeBcp47,
@@ -25,7 +26,8 @@ const randomUUID = (): string => {
   return uuidOf(uuidCounter);
 };
 
-const TOPIC = randomUUID();
+// A real, selectable catalog topic (author proposals must be catalog topics).
+const TOPIC = topicIdForSlug('local-community');
 const ROOM = randomUUID();
 
 function linkBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -85,11 +87,23 @@ describe('storyCreateRequestSchema — shared bounds', () => {
     );
   });
 
-  it('rejects empty topic_ids and non-UUID topics', () => {
+  it('rejects empty topic_ids and non-catalog topics (author proposals must be catalog topics)', () => {
     expect(storyCreateRequestSchema.safeParse(linkBody({ topic_ids: [] })).success).toBe(false);
+    // Non-UUID string is rejected.
     expect(storyCreateRequestSchema.safeParse(linkBody({ topic_ids: ['politics'] })).success).toBe(
       false,
     );
+    // A valid UUID that is NOT in the catalog is also rejected (catalog membership,
+    // not just shape — an author can only PROPOSE a real, selectable topic).
+    expect(
+      storyCreateRequestSchema.safeParse(linkBody({ topic_ids: [randomUUID()] })).success,
+    ).toBe(false);
+    // The UNCLASSIFIED sentinel is never author-selectable.
+    expect(
+      storyCreateRequestSchema.safeParse(
+        linkBody({ topic_ids: ['70b1c0de-0000-4000-8000-000000000000'] }),
+      ).success,
+    ).toBe(false);
   });
 
   it('rejects invalid BCP 47 tags and unknown sensitivity labels', () => {

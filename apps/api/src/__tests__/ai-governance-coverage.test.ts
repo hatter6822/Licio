@@ -184,6 +184,39 @@ describe('WS-K wiring builders + classification consumer', () => {
     );
     expect(records.some((r) => r.output_ref === storyId)).toBe(true);
   });
+
+  it('invokes the post-classification hook so ranking features refresh (WS-I cold-start)', async () => {
+    const { forum, ai } = fresh();
+    const refreshed: string[] = [];
+    registerAiGovernanceConsumers(forum.events, ai, async (storyId) => {
+      refreshed.push(storyId);
+    });
+    const { storyId } = await seedThread(forum, { title: 'Climate policy bill vote senate' });
+    await forum.events.router.publish({
+      event_id: randomUUID(),
+      timestamp: '2026-06-19T12:00:00.000Z',
+      schema_version: '1',
+      event_type: 'content.normalized',
+      story_id: storyId,
+      submitted_by: randomUUID(),
+      submission_type: 'link',
+      canonical_url: 'https://example.com/b',
+      topic_ids: [],
+      room_id: '00000000-0000-4000-8000-000000000001',
+      visibility: 'public',
+      privacy_classification: 'public',
+      retention_tier: 'public_contribution',
+      source_id: null,
+      language: 'en',
+      sensitivity_labels: [],
+      duplicate_group_id: null,
+      claim_ids: [],
+      embedding_ref: null,
+    } as never);
+    // The hook fired with the classified story, so the boot wiring can refresh
+    // that story's ranking feature vector off the validated topics.
+    expect(refreshed).toContain(storyId);
+  });
 });
 
 describe('WS-K.1.2f runtime alerts + rollback', () => {

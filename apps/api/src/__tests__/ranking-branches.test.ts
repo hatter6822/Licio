@@ -7,7 +7,13 @@
 // helpers, scheduler lease behavior, and the feed-mapping variants.
 
 import { randomUUID } from 'node:crypto';
-import { rankingDecisionLogSchema, retentionDeadline } from '@licio/ranking';
+import {
+  FEATURE_SCHEMA_VERSION,
+  type FeatureVector,
+  rankingDecisionLogSchema,
+  retentionDeadline,
+} from '@licio/ranking';
+import { COMMONS_ROOM_ID, topicIdForSlug } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
 import type { JobLeaseStore } from '../identity/job-lease.js';
@@ -19,6 +25,7 @@ import { loadRankingRuntimeConfig } from '../ranking/config.js';
 import { assembleFeatureVector } from '../ranking/features.js';
 import { runRankingTick, startRankingScheduler } from '../ranking/scheduler.js';
 import { serveFeed } from '../ranking/service.js';
+import type { FeatureStore } from '../ranking/stores.js';
 import { InMemoryDecisionLogStore } from '../ranking/stores.js';
 import { attentionEvent, seedUserWithSession } from './event-test-helpers.js';
 import {
@@ -288,6 +295,22 @@ describe('per-user service helpers', () => {
     expect(unknown.topicPreferences).toEqual([]);
   });
 
+  it('userContext resolves stored preference SLUGS to catalog UUIDs (WS-I personalization)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity, { handle: 'prefuser' });
+    const user = await fixture.identity.store.getUser(userId);
+    if (user === null) throw new Error('seed failed');
+    // A preference saved as the public slug must match a story's catalog-UUID
+    // topic in topicRelevance, so it is resolved to the UUID here.
+    await fixture.identity.store.updateUser(userId, {
+      personalizationSettings: {
+        ...user.personalizationSettings,
+        topic_preferences: ['technology'],
+      },
+    });
+    const ctx = await fixture.ranking.userContext(userId);
+    expect(ctx.topicPreferences).toEqual([topicIdForSlug('technology')]);
+  });
+
   it('enforcement reflects WS-H promotions (default all-shadow)', async () => {
     const shadow = await fixture.ranking.enforcement();
     expect(Object.values(shadow).every((flag) => flag === false)).toBe(true);
@@ -543,6 +566,56 @@ describe('replay + serving edge branches', () => {
     ]);
     expect(await fixture.ranking.featureStore.listStaleItems(horizon, 1)).toEqual([a.storyId]);
     expect(await fixture.ranking.featureStore.getRevision(a.storyId, 99)).toBeNull();
+  });
+
+  it('rebuilds a stale-schema feature row before scoring it (WS-I.2.1d)', async () => {
+    const { storyId } = await seedStory(fixture.ingestion, { topicIds: ['realtopic'] });
+    const real = fixture.ranking.featureStore;
+    // A row persisted before a FEATURE_SCHEMA_VERSION bump: version 1, a
+    // pre-catalog topic id, no sensitivity_labels. `upsert` rejects it (the
+    // schema literal), so inject it only through getLatestMany on the first serve.
+    const staleRow = {
+      item_id: storyId,
+      item_type: 'story',
+      room_id: COMMONS_ROOM_ID,
+      visibility: 'public',
+      topic_ids: ['stale-random-topic'],
+      source_id: null,
+      created_at: new Date().toISOString(),
+      feature_version: 1,
+      revision: 0,
+      invariant_versions: {},
+      updated_at: new Date().toISOString(),
+    } as unknown as FeatureVector;
+    let serveCount = 0;
+    const staleStore: FeatureStore = {
+      upsert: (v) => real.upsert(v),
+      getLatest: (id) => real.getLatest(id),
+      getRevision: (id, r) => real.getRevision(id, r),
+      getAt: (id, t) => real.getAt(id, t),
+      listStaleItems: (b, l) => real.listStaleItems(b, l),
+      clear: () => real.clear(),
+      getLatestMany: async (ids) => {
+        serveCount += 1;
+        if (serveCount === 1) return new Map([[storyId, staleRow]]);
+        return real.getLatestMany(ids);
+      },
+    };
+    await serveFeed(
+      { ...fixture.ranking, featureStore: staleStore },
+      {
+        userId: null,
+        surface: 'front_page',
+        surfaceRoomId: null,
+        surfaceTopicId: null,
+        mode: undefined,
+      },
+    );
+    // The staleness guard rebuilt the row at the current schema in the REAL store
+    // — scoring never ran on the v1 field set.
+    const rebuilt = await real.getLatest(storyId);
+    expect(rebuilt?.feature_version).toBe(FEATURE_SCHEMA_VERSION);
+    expect(rebuilt?.topic_ids).not.toContain('stale-random-topic');
   });
 });
 

@@ -16,8 +16,10 @@
 //   meri_rank / redundancy_penalty ................ WS-H MERI
 //   mfci_score / mfci_risk_state / coordination_penalty ... WS-H MFCI (+ tropical)
 //   scoi_level .................................... WS-H SCOI context state
-//   phi_risk / holonomy_risk ...................... WS-H PHI
 //   gwei_cohort_disparity ......................... WS-H GWEI
+//   (PHI has NO per-item feature: holonomy is a per-USER/session signal, so it
+//    enters ranking as the per-user diversification constraint — see
+//    `phiDiversification` — never a per-item penalty.)
 //   hodge_harmonic_tension / harmful_tension_risk . WS-H Hodge (WS-J hostility seam)
 //   tropical_cascade_rank ......................... WS-H tropical cascade
 //   braid_agenda_entropy .......................... WS-H braid dynamics
@@ -33,7 +35,10 @@ import { z } from 'zod';
 import { findDeniedFields } from '../denylist.js';
 
 /** Bump on any change to the feature-vector field set (WS-I.2.1c). */
-export const FEATURE_SCHEMA_VERSION = 1;
+// v2: the WS-I topic-validation cut — the PHI penalty inputs (`phi_risk`,
+// `holonomy_risk`) were removed and `sensitivity_labels` added, changing the
+// stored field set, so serve/replay cohorts stay distinguishable by version.
+export const FEATURE_SCHEMA_VERSION = 2;
 
 /** MFCI risk states as ranking features (SPEC §8.5). */
 export const MFCI_RISK_STATE_FEATURES = ['normal', 'elevated', 'high', 'severe'] as const;
@@ -74,6 +79,15 @@ export const featureVectorSchema = z
      *  (every pre-WS-Q served item was public). */
     visibility: z.enum(['public', 'room_only']).default('public'),
     topic_ids: z.array(z.string().min(1).max(128)).max(16),
+    /**
+     * WS-F content-sensitivity labels (the story's `sensitivityLabels`, minus
+     * `none`). A non-empty set marks the item sensitive — the per-ITEM signal
+     * for the conservative decay curve + the §11.5 sensitive-content penalty.
+     * Content sensitivity is a LABEL, not a topic (per-item topics are catalog
+     * UUIDs); absent/empty ⇒ not sensitive. Optional so pre-existing feature
+     * snapshots replay unchanged.
+     */
+    sensitivity_labels: z.array(z.string().min(1).max(32)).max(8).optional(),
     source_id: z.string().uuid().nullable(),
     created_at: z.string(),
     feature_version: z.literal(FEATURE_SCHEMA_VERSION),
@@ -95,12 +109,10 @@ export const featureVectorSchema = z
     mfci_score: z.number().nonnegative().optional(),
     mfci_risk_state: z.enum(MFCI_RISK_STATE_FEATURES).optional(),
     scoi_level: z.enum(SCOI_LEVELS).optional(),
-    phi_risk: z.number().nonnegative().optional(),
     gwei_cohort_disparity: z.number().nonnegative().optional(),
 
     // --- Penalty terms (each normalized to [0, 1]) --------------------------
     coordination_penalty: unit.optional(),
-    holonomy_risk: unit.optional(),
     harmful_tension_risk: unit.optional(),
     redundancy_penalty: unit.optional(),
 

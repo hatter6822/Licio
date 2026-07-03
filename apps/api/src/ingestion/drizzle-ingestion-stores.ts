@@ -81,6 +81,7 @@ import type {
   SignatureStore,
   SourceRecord,
   SourceStore,
+  StoryCreateInput,
   StoryCreateOutcome,
   StoryDedupTier,
   StoryRecord,
@@ -137,6 +138,7 @@ export class DrizzleStoryStore implements StoryStore {
       canonicalPublicStoryId: row.canonicalPublicStoryId,
       language: row.language,
       topicIds: row.topicIds,
+      proposedTopicIds: row.proposedTopicIds,
       locationScope: row.locationScope ?? null,
       sensitivityLabels: row.sensitivityLabels as StoryRecord['sensitivityLabels'],
       lifecycleState: row.lifecycleState,
@@ -250,10 +252,7 @@ export class DrizzleStoryStore implements StoryStore {
     return rows.map((row) => this.#toThread(row.threads));
   }
 
-  async createWithThread(
-    story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
-    threadId: string,
-  ): Promise<StoryCreateOutcome> {
+  async createWithThread(story: StoryCreateInput, threadId: string): Promise<StoryCreateOutcome> {
     try {
       // Explicit millisecond-precision timestamps (not SQL now()): keyset
       // cursors round-trip created_at through JS Dates/ISO strings, which
@@ -277,6 +276,7 @@ export class DrizzleStoryStore implements StoryStore {
             canonicalPublicStoryId: story.canonicalPublicStoryId,
             language: story.language,
             topicIds: story.topicIds,
+            proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
             locationScope: story.locationScope,
             sensitivityLabels: story.sensitivityLabels,
             lifecycleState: story.lifecycleState,
@@ -486,6 +486,9 @@ export class DrizzleStoryStore implements StoryStore {
       values['lastMaterialUpdateAt'] = new Date(patch.lastMaterialUpdateAt);
     }
     if (patch.topicIds !== undefined) values['topicIds'] = patch.topicIds;
+    // WS-K §24.1 — an authoritative body-override classification CONSUMES the
+    // proposals (clears them) so the deferred body-blind re-run preserves.
+    if (patch.proposedTopicIds !== undefined) values['proposedTopicIds'] = patch.proposedTopicIds;
     // WS-Q.2.4 — the author narrow/widen + the room private⇄public cascade patch
     // these fields; omitting them here made a visibility-only patch a silent
     // no-op in Postgres (the no-op-on-empty-values guard returned the unchanged

@@ -414,3 +414,67 @@ export function probeVideo(contentType: string, bytes: Uint8Array): VideoProbeRe
       return { ok: false, reason: 'type_mismatch' };
   }
 }
+
+// ---------------------------------------------------------------------------
+// WebVTT caption text
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the plain caption TEXT from a WebVTT track's bytes (WS-K §24.1).
+ *
+ * A video post's uploaded caption track is the only first-party text that
+ * describes the video, but `submissionBodyText` cannot read an upload — so the
+ * WS-K topic validator would never see it and an author's valid topic proposal,
+ * evidenced only in the captions, would be left UNCLASSIFIED. This strips the
+ * WebVTT structure (the `WEBVTT` header, `NOTE`/`STYLE`/`REGION` blocks, cue
+ * timing/settings lines, and bare cue identifiers) and returns the spoken text,
+ * inline tags removed. Best-effort and forgiving: it is a classification input,
+ * not a renderer, so a malformed track yields whatever text it can recover
+ * (never throws). Returns null when nothing textual remains.
+ */
+export function captionTextFromVtt(bytes: Uint8Array): string | null {
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch {
+    return null;
+  }
+  const out: string[] = [];
+  let skippingBlock = false; // inside a NOTE/STYLE/REGION block
+  for (const raw of text.split(/\r\n|\r|\n/)) {
+    const line = raw.trim();
+    if (line.length === 0) {
+      skippingBlock = false; // a blank line ends any header block / cue
+      continue;
+    }
+    if (skippingBlock) continue;
+    // The stream signature (optionally `WEBVTT - description`) and block headers.
+    if (/^WEBVTT(\s|$)/.test(line) || /^(NOTE|STYLE|REGION)(\s|$)/.test(line)) {
+      skippingBlock = true;
+      continue;
+    }
+    // Cue timing line (`00:00.000 --> 00:02.000 …`) and cue-setting lines.
+    if (line.includes('-->')) continue;
+    // A bare cue identifier: a line with no whitespace that is the id BEFORE a
+    // timing line. We cannot look ahead cheaply, so drop pure-numeric ids (the
+    // common form); textual ids are rare and, if kept, only add stray tokens.
+    if (/^\d+$/.test(line)) continue;
+    // Payload line — strip inline cue tags (`<c>`, `<00:00.000>`, `<v Bob>`). A
+    // character scan, NOT an `<…>` HTML-tag regex: everything from a `<` to the
+    // next `>` is a tag and dropped, and an unclosed `<` drops to end of line —
+    // so no angle bracket can ever survive (a COMPLETE sanitization, no
+    // partial-sanitization gap). The output is classification input only, never
+    // HTML, but it is bracket-free regardless.
+    let cleaned = '';
+    let inTag = false;
+    for (const ch of line) {
+      if (ch === '<') inTag = true;
+      else if (ch === '>') inTag = false;
+      else if (!inTag) cleaned += ch;
+    }
+    cleaned = cleaned.trim();
+    if (cleaned.length > 0) out.push(cleaned);
+  }
+  const joined = out.join(' ').trim();
+  return joined.length > 0 ? joined : null;
+}

@@ -297,11 +297,12 @@ For item `i` in context `c` during time window `t`:
                 + wS * SourceAndEvidenceCompleteness_i,c,t
                 + wC * ContextCoherenceGain_i,c,t
                 - pM * CoordinationPenalty_i,c,t
-                - pH * HolonomyRisk_i,c,t
                 - pT * HarmfulTensionRisk_i,c,t
                 - pR * RedundancyPenalty_i,c,t
 
-Where `B_i,t` is a time-sensitive baseline (freshness, source-reliability state, topic relevance); `ActiveAttention` is bounded, privacy-preserving, and deduplicated; `ConstructiveParticipation` measures contribution quality and downstream thread improvements; `ExposureIndependence` is derived from MERI; `ContextCoherenceGain` is derived partly from SCOI reduction; `CoordinationPenalty` is derived from MFCI and tropical cascade signals; `HolonomyRisk` from PHI; `HarmfulTensionRisk` from Hodge tension combined with safety classifiers; and `RedundancyPenalty` prevents repeated copies from accumulating distribution power.
+Where `B_i,t` is a time-sensitive baseline (freshness, source-reliability state, topic relevance); `ActiveAttention` is bounded, privacy-preserving, and deduplicated; `ConstructiveParticipation` measures contribution quality and downstream thread improvements; `ExposureIndependence` is derived from MERI; `ContextCoherenceGain` is derived partly from SCOI reduction; `CoordinationPenalty` is derived from MFCI and tropical cascade signals; `HarmfulTensionRisk` from Hodge tension combined with safety classifiers; and `RedundancyPenalty` prevents repeated copies from accumulating distribution power.
+
+PHI (holonomy) is deliberately NOT a per-item penalty term here. Holonomy is a per-**user**/session quantity — the curvature of the reader's own topic journey, not a property of any individual story — so there is no meaningful per-item `HolonomyRisk_i`. PHI instead enters ranking as the per-user `holonomy_limits` constraint (Section 13.4): a reader whose recent recommendation sequence exceeds the holonomy threshold gets feed diversification (tightened topic balancing) for that request. (An earlier draft carried a `- pH * HolonomyRisk` per-item term whose input was never populated, so it was structurally always 0; it was removed. A genuine per-item holonomy contribution, if wanted, is a PHI-v1 item.)
 
 The product exposes only a simplified explanation, such as: "Rising because many readers opened the source, three independent evidence cards were added, and the thread has low coordination risk."
 
@@ -895,7 +896,7 @@ No sequence should repeatedly route a user through high-risk loops without delib
 
 ## 11.6 UX requirements
 
-"Change the path" prompt ("Your recent feed has become narrow around this topic. See broader context?"); feed-mode switch ("Balanced," "Chronological," "Source-diverse," "Local," "Low personalization"); quiet notification policy for high-holonomy topics; user-accessible topic controls (mute, reset topic history, reduce personalization).
+**Graduated topic-frequency dampening (not a modal prompt).** A topic the reader is circling is shown steadily *less often* in the feed — its display frequency ramps down to a non-zero floor as the circling intensifies, so a genuinely pursued topic still surfaces, only rarely (never removed). The circling signal is computed entirely in-browser (topic-cluster ids + timing only, nothing sent to the server) and *decays over time*, so the topic's normal frequency recovers once the reader moves on. This is a quiet, self-correcting nudge that reshapes only what the reader's own device renders — it replaces the earlier interrupting "Change the path" prompt. Plus: feed-mode switch ("Balanced," "Chronological," "Source-diverse," "Local," "Low personalization"); quiet notification policy for circled topics; user-accessible topic controls (mute, reset topic history, reduce personalization).
 
 ## 11.7 Acceptance criteria
 
@@ -1011,6 +1012,8 @@ Every submission targets exactly one home room and carries a content visibility 
 | Evidence card | Source tied to an existing claim. | Citation, claim reference, relevance note. |
 | Local update | Time/place-specific update. | Location scope, time, source or experience disclosure. |
 | Live thread | Time-bounded event discussion. | Event, time, moderation mode. |
+
+**Topics: author proposal, AI validation (§24.1).** The "topic" required on every submission is an author **proposal** drawn from a canonical topic **catalog** (a finite, stable set of subject topics with fixed identifiers) — it is **untrusted** until validated. The ingestion/AI pipeline confirms each proposed topic against the story's actual content: supported proposals become the story's **trusted** topics (the only ones ranking, search, and the invariants read); unsupported proposals are rejected to steward review; and content-detected topics the author omitted are added. A story the pipeline cannot classify carries an explicit **"unclassified"** marker, which topic-similarity signals (including the PHI circling/dampening signal) exclude — so an unclassified story never groups with unrelated content. Topic identifiers are catalog-canonical and **shared across stories** (never per-story placeholders), so "the same topic" is genuinely groupable.
 
 ## 14.2 Ingestion pipeline
 
@@ -1583,6 +1586,8 @@ Financial and execution endpoints require idempotency keys; write actions requir
 ## 24.1 Use cases and limits
 
 AI may support topic classification, duplicate detection, claim extraction, evidence linking, toxicity/safety triage, thread-summarization drafts, translation, ranking candidate retrieval, context-obstruction estimation, coordination features, and accessibility alt-text suggestions.
+
+Topic classification acts as the **validation gate** for a story's topics (§14.1): an author's proposed catalog topics become the story's trusted topics only when the model confirms them against the content; unsupported proposals are rejected to review, and content-detected topics are added. Author picks are never trusted on their own.
 
 **Authority over AI is layered (§24.6).** At the **platform layer**, AI is never the sole authority for high-impact moderation unless policy defines a narrow emergency class, and platform AI never autonomously spends funds, approves proposals, or issues final sanctions — the platform legal floor (§17.1 boundary 5) is always human-operated. **Within a Knomosis-enabled room**, by contrast, a community-approved, member-downloadable AI agent (§24.6) may autonomously moderate in-room content, manage the room treasury, and facilitate in-room lawmaking — but **only within community-voted, kernel-enforced bounds**, **holding no private keys**, **subordinate to the non-overridable platform legal floor**, and with every action transparent, logged, explainable, and appealable. Bounded in-room autonomy is made safe by the §24.6 envelope (on-chain bounds + transparency + elections + capability sandboxing + the platform floor), never by trust in the model. In-room AI *moderation* (without a treasury) is available to ordinary rooms in simulated governance; in-room *treasury* powers exist only behind the fail-closed crypto gate and the jurisdiction engine.
 

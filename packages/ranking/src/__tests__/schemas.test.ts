@@ -82,7 +82,6 @@ describe('WS-I.2.1a feature vector schema', () => {
         'gwei_cohort_disparity',
         'harmful_tension_risk',
         'hodge_harmonic_tension',
-        'holonomy_risk',
         'invariant_versions',
         'item_id',
         'item_type',
@@ -90,12 +89,15 @@ describe('WS-I.2.1a feature vector schema', () => {
         'mfci_risk_state',
         'mfci_score',
         'path_signature_wellbeing',
-        'phi_risk',
         'redundancy_penalty',
         'reeb_landscape_basin_id',
         'revision',
         'room_id',
         'scoi_level',
+        // WS-I sensitive-content review-gate: per-item WS-F sensitivity labels
+        // drive the conservative curve + the §11.5 penalty (content sensitivity
+        // is a label, not a topic).
+        'sensitivity_labels',
         'source_evidence_completeness',
         'source_id',
         'source_reliability',

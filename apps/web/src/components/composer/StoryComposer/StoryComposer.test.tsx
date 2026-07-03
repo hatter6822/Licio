@@ -4,7 +4,7 @@
 // control LOCKED to in-room for private rooms (shown value == server-derived),
 // image posts that block submit without alt text, and videos rejected pre-upload
 // when oversize. A link submit builds the shared StoryCreateRequest.
-import { COMMONS_ROOM_ID, FAIL_CLOSED_FLAGS, MAX_VIDEO_BYTES } from '@licio/shared';
+import { COMMONS_ROOM_ID, FAIL_CLOSED_FLAGS, MAX_VIDEO_BYTES, topicIdForSlug } from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -22,6 +22,8 @@ vi.mock('../../../lib/api.js', async (importActual) => {
 });
 
 const PRIVATE_ROOM = '11111111-1111-4111-8111-111111111111';
+/** The catalog id behind the "Technology" topic chip (author proposal). */
+const TECHNOLOGY_TOPIC_ID = topicIdForSlug('technology');
 
 function roomList() {
   return {
@@ -104,12 +106,15 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     await user.type(screen.getByLabelText(/^title/i), 'A field note');
     // The body is the Markdown editor (labelled "Text"), not a bare input.
     await user.type(screen.getByRole('textbox', { name: /^text/i }), 'Some **observed** context.');
+    // At least one topic PROPOSAL is required before submitting (WS-K §24.1).
+    await user.click(screen.getByRole('button', { name: 'Technology' }));
     await user.click(screen.getByRole('button', { name: /post/i }));
     await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
     expect(createStory.mock.calls[0]?.[0]).toMatchObject({
       submission_type: 'original_brief',
       body: 'Some **observed** context.',
       room_id: COMMONS_ROOM_ID,
+      topic_ids: [TECHNOLOGY_TOPIC_ID],
     });
   });
 
@@ -170,6 +175,7 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     await user.type(screen.getByLabelText(/^title/i), 'Reservoir report');
     await user.type(screen.getByLabelText(/link url/i), 'https://example.org/a');
     await user.type(screen.getByLabelText(/why this matters/i), 'Primary source');
+    await user.click(screen.getByRole('button', { name: 'Technology' }));
     await user.click(screen.getByRole('button', { name: /post/i }));
     await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
     const request = createStory.mock.calls[0]?.[0];
@@ -179,6 +185,8 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
       reason: 'Primary source',
       room_id: COMMONS_ROOM_ID,
       visibility: 'public',
+      // Author PROPOSALS — a real catalog id, never a random placeholder.
+      topic_ids: [TECHNOLOGY_TOPIC_ID],
     });
     await waitFor(() => expect(onSubmitted).toHaveBeenCalled());
   });

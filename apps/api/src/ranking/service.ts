@@ -36,6 +36,7 @@ import {
   emptyFeatureVector,
   explainItem,
   type FallbackReason,
+  FEATURE_SCHEMA_VERSION,
   type FeatureVector,
   fallbackExplanation,
   type GeneratedExplanation,
@@ -60,7 +61,9 @@ import {
   type FeedItem,
   type FeedMode,
   feedItemSchema,
+  isSentinelTopicId,
   rankingDecisionLoggedEventSchema,
+  TOPIC_ID_BY_SLUG,
   TOPIC_REGISTRY,
   uuidSchema,
 } from '@licio/shared';
@@ -73,7 +76,7 @@ import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-publ
 import { killSwitchDecision } from './killswitch.js';
 import { assembleCandidatePool } from './orchestrator.js';
 import { applySafetyFilter } from './safety-filter.js';
-import { type RankingServices, SEEN_HISTORY_WINDOW_MS } from './services.js';
+import { type RankingServices, refreshStoryFeatures, SEEN_HISTORY_WINDOW_MS } from './services.js';
 
 /**
  * The locale explanations are served in. The renderer is catalog-ready
@@ -273,7 +276,9 @@ async function buildFeedItems(
         exposure_label: exposureLabel,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
         context_card: entry.contextCard,
-        topic_ids: story.topicIds.slice(0, 8),
+        // Never surface the UNCLASSIFIED sentinel as a topic on the wire — it
+        // would drive a topic-repeats control for a non-subject "topic".
+        topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 8),
       }),
     );
   }
@@ -581,7 +586,11 @@ export async function serveFeed(
   if (request.surface === 'room' && request.surfaceRoomId !== null) {
     surfacePool = surfacePool.filter((c) => c.room_id === request.surfaceRoomId);
   } else if (request.surface === 'topic' && request.surfaceTopicId !== null) {
-    const topicId = request.surfaceTopicId;
+    // `?topic=` may be a catalog SLUG (the canonical public form) or a raw
+    // catalog UUID; resolve a known slug to its UUID so it matches candidates'
+    // trusted catalog topic ids (UUIDs). An unknown value passes through
+    // unchanged (already a UUID, or a test/legacy slug the seed used directly).
+    const topicId = TOPIC_ID_BY_SLUG.get(request.surfaceTopicId) ?? request.surfaceTopicId;
     surfacePool = surfacePool.filter((c) => c.topic_ids.includes(topicId));
   }
   // WS-Q.4.2a — the always-on distribution gate runs BEFORE the ranked/fallback
@@ -730,7 +739,24 @@ export async function serveFeed(
   // a stored revision, or the decision could not be replayed at its
   // recorded versions. The empty vector carries metadata only.
   for (const candidate of safety.feasible) {
-    if (featuresById.has(candidate.item_id)) continue;
+    const stored = featuresById.get(candidate.item_id);
+    if (stored !== undefined && stored.feature_version >= FEATURE_SCHEMA_VERSION) continue;
+    if (stored !== undefined) {
+      // A STALE-schema row (a store carried across a FEATURE_SCHEMA_VERSION bump)
+      // can hold pre-catalog/random topic_ids and lack sensitivity_labels, so
+      // scoring would run on the old field set while the decision log claims the
+      // new version. Rebuild it at the current schema before scoring; the
+      // rebuilt row sticks (a one-time, self-healing migration-on-read).
+      await refreshStoryFeatures(services, candidate.item_id);
+      const rebuilt = await services.featureStore.getLatest(candidate.item_id);
+      featuresById.set(
+        candidate.item_id,
+        rebuilt !== null && rebuilt.feature_version >= FEATURE_SCHEMA_VERSION
+          ? rebuilt
+          : emptyFeatureVector(candidate, nowMs),
+      );
+      continue;
+    }
     const empty = emptyFeatureVector(candidate, nowMs);
     const written = await services.featureStore.upsert(empty);
     if (written !== null) {
@@ -885,7 +911,7 @@ export async function serveFeed(
     timestamp: nowIso,
     profile_id: profile.profile_id,
     profile_version: profile.profile_version,
-    feature_version: 1,
+    feature_version: FEATURE_SCHEMA_VERSION,
     fallback: false,
     fallback_reason: null,
     replay_inputs: {
@@ -1025,7 +1051,7 @@ async function serveFallback(
     timestamp: args.nowIso,
     profile_id: args.profile.profile_id,
     profile_version: args.profile.profile_version,
-    feature_version: 1,
+    feature_version: FEATURE_SCHEMA_VERSION,
     fallback: true,
     fallback_reason: args.reason,
     replay_inputs: null,

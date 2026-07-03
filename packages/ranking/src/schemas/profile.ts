@@ -44,12 +44,13 @@ export const profileWeightsSchema = z
   })
   .strict();
 
-/** The four penalty coefficients — separate NONNEGATIVE multipliers, never
- *  part of the convex combination (SPEC §5.4/§5.5). */
+/** The per-item penalty coefficients — separate NONNEGATIVE multipliers, never
+ *  part of the convex combination (SPEC §5.4/§5.5). There is no `pH` (holonomy):
+ *  PHI is realized as the per-user diversification constraint, not a per-item
+ *  penalty (the vestigial per-item holonomy term was removed). */
 export const profilePenaltiesSchema = z
   .object({
     pM: z.number().nonnegative(),
-    pH: z.number().nonnegative(),
     pT: z.number().nonnegative(),
     pR: z.number().nonnegative(),
   })
@@ -314,9 +315,9 @@ const DEFAULT_QUOTAS: z.infer<typeof profileQuotasSchema> = {
  */
 export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
   profile_id: 'breaking_news',
-  profile_version: '1.1.0',
+  profile_version: '1.2.0',
   weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 },
-  penalties: { pM: 1.0, pH: 0.5, pT: 0.75, pR: 0.5 },
+  penalties: { pM: 1.0, pT: 0.75, pR: 0.5 },
   constraints: DEFAULT_CONSTRAINTS,
   // Timeliness-weighted baseline: freshness carries more of B.
   baseline_weights: { freshness: 60, reliability: 25, relevance: 15 },
@@ -347,9 +348,9 @@ export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
  */
 export const EVERGREEN_PROFILE: RankingProfileConfig = {
   profile_id: 'evergreen',
-  profile_version: '1.1.0',
+  profile_version: '1.2.0',
   weights: { wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 },
-  penalties: { pM: 1.0, pH: 0.75, pT: 0.75, pR: 0.75 },
+  penalties: { pM: 1.0, pT: 0.75, pR: 0.75 },
   constraints: DEFAULT_CONSTRAINTS,
   baseline_weights: { freshness: 50, reliability: 30, relevance: 20 },
   decay_curves: {

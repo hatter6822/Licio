@@ -3,8 +3,12 @@
 // WS-I.2.3a — the PWAtt composite (SPEC §5.4):
 //
 //   PWAtt = B + (wA·A + wP·P + wE·E + wS·S + wC·C) / 100
-//             − pM·CoordinationPenalty − pH·HolonomyRisk
-//             − pT·HarmfulTensionRisk  − pR·RedundancyPenalty
+//             − pM·CoordinationPenalty − pT·HarmfulTensionRisk
+//             − pR·RedundancyPenalty
+//
+// (The §5.4 `pH·HolonomyRisk` per-item penalty is not applied: holonomy is a
+// per-user signal, so PHI enters ranking as the per-user diversification
+// constraint (§13 `holonomy_limits`), not a per-item term.)
 //
 // The five positive weights are the profile's §5.5-validated integer percents
 // (they sum to exactly 100 — enforced by the loader through the SAME

@@ -63,10 +63,12 @@ export const penaltyTermSchema = z
   .strict();
 export type PenaltyTerm = z.infer<typeof penaltyTermSchema>;
 
+// No `holonomy` term: the per-item PHI holonomy penalty was removed (it read a
+// `phi_risk` feature the assembler never populated, so it was always 0). PHI
+// enters ranking only as the per-user diversification constraint.
 export const penaltyComponentsSchema = z
   .object({
     coordination: penaltyTermSchema,
-    holonomy: penaltyTermSchema,
     harmful_tension: penaltyTermSchema,
     redundancy: penaltyTermSchema,
     /** Sum of the applied (enforced) penalties. */

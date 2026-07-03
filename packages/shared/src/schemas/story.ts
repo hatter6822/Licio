@@ -12,8 +12,21 @@
 // extraction diagnostics, review flags, and moderation state never reach the
 // wire (WS-F.1.1b security consideration).
 import { z } from 'zod';
+import { isSelectableTopicId, MAX_PROPOSED_TOPICS } from '../constants/topics.js';
 import { STORY_LIFECYCLE_STATES, type StoryLifecycleState } from '../utils/story-lifecycle.js';
 import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
+
+/**
+ * An author-PROPOSED topic: it must be a real, selectable catalog topic (never
+ * the `UNCLASSIFIED` sentinel, never an off-catalog/random id). This is the
+ * trust boundary for author input — the picks land in `proposed_topic_ids`
+ * (untrusted) and only enter the story's TRUSTED `topic_ids` once the WS-K
+ * validator confirms them against the content (SPEC §14.1/§24.1).
+ */
+export const proposedTopicIdSchema = z
+  .string()
+  .refine(isSelectableTopicId, { message: 'not a selectable catalog topic' });
+
 import {
   STORY_VISIBILITIES,
   type StoryVisibility,
@@ -234,8 +247,14 @@ export type SubmissionMetadata = z.infer<typeof submissionMetadataSchema>;
 
 const storyCreateBaseShape = {
   title: z.string().min(1).max(300),
-  /** At least one topic (§14.1 requires a topic on every type). */
-  topic_ids: z.array(uuidSchema).min(1).max(10),
+  /**
+   * At least one author-PROPOSED topic (§14.1 requires a topic on every type).
+   * These are PROPOSALS, not the story's trusted topics: the server stores
+   * them as `proposed_topic_ids` and the WS-K validator decides which become
+   * the trusted `topic_ids` (SPEC §24.1). Each must be a selectable catalog
+   * topic — the sentinel and off-catalog ids are rejected at the boundary.
+   */
+  topic_ids: z.array(proposedTopicIdSchema).min(1).max(MAX_PROPOSED_TOPICS),
   language: bcp47Schema.optional(),
   sensitivity_labels: z.array(sensitivityLabelSchema).max(5).optional(),
   location_scope: locationScopeSchema.nullable().optional(),
@@ -299,7 +318,10 @@ export const storyPublicSchema = z
     canonical_public_story_id: uuidSchema.nullable(),
     submitted_by: uuidSchema,
     language: bcp47Schema.nullable(),
-    topic_ids: z.array(uuidSchema).min(1).max(20),
+    // Subject topics only — the wire strips the UNCLASSIFIED sentinel, so an
+    // unclassified story carries NO topic here (the DB still holds the sentinel,
+    // satisfying its own non-empty CHECK). Hence min 0, not 1.
+    topic_ids: z.array(uuidSchema).max(20),
     location_scope: locationScopeSchema.nullable(),
     sensitivity_labels: z.array(sensitivityLabelSchema).max(5),
     lifecycle_state: storyLifecycleStateSchema,

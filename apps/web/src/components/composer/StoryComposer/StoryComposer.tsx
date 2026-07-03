@@ -14,6 +14,8 @@
 import {
   COMMONS_ROOM_ID,
   deriveStoryVisibility,
+  MAX_PROPOSED_TOPICS,
+  SELECTABLE_TOPICS,
   type StoryCreateRequest,
   UPLOAD_IMAGE_TYPES,
   UPLOAD_VIDEO_TYPES,
@@ -22,6 +24,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
 import { mintObjectUrl, sanitizeBlobUrl } from '../../../lib/blob-url.js';
+import { cn } from '../../../lib/cn.js';
 import { fileInputClasses } from '../../../lib/controls.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
 import {
@@ -107,6 +110,22 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
   const [mode, setMode] = useState<StoryComposerMode>('link');
   const [roomId, setRoomId] = useState<string>(COMMONS_ROOM_ID);
   const [requestedVisibility, setRequestedVisibility] = useState<'public' | 'room_only'>('public');
+  // WS-K §24.1 — the author PROPOSES catalog topics here. They are UNTRUSTED:
+  // the server stores them as `proposed_topic_ids` and the AI validator decides
+  // which become the story's real `topic_ids` after checking the content.
+  const [topics, setTopics] = useState<string[]>([]);
+  const toggleTopic = (id: string): void => {
+    setTopics((prev) => {
+      if (prev.includes(id)) return prev.filter((t) => t !== id);
+      if (prev.length >= MAX_PROPOSED_TOPICS) return prev; // bounded proposals
+      return [...prev, id];
+    });
+    setErrors((prev) => {
+      if (prev['topics'] === undefined) return prev;
+      const { topics: _dropped, ...rest } = prev;
+      return rest;
+    });
+  };
   // Share-target intake (WS-Q.5.1c): a shared URL/title seeds a link post.
   const [title, setTitle] = useState(share?.title ?? '');
   const [url, setUrl] = useState(share?.url ?? '');
@@ -208,6 +227,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       mode,
       roomId,
       visibility: requestedVisibility,
+      topicIds: topics,
       values,
     };
     if (debounceTimer.current !== null) clearTimeout(debounceTimer.current);
@@ -221,7 +241,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
         debounceTimer.current = null;
       }
     };
-  }, [mode, roomId, requestedVisibility, title, url, reason, body, altText, captionsText]);
+  }, [mode, roomId, requestedVisibility, topics, title, url, reason, body, altText, captionsText]);
 
   // Flush the latest draft immediately on app backgrounding and on unmount, so a
   // half-written post is never lost between debounce ticks (WS-Q.5.1b).
@@ -250,6 +270,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
     setMode(draft.mode);
     setRoomId(draft.roomId);
     setRequestedVisibility(draft.visibility);
+    setTopics(draft.topicIds ?? []);
     setTitle(draft.values['title'] ?? '');
     setUrl(draft.values['url'] ?? '');
     setReason(draft.values['reason'] ?? '');
@@ -297,6 +318,9 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       next['title'] = t('storyComposer.err.title', 'A title is required.');
     if (!postable) {
       next['room'] = t('storyComposer.err.room', 'Join this room before posting here.');
+    }
+    if (topics.length === 0) {
+      next['topics'] = t('storyComposer.err.topics', 'Choose at least one topic.');
     }
     if (mode === 'link' && url.trim().length === 0) {
       next['url'] = t('storyComposer.err.url', 'A link URL is required.');
@@ -356,11 +380,11 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       mode,
       roomId,
       visibility: requestedVisibility,
+      topicIds: topics,
       values: { title, url, reason, body, altText, captionsText },
     }).catch(() => undefined);
 
     try {
-      const topicIds = [crypto.randomUUID()]; // WS-K taxonomy seam: a placeholder topic.
       let uploadId: string | null = null;
       if (isMedia && file !== null) {
         setStatus('uploading');
@@ -377,7 +401,8 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
         title: title.trim(),
         room_id: roomId,
         visibility: submittedVisibility,
-        topic_ids: topicIds,
+        // Author PROPOSALS — validated server-side before they become trusted.
+        topic_ids: topics,
       };
       let request: StoryCreateRequest;
       if (mode === 'link') {
@@ -537,6 +562,50 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
         required
         {...(errors['title'] ? { error: errors['title'] } : {})}
       />
+
+      {/* WS-K §24.1 — topic PROPOSALS. Author picks are confirmed against the
+          content server-side before they take effect, so this is framed as a
+          proposal, not a final label. */}
+      <fieldset className="flex flex-col gap-2">
+        <legend className="font-medium text-ink text-sm">
+          {t('storyComposer.topics.label', 'Topics')}
+        </legend>
+        <p id={`${formId}-topics-help`} className="text-ink-muted text-sm">
+          {t(
+            'storyComposer.topics.help',
+            'Pick up to {max} topics this is about. We confirm them against your content before they take effect.',
+            { max: MAX_PROPOSED_TOPICS },
+          )}
+        </p>
+        <div
+          className="flex flex-wrap gap-2"
+          role="group"
+          aria-label={t('storyComposer.topics.label', 'Topics')}
+          aria-describedby={`${formId}-topics-help`}
+        >
+          {SELECTABLE_TOPICS.map((topic) => {
+            const selected = topics.includes(topic.id);
+            const atCap = !selected && topics.length >= MAX_PROPOSED_TOPICS;
+            return (
+              <button
+                key={topic.id}
+                type="button"
+                aria-pressed={selected}
+                disabled={atCap}
+                onClick={() => toggleTopic(topic.id)}
+                className={cn(
+                  'rounded-full border border-line px-3 py-1 text-sm transition-colors',
+                  selected ? 'neu-pressed text-ink' : 'neu-raised text-ink-muted',
+                  atCap && 'cursor-not-allowed opacity-50',
+                )}
+              >
+                {topic.name}
+              </button>
+            );
+          })}
+        </div>
+        {errors['topics'] ? <p className="text-error-on-soft text-sm">{errors['topics']}</p> : null}
+      </fieldset>
 
       {mode === 'link' ? (
         <>

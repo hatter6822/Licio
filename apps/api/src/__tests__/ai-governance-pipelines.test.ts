@@ -5,6 +5,7 @@
 // gate → publish/withhold), translation (AI-translated + consistency), correction
 // + accuracy, governance AI (cited fields, uncertainty, COI/scam advisories,
 // prohibited capabilities blocked), and runtime monitoring.
+import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import {
   accuracyMetrics,
@@ -40,6 +41,8 @@ import {
   type TranslationDeps,
   translateContent,
 } from '../ai-governance/translation.js';
+import { captionTextFromVtt } from '../forum/video.js';
+import { recomputeFreshness } from '../ingestion/freshness.js';
 import { freshForumServices, seedThread } from './forum-test-helpers.js';
 
 const NOW = () => Date.parse('2026-06-19T00:00:00.000Z');
@@ -58,11 +61,19 @@ function fresh(): Fixture {
 function pipelineDeps(f: Fixture): PipelineDeps {
   return {
     stories: f.forum.ingestion.stories,
+    sources: f.forum.ingestion.sources,
+    freshness: f.forum.ingestion.freshness,
     outputRecords: f.ai.outputRecords,
     reviewQueue: f.ai.reviewQueue,
     guard: f.ai.guard,
     topicConfidenceThreshold: () => f.ai.config().topicConfidenceThreshold,
     claimConfidenceFloor: () => f.ai.config().claimConfidenceFloor,
+    // WS-K §24.1 — the caption-track reader (parity with buildPipelineDeps): read
+    // the WebVTT bytes from the forum upload store, strip to plain text.
+    readCaptionText: async (uploadId: string): Promise<string | null> => {
+      const bytes = await f.forum.forum.uploads.getBytes(uploadId);
+      return bytes === null ? null : captionTextFromVtt(bytes);
+    },
     metrics: f.ai.metrics,
     log: f.ai.log,
     now: f.ai.now,
@@ -85,6 +96,179 @@ describe('WS-K.1.3a topic classification', () => {
     expect(story?.topicIds).toEqual(expect.arrayContaining(applied.map((a) => a.topic_id)));
     // An AIOutputRecord was written.
     expect(await f.ai.outputRecords.get(result?.output_id ?? '')).not.toBeNull();
+  });
+
+  it('validates supported author proposals and REJECTS unsupported ones (SPEC §24.1)', async () => {
+    const f = fresh();
+    const climate = topicIdForSlug('climate-environment'); // supported by the title
+    const health = topicIdForSlug('health'); // NOT supported by the title
+    const { storyId } = await seedThread(f.forum, {
+      // Multiple climate keywords clear the confidence threshold; no health ones.
+      title: 'Climate carbon emissions drought and renewable water levels',
+      proposedTopicIds: [climate, health],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The content-supported proposal becomes trusted; the unsupported one does not.
+    expect(story?.topicIds).toContain(climate);
+    expect(story?.topicIds).not.toContain(health);
+    // The trusted set is real (not the sentinel) since something validated.
+    expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+    // A rejected author proposal is recorded for steward review.
+    const review = await f.ai.reviewQueue.list({ status: 'pending' }, 50);
+    expect(
+      review.some(
+        (r) =>
+          r.kind === 'low_confidence_classification' &&
+          (r.context as Record<string, unknown>)['topic_id'] === health &&
+          (r.context as Record<string, unknown>)['rejected_author_proposal'] === true,
+      ),
+    ).toBe(true);
+  });
+
+  it('carries the UNCLASSIFIED sentinel when nothing validates', async () => {
+    const f = fresh();
+    const { storyId } = await seedThread(f.forum, {
+      title: 'The annual photography contest winners announced',
+      proposedTopicIds: [topicIdForSlug('health')],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    expect(story?.topicIds).toEqual([UNCLASSIFIED_TOPIC_ID]);
+  });
+
+  it('validates a video topic evidenced ONLY in an uploaded caption track (WS-K §24.1)', async () => {
+    const f = fresh();
+    const tech = topicIdForSlug('technology');
+    const captionsUploadId = '22222222-2222-4222-8222-222222222222';
+    // Store the WebVTT track: the technology keywords live ONLY in the captions,
+    // not the title, and there is no inline `captions_text`.
+    await f.forum.forum.uploads.put(
+      {
+        uploadId: captionsUploadId,
+        ownerUserId: null,
+        contentType: 'text/vtt',
+        byteSize: 0,
+        altText: null,
+        storageRef: 'ref',
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      new TextEncoder().encode(
+        'WEBVTT\n\n1\n00:00:00.000 --> 00:00:04.000\nThe new software algorithm runs on\n\n2\n00:00:04.000 --> 00:00:08.000\nevery computer chip in the datacenter.',
+      ),
+    );
+    const { storyId } = await seedThread(f.forum, {
+      title: 'A short clip', // carries no technology keywords
+      proposedTopicIds: [tech],
+      submissionMetadata: {
+        submission_type: 'video_post',
+        upload_id: '33333333-3333-4333-8333-333333333333',
+        captions_upload_id: captionsUploadId,
+      },
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The caption evidence validated the author's proposal — not left UNCLASSIFIED.
+    expect(story?.topicIds).toContain(tech);
+    expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+  });
+
+  it('validates a topic from EPHEMERAL override text and consumes the proposals (WS-K §24.1)', async () => {
+    const f = fresh();
+    const tech = topicIdForSlug('technology');
+    // A story whose persisted text (title + body + null excerpt) carries NO
+    // technology keywords — the noarchive-link shape, where the evidence lives
+    // only in the ephemeral fetched body passed as overrideText.
+    const { storyId } = await seedThread(f.forum, {
+      title: 'A short update',
+      body: 'Neutral body with no topical keywords.',
+      excerpt: null,
+      proposedTopicIds: [tech],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId, {
+      overrideText: 'The new software algorithm runs on every computer chip.',
+    });
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    expect(story?.topicIds).toContain(tech);
+    // The override run is AUTHORITATIVE: proposals are consumed…
+    expect(story?.proposedTopicIds).toEqual([]);
+    // …so the deferred, body-blind re-run PRESERVES the topic instead of
+    // re-adjudicating it to UNCLASSIFIED.
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const after = await f.forum.ingestion.stories.getById(storyId);
+    expect(after?.topicIds).toContain(tech);
+    expect(after?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+  });
+
+  it('drops a pre-catalog placeholder topic on reclassification with no proposals (WS-K)', async () => {
+    const f = fresh();
+    // A legacy row: the pre-catalog composer stored a random UUID as `topic_ids`
+    // and `proposed_topic_ids` is empty. The title carries no catalog keywords.
+    const placeholder = '11111111-1111-4111-8111-111111111111';
+    const { storyId } = await seedThread(f.forum, {
+      title: 'The annual photography contest winners announced',
+      topicIds: [placeholder],
+      proposedTopicIds: [],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The random placeholder never survives into the trusted set.
+    expect(story?.topicIds).not.toContain(placeholder);
+    expect(story?.topicIds).toEqual([UNCLASSIFIED_TOPIC_ID]);
+  });
+
+  it('preserves an existing CATALOG topic on reclassification with no proposals (WS-K)', async () => {
+    const f = fresh();
+    const climate = topicIdForSlug('climate-environment');
+    const { storyId } = await seedThread(f.forum, {
+      title: 'The annual photography contest winners announced', // no catalog keywords
+      topicIds: [climate],
+      proposedTopicIds: [],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // A genuine catalog topic on a legacy/backfill row is retained, not destroyed.
+    expect(story?.topicIds).toContain(climate);
+  });
+
+  it('validates a proposal supported only by the submission body when there is no excerpt (SPEC §24.1)', async () => {
+    const f = fresh();
+    const climate = topicIdForSlug('climate-environment');
+    const { storyId } = await seedThread(f.forum, {
+      title: 'A short note', // no catalog keywords in the title
+      body: 'Climate carbon emissions drought and renewable water levels',
+      excerpt: null, // a robots-disallowed / noarchive link stores no excerpt
+      proposedTopicIds: [climate],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The reason (submission body) names the topic, so the proposal validates
+    // instead of being rejected for lack of a fetched excerpt.
+    expect(story?.topicIds).toContain(climate);
+    expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+  });
+
+  it('an unclassified story derives no topic-cadence freshness baseline (sentinel excluded)', async () => {
+    const f = fresh();
+    // Two stories both carrying ONLY the UNCLASSIFIED sentinel.
+    const a = await seedThread(f.forum, {
+      title: 'A',
+      topicIds: [UNCLASSIFIED_TOPIC_ID],
+    });
+    await seedThread(f.forum, { title: 'B', topicIds: [UNCLASSIFIED_TOPIC_ID] });
+    const storyA = await f.forum.ingestion.stories.getById(a.storyId);
+    if (storyA === null) throw new Error('seed failed');
+    // Window anchored to the story's own creation so both stories fall inside.
+    await recomputeFreshness(
+      f.forum.ingestion.stories,
+      f.forum.ingestion.freshness,
+      storyA,
+      Date.parse(storyA.createdAt) + 1000,
+    );
+    // The sentinel is excluded, so two unclassified stories never derive a
+    // common topic-cadence baseline (it would be non-null without the filter).
+    expect((await f.forum.ingestion.freshness.get(a.storyId))?.topicBaselineMs).toBeNull();
   });
 
   it('returns null for an unknown story', async () => {

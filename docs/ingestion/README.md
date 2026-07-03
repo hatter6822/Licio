@@ -48,6 +48,29 @@ WS-F follows the WS-D/WS-E house pattern end to end:
   freshness refresh, extraction retries, one rate-limited embedding-backfill
   step, and config reload.
 
+## Topics (SPEC §14.1/§24.1) — proposed vs. trusted
+
+Story topics come from a canonical catalog SSOT (`@licio/shared`
+`constants/topics.ts`: stable UUID + slug + display name + classifier keywords
+per topic, plus the non-selectable `UNCLASSIFIED` sentinel). A story carries
+TWO topic fields:
+
+- `proposed_topic_ids` — the author's composer picks, **untrusted**. The wire
+  schema (`proposedTopicIdSchema`) rejects any id that is not a selectable
+  catalog topic, so a random/placeholder id can never be proposed.
+- `topic_ids` — the **trusted** set every ranking / search / invariant / PHI
+  consumer reads. It is written ONLY by the WS-K validator
+  (`classifyStoryTopics`, on `content.normalized`): each proposed topic becomes
+  trusted only if the story's content supports it (classifier confidence ≥
+  threshold); unsupported picks are rejected to steward review; the classifier's
+  own high-confidence detections are added. When nothing validates, `topic_ids`
+  is the `UNCLASSIFIED` sentinel — which similarity/loop consumers EXCLUDE, so an
+  unclassified story never groups with unrelated content.
+
+At submit the trusted set starts as `[UNCLASSIFIED]`; the validator promotes the
+content-supported topics asynchronously (it runs for every submission type — the
+pipeline emits `content.normalized` for link and non-link stories alike).
+
 ## Submission flow (WS-F.1.4a, the §14.2 pipeline)
 
 `POST /v1/stories` guard order (after route auth + zod discriminated-union

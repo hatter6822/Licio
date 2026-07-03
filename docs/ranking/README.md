@@ -229,8 +229,17 @@ The §5.4 formula, exactly:
 
 ```
 PWAtt = B + (wA·A + wP·P + wE·E + wS·S + wC·C) / 100
-          − pM·coordination − pH·holonomy − pT·harmful_tension − pR·redundancy
+          − pM·coordination − pT·harmful_tension − pR·redundancy
 ```
+
+There is no per-item `pH·holonomy` penalty: PHI (holonomy) is a per-**user**
+signal, not a per-item property, so it enters ranking only as the per-user
+`holonomy_limits` diversification constraint (see PHI diversification below),
+never a per-item penalty. (The earlier per-item `pH` term read a `phi_risk`
+feature the assembler never populated — it was structurally always 0 — and was
+removed. **PHI-v1 residual:** if a genuine per-item holonomy contribution is
+ever wanted, define a per-`(user, item)` signal and reintroduce the term; until
+then PHI's ranking effect is diversification only.)
 
 - **Profiles (WS-I.2.3f).** `breaking_news` (wA at its 30% cap, 6h breaking
   half-life) and `evergreen` (wP at its 40% cap — the conservative default

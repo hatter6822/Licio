@@ -27,6 +27,7 @@ import {
   type SheafStructure,
   type TopicStructure,
 } from '@licio/invariants';
+import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -268,7 +269,9 @@ export async function assembleMfciActions(
       if (user) group = accountAgeBucket(Date.parse(user.createdAt), atMs);
     }
     const story = await ingestion.stories.getById(targetId);
-    const topic = story?.topicIds[0] ?? 'untagged';
+    // First REAL topic (never the UNCLASSIFIED sentinel) — unclassified stories
+    // must not group under one synthetic MFCI topic label.
+    const topic = story?.topicIds.find((id) => !isSentinelTopicId(id)) ?? 'untagged';
     const bucket = `b${Math.max(0, Math.floor((atMs - fromMs) / 600_000))}`;
     observations.push({ labels: [group, topic, bucket, row.topic, targetId] });
     rawActions.push({ actorRef, targetId, atMs });
@@ -382,7 +385,8 @@ export async function assembleCohorts(
     const cached = storyTopics.get(storyId);
     if (cached) return cached;
     const story = await ingestion.stories.getById(storyId);
-    const topics = story ? [...story.topicIds] : [];
+    // Real topics only — the sentinel is not a shared cohort topic.
+    const topics = story ? story.topicIds.filter((id) => !isSentinelTopicId(id)) : [];
     storyTopics.set(storyId, topics);
     return topics;
   };
@@ -462,7 +466,7 @@ export async function assembleCohorts(
       items.push({
         itemId: storyId,
         sourceKey: story.sourceId ?? 'unknown',
-        topicIds: [...story.topicIds],
+        topicIds: story.topicIds.filter((id) => !isSentinelTopicId(id)),
         hasPrimaryEvidence: enrichedStory.hasPrimaryEvidence,
         discussionDepth: enrichedStory.discussionDepth,
         lensKeys: enrichedStory.lensKeys,
@@ -475,7 +479,7 @@ export async function assembleCohorts(
         semantic: projectEmbedding([...embedding], 16),
         sourceKey: story.sourceId ?? 'unknown',
         evidenceKeys: claims.map((c) => c.independenceGroupId ?? c.claimId).slice(0, 8),
-        communityKeys: story.topicIds.slice(0, 4),
+        communityKeys: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 4),
         weight: weights.weight,
       });
     }
@@ -596,6 +600,10 @@ export async function assembleTopicCascade(
   topicId: string,
   limit = 200,
 ): Promise<CascadeEvent[]> {
+  // The UNCLASSIFIED sentinel is not a real topic — never assemble a cascade
+  // over it (defense-in-depth alongside the caller's topic enumeration filter),
+  // so unrelated unclassified stories never form a synthetic cascade.
+  if (isSentinelTopicId(topicId)) return [];
   const recent = await ingestion.stories.listRecent(limit * 2);
   const stories = recent.filter((s) => s.topicIds.includes(topicId)).slice(0, limit);
   const cascade: CascadeEvent[] = [];
@@ -625,7 +633,8 @@ export async function assembleActivitySnapshots(
   const recent = await ingestion.stories.listRecent(200);
   const topicOf = new Map<string, string>();
   for (const story of recent) {
-    const topic = story.topicIds[0];
+    // First REAL topic — the sentinel must not become a braid activity topic.
+    const topic = story.topicIds.find((id) => !isSentinelTopicId(id));
     if (topic) topicOf.set(story.storyId, topic);
   }
   const snapshots: RankSnapshot[] = [];
@@ -673,7 +682,10 @@ export async function assembleEngagementLandscape(
       const a = recent[i];
       const b = recent[j];
       if (!a || !b) continue;
-      if (a.topicIds.some((t) => b.topicIds.includes(t))) {
+      // Two stories are topic-adjacent only through a REAL shared topic — the
+      // sentinel must not create an engagement-landscape edge between unrelated
+      // unclassified stories.
+      if (a.topicIds.some((t) => !isSentinelTopicId(t) && b.topicIds.includes(t))) {
         edges.push({ a: a.storyId, b: b.storyId });
       }
     }
@@ -761,7 +773,9 @@ export async function assemblePhiTopicData(
   const sharedDim = options.sharedDim ?? PHI_SHARED_DIM;
   const preferenceDim = options.preferenceDim ?? PHI_PREFERENCE_DIM;
   const maxStories = options.maxStoriesPerTopic ?? 32;
-  const wanted = new Set(topicClusterIds);
+  // The sentinel is never a real PHI topic cluster (unclassified stories must
+  // not share a synthetic cluster), regardless of what the caller passed.
+  const wanted = new Set(topicClusterIds.filter((id) => !isSentinelTopicId(id)));
   const sensitive = new Map<string, boolean>();
   const structures = new Map<string, TopicStructure>();
   if (wanted.size === 0) return { structures, sensitive };

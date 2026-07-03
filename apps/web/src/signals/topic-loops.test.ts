@@ -4,6 +4,7 @@
 // topic-cluster ids + timestamps ONLY, stays bounded, detects narrow loops
 // with the shared @licio/invariants mathematics, resets cleanly (PHI-4),
 // and degrades silently when storage is unavailable.
+import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   getTopicLoopTracker,
@@ -96,21 +97,44 @@ describe('TopicLoopTracker', () => {
     expect(JSON.parse(storage.getItem('licio.topic-sequence.v1') ?? '[]')).toHaveLength(1);
   });
 
-  it('remembers a per-cluster prompt dismissal for the session (no re-nagging)', () => {
-    const storage = new FakeStorage();
-    const tracker = new TopicLoopTracker(storage, () => 1_000);
-    expect(tracker.isPromptDismissed('topic-a')).toBe(false);
-    tracker.dismissPrompt('topic-a');
-    // Same cluster stays dismissed (a fresh tracker over the same storage too).
-    expect(tracker.isPromptDismissed('topic-a')).toBe(true);
-    expect(new TopicLoopTracker(storage, () => 1_000).isPromptDismissed('topic-a')).toBe(true);
-    // A DIFFERENT cluster is unaffected — a genuinely new loop can still prompt.
-    expect(tracker.isPromptDismissed('topic-b')).toBe(false);
-    // Empty id is a no-op; reset (PHI-4) also clears dismissals.
-    tracker.dismissPrompt('');
-    expect(tracker.isPromptDismissed('')).toBe(false);
-    tracker.reset();
-    expect(tracker.isPromptDismissed('topic-a')).toBe(false);
+  it('exposes per-topic display multipliers + circling for a circled topic', () => {
+    let nowMs = 1_000_000;
+    const tracker = new TopicLoopTracker(new FakeStorage(), () => nowMs);
+    // Circle 'a' heavily (repeated re-entries); 'z' is visited once.
+    for (const topic of ['a', 'b', 'a', 'b', 'a', 'b', 'a', 'z']) {
+      tracker.recordVisit(topic);
+      nowMs += 60_000;
+    }
+    const multipliers = tracker.topicMultipliers();
+    const a = multipliers.get('a');
+    expect(a).toBeDefined();
+    expect(a).toBeLessThan(1); // 'a' is dampened
+    expect(a).toBeGreaterThan(0); // never zero (the floor keeps it visible)
+    expect(multipliers.has('z')).toBe(false); // visited once ⇒ not dampened
+    expect(tracker.isCircling('a')).toBe(true);
+    expect(tracker.isCircling('z')).toBe(false);
+    expect(tracker.isCircling(null)).toBe(false);
+  });
+
+  it('never records or dampens the UNCLASSIFIED sentinel', () => {
+    const tracker = new TopicLoopTracker(new FakeStorage(), () => 1_000);
+    for (let i = 0; i < 6; i += 1) tracker.recordVisit(UNCLASSIFIED_TOPIC_ID);
+    expect(tracker.topicMultipliers().size).toBe(0);
+    expect(tracker.isCircling(UNCLASSIFIED_TOPIC_ID)).toBe(false);
+  });
+
+  it('recovers a circled topic frequency after the reader moves on (decay)', () => {
+    let nowMs = 1_000_000;
+    const tracker = new TopicLoopTracker(new FakeStorage(), () => nowMs);
+    for (const topic of ['a', 'b', 'a', 'b', 'a', 'b', 'a']) {
+      tracker.recordVisit(topic);
+      nowMs += 30_000;
+    }
+    expect(tracker.topicMultipliers(nowMs).get('a')).toBeLessThan(1);
+    // Long after the reader stops circling, the score decays out of the window
+    // and the topic's normal frequency returns (no permanent penalty).
+    const laterMs = nowMs + 3 * 60 * 60_000;
+    expect(tracker.topicMultipliers(laterMs).has('a')).toBe(false);
   });
 });
 

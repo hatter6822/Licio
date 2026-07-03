@@ -123,6 +123,7 @@ export async function seedStory(
       canonicalPublicStoryId: null,
       language: 'en',
       topicIds: options.topicIds ?? ['civics'],
+      proposedTopicIds: options.topicIds ?? ['civics'],
       locationScope: options.locationScope ?? null,
       sensitivityLabels: options.sensitivityLabels ?? [],
       lifecycleState: options.lifecycleState ?? 'gathering_attention',

@@ -52,7 +52,19 @@ export interface StoryRecord {
   /** WS-Q.2.2b — the canonical PUBLIC story for the same URL (room_only rows). */
   canonicalPublicStoryId: string | null;
   language: string | null;
+  /**
+   * TRUSTED topics — the story's real subjects, set ONLY by the WS-K validator
+   * (`classifyStoryTopics`) after confirming content support. Every ranking,
+   * search, invariant, and PHI-loop consumer reads THIS. Never empty: a story
+   * the validator cannot classify carries the `UNCLASSIFIED` sentinel.
+   */
   topicIds: string[];
+  /**
+   * The author's PROPOSED topics from the composer (SPEC §14.1). UNTRUSTED
+   * until the validator confirms each against the content — kept for validation
+   * input + audit; never read by ranking/similarity directly.
+   */
+  proposedTopicIds: string[];
   locationScope: LocationScope | null;
   sensitivityLabels: SensitivityLabel[];
   lifecycleState: StoryLifecycleState;
@@ -75,6 +87,19 @@ export interface StoryRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * The `createWithThread` input: a story record minus the store-stamped
+ * timestamps. `proposedTopicIds` is OPTIONAL — the submission path sets it
+ * explicitly (author picks, with trusted `topicIds` starting as the sentinel),
+ * but any other caller that omits it defaults `proposedTopicIds` to `topicIds`
+ * (a story with no separate proposals). The stored `StoryRecord` always carries
+ * both (non-optional).
+ */
+export type StoryCreateInput = Omit<
+  StoryRecord,
+  'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt' | 'proposedTopicIds'
+> & { proposedTopicIds?: string[] };
 
 export interface ThreadShellRecord {
   threadId: string;
@@ -257,10 +282,7 @@ export interface StoryStore {
   /** Transactional story + thread-shell creation (WS-F.1.4d): both or neither.
    *  Returns the duplicate outcome when the canonical URL already exists —
    *  including the lost half of a concurrent race (unique-index backstop). */
-  createWithThread(
-    story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
-    threadId: string,
-  ): Promise<StoryCreateOutcome>;
+  createWithThread(story: StoryCreateInput, threadId: string): Promise<StoryCreateOutcome>;
   getById(storyId: string): Promise<StoryRecord | null>;
   /** Batch read (the WS-I safety filter / feed mapping — one query per
    *  pool, never one per item). Unknown ids simply have no map entry. */
@@ -347,6 +369,7 @@ export interface StoryStore {
         | 'lifecycleState'
         | 'lastMaterialUpdateAt'
         | 'topicIds'
+        | 'proposedTopicIds'
         | 'visibility'
         | 'canonicalPublicStoryId'
         | 'mediaUploadRef'
@@ -646,10 +669,7 @@ export class InMemoryStoryStore implements StoryStore {
     if (slot !== null) slot.map.set(slot.key, next.storyId);
   }
 
-  async createWithThread(
-    story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
-    threadId: string,
-  ): Promise<StoryCreateOutcome> {
+  async createWithThread(story: StoryCreateInput, threadId: string): Promise<StoryCreateOutcome> {
     // WS-Q.2.2a — TIER-SCOPED exact-URL uniqueness (race backstop). A visible
     // public story collides globally; a visible room_only story collides only
     // within the same room. A room_only twin never blocks a public insert.
@@ -667,6 +687,9 @@ export class InMemoryStoryStore implements StoryStore {
     const at = nowIso(this.#now);
     const record: StoryRecord = {
       ...story,
+      // Default proposals to the trusted topics when a caller omits them (only
+      // the submission path sets them separately — author picks vs sentinel).
+      proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
       createdAt: at,
       updatedAt: at,
       lastMaterialUpdateAt: at,

@@ -166,8 +166,8 @@ describe('WS-I.2.3f deterministic profile selection', () => {
   });
 
   it('shipped-profile snapshot (unreviewed changes fail here)', () => {
-    expect(BREAKING_NEWS_PROFILE.profile_version).toBe('1.1.0');
-    expect(EVERGREEN_PROFILE.profile_version).toBe('1.1.0');
+    expect(BREAKING_NEWS_PROFILE.profile_version).toBe('1.2.0');
+    expect(EVERGREEN_PROFILE.profile_version).toBe('1.2.0');
     expect(BREAKING_NEWS_PROFILE.weights).toEqual({ wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 });
     expect(EVERGREEN_PROFILE.weights).toEqual({ wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 });
     expect(BREAKING_NEWS_PROFILE.baseline_weights).toEqual({

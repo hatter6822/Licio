@@ -23,7 +23,6 @@ import {
   computePenalties,
   coordinationInput,
   harmfulTensionInput,
-  holonomyInput,
   MFCI_RISK_PENALTY,
   SHADOW_ENFORCEMENT,
 } from '../scoring/penalties.js';
@@ -280,15 +279,6 @@ describe('WS-I.2.3b penalties', () => {
     expect(coordinationInput(tie, { mfci: true, tropical: true }).value).toBe(0.5);
   });
 
-  it('pH uses STRICTER thresholds for sensitive topics (§11.5)', () => {
-    const standard = holonomyInput(0.5, PROFILE, false);
-    const sensitive = holonomyInput(0.5, PROFILE, true);
-    expect(sensitive).toBeGreaterThan(standard);
-    // threshold 1.0, sensitive factor 0.5 ⇒ 0.5/1 = 0.5 vs 0.5/0.5 = 1.
-    expect(standard).toBeCloseTo(0.5, 12);
-    expect(sensitive).toBeCloseTo(1, 12);
-  });
-
   it('pT: high harmonic tension WITHOUT hostility produces ZERO penalty', () => {
     // The Hodge contract: harmful_tension_risk ≡ 0 absent hostility. The
     // penalty reads ONLY that field — raw tension never penalizes.
@@ -316,10 +306,9 @@ describe('WS-I.2.3b penalties', () => {
     expect(penalties.harmful_tension.applied).toBeCloseTo(0.8 * PROFILE.penalties.pT, 12);
   });
 
-  it('all four penalties are nonnegative and can drive the total below zero', () => {
+  it('all penalties are nonnegative and can drive the total below zero', () => {
     const features = makeFeatures(6, {
       mfci_risk_state: 'severe',
-      phi_risk: 5,
       harmful_tension_risk: 1,
       redundancy_penalty: 1,
       active_attention: 0.1,
@@ -328,12 +317,7 @@ describe('WS-I.2.3b penalties', () => {
     const penalties = computePenalties(features, PROFILE, FULL_ENFORCEMENT, {
       sensitiveTopic: true,
     });
-    for (const term of [
-      penalties.coordination,
-      penalties.holonomy,
-      penalties.harmful_tension,
-      penalties.redundancy,
-    ]) {
+    for (const term of [penalties.coordination, penalties.harmful_tension, penalties.redundancy]) {
       expect(term.value).toBeGreaterThanOrEqual(0);
       expect(term.applied).toBeGreaterThanOrEqual(0);
     }
@@ -350,7 +334,6 @@ describe('WS-I.2.3b penalties', () => {
     const features = makeFeatures(7, {
       mfci_risk_state: 'severe',
       redundancy_penalty: 1,
-      phi_risk: 5,
       harmful_tension_risk: 1,
     });
     const penalties = computePenalties(features, PROFILE, SHADOW_ENFORCEMENT, {

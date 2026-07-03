@@ -94,6 +94,24 @@ export interface IngestionServices {
   setSearchRoomVisibilityProvider: (
     provider: () => Promise<Map<string, 'public' | 'private'>>,
   ) => void;
+  /** WS-K §24.1 — read the plain text of an uploaded WebVTT caption track (a
+   *  video's only first-party text). Returns null when there is no reader wired
+   *  or no such upload. The §14.2 pipeline uses it so a caption-only video gets
+   *  sensitivity labels, claims, an excerpt, and freshness — not just topics.
+   *  Late-bound (uploads live in the forum, built after ingestion); default
+   *  returns null. */
+  readCaptionText: (uploadId: string) => Promise<string | null>;
+  /** Forum boot sets the {@link IngestionServices.readCaptionText} reader. */
+  setCaptionTextReader: (reader: (uploadId: string) => Promise<string | null>) => void;
+  /** WS-K §24.1 — validate a story's topics over EPHEMERAL text the persisted
+   *  story does not carry (a `noarchive` link's fetched body, dropped before the
+   *  deferred content.normalized validator runs). Runs the WS-K classifier
+   *  authoritatively (consumes the proposals so the deferred re-run preserves).
+   *  Late-bound (the classifier lives in WS-K, wired after ingestion); default is
+   *  a no-op so a topic simply stays unvalidated until other text supports it. */
+  revalidateTopicsFromText: (storyId: string, text: string) => Promise<void>;
+  /** WS-K boot sets the {@link IngestionServices.revalidateTopicsFromText} hook. */
+  setTopicRevalidator: (fn: (storyId: string, text: string) => Promise<void>) => void;
   submissionLimiter: SubmissionRateLimiter;
   /**
    * DEVELOPMENT/TEST ONLY: when true, the account-age ("account too new")
@@ -303,6 +321,12 @@ export function createInMemoryIngestionServices(
   // all rooms unknown ⇒ private ⇒ nothing surfaces globally until wired).
   let roomVisibilityProvider: () => Promise<Map<string, 'public' | 'private'>> = async () =>
     new Map();
+  // WS-K §24.1 — late-bound uploaded-caption reader (uploads live in the forum,
+  // built after ingestion). Default: no captions available.
+  let captionTextReader: (uploadId: string) => Promise<string | null> = async () => null;
+  // WS-K §24.1 — late-bound topic revalidator (the classifier lives in WS-K,
+  // built after ingestion). Default: a no-op.
+  let topicRevalidator: (storyId: string, text: string) => Promise<void> = async () => {};
 
   const services: IngestionServices = {
     stories,
@@ -318,6 +342,10 @@ export function createInMemoryIngestionServices(
     embeddings: new InMemoryEmbeddingStore(now),
     searchIndex: undefined as unknown as SearchIndex, // assigned below
     setSearchRoomVisibilityProvider: () => {}, // assigned below
+    readCaptionText: (uploadId) => captionTextReader(uploadId),
+    setCaptionTextReader: () => {}, // assigned below
+    revalidateTopicsFromText: (storyId, text) => topicRevalidator(storyId, text),
+    setTopicRevalidator: () => {}, // assigned below
     submissionLimiter: new SubmissionRateLimiter(new InMemorySlidingWindowStore()),
     // Fail-closed: the account-age gate stays ON unless the caller (boot path)
     // opts out for a development/test environment.
@@ -366,6 +394,12 @@ export function createInMemoryIngestionServices(
   services.urlSafety = new LocalDenylistUrlSafety(() => config.malwareDomains);
   services.setSearchRoomVisibilityProvider = (provider) => {
     roomVisibilityProvider = provider;
+  };
+  services.setCaptionTextReader = (reader) => {
+    captionTextReader = reader;
+  };
+  services.setTopicRevalidator = (fn) => {
+    topicRevalidator = fn;
   };
   services.searchIndex = new InMemorySearchIndex(
     buildSearchDocuments(

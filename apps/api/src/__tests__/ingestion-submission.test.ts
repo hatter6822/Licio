@@ -18,6 +18,7 @@ import {
   linkSubmission,
   post,
   seedUserWithSession,
+  TEST_TOPIC_ID,
 } from './ingestion-test-helpers.js';
 
 function app() {
@@ -46,7 +47,7 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
       extractionConfidence: null,
       modelVersion: null,
     });
-    const topic = '22222222-2222-4222-8222-222222222222';
+    const topic = TEST_TOPIC_ID;
     const bodies = [
       linkSubmission('https://example.com/article-1'),
       briefSubmission(),
@@ -143,7 +144,7 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
           claim_id: '99999999-9999-4999-8999-999999999999',
           relevance_note: 'dangling reference',
           title: 'Bad evidence card',
-          topic_ids: ['22222222-2222-4222-8222-222222222222'],
+          topic_ids: [TEST_TOPIC_ID],
         },
         cookie,
       ),
@@ -242,7 +243,7 @@ describe('POST /v1/stories — evidence-card routing (WS-F.2.5a)', () => {
           claim_id: claims[0]?.claimId,
           relevance_note: 'Independent replication of the figure',
           title: 'Replication study',
-          topic_ids: ['33333333-3333-4333-8333-333333333333'],
+          topic_ids: [TEST_TOPIC_ID],
         },
         cookie,
       ),

@@ -21,7 +21,7 @@ import { applyBalancing, type BalancingInput } from './diversify/balancing.js';
 import { applyMatroidDedup, type DedupInput } from './diversify/dedup.js';
 import { type Candidate, mergeCandidates } from './schemas/candidate.js';
 import type { ConstraintApplication } from './schemas/decision-log.js';
-import type { FeatureVector } from './schemas/feature-vector.js';
+import { FEATURE_SCHEMA_VERSION, type FeatureVector } from './schemas/feature-vector.js';
 import type { RankingProfileConfig } from './schemas/profile.js';
 import { type ConstraintFlag, type ScoredItem, scoredItemSchema } from './schemas/scored-item.js';
 import { computeBaseline, freshnessFromAge } from './scoring/baseline.js';
@@ -115,7 +115,14 @@ export function scoreItem(
   // Topic/freshness inputs come from the FEATURE VECTOR (the revision the
   // decision log pins), never the live candidate — serving and replay see
   // byte-identical inputs (WS-I.2.5b).
-  const sensitiveTopic = features.topic_ids.some((topic) => context.sensitiveTopicIds.has(topic));
+  // Per-item sensitivity is content-LABEL-driven (the story's non-`none`
+  // sensitivity labels — per-item topics are catalog UUIDs, not slugs, so a
+  // topic match against a slug set never fires per item). The topic-id set
+  // stays a forward-compat hook for a deployment that marks specific catalog
+  // topics sensitive. Either fires the conservative curve + the §11.5 penalty.
+  const sensitiveTopic =
+    (features.sensitivity_labels?.some((label) => label !== 'none') ?? false) ||
+    features.topic_ids.some((topic) => context.sensitiveTopicIds.has(topic));
   const ageMs = Math.max(0, context.nowMs - Date.parse(features.created_at));
   const curve = sensitiveTopic ? profile.decay_curves.evergreen : profile.decay_curves.breaking;
   const relevance = context.topicRelevanceByItem?.get(candidate.item_id);
@@ -257,9 +264,14 @@ export function emptyFeatureVector(candidate: Candidate, nowMs: number): Feature
     room_id: candidate.room_id,
     visibility: candidate.visibility,
     topic_ids: [...candidate.topic_ids],
+    // Cold-start sensitivity: inherit the candidate's labels so the §11.5 guard
+    // in scoreItem fires on an unrevisioned item's first serve.
+    ...(candidate.sensitivity_labels !== undefined
+      ? { sensitivity_labels: [...candidate.sensitivity_labels] }
+      : {}),
     source_id: candidate.source_id,
     created_at: candidate.freshness_timestamp,
-    feature_version: 1,
+    feature_version: FEATURE_SCHEMA_VERSION,
     revision: 0,
     invariant_versions: {},
     updated_at: now,

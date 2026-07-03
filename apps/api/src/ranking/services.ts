@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto';
 import { InvariantType } from '@licio/invariants';
 import type { RankingEnforcement } from '@licio/ranking';
+import { TOPIC_ID_BY_SLUG } from '@licio/shared';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
 import { type ForumServices, getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
@@ -34,6 +35,7 @@ import {
 import {
   type FeatureAssemblyDeps,
   pwattRowForRanking,
+  refreshFeatures,
   registerFeatureStoreConsumer,
 } from './features.js';
 import type { ClassificationPorts } from './orchestrator.js';
@@ -112,7 +114,16 @@ export const PHI_SESSION_BUCKET_CAP = 8;
 /** GWEI-gate read cache TTL (the serving path pays ≤ 1 query per minute). */
 export const GWEI_CACHE_TTL_MS = 60_000;
 
-/** WS-A sensitive-topic categories with stricter PHI thresholds (§11.5). */
+/**
+ * SURFACE-level sensitive-topic SLUGS (§11.5): a `?topic=<slug>` surface on one
+ * of these selects the conservative profile. This is a topic-SLUG set matched
+ * against `surfaceTopicId` (the raw `?topic=` value). PER-ITEM sensitivity is
+ * NOT topic-driven — an item's content sensitivity rides its WS-F
+ * `sensitivity_labels` (wired into the feature vector), because per-item topics
+ * are catalog UUIDs, not these slugs. A deployment may add catalog topic UUIDs
+ * here to also mark specific topics sensitive per item (the forward-compat hook
+ * in `scoreItem`).
+ */
 export const DEFAULT_SENSITIVE_TOPIC_IDS: ReadonlySet<string> = new Set([
   'self-harm',
   'eating-disorders',
@@ -347,7 +358,12 @@ export function createInMemoryRankingServices(
         userId,
         ageBand: user.ageBand,
         personalizationEnabled: user.privacySettings.personalization_enabled,
-        topicPreferences: user.personalizationSettings.topic_preferences,
+        // Resolve stored preference SLUGS to catalog UUIDs so they match
+        // candidates' trusted catalog topic ids (UUIDs) in `topicRelevance`; an
+        // unknown value (already a UUID, or off-catalog) passes through.
+        topicPreferences: user.personalizationSettings.topic_preferences.map(
+          (p) => TOPIC_ID_BY_SLUG.get(p) ?? p,
+        ),
         feedModeDefault: user.personalizationSettings.feed_mode,
       };
     },
@@ -406,8 +422,8 @@ export function createInMemoryRankingServices(
 }
 
 /** Register the WS-I durable consumers (feature-store real-time path). */
-export function registerRankingConsumers(services: RankingServices): void {
-  const deps: FeatureAssemblyDeps = {
+function featureAssemblyDeps(services: RankingServices): FeatureAssemblyDeps {
+  return {
     events: services.events,
     ingestion: services.ingestion,
     invariants: services.invariants,
@@ -415,7 +431,25 @@ export function registerRankingConsumers(services: RankingServices): void {
     log: services.log,
     now: services.now,
   };
-  registerFeatureStoreConsumer(deps);
+}
+
+export function registerRankingConsumers(services: RankingServices): void {
+  registerFeatureStoreConsumer(featureAssemblyDeps(services));
+}
+
+/**
+ * Refresh ONE story's ranking feature vector on demand — e.g. after the WS-K
+ * topic-validation pass promotes the trusted topics — so a cold-start empty
+ * revision (written when the story was served while classification was still
+ * pending) does not shadow the validated topics + sensitivity labels until the
+ * hourly batch. Assembles from the CURRENT story, so it picks up the validated
+ * state. Best-effort; a failure leaves the batch path to catch up.
+ */
+export async function refreshStoryFeatures(
+  services: RankingServices,
+  storyId: string,
+): Promise<void> {
+  await refreshFeatures(featureAssemblyDeps(services), storyId);
 }
 
 // --- Module singleton (house pattern) ---------------------------------------

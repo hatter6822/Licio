@@ -5,6 +5,7 @@
 // source suite includes the §14.3 doctrine assertion: NO truth/credibility/
 // reliability scalar exists anywhere in the source shape.
 import { describe, expect, it } from 'vitest';
+import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '../constants/topics.js';
 import { claimPublicSchema, evidenceCardPublicSchema } from '../schemas/claim.js';
 import { searchRequestSchema, searchResultSchema } from '../schemas/search.js';
 import {
@@ -164,6 +165,31 @@ describe('source schemas (WS-F.2.1a / WS-F.2.3a)', () => {
     ).toBe(false);
   });
 
+  it('constrains typical_topics edits to selectable catalog topics (SPEC §24.1)', () => {
+    // A real catalog subject topic is accepted…
+    expect(
+      sourceEditRequestSchema.safeParse({
+        reason: 'edit',
+        typical_topics: [topicIdForSlug('technology')],
+      }).success,
+    ).toBe(true);
+    // …but the UNCLASSIFIED sentinel and an off-catalog/random UUID are rejected,
+    // so a steward PATCH cannot reintroduce a non-catalog id that the source read
+    // would then expose.
+    expect(
+      sourceEditRequestSchema.safeParse({
+        reason: 'edit',
+        typical_topics: [UNCLASSIFIED_TOPIC_ID],
+      }).success,
+    ).toBe(false);
+    expect(
+      sourceEditRequestSchema.safeParse({
+        reason: 'edit',
+        typical_topics: ['11111111-1111-4111-8111-111111111111'],
+      }).success,
+    ).toBe(false);
+  });
+
   it('validates syndication create requests', () => {
     expect(
       syndicationCreateRequestSchema.safeParse({
@@ -198,6 +224,23 @@ describe('search request schema (WS-F.3.1b)', () => {
     expect(searchRequestSchema.safeParse({ q: 'x'.repeat(201) }).success).toBe(false);
     expect(searchRequestSchema.safeParse({ q: 'ok', limit: '500' }).success).toBe(false);
     expect(searchRequestSchema.safeParse({ q: 'ok', boost_paid: 'true' }).success).toBe(false);
+  });
+
+  it('rejects the UNCLASSIFIED sentinel as a topic filter but accepts a real subject topic', () => {
+    // The sentinel is not a subject topic (SPEC §24.1) — filtering on it would
+    // surface every unclassified story as one pseudo-topic.
+    expect(
+      searchRequestSchema.safeParse({
+        q: 'water',
+        topic_id: UNCLASSIFIED_TOPIC_ID,
+      }).success,
+    ).toBe(false);
+    expect(
+      searchRequestSchema.safeParse({
+        q: 'water',
+        topic_id: topicIdForSlug('government-policy'),
+      }).success,
+    ).toBe(true);
   });
 
   it('search results carry relevance + recency only — no financial field', () => {

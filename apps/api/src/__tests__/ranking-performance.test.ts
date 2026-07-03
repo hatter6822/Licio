@@ -22,6 +22,7 @@ import { createDbClient, migrationsFolder } from '@licio/db';
 import {
   type Candidate,
   EVERGREEN_PROFILE,
+  FEATURE_SCHEMA_VERSION,
   type FeatureVector,
   type RankingDecisionLog,
   type RankingEnforcement,
@@ -102,7 +103,7 @@ function buildPool(n: number): {
       topic_ids: [topic],
       source_id: sourceId,
       created_at: createdAt,
-      feature_version: 1,
+      feature_version: FEATURE_SCHEMA_VERSION,
       revision: 0,
       invariant_versions: {},
       updated_at: createdAt,

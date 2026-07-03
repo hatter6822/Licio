@@ -7,11 +7,15 @@
 // redelivery, deterministic normalized-event ids, the lifecycle/freshness
 // consumers, and the low-activity sweep.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID } from '@licio/shared';
+import { COMMONS_ROOM_ID, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { sweepLowActivity } from '../ingestion/lifecycle.js';
-import { deterministicEventId, retryDueExtractions } from '../ingestion/pipeline.js';
+import {
+  deterministicEventId,
+  processSubmittedStory,
+  retryDueExtractions,
+} from '../ingestion/pipeline.js';
 import { runIngestionTick } from '../ingestion/scheduler.js';
 import { createV1Routes } from '../routes/v1.js';
 import { attentionEvent } from './event-test-helpers.js';
@@ -22,6 +26,7 @@ import {
   linkSubmission,
   post,
   seedUserWithSession,
+  TEST_TOPIC_ID,
 } from './ingestion-test-helpers.js';
 
 function app() {
@@ -160,6 +165,124 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
   });
 });
 
+describe('excerpt folds in the fetched body for the deferred classifier (WS-K §24.1)', () => {
+  it('leads with the meta description but includes the article body, so a body-supported topic is not lost', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
+    const url = 'https://news.example/tech-piece';
+    // A GENERIC og:description (the helper hard-codes the reservoir blurb — no
+    // technology keywords) over a body whose distinctive text ('algorithm')
+    // carries the real topical evidence. content.normalized ships no fetched
+    // body, so the deferred WS-K classifier only ever sees `story.excerpt`.
+    fixture.pages.set(url, {
+      status: 200,
+      body: articleHtml({
+        body: 'A breakthrough software algorithm now runs on every computer chip in the datacenter.',
+      }),
+    });
+    const storyId = await submitLink(url, cookie);
+    const story = await fixture.ingestion.stories.getById(storyId);
+    expect(story?.extractionState).toBe('completed');
+    const excerpt = story?.excerpt ?? '';
+    // The publisher's curated description still LEADS (display quality)…
+    expect(excerpt.startsWith('Utility data shows a sharp reservoir decline.')).toBe(true);
+    // …and the fetched body is folded in, so the classifier can see the evidence
+    // the generic meta description omitted (the H3 fix — same copyright bound).
+    expect(excerpt).toContain('algorithm');
+  });
+});
+
+describe('noarchive links validate topics over the ephemeral body (WS-K §24.1)', () => {
+  it('passes the fetched body to the topic revalidator before dropping it', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
+    let capturedText: string | null = null;
+    fixture.ingestion.setTopicRevalidator(async (_storyId, text) => {
+      capturedText = text;
+    });
+    const url = 'https://noarchive.example/piece';
+    fixture.pages.set(url, {
+      status: 200,
+      body: articleHtml({
+        robotsMeta: 'noarchive',
+        body: 'A breakthrough software algorithm now runs on every computer chip.',
+      }),
+    });
+    const storyId = await submitLink(url, cookie);
+    const story = await fixture.ingestion.stories.getById(storyId);
+    // noarchive stores NO excerpt (the body is dropped)…
+    expect(story?.excerpt).toBeNull();
+    // …but the fetched body was handed to the revalidator first, so a body-only
+    // topic can still validate despite nothing being persisted.
+    expect(capturedText).not.toBeNull();
+    expect(capturedText as unknown as string).toContain('algorithm');
+  });
+});
+
+describe('uploaded video captions drive the §14.2 non-link pipeline (WS-K §24.1)', () => {
+  it('labels + excerpts a caption-only video from its uploaded track, not just topics', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity, { nowMs });
+    const captionsUploadId = randomUUID();
+    // The WebVTT track carries a medical sensitivity term ('symptom') and no
+    // inline captions_text; the title is neutral.
+    await fixture.forum.uploads.put(
+      {
+        uploadId: captionsUploadId,
+        ownerUserId: userId,
+        contentType: 'text/vtt',
+        byteSize: 0,
+        altText: null,
+        storageRef: 'ref',
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      new TextEncoder().encode(
+        'WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nThe patient describes each symptom in detail.',
+      ),
+    );
+    const storyId = randomUUID();
+    const created = await fixture.ingestion.stories.createWithThread(
+      {
+        storyId,
+        canonicalUrl: null,
+        title: 'A short clip',
+        titleHash: `hash-${storyId}`,
+        submittedBy: userId,
+        sourceId: null,
+        roomId: COMMONS_ROOM_ID,
+        visibility: 'public',
+        mediaUploadRef: randomUUID(),
+        canonicalPublicStoryId: null,
+        language: null,
+        topicIds: [UNCLASSIFIED_TOPIC_ID],
+        proposedTopicIds: [],
+        locationScope: null,
+        sensitivityLabels: ['none'],
+        lifecycleState: 'submitted',
+        submissionType: 'video_post',
+        submissionMetadata: {
+          submission_type: 'video_post',
+          upload_id: randomUUID(),
+          captions_upload_id: captionsUploadId,
+        },
+        excerpt: null,
+        publisher: null,
+        author: null,
+        publishedAt: null,
+        mediaType: 'video',
+        extractionState: 'pending',
+        hiddenState: null,
+      },
+      randomUUID(),
+    );
+    expect(created.ok).toBe(true);
+    await processSubmittedStory(fixture.ingestion, fixture.events, { story_id: storyId });
+    const story = await fixture.ingestion.stories.getById(storyId);
+    // The pipeline read the uploaded track: sensitivity labeling + excerpt now
+    // reflect the caption content (not just the deferred WS-K topic validator).
+    expect(story?.sensitivityLabels).toContain('medical');
+    expect(story?.excerpt ?? '').toContain('symptom');
+  });
+});
+
 describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {
   it('keeps the story readable, schedules a backoff retry, and succeeds later', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
@@ -191,7 +314,6 @@ describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {
     const storyId = await submitLink(url, cookie);
     const fetchCount = fixture.fetchedUrls.filter((u) => u === url).length;
     // Redeliver the stored event through the pipeline body directly.
-    const { processSubmittedStory } = await import('../ingestion/pipeline.js');
     await processSubmittedStory(fixture.ingestion, fixture.events, { story_id: storyId });
     expect(fixture.fetchedUrls.filter((u) => u === url).length).toBe(fetchCount); // no refetch
     // And the normalized event id is deterministic — exactly one stored.
@@ -283,7 +405,7 @@ describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
           room_id: COMMONS_ROOM_ID,
           body: 'Body for the lifecycle test story.',
           title: 'Lifecycle test',
-          topic_ids: [randomUUID()],
+          topic_ids: [TEST_TOPIC_ID],
         },
         cookie,
       ),
@@ -317,7 +439,7 @@ describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
           room_id: COMMONS_ROOM_ID,
           body: 'Soon to be idle.',
           title: 'Idle story',
-          topic_ids: [randomUUID()],
+          topic_ids: [TEST_TOPIC_ID],
         },
         cookie,
       ),

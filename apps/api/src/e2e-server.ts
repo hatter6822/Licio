@@ -53,6 +53,7 @@ import { RendezvousService, setRendezvousService } from './private-rendezvous/se
 import { InMemoryRendezvousStore } from './private-rendezvous/stores.js';
 import {
   createInMemoryRankingServices,
+  refreshStoryFeatures,
   registerRankingConsumers,
   setRankingServices,
 } from './ranking/services.js';
@@ -161,7 +162,9 @@ aiGovernanceServices.ingestion = ingestionServices;
 aiGovernanceServices.forum = forumServices;
 await aiGovernanceServices.reloadConfig();
 setAiGovernanceServices(aiGovernanceServices);
-registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+registerAiGovernanceConsumers(eventServices, aiGovernanceServices, (storyId) =>
+  refreshStoryFeatures(rankingServices, storyId),
+);
 
 // WS-S.6.6 — force the IN-MEMORY server-blind rendezvous store.  The harness sets a DUMMY
 // DATABASE_URL to satisfy the env validator, but `getRendezvousService()`'s `buildStore()` keys off

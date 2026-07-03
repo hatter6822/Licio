@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// PHI v0 client-side topic-loop tracking (WS-H.6.1a/b, SPEC §11.3).
+// PHI v0 client-side topic-loop tracking (WS-H.6.1a/b, SPEC §11.3/§11.6).
 //
 // The session topic sequence lives ENTIRELY in the browser (the same
 // privacy philosophy as the attention signal pipeline): topic-cluster ids
 // and timestamps only — no story ids, no content — capped at the bounded
 // sequence length and persisted to sessionStorage so it dies with the
 // session. Detection reuses the @licio/invariants mathematics verbatim
-// (one source of truth with the server-side batch tier), and its result
-// feeds the NON-BLOCKING wellbeing prompt only.
+// (one source of truth with the server-side batch tier).
+//
+// The recorded sequence drives the CLIENT-SIDE topic-frequency dampener
+// (topic-dampening.ts): a topic the reader is circling is shown steadily less
+// often in the front-page feed, down to a non-zero floor (a quiet, self-
+// correcting nudge — NOT an interrupting prompt), and the quiet-notification
+// policy for a strongly-circled topic.
 //
 // "Reset topic history" (WS-H.6.1c-2 / PHI-4) clears this state without
 // touching the account or any contribution.
@@ -21,26 +26,11 @@ import {
   type NarrowLoopDetection,
   type TopicTransition,
 } from '@licio/invariants';
+import { isSentinelTopicId } from '@licio/shared';
+import { CIRCLING_QUIET_MULTIPLIER, computeTopicMultipliers } from './topic-dampening.js';
 
 const STORAGE_KEY = 'licio.topic-sequence.v1';
 const SEQUENCE_CAP = 200;
-/** Per-topic-cluster narrow-loop prompt dismissals for the SESSION (dies with
- *  it, same as the sequence). Prevents the prompt re-nagging on every story in
- *  the same loop after the reader has already dismissed it once. */
-const DISMISSED_KEY = 'licio.loop-dismissed.v1';
-
-function readDismissed(storage: Storage): Set<string> {
-  try {
-    const raw = storage.getItem(DISMISSED_KEY);
-    if (!raw) return new Set();
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? new Set(parsed.filter((id): id is string => typeof id === 'string'))
-      : new Set();
-  } catch {
-    return new Set();
-  }
-}
 
 function readSequence(storage: Storage): TopicTransition[] {
   try {
@@ -83,9 +73,12 @@ export class TopicLoopTracker {
     this.#now = now;
   }
 
-  /** Record a topic-context visit (topic-cluster id only — never a story id). */
+  /** Record a topic-context visit (topic-cluster id only — never a story id).
+   *  The UNCLASSIFIED sentinel is NEVER recorded: an unclassified story has no
+   *  known topic, so it must never contribute to "circling one topic" (that is
+   *  exactly the false-positive a shared placeholder topic would cause). */
   recordVisit(topicClusterId: string): void {
-    if (!topicClusterId) return;
+    if (!topicClusterId || isSentinelTopicId(topicClusterId)) return;
     const sequence = readSequence(this.#storage);
     writeSequence(
       this.#storage,
@@ -102,32 +95,27 @@ export class TopicLoopTracker {
     };
   }
 
-  /** Record that the reader dismissed the narrow-loop prompt for this topic
-   *  cluster — session-scoped, so it does not re-nag on the next story in the
-   *  same loop (WS-H.6.1c: a soft, non-repeating intervention). */
-  dismissPrompt(topicClusterId: string): void {
-    if (!topicClusterId) return;
-    const dismissed = readDismissed(this.#storage);
-    dismissed.add(topicClusterId);
-    try {
-      this.#storage.setItem(DISMISSED_KEY, JSON.stringify([...dismissed]));
-    } catch {
-      // Storage full/unavailable: the prompt may re-show (best-effort).
-    }
+  /** Per-topic feed display multipliers ∈ [floor, 1) for topics the reader is
+   *  circling (topics with no dampening are omitted). The front-page feed uses
+   *  these to show a circled topic less often; the score decays over time, so a
+   *  reader who moves on recovers that topic's normal frequency. */
+  topicMultipliers(nowMs: number = this.#now()): Map<string, number> {
+    return computeTopicMultipliers(readSequence(this.#storage), nowMs);
   }
 
-  /** Whether the narrow-loop prompt for this topic cluster was dismissed this
-   *  session (empty/absent id ⇒ never dismissed). */
-  isPromptDismissed(topicClusterId: string | null | undefined): boolean {
-    if (!topicClusterId) return false;
-    return readDismissed(this.#storage).has(topicClusterId);
+  /** Whether a topic is being circled ENOUGH to warrant the quiet-notification
+   *  policy (its display multiplier is at/below {@link CIRCLING_QUIET_MULTIPLIER}).
+   *  The sentinel is never circling (it is never recorded). */
+  isCircling(topicClusterId: string | null | undefined, nowMs: number = this.#now()): boolean {
+    if (!topicClusterId || isSentinelTopicId(topicClusterId)) return false;
+    const multiplier = this.topicMultipliers(nowMs).get(topicClusterId);
+    return multiplier !== undefined && multiplier <= CIRCLING_QUIET_MULTIPLIER;
   }
 
   /** PHI-4: clear the topic-sequence state. Touches nothing else. */
   reset(): void {
     try {
       this.#storage.removeItem(STORAGE_KEY);
-      this.#storage.removeItem(DISMISSED_KEY);
     } catch {
       // Already unavailable — nothing to clear.
     }

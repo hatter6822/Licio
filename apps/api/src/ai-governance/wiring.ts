@@ -8,6 +8,7 @@
 // absent so a misconfiguration fails loudly rather than silently no-op'ing.
 import type { ContentNormalizedEvent } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import { captionTextFromVtt } from '../forum/video.js';
 import type { CorrectionDeps } from './correction.js';
 import type { GovernanceAiDeps } from './governance-ai.js';
 import type { HarnessDeps } from './harness.js';
@@ -57,13 +58,28 @@ export function buildLineageDeps(ai: AiGovernanceServices): LineageDeps {
 }
 
 export function buildPipelineDeps(ai: AiGovernanceServices): PipelineDeps {
+  // WS-K §24.1 — the classifier reads an uploaded WebVTT caption track's text
+  // through the forum upload store (video posts carry no other local text). The
+  // seam is present only when the forum boot is wired; absent ⇒ the classifier
+  // falls back to the title (no regression, and never surfaced to display).
+  const forum = ai.forum;
   return {
     stories: requireIngestion(ai).stories,
+    sources: requireIngestion(ai).sources,
+    freshness: requireIngestion(ai).freshness,
     outputRecords: ai.outputRecords,
     reviewQueue: ai.reviewQueue,
     guard: ai.guard,
     topicConfidenceThreshold: () => ai.config().topicConfidenceThreshold,
     claimConfidenceFloor: () => ai.config().claimConfidenceFloor,
+    ...(forum !== null
+      ? {
+          readCaptionText: async (uploadId: string): Promise<string | null> => {
+            const bytes = await forum.uploads.getBytes(uploadId);
+            return bytes === null ? null : captionTextFromVtt(bytes);
+          },
+        }
+      : {}),
     metrics: ai.metrics,
     log: ai.log,
     now: ai.now,
@@ -142,7 +158,22 @@ export function buildRuntimeMonitorDeps(ai: AiGovernanceServices): RuntimeMonito
 export function registerAiGovernanceConsumers(
   events: EventPipelineServices,
   ai: AiGovernanceServices,
+  // Composition-root hook: after a story's topics are validated, refresh its
+  // ranking feature vector so the validated topics/sensitivity reach scoring
+  // without waiting for the hourly batch (WS-I cold-start staleness). Optional
+  // — a domain-pure seam; only the boot wiring knows about the ranking domain.
+  onStoryClassified?: (storyId: string) => Promise<void>,
 ): void {
+  // WS-K §24.1 — wire the ingestion → WS-K topic revalidator so the §14.2
+  // pipeline can validate a `noarchive` link's topics over the EPHEMERAL fetched
+  // body (which the persisted story never carries) before it is dropped. The
+  // override run is authoritative and consumes the proposals, so the deferred
+  // content.normalized re-run below preserves the validated topics.
+  if (ai.ingestion !== null) {
+    ai.ingestion.setTopicRevalidator(async (storyId, text) => {
+      await classifyStoryTopics(buildPipelineDeps(ai), storyId, { overrideText: text });
+    });
+  }
   events.router.register({
     name: 'ai-governance-classification',
     topics: ['content.normalized'],
@@ -157,6 +188,15 @@ export function registerAiGovernanceConsumers(
       const story = await ai.ingestion.stories.getById(storyId);
       if (story === null) return;
       await classifyStoryTopics(deps, storyId);
+      // Push the validated topics/sensitivity into the ranking feature store now
+      // (best-effort; the batch path is the backstop).
+      if (onStoryClassified !== undefined) {
+        try {
+          await onStoryClassified(storyId);
+        } catch {
+          ai.metrics.increment('ai.topic.classification.feature_refresh_skipped');
+        }
+      }
       // Extraction over the available body text (excerpt; a backend carries the
       // full normalized text). Best-effort — a failure never blocks ingestion.
       const body = story.excerpt ?? story.title;
