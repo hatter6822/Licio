@@ -9,9 +9,10 @@
 // empty bounded maps).
 import { randomUUID } from 'node:crypto';
 import { minhashSignature } from '@licio/invariants';
+import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
-import { assembleMeriCandidates } from '../invariants/data.js';
+import { assembleMeriCandidates, assembleTopicCascade } from '../invariants/data.js';
 import {
   HealthRecorder,
   hourWindow,
@@ -252,6 +253,16 @@ describe('MERI assembly through real MinHash signatures', () => {
     expect(
       await assembleMeriCandidates(fixture.ingestion, 'no-such-topic', 100, 0.7, 0.85),
     ).toEqual([]);
+  });
+
+  it('assembleTopicCascade returns no cascade for the UNCLASSIFIED sentinel', async () => {
+    const fixture = freshInvariantServices();
+    // Two UNRELATED unclassified stories share the sentinel id; they must never
+    // be assembled into one synthetic tropical cascade (a false coordination
+    // signal). The sentinel guard short-circuits regardless of matching rows.
+    await seedStory(fixture, { topicIds: [UNCLASSIFIED_TOPIC_ID] });
+    await seedStory(fixture, { topicIds: [UNCLASSIFIED_TOPIC_ID] });
+    expect(await assembleTopicCascade(fixture.ingestion, UNCLASSIFIED_TOPIC_ID)).toEqual([]);
   });
 });
 

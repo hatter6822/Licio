@@ -27,7 +27,10 @@ export const TOPIC_CLASSIFIER: ModelIdentity = {
   useCaseId: 'topic_classification',
   modalities: ['classification'],
   promptTemplateId: 'topic-classifier/keyword-v1',
-  config: { method: 'deterministic-keyword', taxonomy_version: 1 },
+  // taxonomy_version 2: the label space moved from the old local slug set to the
+  // shared catalog UUID/keyword map. Bumping it changes the AIOutputRecord config
+  // hash, so governance/audit records stay attributable to the actual taxonomy.
+  config: { method: 'deterministic-keyword', taxonomy_version: 2 },
 };
 
 export const CLAIM_EXTRACTOR: ModelIdentity = {

@@ -8,6 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { rankingDecisionLogSchema, retentionDeadline } from '@licio/ranking';
+import { topicIdForSlug } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
 import type { JobLeaseStore } from '../identity/job-lease.js';
@@ -286,6 +287,22 @@ describe('per-user service helpers', () => {
     const unknown = await fixture.ranking.userContext(randomUUID());
     expect(unknown.ageBand).toBeNull();
     expect(unknown.topicPreferences).toEqual([]);
+  });
+
+  it('userContext resolves stored preference SLUGS to catalog UUIDs (WS-I personalization)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity, { handle: 'prefuser' });
+    const user = await fixture.identity.store.getUser(userId);
+    if (user === null) throw new Error('seed failed');
+    // A preference saved as the public slug must match a story's catalog-UUID
+    // topic in topicRelevance, so it is resolved to the UUID here.
+    await fixture.identity.store.updateUser(userId, {
+      personalizationSettings: {
+        ...user.personalizationSettings,
+        topic_preferences: ['technology'],
+      },
+    });
+    const ctx = await fixture.ranking.userContext(userId);
+    expect(ctx.topicPreferences).toEqual([topicIdForSlug('technology')]);
   });
 
   it('enforcement reflects WS-H promotions (default all-shadow)', async () => {

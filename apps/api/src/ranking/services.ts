@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto';
 import { InvariantType } from '@licio/invariants';
 import type { RankingEnforcement } from '@licio/ranking';
+import { TOPIC_ID_BY_SLUG } from '@licio/shared';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
 import { type ForumServices, getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
@@ -357,7 +358,12 @@ export function createInMemoryRankingServices(
         userId,
         ageBand: user.ageBand,
         personalizationEnabled: user.privacySettings.personalization_enabled,
-        topicPreferences: user.personalizationSettings.topic_preferences,
+        // Resolve stored preference SLUGS to catalog UUIDs so they match
+        // candidates' trusted catalog topic ids (UUIDs) in `topicRelevance`; an
+        // unknown value (already a UUID, or off-catalog) passes through.
+        topicPreferences: user.personalizationSettings.topic_preferences.map(
+          (p) => TOPIC_ID_BY_SLUG.get(p) ?? p,
+        ),
         feedModeDefault: user.personalizationSettings.feed_mode,
       };
     },

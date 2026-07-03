@@ -27,6 +27,7 @@ import {
   type SheafStructure,
   type TopicStructure,
 } from '@licio/invariants';
+import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -596,6 +597,10 @@ export async function assembleTopicCascade(
   topicId: string,
   limit = 200,
 ): Promise<CascadeEvent[]> {
+  // The UNCLASSIFIED sentinel is not a real topic — never assemble a cascade
+  // over it (defense-in-depth alongside the caller's topic enumeration filter),
+  // so unrelated unclassified stories never form a synthetic cascade.
+  if (isSentinelTopicId(topicId)) return [];
   const recent = await ingestion.stories.listRecent(limit * 2);
   const stories = recent.filter((s) => s.topicIds.includes(topicId)).slice(0, limit);
   const cascade: CascadeEvent[] = [];
