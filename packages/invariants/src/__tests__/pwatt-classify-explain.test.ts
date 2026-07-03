@@ -55,6 +55,8 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: true,
       sourceBounceOnly: false,
       contextOpened: false,
+      savedForLater: false,
+      replyDepthBucket: 'none',
       returnVisitBucket: 'few',
       contributions: { question: 1 },
       annotations: [],
@@ -71,6 +73,8 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: true,
       sourceBounceOnly: true,
       contextOpened: false,
+      savedForLater: false,
+      replyDepthBucket: 'none',
       returnVisitBucket: 'none',
       contributions: {},
       annotations: [],
@@ -84,6 +88,8 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: false,
       sourceBounceOnly: false,
       contextOpened: false,
+      savedForLater: false,
+      replyDepthBucket: 'none',
       returnVisitBucket: 'none',
       contributions: { correction: 1 },
       annotations: ['source_free_accusation_downweight', 'rapid_repetition_dampened'],
@@ -98,11 +104,45 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: false,
       sourceBounceOnly: false,
       contextOpened: false,
+      savedForLater: false,
+      replyDepthBucket: 'none',
       returnVisitBucket: 'none',
       contributions: {},
       annotations: [],
     });
     expect(summary).toBe('No attention signals were counted for this item in this window.');
+  });
+
+  it('surfaces a save-only window (SIG-ATT-SAVE) instead of "nothing counted"', () => {
+    const summary = buildLedgerSummary({
+      dwellBucket: 'none',
+      sourceOpened: false,
+      sourceBounceOnly: false,
+      contextOpened: false,
+      savedForLater: true,
+      replyDepthBucket: 'none',
+      returnVisitBucket: 'none',
+      contributions: {},
+      annotations: [],
+    });
+    expect(summary).toBe('You saved it for later.');
+    expect(summary).not.toContain('No attention signals were counted');
+  });
+
+  it('surfaces a traversal-only window (SIG-ATT-TRAVERSE) instead of "nothing counted"', () => {
+    const summary = buildLedgerSummary({
+      dwellBucket: 'none',
+      sourceOpened: false,
+      sourceBounceOnly: false,
+      contextOpened: false,
+      savedForLater: false,
+      replyDepthBucket: 'shallow',
+      returnVisitBucket: 'none',
+      contributions: {},
+      annotations: [],
+    });
+    expect(summary).toBe('You read into the replies.');
+    expect(summary).not.toContain('No attention signals were counted');
   });
 
   it('never emits applause language', () => {
@@ -111,6 +151,8 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       sourceOpened: true,
       sourceBounceOnly: false,
       contextOpened: true,
+      savedForLater: false,
+      replyDepthBucket: 'none',
       returnVisitBucket: 'many',
       contributions: { evidence: 2, bridge_comment: 1 },
       annotations: [],

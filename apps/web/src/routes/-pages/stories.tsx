@@ -98,10 +98,17 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     if (firstTopic) tracker.recordVisit(firstTopic);
     setAssessment(tracker.assess());
   }, [topicIds]);
+  const loopedTopic = assessment.narrowLoop.topicClusterId;
+  // Reflect the PERSISTED per-cluster dismissal whenever the loop cluster
+  // changes: dismissing the prompt on one story suppresses it for every other
+  // story in the SAME loop this session (no per-mount re-nagging), while a
+  // genuinely NEW loop cluster can still surface it.
+  useEffect(() => {
+    setLoopPromptDismissed(getTopicLoopTracker().isPromptDismissed(loopedTopic));
+  }, [loopedTopic]);
   const loopDetected = !loopPromptDismissed && assessment.narrowLoop.detected;
   // Quiet-notification policy (WS-H.6.1c): a flagged topic's pushes show
   // silently for a while — never a buzz that reinforces the loop.
-  const loopedTopic = assessment.narrowLoop.topicClusterId;
   useEffect(() => {
     if (loopedTopic) void markTopicQuiet(loopedTopic);
   }, [loopedTopic]);
@@ -139,7 +146,10 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
             {loopDetected ? (
               <NarrowLoopPrompt
                 onSeeBroader={broadenFeed}
-                onDismiss={() => setLoopPromptDismissed(true)}
+                onDismiss={() => {
+                  if (loopedTopic) getTopicLoopTracker().dismissPrompt(loopedTopic);
+                  setLoopPromptDismissed(true);
+                }}
               />
             ) : null}
             {data.media ? (
@@ -184,7 +194,7 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               />
             ) : null}
             {interpretations.data ? (
-              <WhereInterpretationsDiffer data={interpretations.data} />
+              <WhereInterpretationsDiffer data={interpretations.data} storyId={storyId} />
             ) : null}
           </article>
         )

@@ -7,18 +7,12 @@
 // defaults (logged) — a misconfiguration can never silently rebalance
 // distribution (WS-E.2.3c).
 import {
-  DEFAULT_PENALTY_COEFFICIENTS,
   DEFAULT_PWATT_V0_CONFIG,
   DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
-  DEFAULT_RANKING_PROFILES,
-  type PenaltyCoefficients,
   type PwattV0Config,
   type PwattV1ComponentsConfig,
-  type RankingProfile,
-  validatePenaltyCoefficients,
   validatePwattV0Config,
   validatePwattV1ComponentsConfig,
-  validateRankingProfile,
 } from '@licio/invariants';
 import { EVENT_CONTRIBUTION_TYPES } from '@licio/shared';
 import { z } from 'zod';
@@ -40,11 +34,15 @@ export interface PwattRuntimeConfig {
   cascade: CascadeDetectorConfig;
   /** Account-age progressive-trust weights (WS-O.4.5). */
   trustWeights: TrustWeights;
-  penaltyCoefficients: PenaltyCoefficients;
-  profiles: readonly RankingProfile[];
   /** Real-time event-count threshold that triggers an early aggregation run. */
   triggerThreshold: number;
 }
+
+// NOTE: the batch engine no longer holds ranking profiles or penalty
+// coefficients. Those are the SERVED §5.4 composition's inputs and live SOLELY
+// in the WS-I ranking config (`ranking.*`), which is where a steward tunes
+// them; a second copy here would be dead config that silently changes nothing
+// when set (PR7 — single §5.4 config source, no drift).
 
 export const DEFAULT_PWATT_RUNTIME_CONFIG: PwattRuntimeConfig = {
   v0: DEFAULT_PWATT_V0_CONFIG,
@@ -52,8 +50,6 @@ export const DEFAULT_PWATT_RUNTIME_CONFIG: PwattRuntimeConfig = {
   burst: DEFAULT_BURST_CONFIG,
   cascade: DEFAULT_CASCADE_CONFIG,
   trustWeights: DEFAULT_TRUST_WEIGHTS,
-  penaltyCoefficients: DEFAULT_PENALTY_COEFFICIENTS,
-  profiles: DEFAULT_RANKING_PROFILES,
   triggerThreshold: 500,
 };
 
@@ -88,30 +84,6 @@ const trustWeightsSchema = z
     message: 'trust weights must be monotone non-decreasing (new ≤ recent ≤ active ≤ established)',
   });
 
-const penaltySchema = z
-  .object({
-    pM: z.number().min(0),
-    pH: z.number().min(0),
-    pT: z.number().min(0),
-    pR: z.number().min(0),
-  })
-  .strict();
-
-const profileSchema = z
-  .object({
-    name: z.string().min(1).max(64),
-    weights: z
-      .object({
-        wA: z.number().int(),
-        wP: z.number().int(),
-        wE: z.number().int(),
-        wS: z.number().int(),
-        wC: z.number().int(),
-      })
-      .strict(),
-  })
-  .strict();
-
 const integerPercentSchema = z.number().int().min(1).max(50);
 
 const v0Schema = z
@@ -123,6 +95,7 @@ const v0Schema = z
             dwellPct: integerPercentSchema,
             sourcePct: integerPercentSchema,
             contextPct: integerPercentSchema,
+            traversalPct: integerPercentSchema,
           })
           .strict(),
         halfSaturationActors: z.number().positive(),
@@ -170,12 +143,24 @@ const contributionWeightsSchema = z
   )
   .strict();
 
+const antiSignalAttenuationSchema = z
+  .object({
+    coordinatedBurstMax: z.number().min(0).max(1),
+    harassmentCascade: z.number().min(0).max(1),
+  })
+  .strict();
+
 const v1Schema = z
   .object({
     contributionWeights: contributionWeightsSchema,
     contributionCurve: curveSchema,
     attentionDimensions: z
-      .object({ dwell: dimensionSchema, source: dimensionSchema, context: dimensionSchema })
+      .object({
+        dwell: dimensionSchema,
+        source: dimensionSchema,
+        context: dimensionSchema,
+        traversal: dimensionSchema,
+      })
       .strict(),
     participationDimensions: z
       .object({ returns: dimensionSchema, saves: dimensionSchema, contributions: dimensionSchema })
@@ -183,21 +168,75 @@ const v1Schema = z
     accusationDownweight: z.number().min(0).max(1),
     rapidThreshold: z.number().min(1),
     rapidDampening: z.number().min(0).max(1),
+    antiSignalAttenuation: antiSignalAttenuationSchema,
   })
   .strict();
 
-/** The closed set of writable pwatt_config keys (the steward admin surface). */
+/** The closed set of writable pwatt_config keys (the steward admin surface).
+ *  Ranking profiles + penalty coefficients are NOT here: they are the served
+ *  §5.4 composition's inputs and are tuned via the WS-I `ranking.*` config. */
 export const PWATT_CONFIG_KEYS = [
   'v0',
   'v1',
   'burst',
   'cascade',
   'trust_weights',
-  'penalty_coefficients',
-  'ranking_profiles',
   'trigger_threshold',
 ] as const;
 export type PwattConfigKey = (typeof PWATT_CONFIG_KEYS)[number];
+
+/**
+ * Backward-compat upgrade of a STORED v0/v1 config row (WS-E.2.3a). Adding the
+ * `traversal` ActiveAttention dimension + the v1 `antiSignalAttenuation` block
+ * changed the config shape; a row written before that change would otherwise
+ * fail the strict schema and be silently discarded on deploy — losing the
+ * steward's OTHER tuning (contribution weights, curves, participation split, …)
+ * to the reviewed defaults. This fills ONLY the structurally-changed pieces from
+ * the reviewed defaults, preserving everything else. Pure; leaves an already-new
+ * row untouched. (New WRITES still go through the strict `validatePwattConfigValue`.)
+ */
+function upgradeStoredV0Config(raw: Record<string, unknown>): Record<string, unknown> {
+  const attention = raw['activeAttention'];
+  if (
+    typeof attention === 'object' &&
+    attention !== null &&
+    typeof (attention as { weights?: unknown }).weights === 'object' &&
+    (attention as { weights?: Record<string, unknown> }).weights !== null &&
+    !('traversalPct' in (attention as { weights: Record<string, unknown> }).weights)
+  ) {
+    return {
+      ...raw,
+      activeAttention: {
+        ...(attention as Record<string, unknown>),
+        // The old 3-weight split cannot absorb `traversal` without breaking the
+        // sum-to-100 invariant, so adopt the reviewed default weight split
+        // (keeping any tuned halfSaturationActors).
+        weights: { ...DEFAULT_PWATT_V0_CONFIG.activeAttention.weights },
+      },
+    };
+  }
+  return raw;
+}
+
+function upgradeStoredV1Config(raw: Record<string, unknown>): Record<string, unknown> {
+  let next = raw;
+  const dims = raw['attentionDimensions'];
+  if (typeof dims === 'object' && dims !== null && !('traversal' in dims)) {
+    // The old 3-dimension attention set cannot absorb `traversal` without
+    // breaking sum-to-100; adopt the reviewed default dimension set.
+    next = {
+      ...next,
+      attentionDimensions: { ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG.attentionDimensions },
+    };
+  }
+  if (!('antiSignalAttenuation' in next)) {
+    next = {
+      ...next,
+      antiSignalAttenuation: { ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG.antiSignalAttenuation },
+    };
+  }
+  return next;
+}
 
 /**
  * Validate a config value for `key` BEFORE it is written (the steward admin
@@ -238,21 +277,6 @@ export function validatePwattConfigValue(
         const parsed = trustWeightsSchema.safeParse(value);
         return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid trust weights');
       }
-      case 'penalty_coefficients': {
-        const parsed = penaltySchema.safeParse(value);
-        if (!parsed.success) return parsed.error.issues[0]?.message ?? 'invalid penalties';
-        validatePenaltyCoefficients(parsed.data);
-        return null;
-      }
-      case 'ranking_profiles': {
-        const parsed = z.object({ profiles: z.array(profileSchema).min(1) }).safeParse(value);
-        if (!parsed.success) return parsed.error.issues[0]?.message ?? 'invalid profiles';
-        for (const profile of parsed.data.profiles) {
-          const result = validateRankingProfile(profile);
-          if (!result.ok) return `${profile.name}: ${result.problems.join('; ')}`;
-        }
-        return null;
-      }
       case 'trigger_threshold': {
         const parsed = z.object({ value: z.number().int().min(1) }).safeParse(value);
         return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid threshold');
@@ -279,7 +303,8 @@ export async function loadPwattRuntimeConfig(
 
   const v0 = await events.configStore.get('v0');
   if (v0) {
-    const parsed = v0Schema.safeParse(v0);
+    // Upgrade a pre-`traversal` row so its OTHER tuning survives (WS-E.2.3a).
+    const parsed = v0Schema.safeParse(upgradeStoredV0Config(v0));
     if (parsed.success) {
       try {
         validatePwattV0Config(parsed.data);
@@ -294,7 +319,8 @@ export async function loadPwattRuntimeConfig(
 
   const v1 = await events.configStore.get('v1');
   if (v1) {
-    const parsed = v1Schema.safeParse(v1);
+    // Upgrade a pre-`traversal`/`antiSignalAttenuation` row (WS-E.2.3a).
+    const parsed = v1Schema.safeParse(upgradeStoredV1Config(v1));
     if (parsed.success) {
       try {
         validatePwattV1ComponentsConfig(parsed.data);
@@ -326,44 +352,6 @@ export async function loadPwattRuntimeConfig(
     const parsed = trustWeightsSchema.safeParse(trustWeights);
     if (parsed.success) config.trustWeights = parsed.data;
     else reject('trust_weights', parsed.error.issues[0]?.message ?? 'invalid');
-  }
-
-  const penalties = await events.configStore.get('penalty_coefficients');
-  if (penalties) {
-    const parsed = penaltySchema.safeParse(penalties);
-    if (parsed.success) {
-      try {
-        validatePenaltyCoefficients(parsed.data);
-        config.penaltyCoefficients = parsed.data;
-      } catch (error) {
-        reject('penalty_coefficients', error instanceof Error ? error.message : 'invalid');
-      }
-    } else {
-      reject('penalty_coefficients', parsed.error.issues[0]?.message ?? 'invalid');
-    }
-  }
-
-  const profiles = await events.configStore.get('ranking_profiles');
-  if (profiles) {
-    const parsed = z.object({ profiles: z.array(profileSchema).min(1) }).safeParse(profiles);
-    if (parsed.success) {
-      const validated: RankingProfile[] = [];
-      for (const profile of parsed.data.profiles) {
-        const result = validateRankingProfile(profile);
-        if (result.ok) validated.push(profile);
-        else reject(`ranking_profiles.${profile.name}`, result.problems.join('; '));
-      }
-      // All-or-none: a partially valid profile set is a config mistake.
-      if (validated.length === parsed.data.profiles.length) {
-        config.profiles = validated;
-        // Profile changes are audit-relevant (WS-E.2.3c acceptance).
-        events.log('pwatt.config.profiles_changed', {
-          profiles: validated.map((p) => p.name),
-        });
-      }
-    } else {
-      reject('ranking_profiles', parsed.error.issues[0]?.message ?? 'invalid');
-    }
   }
 
   const trigger = await events.configStore.get('trigger_threshold');

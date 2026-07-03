@@ -118,6 +118,23 @@ export class ReturnTracker {
     this.persist(now);
   }
 
+  /**
+   * Mark an item SEEN-until-now WITHOUT counting a return — used when the reader
+   * leaves one of a story's own surfaces (its page ⇄ its comments page). It
+   * advances `lastVisitAt` so a subsequent re-entry measures time-away from when
+   * the reader actually left the story, not from its first visit: continuous
+   * in-story navigation then never looks like a return (even after a long dwell
+   * on either surface), while a genuine away-and-back still accrues the gap on
+   * the OTHER surface (which never touches this item) and is counted on re-entry.
+   * A touch never affects the return count or the rage window.
+   */
+  touch(itemId: string, now: number): void {
+    const state = this.items.get(itemId);
+    if (!state) return; // never-visited item: nothing to keep alive
+    state.lastVisitAt = now;
+    this.persist(now);
+  }
+
   /** True when returns within the window currently exceed the rage threshold. */
   isRageLoop(itemId: string): boolean {
     return (this.items.get(itemId)?.returnTimes.length ?? 0) >= this.config.rageCount;
@@ -169,9 +186,15 @@ export class ReturnTracker {
 export class TraversalTracker {
   private readonly depthsByStory = new Map<string, Set<number>>();
 
-  /** Record a bounded reply depth. Revisiting the same depth does not raise the count. */
+  /**
+   * Record a bounded reply depth. Revisiting the same depth does not raise the
+   * count. Depth 0 (a top-level comment) is NOT traversal — traversal is reading
+   * into NESTED replies — so only positive depths are counted; a reader who
+   * reaches only ordinary top-level comments earns no reply-depth signal.
+   */
   visitReplyDepth(storyId: string, depth: number): void {
-    const bounded = Math.max(0, Math.min(10, Math.trunc(depth)));
+    const bounded = Math.min(10, Math.trunc(depth));
+    if (bounded < 1) return;
     const set = this.depthsByStory.get(storyId) ?? new Set<number>();
     set.add(bounded);
     this.depthsByStory.set(storyId, set);

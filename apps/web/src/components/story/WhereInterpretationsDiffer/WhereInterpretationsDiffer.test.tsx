@@ -27,7 +27,7 @@ const base: StoryInterpretationsResponse = {
 
 describe('WhereInterpretationsDiffer', () => {
   it('renders the section with the difference summaries', () => {
-    render(<WhereInterpretationsDiffer data={base} />);
+    render(<WhereInterpretationsDiffer data={base} storyId="s1" />);
     expect(
       screen.getByRole('heading', { name: /where interpretations differ/i }),
     ).toBeInTheDocument();
@@ -35,7 +35,7 @@ describe('WhereInterpretationsDiffer', () => {
   });
 
   it('"needs context" copy never implies falsity and no side is marked correct', () => {
-    const { container } = render(<WhereInterpretationsDiffer data={base} />);
+    const { container } = render(<WhereInterpretationsDiffer data={base} storyId="s1" />);
     const text = container.textContent ?? '';
     expect(text).toMatch(/not that it is false or banned/i);
     expect(text.toLowerCase()).not.toMatch(/incorrect|wrong side|misinformation/);
@@ -43,13 +43,16 @@ describe('WhereInterpretationsDiffer', () => {
 
   it('renders nothing when there are no interpretations', () => {
     const { container } = render(
-      <WhereInterpretationsDiffer data={{ ...base, interpretations: [], needs_context: false }} />,
+      <WhereInterpretationsDiffer
+        data={{ ...base, interpretations: [], needs_context: false }}
+        storyId="s1"
+      />,
     );
     expect(container.firstChild).toBeNull();
   });
 
   it('passes the accessibility audit', async () => {
-    const { container } = render(<WhereInterpretationsDiffer data={base} />);
+    const { container } = render(<WhereInterpretationsDiffer data={base} storyId="s1" />);
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 });
@@ -68,13 +71,14 @@ describe('lens names (WS-H.4.3b)', () => {
             },
           ],
         }}
+        storyId="s1"
       />,
     );
     expect(screen.getByText('Between Local residents and Water engineers')).toBeInTheDocument();
   });
 
   it('falls back to the generic heading when names are absent', () => {
-    render(<WhereInterpretationsDiffer data={base} />);
+    render(<WhereInterpretationsDiffer data={base} storyId="s1" />);
     expect(screen.getByText('Between two lenses')).toBeInTheDocument();
   });
 });

@@ -250,6 +250,11 @@ async function buildFeedItems(
       interpretationsDiverge: entry.contextCard !== null,
       evidenceCount: evidence.independentVerified,
       meriExposure: exposureLabel,
+      // The served ActiveAttention component keeps the default label truthful:
+      // "Getting Attention" only when there is a real signal, else "New".
+      ...(entry.features?.active_attention !== undefined
+        ? { activeAttention: entry.features.active_attention }
+        : {}),
     });
     items.push(
       feedItemSchema.parse({

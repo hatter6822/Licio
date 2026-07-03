@@ -188,6 +188,56 @@ describe('WS-I.1.1a retrievers', () => {
     expect(candidates.map((c) => c.item_id)).toEqual([above.storyId]);
   });
 
+  it('retrieval treats a SHADOW/degraded PWAtt row as ABSENT (§30.5 gate binds retrieval)', async () => {
+    // An OLD story (low freshness ⇒ no cold-start) with a STRONG PWAtt row that
+    // is shadow_mode:true. The retrieval leg must apply the same bounded-input
+    // gate as the feature join, so the shadow row does NOT admit the candidate.
+    const oldTs = new Date(Date.now() - 100 * 3_600_000).toISOString();
+    const shadowStory = await seedStory(fixture.ingestion, { publishedAt: oldTs });
+    const strong = {
+      invariantType: 'PWAtt_v1' as const,
+      targetType: 'story' as const,
+      targetId: shadowStory.storyId,
+      timeWindow: { start: '2026-06-10T00:00:00.000Z', end: '2026-06-10T01:00:00.000Z' },
+      version: 'v1',
+      scoreVector: { active_attention: 0.9, participation: 0.9 },
+      explanationSummary: null,
+      confidence: 1,
+      coverage: 1,
+      reasonCodes: [] as string[],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: true, // pre-lift / kill-switch posture
+      createdAt: new Date().toISOString(),
+    };
+    await fixture.events.invariantStore.upsert(strong);
+    expect(
+      (await new GlobalCandidatesRetriever(ports()).retrieve(retrieveContext())).map(
+        (c) => c.item_id,
+      ),
+    ).not.toContain(shadowStory.storyId);
+
+    // A DEGRADED (TIMEOUT) post-lift row is likewise ABSENT.
+    await fixture.events.invariantStore.upsert({
+      ...strong,
+      shadowMode: false,
+      reasonCodes: ['TIMEOUT'],
+    });
+    expect(
+      (await new GlobalCandidatesRetriever(ports()).retrieve(retrieveContext())).map(
+        (c) => c.item_id,
+      ),
+    ).not.toContain(shadowStory.storyId);
+
+    // The SAME strong row post-lift and non-degraded DOES admit it.
+    await fixture.events.invariantStore.upsert({ ...strong, shadowMode: false, reasonCodes: [] });
+    expect(
+      (await new GlobalCandidatesRetriever(ports()).retrieve(retrieveContext())).map(
+        (c) => c.item_id,
+      ),
+    ).toContain(shadowStory.storyId);
+  });
+
   it('global cold start: brand-new uncovered stories are eligible at a LOWER score', async () => {
     const fresh = await seedStory(fixture.ingestion, {
       publishedAt: new Date().toISOString(),

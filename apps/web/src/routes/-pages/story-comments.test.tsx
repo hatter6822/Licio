@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const navigate = vi.fn();
 const recordReplyDepth = vi.fn();
+const setActiveStory = vi.fn();
 let canGoBack: boolean;
 let search: { root?: string };
 let storyState: { data?: { title: string; thread_id: string | null } };
@@ -60,7 +61,7 @@ vi.mock('@tanstack/react-router', () => ({
 
 vi.mock('../../components/a11y/index.js', () => ({ useSpaFocus: vi.fn() }));
 vi.mock('../../signals/runtime.js', () => ({
-  getSignalProcessor: () => ({ recordReplyDepth }),
+  getSignalProcessor: () => ({ recordReplyDepth, setActiveStory }),
 }));
 vi.mock('../../lib/queries.js', () => ({
   useStoryQuery: () => storyState,
@@ -110,6 +111,7 @@ function node(id: string, overrides: Partial<CommentItem> = {}): CommentItem {
 beforeEach(() => {
   navigate.mockReset();
   recordReplyDepth.mockReset();
+  setActiveStory.mockReset();
   historyBack.mockReset();
   canGoBack = true;
   search = {};
@@ -159,6 +161,15 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
     expect(screen.queryByRole('link', { name: /back to the story/i })).not.toBeInTheDocument();
   });
 
+  it('marks the story active so reply-depth traversal (§5.3) is captured here', () => {
+    render(<StoryCommentsPage />);
+    // Without this, the story route cleared the active item before this page
+    // mounted, so captureCurrent() would emit no aggregate and traversal would
+    // be dropped from the now-scored ActiveAttention dimension. (The story ⇄
+    // comments hop is de-duped as a return by setActiveStory's touch-on-leave.)
+    expect(setActiveStory).toHaveBeenCalledWith(STORY_ID);
+  });
+
   it('renders the focused anchor with breadcrumbs when rooted', () => {
     const anchorParent = '66666666-6666-4666-8666-666666666666';
     const anchor = node('77777777-7777-4777-8777-777777777777', {
@@ -188,6 +199,23 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
       'href',
       `/stories/${STORY_ID}/comments?root=${anchorParent}`,
     );
+  });
+
+  it('records the focused anchor depth even with no rendered replies (§5.3)', () => {
+    const anchor = node('77777777-7777-4777-8777-777777777777', {
+      depth: 3,
+      body: 'A deep focused comment with no replies.',
+      reply_count: 0,
+    });
+    search = { root: anchor.contribution_id };
+    commentsState = { data: { comments: [], anchor, next_cursor: null } };
+
+    render(<StoryCommentsPage />);
+
+    // The anchor is its own article (not a CommentNode), so it must record its
+    // own depth — else drilling straight to a deep comment contributes no
+    // traversal. jsdom has no IntersectionObserver, so the hook records on attach.
+    expect(recordReplyDepth).toHaveBeenCalledWith(STORY_ID, 3);
   });
 
   it('hides the redundant "Up one level" when the anchor is a top-level comment', () => {

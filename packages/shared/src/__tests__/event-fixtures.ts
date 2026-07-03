@@ -73,6 +73,15 @@ export const EVENT_FIXTURES: Readonly<Record<EventTopic, Record<string, unknown>
     privacy_classification: 'aggregated',
     retention_tier: 'attention_aggregated',
   },
+  'content.saved': {
+    ...base('content.saved'),
+    nonce: U4,
+    user_id: U3,
+    privacy_level: 'standard',
+    story_id: U2,
+    privacy_classification: 'aggregated',
+    retention_tier: 'attention_aggregated',
+  },
   'attention.aggregate': {
     ...base('attention.aggregate'),
     nonce: U4,

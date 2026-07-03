@@ -106,12 +106,15 @@ describe('demo seed — development test accounts', () => {
 });
 
 describe('demo seed — the feed shows every rating label', () => {
-  it('serves a varied set of labels, not a monotone "Getting Attention"', async () => {
+  it('serves a varied set of labels, not a monotone default', async () => {
     const items = await fullFrontPage();
     const labels = new Set<RatingLabelKind>(items.map((i) => i.rating_label));
-    // The seeded public corpus exercises all seven §5.6 labels.
+    // The seeded public corpus exercises the live-signal §5.6 labels plus the
+    // neutral "New" floor (a story with no active-reading signal — the honest
+    // default; §5.6 gates "Getting Attention" on a real attention signal, so a
+    // plain-attention-only story is proven reachable by the shared unit test).
     const expected: RatingLabelKind[] = [
-      'getting-attention',
+      'new',
       'deepening',
       'well-sourced',
       'needs-context',
@@ -227,9 +230,13 @@ describe('demo seed — the story-detail read agrees with the feed', () => {
     expect(s19.rating_label).toBe(feedLabel(S(19)));
   });
 
-  it('a freshly-submitted story with no signals reads getting-attention on both', async () => {
+  it('a freshly-submitted story with no signals reads "New" (the honest floor, §5.6)', async () => {
+    // No live signals AND no active-reading signal ⇒ the neutral "New" floor,
+    // never a false "Getting Attention" (which requires real attention).
     const s21 = await detail(S(21)); // submitted lifecycle, no live signals
-    expect(s21.rating_label).toBe('getting-attention');
+    expect(s21.rating_label).toBe('new');
+    const items = await fullFrontPage();
+    expect(items.find((i) => i.story_id === S(21))?.rating_label).toBe('new'); // agrees
   });
 });
 

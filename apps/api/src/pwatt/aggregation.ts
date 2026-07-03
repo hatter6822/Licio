@@ -15,6 +15,7 @@
 import type { ActorItemSummary } from '@licio/invariants';
 import {
   type AttentionAggregateEvent,
+  type ContentSavedAggregateEvent,
   DWELL_BUCKETS,
   type DwellBucket,
   type EventContributionType,
@@ -70,6 +71,8 @@ interface ActorFold {
   /** Bounce-adjacent evidence only: bounce=true, or a `brief` source dwell. */
   sawBounceAdjacentOpen: boolean;
   contextOpened: boolean;
+  /** The actor saved this item for later (§5.3 SIG-ATT-SAVE; deduped by OR). */
+  saved: boolean;
   contributions: Partial<Record<EventContributionType, number>>;
   uncitedAccusationsByType: Partial<Record<EventContributionType, number>>;
 }
@@ -90,6 +93,7 @@ export interface WindowAggregationResult {
 export const SCORING_TOPICS = [
   'attention.aggregate',
   'source.opened.aggregate',
+  'content.saved',
   'contribution.created',
   'evidence.added',
   'integrity.signal.detected',
@@ -103,6 +107,7 @@ function emptyActor(): ActorFold {
     sawMeaningfulSourceOpen: false,
     sawBounceAdjacentOpen: false,
     contextOpened: false,
+    saved: false,
     contributions: {},
     uncitedAccusationsByType: {},
   };
@@ -173,6 +178,14 @@ export async function computeAggregationWindow(
       // a moderate/extended non-bounce visit is a meaningful open.
       if (event.bounce || event.dwell_bucket === 'brief') actor.sawBounceAdjacentOpen = true;
       else actor.sawMeaningfulSourceOpen = true;
+    } else if (row.topic === 'content.saved') {
+      // §5.3 "Save for later": a discrete, deduped low-weight interest signal.
+      // Booleans join by OR, so one user's repeated save counts once (the
+      // structural refresh-loop defense, WS-E.2.1a).
+      const event = row.payload as unknown as ContentSavedAggregateEvent;
+      const item = itemOf(event.story_id);
+      item.eventCount += 1;
+      actorOf(item, actorKeyOfPayload(row.payload)).saved = true;
     } else if (row.topic === 'contribution.created') {
       const payload = row.payload as {
         thread_id: string;
@@ -226,7 +239,14 @@ export async function computeAggregationWindow(
         actor.dwellBucket !== 'none' ||
         actor.sawMeaningfulSourceOpen ||
         actor.contextOpened ||
-        actor.returnVisitBucket !== 'none';
+        actor.returnVisitBucket !== 'none' ||
+        // A §5.3 save is now a scored participation signal, so a save-only reader
+        // IS an active participant — count them here so this durable unique tally
+        // matches the realtime HLL (which `recordSave` adds each saver to), and
+        // the hourly reconciliation does not flag save-only windows as
+        // discrepancies. `uniqueActiveUsers` is a monitoring/reconciliation stat
+        // only (never a PWAtt scoring input), so this shifts no ranking.
+        actor.saved;
       if (hasAttention) uniqueActiveUsers += 1;
       if (actor.sawMeaningfulSourceOpen) sourceOpens += 1;
       if (actor.contextOpened) contextOpens += 1;
@@ -254,8 +274,17 @@ export async function computeAggregationWindow(
   return { windowStart: fromIso, windowSize: size, items };
 }
 
-/** Convert a fold actor into the pure-scoring input shape. */
-export function toActorSummary(actorKey: string, fold: ActorFold): ActorItemSummary {
+/**
+ * Convert a fold actor into the pure-scoring input shape. `trustWeight`
+ * (WS-O.4.5) is the actor's account-age trust factor ∈ [0, 1] — the caller
+ * resolves it (the coarse privacy bucket and any unresolvable actor get 1, so
+ * anonymity is never penalized); absent ⇒ 1 (no effect).
+ */
+export function toActorSummary(
+  actorKey: string,
+  fold: ActorFold,
+  trustWeight = 1,
+): ActorItemSummary {
   return {
     actor: actorKey,
     dwellBucket: fold.dwellBucket,
@@ -263,8 +292,16 @@ export function toActorSummary(actorKey: string, fold: ActorFold): ActorItemSumm
     sourceBounceOnly: fold.sawBounceAdjacentOpen && !fold.sawMeaningfulSourceOpen,
     contextOpened: fold.contextOpened,
     returnVisitBucket: fold.returnVisitBucket,
+    // §5.3 thread traversal (SIG-ATT-TRAVERSE): the deduped max distinct
+    // reply-depth bucket the actor reached — now a scored ActiveAttention
+    // dimension, no longer collected-then-dropped at the fold boundary.
+    replyDepthBucket: fold.branchDepthBucket,
     contributions: fold.contributions,
     uncitedAccusationsByType: fold.uncitedAccusationsByType,
-    savedForLater: 0,
+    // §5.3 "Save for later" (SIG-ATT-SAVE): 1 when the actor saved the item in
+    // the window, else 0. Private by default (the saved COLLECTION never leaves
+    // the browser); only this deduped, privacy-leveled boolean is scored.
+    savedForLater: fold.saved ? 1 : 0,
+    trustWeight,
   };
 }

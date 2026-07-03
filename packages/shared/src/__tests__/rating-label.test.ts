@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // SPEC §5.6 rating-label derivation: proves the priority cascade is correct and
-// that ALL SEVEN labels are reachable (the bug this fixed: only five were
-// producible, so every story read "Getting Attention"). Also proves the shared
-// safety-state derivation so the feed and story-detail surfaces agree.
+// that ALL EIGHT labels are reachable — including the neutral "New" floor, so the
+// default never falsely claims "Getting Attention" for a story nobody has read.
+// Also proves the shared safety-state derivation so the surfaces agree.
 import { describe, expect, it } from 'vitest';
 import {
   RATING_LABEL_KINDS,
@@ -20,7 +20,9 @@ import {
 } from '../utils/rating-label.js';
 import { STORY_LIFECYCLE_STATES } from '../utils/story-lifecycle.js';
 
-/** A baseline input: a fresh, safe, single-lens, evidence-free story. */
+/** A baseline input: a fresh, safe, single-lens, evidence-free story that HAS a
+ *  real active-reading signal (so the default cascade reads "Getting Attention";
+ *  the neutral "New" floor is covered explicitly below). */
 function base(overrides: Partial<RatingLabelInputs> = {}): RatingLabelInputs {
   return {
     lifecycleState: 'gathering_attention',
@@ -28,15 +30,41 @@ function base(overrides: Partial<RatingLabelInputs> = {}): RatingLabelInputs {
     interpretationsDiverge: false,
     evidenceCount: 0,
     meriExposure: null,
+    activeAttention: 0.5,
     ...overrides,
   };
 }
 
 describe('deriveRatingLabel — lifecycle base mapping', () => {
-  it('maps submitted/gathering_attention → getting-attention (the default)', () => {
+  it('maps submitted/gathering_attention → getting-attention WHEN there is attention', () => {
     expect(deriveRatingLabel(base({ lifecycleState: 'submitted' }))).toBe('getting-attention');
     expect(deriveRatingLabel(base({ lifecycleState: 'gathering_attention' }))).toBe(
       'getting-attention',
+    );
+  });
+
+  it('the neutral New floor: the default reads New until a real attention signal arrives (§5.6)', () => {
+    // No attention component at all (field OMITTED), or exactly zero ⇒ New,
+    // never a false "Getting Attention" (the fold already zeroed idle/bounce).
+    expect(
+      deriveRatingLabel({
+        lifecycleState: 'gathering_attention',
+        safetyState: 'ok',
+        interpretationsDiverge: false,
+        evidenceCount: 0,
+        meriExposure: null,
+      }),
+    ).toBe('new');
+    expect(deriveRatingLabel(base({ activeAttention: 0 }))).toBe('new');
+    // ANY positive genuine attention ⇒ Getting Attention.
+    expect(deriveRatingLabel(base({ activeAttention: 0.01 }))).toBe('getting-attention');
+    expect(deriveRatingLabel(base({ activeAttention: 0.9 }))).toBe('getting-attention');
+    // The attention gate only affects the DEFAULT; a live signal still wins.
+    expect(deriveRatingLabel(base({ activeAttention: 0, safetyState: 'under-review' }))).toBe(
+      'under-review',
+    );
+    expect(deriveRatingLabel(base({ activeAttention: 0, lifecycleState: 'deepening' }))).toBe(
+      'deepening',
     );
   });
 
@@ -92,8 +120,9 @@ describe('deriveRatingLabel — live signals (the previously unreachable labels)
     expect(deriveRatingLabel(base({ interpretationsDiverge: true }))).toBe('needs-context');
   });
 
-  it('reaches ALL SEVEN labels (proves none is dead) ', () => {
+  it('reaches ALL EIGHT labels (proves none is dead) ', () => {
     const produced = new Set<RatingLabelKind>([
+      deriveRatingLabel(base({ activeAttention: 0 })), // new (the neutral floor)
       deriveRatingLabel(base()), // getting-attention
       deriveRatingLabel(base({ lifecycleState: 'deepening' })), // deepening
       deriveRatingLabel(base({ evidenceCount: 2, meriExposure: 'independent_source' })), // well-sourced

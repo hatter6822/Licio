@@ -17,7 +17,7 @@
 // Pure and total: same window input + config ⇒ same components (SPEC §30.6).
 // Every parameter here is data (validated, tunable via the pwatt_config store).
 import type { EventContributionType } from '@licio/shared';
-import { DWELL_BUCKET_WEIGHTS } from './active-attention.js';
+import { DWELL_BUCKET_WEIGHTS, REPLY_DEPTH_BUCKET_WEIGHTS } from './active-attention.js';
 import { RETURN_BUCKET_WEIGHTS } from './participation.js';
 import {
   applySaturation,
@@ -27,8 +27,81 @@ import {
   validateCurve,
   validateSaturationDimensions,
 } from './saturation.js';
-import { type ActorItemSummary, clamp01, toNonNegative } from './types.js';
+import {
+  type ActorItemSummary,
+  actorTrustFactor,
+  clamp01,
+  type ItemAntiSignals,
+  toNonNegative,
+} from './types.js';
 import { assertV1HierarchyOrder, V1_CONTRIBUTION_WEIGHTS } from './v1.js';
+
+/**
+ * Anti-signal attenuation of the SERVED v1 components (WS-E.2.2 → WS-I). PWAtt
+ * v1's own coordinated-burst / harassment-cascade detection is intrinsic to the
+ * (already-lifted, §30.5) v1 stage — NOT a promotion-gated WS-H invariant — so
+ * its dampening must bind the `active_attention` / `participation` the ranking
+ * feature store actually reads, or detection is cosmetic. A detected burst
+ * scales the components down in proportion to its confidence (up to
+ * `coordinatedBurstMax`); a harassment cascade applies a fixed stronger factor.
+ * Both factors compose multiplicatively, so an item carrying both signals is
+ * attenuated the most. This is a positive-signal ATTENUATION (never a penalty
+ * on the §5.4 penalty side), so it needs no WS-H promotion — it withholds trust
+ * from an inauthentic window's attention rather than sanctioning the item.
+ */
+export interface AntiSignalAttenuationConfig {
+  /** Max fraction of the components a full-confidence coordinated burst removes
+   *  (0 = no effect, 1 = a full-confidence burst zeroes the window). */
+  coordinatedBurstMax: number;
+  /** Multiplier (< 1) applied to the components when a harassment cascade is
+   *  detected for the window (0 = zero the window, 1 = no effect). */
+  harassmentCascade: number;
+}
+
+export const DEFAULT_ANTI_SIGNAL_ATTENUATION: AntiSignalAttenuationConfig = {
+  coordinatedBurstMax: 0.5,
+  harassmentCascade: 0.3,
+};
+
+/** Validate the attenuation config; both factors must be in [0, 1]. */
+export function validateAntiSignalAttenuation(config: AntiSignalAttenuationConfig): void {
+  for (const [name, value] of [
+    ['coordinatedBurstMax', config.coordinatedBurstMax],
+    ['harassmentCascade', config.harassmentCascade],
+  ] as const) {
+    if (!(value >= 0 && value <= 1)) throw new Error(`${name} must be in [0, 1]`);
+  }
+}
+
+export interface AntiSignalAttenuationResult {
+  /** The multiplicative factor applied to each component, in [0, 1]. */
+  factor: number;
+  /** Ledger/audit annotations naming which anti-signal(s) attenuated. */
+  annotations: string[];
+}
+
+/**
+ * The multiplicative attenuation factor for a window's anti-signals. Pure and
+ * total: no anti-signal ⇒ factor 1 (identity). Monotone in confidence — a
+ * higher-confidence burst never raises the factor.
+ */
+export function antiSignalAttenuation(
+  antiSignals: ItemAntiSignals | undefined,
+  config: AntiSignalAttenuationConfig = DEFAULT_ANTI_SIGNAL_ATTENUATION,
+): AntiSignalAttenuationResult {
+  let factor = 1;
+  const annotations: string[] = [];
+  if (antiSignals?.coordinatedBurst !== undefined) {
+    const confidence = clamp01(antiSignals.coordinatedBurst.confidence);
+    factor *= 1 - config.coordinatedBurstMax * confidence;
+    annotations.push('coordinated_burst_attenuated');
+  }
+  if (antiSignals?.harassmentCascade === true) {
+    factor *= config.harassmentCascade;
+    annotations.push('harassment_cascade_attenuated');
+  }
+  return { factor: clamp01(factor), annotations };
+}
 
 export interface PwattV1ComponentsConfig {
   /** The WS-E.2.3b hierarchy weights, each in [0, 1]; low_info_reply/flag = 0. */
@@ -36,7 +109,9 @@ export interface PwattV1ComponentsConfig {
   /** Per-user diminishing-returns curve over each contribution type's count. */
   contributionCurve: SaturationCurve;
   /** Item-level ActiveAttention dimensions (weights sum 100, each <= 50). */
-  attentionDimensions: Readonly<Record<'dwell' | 'source' | 'context', SaturationDimension>>;
+  attentionDimensions: Readonly<
+    Record<'dwell' | 'source' | 'context' | 'traversal', SaturationDimension>
+  >;
   /** Item-level Participation dimensions (weights sum 100, each <= 50). */
   participationDimensions: Readonly<
     Record<'returns' | 'saves' | 'contributions', SaturationDimension>
@@ -47,6 +122,8 @@ export interface PwattV1ComponentsConfig {
   rapidThreshold: number;
   /** Multiplier (< 1) applied to a rapid actor's contribution score (§5.3). */
   rapidDampening: number;
+  /** Attenuation of the SERVED components when the window's anti-signals fire. */
+  antiSignalAttenuation: AntiSignalAttenuationConfig;
 }
 
 const LOG_CURVE_DEFAULT: SaturationCurve = { kind: 'logarithmic', scale: 4, saturationPoint: 25 };
@@ -55,10 +132,14 @@ export const DEFAULT_PWATT_V1_COMPONENTS_CONFIG: PwattV1ComponentsConfig = {
   contributionWeights: V1_CONTRIBUTION_WEIGHTS,
   contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
   attentionDimensions: {
-    dwell: { weightPct: 50, curve: LOG_CURVE_DEFAULT },
-    source: { weightPct: 30, curve: LOG_CURVE_DEFAULT },
+    dwell: { weightPct: 40, curve: LOG_CURVE_DEFAULT },
+    source: { weightPct: 25, curve: LOG_CURVE_DEFAULT },
     context: { weightPct: 20, curve: LOG_CURVE_DEFAULT },
+    traversal: { weightPct: 15, curve: LOG_CURVE_DEFAULT },
   },
+  // The `saves` dimension carries the §5.3 "Save for later" LOW rank weight now
+  // that the privacy-respecting `content.saved` signal flows (the save rides the
+  // attention privacy pipeline; the saved collection stays client-local, §19.2).
   participationDimensions: {
     returns: { weightPct: 40, curve: LOG_CURVE_DEFAULT },
     saves: { weightPct: 10, curve: LOG_CURVE_DEFAULT },
@@ -67,6 +148,7 @@ export const DEFAULT_PWATT_V1_COMPONENTS_CONFIG: PwattV1ComponentsConfig = {
   accusationDownweight: 0.25,
   rapidThreshold: 5,
   rapidDampening: 0.3,
+  antiSignalAttenuation: DEFAULT_ANTI_SIGNAL_ATTENUATION,
 };
 
 /** Config-time rejection (WS-E.2.3a/b): every violation named. */
@@ -90,6 +172,7 @@ export function validatePwattV1ComponentsConfig(config: PwattV1ComponentsConfig)
     if (!(factor >= 0 && factor <= 1)) throw new Error(`${name} must be in [0, 1]`);
   }
   if (!(config.rapidThreshold >= 1)) throw new Error('rapidThreshold must be >= 1');
+  validateAntiSignalAttenuation(config.antiSignalAttenuation);
 }
 
 export interface ActorV1ContributionResult {
@@ -136,15 +219,23 @@ export function actorV1Contribution(
 }
 
 export interface ComputedV1Components {
-  /** ActiveAttention component in [0, 1]. */
+  /** ActiveAttention component in [0, 1] — SERVED (anti-signal attenuated). */
   activeAttention: number;
-  /** ConstructiveParticipation component in [0, 1]. */
+  /** ConstructiveParticipation component in [0, 1] — SERVED (attenuated). */
   participation: number;
+  /** ActiveAttention BEFORE anti-signal attenuation (audit/ledger). */
+  rawActiveAttention: number;
+  /** ConstructiveParticipation BEFORE anti-signal attenuation (audit/ledger). */
+  rawParticipation: number;
+  /** The anti-signal attenuation factor applied to both components (1 = none). */
+  antiSignalFactor: number;
   /** Per-dimension contributions (each <= its <=50% share — the cap proof). */
   attentionDimensions: Record<string, number>;
   participationDimensions: Record<string, number>;
   /** Per-actor v1 contribution annotations, for ledger/audit parity with v0. */
   actorAnnotations: Map<string, string[]>;
+  /** Item-level anti-signal annotations (which detections attenuated). */
+  antiSignalAnnotations: string[];
 }
 
 /**
@@ -154,6 +245,7 @@ export interface ComputedV1Components {
  *   dwell    = Σ_u dwellWeight(bucket_u)            (each <= 1)
  *   source   = Σ_u [meaningful source open]          (0/1; bounce-only = 0)
  *   context  = Σ_u [context open]                    (0/1)
+ *   traversal= Σ_u replyDepthWeight(bucket_u)        (§5.3 thread traversal)
  *   returns  = Σ_u returnWeight(bucket_u)            (diminishing buckets)
  *   saves    = Σ_u [saved]                           (0/1; low 10% budget)
  *   contribs = Σ_u actorV1Contribution(u)            (hierarchy + curve, <= 1)
@@ -164,36 +256,55 @@ export interface ComputedV1Components {
 export function computePwattV1Components(
   actors: readonly ActorItemSummary[],
   config: PwattV1ComponentsConfig = DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+  antiSignals?: ItemAntiSignals,
 ): ComputedV1Components {
   let dwell = 0;
   let source = 0;
   let context = 0;
+  let traversal = 0;
   let returns = 0;
   let saves = 0;
   let contributions = 0;
   const actorAnnotations = new Map<string, string[]>();
   for (const actor of actors) {
-    dwell += DWELL_BUCKET_WEIGHTS[actor.dwellBucket];
-    if (actor.sourceOpened && !actor.sourceBounceOnly) source += 1;
-    if (actor.contextOpened) context += 1;
-    returns += RETURN_BUCKET_WEIGHTS[actor.returnVisitBucket];
-    if (toNonNegative(actor.savedForLater) > 0) saves += 1;
+    // Account-age trust (WS-O.4.5) scales this actor's whole contribution: a
+    // fresh/throwaway account adds less to every dimension than an aged one
+    // (anonymity carries full trust — the coarse privacy bucket resolves to 1).
+    const trust = actorTrustFactor(actor);
+    dwell += trust * DWELL_BUCKET_WEIGHTS[actor.dwellBucket];
+    if (actor.sourceOpened && !actor.sourceBounceOnly) source += trust;
+    if (actor.contextOpened) context += trust;
+    traversal += trust * REPLY_DEPTH_BUCKET_WEIGHTS[actor.replyDepthBucket ?? 'none'];
+    returns += trust * RETURN_BUCKET_WEIGHTS[actor.returnVisitBucket];
+    if (toNonNegative(actor.savedForLater) > 0) saves += trust;
     const contribution = actorV1Contribution(actor, config);
-    contributions += contribution.value;
+    contributions += trust * contribution.value;
     if (contribution.annotations.length > 0) {
       actorAnnotations.set(actor.actor, contribution.annotations);
     }
   }
-  const attention = applySaturation({ dwell, source, context }, config.attentionDimensions);
+  const attention = applySaturation(
+    { dwell, source, context, traversal },
+    config.attentionDimensions,
+  );
   const participation = applySaturation(
     { returns, saves, contributions },
     config.participationDimensions,
   );
+  // Bind the window's own anti-signals to the SERVED components (WS-E.2.2 →
+  // WS-I): a coordinated burst / harassment cascade withholds trust from an
+  // inauthentic window's attention so detection is consequential for ranking,
+  // not merely logged. The raw components are retained for ledger/audit.
+  const attenuation = antiSignalAttenuation(antiSignals, config.antiSignalAttenuation);
   return {
-    activeAttention: attention.total,
-    participation: participation.total,
+    activeAttention: clamp01(attention.total * attenuation.factor),
+    participation: clamp01(participation.total * attenuation.factor),
+    rawActiveAttention: attention.total,
+    rawParticipation: participation.total,
+    antiSignalFactor: attenuation.factor,
     attentionDimensions: attention.perDimension,
     participationDimensions: participation.perDimension,
     actorAnnotations,
+    antiSignalAnnotations: attenuation.annotations,
   };
 }

@@ -21,6 +21,7 @@ import {
 import { type NewStoredEvent, PRIVACY_BUCKET, PSEUDONYMOUS_USER_ID } from '../events/stores.js';
 import {
   attentionEvent,
+  contentSavedEvent,
   type EventServicesFixture,
   freshEventServices,
   seedUserWithSession,
@@ -416,6 +417,25 @@ describe('WS-D hook bindings (SPEC §19.3)', () => {
       'attention_events',
     ]);
     expect(exported[0]?.rows).toHaveLength(1);
+  });
+
+  it('includes owned content.saved (SIG-ATT-SAVE) events in the attention export', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await ingestAttentionEvents(
+      fixture.events,
+      fixture.identity,
+      userId,
+      [contentSavedEvent(userId)],
+      ONLINE_ACCEPTANCE,
+    );
+    const exported = (await exportUserAttention(fixture.events, userId)) as Array<{
+      kind: string;
+      rows: Array<{ topic: string }>;
+    }>;
+    const attentionEvents = exported.find((e) => e.kind === 'attention_events');
+    // A retained, attributable save signal must appear in the §19.3 export —
+    // omitting it would silently drop owned attention data from the DSAR.
+    expect(attentionEvents?.rows.map((r) => r.topic)).toContain('content.saved');
   });
 
   it('a retention change to `none` tightens existing purge deadlines (never extends)', async () => {

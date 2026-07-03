@@ -556,11 +556,18 @@ function toLedgerItem(entry: SignalLedgerEntry): SignalLedgerItem {
   if (entry.active_dwell_bucket !== 'none') signals.push('active_dwell');
   if (entry.source_opened) signals.push('source_opened');
   if (entry.context_opened) signals.push('context_opened');
+  if (entry.reply_depth_bucket !== 'none') signals.push('thread_traversal');
+  if (entry.saved_for_later) signals.push('saved_for_later');
   if (entry.return_visit_count_bucket !== 'none') signals.push('return_visit');
   return {
     id: entry.item_id,
     title: entry.story_title,
     signals,
+    recordedAt: entry.recorded_at,
+    // The §5.3 anti-signals the server applied to this item, shown qualitatively.
+    ...(entry.anti_signals && entry.anti_signals.length > 0
+      ? { antiSignals: entry.anti_signals }
+      : {}),
     ...(entry.cap_reached ? { capReached: true } : {}),
     // WS-E.2.1d: the server-generated plain-language explanation (qualitative
     // wording only — never a number).

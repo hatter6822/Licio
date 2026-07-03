@@ -233,6 +233,54 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
     expect(Math.abs(purgeAfter - expected)).toBeLessThan(5_000);
   });
 
+  it('neutralizes an incoherent aggregate (reply traversal with zero dwell, §25.5)', async () => {
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const event = attentionEvent(userId, {
+      items: [
+        {
+          story_id: '55555555-5555-4555-8555-555555555555',
+          active_dwell_bucket: 'none',
+          source_opened: true, // a real signal, so the item survives normalization
+          context_opened: false,
+          reply_depth_bucket: 'deep', // client-impossible with zero active dwell
+          return_visit_count_bucket: 'none',
+        },
+      ],
+    });
+    const res = await app().request(post('/v1/events/attention', event, cookie));
+    expect(res.status).toBe(202);
+    // The stored event payload has the fabricated traversal neutralized…
+    const stored = await fixture.events.eventStore.listByOwner(userId);
+    const items = (stored[0]?.payload as { items?: Array<{ reply_depth_bucket?: string }> }).items;
+    expect(items?.[0]?.reply_depth_bucket).toBe('none');
+    // …and so does the durable §22.1 aggregate row.
+    const rows = await fixture.events.attentionStore.listByUser(userId);
+    expect(rows[0]?.reply_depth_bucket).toBe('none');
+  });
+
+  it('DISCARDS an aggregate emptied by normalization (no signal-free row, §25.5)', async () => {
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    // The ONLY signal is reply-depth with zero dwell — neutralized to `none`,
+    // which empties the item entirely. It must not be stored (an empty row would
+    // still seed eventCount / a burst actor / read history).
+    const event = attentionEvent(userId, {
+      items: [
+        {
+          story_id: '55555555-5555-4555-8555-555555555555',
+          active_dwell_bucket: 'none',
+          source_opened: false,
+          context_opened: false,
+          reply_depth_bucket: 'deep',
+          return_visit_count_bucket: 'none',
+        },
+      ],
+    });
+    const res = await app().request(post('/v1/events/attention', event, cookie));
+    expect(res.status).toBe(202); // the upload is valid, just empty
+    expect(await fixture.events.eventStore.listByOwner(userId)).toHaveLength(0);
+    expect(await fixture.events.attentionStore.listByUser(userId)).toHaveLength(0);
+  });
+
   it('a mid-session settings change takes effect on the next event', async () => {
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     expect(
@@ -291,6 +339,11 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
     expect(all).toHaveLength(1);
     expect(all[0]?.ownerUserId).toBeNull();
     expect(all[0]?.payload['user_id']).toBe(PSEUDONYMOUS_USER_ID);
+    // The stored payload carries the SERVER-ENFORCED level, not the `standard`
+    // claim: `actorKeyOfPayload` keys on `privacy_level`, so it must read
+    // `minimum` here or the row would fold under the synthetic UUID instead of
+    // `privacy-bucket` and split this reader into two actors.
+    expect(all[0]?.payload['privacy_level']).toBe('minimum');
     const aggregates = await fixture.events.attentionStore.listByUser(PRIVACY_BUCKET);
     expect(aggregates).toHaveLength(1);
     expect(aggregates[0]?.privacy_level).toBe('minimum');

@@ -9,9 +9,13 @@ import { describe, expect, it } from 'vitest';
 import {
   type ActorItemSummary,
   actorV1Contribution,
+  antiSignalAttenuation,
   computePwattV1Components,
+  DEFAULT_ANTI_SIGNAL_ATTENUATION,
   DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+  type ItemAntiSignals,
   V1_CONTRIBUTION_WEIGHTS,
+  validateAntiSignalAttenuation,
   validatePwattV1ComponentsConfig,
 } from '../index.js';
 import { bool, forAll, int, pick } from './prop.js';
@@ -140,6 +144,7 @@ describe('computePwattV1Components (item-level dominance cap)', () => {
       'context',
       'dwell',
       'source',
+      'traversal',
     ]);
   });
 
@@ -226,7 +231,8 @@ describe('validatePwattV1ComponentsConfig (config-time rejection)', () => {
         attentionDimensions: {
           dwell: { weightPct: 60, curve: { kind: 'sigmoid', scale: 4 } },
           source: { weightPct: 20, curve: { kind: 'sigmoid', scale: 4 } },
-          context: { weightPct: 20, curve: { kind: 'sigmoid', scale: 4 } },
+          context: { weightPct: 10, curve: { kind: 'sigmoid', scale: 4 } },
+          traversal: { weightPct: 10, curve: { kind: 'sigmoid', scale: 4 } },
         },
       }),
     ).toThrow(/dominance cap/);
@@ -236,5 +242,79 @@ describe('validatePwattV1ComponentsConfig (config-time rejection)', () => {
         rapidDampening: 1.2,
       }),
     ).toThrow(/\[0, 1\]/);
+  });
+
+  it('rejects an out-of-range anti-signal attenuation factor', () => {
+    expect(() =>
+      validatePwattV1ComponentsConfig({
+        ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+        antiSignalAttenuation: { coordinatedBurstMax: 1.5, harassmentCascade: 0.3 },
+      }),
+    ).toThrow(/\[0, 1\]/);
+    expect(() =>
+      validateAntiSignalAttenuation({ coordinatedBurstMax: 0.5, harassmentCascade: -0.1 }),
+    ).toThrow(/\[0, 1\]/);
+  });
+});
+
+describe('anti-signal attenuation of the served components (WS-E.2.2 → WS-I)', () => {
+  const active = (overrides: Partial<ActorItemSummary> = {}) =>
+    actor({
+      dwellBucket: 'extended',
+      sourceOpened: true,
+      contextOpened: true,
+      contributions: { evidence: 2 },
+      ...overrides,
+    });
+
+  it('no anti-signal ⇒ factor 1 and served == raw', () => {
+    const result = computePwattV1Components(
+      [active({ actor: 'a' }), active({ actor: 'b' })],
+      DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+      {},
+    );
+    expect(result.antiSignalFactor).toBe(1);
+    expect(result.activeAttention).toBe(result.rawActiveAttention);
+    expect(result.participation).toBe(result.rawParticipation);
+    expect(result.antiSignalAnnotations).toEqual([]);
+  });
+
+  it('a full-confidence coordinated burst attenuates the served components', () => {
+    const actors = [active({ actor: 'a' }), active({ actor: 'b' }), active({ actor: 'c' })];
+    const clean = computePwattV1Components(actors, DEFAULT_PWATT_V1_COMPONENTS_CONFIG, {});
+    const burst = computePwattV1Components(actors, DEFAULT_PWATT_V1_COMPONENTS_CONFIG, {
+      coordinatedBurst: { confidence: 1 },
+    });
+    // Raw is unchanged; served is scaled by (1 - coordinatedBurstMax).
+    expect(burst.rawActiveAttention).toBeCloseTo(clean.rawActiveAttention, 12);
+    expect(burst.antiSignalFactor).toBeCloseTo(
+      1 - DEFAULT_ANTI_SIGNAL_ATTENUATION.coordinatedBurstMax,
+      12,
+    );
+    expect(burst.activeAttention).toBeLessThan(clean.activeAttention);
+    expect(burst.participation).toBeLessThan(clean.participation);
+    expect(burst.antiSignalAnnotations).toContain('coordinated_burst_attenuated');
+  });
+
+  it('attenuation is monotone in burst confidence and composes with a cascade', () => {
+    const actors = [active({ actor: 'a' }), active({ actor: 'b' })];
+    const f = (signals: ItemAntiSignals) =>
+      computePwattV1Components(actors, DEFAULT_PWATT_V1_COMPONENTS_CONFIG, signals)
+        .antiSignalFactor;
+    expect(f({ coordinatedBurst: { confidence: 0.2 } })).toBeGreaterThan(
+      f({ coordinatedBurst: { confidence: 0.8 } }),
+    );
+    // Both signals compose multiplicatively ⇒ strictly smaller than either alone.
+    const both = f({ coordinatedBurst: { confidence: 1 }, harassmentCascade: true });
+    expect(both).toBeLessThan(f({ coordinatedBurst: { confidence: 1 } }));
+    expect(both).toBeLessThan(f({ harassmentCascade: true }));
+  });
+
+  it('the pure attenuation helper is total and identity-on-empty', () => {
+    expect(antiSignalAttenuation(undefined).factor).toBe(1);
+    expect(antiSignalAttenuation({}).factor).toBe(1);
+    expect(antiSignalAttenuation({ harassmentCascade: false }).factor).toBe(1);
+    // A NaN confidence clamps to 0 ⇒ no attenuation (totality).
+    expect(antiSignalAttenuation({ coordinatedBurst: { confidence: Number.NaN } }).factor).toBe(1);
   });
 });

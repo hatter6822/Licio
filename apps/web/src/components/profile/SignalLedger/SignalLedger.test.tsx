@@ -86,6 +86,38 @@ describe('SignalLedger (WS-B.2.6)', () => {
     expect(entryText).not.toContain('%');
   });
 
+  it('surfaces thread traversal, anti-signals, timestamps, and the hourly cadence note', () => {
+    const enriched: SignalLedgerItem[] = [
+      {
+        id: 'c',
+        title: 'A digit-free headline about the estuary',
+        signals: ['active_dwell', 'thread_traversal'],
+        recordedAt: '2026-06-10T09:00:00.000Z',
+        antiSignals: ['rapid_repetition', 'source_free_accusation'],
+      },
+    ];
+    const { container } = render(<SignalLedger items={enriched} />);
+    // The newly-scored traversal signal has its own phrasing.
+    expect(screen.getByText('You read across the discussion')).toBeInTheDocument();
+    // Anti-signals render as qualitative notes (why something counted LESS).
+    expect(screen.getByText('Rapid repeats were counted once')).toBeInTheDocument();
+    expect(screen.getByText('An accusation without a source counted less')).toBeInTheDocument();
+    // The hourly cadence is stated so a not-yet-counted entry reads correctly.
+    expect(screen.getByText(/counted about once an hour/i)).toBeInTheDocument();
+    // The timestamp is a real <time> element carrying the machine-readable ISO.
+    const time = container.querySelector('time');
+    expect(time).not.toBeNull();
+    expect(time?.getAttribute('dateTime')).toBe('2026-06-10T09:00:00.000Z');
+    // No-applause holds: the ONLY digits are inside <time> (a timestamp, never a
+    // score/count/rank); the signal + anti-signal phrasings stay digit-free.
+    time?.remove();
+    const listText = Array.from(container.querySelectorAll('li'))
+      .map((node) => node.textContent ?? '')
+      .join(' ');
+    expect(listText).not.toMatch(/\d/);
+    expect(listText).not.toMatch(/\b(?:points?|score|rank(?:ed)?|votes?)\b/i);
+  });
+
   it('renders an empty state with no leaked figures when there is no activity', () => {
     const { container } = render(<SignalLedger items={[]} />);
     expect(screen.getByText('No activity recorded yet.')).toBeInTheDocument();

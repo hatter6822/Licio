@@ -20,6 +20,7 @@ import {
   type ContributionCreateResponse,
   type ContributionWriteCreate,
   type CreateReportRequest,
+  contentSavedAggregateEventSchema,
   contributionCreateResponseSchema,
   type FeatureFlags,
   type FeedMode,
@@ -32,6 +33,7 @@ import {
   type NotificationPreferences,
   notificationPreferencesSchema,
   okAckSchema,
+  type PrivacyLevel,
   type PushSubscriptionJson,
   type ReportCreatedResponse,
   type RoomCreateRequest,
@@ -217,8 +219,10 @@ export async function parseResponse<T>(response: Response, schema: z.ZodType<T>)
 
 // --- Typed endpoint functions ---------------------------------------------
 
-export async function fetchFeed(mode?: FeedMode): Promise<FeedResponse> {
-  const response = await client.v1.feed.$get({ query: mode ? { mode } : {} });
+export async function fetchFeed(mode?: FeedMode, cursor?: string): Promise<FeedResponse> {
+  const response = await client.v1.feed.$get({
+    query: { ...(mode ? { mode } : {}), ...(cursor ? { cursor } : {}) },
+  });
   return parseResponse(response, feedResponseSchema);
 }
 
@@ -401,6 +405,59 @@ export async function uploadAttentionAggregates(
     accepted += ack.accepted;
   }
   return attentionIngestAckSchema.parse({ accepted });
+}
+
+/**
+ * Emit the §5.3 "Save for later" attention signal (`content.saved`) for one
+ * story on behalf of the authenticated session user. Rides the SAME
+ * attention-ingestion privacy pipeline (`POST /v1/events/attention`): the server
+ * verifies ownership against the session, applies the user's identification
+ * floor + retention preference, and DISCARDS the event entirely when
+ * personalization is off (§19.2). The saved COLLECTION never leaves the browser
+ * — only this one deduped, privacy-leveled signal does. Best-effort by contract:
+ * the caller fires it after the local save succeeds and never blocks on it.
+ *
+ * `privacyLevel` is the reader's CURRENT collection level (from the signal
+ * processor): stamping it here makes the server fold the save under the SAME
+ * actor key as the reader's aggregates (`actorKeyOfPayload` keys on
+ * `privacy_level`), so a minimum-privacy reader is not split into two actors.
+ * The server still strengthens (never weakens) to the durable floor.
+ */
+export async function emitContentSaved(
+  storyId: string,
+  userId: string,
+  privacyLevel: PrivacyLevel,
+): Promise<void> {
+  const now = Date.now();
+  const event = contentSavedAggregateEventSchema.parse({
+    event_id: crypto.randomUUID(),
+    event_type: 'content.saved',
+    timestamp: new Date(now).toISOString(),
+    schema_version: '1',
+    nonce: crypto.randomUUID(),
+    user_id: userId,
+    privacy_level: privacyLevel,
+    story_id: storyId,
+    privacy_classification: 'aggregated',
+    retention_tier: 'attention_aggregated',
+  });
+  // Ride the SAME serialized cooldown gate as aggregate uploads: this hits the
+  // same per-account attention endpoint, so honor an armed Retry-After window
+  // and arm/clear it from the response (shared backpressure, §25.5) instead of
+  // hammering the endpoint while it cools down.
+  const run = attentionUploadChain.then(async () => {
+    if (attentionUploadsCoolingDown()) {
+      throw new ApiClientError('rate_limited', 'Attention uploads are cooling down', 429);
+    }
+    const response = await client.v1.events.attention.$post({ json: event });
+    if (response.status === 429) noteAttentionRateLimited(retryAfterSeconds(response));
+    else if (response.ok) noteAttentionUploadOk();
+  });
+  attentionUploadChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  await run;
 }
 
 export async function fetchVapidPublicKey(): Promise<string> {

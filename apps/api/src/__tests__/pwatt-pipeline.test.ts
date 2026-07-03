@@ -72,6 +72,32 @@ function contributionRow(
   };
 }
 
+/** A stored `content.saved` event (§5.3 Save-for-later signal). */
+function savedRow(storyId: string, userId: string, timestamp: string = IN_WINDOW): NewStoredEvent {
+  return {
+    eventId: randomUUID(),
+    eventType: 'content.saved',
+    topic: 'content.saved',
+    timestamp,
+    privacyClassification: 'aggregated',
+    retentionTier: 'attention_aggregated',
+    payload: {
+      event_id: randomUUID(),
+      event_type: 'content.saved',
+      timestamp,
+      schema_version: '1',
+      nonce: randomUUID(),
+      user_id: userId,
+      privacy_level: 'standard',
+      story_id: storyId,
+      privacy_classification: 'aggregated',
+      retention_tier: 'attention_aggregated',
+    },
+    ownerUserId: userId,
+    purgeAfter: null,
+  };
+}
+
 async function ingestAttention(
   userId: string,
   storyId: string,
@@ -132,6 +158,56 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
     expect(row?.contextOpens).toBe(1);
     expect(row?.returnVisits).toBe(1);
     expect(row?.contributionCounts).toEqual({ question: 1, evidence: 1, low_info_reply: 1 });
+  });
+
+  it('folds the §5.3 "Save for later" signal, deduped per (actor, item)', async () => {
+    const a = await seedUserWithSession(fixture.identity, { handle: 'saverone' });
+    const b = await seedUserWithSession(fixture.identity, { handle: 'savertwo' });
+    const storyId = randomUUID();
+    await fixture.events.eventStore.insertMany([
+      savedRow(storyId, a.userId),
+      savedRow(storyId, a.userId), // same user's repeat save…
+      savedRow(storyId, b.userId),
+    ]);
+    const result = await computeAggregationWindow(fixture.events, T0, '1h');
+    const actors = result.items.get(storyId)?.actors;
+    // …counts ONCE per actor (booleans OR), never inflates.
+    expect(actors?.get(a.userId)?.saved).toBe(true);
+    expect(actors?.get(b.userId)?.saved).toBe(true);
+    expect(actors?.size).toBe(2);
+  });
+
+  it('a saved item earns MORE participation than an unsaved one (§5.3 low weight)', async () => {
+    // Two stories, one attended reader each with identical attention; one ALSO
+    // saves. The save lifts the saved story's participation component.
+    const saver = await seedUserWithSession(fixture.identity, { handle: 'keeps' });
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'reads' });
+    const savedStory = randomUUID();
+    const plainStory = randomUUID();
+    for (const [user, story] of [
+      [saver, savedStory],
+      [reader, plainStory],
+    ] as const) {
+      await ingestAttention(user.userId, story, {
+        items: [
+          {
+            story_id: story,
+            active_dwell_bucket: 'long',
+            source_opened: true,
+            context_opened: false,
+            reply_depth_bucket: 'shallow',
+            return_visit_count_bucket: 'few',
+          },
+        ],
+      });
+    }
+    await fixture.events.eventStore.insertMany([savedRow(savedStory, saver.userId)]);
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    const saved = await fixture.events.invariantStore.latest('PWAtt_v1', savedStory);
+    const plain = await fixture.events.invariantStore.latest('PWAtt_v1', plainStory);
+    expect(asNumber(saved?.scoreVector['participation'], 0)).toBeGreaterThan(
+      asNumber(plain?.scoreVector['participation'], Number.POSITIVE_INFINITY),
+    );
   });
 
   it('is idempotent: recomputing a window produces identical results', async () => {
@@ -249,8 +325,8 @@ describe('shadow scoring + Signal Ledger (WS-E.2.1b-d)', () => {
     const ledger = await fixture.events.ledgerStore.listForUser(userId, 10);
     expect(ledger.entries).toHaveLength(1);
     expect(ledger.entries[0]?.summary).toBe(
-      'You read this for a moderate duration, opened the source, and returned to it. ' +
-        'Your question was counted as constructive participation.',
+      'You read this for a moderate duration, opened the source, read into the replies, ' +
+        'and returned to it. Your question was counted as constructive participation.',
     );
     expect(ledger.entries[0]?.storyTitle).toBe('Water main study');
     expect(ledger.entries[0]?.pwattScore).toBe(v0?.scoreVector['score']);
@@ -421,6 +497,53 @@ describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
     const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     expect(report.burstsDetected).toBe(1);
   });
+
+  it('a FRESH-account item earns LESS PWAtt score than an AGED one with identical attention', async () => {
+    // Below the burst floor (3 actors < minVolume 10) so anti-signal attenuation
+    // never fires — this isolates the per-actor account-age SCORE scaling: each
+    // fresh account (trust 0.5) contributes half an aged account (trust 1.0).
+    async function attendedStory(prefix: string, accountAgeMs: number): Promise<string> {
+      const storyId = randomUUID();
+      for (let i = 0; i < 3; i += 1) {
+        const { userId } = await seedUserWithSession(fixture.identity, {
+          handle: `${prefix}${i}s`,
+          accountAgeMs,
+        });
+        await ingestAttention(userId, storyId, {
+          items: [
+            {
+              story_id: storyId,
+              active_dwell_bucket: 'extended',
+              source_opened: true,
+              context_opened: true,
+              reply_depth_bucket: 'shallow',
+              return_visit_count_bucket: 'several',
+            },
+          ],
+        });
+        await fixture.events.eventStore.insertMany([
+          contributionRow(storyId, userId, 'evidence', { hasCitation: true }),
+        ]);
+      }
+      return storyId;
+    }
+    const agedStory = await attendedStory('aged', 500 * 86_400_000); // trust 1.0
+    const freshStory = await attendedStory('fresh', 1 * 86_400_000); // trust 0.5
+    const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    expect(report.burstsDetected).toBe(0); // no anti-signal confound
+
+    const aged = await fixture.events.invariantStore.latest('PWAtt_v1', agedStory);
+    const fresh = await fixture.events.invariantStore.latest('PWAtt_v1', freshStory);
+    expect(asNumber(fresh?.scoreVector['active_attention'], 1)).toBeLessThan(
+      asNumber(aged?.scoreVector['active_attention'], 0),
+    );
+    expect(asNumber(fresh?.scoreVector['participation'], 1)).toBeLessThan(
+      asNumber(aged?.scoreVector['participation'], 0),
+    );
+    // The anti-signal factor is 1 for both (no burst) — the difference is trust.
+    expect(fresh?.scoreVector['anti_signal_factor']).toBe(1);
+    expect(aged?.scoreVector['anti_signal_factor']).toBe(1);
+  });
 });
 
 describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
@@ -471,6 +594,19 @@ describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
     const v0 = await fixture.events.invariantStore.latest('PWAtt_v0', storyId);
     expect(v0?.scoreVector['score']).toBe(0); // pinned at the freeze-time score
     expect(v0?.scoreVector['raw_score']).toBeGreaterThan(0); // raw kept for audit
+
+    // WS-E.2.3e freeze binds the SERVED COMPONENTS the ranking feature store
+    // reads (§5.3 "freeze ranking growth"): a frozen item's active_attention /
+    // participation are pinned (0 here — the cascade was the item's first
+    // window, no prior legitimate level), while the RAW components record the
+    // late reader's real attention for audit. Without this, the late reader's
+    // fresh attention would keep growing the frozen item's rank.
+    expect(v0?.scoreVector['active_attention']).toBe(0); // served: pinned
+    expect(v0?.scoreVector['raw_active_attention']).toBeGreaterThan(0); // raw: real
+    const v1 = await fixture.events.invariantStore.latest('PWAtt_v1', storyId);
+    expect(v1?.scoreVector['active_attention']).toBe(0); // served: pinned
+    expect(v1?.scoreVector['participation']).toBe(0); // served: pinned
+    expect(v1?.scoreVector['raw_active_attention']).toBeGreaterThan(0); // raw: real
   });
 
   it('isolated criticism does not trigger a cascade (conservative detector)', async () => {
@@ -677,11 +813,11 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt_v1', evidenceItem);
     const questionV1 = await fixture.events.invariantStore.latest('PWAtt_v1', questionItem);
+    // The served `participation` component (what ranking consumes) reflects the
+    // hierarchy — evidence outranks a bare question. (No composite `total` is
+    // stored: the §5.4 composition is @licio/ranking's, PR7.)
     expect(evidenceV1?.scoreVector['participation']).toBeGreaterThan(
       asNumber(questionV1?.scoreVector['participation'], Number.POSITIVE_INFINITY),
-    );
-    expect(evidenceV1?.scoreVector['total']).toBeGreaterThan(
-      asNumber(questionV1?.scoreVector['total'], Number.POSITIVE_INFINITY),
     );
     // v0 (uniform weights) sees them identically — the control assertion.
     const evidenceV0 = await fixture.events.invariantStore.latest('PWAtt_v0', evidenceItem);
@@ -714,9 +850,10 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
       },
       contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
       attentionDimensions: {
-        dwell: { weightPct: 50, curve },
-        source: { weightPct: 30, curve },
+        dwell: { weightPct: 40, curve },
+        source: { weightPct: 25, curve },
         context: { weightPct: 20, curve },
+        traversal: { weightPct: 15, curve },
       },
       participationDimensions: {
         returns: { weightPct: 45, curve },
@@ -726,6 +863,7 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
       accusationDownweight: 0.25,
       rapidThreshold: 5,
       rapidDampening: 0.3,
+      antiSignalAttenuation: { coordinatedBurstMax: 0.5, harassmentCascade: 0.3 },
     });
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const after = await fixture.events.invariantStore.latest('PWAtt_v1', itemId);

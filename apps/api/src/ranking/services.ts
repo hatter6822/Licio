@@ -31,7 +31,11 @@ import {
   loadRankingRuntimeConfig,
   type RankingRuntimeConfig,
 } from './config.js';
-import { type FeatureAssemblyDeps, registerFeatureStoreConsumer } from './features.js';
+import {
+  type FeatureAssemblyDeps,
+  pwattRowForRanking,
+  registerFeatureStoreConsumer,
+} from './features.js';
 import type { ClassificationPorts } from './orchestrator.js';
 import {
   type CandidateDataPorts,
@@ -182,9 +186,14 @@ export function createCandidateDataPorts(
       };
     },
     async latestPwattComponents(storyId) {
+      // The retrieval leg reads PWAtt through the SAME §30.5 bounded-input gate
+      // as the feature join (WS-I.2.1d): the lift constant + the row's own
+      // shadow_mode + the degraded⇒ABSENT rule. A pre-lift/shadow/degraded row
+      // is ABSENT here too, so a §30.5 revert or a compute failure withholds
+      // PWAtt from candidate eligibility AND scoring, never only from scoring.
       const row =
-        (await events.invariantStore.latest('PWAtt_v1', storyId)) ??
-        (await events.invariantStore.latest('PWAtt_v0', storyId));
+        pwattRowForRanking(await events.invariantStore.latest('PWAtt_v1', storyId)) ??
+        pwattRowForRanking(await events.invariantStore.latest('PWAtt_v0', storyId));
       if (row === null) return null;
       const attention = row.scoreVector['active_attention'];
       const participation = row.scoreVector['participation'];

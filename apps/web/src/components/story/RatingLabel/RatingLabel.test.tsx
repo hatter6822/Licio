@@ -8,7 +8,7 @@ import { checkA11y } from '../../../test/axe.js';
 import { RatingLabel, ratingLabelKinds, ratingLabels } from './RatingLabel.js';
 
 describe('RatingLabel', () => {
-  it('renders all seven labels with text (icon + text, never colour alone)', () => {
+  it('renders all eight labels with text (icon + text, never colour alone)', () => {
     const { container } = render(
       <div>
         {ratingLabelKinds.map((kind) => (
@@ -16,20 +16,20 @@ describe('RatingLabel', () => {
         ))}
       </div>,
     );
-    expect(ratingLabelKinds).toHaveLength(7);
+    expect(ratingLabelKinds).toHaveLength(8);
     for (const kind of ratingLabelKinds) {
       expect(screen.getByText(ratingLabels[kind].defaultText)).toBeInTheDocument();
     }
     // Every label includes a decorative icon AND a text node — two non-colour
     // differentiators that survive a grayscale rendering.
-    expect(container.querySelectorAll('svg')).toHaveLength(7);
+    expect(container.querySelectorAll('svg')).toHaveLength(8);
   });
 
   it('gives every label a unique icon and unique text (disambiguates same-hue pairs)', () => {
     const icons = new Set(ratingLabelKinds.map((k) => ratingLabels[k].icon));
     const texts = new Set(ratingLabelKinds.map((k) => ratingLabels[k].defaultText));
-    expect(icons.size).toBe(7);
-    expect(texts.size).toBe(7);
+    expect(icons.size).toBe(8);
+    expect(texts.size).toBe(8);
   });
 
   it('makes same-hue label pairs ≥3:1 distinct (solid vs soft chip lightness)', () => {

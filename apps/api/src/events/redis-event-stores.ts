@@ -11,7 +11,11 @@
 // Covered by gated integration tests (REDIS_URL) rather than unit coverage —
 // the same policy as the WS-D Redis adapters.
 import { randomBytes } from 'node:crypto';
-import type { AttentionAggregateEvent, SourceOpenedAggregateEvent } from '@licio/shared';
+import type {
+  AttentionAggregateEvent,
+  ContentSavedAggregateEvent,
+  SourceOpenedAggregateEvent,
+} from '@licio/shared';
 import type { Redis } from 'ioredis';
 import type { SlidingWindowStore } from './ingest-limiter.js';
 import {
@@ -150,6 +154,13 @@ export class RedisRealtimeAggregator implements RealtimeAggregator {
   async recordContribution(itemId: string, actorKey: string, timestampIso: string): Promise<void> {
     const windowStart = realtimeWindowStart(Date.parse(timestampIso));
     await this.#bump(windowStart, itemId, actorKey, { contributions: 1 });
+  }
+
+  async recordSave(event: ContentSavedAggregateEvent, actorKey: string): Promise<void> {
+    // eventCount + HLL only (no sub-counter): enough to feed the §5.3 save into
+    // the volume trigger + uniques; the durable fold computes the score.
+    const windowStart = realtimeWindowStart(Date.parse(event.timestamp));
+    await this.#bump(windowStart, event.story_id, actorKey, {});
   }
 
   async snapshot(itemId: string, windowStartMs: number): Promise<RealtimeItemCounts | null> {

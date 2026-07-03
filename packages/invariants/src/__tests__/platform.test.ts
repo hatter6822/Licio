@@ -182,8 +182,31 @@ describe('score-vector schemas (WS-H.1.1d)', () => {
         risk_state: 'high',
       }).ok,
     ).toBe(false);
-    expect(validateScoreVector('PWAtt_v0', { score: 0.5 })).toEqual({ ok: true });
-    expect(validateScoreVector('PWAtt_v0', { score: 'high' }).ok).toBe(false);
+    // PWAtt_v0 / PWAtt_v1 are pinned STRICT (WS-H.1.1d): exact keys, [0,1].
+    const validV0 = {
+      active_attention: 0.4,
+      participation: 0.3,
+      raw_active_attention: 0.4,
+      raw_participation: 0.3,
+      score: 0.35,
+      raw_score: 0.35,
+    };
+    expect(validateScoreVector('PWAtt_v0', validV0)).toEqual({ ok: true });
+    expect(validateScoreVector('PWAtt_v0', { score: 0.5 }).ok).toBe(false); // missing keys
+    expect(validateScoreVector('PWAtt_v0', { ...validV0, smuggled: 1 }).ok).toBe(false); // extra key
+    expect(validateScoreVector('PWAtt_v0', { ...validV0, score: 2 }).ok).toBe(false); // out of [0,1]
+    expect(
+      validateScoreVector('PWAtt_v1', {
+        active_attention: 0.2,
+        participation: 0.1,
+        raw_active_attention: 0.2,
+        raw_participation: 0.1,
+        anti_signal_factor: 1,
+      }),
+    ).toEqual({ ok: true });
+    // A not-yet-pinned PWAtt family falls back to the OPEN numeric record.
+    expect(validateScoreVector('PWAtt_v2', { anything: 0.5 }).ok).toBe(true);
+    expect(validateScoreVector('PWAtt_v2', { bad: 'high' }).ok).toBe(false);
     expect(validateScoreVector('unknown_type', {}).ok).toBe(false);
   });
 

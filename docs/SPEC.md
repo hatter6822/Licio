@@ -331,6 +331,7 @@ Because there are no likes or upvotes, the app uses descriptive labels, none of 
 | Under Review | Coordination, safety, or policy signals require review. |
 | Resolved Context | A previously ambiguous issue has a high-quality synthesis. |
 | Bridge Active | Multiple communities are engaging with improving coherence. |
+| New | No active-reading signal yet — the neutral floor (a freshly surfaced item nobody has actively read). |
 
 Exactly one label is shown per item, derived as a **priority cascade** in which
 the live invariant signals outrank the slower lifecycle state (Section 14.4):
@@ -340,8 +341,12 @@ reconciliation (Bridge Active) → a resolved synthesis (Resolved Context) →
 independent evidence (Well-Sourced, requiring ≥2 **distinct independent,
 verified** evidence cards — verified cards sharing a MERI independence group
 count once, and unverified/disputed/retracted cards never count — **and** a
-MERI source-independence signal) → ongoing contribution (Deepening) → the
-default (Getting Attention). Well-Sourced and Under Review are reachable only
+MERI source-independence signal) → ongoing contribution (Deepening) → active
+reading (Getting Attention, requiring a real above-noise ActiveAttention signal)
+→ the neutral floor (New). Because Getting Attention is gated on an actual
+attention signal, the default never falsely claims that reading is increasing for
+an item nobody has read; such an item reads **New** until attention arrives.
+Well-Sourced and Under Review are reachable only
 through the live signal — the lifecycle state alone never produces them. This
 derivation is implemented once and shared by every reader-facing surface, so the
 feed card and the story page agree on every dimension; the one input that is
@@ -1354,7 +1359,7 @@ API gateway; web BFF (backend-for-frontend) for the PWA; identity and account; c
 
 ## 21.3 Event-driven processing
 
-Core topics: `content.submitted`, `content.normalized`, `content.visibility.changed`, `source.opened.aggregate`, `attention.aggregate`, `contribution.created`, `evidence.added`, `claim.updated`, `thread.state.changed`, `moderation.case.created`, `integrity.signal.detected`, `invariant.run.completed`, `ranking.decision.logged`, `notification.sent`, `privacy.request.created`. Knomosis topics: `wallet.link.requested`, `wallet.linked`, `payment.intent.created`, `payment.intent.failed`, `payment.receipt.indexed`, `room.governance.mode.changed`, `governance.proposal.created`, `governance.signature.recorded`, `governance.proposal.executed`, `governance.proposal.challenged`, `treasury.deposit.indexed`, `treasury.grant.approved`, `treasury.payout.executed`, `knomosis.action.preflighted`, `knomosis.action.submitted`, `knomosis.event.indexed`, `compliance.financial.case.created`, `jurisdiction.feature.disabled`.
+Core topics: `content.submitted`, `content.normalized`, `content.visibility.changed`, `source.opened.aggregate`, `content.saved`, `attention.aggregate`, `contribution.created`, `evidence.added`, `claim.updated`, `thread.state.changed`, `moderation.case.created`, `integrity.signal.detected`, `invariant.run.completed`, `ranking.decision.logged`, `notification.sent`, `privacy.request.created`. Knomosis topics: `wallet.link.requested`, `wallet.linked`, `payment.intent.created`, `payment.intent.failed`, `payment.receipt.indexed`, `room.governance.mode.changed`, `governance.proposal.created`, `governance.signature.recorded`, `governance.proposal.executed`, `governance.proposal.challenged`, `treasury.deposit.indexed`, `treasury.grant.approved`, `treasury.payout.executed`, `knomosis.action.preflighted`, `knomosis.action.submitted`, `knomosis.event.indexed`, `compliance.financial.case.created`, `jurisdiction.feature.disabled`.
 
 ## 21.4 Invariant computation platform
 

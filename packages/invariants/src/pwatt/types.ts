@@ -4,7 +4,12 @@
 // scoring function in this package is PURE — same inputs, same outputs, no
 // clock, no randomness — which is what makes shadow-mode equivalence testing
 // (WS-E.2.1e) and decision replay (SPEC §30.6) possible.
-import type { DwellBucket, EventContributionType, ReturnVisitBucket } from '@licio/shared';
+import type {
+  DwellBucket,
+  EventContributionType,
+  ReplyDepthBucket,
+  ReturnVisitBucket,
+} from '@licio/shared';
 
 /**
  * SHADOW MODE (SPEC §30.5). LIFTED by WS-I (the §30.5 v1 "bounded ranking
@@ -53,6 +58,13 @@ export interface ActorItemSummary {
   contextOpened: boolean;
   /** Maximum return-visit bucket observed (rage-loops excluded upstream). */
   returnVisitBucket: ReturnVisitBucket;
+  /**
+   * Maximum distinct reply-depth traversal bucket observed in the window
+   * (SIG-ATT-TRAVERSE, §5.3 "thread traversal"): nonredundant traversal of
+   * nested comment depths. Absent ⇒ `none` (no effect) — the field is optional
+   * so pre-traversal callers/tests need no change; the fold populates it.
+   */
+  replyDepthBucket?: ReplyDepthBucket;
   /** Contribution counts by type within the window. */
   contributions: Partial<Record<EventContributionType, number>>;
   /**
@@ -64,6 +76,21 @@ export interface ActorItemSummary {
   uncitedAccusationsByType: Partial<Record<EventContributionType, number>>;
   /** Private saves within the window (0 until a save topic exists; low weight). */
   savedForLater: number;
+  /**
+   * Account-age trust weight in [0, 1] (WS-O.4.5): a coarse, non-financial,
+   * privacy-preserving multiplier applied to THIS actor's contribution so a
+   * fresh/throwaway account contributes reduced score and the economic cost of
+   * a Sybil brigade rises with account age. Absent ⇒ 1 (no effect). The coarse
+   * privacy-bucket actor and any unresolvable actor are ALWAYS 1 (anonymity is
+   * never penalized — the caller resolves this before building the summary).
+   */
+  trustWeight?: number;
+}
+
+/** Read an actor's trust weight, defaulting to 1 (no effect) and clamped to
+ *  [0, 1]. Anonymity/unresolved actors carry no weight field ⇒ full trust. */
+export function actorTrustFactor(actor: Pick<ActorItemSummary, 'trustWeight'>): number {
+  return clamp01(actor.trustWeight ?? 1);
 }
 
 /** Anti-signal flags computed at the item level for the window. */

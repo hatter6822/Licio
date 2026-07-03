@@ -82,6 +82,32 @@ describe('ReturnTracker', () => {
     expect(tracker.returnCount('item-1')).toBe(0);
   });
 
+  it('touch keeps an item seen-until-now so an in-story hop is not a return', () => {
+    const tracker = new ReturnTracker();
+    tracker.visit('item-1', 0); // enter the story
+    // Leaving after a >30-min dwell TOUCHES the story (seen-until-now, no return)…
+    tracker.touch('item-1', MIN + 1);
+    // …so re-entering its sibling surface a moment later is NOT a return.
+    tracker.visit('item-1', MIN + 2);
+    expect(tracker.returnCount('item-1')).toBe(0);
+  });
+
+  it('touch still lets a genuine away-and-back count as a return', () => {
+    const tracker = new ReturnTracker();
+    tracker.visit('item-1', 0);
+    tracker.touch('item-1', MIN + 1); // left the story at MIN+1
+    // Away on another surface for >30 min, then back: gap from the touch ≥ MIN.
+    tracker.visit('item-1', 2 * MIN + 2);
+    expect(tracker.returnCount('item-1')).toBe(1);
+  });
+
+  it('touch on a never-visited item is a no-op (no phantom visit)', () => {
+    const tracker = new ReturnTracker();
+    tracker.touch('item-1', 1_000);
+    tracker.visit('item-1', 2_000);
+    expect(tracker.returnCount('item-1')).toBe(0);
+  });
+
   it('dampens a rage loop to zero returns', () => {
     const tracker = new ReturnTracker({ rageWindowMs: 90 * 60_000, rageCount: 3 });
     // Three returns spaced at the minimum threshold, all inside the rage window.
@@ -168,19 +194,27 @@ describe('ReturnTracker', () => {
 });
 
 describe('TraversalTracker', () => {
-  it('counts distinct reply-depth levels and ignores repeats', () => {
+  it('counts distinct NESTED reply-depth levels and ignores repeats', () => {
     const tracker = new TraversalTracker();
-    tracker.visitReplyDepth('s1', 0);
+    tracker.visitReplyDepth('s1', 0); // top-level — not traversal, ignored
     tracker.visitReplyDepth('s1', 1);
     tracker.visitReplyDepth('s1', 1); // repeat — no increase
     tracker.visitReplyDepth('s1', 3);
-    expect(tracker.distinctReplyDepthLevels('s1')).toBe(3);
+    // Only the nested depths {1, 3} count — depth 0 is not a traversal.
+    expect(tracker.distinctReplyDepthLevels('s1')).toBe(2);
+  });
+
+  it('does not count reading only top-level comments as traversal', () => {
+    const tracker = new TraversalTracker();
+    tracker.visitReplyDepth('s1', 0);
+    tracker.visitReplyDepth('s1', 0);
+    expect(tracker.distinctReplyDepthLevels('s1')).toBe(0);
   });
 
   it('tracks stories independently and resets between sessions', () => {
     const tracker = new TraversalTracker();
-    tracker.visitReplyDepth('s1', 0);
-    tracker.visitReplyDepth('s2', 0);
+    tracker.visitReplyDepth('s1', 1);
+    tracker.visitReplyDepth('s2', 1);
     expect(tracker.distinctReplyDepthLevels('s1')).toBe(1);
     tracker.resetSession();
     expect(tracker.distinctReplyDepthLevels('s1')).toBe(0);

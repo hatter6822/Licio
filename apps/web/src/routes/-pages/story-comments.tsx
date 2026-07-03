@@ -14,7 +14,7 @@
 // the anchor's replies nest INSIDE its article for a tighter reading column.
 import type { CommentItem } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSpaFocus } from '../../components/a11y/index.js';
 import {
   CommentComposer,
@@ -30,11 +30,13 @@ import { Icon } from '../../components/ui/Icon/index.js';
 import { LoadingState } from '../../components/ui/LoadingState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
+import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { isValidUuidParam } from '../../routing/guards.js';
+import { getSignalProcessor } from '../../signals/runtime.js';
 
 /** Unrooted "all comments" view: two nested reply layers per top-level comment. */
 const ALL_COMMENTS_DEPTH = 2;
@@ -57,8 +59,13 @@ function AnchorComment({
   children: React.ReactNode;
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
+  // The focused anchor is its OWN article (not a CommentNode), so it records its
+  // depth here — else drilling straight to a deep comment with no rendered
+  // replies would contribute no §5.3 traversal at all (visibility-gated).
+  const recordDepthWhenVisible = useRecordReplyDepth(storyId, anchor.depth);
   return (
     <article
+      ref={recordDepthWhenVisible}
       // A surface-tinted raised tile (vs. the canvas-filled reply tiles) plus the
       // "Replying within" label sets the focused anchor apart from its replies.
       className={cn(raisedSurface, 'flex flex-col gap-3 bg-surface p-3')}
@@ -144,6 +151,23 @@ function StoryCommentsContent({
   const t = useT();
   const navigate = useNavigate();
   const story = useStoryQuery(storyId);
+
+  // Mark this story the active item so deep-thread reading on THIS dedicated
+  // page records the §5.3 reply-depth traversal: CommentNode calls
+  // recordReplyDepth(storyId, depth), and the §22.1 aggregate — with the max
+  // depth reached — is captured on the "done attending" boundary when the reader
+  // leaves. Without a current item, captureCurrent() emits nothing, so traversal
+  // (now a scored ActiveAttention dimension) would be dropped here. The story ⇄
+  // comments hop is not scored as a return: setActiveStory TOUCHES the outgoing
+  // surface's story, so a continuous in-story session never looks like a return.
+  useEffect(() => {
+    const processor = getSignalProcessor();
+    processor.setActiveStory(storyId);
+    return () => {
+      processor.setActiveStory(null);
+    };
+  }, [storyId]);
+
   const isRooted = root !== undefined;
   const depth = isRooted ? FOCUSED_DEPTH : ALL_COMMENTS_DEPTH;
   const comments = useStoryCommentsQuery(

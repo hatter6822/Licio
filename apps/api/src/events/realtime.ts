@@ -12,7 +12,11 @@
 //     production adapter) is an acceleration layer, never a shadow attention
 //     database. The durable PostgreSQL aggregation (WS-E.2.1a) is the source
 //     of truth; reconciliation compares the two within the HLL error bound.
-import type { AttentionAggregateEvent, SourceOpenedAggregateEvent } from '@licio/shared';
+import type {
+  AttentionAggregateEvent,
+  ContentSavedAggregateEvent,
+  SourceOpenedAggregateEvent,
+} from '@licio/shared';
 import { HyperLogLog } from './hll.js';
 import type { StoredEvent } from './stores.js';
 
@@ -36,6 +40,7 @@ export interface RealtimeAggregator {
   recordAttention(event: AttentionAggregateEvent, actorKey: string): Promise<void>;
   recordSourceOpen(event: SourceOpenedAggregateEvent, actorKey: string): Promise<void>;
   recordContribution(itemId: string, actorKey: string, timestampIso: string): Promise<void>;
+  recordSave(event: ContentSavedAggregateEvent, actorKey: string): Promise<void>;
   snapshot(itemId: string, windowStartMs: number): Promise<RealtimeItemCounts | null>;
   /** Items with any activity in the window (reconciliation enumeration). */
   itemsInWindow(windowStartMs: number): Promise<string[]>;
@@ -127,6 +132,16 @@ export class InMemoryRealtimeAggregator implements RealtimeAggregator {
     counters.contributions += 1;
   }
 
+  async recordSave(event: ContentSavedAggregateEvent, actorKey: string): Promise<void> {
+    // A save is a scoring event (§5.3): count it toward the item's uniques +
+    // eventCount so a save-heavy window can cross the volume trigger promptly
+    // (the durable hourly fold still computes the actual savedForLater score).
+    const windowStart = realtimeWindowStart(Date.parse(event.timestamp));
+    const counters = this.#counters(windowStart, event.story_id);
+    counters.hll.add(actorKey);
+    counters.eventCount += 1;
+  }
+
   async snapshot(itemId: string, windowStartMs: number): Promise<RealtimeItemCounts | null> {
     this.#expire();
     const counters = this.#windows.get(windowStartMs)?.get(itemId);
@@ -182,6 +197,11 @@ export async function rebuildRealtimeFromEvents(
           event.timestamp,
         );
       }
+    } else if (event.topic === 'content.saved') {
+      await aggregator.recordSave(
+        event.payload as unknown as ContentSavedAggregateEvent,
+        actorKeyOf(event.payload),
+      );
     }
   }
 }

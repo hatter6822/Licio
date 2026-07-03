@@ -113,6 +113,16 @@ export interface RatingLabelInputs {
   evidenceCount: number;
   /** Latest MERI exposure label for the story; null until a MERI run covers it. */
   meriExposure: MeriExposureLabelWire | null;
+  /**
+   * The item's served PWAtt ActiveAttention component in [0, 1] (SPEC §5.4),
+   * or undefined when no PWAtt run has covered it yet. Used ONLY to keep the
+   * default label truthful: "Getting Attention" (§5.6 "active, non-idle reading
+   * is increasing") requires an ACTUAL attention signal (any positive value —
+   * the PWAtt fold already zeroes idle time and bounce-only opens, so a positive
+   * component means genuine engagement passed those filters). Zero or absent
+   * ⇒ the neutral "New" label. Never a number reaches the UI.
+   */
+  activeAttention?: number;
 }
 
 /**
@@ -158,6 +168,10 @@ export function deriveRatingLabel(inputs: RatingLabelInputs): RatingLabelKind {
   if (inputs.lifecycleState === 'deepening') {
     return 'deepening';
   }
-  // 7. Active, non-idle reading is increasing — the default (Getting Attention).
-  return 'getting-attention';
+  // 7. Active, non-idle reading is increasing (Getting Attention) — but ONLY when
+  //    there is a real ActiveAttention signal (any positive component; the fold
+  //    already filtered idle/bounce). A story nobody has actively read yet reads
+  //    as the neutral floor "New" rather than falsely claiming rising attention
+  //    (SPEC §5.6).
+  return (inputs.activeAttention ?? 0) > 0 ? 'getting-attention' : 'new';
 }

@@ -13,18 +13,18 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  applySafetyStateToComponents,
   applySafetyStateToScore,
   buildLedgerSummary,
   computePwattV0,
-  computePwattV1,
   computePwattV1Components,
   type ItemWindowInput,
   PWATT_V0_SHADOW_MODE,
   PWATT_V0_VERSION,
   PWATT_V1_VERSION,
-  selectRankingProfile,
+  pwattV0ScoreVectorSchema,
+  pwattV1ScoreVectorSchema,
   transitionItemSafetyState,
-  V1_PLACEHOLDER_PENALTY_INPUTS,
 } from '@licio/invariants';
 import {
   integritySignalDetectedEventSchema,
@@ -54,6 +54,7 @@ import {
   detectHarassmentCascade,
 } from './anti-signals.js';
 import { loadPwattRuntimeConfig, type PwattRuntimeConfig } from './config.js';
+import { pwattRowForRanking } from './shadow.js';
 
 /** How many trailing windows condition the base rate (WS-E.2.2a, SPEC §8). */
 const BASE_RATE_TRAILING_WINDOWS = 6;
@@ -145,12 +146,26 @@ async function freezeItem(
   const state = current?.safetyState ?? 'normal';
   const transition = transitionItemSafetyState(state, 'flag');
   if (!transition.ok) return; // already frozen/removed — idempotent
-  const latest = await events.invariantStore.latest('PWAtt_v0', itemId);
-  const latestScore = latest?.scoreVector['score'];
+  const latestV0 = await events.invariantStore.latest('PWAtt_v0', itemId);
+  const latestScore = latestV0?.scoreVector['score'];
+  // Pin the SERVED components at their PRE-cascade level (§5.3 freeze growth):
+  // freeze runs BEFORE this window's row is stored, so `latest` is the last
+  // pre-cascade good state (v1 preferred — the served source — then v0). Read it
+  // through the SAME §30.5 serving-row gate ranking uses, so a shadow / degraded
+  // / pre-lift row is NEVER laundered into a served frozen component (it counts
+  // as ABSENT). No serving row (or a brand-new first-window cascade) ⇒ null ⇒
+  // pinned to 0 by applySafetyStateToComponents.
+  const componentRow =
+    pwattRowForRanking(await events.invariantStore.latest('PWAtt_v1', itemId)) ??
+    pwattRowForRanking(latestV0);
+  const numberOrNull = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
   await events.safetyStore.set({
     itemId,
     safetyState: transition.next,
     frozenScore: typeof latestScore === 'number' ? latestScore : 0,
+    frozenActiveAttention: numberOrNull(componentRow?.scoreVector['active_attention']),
+    frozenParticipation: numberOrNull(componentRow?.scoreVector['participation']),
     caseId,
     updatedBy: 'system:harassment_cascade',
     updatedAt: nowIso,
@@ -210,6 +225,26 @@ export async function runPwattWindow(
   preloadedConfig?: PwattRuntimeConfig,
 ): Promise<WindowScoringReport> {
   const config = preloadedConfig ?? (await loadPwattRuntimeConfig(events));
+  // A stable identity of the scoring-relevant runtime config, stamped on every
+  // stored PWAtt row so the ranking feature store's `config_hash` (derived from
+  // versionMetadata) VARIES with the applied weights/attenuation/trust — replay
+  // and audit can then tell which config produced a stored component (WS-I.2.1c).
+  const configHash = createHash('sha256')
+    .update(
+      JSON.stringify({
+        v0: config.v0,
+        v1: config.v1,
+        trustWeights: config.trustWeights,
+        // The anti-signal DETECTOR configs are part of the scoring identity too:
+        // they decide whether a burst/cascade fires, which changes v0 dampening,
+        // the v1 anti_signal_factor, the served components, and the freeze — so
+        // tuning either must change the replay/audit hash (WS-I.2.1c).
+        burst: config.burst,
+        cascade: config.cascade,
+      }),
+    )
+    .digest('hex')
+    .slice(0, 16);
   const aggregation: WindowAggregationResult = await computeAggregationWindow(
     events,
     startMs,
@@ -227,21 +262,24 @@ export async function runPwattWindow(
     ledgerEntriesWritten: 0,
   };
 
-  // WS-O.4.5 — average account-age trust factor of an actor (memoized across the
-  // window). Anonymous (privacy-bucket) and unresolvable actors are treated as
-  // ESTABLISHED, so anonymity is never penalized; only resolvable fresh accounts
-  // lower the factor. Account age is the coarse, non-financial signal MFCI
-  // already uses; no age ever leaves this function.
+  // WS-O.4.5 — account-age trust factor of an actor (memoized across the window),
+  // used for BOTH the burst-detection threshold AND the per-actor score scaling.
+  // Anonymous (privacy-bucket) and unresolvable actors are treated as FULLY
+  // TRUSTED (literal 1) — NOT the configurable `established` weight, which a
+  // steward may set below 1: anonymity must never be penalized, and a privacy
+  // reader's served PWAtt components must never depend on trust config. Only
+  // RESOLVABLE fresh accounts lower the factor. Account age is the coarse,
+  // non-financial signal MFCI already uses; no age ever leaves this function.
   const nowMs = events.now();
   const trustCache = new Map<string, number>();
   const actorTrust = async (actorKey: string): Promise<number> => {
-    if (actorKey === PRIVACY_BUCKET) return config.trustWeights.established;
+    if (actorKey === PRIVACY_BUCKET) return 1;
     const cached = trustCache.get(actorKey);
     if (cached !== undefined) return cached;
     const user = await identity.store.getUser(actorKey);
     const weight = user
       ? accountTrustWeight((nowMs - Date.parse(user.createdAt)) / 86_400_000, config.trustWeights)
-      : config.trustWeights.established;
+      : 1;
     trustCache.set(actorKey, weight);
     return weight;
   };
@@ -265,9 +303,15 @@ export async function runPwattWindow(
     // genuinely viral item drawing a MAJORITY of new users may also trip the
     // lowered threshold; that is an accepted trade-off (flags are shadow and the
     // exact fiber test + human review clear organic virality).
-    const trustWeights: number[] = [];
-    for (const actorKey of item.actors.keys()) trustWeights.push(await actorTrust(actorKey));
-    const trustFactor = lowQuantileTrust(trustWeights);
+    // Resolve each actor's account-age trust ONCE (WS-O.4.5): the low quantile
+    // scales the burst DETECTION threshold, and the SAME per-actor factor
+    // scales that actor's SCORE contribution (so a fresh-account brigade both
+    // trips detection sooner AND earns less distribution power).
+    const trustByActor = new Map<string, number>();
+    for (const actorKey of item.actors.keys()) {
+      trustByActor.set(actorKey, await actorTrust(actorKey));
+    }
+    const trustFactor = lowQuantileTrust([...trustByActor.values()]);
 
     const burst = detectCoordinatedBurst(
       { eventCount: item.eventCount, distinctActors, trailingEventCounts, trustFactor },
@@ -367,7 +411,9 @@ export async function runPwattWindow(
     const computeStartedAt = Date.now();
     const input: ItemWindowInput = {
       itemId: item.itemId,
-      actors: [...item.actors.entries()].map(([actorKey, fold]) => toActorSummary(actorKey, fold)),
+      actors: [...item.actors.entries()].map(([actorKey, fold]) =>
+        toActorSummary(actorKey, fold, trustByActor.get(actorKey) ?? 1),
+      ),
       antiSignals: {
         ...(burst.detected ? { coordinatedBurst: { confidence: burst.confidence } } : {}),
         ...(cascade.detected ? { harassmentCascade: true } : {}),
@@ -375,56 +421,48 @@ export async function runPwattWindow(
     };
     const v0 = computePwattV0(input, config.v0);
 
-    const profile = selectRankingProfile(
-      {
-        surface: 'feed',
-        freshness: 'recent',
-        topicSensitivity: 'standard',
-        riskState: burst.detected || cascade.detected ? 'elevated' : 'normal',
-      },
-      config.profiles,
-    );
-    // The INTEGRATED v1 stage (WS-E.2.3a/b): the contribution-type hierarchy
-    // and per-user/per-dimension saturation curves compute the v1 components —
-    // not a reuse of the v0 values.
-    const v1Components = computePwattV1Components(input.actors, config.v1);
-    const v1 = computePwattV1({
-      // The freshness baseline B is supplied by the ranking layer (WS-I) at
-      // decision time; stored v1 outputs carry the content-signal part only.
-      baseline: 0,
-      components: {
-        activeAttention: v1Components.activeAttention,
-        participation: v1Components.participation,
-        exposureIndependence: 0, // WS-H.2 (MERI) provider integration point
-        evidenceCompleteness: 0, // WS-F provider integration point
-        contextCoherence: 0, // WS-H.4 (SCOI) provider integration point
-      },
-      profile,
-      penaltyCoefficients: config.penaltyCoefficients,
-      penaltyInputs: {
-        coordination: burst.confidence,
-        redundancy: events.hooks.redundancy?.(item.itemId) ?? 0,
-        ...V1_PLACEHOLDER_PENALTY_INPUTS,
-      },
-    });
-    const computationTimeMs = Math.max(0, Date.now() - computeStartedAt);
-    // Penalty application is logged for audit + "Under Review" surfaces.
-    if (v1.penalties.applied.some((p) => p.delta > 0)) {
-      events.log('pwatt.penalties.applied', {
+    // The INTEGRATED v1 stage (WS-E.2.3a/b) produces the two CONTENT components
+    // — ActiveAttention and ConstructiveParticipation — with the contribution-
+    // type hierarchy, per-user/per-dimension saturation, account-age trust, and
+    // the window's own anti-signal attenuation. It deliberately stops there: the
+    // full §5.4 composite (baseline B, MERI/evidence/SCOI terms, promotion-gated
+    // penalties) is a per-REQUEST quantity the batch engine cannot know (B
+    // carries the requesting user's freshness/relevance), so it is composed at
+    // decision time by the SINGLE production §5.4 implementation, @licio/ranking
+    // (`computePositiveScore` + `computePenalties`). The engine persists only
+    // what it can legitimately compute; no second, partial §5.4 is stored.
+    const v1Components = computePwattV1Components(input.actors, config.v1, input.antiSignals);
+    if (v1Components.antiSignalAnnotations.length > 0) {
+      events.log('pwatt.anti_signal.attenuated', {
         item_id: item.itemId,
         window: label,
-        penalties: v1.penalties.applied.filter((p) => p.delta > 0).map((p) => p.name),
+        factor: v1Components.antiSignalFactor,
+        signals: v1Components.antiSignalAnnotations,
       });
     }
+    const computationTimeMs = Math.max(0, Date.now() - computeStartedAt);
 
     // --- Safety-state constraint (WS-E.2.3e): freeze pins, removed zeroes --
+    // The pin binds the COMPONENTS the ranking feature store reads, not only
+    // the composite score/total (§5.3 "freeze ranking growth"): a frozen item
+    // keeps its pre-cascade component level, a removed item zeroes, so the
+    // freeze actually stops attention-driven growth on the served path.
     const safety = await events.safetyStore.get(item.itemId);
     const snapshot = {
       safetyState: safety?.safetyState ?? ('normal' as const),
       frozenScore: safety?.frozenScore ?? null,
+      frozenActiveAttention: safety?.frozenActiveAttention ?? null,
+      frozenParticipation: safety?.frozenParticipation ?? null,
     };
     const v0Stored = applySafetyStateToScore(snapshot, v0.score);
-    const v1Stored = applySafetyStateToScore(snapshot, v1.total);
+    const v0Served = applySafetyStateToComponents(snapshot, {
+      activeAttention: v0.activeAttention,
+      participation: v0.participation,
+    });
+    const v1Served = applySafetyStateToComponents(snapshot, {
+      activeAttention: v1Components.activeAttention,
+      participation: v1Components.participation,
+    });
 
     await events.invariantStore.upsert({
       invariantType: 'PWAtt_v0',
@@ -432,19 +470,23 @@ export async function runPwattWindow(
       targetId: item.itemId,
       timeWindow: bounds,
       version: PWATT_V0_VERSION,
-      scoreVector: {
-        active_attention: v0.activeAttention,
-        participation: v0.participation,
+      // Strict-validated at the write site (WS-H.1.1d): a shape drift fails
+      // loudly here instead of silently zeroing PWAtt's ranking influence.
+      scoreVector: pwattV0ScoreVectorSchema.parse({
+        active_attention: v0Served.activeAttention,
+        participation: v0Served.participation,
+        raw_active_attention: v0.activeAttention,
+        raw_participation: v0.participation,
         score: v0Stored,
         raw_score: v0.score,
-      },
+      }),
       explanationSummary: null,
       confidence: v0.confidence,
       // The window fold consumes its own complete inputs (WS-H.1.1c).
       coverage: 1,
       reasonCodes: [],
       fallbackUsed: false,
-      versionMetadata: null,
+      versionMetadata: { config_hash: configHash },
       shadowMode: PWATT_V0_SHADOW_MODE,
       createdAt: nowIso,
     });
@@ -454,22 +496,22 @@ export async function runPwattWindow(
       targetId: item.itemId,
       timeWindow: bounds,
       version: PWATT_V1_VERSION,
-      scoreVector: {
-        active_attention: v1Components.activeAttention,
-        participation: v1Components.participation,
-        positive: v1.positive,
-        total: v1Stored,
-        raw_total: v1.total,
-        coordination_penalty:
-          v1.penalties.applied.find((p) => p.name === 'coordination')?.delta ?? 0,
-        redundancy_penalty: v1.penalties.applied.find((p) => p.name === 'redundancy')?.delta ?? 0,
-      },
-      explanationSummary: `profile=${v1.profileName}`,
+      // Strict-validated at the write site (WS-H.1.1d): the SERVED content
+      // components (safety-pinned) the ranking feature store consumes; the RAW
+      // pair + the anti-signal factor are audit-only.
+      scoreVector: pwattV1ScoreVectorSchema.parse({
+        active_attention: v1Served.activeAttention,
+        participation: v1Served.participation,
+        raw_active_attention: v1Components.rawActiveAttention,
+        raw_participation: v1Components.rawParticipation,
+        anti_signal_factor: v1Components.antiSignalFactor,
+      }),
+      explanationSummary: null,
       confidence: v0.confidence,
       coverage: 1,
       reasonCodes: [],
       fallbackUsed: false,
-      versionMetadata: { profile: v1.profileName },
+      versionMetadata: { config_hash: configHash },
       shadowMode: PWATT_V0_SHADOW_MODE,
       createdAt: nowIso,
     });
@@ -492,8 +534,8 @@ export async function runPwattWindow(
         score_vector: {
           v0_score: v0Stored,
           v0_raw: v0.score,
-          v1_total: v1Stored,
-          v1_raw: v1.total,
+          v1_active_attention: v1Served.activeAttention,
+          v1_participation: v1Served.participation,
         },
         confidence: v0.confidence,
         computation_time_ms: computationTimeMs,
@@ -534,6 +576,10 @@ export async function runPwattWindow(
           context_opened: summaryInput.contextOpened,
           reply_depth_bucket: fold.branchDepthBucket,
           return_visit_count_bucket: summaryInput.returnVisitBucket,
+          // §5.3 "Save for later": the deduped, scored save boolean, so a
+          // save-only window renders a checklist item instead of "nothing
+          // counted" — mirrors the scored `savedForLater` component.
+          saved_for_later: summaryInput.savedForLater === 1,
           contributions: summaryInput.contributions,
           // Cap status is knowable only on the client (the §22.1 wire carries
           // buckets, whose ceilings ARE the cap expression) — the ledger entry
@@ -546,6 +592,8 @@ export async function runPwattWindow(
           sourceOpened: summaryInput.sourceOpened,
           sourceBounceOnly: summaryInput.sourceBounceOnly,
           contextOpened: summaryInput.contextOpened,
+          savedForLater: summaryInput.savedForLater === 1,
+          replyDepthBucket: fold.branchDepthBucket,
           returnVisitBucket: summaryInput.returnVisitBucket,
           contributions: summaryInput.contributions,
           annotations,
@@ -583,10 +631,13 @@ export async function resolveItemSafetyState(
   const state = current?.safetyState ?? 'normal';
   const transition = transitionItemSafetyState(state, action);
   if (!transition.ok) return { ok: false, reason: transition.reason };
+  const stayFrozen = transition.next === 'frozen';
   await events.safetyStore.set({
     itemId,
     safetyState: transition.next,
-    frozenScore: transition.next === 'frozen' ? (current?.frozenScore ?? null) : null,
+    frozenScore: stayFrozen ? (current?.frozenScore ?? null) : null,
+    frozenActiveAttention: stayFrozen ? (current?.frozenActiveAttention ?? null) : null,
+    frozenParticipation: stayFrozen ? (current?.frozenParticipation ?? null) : null,
     caseId: current?.caseId ?? null,
     updatedBy: actor,
     updatedAt: new Date(events.now()).toISOString(),

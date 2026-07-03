@@ -8,6 +8,7 @@ import {
   commentItemSchema,
   contributionTypeSchema,
   dwellBucketSchema,
+  ledgerAntiSignalSchema,
   replyDepthBucketSchema,
   returnVisitBucketSchema,
   storyCommentsResponseSchema,
@@ -140,6 +141,15 @@ export const signalLedgerRecordSchema = z.object({
   contextOpened: z.boolean(),
   replyDepthBucket: replyDepthBucketSchema,
   returnVisitCountBucket: returnVisitBucketSchema,
+  // §5.3 save signal (optional: pre-save-signal cached rows omit it) — round-
+  // tripped so an offline-rehydrated save-only ledger row still renders its
+  // "saved for later" checklist item instead of reading as "nothing counted".
+  savedForLater: z.boolean().optional(),
+  // The §5.3 anti-signal transparency notes + the plain-language summary the
+  // ledger renders — round-tripped so an offline-rehydrated row shows the SAME
+  // private notes/explanation the online response did (optional; older rows omit).
+  antiSignals: z.array(ledgerAntiSignalSchema).max(8).optional(),
+  summary: z.string().min(1).max(500).optional(),
   // Optional since WS-E: cap status is client-known only; server-generated
   // ledger entries omit it (loosening only — older cached rows still parse).
   capReached: z.boolean().optional(),

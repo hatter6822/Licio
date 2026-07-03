@@ -13,9 +13,9 @@
 // into the dedicated page re-rooted at that comment instead of nesting further.
 import type { CommentItem as CommentItemType } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { cn } from '../../lib/cn.js';
-import { getSignalProcessor } from '../../signals/runtime.js';
 import { UgcBody } from '../ugc/UgcBody.js';
 import { Icon } from '../ui/Icon/index.js';
 import {
@@ -69,18 +69,21 @@ export function CommentNode({
   maxDepthInView,
 }: CommentNodeProps): React.ReactElement {
   const [replying, setReplying] = useState(false);
-  // Record the ABSOLUTE reply depth for attention bucketing (WS-H PHI input) —
-  // the in-view depth is presentational only.
-  useEffect(() => {
-    getSignalProcessor().recordReplyDepth(storyId, comment.depth);
-  }, [storyId, comment.depth]);
+
+  // Record the ABSOLUTE reply depth for §5.3 traversal bucketing only once the
+  // comment is actually SEEN (visibility-gated; see the hook). The in-view depth
+  // is presentational only.
+  const recordDepthWhenVisible = useRecordReplyDepth(storyId, comment.depth);
 
   const canNestDeeper = depthInView < maxDepthInView;
   const replyCount = comment.reply_count;
   const replyWord = replyCount === 1 ? 'reply' : 'replies';
 
   return (
-    <article className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}>
+    <article
+      ref={recordDepthWhenVisible}
+      className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}
+    >
       <CommentHeader comment={comment} />
       {comment.body.length > 0 ? <UgcBody markdown={comment.body} compact /> : null}
       <CommentMedia comment={comment} />

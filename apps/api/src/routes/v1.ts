@@ -74,6 +74,7 @@ import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
+import { pwattRowForRanking } from '../pwatt/shadow.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
 import { createAiGovernanceAdminRoutes } from './ai-governance-admin.js';
@@ -138,6 +139,9 @@ interface StoryReadSignals {
   /** Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate). */
   evidenceCount: number;
   meriExposure: ReturnType<typeof exposureLabelForGain>;
+  /** Served ActiveAttention component (§5.4), or undefined when uncovered —
+   *  keeps the §5.6 default label truthful (Getting Attention vs New). */
+  activeAttention: number | undefined;
 }
 
 /**
@@ -160,12 +164,23 @@ async function assembleStoryReadSignals(
   // Invariants are a SOFT dependency: when the platform is not wired, MFCI risk
   // and the SCOI threshold are simply absent (the read still serves).
   const invariants = tryGetInvariantServices();
-  const [safeties, mfciRisk, scoiLatest, gains] = await Promise.all([
+  const [safeties, mfciRisk, scoiLatest, gains, pwattV1, pwattV0] = await Promise.all([
     events.safetyStore.getMany([story.storyId]),
     invariants ? invariants.mfciRiskStates.get(story.storyId) : Promise.resolve(null),
     events.invariantStore.latest('SCOI', story.storyId),
     latestMeriGains(events),
+    events.invariantStore.latest('PWAtt_v1', story.storyId),
+    events.invariantStore.latest('PWAtt_v0', story.storyId),
   ]);
+  // Served ActiveAttention (v1 preferred, v0 fallback) for the §5.6 default-label
+  // truthfulness gate; absent when no PWAtt run has covered the story yet. Read
+  // through the SAME §30.5 serving-row gate the feed's feature join uses, so a
+  // pre-lift shadow row, a degraded row, or a code-level revert is ABSENT here
+  // too — otherwise the detail read could label a story `getting-attention`
+  // from a value the feed treats as absent, and the two surfaces would diverge.
+  const servedPwatt = pwattRowForRanking(pwattV1) ?? pwattRowForRanking(pwattV0);
+  const pwattAttention = servedPwatt?.scoreVector['active_attention'];
+  const activeAttention = typeof pwattAttention === 'number' ? pwattAttention : undefined;
   const safetyState = deriveStorySafetyState({
     frozen: safeties.get(story.storyId)?.safetyState === 'frozen',
     mfciRiskState: mfciRisk?.state,
@@ -203,6 +218,7 @@ async function assembleStoryReadSignals(
     interpretationsDiverge,
     evidenceCount: verifiedGroups.size + ungroupedVerified,
     meriExposure: exposureLabelForGain(gains[story.storyId] ?? null),
+    activeAttention,
   };
 }
 
@@ -234,6 +250,9 @@ function realStoryToDetail(
       interpretationsDiverge: signals.interpretationsDiverge,
       evidenceCount: signals.evidenceCount,
       meriExposure: signals.meriExposure,
+      ...(signals.activeAttention !== undefined
+        ? { activeAttention: signals.activeAttention }
+        : {}),
     }),
     distribution_reason: 'Recently submitted to Licio',
     context_chips: [],
@@ -266,6 +285,7 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
     context_opened?: boolean;
     reply_depth_bucket?: string;
     return_visit_count_bucket?: string;
+    saved_for_later?: boolean;
     cap_reached?: boolean;
   };
   const antiSignals = [
@@ -287,7 +307,12 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
       'none') as SignalLedgerEntry['reply_depth_bucket'],
     return_visit_count_bucket: (signals.return_visit_count_bucket ??
       'none') as SignalLedgerEntry['return_visit_count_bucket'],
-    cap_reached: signals.cap_reached ?? false,
+    saved_for_later: signals.saved_for_later ?? false,
+    // OMIT cap status when the server does not know it (the §22.1 wire carries
+    // buckets, not the cap flag): asserting `false` from ignorance would make
+    // the "counting stopped" disclosure permanently unreachable. Only a client-
+    // emitted cap flag ever populates it.
+    ...(signals.cap_reached !== undefined ? { cap_reached: signals.cap_reached } : {}),
     anti_signals: antiSignals,
     pwatt_v0_score: row.pwattScore,
     summary: row.summary,

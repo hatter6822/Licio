@@ -34,6 +34,13 @@ export const signalLedgerEntrySchema = z.object({
   reply_depth_bucket: replyDepthBucketSchema,
   return_visit_count_bucket: returnVisitBucketSchema,
   /**
+   * True when the reader saved the item for later in this window (SIG-ATT-SAVE,
+   * §5.3) — a scored participation signal, so the ledger must show it or a
+   * save-only window would render no checklist item and read as "nothing
+   * counted". OPTIONAL: pre-save-signal entries omit it (⇒ treated as false).
+   */
+  saved_for_later: z.boolean().optional(),
+  /**
    * True when the per-item cap was reached and counting stopped (WS-C.4.1c).
    * OPTIONAL because cap state is known only on the client (the §22.1 wire
    * deliberately carries buckets, not the cap flag — the bucket ceiling IS the

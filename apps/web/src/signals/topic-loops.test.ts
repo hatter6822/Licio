@@ -95,6 +95,23 @@ describe('TopicLoopTracker', () => {
     tracker.recordVisit('a'); // recovers by rewriting
     expect(JSON.parse(storage.getItem('licio.topic-sequence.v1') ?? '[]')).toHaveLength(1);
   });
+
+  it('remembers a per-cluster prompt dismissal for the session (no re-nagging)', () => {
+    const storage = new FakeStorage();
+    const tracker = new TopicLoopTracker(storage, () => 1_000);
+    expect(tracker.isPromptDismissed('topic-a')).toBe(false);
+    tracker.dismissPrompt('topic-a');
+    // Same cluster stays dismissed (a fresh tracker over the same storage too).
+    expect(tracker.isPromptDismissed('topic-a')).toBe(true);
+    expect(new TopicLoopTracker(storage, () => 1_000).isPromptDismissed('topic-a')).toBe(true);
+    // A DIFFERENT cluster is unaffected — a genuinely new loop can still prompt.
+    expect(tracker.isPromptDismissed('topic-b')).toBe(false);
+    // Empty id is a no-op; reset (PHI-4) also clears dismissals.
+    tracker.dismissPrompt('');
+    expect(tracker.isPromptDismissed('')).toBe(false);
+    tracker.reset();
+    expect(tracker.isPromptDismissed('topic-a')).toBe(false);
+  });
 });
 
 describe('TopicLoopTracker storage failures', () => {

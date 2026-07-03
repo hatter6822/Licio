@@ -339,6 +339,11 @@ export const itemSafetyStates = pgTable('item_safety_states', {
   safetyState: itemSafetyStateEnum('safety_state').notNull().default('normal'),
   /** The pinned score while frozen; null when not frozen. */
   frozenScore: doublePrecision('frozen_score'),
+  /** The SERVED PWAtt components pinned at freeze time (§5.3 freeze growth):
+   *  the ranking feature store reads components, not the composite, so the
+   *  freeze must pin these or a frozen item keeps growing. Null when unfrozen. */
+  frozenActiveAttention: doublePrecision('frozen_active_attention'),
+  frozenParticipation: doublePrecision('frozen_participation'),
   /** The moderation/safety case that drove the current state, when any. */
   caseId: uuid('case_id'),
   updatedBy: text('updated_by').notNull(),

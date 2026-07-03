@@ -105,20 +105,55 @@ export class SignalProcessor {
   }
 
   /**
+   * Whether attention collection is currently ON — the SAME live `collect` flag
+   * (`personalization_enabled && authenticated`) every signal path here guards.
+   * The single source of truth for any OTHER emit path (e.g. the §5.3 save
+   * signal) so an opted-out reader's event never crosses the network boundary
+   * (WS-C.4.1d): the server discards it anyway, but the gate belongs here too so
+   * it never consumes the ingest limiter or is visible at the request boundary.
+   */
+  isCollecting(): boolean {
+    return this.policy.collect;
+  }
+
+  /**
+   * The reader's CURRENT collection privacy level. Any OTHER attention emit path
+   * (e.g. the §5.3 save signal) must stamp its event with THIS level so the
+   * server folds it under the SAME actor key as the reader's aggregates — a
+   * minimum-privacy reader's save then buckets under `privacy-bucket` like their
+   * attention, instead of a distinct pseudonymous UUID that would split one
+   * reader into two actors (`actorKeyOfPayload` keys on `privacy_level`).
+   */
+  collectionPrivacyLevel(): CollectionPolicy['privacyLevel'] {
+    return this.policy.privacyLevel;
+  }
+
+  /**
    * The story currently in view. Switching away is the "done attending" boundary:
    * the outgoing item's final dwell is accrued and its §22.1 aggregate is snapshot
    * (so per-item attention is buffered on navigation, not only at session end), then
    * the new item — if any — records a (possibly returning) visit.
+   *
+   * Leaving an item TOUCHES it (marks it seen-until-now without counting a
+   * return), so a reader who navigates between a story's own surfaces (its page ⇄
+   * its comments page) — even after a long dwell on either — is never misread by
+   * the return tracker (which counts a revisit ≥30 min after the last visit) as a
+   * genuine return from time away. A true away-and-back still accrues the gap on
+   * the OTHER surface (which never touches this item) and is counted on re-entry.
    */
   setActiveStory(storyId: string | null): void {
     if (storyId === this.currentItemId) return;
     this.captureCurrent();
+    const outgoing = this.currentItemId;
     this.currentItemId = storyId;
     this.dwell.reset();
     this.lastDwellMs = 0;
-    // Personalization gates the return tracker too (WS-C.4.1d): no visit is
+    // Personalization gates the return tracker too (WS-C.4.1d): no visit/touch is
     // recorded — or persisted — while collection is off.
-    if (storyId && this.policy.collect) this.returns.visit(storyId, this.wallClock());
+    if (this.policy.collect) {
+      if (outgoing !== null) this.returns.touch(outgoing, this.wallClock());
+      if (storyId) this.returns.visit(storyId, this.wallClock());
+    }
   }
 
   recordSourceOpen(openId: string, storyId: string): void {

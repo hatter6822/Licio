@@ -25,6 +25,9 @@ import {
   type AttentionAggregate,
   type AttentionAggregateEvent,
   attentionAggregateEventSchema,
+  attentionItemHasSignal,
+  type ContentSavedAggregateEvent,
+  coherentAttentionItem,
   type PrivacySettings,
   type SourceOpenedAggregateEvent,
   TOPIC_REGISTRY,
@@ -68,7 +71,10 @@ export const OFFLINE_SYNC_ACCEPTANCE: AcceptancePolicy = {
   maxFutureMs: 30_000,
 };
 
-export type AttentionIngestEvent = AttentionAggregateEvent | SourceOpenedAggregateEvent;
+export type AttentionIngestEvent =
+  | AttentionAggregateEvent
+  | SourceOpenedAggregateEvent
+  | ContentSavedAggregateEvent;
 
 export type IngestOutcome =
   | 'accepted'
@@ -165,6 +171,46 @@ export async function ingestAttentionEvents(
       continue;
     }
 
+    // 4b. Coherence normalization (SPEC §25.5 "client aggregates are hints"):
+    //     neutralize the one PROVABLY-impossible bucket combination before
+    //     storage, so a fabricated aggregate can't smuggle a client-impossible
+    //     signal (reply traversal with zero active dwell). Fail-open: only ever
+    //     WEAKENS the aggregate, never rejects it, never touches a real reader.
+    let eventForStorage: AttentionIngestEvent = event;
+    if (event.event_type === 'attention.aggregate') {
+      const neutralized: string[] = [];
+      const normalized = event.items.map((item) => {
+        const result = coherentAttentionItem(item);
+        if (result.neutralized.length > 0) neutralized.push(...result.neutralized);
+        return result.item;
+      });
+      // Drop any item left signal-free by normalization: an empty item would
+      // still bump realtime/window `eventCount`, seed a burst-detection actor,
+      // and enter read history despite its only signal (e.g. reply-depth without
+      // dwell) having just been neutralized.
+      const items = normalized.filter(attentionItemHasSignal);
+      if (items.length === 0) {
+        // Nothing left to store. Ack the (valid) upload as accepted but persist
+        // and publish nothing — never write a signal-free row.
+        events.metrics.increment('events_attention_empty', 1);
+        events.log('events.attention.empty_after_normalization', {
+          user_id: sessionUserId,
+          event_id: event.event_id,
+        });
+        outcomes.push('accepted');
+        continue;
+      }
+      if (neutralized.length > 0 || items.length !== event.items.length) {
+        eventForStorage = { ...event, items };
+        events.metrics.increment('events_attention_incoherent', 1);
+        events.log('events.attention.incoherent_neutralized', {
+          user_id: sessionUserId,
+          event_id: event.event_id,
+          neutralized: [...new Set(neutralized)],
+        });
+      }
+    }
+
     // 5. Build storage rows. The effective level is the MORE private of the
     //    claim and the user's durable identification floor (WS-E.1.3d): the
     //    claim can only ever STRENGTHEN pseudonymization, and a compromised
@@ -172,9 +218,17 @@ export async function ingestAttentionEvents(
     const level = effectivePrivacyLevel(event.privacy_level, decision.identificationFloor);
     const pseudonymous = level === 'minimum';
     const purgeAfter = attentionPurgeAfterIso(decision.preference, eventMs, now);
-    const storedPayload = asRecord(
-      pseudonymous ? { ...event, user_id: PSEUDONYMOUS_USER_ID } : event,
-    );
+    // Stamp the SERVER-ENFORCED effective level on the stored payload (never the
+    // raw claim): downstream folding keys the actor on `privacy_level`
+    // (`actorKeyOfPayload`), so a stale/malicious client claiming `standard` for
+    // a `minimum`-floor user must not fold that row under the synthetic UUID
+    // instead of `privacy-bucket` — that would split one reader into two actors
+    // and leak the floor. The floor can only ever STRENGTHEN the claim.
+    const storedPayload = asRecord({
+      ...eventForStorage,
+      privacy_level: level,
+      ...(pseudonymous ? { user_id: PSEUDONYMOUS_USER_ID } : {}),
+    });
     const registryEntry = TOPIC_REGISTRY[event.event_type];
     storeIndexByEventId.set(event.event_id, outcomes.length);
     toStore.push({
@@ -196,15 +250,17 @@ export async function ingestAttentionEvents(
     toPublish.push(storedPayload as unknown as AttentionIngestEvent);
 
     // Durable §22.1 aggregate rows — only when the preference retains them.
-    if (decision.persistDurable && event.event_type === 'attention.aggregate') {
-      for (const item of event.items) {
+    // Built from the coherence-normalized items so a neutralized signal never
+    // reaches the durable store or the DSAR export.
+    if (decision.persistDurable && eventForStorage.event_type === 'attention.aggregate') {
+      for (const item of eventForStorage.items) {
         aggregateRowsByEvent.push({
           eventId: event.event_id,
           row: {
             aggregate_id: randomUUID(),
             user_id_or_privacy_bucket: pseudonymous ? PRIVACY_BUCKET : sessionUserId,
             story_id: item.story_id,
-            session_bucket: event.session_bucket,
+            session_bucket: eventForStorage.session_bucket,
             active_dwell_bucket: item.active_dwell_bucket,
             source_opened: item.source_opened,
             context_opened: item.context_opened,

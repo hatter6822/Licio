@@ -11,10 +11,18 @@
 //
 // v1 component sourcing: A and P come from the WS-E aggregation + saturation
 // pipeline; E (MERI), S (evidence completeness), and C (SCOI coherence gain)
-// are provider inputs defaulting to 0 until WS-H/WS-F land — the weights,
-// validation, and tests are complete now, so wiring a provider is purely
-// additive. v1 outputs REMAIN SHADOW (PWATT_V0_SHADOW_MODE) until the §30.5
-// safety review with WS-I lifts them by code change.
+// are provider inputs defaulting to 0.
+//
+// NOTE: this composite is NOT the production served score. The batch PWAtt
+// engine (apps/api/src/pwatt/scoring.ts) stores only the CONTENT components
+// (A, P); the full §5.4 composite — baseline B, the E/S/C terms, and the
+// promotion-gated penalties — is a per-REQUEST quantity (B carries the
+// requesting user's freshness/relevance) composed at decision time by the
+// SINGLE production §5.4 implementation, @licio/ranking (`computePositiveScore`
+// + `computePenalties`). `computePwattV1` here is the reference/self-contained
+// composer used by the property tests and any caller that already holds a
+// baseline; production never persists its output, so there is exactly one
+// served §5.4 path and no partial duplicate to drift.
 import type { EventContributionType } from '@licio/shared';
 import {
   applyPenalties,

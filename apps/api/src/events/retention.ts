@@ -289,8 +289,19 @@ export async function purgeUserAttention(
   return eventsDeleted + aggregatesDeleted + ledgerDeleted + detached;
 }
 
-/** Attention-bearing topics included in the DSAR attention export. */
-const ATTENTION_EXPORT_TOPICS = ['attention.aggregate', 'source.opened.aggregate'] as const;
+/**
+ * Attention-bearing topics included in the DSAR attention export — every OWNED
+ * attention event under an `ATTENTION_TIERS` tier that is attributable to the
+ * user. `content.saved` (SIG-ATT-SAVE, §5.3) is an owned `attention_aggregated`
+ * event just like `source.opened.aggregate`, so it MUST appear here or a user
+ * who saved a story would have that retained, attributable signal silently
+ * omitted from their §19.3 export.
+ */
+const ATTENTION_EXPORT_TOPICS = [
+  'attention.aggregate',
+  'source.opened.aggregate',
+  'content.saved',
+] as const;
 
 /**
  * The WS-D `exportAttention` binding (SPEC §19.3 DSAR export): the COMPLETE

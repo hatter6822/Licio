@@ -840,6 +840,12 @@ export interface ItemSafetyRecord {
   itemId: string;
   safetyState: 'normal' | 'frozen' | 'removed';
   frozenScore: number | null;
+  /** The SERVED PWAtt components pinned at freeze time (§5.3 freeze growth):
+   *  the ranking feature store reads components, so the freeze must pin them or
+   *  a frozen item keeps growing. Null/absent when not frozen / no prior level;
+   *  the scoring + moderation paths set them explicitly on every freeze. */
+  frozenActiveAttention?: number | null;
+  frozenParticipation?: number | null;
   caseId: string | null;
   updatedBy: string;
   updatedAt: string;

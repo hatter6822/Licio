@@ -135,9 +135,10 @@ export function StoryCard({
       {/* 4. One-line distribution reason (human-readable, no raw score) */}
       <p className="text-sm text-ink">{distributionReason}</p>
 
-      {/* 5. Context chips (lenses, primary sources, coordination-risk band) */}
+      {/* 5. Context chips (lenses, primary sources, coordination-risk band).
+          Secondary metadata: hidden in focus mode for a calmer layout. */}
       {contextChips && contextChips.length > 0 ? (
-        <ul className="flex flex-wrap gap-2">
+        <ul className="flex flex-wrap gap-2" data-focus-hide>
           {contextChips.map((chip) => (
             <li
               key={chip.id}
@@ -153,9 +154,9 @@ export function StoryCard({
       {/* 6. Reading estimate (a cognitive-accessibility aid; never a score) */}
       <p className="text-xs text-ink-muted">{readingEstimate}</p>
 
-      {/* 7. Thread-branch preview */}
+      {/* 7. Thread-branch preview (secondary: hidden in focus mode) */}
       {branchPreview && branchPreview.length > 0 ? (
-        <div>
+        <div data-focus-hide>
           <p className="text-xs font-medium text-ink-muted">
             {t('storycard.branches', 'Thread branches')}
           </p>

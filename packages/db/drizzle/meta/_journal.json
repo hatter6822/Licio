@@ -351,6 +351,13 @@
       "when": 1782198300829,
       "tag": "0050_ws_r_lcap_closure_reverse_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1782198400000,
+      "tag": "0051_pwatt_freeze_components",
+      "breakpoints": true
     }
   ]
 }

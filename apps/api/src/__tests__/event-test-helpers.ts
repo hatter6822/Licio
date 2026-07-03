@@ -10,6 +10,8 @@ import {
   type AttentionAggregateEvent,
   attentionAggregateEventSchema,
   attentionAggregateSchema,
+  type ContentSavedAggregateEvent,
+  contentSavedAggregateEventSchema,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   emptyReputationSummary,
@@ -201,6 +203,26 @@ export function sourceOpenEvent(
     source_id: randomUUID(),
     dwell_bucket: 'moderate',
     bounce: false,
+    privacy_classification: 'aggregated',
+    retention_tier: 'attention_aggregated',
+    ...overrides,
+  });
+}
+
+/** A canonical content.saved (SIG-ATT-SAVE, §5.3) event. */
+export function contentSavedEvent(
+  userId: string,
+  overrides: Partial<ContentSavedAggregateEvent> = {},
+): ContentSavedAggregateEvent {
+  return contentSavedAggregateEventSchema.parse({
+    event_id: randomUUID(),
+    event_type: 'content.saved',
+    timestamp: new Date().toISOString(),
+    schema_version: '1',
+    nonce: randomUUID(),
+    user_id: userId,
+    privacy_level: 'standard',
+    story_id: randomUUID(),
     privacy_classification: 'aggregated',
     retention_tier: 'attention_aggregated',
     ...overrides,

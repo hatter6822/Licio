@@ -168,8 +168,46 @@ export const pathSignatureScoreVectorSchema = z
   .strict();
 export type PathSignatureScoreVector = z.infer<typeof pathSignatureScoreVectorSchema>;
 
-/** PWAtt (WS-E shadow scorer): flat named numeric components. */
+/** PWAtt (WS-E scorer): flat named numeric components — the OPEN fallback for
+ *  any future PWAtt family (e.g. `PWAtt_v2`) not yet pinned below. */
 export const pwattScoreVectorSchema = z.record(z.string().min(1).max(64), z.number());
+
+/**
+ * PWAtt_v0 — STRICT (WS-H.1.1d bar). The instrumented-salience row: the served
+ * (safety-pinned) components, the pre-pin RAW components, and the combined v0
+ * score with its raw twin. Every field bounded to [0, 1]; no extra key admitted
+ * (a producer-side key rename fails LOUDLY here instead of silently zeroing
+ * PWAtt's ranking influence — the P3 hardening finding).
+ */
+export const pwattV0ScoreVectorSchema = z
+  .object({
+    active_attention: score01,
+    participation: score01,
+    raw_active_attention: score01,
+    raw_participation: score01,
+    score: score01,
+    raw_score: score01,
+  })
+  .strict();
+export type PwattV0ScoreVector = z.infer<typeof pwattV0ScoreVectorSchema>;
+
+/**
+ * PWAtt_v1 — STRICT. The engine's CONTENT components only (the served/pinned
+ * pair, the raw pair, and the anti-signal attenuation factor). The full §5.4
+ * composite is NOT stored here — it is a per-request quantity composed at
+ * decision time by @licio/ranking (the single production §5.4 implementation),
+ * so there is exactly one composite path and no partial duplicate to drift.
+ */
+export const pwattV1ScoreVectorSchema = z
+  .object({
+    active_attention: score01,
+    participation: score01,
+    raw_active_attention: score01,
+    raw_participation: score01,
+    anti_signal_factor: score01,
+  })
+  .strict();
+export type PwattV1ScoreVector = z.infer<typeof pwattV1ScoreVectorSchema>;
 
 /** Registry: invariant type → its score-vector schema. */
 export const SCORE_VECTOR_SCHEMAS: Readonly<Record<InvariantType, z.ZodType>> = {
@@ -196,7 +234,15 @@ export function validateScoreVector(
   vector: unknown,
 ): { ok: true } | { ok: false; problem: string } {
   if (invariantType.startsWith('PWAtt')) {
-    const result = pwattScoreVectorSchema.safeParse(vector);
+    // Exact-version families are pinned STRICT (WS-H.1.1d); any other PWAtt
+    // family falls back to the open numeric record.
+    const pwattSchema =
+      invariantType === 'PWAtt_v0'
+        ? pwattV0ScoreVectorSchema
+        : invariantType === 'PWAtt_v1'
+          ? pwattV1ScoreVectorSchema
+          : pwattScoreVectorSchema;
+    const result = pwattSchema.safeParse(vector);
     return result.success
       ? { ok: true }
       : { ok: false, problem: result.error.issues[0]?.message ?? 'invalid PWAtt vector' };

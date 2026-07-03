@@ -12,7 +12,11 @@
 // receipt). Logs and metrics carry event ids and the user id only — never an
 // attention value.
 import { zValidator } from '@hono/zod-validator';
-import { attentionAggregateEventSchema, sourceOpenedAggregateEventSchema } from '@licio/shared';
+import {
+  attentionAggregateEventSchema,
+  contentSavedAggregateEventSchema,
+  sourceOpenedAggregateEventSchema,
+} from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { ingestAttentionEvents, ONLINE_ACCEPTANCE } from '../events/ingest.js';
@@ -25,6 +29,7 @@ import { createEventsAdminRoutes } from './events-admin.js';
 const attentionIngestBodySchema = z.discriminatedUnion('event_type', [
   attentionAggregateEventSchema,
   sourceOpenedAggregateEventSchema,
+  contentSavedAggregateEventSchema,
 ]);
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;

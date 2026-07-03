@@ -102,3 +102,23 @@ export const sourceOpenedAggregateEventSchema = z
   })
   .strict();
 export type SourceOpenedAggregateEvent = z.infer<typeof sourceOpenedAggregateEventSchema>;
+
+/**
+ * `content.saved` (SIG-ATT-SAVE, SPEC §5.3 "Save for later" — private by
+ * default, LOW rank weight). A discrete, deduped save signal that rides the
+ * SAME attention-ingestion privacy machinery as every other attention event
+ * (ownership, replay nonce, privacy level, minimum-privacy pseudonymization,
+ * retention preference). It carries ONLY the item id — never the user's saved
+ * COLLECTION, which stays client-local (IndexedDB) and never reaches the server.
+ * So a save aggregate is no more revealing than an attention aggregate: it says
+ * "an interested reader kept this item", privacy-leveled, and contributes a low
+ * weight to the item's ConstructiveParticipation.
+ */
+export const contentSavedAggregateEventSchema = z
+  .object({
+    ...attentionEventShape,
+    event_type: z.literal('content.saved'),
+    story_id: uuidSchema,
+  })
+  .strict();
+export type ContentSavedAggregateEvent = z.infer<typeof contentSavedAggregateEventSchema>;

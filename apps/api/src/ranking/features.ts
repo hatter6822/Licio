@@ -28,7 +28,7 @@
 //                            key only feeds the per-page cluster cap)
 
 import { createHash } from 'node:crypto';
-import { lshBandHashes, PWATT_V0_SHADOW_MODE } from '@licio/invariants';
+import { lshBandHashes } from '@licio/invariants';
 import {
   FEATURE_SCHEMA_VERSION,
   type FeatureVector,
@@ -44,6 +44,7 @@ import type { IngestionServices } from '../ingestion/services.js';
 import type { InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
+import { pwattRowForRanking, usable } from '../pwatt/shadow.js';
 import type { FeatureStore } from './stores.js';
 
 /** SCOI context states → the WS-I.2.4c gating ladder (SPEC §10.4 → §10.6). */
@@ -58,16 +59,10 @@ const SCOI_STATE_TO_LEVEL: Readonly<Record<string, ScoiLevel>> = {
 const clamp01 = (value: number): number =>
   Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
 
-/** A usable (non-degraded) output: fallback rows with hard failure reason
- *  codes and zero-coverage rows are ABSENT for ranking (WS-H.1.2c). */
-function usable(row: InvariantOutputRecord | null): InvariantOutputRecord | null {
-  if (row === null) return null;
-  if (row.reasonCodes.includes('TIMEOUT') || row.reasonCodes.includes('COMPUTE_ERROR')) {
-    return null;
-  }
-  if (row.reasonCodes.includes('INSUFFICIENT_COVERAGE')) return null;
-  return row;
-}
+// `usable` + `pwattRowForRanking` live in ../pwatt/shadow.ts (the §30.5 boundary
+// module) so the feature join, the retrieval-side read, AND the freeze pin all
+// apply the ONE identical serving-row gate. Re-exported here for existing importers.
+export { pwattRowForRanking, usable };
 
 function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -130,11 +125,10 @@ export async function assembleFeatureVector(
   // from rows stored `shadow_mode: false` (the post-lift artifact) AND only
   // while the code-level lift holds. Rows stored before the lift — and every
   // row again, should PWATT_V0_SHADOW_MODE be reverted — stay powerless.
-  const pwattLifted = (PWATT_V0_SHADOW_MODE as boolean) === false;
-  const pwattV1 = usable(await events.invariantStore.latest('PWAtt_v1', storyId));
-  const pwattV0 = usable(await events.invariantStore.latest('PWAtt_v0', storyId));
+  const pwattV1 = pwattRowForRanking(await events.invariantStore.latest('PWAtt_v1', storyId));
+  const pwattV0 = pwattRowForRanking(await events.invariantStore.latest('PWAtt_v0', storyId));
   const pwatt = pwattV1 ?? pwattV0;
-  if (pwatt !== null && pwattLifted && pwatt.shadowMode === false) {
+  if (pwatt !== null) {
     const attention = num(pwatt.scoreVector['active_attention']);
     const participation = num(pwatt.scoreVector['participation']);
     if (attention !== undefined) vector.active_attention = clamp01(attention);

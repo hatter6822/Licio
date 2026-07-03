@@ -59,6 +59,22 @@ describe('active attention (WS-E.2.1b)', () => {
     expect(DWELL_BUCKET_WEIGHTS.none).toBe(0);
   });
 
+  it('rewards nonredundant thread traversal (§5.3 SIG-ATT-TRAVERSE)', () => {
+    const noTraversal = actorActiveAttention(actor({ dwellBucket: 'short' }));
+    const deepTraversal = actorActiveAttention(
+      actor({ dwellBucket: 'short', replyDepthBucket: 'deep' }),
+    );
+    expect(deepTraversal).toBeGreaterThan(noTraversal);
+    // Monotone over the reply-depth buckets.
+    const shallow = actorActiveAttention(actor({ replyDepthBucket: 'shallow' }));
+    const deep = actorActiveAttention(actor({ replyDepthBucket: 'deep' }));
+    expect(deep).toBeGreaterThan(shallow);
+    // Absent reply-depth ⇒ no traversal contribution (backward compatible).
+    expect(actorActiveAttention(actor({ dwellBucket: 'short' }))).toBe(
+      actorActiveAttention(actor({ dwellBucket: 'short', replyDepthBucket: 'none' })),
+    );
+  });
+
   it('dwell weights are monotone over the bucket order with ceiling 1 (cap)', () => {
     const weights = DWELL_BUCKETS.map((b) => DWELL_BUCKET_WEIGHTS[b]);
     for (let i = 1; i < weights.length; i += 1) {
@@ -72,6 +88,7 @@ describe('active attention (WS-E.2.1b)', () => {
       dwellBucket: 'extended',
       sourceOpened: true,
       contextOpened: true,
+      replyDepthBucket: 'deep',
     });
     expect(actorActiveAttention(maxed)).toBe(1);
     const crowd = Array.from({ length: 5_000 }, (_, i) => ({ ...maxed, actor: `u${i}` }));
@@ -86,6 +103,19 @@ describe('active attention (WS-E.2.1b)', () => {
       actor({ actor: 'user-2', contextOpened: true }),
     ];
     expect(itemActiveAttention(input)).toBe(itemActiveAttention(input));
+  });
+
+  it('account-age trust (WS-O.4.5) reduces a fresh-account item vs an aged one', () => {
+    const maxed = { dwellBucket: 'extended', sourceOpened: true, contextOpened: true } as const;
+    const aged = Array.from({ length: 6 }, (_, i) => actor({ actor: `a${i}`, ...maxed }));
+    const fresh = aged.map((a) => ({ ...a, trustWeight: 0.5 }));
+    expect(itemActiveAttention(fresh)).toBeLessThan(itemActiveAttention(aged));
+    // Absent trustWeight ⇒ full trust (backward compatible).
+    expect(itemActiveAttention(aged)).toBe(
+      itemActiveAttention(aged.map((a) => ({ ...a, trustWeight: 1 }))),
+    );
+    // The coarse privacy-bucket actor (anonymity) is never penalized: default 1.
+    expect(actor({ ...maxed }).trustWeight).toBeUndefined();
   });
 
   it('property: scores are always in [0, 1] for random valid inputs', () => {
@@ -163,13 +193,13 @@ describe('active attention (WS-E.2.1b)', () => {
   it('rejects invalid configuration at config time', () => {
     expect(() =>
       validateActiveAttentionConfig({
-        weights: { dwellPct: 60, sourcePct: 30, contextPct: 10 },
+        weights: { dwellPct: 60, sourcePct: 20, contextPct: 10, traversalPct: 10 },
         halfSaturationActors: 8,
       }),
     ).toThrow(/\[1, 50\]/);
     expect(() =>
       validateActiveAttentionConfig({
-        weights: { dwellPct: 50, sourcePct: 30, contextPct: 10 },
+        weights: { dwellPct: 50, sourcePct: 30, contextPct: 10, traversalPct: 5 },
         halfSaturationActors: 8,
       }),
     ).toThrow(/sum to exactly 100/);
@@ -236,6 +266,18 @@ describe('participation (WS-E.2.1c)', () => {
     const burst = itemParticipation(actors, { coordinatedBurst: { confidence: 0.9 } });
     expect(burst.value).toBeLessThan(clean.value);
     expect(burst.annotations).toContain('coordinated_burst_placeholder_dampening');
+  });
+
+  it('account-age trust (WS-O.4.5) scales only the ITEM sum, not the per-actor record', () => {
+    const aged = Array.from({ length: 4 }, (_, i) =>
+      actor({ actor: `a${i}`, contributions: { evidence: 2 }, returnVisitBucket: 'several' }),
+    );
+    const fresh = aged.map((a) => ({ ...a, trustWeight: 0.5 }));
+    const agedItem = itemParticipation(aged, {});
+    const freshItem = itemParticipation(fresh, {});
+    expect(freshItem.value).toBeLessThan(agedItem.value);
+    // The per-actor ledger record stays UNWEIGHTED (the user's honest signal).
+    expect(freshItem.perActor.get('a0')?.value).toBe(agedItem.perActor.get('a0')?.value);
   });
 
   it('property: constructive contributions always increase the score up to the cap', () => {

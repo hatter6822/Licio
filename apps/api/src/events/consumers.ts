@@ -14,6 +14,7 @@
 //     this one holding the corresponding access (WS-E.1.5 acceptance).
 import type {
   AttentionAggregateEvent,
+  ContentSavedAggregateEvent,
   IntegritySignalDetectedEvent,
   SourceOpenedAggregateEvent,
 } from '@licio/shared';
@@ -38,7 +39,12 @@ export function registerDefaultConsumers(
 
   events.router.register({
     name: 'realtime-aggregation',
-    topics: ['attention.aggregate', 'source.opened.aggregate', 'contribution.created'],
+    topics: [
+      'attention.aggregate',
+      'source.opened.aggregate',
+      'contribution.created',
+      'content.saved',
+    ],
     accessClassifications: ['public', 'aggregated'],
     scoring: true,
     handle: async (event) => {
@@ -61,6 +67,10 @@ export function registerDefaultConsumers(
           contribution.timestamp,
         );
         itemIds.push(contribution.thread_id);
+      } else if (event.event_type === 'content.saved') {
+        const saved = event as ContentSavedAggregateEvent;
+        await events.realtime.recordSave(saved, actorKey);
+        itemIds.push(saved.story_id);
       }
       // Volume-threshold trigger for early aggregation (WS-E.2.1a).
       if (options.onVolumeTrigger) {
