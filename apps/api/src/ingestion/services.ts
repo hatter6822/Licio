@@ -103,6 +103,15 @@ export interface IngestionServices {
   readCaptionText: (uploadId: string) => Promise<string | null>;
   /** Forum boot sets the {@link IngestionServices.readCaptionText} reader. */
   setCaptionTextReader: (reader: (uploadId: string) => Promise<string | null>) => void;
+  /** WS-K §24.1 — validate a story's topics over EPHEMERAL text the persisted
+   *  story does not carry (a `noarchive` link's fetched body, dropped before the
+   *  deferred content.normalized validator runs). Runs the WS-K classifier
+   *  authoritatively (consumes the proposals so the deferred re-run preserves).
+   *  Late-bound (the classifier lives in WS-K, wired after ingestion); default is
+   *  a no-op so a topic simply stays unvalidated until other text supports it. */
+  revalidateTopicsFromText: (storyId: string, text: string) => Promise<void>;
+  /** WS-K boot sets the {@link IngestionServices.revalidateTopicsFromText} hook. */
+  setTopicRevalidator: (fn: (storyId: string, text: string) => Promise<void>) => void;
   submissionLimiter: SubmissionRateLimiter;
   /**
    * DEVELOPMENT/TEST ONLY: when true, the account-age ("account too new")
@@ -315,6 +324,9 @@ export function createInMemoryIngestionServices(
   // WS-K §24.1 — late-bound uploaded-caption reader (uploads live in the forum,
   // built after ingestion). Default: no captions available.
   let captionTextReader: (uploadId: string) => Promise<string | null> = async () => null;
+  // WS-K §24.1 — late-bound topic revalidator (the classifier lives in WS-K,
+  // built after ingestion). Default: a no-op.
+  let topicRevalidator: (storyId: string, text: string) => Promise<void> = async () => {};
 
   const services: IngestionServices = {
     stories,
@@ -332,6 +344,8 @@ export function createInMemoryIngestionServices(
     setSearchRoomVisibilityProvider: () => {}, // assigned below
     readCaptionText: (uploadId) => captionTextReader(uploadId),
     setCaptionTextReader: () => {}, // assigned below
+    revalidateTopicsFromText: (storyId, text) => topicRevalidator(storyId, text),
+    setTopicRevalidator: () => {}, // assigned below
     submissionLimiter: new SubmissionRateLimiter(new InMemorySlidingWindowStore()),
     // Fail-closed: the account-age gate stays ON unless the caller (boot path)
     // opts out for a development/test environment.
@@ -383,6 +397,9 @@ export function createInMemoryIngestionServices(
   };
   services.setCaptionTextReader = (reader) => {
     captionTextReader = reader;
+  };
+  services.setTopicRevalidator = (fn) => {
+    topicRevalidator = fn;
   };
   services.searchIndex = new InMemorySearchIndex(
     buildSearchDocuments(

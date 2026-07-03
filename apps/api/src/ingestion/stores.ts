@@ -369,6 +369,7 @@ export interface StoryStore {
         | 'lifecycleState'
         | 'lastMaterialUpdateAt'
         | 'topicIds'
+        | 'proposedTopicIds'
         | 'visibility'
         | 'canonicalPublicStoryId'
         | 'mediaUploadRef'

@@ -95,6 +95,14 @@ async function readVideoCaptionText(
 export async function classifyStoryTopics(
   deps: PipelineDeps,
   storyId: string,
+  // `overrideText` supplies EPHEMERAL first-party text the persisted story does
+  // not carry — the §14.2 pipeline passes a `noarchive` link's fetched body here
+  // so a body-only topic still validates (the body is never stored, SPEC §24.1).
+  // When present, this run is AUTHORITATIVE: it CONSUMES the author's proposals
+  // (clears `proposed_topic_ids`), so the deferred content.normalized re-run —
+  // which cannot see the body — PRESERVES these validated topics instead of
+  // re-adjudicating them to UNCLASSIFIED.
+  options: { overrideText?: string } = {},
 ): Promise<TopicClassificationResult | null> {
   const story = await deps.stories.getById(storyId);
   if (story === null) return null;
@@ -127,7 +135,12 @@ export async function classifyStoryTopics(
   // topic evidenced only in the captions still validates (parity with inline
   // `captions_text`, which `submissionBodyText` already returns).
   const captionText = await readVideoCaptionText(deps, story);
-  const classifyText = [story.excerpt ?? '', submissionBodyText(story), captionText]
+  const classifyText = [
+    story.excerpt ?? '',
+    submissionBodyText(story),
+    captionText,
+    options.overrideText ?? '',
+  ]
     .filter((text) => text.length > 0)
     .join(' ');
   const scores = classifyTopics(story.title, classifyText);
@@ -169,7 +182,12 @@ export async function classifyStoryTopics(
   const trusted = [...new Set([...baseTrusted, ...added])];
   const topicIds = trusted.length > 0 ? trusted : [UNCLASSIFIED_TOPIC_ID];
   const trustedSet = new Set(topicIds);
-  const updated = await deps.stories.update(storyId, { topicIds });
+  // An authoritative override run CONSUMES the proposals so the deferred, body-
+  // blind re-run takes the `proposed=[]` PRESERVE path rather than clobbering.
+  const updated = await deps.stories.update(
+    storyId,
+    options.overrideText !== undefined ? { topicIds, proposedTopicIds: [] } : { topicIds },
+  );
   // The §14.2 pipeline computed the topic-dependent derivations — the source's
   // typical-topics observation and the freshness baseline — with the pre-
   // validation UNCLASSIFIED sentinel. Now that the trusted topics are known,

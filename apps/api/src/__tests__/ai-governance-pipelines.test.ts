@@ -174,6 +174,33 @@ describe('WS-K.1.3a topic classification', () => {
     expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
   });
 
+  it('validates a topic from EPHEMERAL override text and consumes the proposals (WS-K §24.1)', async () => {
+    const f = fresh();
+    const tech = topicIdForSlug('technology');
+    // A story whose persisted text (title + body + null excerpt) carries NO
+    // technology keywords — the noarchive-link shape, where the evidence lives
+    // only in the ephemeral fetched body passed as overrideText.
+    const { storyId } = await seedThread(f.forum, {
+      title: 'A short update',
+      body: 'Neutral body with no topical keywords.',
+      excerpt: null,
+      proposedTopicIds: [tech],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId, {
+      overrideText: 'The new software algorithm runs on every computer chip.',
+    });
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    expect(story?.topicIds).toContain(tech);
+    // The override run is AUTHORITATIVE: proposals are consumed…
+    expect(story?.proposedTopicIds).toEqual([]);
+    // …so the deferred, body-blind re-run PRESERVES the topic instead of
+    // re-adjudicating it to UNCLASSIFIED.
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const after = await f.forum.ingestion.stories.getById(storyId);
+    expect(after?.topicIds).toContain(tech);
+    expect(after?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+  });
+
   it('drops a pre-catalog placeholder topic on reclassification with no proposals (WS-K)', async () => {
     const f = fresh();
     // A legacy row: the pre-catalog composer stored a random UUID as `topic_ids`

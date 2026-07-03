@@ -191,6 +191,32 @@ describe('excerpt folds in the fetched body for the deferred classifier (WS-K §
   });
 });
 
+describe('noarchive links validate topics over the ephemeral body (WS-K §24.1)', () => {
+  it('passes the fetched body to the topic revalidator before dropping it', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
+    let capturedText: string | null = null;
+    fixture.ingestion.setTopicRevalidator(async (_storyId, text) => {
+      capturedText = text;
+    });
+    const url = 'https://noarchive.example/piece';
+    fixture.pages.set(url, {
+      status: 200,
+      body: articleHtml({
+        robotsMeta: 'noarchive',
+        body: 'A breakthrough software algorithm now runs on every computer chip.',
+      }),
+    });
+    const storyId = await submitLink(url, cookie);
+    const story = await fixture.ingestion.stories.getById(storyId);
+    // noarchive stores NO excerpt (the body is dropped)…
+    expect(story?.excerpt).toBeNull();
+    // …but the fetched body was handed to the revalidator first, so a body-only
+    // topic can still validate despite nothing being persisted.
+    expect(capturedText).not.toBeNull();
+    expect(capturedText as unknown as string).toContain('algorithm');
+  });
+});
+
 describe('uploaded video captions drive the §14.2 non-link pipeline (WS-K §24.1)', () => {
   it('labels + excerpts a caption-only video from its uploaded track, not just topics', async () => {
     const { userId } = await seedUserWithSession(fixture.identity, { nowMs });

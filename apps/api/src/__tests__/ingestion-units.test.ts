@@ -181,8 +181,8 @@ describe('sensitivity classification + excerpt bound (WS-F.1.4e/f)', () => {
     expect(excerpt).not.toBeNull();
     // …still leaves the distinctive body term for the deferred topic validator.
     expect(excerpt).toContain('quantumfluxcapacitor');
-    // Total stays within the bound (+ the single joiner space).
-    expect(excerpt.length).toBeLessThanOrEqual(201);
+    // Total stays STRICTLY within the bound — the joiner is reserved.
+    expect(excerpt.length).toBeLessThanOrEqual(200);
     // Degenerate inputs fall back to plain bounded text.
     expect(excerptReservingBody(null, 'just body', 200)).toBe('just body');
     expect(excerptReservingBody('just desc', '', 200)).toBe('just desc');

@@ -157,7 +157,9 @@ export function excerptReservingBody(
   if (body.length === 0) return boundedExcerpt(desc, cap);
   // Cap the description at half the bound so the body is guaranteed the rest.
   const descPart = boundedExcerpt(desc, Math.max(1, Math.floor(cap / 2)));
-  const bodyBudget = cap - (descPart?.length ?? 0);
+  // Reserve one character for the ` ` joiner so `descPart + ' ' + bodyPart`
+  // never exceeds `cap` (the copyright/display bound is strict).
+  const bodyBudget = cap - (descPart?.length ?? 0) - (descPart !== null ? 1 : 0);
   const bodyPart = bodyBudget > 0 ? boundedExcerpt(body, bodyBudget) : null;
   return [descPart, bodyPart].filter((part): part is string => part !== null).join(' ') || null;
 }
@@ -478,7 +480,7 @@ export async function processSubmittedStory(
     extractionState:
       metadata.author === null && metadata.publishedAt === null ? 'partial' : 'completed',
   });
-  const current = updated ?? story;
+  let current = updated ?? story;
 
   // Near-duplicate detection on the FETCHED text (WS-F.1.3c/d). WS-Q.2.2c — the
   // signature is stored for EVERY story (so a later widen joins the public
@@ -556,6 +558,20 @@ export async function processSubmittedStory(
   );
 
   await recomputeFreshness(ingestion.stories, ingestion.freshness, current, ingestion.now());
+
+  // WS-K §24.1 — a `noarchive` link stores NO excerpt, so the deferred,
+  // story-reading topic validator would only ever see the title + the author's
+  // reason. The fetched body is right here (used above for sensitivity + claims);
+  // validate the topics over it NOW, before it is dropped, so a body-only topic
+  // still validates. The result is topic ids, not the body, so noarchive holds;
+  // the authoritative override consumes the proposals so the deferred re-run
+  // preserves the topics rather than re-adjudicating them body-blind.
+  if (metadata.noarchive && bodyText.trim().length > 0) {
+    await ingestion.revalidateTopicsFromText(story.storyId, bodyText);
+    current = (await ingestion.stories.getById(story.storyId)) ?? current;
+    ingestion.metrics.increment('pipeline.noarchive_topics_validated');
+  }
+
   ingestion.metrics.increment('pipeline.processed_link');
   await emitNormalized(ingestion, events, current, {
     sourceId: source.sourceId,

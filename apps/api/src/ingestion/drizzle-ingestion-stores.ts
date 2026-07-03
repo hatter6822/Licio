@@ -486,6 +486,9 @@ export class DrizzleStoryStore implements StoryStore {
       values['lastMaterialUpdateAt'] = new Date(patch.lastMaterialUpdateAt);
     }
     if (patch.topicIds !== undefined) values['topicIds'] = patch.topicIds;
+    // WS-K §24.1 — an authoritative body-override classification CONSUMES the
+    // proposals (clears them) so the deferred body-blind re-run preserves.
+    if (patch.proposedTopicIds !== undefined) values['proposedTopicIds'] = patch.proposedTopicIds;
     // WS-Q.2.4 — the author narrow/widen + the room private⇄public cascade patch
     // these fields; omitting them here made a visibility-only patch a silent
     // no-op in Postgres (the no-op-on-empty-values guard returned the unchanged

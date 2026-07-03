@@ -164,6 +164,16 @@ export function registerAiGovernanceConsumers(
   // — a domain-pure seam; only the boot wiring knows about the ranking domain.
   onStoryClassified?: (storyId: string) => Promise<void>,
 ): void {
+  // WS-K §24.1 — wire the ingestion → WS-K topic revalidator so the §14.2
+  // pipeline can validate a `noarchive` link's topics over the EPHEMERAL fetched
+  // body (which the persisted story never carries) before it is dropped. The
+  // override run is authoritative and consumes the proposals, so the deferred
+  // content.normalized re-run below preserves the validated topics.
+  if (ai.ingestion !== null) {
+    ai.ingestion.setTopicRevalidator(async (storyId, text) => {
+      await classifyStoryTopics(buildPipelineDeps(ai), storyId, { overrideText: text });
+    });
+  }
   events.router.register({
     name: 'ai-governance-classification',
     topics: ['content.normalized'],
