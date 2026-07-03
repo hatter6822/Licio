@@ -14,9 +14,10 @@ import {
   type TopicClassificationResult,
   topicClassificationResultSchema,
 } from '@licio/ai-governance';
-import { isSentinelTopicId, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import { isSelectableTopicId, isSentinelTopicId, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { HeuristicClaimExtractor } from '../ingestion/claims.js';
 import { recomputeFreshness } from '../ingestion/freshness.js';
+import { submissionBodyText } from '../ingestion/pipeline.js';
 import type { FreshnessStore, SourceStore, StoryStore } from '../ingestion/stores.js';
 import type { ProhibitedUseGuard } from './guard.js';
 import type { AiGovernanceMetrics } from './metrics.js';
@@ -74,7 +75,14 @@ export async function classifyStoryTopics(
   });
 
   const threshold = deps.topicConfidenceThreshold();
-  const scores = classifyTopics(story.title, story.excerpt ?? '');
+  // Classify over the richest first-party text. A robots-disallowed / noarchive
+  // LINK story stores NO excerpt, but its author-written submission text (the
+  // `reason`) is local text the §14.2 pipeline already classifies — fall back to
+  // it so a proposal named only in the reason still validates (never left
+  // UNCLASSIFIED for lack of a fetched excerpt).
+  const classifyText =
+    story.excerpt !== null && story.excerpt.length > 0 ? story.excerpt : submissionBodyText(story);
+  const scores = classifyTopics(story.title, classifyText);
   const confidenceById = new Map(scores.map((s) => [s.topicId, s.confidence]));
   const nowIso = new Date(deps.now()).toISOString();
   const output = await recordAiOutput(deps.outputRecords, {
@@ -102,12 +110,14 @@ export async function classifyStoryTopics(
     .filter((s) => s.confidence >= threshold && !proposedSet.has(s.topicId))
     .map((s) => s.topicId);
   // When there are NO author proposals to validate — a pre-migration-0052 legacy
-  // row (`proposed_topic_ids = []` but real trusted `topic_ids`), or a
-  // content.normalized re-run/backfill — PRESERVE the story's existing trusted
-  // (non-sentinel) topics instead of destroying them; only ever augment. With
-  // proposals present, the trusted base is exactly the validated subset.
+  // row (`proposed_topic_ids = []` but existing `topic_ids`), or a
+  // content.normalized re-run/backfill — PRESERVE only the story's existing
+  // CATALOG topics (never the sentinel, and never a pre-catalog `randomUUID()`
+  // placeholder the old composer stored), so a random legacy id can't survive
+  // into ranking / feed / PHI; only ever augment. With proposals present, the
+  // trusted base is exactly the validated subset.
   const baseTrusted =
-    proposed.length === 0 ? story.topicIds.filter((id) => !isSentinelTopicId(id)) : validated;
+    proposed.length === 0 ? story.topicIds.filter(isSelectableTopicId) : validated;
   const trusted = [...new Set([...baseTrusted, ...added])];
   const topicIds = trusted.length > 0 ? trusted : [UNCLASSIFIED_TOPIC_ID];
   const trustedSet = new Set(topicIds);

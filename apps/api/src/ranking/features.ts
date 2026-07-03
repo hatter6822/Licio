@@ -37,6 +37,7 @@ import {
   type ScoiLevel,
   sourceReliabilityFromHistory,
 } from '@licio/ranking';
+import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { InvariantOutputRecord } from '../events/stores.js';
 import { findNearDuplicates } from '../ingestion/dedup.js';
@@ -111,7 +112,9 @@ export async function assembleFeatureVector(
     room_id: thread?.roomId ?? story.roomId,
     // WS-Q.4.3 — record visibility (a non-scoring eligibility/audit field).
     visibility: story.visibility,
-    topic_ids: story.topicIds.slice(0, 16),
+    // Drop the UNCLASSIFIED sentinel — ranking topic logic (surface filter,
+    // per-topic balancing) must not treat it as a shared real topic.
+    topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 16),
     // Per-item content sensitivity (WS-F labels, `none` dropped) — the real
     // per-item sensitive signal for the conservative curve + §11.5 penalty.
     sensitivity_labels: story.sensitivityLabels.filter((label) => label !== 'none'),

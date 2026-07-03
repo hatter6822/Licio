@@ -264,6 +264,11 @@ export function emptyFeatureVector(candidate: Candidate, nowMs: number): Feature
     room_id: candidate.room_id,
     visibility: candidate.visibility,
     topic_ids: [...candidate.topic_ids],
+    // Cold-start sensitivity: inherit the candidate's labels so the §11.5 guard
+    // in scoreItem fires on an unrevisioned item's first serve.
+    ...(candidate.sensitivity_labels !== undefined
+      ? { sensitivity_labels: [...candidate.sensitivity_labels] }
+      : {}),
     source_id: candidate.source_id,
     created_at: candidate.freshness_timestamp,
     feature_version: 1,

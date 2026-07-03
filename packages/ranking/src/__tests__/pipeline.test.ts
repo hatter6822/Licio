@@ -193,6 +193,16 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
     expect(Object.keys(vector.invariant_versions)).toHaveLength(0);
   });
 
+  it('emptyFeatureVector inherits candidate sensitivity labels for the cold-start §11.5 guard', () => {
+    // A sensitive item with NO stored feature revision still carries its labels
+    // into the empty vector, so scoreItem's sensitivity guard fires on the first
+    // serve (not only after a later feature refresh).
+    const vector = emptyFeatureVector(makeCandidate(7, { sensitivity_labels: ['crisis'] }), T0);
+    expect(vector.sensitivity_labels).toEqual(['crisis']);
+    // Absent on the candidate ⇒ absent on the vector (⇒ not sensitive).
+    expect(emptyFeatureVector(makeCandidate(8), T0).sensitivity_labels).toBeUndefined();
+  });
+
   it('MERI clusters are capped and expansions reported', () => {
     const candidates = [1, 2, 3, 4].map((n) => makeCandidate(n));
     const features = featureMap(

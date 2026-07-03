@@ -22,6 +22,7 @@ import {
   type CandidateSourceType,
   candidateSchema,
 } from '@licio/ranking';
+import { isSentinelTopicId } from '@licio/shared';
 import type { AggregationWindowRecord } from '../events/stores.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 
@@ -138,7 +139,15 @@ async function storyToCandidate(
     // lookup is needed, and the item carries its visibility for the gate.
     room_id: story.roomId,
     visibility: story.visibility,
-    topic_ids: story.topicIds.slice(0, 16),
+    // Drop the UNCLASSIFIED sentinel: an unclassified story carries NO real
+    // topic, so it must not match a `?topic=` surface or count toward the
+    // per-topic balancing cap as if it shared a subject with other
+    // unclassified items (parity with the feature vector + PHI consumers).
+    topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 16),
+    // Carry per-item content sensitivity so a COLD-START serve (an item with no
+    // stored feature revision, scored off `emptyFeatureVector`) still fires the
+    // §11.5 conservative-curve / sensitive guard on the first serve.
+    sensitivity_labels: story.sensitivityLabels.filter((label) => label !== 'none'),
     source_id: story.sourceId,
     freshness_timestamp: storyFreshnessIso(story),
     retrieval_score: clamp01(retrievalScore),

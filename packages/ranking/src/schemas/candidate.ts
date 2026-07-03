@@ -57,6 +57,11 @@ export const candidateSchema = z
      *  — proven by the WS-Q.4.3 not-a-signal property). */
     visibility: z.enum(['public', 'room_only']),
     topic_ids: z.array(z.string().min(1).max(128)).max(16),
+    /** WS-F content-sensitivity labels (non-`none`), carried for the COLD-START
+     *  serve: an unrevisioned item's `emptyFeatureVector` inherits these so the
+     *  §11.5 sensitive-content guard fires on the FIRST serve, not only after a
+     *  later feature refresh. Optional (absent ⇒ not sensitive). */
+    sensitivity_labels: z.array(z.string().min(1).max(32)).max(8).optional(),
     source_id: z.string().uuid().nullable(),
     /** ISO instant used for freshness/chronological ordering. */
     freshness_timestamp: z.string(),

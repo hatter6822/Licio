@@ -129,6 +129,54 @@ describe('WS-K.1.3a topic classification', () => {
     expect(story?.topicIds).toEqual([UNCLASSIFIED_TOPIC_ID]);
   });
 
+  it('drops a pre-catalog placeholder topic on reclassification with no proposals (WS-K)', async () => {
+    const f = fresh();
+    // A legacy row: the pre-catalog composer stored a random UUID as `topic_ids`
+    // and `proposed_topic_ids` is empty. The title carries no catalog keywords.
+    const placeholder = '11111111-1111-4111-8111-111111111111';
+    const { storyId } = await seedThread(f.forum, {
+      title: 'The annual photography contest winners announced',
+      topicIds: [placeholder],
+      proposedTopicIds: [],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The random placeholder never survives into the trusted set.
+    expect(story?.topicIds).not.toContain(placeholder);
+    expect(story?.topicIds).toEqual([UNCLASSIFIED_TOPIC_ID]);
+  });
+
+  it('preserves an existing CATALOG topic on reclassification with no proposals (WS-K)', async () => {
+    const f = fresh();
+    const climate = topicIdForSlug('climate-environment');
+    const { storyId } = await seedThread(f.forum, {
+      title: 'The annual photography contest winners announced', // no catalog keywords
+      topicIds: [climate],
+      proposedTopicIds: [],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // A genuine catalog topic on a legacy/backfill row is retained, not destroyed.
+    expect(story?.topicIds).toContain(climate);
+  });
+
+  it('validates a proposal supported only by the submission body when there is no excerpt (SPEC §24.1)', async () => {
+    const f = fresh();
+    const climate = topicIdForSlug('climate-environment');
+    const { storyId } = await seedThread(f.forum, {
+      title: 'A short note', // no catalog keywords in the title
+      body: 'Climate carbon emissions drought and renewable water levels',
+      excerpt: null, // a robots-disallowed / noarchive link stores no excerpt
+      proposedTopicIds: [climate],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The reason (submission body) names the topic, so the proposal validates
+    // instead of being rejected for lack of a fetched excerpt.
+    expect(story?.topicIds).toContain(climate);
+    expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+  });
+
   it('returns null for an unknown story', async () => {
     const f = fresh();
     expect(await classifyStoryTopics(pipelineDeps(f), 'missing')).toBeNull();

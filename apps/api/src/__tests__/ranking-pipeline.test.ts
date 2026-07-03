@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { DeniedFinancialFieldError, EVERGREEN_PROFILE } from '@licio/ranking';
+import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -168,6 +169,23 @@ describe('feature assembly (WS-I.2.1a/c provenance)', () => {
     const vector = await assembleFeatureVector(featureDeps(), storyId);
     expect(vector?.scoi_level).toBeUndefined();
     expect(vector?.context_coherence_gain).toBeUndefined();
+  });
+
+  it('excludes the UNCLASSIFIED sentinel from feature topic_ids (WS-I topic logic)', async () => {
+    const { storyId } = await seedStory(fixture.ingestion, { topicIds: [UNCLASSIFIED_TOPIC_ID] });
+    const vector = await assembleFeatureVector(featureDeps(), storyId);
+    // An unclassified story carries NO real topic into ranking — no `?topic=`
+    // surface match, no per-topic balancing collision with other unclassified
+    // items masquerading as one shared subject.
+    expect(vector?.topic_ids).toEqual([]);
+  });
+
+  it('carries non-none sensitivity labels into the feature vector (WS-I §11.5)', async () => {
+    const { storyId } = await seedStory(fixture.ingestion, {
+      sensitivityLabels: ['crisis', 'none'],
+    });
+    const vector = await assembleFeatureVector(featureDeps(), storyId);
+    expect(vector?.sensitivity_labels).toEqual(['crisis']);
   });
 
   it('the real-time consumer refreshes features on invariant.run.completed', async () => {

@@ -74,6 +74,10 @@ export async function seedThread(
     topicIds?: string[];
     /** Author-proposed topics (defaults to the trusted set / random). */
     proposedTopicIds?: string[];
+    /** original_brief body text (defaults to 'Seed body.'). */
+    body?: string;
+    /** Excerpt override; pass `null` to model a no-excerpt (link-only) story. */
+    excerpt?: string | null;
   } = {},
 ): Promise<{ storyId: string; threadId: string }> {
   const storyId = options.storyId ?? randomUUID();
@@ -100,8 +104,8 @@ export async function seedThread(
       sensitivityLabels: [],
       lifecycleState: 'gathering_attention',
       submissionType: 'original_brief',
-      submissionMetadata: { submission_type: 'original_brief', body: 'Seed body.' },
-      excerpt: 'Seed body.',
+      submissionMetadata: { submission_type: 'original_brief', body: options.body ?? 'Seed body.' },
+      excerpt: options.excerpt !== undefined ? options.excerpt : (options.body ?? 'Seed body.'),
       publisher: null,
       author: null,
       publishedAt: null,
