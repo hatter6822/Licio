@@ -94,6 +94,10 @@ describe('WS-I.2.1a feature vector schema', () => {
         'revision',
         'room_id',
         'scoi_level',
+        // WS-I sensitive-content review-gate: per-item WS-F sensitivity labels
+        // drive the conservative curve + the §11.5 penalty (content sensitivity
+        // is a label, not a topic).
+        'sensitivity_labels',
         'source_evidence_completeness',
         'source_id',
         'source_reliability',

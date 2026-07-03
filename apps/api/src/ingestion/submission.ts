@@ -432,8 +432,13 @@ export async function submitStory(
     }
     mediaUploadRef = upload.uploadId;
     mediaType = wantImage ? 'image' : 'video';
-    // Media is never URL-normalized or crawled (§14.2 not_applicable).
-    extractionState = 'not_applicable';
+    // Media is never URL-normalized or crawled — but it STILL runs the §14.2
+    // pipeline's non-link path (which classifies the local text: title + alt
+    // text / captions), so its topics get validated and `content.normalized` is
+    // emitted. Left at `pending` for that pass; the non-link path sets the final
+    // `not_applicable` state. (Skipping the pipeline left media permanently
+    // UNCLASSIFIED — excluded from topic feeds and PHI/topic matching.)
+    extractionState = 'pending';
     heldForScan = upload.scanState === 'pending';
   }
 

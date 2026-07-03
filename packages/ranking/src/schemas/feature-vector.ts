@@ -76,6 +76,15 @@ export const featureVectorSchema = z
      *  (every pre-WS-Q served item was public). */
     visibility: z.enum(['public', 'room_only']).default('public'),
     topic_ids: z.array(z.string().min(1).max(128)).max(16),
+    /**
+     * WS-F content-sensitivity labels (the story's `sensitivityLabels`, minus
+     * `none`). A non-empty set marks the item sensitive — the per-ITEM signal
+     * for the conservative decay curve + the §11.5 sensitive-content penalty.
+     * Content sensitivity is a LABEL, not a topic (per-item topics are catalog
+     * UUIDs); absent/empty ⇒ not sensitive. Optional so pre-existing feature
+     * snapshots replay unchanged.
+     */
+    sensitivity_labels: z.array(z.string().min(1).max(32)).max(8).optional(),
     source_id: z.string().uuid().nullable(),
     created_at: z.string(),
     feature_version: z.literal(FEATURE_SCHEMA_VERSION),

@@ -30,6 +30,7 @@ import {
   riskStateForScore,
   targetConcentrationScore,
 } from '@licio/invariants';
+import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -297,8 +298,11 @@ export function registerInvariantConsumers(
         // source/context booleans, dwell midpoint) are retained — the story
         // id never enters the sequence, and no information class beyond
         // what the aggregate already discloses is added (WS-H.6.1a).
+        // The UNCLASSIFIED sentinel is NEVER a real topic: excluding it here
+        // matches the client tracker (topic-loops.ts) so several unvalidated /
+        // unclassified stories can't report a fake same-topic loop server-side.
         const topicClusterId = story?.topicIds[0];
-        if (!topicClusterId) continue;
+        if (!topicClusterId || isSentinelTopicId(topicClusterId)) continue;
         const kind = item.source_opened
           ? ('open_source' as const)
           : item.context_opened

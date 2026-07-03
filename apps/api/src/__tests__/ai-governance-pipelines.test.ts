@@ -59,6 +59,8 @@ function fresh(): Fixture {
 function pipelineDeps(f: Fixture): PipelineDeps {
   return {
     stories: f.forum.ingestion.stories,
+    sources: f.forum.ingestion.sources,
+    freshness: f.forum.ingestion.freshness,
     outputRecords: f.ai.outputRecords,
     reviewQueue: f.ai.reviewQueue,
     guard: f.ai.guard,

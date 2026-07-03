@@ -23,6 +23,7 @@ import {
   type ContentSubmittedEvent,
   contentEventClassification,
   contentNormalizedEventSchema,
+  isSentinelTopicId,
 } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import { type ClaimEmbeddingDedup, persistCandidateClaims } from './claims.js';
@@ -380,7 +381,12 @@ export async function processSubmittedStory(
   const source = await ingestion.sources.upsertByDomain(domain, {
     name: metadata.publisher ?? domain,
   });
-  await ingestion.sources.recordObservation(source.sourceId, { topicIds: story.topicIds });
+  // Topics here are still the pre-validation UNCLASSIFIED sentinel (the WS-K
+  // classifier re-records the real topics after `content.normalized`); filter it
+  // so the sentinel never pollutes the source's typical-topics observation.
+  await ingestion.sources.recordObservation(source.sourceId, {
+    topicIds: story.topicIds.filter((t) => !isSentinelTopicId(t)),
+  });
   if (metadata.noindex || metadata.noarchive) {
     await ingestion.sources.update(source.sourceId, {
       displayRestrictions: {

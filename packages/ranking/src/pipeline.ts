@@ -115,7 +115,14 @@ export function scoreItem(
   // Topic/freshness inputs come from the FEATURE VECTOR (the revision the
   // decision log pins), never the live candidate — serving and replay see
   // byte-identical inputs (WS-I.2.5b).
-  const sensitiveTopic = features.topic_ids.some((topic) => context.sensitiveTopicIds.has(topic));
+  // Per-item sensitivity is content-LABEL-driven (the story's non-`none`
+  // sensitivity labels — per-item topics are catalog UUIDs, not slugs, so a
+  // topic match against a slug set never fires per item). The topic-id set
+  // stays a forward-compat hook for a deployment that marks specific catalog
+  // topics sensitive. Either fires the conservative curve + the §11.5 penalty.
+  const sensitiveTopic =
+    (features.sensitivity_labels?.some((label) => label !== 'none') ?? false) ||
+    features.topic_ids.some((topic) => context.sensitiveTopicIds.has(topic));
   const ageMs = Math.max(0, context.nowMs - Date.parse(features.created_at));
   const curve = sensitiveTopic ? profile.decay_curves.evergreen : profile.decay_curves.breaking;
   const relevance = context.topicRelevanceByItem?.get(candidate.item_id);

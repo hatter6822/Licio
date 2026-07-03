@@ -112,7 +112,16 @@ export const PHI_SESSION_BUCKET_CAP = 8;
 /** GWEI-gate read cache TTL (the serving path pays ≤ 1 query per minute). */
 export const GWEI_CACHE_TTL_MS = 60_000;
 
-/** WS-A sensitive-topic categories with stricter PHI thresholds (§11.5). */
+/**
+ * SURFACE-level sensitive-topic SLUGS (§11.5): a `?topic=<slug>` surface on one
+ * of these selects the conservative profile. This is a topic-SLUG set matched
+ * against `surfaceTopicId` (the raw `?topic=` value). PER-ITEM sensitivity is
+ * NOT topic-driven — an item's content sensitivity rides its WS-F
+ * `sensitivity_labels` (wired into the feature vector), because per-item topics
+ * are catalog UUIDs, not these slugs. A deployment may add catalog topic UUIDs
+ * here to also mark specific topics sensitive per item (the forward-compat hook
+ * in `scoreItem`).
+ */
 export const DEFAULT_SENSITIVE_TOPIC_IDS: ReadonlySet<string> = new Set([
   'self-harm',
   'eating-disorders',

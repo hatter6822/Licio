@@ -59,6 +59,8 @@ export function buildLineageDeps(ai: AiGovernanceServices): LineageDeps {
 export function buildPipelineDeps(ai: AiGovernanceServices): PipelineDeps {
   return {
     stories: requireIngestion(ai).stories,
+    sources: requireIngestion(ai).sources,
+    freshness: requireIngestion(ai).freshness,
     outputRecords: ai.outputRecords,
     reviewQueue: ai.reviewQueue,
     guard: ai.guard,

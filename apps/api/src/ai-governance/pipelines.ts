@@ -14,9 +14,10 @@ import {
   type TopicClassificationResult,
   topicClassificationResultSchema,
 } from '@licio/ai-governance';
-import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import { isSentinelTopicId, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { HeuristicClaimExtractor } from '../ingestion/claims.js';
-import type { StoryStore } from '../ingestion/stores.js';
+import { recomputeFreshness } from '../ingestion/freshness.js';
+import type { FreshnessStore, SourceStore, StoryStore } from '../ingestion/stores.js';
 import type { ProhibitedUseGuard } from './guard.js';
 import type { AiGovernanceMetrics } from './metrics.js';
 import { CLAIM_EXTRACTOR, classifyTopics, TOPIC_CLASSIFIER } from './models.js';
@@ -25,6 +26,8 @@ import type { AiOutputRecordStore, AiReviewQueueStore } from './stores.js';
 
 export interface PipelineDeps {
   stories: StoryStore;
+  sources: SourceStore;
+  freshness: FreshnessStore;
   outputRecords: AiOutputRecordStore;
   reviewQueue: AiReviewQueueStore;
   guard: ProhibitedUseGuard;
@@ -98,10 +101,30 @@ export async function classifyStoryTopics(
   const added = scores
     .filter((s) => s.confidence >= threshold && !proposedSet.has(s.topicId))
     .map((s) => s.topicId);
-  const trusted = [...new Set([...validated, ...added])];
+  // When there are NO author proposals to validate — a pre-migration-0052 legacy
+  // row (`proposed_topic_ids = []` but real trusted `topic_ids`), or a
+  // content.normalized re-run/backfill — PRESERVE the story's existing trusted
+  // (non-sentinel) topics instead of destroying them; only ever augment. With
+  // proposals present, the trusted base is exactly the validated subset.
+  const baseTrusted =
+    proposed.length === 0 ? story.topicIds.filter((id) => !isSentinelTopicId(id)) : validated;
+  const trusted = [...new Set([...baseTrusted, ...added])];
   const topicIds = trusted.length > 0 ? trusted : [UNCLASSIFIED_TOPIC_ID];
   const trustedSet = new Set(topicIds);
-  await deps.stories.update(storyId, { topicIds });
+  const updated = await deps.stories.update(storyId, { topicIds });
+  // The §14.2 pipeline computed the topic-dependent derivations — the source's
+  // typical-topics observation and the freshness baseline — with the pre-
+  // validation UNCLASSIFIED sentinel. Now that the trusted topics are known,
+  // refresh both so a validated story's source profile and freshness never lag
+  // its real topics (SPEC §24.1). An unclassified story (no real topics) leaves
+  // the source observation untouched — the sentinel is never recorded.
+  if (updated !== null) {
+    const realTopics = topicIds.filter((id) => !isSentinelTopicId(id));
+    if (updated.sourceId !== null && realTopics.length > 0) {
+      await deps.sources.recordObservation(updated.sourceId, { topicIds: realTopics });
+    }
+    await recomputeFreshness(deps.stories, deps.freshness, updated, deps.now());
+  }
 
   // Audit trail: one assignment per topic CONSIDERED (proposed ∪ detected);
   // `applied` = it entered the trusted set.

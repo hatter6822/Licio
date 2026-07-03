@@ -112,6 +112,9 @@ export async function assembleFeatureVector(
     // WS-Q.4.3 — record visibility (a non-scoring eligibility/audit field).
     visibility: story.visibility,
     topic_ids: story.topicIds.slice(0, 16),
+    // Per-item content sensitivity (WS-F labels, `none` dropped) — the real
+    // per-item sensitive signal for the conservative curve + §11.5 penalty.
+    sensitivity_labels: story.sensitivityLabels.filter((label) => label !== 'none'),
     source_id: story.sourceId,
     created_at: story.publishedAt ?? story.createdAt,
     feature_version: FEATURE_SCHEMA_VERSION,

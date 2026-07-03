@@ -315,7 +315,7 @@ const DEFAULT_QUOTAS: z.infer<typeof profileQuotasSchema> = {
  */
 export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
   profile_id: 'breaking_news',
-  profile_version: '1.1.0',
+  profile_version: '1.2.0',
   weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 },
   penalties: { pM: 1.0, pT: 0.75, pR: 0.5 },
   constraints: DEFAULT_CONSTRAINTS,
@@ -348,7 +348,7 @@ export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
  */
 export const EVERGREEN_PROFILE: RankingProfileConfig = {
   profile_id: 'evergreen',
-  profile_version: '1.1.0',
+  profile_version: '1.2.0',
   weights: { wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 },
   penalties: { pM: 1.0, pT: 0.75, pR: 0.75 },
   constraints: DEFAULT_CONSTRAINTS,
