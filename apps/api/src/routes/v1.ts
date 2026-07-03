@@ -26,6 +26,7 @@ import {
   featureFlagsResponseSchema,
   feedQuerySchema,
   feedResponseSchema,
+  isSentinelTopicId,
   notificationPreferencesSchema,
   notificationsResponseSchema,
   okAckSchema,
@@ -260,7 +261,11 @@ function realStoryToDetail(
     exposure_label: signals.meriExposure,
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
-    topic_ids: story.topicIds.slice(0, 8),
+    // A freshly submitted story carries the UNCLASSIFIED sentinel until the WS-K
+    // validator runs; it is NOT a subject topic, so strip it from the wire (parity
+    // with the routes/stories.ts detail projection) — never let a client/offline
+    // cache persist the sentinel as a real topic (SPEC §24.1).
+    topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 8),
     // WS-Q.5.4a — the owner-only author visibility control + widen eligibility.
     is_owner: viewer.isOwner,
     room_visibility: viewer.roomVisibility,

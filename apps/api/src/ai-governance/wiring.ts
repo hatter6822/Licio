@@ -8,6 +8,7 @@
 // absent so a misconfiguration fails loudly rather than silently no-op'ing.
 import type { ContentNormalizedEvent } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import { captionTextFromVtt } from '../forum/video.js';
 import type { CorrectionDeps } from './correction.js';
 import type { GovernanceAiDeps } from './governance-ai.js';
 import type { HarnessDeps } from './harness.js';
@@ -57,6 +58,11 @@ export function buildLineageDeps(ai: AiGovernanceServices): LineageDeps {
 }
 
 export function buildPipelineDeps(ai: AiGovernanceServices): PipelineDeps {
+  // WS-K §24.1 — the classifier reads an uploaded WebVTT caption track's text
+  // through the forum upload store (video posts carry no other local text). The
+  // seam is present only when the forum boot is wired; absent ⇒ the classifier
+  // falls back to the title (no regression, and never surfaced to display).
+  const forum = ai.forum;
   return {
     stories: requireIngestion(ai).stories,
     sources: requireIngestion(ai).sources,
@@ -66,6 +72,14 @@ export function buildPipelineDeps(ai: AiGovernanceServices): PipelineDeps {
     guard: ai.guard,
     topicConfidenceThreshold: () => ai.config().topicConfidenceThreshold,
     claimConfidenceFloor: () => ai.config().claimConfidenceFloor,
+    ...(forum !== null
+      ? {
+          readCaptionText: async (uploadId: string): Promise<string | null> => {
+            const bytes = await forum.uploads.getBytes(uploadId);
+            return bytes === null ? null : captionTextFromVtt(bytes);
+          },
+        }
+      : {}),
     metrics: ai.metrics,
     log: ai.log,
     now: ai.now,

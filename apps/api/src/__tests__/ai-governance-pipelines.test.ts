@@ -41,6 +41,7 @@ import {
   type TranslationDeps,
   translateContent,
 } from '../ai-governance/translation.js';
+import { captionTextFromVtt } from '../forum/video.js';
 import { recomputeFreshness } from '../ingestion/freshness.js';
 import { freshForumServices, seedThread } from './forum-test-helpers.js';
 
@@ -67,6 +68,12 @@ function pipelineDeps(f: Fixture): PipelineDeps {
     guard: f.ai.guard,
     topicConfidenceThreshold: () => f.ai.config().topicConfidenceThreshold,
     claimConfidenceFloor: () => f.ai.config().claimConfidenceFloor,
+    // WS-K §24.1 — the caption-track reader (parity with buildPipelineDeps): read
+    // the WebVTT bytes from the forum upload store, strip to plain text.
+    readCaptionText: async (uploadId: string): Promise<string | null> => {
+      const bytes = await f.forum.forum.uploads.getBytes(uploadId);
+      return bytes === null ? null : captionTextFromVtt(bytes);
+    },
     metrics: f.ai.metrics,
     log: f.ai.log,
     now: f.ai.now,
@@ -128,6 +135,43 @@ describe('WS-K.1.3a topic classification', () => {
     await classifyStoryTopics(pipelineDeps(f), storyId);
     const story = await f.forum.ingestion.stories.getById(storyId);
     expect(story?.topicIds).toEqual([UNCLASSIFIED_TOPIC_ID]);
+  });
+
+  it('validates a video topic evidenced ONLY in an uploaded caption track (WS-K §24.1)', async () => {
+    const f = fresh();
+    const tech = topicIdForSlug('technology');
+    const captionsUploadId = '22222222-2222-4222-8222-222222222222';
+    // Store the WebVTT track: the technology keywords live ONLY in the captions,
+    // not the title, and there is no inline `captions_text`.
+    await f.forum.forum.uploads.put(
+      {
+        uploadId: captionsUploadId,
+        ownerUserId: null,
+        contentType: 'text/vtt',
+        byteSize: 0,
+        altText: null,
+        storageRef: 'ref',
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      new TextEncoder().encode(
+        'WEBVTT\n\n1\n00:00:00.000 --> 00:00:04.000\nThe new software algorithm runs on\n\n2\n00:00:04.000 --> 00:00:08.000\nevery computer chip in the datacenter.',
+      ),
+    );
+    const { storyId } = await seedThread(f.forum, {
+      title: 'A short clip', // carries no technology keywords
+      proposedTopicIds: [tech],
+      submissionMetadata: {
+        submission_type: 'video_post',
+        upload_id: '33333333-3333-4333-8333-333333333333',
+        captions_upload_id: captionsUploadId,
+      },
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The caption evidence validated the author's proposal — not left UNCLASSIFIED.
+    expect(story?.topicIds).toContain(tech);
+    expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
   });
 
   it('drops a pre-catalog placeholder topic on reclassification with no proposals (WS-K)', async () => {

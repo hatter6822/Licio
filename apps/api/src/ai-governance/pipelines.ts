@@ -18,7 +18,7 @@ import { isSelectableTopicId, isSentinelTopicId, UNCLASSIFIED_TOPIC_ID } from '@
 import { HeuristicClaimExtractor } from '../ingestion/claims.js';
 import { recomputeFreshness } from '../ingestion/freshness.js';
 import { submissionBodyText } from '../ingestion/pipeline.js';
-import type { FreshnessStore, SourceStore, StoryStore } from '../ingestion/stores.js';
+import type { FreshnessStore, SourceStore, StoryRecord, StoryStore } from '../ingestion/stores.js';
 import type { ProhibitedUseGuard } from './guard.js';
 import type { AiGovernanceMetrics } from './metrics.js';
 import { CLAIM_EXTRACTOR, classifyTopics, TOPIC_CLASSIFIER } from './models.js';
@@ -34,6 +34,15 @@ export interface PipelineDeps {
   guard: ProhibitedUseGuard;
   topicConfidenceThreshold: () => number;
   claimConfidenceFloor: () => number;
+  /**
+   * Read the plain caption TEXT of an uploaded WebVTT track (WS-K §24.1). A
+   * video post's captions are the only first-party text describing it, but they
+   * live in an upload `submissionBodyText` cannot read — so without this the
+   * classifier would leave a caption-evidenced topic UNCLASSIFIED. Optional: the
+   * composition root wires it to the forum upload store; when absent the
+   * classifier simply falls back to the title (no regression).
+   */
+  readCaptionText?: (uploadId: string) => Promise<string | null>;
   metrics: AiGovernanceMetrics;
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
@@ -56,6 +65,33 @@ export interface PipelineDeps {
  * Sub-threshold detections stay SUGGESTIONS. Runs the prohibited-use guard and
  * writes an AIOutputRecord for audit.
  */
+/**
+ * The uploaded-caption text of a video story ('' when none): only a `video_post`
+ * with a `captions_upload_id` (and no inline `captions_text`, which the caller
+ * already reads via `submissionBodyText`) has one, and only when the reader seam
+ * is wired. Best-effort — a read failure yields '' (never blocks classification).
+ */
+async function readVideoCaptionText(
+  deps: PipelineDeps,
+  story: { submissionMetadata: StoryRecord['submissionMetadata'] },
+): Promise<string> {
+  const meta = story.submissionMetadata;
+  if (
+    meta.submission_type !== 'video_post' ||
+    meta.captions_upload_id === undefined ||
+    meta.captions_text !== undefined ||
+    deps.readCaptionText === undefined
+  ) {
+    return '';
+  }
+  try {
+    return (await deps.readCaptionText(meta.captions_upload_id)) ?? '';
+  } catch {
+    deps.metrics.increment('ai.topic.classification.caption_read_skipped');
+    return '';
+  }
+}
+
 export async function classifyStoryTopics(
   deps: PipelineDeps,
   storyId: string,
@@ -75,13 +111,25 @@ export async function classifyStoryTopics(
   });
 
   const threshold = deps.topicConfidenceThreshold();
-  // Classify over the richest first-party text. A robots-disallowed / noarchive
-  // LINK story stores NO excerpt, but its author-written submission text (the
-  // `reason`) is local text the §14.2 pipeline already classifies — fall back to
-  // it so a proposal named only in the reason still validates (never left
-  // UNCLASSIFIED for lack of a fetched excerpt).
-  const classifyText =
-    story.excerpt !== null && story.excerpt.length > 0 ? story.excerpt : submissionBodyText(story);
+  // Classify over the richest first-party text: the excerpt AND the full local
+  // submission text, unioned (SPEC §24.1). Each covers a case the other misses:
+  //   • the excerpt carries text the body helper does not — a fetched LINK's
+  //     article body (folded in by the §14.2 pipeline) and a video's uploaded
+  //     caption track;
+  //   • `submissionBodyText` carries the FULL first-party body, which for a long
+  //     original brief / question / local update can exceed the 500-char excerpt
+  //     cutoff, and for a robots-disallowed link is the only local text.
+  // The classifier tokenizes into a Set, so the overlap (the excerpt is often a
+  // prefix of the body) is harmless — this only ever ADDS evidence.
+  //
+  // A video post whose captions were UPLOADED (a WebVTT track) rather than typed
+  // inline carries no local text at all above — read the full caption text so a
+  // topic evidenced only in the captions still validates (parity with inline
+  // `captions_text`, which `submissionBodyText` already returns).
+  const captionText = await readVideoCaptionText(deps, story);
+  const classifyText = [story.excerpt ?? '', submissionBodyText(story), captionText]
+    .filter((text) => text.length > 0)
+    .join(' ');
   const scores = classifyTopics(story.title, classifyText);
   const confidenceById = new Map(scores.map((s) => [s.topicId, s.confidence]));
   const nowIso = new Date(deps.now()).toISOString();

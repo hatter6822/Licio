@@ -5,7 +5,7 @@
 // and offset-preserving metadata neutralization (MP4 `udta`→`free`, WebM
 // `Tags`→`Void`).
 import { describe, expect, it } from 'vitest';
-import { probeVideo } from '../forum/video.js';
+import { captionTextFromVtt, probeVideo } from '../forum/video.js';
 
 // --- Fixture builders ------------------------------------------------------
 
@@ -213,5 +213,39 @@ describe('WS-Q.2.3d — dispatch', () => {
       ok: false,
       reason: 'type_mismatch',
     });
+  });
+});
+
+describe('WS-K §24.1 — captionTextFromVtt', () => {
+  const vtt = (s: string): Uint8Array => new TextEncoder().encode(s);
+
+  it('extracts the spoken text and drops WebVTT structure', () => {
+    const text = captionTextFromVtt(
+      vtt(
+        [
+          'WEBVTT - Some description',
+          '',
+          'NOTE this is a comment',
+          'that spans two lines',
+          '',
+          '1',
+          '00:00:00.000 --> 00:00:04.000 align:start',
+          'Hello <c.yellow>world</c>',
+          '',
+          '00:00:04.000 --> 00:00:08.000',
+          'Second caption line.',
+        ].join('\n'),
+      ),
+    );
+    expect(text).toBe('Hello world Second caption line.');
+    // The header, NOTE block, cue ids, and timing lines are all gone.
+    expect(text).not.toContain('WEBVTT');
+    expect(text).not.toContain('NOTE');
+    expect(text).not.toContain('-->');
+  });
+
+  it('returns null when there is no textual payload', () => {
+    expect(captionTextFromVtt(vtt('WEBVTT\n\n1\n00:00:00.000 --> 00:00:04.000\n'))).toBeNull();
+    expect(captionTextFromVtt(vtt(''))).toBeNull();
   });
 });
