@@ -398,10 +398,21 @@ export async function processSubmittedStory(
   }
   await ingestion.stories.addSourceLink(story.storyId, source.sourceId, 'primary', null);
 
+  // The excerpt is BOTH the display snippet AND the deferred WS-K topic
+  // classifier's only view of the article (content.normalized carries no fetched
+  // body — SPEC §24.1). Lead with the publisher's curated description (the best
+  // display text) but FOLD IN the fetched body, so a proposed topic supported
+  // ONLY by the article body — not a generic meta description — still validates
+  // instead of being left UNCLASSIFIED. Same copyright bound as before (the
+  // fallback already stored bounded body text); noarchive still stores nothing.
+  const excerptSource =
+    metadata.description !== null && metadata.description !== bodyText
+      ? `${metadata.description} ${bodyText}`
+      : bodyText;
   const excerpt = metadata.noarchive
     ? null // the publisher said do-not-archive: store NO body text at all
     : boundedExcerpt(
-        metadata.description ?? bodyText,
+        excerptSource,
         Math.min(config.excerptMaxChars, source.displayRestrictions.excerpt_max_chars ?? Infinity),
       );
 

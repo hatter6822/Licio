@@ -5,6 +5,7 @@
 // source suite includes the §14.3 doctrine assertion: NO truth/credibility/
 // reliability scalar exists anywhere in the source shape.
 import { describe, expect, it } from 'vitest';
+import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '../constants/topics.js';
 import { claimPublicSchema, evidenceCardPublicSchema } from '../schemas/claim.js';
 import { searchRequestSchema, searchResultSchema } from '../schemas/search.js';
 import {
@@ -198,6 +199,23 @@ describe('search request schema (WS-F.3.1b)', () => {
     expect(searchRequestSchema.safeParse({ q: 'x'.repeat(201) }).success).toBe(false);
     expect(searchRequestSchema.safeParse({ q: 'ok', limit: '500' }).success).toBe(false);
     expect(searchRequestSchema.safeParse({ q: 'ok', boost_paid: 'true' }).success).toBe(false);
+  });
+
+  it('rejects the UNCLASSIFIED sentinel as a topic filter but accepts a real subject topic', () => {
+    // The sentinel is not a subject topic (SPEC §24.1) — filtering on it would
+    // surface every unclassified story as one pseudo-topic.
+    expect(
+      searchRequestSchema.safeParse({
+        q: 'water',
+        topic_id: UNCLASSIFIED_TOPIC_ID,
+      }).success,
+    ).toBe(false);
+    expect(
+      searchRequestSchema.safeParse({
+        q: 'water',
+        topic_id: topicIdForSlug('government-policy'),
+      }).success,
+    ).toBe(true);
   });
 
   it('search results carry relevance + recency only — no financial field', () => {

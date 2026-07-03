@@ -161,6 +161,32 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
   });
 });
 
+describe('excerpt folds in the fetched body for the deferred classifier (WS-K §24.1)', () => {
+  it('leads with the meta description but includes the article body, so a body-supported topic is not lost', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
+    const url = 'https://news.example/tech-piece';
+    // A GENERIC og:description (the helper hard-codes the reservoir blurb — no
+    // technology keywords) over a body whose distinctive text ('algorithm')
+    // carries the real topical evidence. content.normalized ships no fetched
+    // body, so the deferred WS-K classifier only ever sees `story.excerpt`.
+    fixture.pages.set(url, {
+      status: 200,
+      body: articleHtml({
+        body: 'A breakthrough software algorithm now runs on every computer chip in the datacenter.',
+      }),
+    });
+    const storyId = await submitLink(url, cookie);
+    const story = await fixture.ingestion.stories.getById(storyId);
+    expect(story?.extractionState).toBe('completed');
+    const excerpt = story?.excerpt ?? '';
+    // The publisher's curated description still LEADS (display quality)…
+    expect(excerpt.startsWith('Utility data shows a sharp reservoir decline.')).toBe(true);
+    // …and the fetched body is folded in, so the classifier can see the evidence
+    // the generic meta description omitted (the H3 fix — same copyright bound).
+    expect(excerpt).toContain('algorithm');
+  });
+});
+
 describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {
   it('keeps the story readable, schedules a backoff retry, and succeeds later', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });

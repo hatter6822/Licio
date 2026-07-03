@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FrontPage } from './front-page.js';
 
+const search = vi.hoisted(() => vi.fn<() => Record<string, unknown>>(() => ({})));
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children, className }: { children?: ReactNode; className?: string }) => (
     <a href="#test" className={className}>
@@ -15,7 +16,7 @@ vi.mock('@tanstack/react-router', () => ({
     </a>
   ),
   useNavigate: () => vi.fn(),
-  useSearch: () => ({}),
+  useSearch: () => search(),
   useRouterState: (opts: { select: (s: unknown) => unknown }) =>
     opts.select({ location: { pathname: '/' } }),
 }));
@@ -24,6 +25,17 @@ const feed = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/queries.js', () => ({
   useFeedQuery: () => feed(),
   useUpdateDurablePrivacyMutation: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+// dampenFeed is the PHI personalization pass; the H2 tests assert it runs only
+// in personalized modes. The default mock is a pass-through (the real multipliers
+// are empty anyway); the "dampens in balanced" test overrides it to DROP an item
+// so a dampened render is observable. Mock the loop tracker so real multipliers
+// never interfere.
+const dampenFeed = vi.hoisted(() => vi.fn((items: unknown[]) => items));
+vi.mock('../../signals/topic-dampening.js', () => ({ dampenFeed }));
+vi.mock('../../signals/topic-loops.js', () => ({
+  getTopicLoopTracker: () => ({ topicMultipliers: () => new Map() }),
 }));
 
 vi.mock('../../stores/index.js', () => ({
@@ -67,7 +79,11 @@ function infiniteFeed(overrides: Record<string, unknown> = {}) {
   };
 }
 
-beforeEach(() => feed.mockReset());
+beforeEach(() => {
+  feed.mockReset();
+  search.mockReturnValue({});
+  dampenFeed.mockClear();
+});
 afterEach(() => vi.clearAllMocks());
 
 describe('FrontPage pagination (WS-B.2.8b explicit continuation)', () => {
@@ -109,5 +125,37 @@ describe('FrontPage pagination (WS-B.2.8b explicit continuation)', () => {
     render(<FrontPage />);
     await userEvent.setup().click(screen.getByRole('button', { name: /loading/i }));
     expect(fetchNextPage).not.toHaveBeenCalled();
+  });
+});
+
+describe('FrontPage PHI dampening honors the reader-chosen mode (H2)', () => {
+  it('dampens in a personalized mode (balanced)', () => {
+    search.mockReturnValue({}); // ⇒ savedMode 'balanced'
+    dampenFeed.mockImplementationOnce((items: unknown[]) => items.slice(0, 1));
+    feed.mockReturnValue(infiniteFeed());
+    render(<FrontPage />);
+    expect(dampenFeed).toHaveBeenCalledTimes(1);
+    // The mocked dampenFeed drops the second item ⇒ 'b' is thinned out.
+    expect(screen.getByText('Story a')).toBeInTheDocument();
+    expect(screen.queryByText('Story b')).not.toBeInTheDocument();
+  });
+
+  it('does NOT dampen in chronological mode (a complete server timeline)', () => {
+    search.mockReturnValue({ mode: 'chronological' });
+    feed.mockReturnValue(infiniteFeed());
+    render(<FrontPage />);
+    expect(dampenFeed).not.toHaveBeenCalled();
+    // Both items survive — nothing is dropped from the cursor chain locally.
+    expect(screen.getByText('Story a')).toBeInTheDocument();
+    expect(screen.getByText('Story b')).toBeInTheDocument();
+  });
+
+  it('does NOT dampen in low-personalization mode', () => {
+    search.mockReturnValue({ mode: 'low-personalization' });
+    feed.mockReturnValue(infiniteFeed());
+    render(<FrontPage />);
+    expect(dampenFeed).not.toHaveBeenCalled();
+    expect(screen.getByText('Story a')).toBeInTheDocument();
+    expect(screen.getByText('Story b')).toBeInTheDocument();
   });
 });
