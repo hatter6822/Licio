@@ -248,4 +248,13 @@ describe('WS-K §24.1 — captionTextFromVtt', () => {
     expect(captionTextFromVtt(vtt('WEBVTT\n\n1\n00:00:00.000 --> 00:00:04.000\n'))).toBeNull();
     expect(captionTextFromVtt(vtt(''))).toBeNull();
   });
+
+  it('leaves NO residual angle bracket even for malformed/nested tags', () => {
+    const text = captionTextFromVtt(
+      vtt('WEBVTT\n\n00:00:00.000 --> 00:00:04.000\nkeep <<script>alert(1)</script> me <b'),
+    );
+    expect(text).not.toBeNull();
+    expect(text).not.toContain('<');
+    expect(text).not.toContain('>');
+  });
 });
