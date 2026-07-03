@@ -459,15 +459,20 @@ export function captionTextFromVtt(bytes: Uint8Array): string | null {
     // timing line. We cannot look ahead cheaply, so drop pure-numeric ids (the
     // common form); textual ids are rare and, if kept, only add stray tokens.
     if (/^\d+$/.test(line)) continue;
-    // Payload line — strip inline tags (`<c>`, `<00:00.000>`, `<v Bob>`). Drop
-    // well-formed `<…>` spans, then remove ANY residual `<`/`>` so a malformed or
-    // nested tag (e.g. `<<script>`) cannot leave a stray angle bracket — the
-    // output is classification input only, never HTML, but keep it bracket-free
-    // (single-pass, no partial-sanitization gap).
-    const cleaned = line
-      .replace(/<[^>]*>/g, '')
-      .replace(/[<>]/g, '')
-      .trim();
+    // Payload line — strip inline cue tags (`<c>`, `<00:00.000>`, `<v Bob>`). A
+    // character scan, NOT an `<…>` HTML-tag regex: everything from a `<` to the
+    // next `>` is a tag and dropped, and an unclosed `<` drops to end of line —
+    // so no angle bracket can ever survive (a COMPLETE sanitization, no
+    // partial-sanitization gap). The output is classification input only, never
+    // HTML, but it is bracket-free regardless.
+    let cleaned = '';
+    let inTag = false;
+    for (const ch of line) {
+      if (ch === '<') inTag = true;
+      else if (ch === '>') inTag = false;
+      else if (!inTag) cleaned += ch;
+    }
+    cleaned = cleaned.trim();
     if (cleaned.length > 0) out.push(cleaned);
   }
   const joined = out.join(' ').trim();
