@@ -93,6 +93,9 @@ export const draftStoryRecordSchema = z
     /** The chosen home room: COMMONS_ROOM_ID or a room UUID. */
     roomId: z.string().uuid(),
     visibility: storyVisibilitySchema,
+    /** Author-PROPOSED catalog topics (plaintext metadata — not sensitive; they
+     *  round-trip on restore). Defaults to empty for pre-topics drafts. */
+    topicIds: z.array(z.string().uuid()).default([]),
     values: z.record(z.string(), z.string()),
     updatedAt: z.number().int().nonnegative(),
     /** True when the draft body is encrypted at rest in `cipher` (§6.8). */

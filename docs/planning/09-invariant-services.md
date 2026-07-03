@@ -1547,6 +1547,8 @@ Detect narrow loops (same topic cluster visited repeatedly in short succession) 
 **Description:**
 When narrow-loop or compulsive-session detection triggers, display a non-blocking wellbeing prompt: "Your recent feed has become narrow around this topic. See broader context?" The prompt is dismissible and uses the same prompt framework shared with path-signature stopping cues. This task covers the prompt surface; feed-mode controls and reset/reduce actions are WS-H.6.1c-2.
 
+> **Post-launch update (v0.7.3):** the interrupting prompt was **replaced** by a graduated, in-browser **topic-frequency dampener** — a topic the reader is circling is shown steadily less often in the front-page feed (down to a non-zero floor, so a pursued topic still surfaces rarely) and recovers as the reader moves on. No modal, nothing sent to the server. See SPEC §11.6 and `apps/web/src/signals/topic-dampening.ts`. The narrow-loop math + the quiet-notification policy below are unchanged.
+
 **Acceptance criteria:**
 - Wellbeing prompt displayed when loop/compulsive detection triggers; prompt is non-blocking and dismissible.
 - Prompt copy is supportive, not accusatory, and offers a path to broader context.

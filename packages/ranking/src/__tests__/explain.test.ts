@@ -42,7 +42,6 @@ function scored(partial: {
     },
     penalty_components: {
       coordination: { value: 0, coefficient: 1, applied: 0, enforced: false },
-      holonomy: { value: 0, coefficient: 1, applied: 0, enforced: false },
       harmful_tension: { value: 0, coefficient: 1, applied: 0, enforced: false },
       redundancy: {
         value: redundancy.value,

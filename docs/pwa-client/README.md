@@ -285,6 +285,18 @@ The privacy linchpin. Raw scroll/visibility/focus events are processed locally
 and **discarded**; only the bucketed Section 22.1 `AttentionAggregate` is ever
 uploaded (to `attention.aggregate`).
 
+- **Topic-frequency dampening (PHI v0, WS-H.6.1c / SPEC §11.6):** the reader's
+  circling signal (`signals/topic-loops.ts` — topic-cluster ids + timestamps
+  only, browser-only, sentinel-excluded) drives a **graduated feed dampener**
+  (`signals/topic-dampening.ts`), the replacement for the old interrupting
+  narrow-loop prompt. A topic the reader re-enters gets a per-topic display
+  multiplier that ramps from 1 toward a non-zero floor as circling intensifies,
+  and the front page subsamples that topic accordingly — so a pursued topic
+  still surfaces, only rarely, never removed. The score decays with time, so the
+  frequency recovers once the reader moves on. Nothing about the circling ever
+  leaves the device; this reshapes only what THIS browser renders, never what
+  the server ranks.
+
 - **Active viewing (4.1a):** dwell accrues only while visible **and** focused,
   derived from current DOM truth on every event (robust to unpaired events); a
   monotonic clock means a wall-clock change cannot inflate dwell.
@@ -427,9 +439,15 @@ server's bars, it does not re-decide them.
   handles thread replies). A REQUIRED home-room picker (Commons default;
   non-postable rooms shown with the reason, submit disabled); a public/in-room
   visibility control whose displayed value equals the SHARED
-  `deriveStoryVisibility` output and is LOCKED to in-room for private rooms; and
-  four modes — link, brief, image post (alt text required), video post (optional
-  text captions; oversize/overlong rejected before upload). Media uploads through
+  `deriveStoryVisibility` output and is LOCKED to in-room for private rooms; a
+  REQUIRED topic picker (multi-select chips from the shared canonical topic
+  catalog, capped at `MAX_PROPOSED_TOPICS`) whose selections are author
+  PROPOSALS — the server validates them against the content before any become
+  the story's trusted topics (SPEC §14.1/§24.1), so the composer never mints a
+  random/placeholder topic; and four modes — link, brief, image post (alt text
+  required), video post (optional text captions; oversize/overlong rejected
+  before upload). Room, visibility, AND the proposed topics round-trip through
+  the encrypted draft autosave. Media uploads through
   the scan-gated path first; a still-pending scan shows "pending a safety
   check", never a failure. The form uses `noValidate` so the accessible JS
   validation (not native bubbles) drives the UX.

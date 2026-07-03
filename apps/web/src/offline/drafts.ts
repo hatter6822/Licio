@@ -111,6 +111,8 @@ export interface StoryDraftInput {
   mode: DraftStoryRecord['mode'];
   roomId: string;
   visibility: DraftStoryRecord['visibility'];
+  /** Author-proposed catalog topics (round-trips on restore). */
+  topicIds: string[];
   values: Record<string, string>;
 }
 
@@ -123,6 +125,7 @@ export async function saveStoryDraft(input: StoryDraftInput): Promise<void> {
     mode: input.mode,
     roomId: input.roomId,
     visibility: input.visibility,
+    topicIds: input.topicIds,
     updatedAt: Date.now(),
   } as const;
   if (cipher) {

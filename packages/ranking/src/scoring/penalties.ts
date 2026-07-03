@@ -1,16 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-I.2.3b — the four penalty terms (SPEC §5.4/§5.5). Each is a separate
-// NONNEGATIVE subtractive component derived from its invariant signal; they
-// are NOT part of the convex weight combination, so high risk can drive a
+// WS-I.2.3b — the three per-item penalty terms (SPEC §5.4/§5.5). Each is a
+// separate NONNEGATIVE subtractive component derived from its invariant signal;
+// they are NOT part of the convex weight combination, so high risk can drive a
 // total below any positive contribution.
+//
+// PHI is deliberately ABSENT here: holonomy is a per-USER/session signal (the
+// curvature of the reader's own topic journey), not a per-item property, so
+// PHI enters ranking as the per-user diversification constraint
+// (`phiDiversification` in constraints.ts — SPEC §13 `holonomy_limits`), never
+// a per-item penalty. The old per-item `pH·HolonomyRisk` term read a `phi_risk`
+// feature the assembler never populated, so it was structurally always 0; it
+// was removed (option-2 consolidation). A genuine per-item holonomy signal is a
+// PHI-v1 residual (docs/ranking/README.md).
 //
 //   pM CoordinationPenalty  MFCI risk state (normal 0 → severe 1) joined with
 //                           tropical-cascade synchrony (max, never sum — the
 //                           same coordination evidence must not double-count)
-//   pH HolonomyRisk         PHI holonomy magnitude against the profile
-//                           threshold; SENSITIVE topics use a stricter
-//                           (smaller) threshold ⇒ larger normalized risk
 //   pT HarmfulTensionRisk   Hodge `harmful_tension_risk`, which is ZERO by
 //                           construction absent a hostility/safety signal
 //                           (WS-H.7.1: HarmfulTensionRisk ≡ 0 without
@@ -31,10 +37,10 @@ import type { FeatureVector } from '../schemas/feature-vector.js';
 import type { RankingProfileConfig } from '../schemas/profile.js';
 import type { PenaltyComponents, PenaltyTerm } from '../schemas/scored-item.js';
 
-/** Which invariants' ranking effects are promotion-enabled (WS-H.1.2e). */
+/** Which invariants' PENALTY effects are promotion-enabled (WS-H.1.2e). PHI is
+ *  not here — it is a per-user CONSTRAINT (diversification), not a penalty. */
 export interface PenaltyEnforcement {
   mfci: boolean;
-  phi: boolean;
   hodge: boolean;
   meri: boolean;
   tropical: boolean;
@@ -43,7 +49,6 @@ export interface PenaltyEnforcement {
 /** Everything still shadow — the fail-closed default. */
 export const SHADOW_ENFORCEMENT: PenaltyEnforcement = {
   mfci: false,
-  phi: false,
   hodge: false,
   meri: false,
   tropical: false,
@@ -83,23 +88,6 @@ export function coordinationInput(
 }
 
 /**
- * Holonomy input: PHI magnitude normalized by the profile threshold; the
- * threshold SHRINKS by `phi_sensitive_factor` for sensitive topics (stricter
- * ⇒ the same loop scores higher risk). Clamped to [0, 1].
- */
-export function holonomyInput(
-  phiRisk: number | undefined,
-  profile: Pick<RankingProfileConfig, 'constraints'>,
-  sensitiveTopic: boolean,
-): number {
-  if (phiRisk === undefined) return 0;
-  const base = profile.constraints.phi_diversify_threshold;
-  const threshold = sensitiveTopic ? base * profile.constraints.phi_sensitive_factor : base;
-  if (threshold <= 0) return 1;
-  return clamp01(phiRisk / threshold);
-}
-
-/**
  * Harmful-tension input: the Hodge `harmful_tension_risk` field ONLY. That
  * field is 0 by construction absent a hostility signal, so raw harmonic
  * tension alone (sustained legitimate disagreement) can never penalize.
@@ -124,33 +112,25 @@ export interface PenaltyContext {
 }
 
 /**
- * Compute all four penalty terms with their enforcement provenance. Pure and
- * deterministic; total over malformed inputs (clamped).
+ * Compute the three per-item penalty terms with their enforcement provenance.
+ * Pure and deterministic; total over malformed inputs (clamped). The `context`
+ * (topic sensitivity) is retained for signature stability with the pipeline and
+ * future per-item penalties, though the current terms do not consult it.
  */
 export function computePenalties(
   features: FeatureVector,
   profile: RankingProfileConfig,
   enforcement: PenaltyEnforcement,
-  context: PenaltyContext,
+  _context: PenaltyContext,
 ): PenaltyComponents {
   const coordination = coordinationInput(features, enforcement);
   const coordinationTerm = term(coordination.value, profile.penalties.pM, coordination.enforced);
-  const holonomyTerm = term(
-    holonomyInput(features.phi_risk, profile, context.sensitiveTopic),
-    profile.penalties.pH,
-    enforcement.phi,
-  );
   const tensionTerm = term(harmfulTensionInput(features), profile.penalties.pT, enforcement.hodge);
   const redundancyTerm = term(redundancyInput(features), profile.penalties.pR, enforcement.meri);
   return {
     coordination: coordinationTerm,
-    holonomy: holonomyTerm,
     harmful_tension: tensionTerm,
     redundancy: redundancyTerm,
-    total_applied:
-      coordinationTerm.applied +
-      holonomyTerm.applied +
-      tensionTerm.applied +
-      redundancyTerm.applied,
+    total_applied: coordinationTerm.applied + tensionTerm.applied + redundancyTerm.applied,
   };
 }

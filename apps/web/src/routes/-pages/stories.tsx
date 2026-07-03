@@ -4,7 +4,7 @@
 // error state rather than fetching). Mounting the story marks it the active item
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
-import type { StoryDetail } from '@licio/shared';
+import { isSentinelTopicId, type StoryDetail } from '@licio/shared';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { CommentSection } from '../../components/comments/index.js';
@@ -17,7 +17,6 @@ import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpre
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
-import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import {
@@ -25,14 +24,11 @@ import {
   useStoryInterpretationsQuery,
   useStoryQuery,
   useToggleSavedStoryMutation,
-  useUpdateDurablePrivacyMutation,
 } from '../../lib/queries.js';
 import { markTopicQuiet } from '../../offline/notification-meter.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { getTopicLoopTracker } from '../../signals/topic-loops.js';
-import { useAuthStore } from '../../stores/auth.js';
-import { useUIStore } from '../../stores/ui.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
@@ -63,15 +59,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const story = useStoryQuery(storyId);
   const interpretations = useStoryInterpretationsQuery(storyId);
   const [readerOpen, setReaderOpen] = useState(false);
-  const [loopPromptDismissed, setLoopPromptDismissed] = useState(false);
   const openId = useRef(`source-${storyId}`);
   const navigate = useNavigate();
   // Return to wherever the story was opened from (front page, topic, room); a
   // cold-loaded deep link falls back (replacing) to the front page.
   const goBack = useGoBack(() => void navigate({ to: '/', replace: true }));
-  const setFeedMode = useUIStore((state) => state.setFeedMode);
-  const authenticated = useAuthStore((state) => state.status === 'authenticated');
-  const updateDurable = useUpdateDurablePrivacyMutation();
 
   // Mark this story the active item for dwell/return tracking while it is open.
   // Leaving captures its §22.1 aggregate on the "done attending" boundary; the
@@ -85,43 +77,27 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     };
   }, [storyId]);
 
-  // PHI v0 (WS-H.6.1a/b): record the TOPIC-CLUSTER visit in the in-browser
-  // session sequence (topic ids + timing only — never the story id), then
-  // RE-ASSESS in the same effect — assessment lives in state so the visit
-  // that crosses the narrow-loop threshold triggers the prompt and the
-  // quiet-notification write immediately, not on a later re-render.
+  // PHI v0 (WS-H.6.1a/b, SPEC §11.6): record the TOPIC-CLUSTER visit in the
+  // in-browser session sequence (topic ids + timing only — never the story id).
+  // This feeds the CLIENT-SIDE topic-frequency dampener (the front page shows a
+  // circled topic steadily less often, down to a floor — the quiet replacement
+  // for the old interrupting prompt) and the quiet-notification policy below.
   const topicIds = story.data?.topic_ids;
-  const [assessment, setAssessment] = useState(() => getTopicLoopTracker().assess());
+  // The story's own TRUSTED primary topic — but never the UNCLASSIFIED sentinel
+  // (an unclassified story has no real topic, so it must not contribute to the
+  // circling signal, which would falsely read as "circling one topic").
+  const primaryTopic =
+    topicIds?.[0] !== undefined && !isSentinelTopicId(topicIds[0]) ? topicIds[0] : null;
   useEffect(() => {
-    const tracker = getTopicLoopTracker();
-    const firstTopic = topicIds?.[0];
-    if (firstTopic) tracker.recordVisit(firstTopic);
-    setAssessment(tracker.assess());
-  }, [topicIds]);
-  const loopedTopic = assessment.narrowLoop.topicClusterId;
-  // Reflect the PERSISTED per-cluster dismissal whenever the loop cluster
-  // changes: dismissing the prompt on one story suppresses it for every other
-  // story in the SAME loop this session (no per-mount re-nagging), while a
-  // genuinely NEW loop cluster can still surface it.
+    if (primaryTopic !== null) getTopicLoopTracker().recordVisit(primaryTopic);
+  }, [primaryTopic]);
+  // Quiet-notification policy (WS-H.6.1c): once a topic is being circled enough,
+  // its pushes show silently for a while — never a buzz that reinforces the loop.
   useEffect(() => {
-    setLoopPromptDismissed(getTopicLoopTracker().isPromptDismissed(loopedTopic));
-  }, [loopedTopic]);
-  const loopDetected = !loopPromptDismissed && assessment.narrowLoop.detected;
-  // Quiet-notification policy (WS-H.6.1c): a flagged topic's pushes show
-  // silently for a while — never a buzz that reinforces the loop.
-  useEffect(() => {
-    if (loopedTopic) void markTopicQuiet(loopedTopic);
-  }, [loopedTopic]);
-  const broadenFeed = (): void => {
-    // "See broader context": switch to the source-diverse feed mode and go
-    // there — a soft, reversible intervention (SPEC §11.6). Signed in, the
-    // mode also persists across sessions/devices (WS-H.6.1c-2).
-    setFeedMode('source-diverse');
-    if (authenticated) {
-      updateDurable.mutate({ personalization_settings: { feed_mode: 'source-diverse' } });
+    if (primaryTopic !== null && getTopicLoopTracker().isCircling(primaryTopic)) {
+      void markTopicQuiet(primaryTopic);
     }
-    void navigate({ to: '/', search: { mode: 'source-diverse' } });
-  };
+  }, [primaryTopic]);
 
   const openReader = (): void => {
     getSignalProcessor().recordSourceOpen(openId.current, storyId);
@@ -143,15 +119,6 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
           <SourceReader url={data.url} title={data.title} onClose={closeReader} />
         ) : (
           <article className="flex flex-col gap-4">
-            {loopDetected ? (
-              <NarrowLoopPrompt
-                onSeeBroader={broadenFeed}
-                onDismiss={() => {
-                  if (loopedTopic) getTopicLoopTracker().dismissPrompt(loopedTopic);
-                  setLoopPromptDismissed(true);
-                }}
-              />
-            ) : null}
             {data.media ? (
               <StoryMedia
                 url={data.media.url}

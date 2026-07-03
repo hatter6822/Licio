@@ -70,6 +70,7 @@ export async function seedStory(
       canonicalPublicStoryId: null,
       language: 'en',
       topicIds: options.topicIds ?? ['topic-default'],
+      proposedTopicIds: options.topicIds ?? ['topic-default'],
       locationScope: null,
       sensitivityLabels: options.sensitivityLabels ?? [],
       lifecycleState: 'gathering_attention',

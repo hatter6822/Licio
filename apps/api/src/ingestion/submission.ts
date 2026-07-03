@@ -29,6 +29,7 @@ import {
   type StoryCreateRequest,
   TOPIC_REGISTRY,
   type TrackerDenylist,
+  UNCLASSIFIED_TOPIC_ID,
 } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import { joinRoom, roomContentVisibleToUser, userMayPostTopLevel } from '../forum/rooms.js';
@@ -534,7 +535,11 @@ export async function submitStory(
       mediaUploadRef,
       canonicalPublicStoryId,
       language: request.language !== undefined ? canonicalizeBcp47(request.language) : null,
-      topicIds: [...request.topic_ids],
+      // WS-K §24.1 — author picks are UNTRUSTED proposals. The trusted topic
+      // set starts as the UNCLASSIFIED sentinel; the validator promotes the
+      // content-supported proposals (+ any it detects) on content.normalized.
+      proposedTopicIds: [...request.topic_ids],
+      topicIds: [UNCLASSIFIED_TOPIC_ID],
       locationScope: request.location_scope ?? null,
       sensitivityLabels: [...(request.sensitivity_labels ?? ['none'])],
       lifecycleState: 'submitted',

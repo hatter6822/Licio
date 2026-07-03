@@ -22,6 +22,7 @@ import {
   linkSubmission,
   post,
   seedUserWithSession,
+  TEST_TOPIC_ID,
 } from './ingestion-test-helpers.js';
 
 function app() {
@@ -283,7 +284,7 @@ describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
           room_id: COMMONS_ROOM_ID,
           body: 'Body for the lifecycle test story.',
           title: 'Lifecycle test',
-          topic_ids: [randomUUID()],
+          topic_ids: [TEST_TOPIC_ID],
         },
         cookie,
       ),
@@ -317,7 +318,7 @@ describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
           room_id: COMMONS_ROOM_ID,
           body: 'Soon to be idle.',
           title: 'Idle story',
-          topic_ids: [randomUUID()],
+          topic_ids: [TEST_TOPIC_ID],
         },
         cookie,
       ),

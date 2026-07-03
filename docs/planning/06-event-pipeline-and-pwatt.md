@@ -750,6 +750,8 @@ Implement weight normalization for the five positive PWAtt components. Per Secti
 **Description:**
 Integrate the four penalty terms into the PWAtt formula. Penalties are separate nonnegative coefficients on risk terms -- they are not part of the convex combination of positive weights (Section 5.5). Terms: `pM * CoordinationPenalty` (derived from MFCI -- coordinated burst detection, Section 8), `pH * HolonomyRisk` (derived from PHI -- path-dependent steering risk), `pT * HarmfulTensionRisk` (derived from Hodge tension combined with safety classifiers), `pR * RedundancyPenalty` (derived from MERI -- duplicate content dampening). Each penalty coefficient is configurable and nonnegative. Penalties can drive the total score below zero (a high-risk item's penalties can dominate any positive contribution). In v1, MFCI and MERI provide initial penalty values; PHI and Hodge provide placeholder values pending their v0 implementations in WS-H.
 
+> **Note (v0.7.3):** this WS-E `packages/invariants/pwatt` penalty structure (the shadow scorer's placeholder set, with `pH`/`pT` pinned to 0) is separate from the **served §5.4 composite**, which is composed per-request by `@licio/ranking`. The served composite now carries only **three** penalty terms — the per-item `pH * HolonomyRisk` was removed, because holonomy is a per-user signal realized as the per-user diversification constraint, not a per-item penalty (see SPEC §5.4 and `docs/ranking/README.md`). This WS-E placeholder set is unchanged.
+
 **Acceptance criteria:**
 - Penalty terms are subtracted from the positive score, not included in the 100% weight normalization.
 - Each penalty coefficient is nonnegative and configurable.

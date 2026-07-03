@@ -14,6 +14,7 @@ import {
   type TopicClassificationResult,
   topicClassificationResultSchema,
 } from '@licio/ai-governance';
+import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { HeuristicClaimExtractor } from '../ingestion/claims.js';
 import type { StoryStore } from '../ingestion/stores.js';
 import type { ProhibitedUseGuard } from './guard.js';
@@ -34,8 +35,23 @@ export interface PipelineDeps {
   now: () => number;
 }
 
-/** Classify a story's topics (WS-K.1.3a). Above-threshold labels are applied
- *  and merged into the story; sub-threshold labels route to review. */
+/**
+ * VALIDATE a story's topics (WS-K.1.3a, SPEC §24.1) — the trust gate for topics.
+ *
+ * The author's picks arrive as UNTRUSTED `proposed_topic_ids`; this pass (the
+ * deterministic classifier over the story's ACTUAL content) decides which
+ * become the story's TRUSTED `topic_ids`:
+ *   • a proposed topic is VALIDATED (→ trusted) iff the content supports it
+ *     (confidence ≥ threshold); otherwise it is REJECTED (routed to steward
+ *     review, never trusted);
+ *   • the classifier's own above-threshold detections the author did NOT
+ *     propose are ADDED (augmentation);
+ *   • if nothing validates, the story carries the UNCLASSIFIED sentinel, which
+ *     every topic-similarity / PHI-loop consumer EXCLUDES — so an unclassified
+ *     story never looks like a shared topic.
+ * Sub-threshold detections stay SUGGESTIONS. Runs the prohibited-use guard and
+ * writes an AIOutputRecord for audit.
+ */
 export async function classifyStoryTopics(
   deps: PipelineDeps,
   storyId: string,
@@ -56,6 +72,7 @@ export async function classifyStoryTopics(
 
   const threshold = deps.topicConfidenceThreshold();
   const scores = classifyTopics(story.title, story.excerpt ?? '');
+  const confidenceById = new Map(scores.map((s) => [s.topicId, s.confidence]));
   const nowIso = new Date(deps.now()).toISOString();
   const output = await recordAiOutput(deps.outputRecords, {
     modelName: TOPIC_CLASSIFIER.name,
@@ -68,30 +85,47 @@ export async function classifyStoryTopics(
     nowIso,
   });
 
-  const assignments = scores.map((s) => ({
-    topic_id: s.topicId,
-    confidence: s.confidence,
-    applied: s.confidence >= threshold,
+  // The AUTHOR'S proposals are untrusted input; a proposal is validated only
+  // when the content supports it. AI-detected topics the author did not propose
+  // are added (augmentation). The trusted set is validated ∪ added; the
+  // UNCLASSIFIED sentinel stands in when nothing validates (never author picks
+  // untrusted — an unvalidated topic never reaches `topic_ids`).
+  const proposed = story.proposedTopicIds;
+  const proposedSet = new Set(proposed);
+  const supported = (id: string): boolean => (confidenceById.get(id) ?? 0) >= threshold;
+  const validated = proposed.filter(supported);
+  const rejected = proposed.filter((id) => !supported(id));
+  const added = scores
+    .filter((s) => s.confidence >= threshold && !proposedSet.has(s.topicId))
+    .map((s) => s.topicId);
+  const trusted = [...new Set([...validated, ...added])];
+  const topicIds = trusted.length > 0 ? trusted : [UNCLASSIFIED_TOPIC_ID];
+  const trustedSet = new Set(topicIds);
+  await deps.stories.update(storyId, { topicIds });
+
+  // Audit trail: one assignment per topic CONSIDERED (proposed ∪ detected);
+  // `applied` = it entered the trusted set.
+  const consideredIds = [...new Set([...proposed, ...scores.map((s) => s.topicId)])];
+  const assignments = consideredIds.map((topicId) => ({
+    topic_id: topicId,
+    confidence: confidenceById.get(topicId) ?? 0,
+    applied: trustedSet.has(topicId),
     label: 'AI-classified' as const,
   }));
 
-  // Apply above-threshold topics (union with the story's existing topics, so a
-  // governed assignment never clobbers a user/steward topic).
-  const applied = assignments.filter((a) => a.applied).map((a) => a.topic_id);
-  if (applied.length > 0) {
-    const merged = [...new Set([...story.topicIds, ...applied])];
-    await deps.stories.update(storyId, { topicIds: merged });
-  }
-  // Sub-threshold suggestions → steward review queue (never auto-applied).
-  for (const assignment of assignments) {
-    if (assignment.applied) continue;
+  // Rejected author proposals + sub-threshold detections → steward review
+  // (never auto-applied). A rejected proposal is flagged so a steward sees the
+  // author asked for a topic the content did not support.
+  for (const topicId of consideredIds) {
+    if (trustedSet.has(topicId)) continue;
     await deps.reviewQueue.insert({
       kind: 'low_confidence_classification',
       subjectRef: storyId,
       context: {
-        topic_id: assignment.topic_id,
-        confidence: assignment.confidence,
+        topic_id: topicId,
+        confidence: confidenceById.get(topicId) ?? 0,
         output_id: output.output_id,
+        rejected_author_proposal: proposedSet.has(topicId),
       },
       status: 'pending',
       resolution: null,
@@ -99,15 +133,17 @@ export async function classifyStoryTopics(
     });
   }
 
+  const unclassified = trusted.length === 0;
   deps.metrics.increment('ai.topic.classification.completed');
-  deps.metrics.increment(
-    'ai.topic.classification.suggestions',
-    assignments.length - applied.length,
-  );
+  if (unclassified) deps.metrics.increment('ai.topic.classification.unclassified');
+  deps.metrics.increment('ai.topic.classification.rejected_proposals', rejected.length);
   deps.log('topic.classification.completed', {
     story_id: storyId,
-    applied: applied.length,
-    suggested: assignments.length - applied.length,
+    proposed: proposed.length,
+    validated: validated.length,
+    added: added.length,
+    rejected: rejected.length,
+    unclassified,
   });
 
   return topicClassificationResultSchema.parse({

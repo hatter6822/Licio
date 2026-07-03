@@ -6,7 +6,12 @@
 // lib/demo-seed.ts (development only). This fixture is deterministic (fixed
 // ids matching the seeded stories) and carries no popularity/applause fields
 // — only descriptive, conversation-state signals (no-applause doctrine).
-import type { FeedItem, SignalLedgerEntry, StoryDetail } from '@licio/shared';
+import {
+  type FeedItem,
+  type SignalLedgerEntry,
+  type StoryDetail,
+  topicIdForSlug,
+} from '@licio/shared';
 
 export const DEMO_IDS = {
   STORY_1: '5f5e1000-0000-4000-8000-000000000001',
@@ -39,7 +44,7 @@ const feedWater: FeedItem = {
   safety_state: 'ok',
   more_on_this_story: [],
   context_card: null,
-  topic_ids: ['water-quality'],
+  topic_ids: [topicIdForSlug('climate-environment')],
 };
 
 const feedZoning: FeedItem = {
@@ -56,7 +61,7 @@ const feedZoning: FeedItem = {
   safety_state: 'ok',
   more_on_this_story: [],
   context_card: null,
-  topic_ids: ['zoning'],
+  topic_ids: [topicIdForSlug('local-community')],
 };
 
 const feedTransit: FeedItem = {
@@ -72,7 +77,7 @@ const feedTransit: FeedItem = {
   safety_state: 'caution',
   more_on_this_story: [],
   context_card: null,
-  topic_ids: ['transit'],
+  topic_ids: [topicIdForSlug('local-community')],
 };
 
 export const DEMO_FEED: FeedItem[] = [feedWater, feedZoning, feedTransit];
@@ -83,21 +88,21 @@ const STORY_DETAILS: Record<string, StoryDetail> = {
     body_summary:
       'The board released raw and processed results alongside the sampling methodology. Several readers opened the dataset and cross-checked it against an independent lab report.',
     thread_id: THREAD_1,
-    topic_ids: ['water-quality'],
+    topic_ids: [topicIdForSlug('climate-environment')],
   },
   [STORY_2]: {
     ...feedZoning,
     body_summary:
       'The proposal text is identical, but two rooms summarise its effects differently. A bridge contribution translated each interpretation for the other.',
     thread_id: THREAD_2,
-    topic_ids: ['zoning'],
+    topic_ids: [topicIdForSlug('local-community')],
   },
   [STORY_3]: {
     ...feedTransit,
     body_summary:
       'The timetable claim omits a service-frequency caveat. A clarifying question is awaiting a cited source before the label changes.',
     thread_id: null,
-    topic_ids: ['transit'],
+    topic_ids: [topicIdForSlug('local-community')],
   },
 };
 

@@ -27,6 +27,7 @@ import {
   type StewardRoleId,
   type StoryLifecycleState,
   type SubmissionMetadata,
+  topicIdForSlug,
 } from '@licio/shared';
 import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
@@ -67,7 +68,6 @@ const SUM = (n: number): string => `5f5e7000-0000-4000-8000-${String(n).padStart
 const SUB = (n: number): string => `5f5e8000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const CLAIM = (n: number): string => `5f5e9000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const EVID = (n: number): string => `5f5ea000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const TOPIC = (n: number): string => `5f5e6000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
@@ -309,7 +309,10 @@ export async function seedForumDemoData(
         mediaUploadRef: null,
         canonicalPublicStoryId: null,
         language: 'en',
-        topicIds: ['5f5e6000-0000-4000-8000-000000000001'],
+        // Seed content is authoritative/pre-validated → trusted catalog topic
+        // directly (proposed == trusted, as if the validator confirmed it).
+        topicIds: [topicIdForSlug('climate-environment')],
+        proposedTopicIds: [topicIdForSlug('climate-environment')],
         locationScope: null,
         sensitivityLabels: [],
         lifecycleState: story.lifecycle,
@@ -645,6 +648,7 @@ export async function seedForumDemoData(
         canonicalPublicStoryId: null,
         language: 'en',
         topicIds: spec.topicIds,
+        proposedTopicIds: spec.topicIds,
         locationScope: spec.locationScope ?? null,
         sensitivityLabels: [],
         lifecycleState: spec.lifecycle ?? 'gathering_attention',
@@ -663,12 +667,16 @@ export async function seedForumDemoData(
     if (created.ok) await forum.rooms.touchActivity(spec.roomId, created.thread.createdAt);
   };
 
+  // Canonical catalog topics (SPEC §14.1): the seed content is authoritative /
+  // pre-validated, so its trusted `topicIds` are set directly to real catalog
+  // ids (no random per-story topics — that is exactly what made the demo feed
+  // trip the PHI narrow-loop detector on meaningless buckets).
   const topics = {
-    water: TOPIC(2),
-    climate: TOPIC(3),
-    elections: TOPIC(4),
-    science: TOPIC(5),
-    local: TOPIC(6),
+    water: topicIdForSlug('climate-environment'),
+    climate: topicIdForSlug('climate-environment'),
+    elections: topicIdForSlug('elections-democracy'),
+    science: topicIdForSlug('science-research'),
+    local: topicIdForSlug('local-community'),
   };
   const link = (url: string, reason: string): SubmissionMetadata => ({
     submission_type: 'link',
@@ -1083,6 +1091,7 @@ export async function seedForumDemoData(
       canonicalPublicStoryId: null,
       language: 'en',
       topicIds: [topics.local],
+      proposedTopicIds: [topics.local],
       locationScope: { type: 'city', value: 'Harbor District' },
       sensitivityLabels: [],
       lifecycleState: 'gathering_attention',

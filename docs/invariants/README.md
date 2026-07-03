@@ -37,7 +37,7 @@ Two constraints govern everything here (SPEC §30.4, the M2 gate):
 | Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the eleven service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
 | Routes | `apps/api/src/routes/invariants-admin.ts`, `invariants-public.ts` | Steward/analyst surface; public SCOI/MERI reads |
 | Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `scoi_context_actions` (WS-H.4.3d), `bridge_attempts` (WS-H.4.2d) |
-| Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `components/wellbeing/NarrowLoopPrompt`, `signals/topic-loops.ts` | Exposure labels, the independent-sources drawer, interpretation differences, the composer context warning, PHI v0 prompts and controls |
+| Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `signals/topic-loops.ts`, `signals/topic-dampening.ts` | Exposure labels, the independent-sources drawer, interpretation differences, the composer context warning, PHI v0 topic-frequency feed dampening + wellbeing controls |
 
 ## The numeric kernels (`packages/invariants/src/math/`)
 
@@ -418,9 +418,12 @@ NAMES resolved through the room when available), the composer
 `ShareStoryButton` with the §10.5 origin-context prompt (sharing a
 context-sensitive story first offers to include a one-line origin note —
 "share as is" always works; Web Share API with clipboard fallback), the
-`NarrowLoopPrompt` (non-blocking; "see broader context" switches to the
-source-diverse feed mode AND, signed in, persists it through the durable
-personalization settings), and the PHI-4 wellbeing controls ("Reset topic
+**graduated topic-frequency dampener** (the quiet replacement for the removed
+`NarrowLoopPrompt`: a topic the reader is circling is shown steadily less often
+on the front page — down to a non-zero floor, so a pursued topic still surfaces
+rarely — computed entirely in-browser, sentinel-excluded, and recovering over
+time; `apps/web/src/signals/topic-dampening.ts`), and the PHI-4 wellbeing
+controls ("Reset topic
 history" clears the device-local sequence and the quiet-topic set;
 "Reduce personalization" switches the feed mode) — plus the per-topic
 repeats preference control on the story page (WS-H.2.3c), persisted in
@@ -487,7 +490,8 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 - **WS-I** is CLOSED as a seam (`docs/ranking/README.md`): the ranking
   pipeline consults `effectsEnabled(invariantType)` for every penalty and
   constraint (MERI dampening + cluster caps, MFCI risk-state effects, SCOI
-  context gates, PHI dampening, the GWEI deployment gate) — promoted
+  context gates, PHI per-user diversification, the GWEI deployment gate) —
+  promoted
   invariants ENFORCE; shadow invariants are computed and RECORDED in every
   decision log with `enforced: false`. Nothing has been promoted yet, by
   design; the per-topic repeats preference and the deliberate-choice

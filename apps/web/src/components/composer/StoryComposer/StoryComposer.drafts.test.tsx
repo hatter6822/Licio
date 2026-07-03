@@ -101,6 +101,7 @@ describe('StoryComposer draft restore (WS-Q.5.1b)', () => {
       mode: 'link',
       roomId: PUBLIC_ROOM,
       visibility: 'room_only',
+      topicIds: [],
       values: { title: 'Saved headline', url: 'https://draft.example/a', reason: 'Saved reason' },
     });
     const user = userEvent.setup();
@@ -135,6 +136,8 @@ describe('StoryComposer draft restore (WS-Q.5.1b)', () => {
     await user.type(screen.getByLabelText(/^title/i), 'Half-written post');
     await user.type(screen.getByLabelText(/link url/i), 'https://example.org/q');
     await user.type(screen.getByLabelText(/why this matters/i), 'Worth keeping');
+    // A topic proposal is required before submit (WS-K §24.1).
+    await user.click(screen.getByRole('button', { name: 'Technology' }));
     await user.click(screen.getByRole('button', { name: /post/i }));
 
     await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
@@ -153,6 +156,7 @@ describe('StoryComposer draft restore (WS-Q.5.1b)', () => {
       mode: 'original_brief',
       roomId: PUBLIC_ROOM,
       visibility: 'public',
+      topicIds: [],
       values: { body: 'a discarded brief' },
     });
     const user = userEvent.setup();

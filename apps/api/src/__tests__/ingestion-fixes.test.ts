@@ -27,6 +27,7 @@ import {
   type IngestionServicesFixture,
   post,
   seedUserWithSession,
+  TEST_TOPIC_ID,
 } from './ingestion-test-helpers.js';
 
 function v1Routes() {
@@ -86,7 +87,7 @@ describe('A1: anonymous takedown intake through the FULL app (WS-F.1.4f)', () =>
           room_id: COMMONS_ROOM_ID,
           body: 'A body.',
           title: 'A title',
-          topic_ids: [randomUUID()],
+          topic_ids: [TEST_TOPIC_ID],
         }),
       }),
     );
@@ -120,7 +121,7 @@ describe('A2: evidence-card submissions get embedded via evidence.added (WS-F.3.
           claim_id: claim.claimId,
           relevance_note: 'Replicates the headline finding with a larger sample.',
           title: 'Replication study',
-          topic_ids: [randomUUID()],
+          topic_ids: [TEST_TOPIC_ID],
         },
         cookie,
       ),
@@ -379,7 +380,7 @@ describe('E18: evidence-card citations populate source evidence-type frequency (
             claim_id: claim.claimId,
             relevance_note: 'A relevance note about the citation.',
             title: `Evidence ${randomUUID().slice(0, 6)}`,
-            topic_ids: [randomUUID()],
+            topic_ids: [TEST_TOPIC_ID],
           },
           cookie,
         ),

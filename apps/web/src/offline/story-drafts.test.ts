@@ -40,6 +40,7 @@ describe('WS-Q.5.1b story-draft autosave', () => {
       mode: 'link',
       roomId: PRIVATE_ROOM,
       visibility: 'room_only',
+      topicIds: [],
       values: { title: 'Reservoir report', url: 'https://example.org/a', reason: 'Primary' },
     });
     const restored = await loadStoryDraft('story-1');
@@ -59,6 +60,7 @@ describe('WS-Q.5.1b story-draft autosave', () => {
       mode: 'link',
       roomId: COMMONS_ROOM_ID,
       visibility: 'public',
+      topicIds: [],
       values: { title: 'older' },
     });
     await saveStoryDraft({
@@ -66,6 +68,7 @@ describe('WS-Q.5.1b story-draft autosave', () => {
       mode: 'original_brief',
       roomId: COMMONS_ROOM_ID,
       visibility: 'public',
+      topicIds: [],
       values: { body: 'newer' },
     });
     const drafts = await listStoryDrafts();
@@ -79,6 +82,7 @@ describe('WS-Q.5.1b story-draft autosave', () => {
       mode: 'link',
       roomId: COMMONS_ROOM_ID,
       visibility: 'public',
+      topicIds: [],
       values: { title: 'x' },
     });
     await deleteStoryDraft('story-x');
@@ -91,6 +95,7 @@ describe('WS-Q.5.1b story-draft autosave', () => {
       mode: 'link',
       roomId: COMMONS_ROOM_ID,
       visibility: 'public',
+      topicIds: [],
       values: { title: 'stale' },
     });
     const removed = await expireOldDrafts(Date.now() + DRAFT_MAX_AGE_MS + 1_000);

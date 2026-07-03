@@ -16,8 +16,10 @@
 //   meri_rank / redundancy_penalty ................ WS-H MERI
 //   mfci_score / mfci_risk_state / coordination_penalty ... WS-H MFCI (+ tropical)
 //   scoi_level .................................... WS-H SCOI context state
-//   phi_risk / holonomy_risk ...................... WS-H PHI
 //   gwei_cohort_disparity ......................... WS-H GWEI
+//   (PHI has NO per-item feature: holonomy is a per-USER/session signal, so it
+//    enters ranking as the per-user diversification constraint — see
+//    `phiDiversification` — never a per-item penalty.)
 //   hodge_harmonic_tension / harmful_tension_risk . WS-H Hodge (WS-J hostility seam)
 //   tropical_cascade_rank ......................... WS-H tropical cascade
 //   braid_agenda_entropy .......................... WS-H braid dynamics
@@ -95,12 +97,10 @@ export const featureVectorSchema = z
     mfci_score: z.number().nonnegative().optional(),
     mfci_risk_state: z.enum(MFCI_RISK_STATE_FEATURES).optional(),
     scoi_level: z.enum(SCOI_LEVELS).optional(),
-    phi_risk: z.number().nonnegative().optional(),
     gwei_cohort_disparity: z.number().nonnegative().optional(),
 
     // --- Penalty terms (each normalized to [0, 1]) --------------------------
     coordination_penalty: unit.optional(),
-    holonomy_risk: unit.optional(),
     harmful_tension_risk: unit.optional(),
     redundancy_penalty: unit.optional(),
 

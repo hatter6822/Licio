@@ -358,6 +358,13 @@
       "when": 1782198400000,
       "tag": "0051_pwatt_freeze_components",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1782198500000,
+      "tag": "0052_topic_catalog_proposed_topics",
+      "breakpoints": true
     }
   ]
 }

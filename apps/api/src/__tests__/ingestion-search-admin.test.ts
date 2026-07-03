@@ -18,6 +18,7 @@ import {
   linkSubmission,
   post,
   seedUserWithSession,
+  TEST_TOPIC_ID,
 } from './ingestion-test-helpers.js';
 
 function app() {
@@ -84,13 +85,17 @@ describe('GET /v1/search (WS-F.3.1b)', () => {
 
   it('filters by topic/source/language/date and validates inputs', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);
-    const topic = randomUUID();
     const inTopic = await submitBrief(cookie, {
       title: 'Wetland restoration funding approved',
-      topic_ids: [topic],
+      topic_ids: [TEST_TOPIC_ID],
     });
+    // The trusted topic is set by the WS-K validator (wired at boot, not in this
+    // ingestion-only fixture); simulate the validated state so the search topic
+    // filter has a real trusted topic to match on (author picks alone never
+    // populate `topic_ids`).
+    await fixture.ingestion.stories.update(inTopic, { topicIds: [TEST_TOPIC_ID] });
     await submitBrief(cookie, { title: 'Wetland photography contest results' });
-    const filtered = await search(`q=wetland&topic_id=${topic}`);
+    const filtered = await search(`q=wetland&topic_id=${TEST_TOPIC_ID}`);
     expect(filtered.items.map((i) => i.id)).toEqual([inTopic]);
     // Invalid filters are 400 (zod), never silently widened.
     expect((await search('q=wetland&topic_id=not-a-uuid')).status).toBe(400);

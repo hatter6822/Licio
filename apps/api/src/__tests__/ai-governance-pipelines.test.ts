@@ -5,6 +5,7 @@
 // gate → publish/withhold), translation (AI-translated + consistency), correction
 // + accuracy, governance AI (cited fields, uncertainty, COI/scam advisories,
 // prohibited capabilities blocked), and runtime monitoring.
+import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import {
   accuracyMetrics,
@@ -85,6 +86,45 @@ describe('WS-K.1.3a topic classification', () => {
     expect(story?.topicIds).toEqual(expect.arrayContaining(applied.map((a) => a.topic_id)));
     // An AIOutputRecord was written.
     expect(await f.ai.outputRecords.get(result?.output_id ?? '')).not.toBeNull();
+  });
+
+  it('validates supported author proposals and REJECTS unsupported ones (SPEC §24.1)', async () => {
+    const f = fresh();
+    const climate = topicIdForSlug('climate-environment'); // supported by the title
+    const health = topicIdForSlug('health'); // NOT supported by the title
+    const { storyId } = await seedThread(f.forum, {
+      // Multiple climate keywords clear the confidence threshold; no health ones.
+      title: 'Climate carbon emissions drought and renewable water levels',
+      proposedTopicIds: [climate, health],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    // The content-supported proposal becomes trusted; the unsupported one does not.
+    expect(story?.topicIds).toContain(climate);
+    expect(story?.topicIds).not.toContain(health);
+    // The trusted set is real (not the sentinel) since something validated.
+    expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+    // A rejected author proposal is recorded for steward review.
+    const review = await f.ai.reviewQueue.list({ status: 'pending' }, 50);
+    expect(
+      review.some(
+        (r) =>
+          r.kind === 'low_confidence_classification' &&
+          (r.context as Record<string, unknown>)['topic_id'] === health &&
+          (r.context as Record<string, unknown>)['rejected_author_proposal'] === true,
+      ),
+    ).toBe(true);
+  });
+
+  it('carries the UNCLASSIFIED sentinel when nothing validates', async () => {
+    const f = fresh();
+    const { storyId } = await seedThread(f.forum, {
+      title: 'The annual photography contest winners announced',
+      proposedTopicIds: [topicIdForSlug('health')],
+    });
+    await classifyStoryTopics(pipelineDeps(f), storyId);
+    const story = await f.forum.ingestion.stories.getById(storyId);
+    expect(story?.topicIds).toEqual([UNCLASSIFIED_TOPIC_ID]);
   });
 
   it('returns null for an unknown story', async () => {

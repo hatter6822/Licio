@@ -8,6 +8,7 @@
 // model backends are a seam that swaps in behind the same registry/evaluation/
 // guard machinery without changing any governance code.
 import { type AiModality, type AiUseCaseId, tokenize } from '@licio/ai-governance';
+import { TOPIC_KEYWORDS } from '@licio/shared';
 
 /** The governance identity every governed model carries. */
 export interface ModelIdentity {
@@ -74,34 +75,29 @@ export const GOVERNED_MODELS: readonly ModelIdentity[] = [
   GOVERNANCE_SUMMARIZER,
 ];
 
-// --- the deterministic topic classifier ------------------------------------
-
-/** A small canonical topic keyword map (the WS-A taxonomy is the SSOT; this is a
- *  deterministic stand-in until a governed model backend lands). */
-const TOPIC_KEYWORDS: Readonly<Record<string, readonly string[]>> = {
-  climate: ['climate', 'carbon', 'emissions', 'warming', 'renewable', 'wildfire', 'drought'],
-  policy: ['policy', 'law', 'bill', 'regulation', 'senate', 'congress', 'vote', 'election'],
-  technology: ['ai', 'software', 'chip', 'computer', 'internet', 'app', 'algorithm', 'data'],
-  health: ['health', 'disease', 'vaccine', 'hospital', 'medical', 'outbreak', 'mental'],
-  economy: ['economy', 'inflation', 'jobs', 'market', 'trade', 'tax', 'growth', 'budget'],
-  science: ['research', 'study', 'scientists', 'experiment', 'discovery', 'space', 'physics'],
-  local: ['city', 'council', 'neighborhood', 'community', 'school', 'county', 'mayor'],
-};
+// --- the deterministic topic classifier / validator ------------------------
 
 export interface TopicScore {
+  /** A canonical catalog topic id (`@licio/shared` TOPICS). */
   topicId: string;
   confidence: number;
 }
 
 /**
- * Deterministic multi-label topic classifier: score each topic by the fraction
- * of its keyword set present in the text, lightly boosted by hit count. Total
- * and pure; identical inputs yield identical scores.
+ * Deterministic multi-label topic classifier: score each CATALOG topic by the
+ * fraction of its keyword set present in the text, lightly boosted by hit
+ * count. Total and pure; identical inputs yield identical scores. The keyword
+ * evidence is sourced from the shared catalog (`TOPIC_KEYWORDS`) so the catalog
+ * is the single source of truth; a governed model backend swaps in here without
+ * changing consumers. Output ids are catalog UUIDs, never slugs — the classifier
+ * is the AI VALIDATOR that turns author proposals into trusted `topic_ids`
+ * (WS-K §24.1, `classifyStoryTopics`).
  */
 export function classifyTopics(title: string, body: string): TopicScore[] {
   const tokens = new Set(tokenize(`${title} ${title} ${body}`)); // title weighted ×2
   const scores: TopicScore[] = [];
-  for (const [topicId, keywords] of Object.entries(TOPIC_KEYWORDS)) {
+  for (const [topicId, keywords] of TOPIC_KEYWORDS) {
+    if (keywords.length === 0) continue; // the sentinel carries no keywords
     let hits = 0;
     for (const keyword of keywords) if (tokens.has(keyword)) hits += 1;
     if (hits === 0) continue;

@@ -180,10 +180,16 @@ the human-revision upgrades), sourcing the vocabulary from
 
 ## WS-K.1.3 / 1.4 Pipelines
 
-- **Topic classification** (WS-K.1.3a): multi-label with confidence;
-  above-threshold labels applied (merged into the story's topics for WS-I),
-  sub-threshold suggested to the review queue; AI-classified label;
-  `AIOutputRecord`.
+- **Topic classification / VALIDATION** (WS-K.1.3a, SPEC §24.1): the topic
+  classifier is the trust gate for a story's topics. The author's picks arrive
+  as UNTRUSTED `proposed_topic_ids`; `classifyStoryTopics` confirms each against
+  the story's actual content (confidence ≥ threshold) — supported picks become
+  the trusted `topic_ids`, unsupported picks are rejected to the review queue
+  (flagged `rejected_author_proposal`), and the classifier's own high-confidence
+  detections are added. Topic ids are canonical catalog UUIDs
+  (`@licio/shared` `constants/topics.ts`, the classifier's keyword evidence
+  SSOT); when nothing validates, the story carries the `UNCLASSIFIED` sentinel.
+  Multi-label with confidence; AI-classified label; `AIOutputRecord`.
 - **Claim extraction** (WS-K.1.3b): AI-draft propositions linked to their
   source passage.
 - **Human-in-the-loop correction** (WS-K.1.3c): a steward confirm/reject/modify

@@ -187,7 +187,7 @@ Define the per-item feature vector schema used by the ranking pipeline. The sche
 
 - **PWAtt components:** `ActiveAttention`, `ConstructiveParticipation`, `ExposureIndependence`, `SourceAndEvidenceCompleteness`, `ContextCoherenceGain` (each as a normalized float in `[0,1]`).
 - **Invariant signals:** `MERI_rank` (integer), `MFCI_score` (float + `risk_state` enum), `SCOI_level` (enum: low/medium/high/very_high), `PHI_risk` (float), `GWEI_cohort_disparity` (float).
-- **Penalty terms:** `CoordinationPenalty` (from MFCI), `HolonomyRisk` (from PHI), `HarmfulTensionRisk` (from Hodge), `RedundancyPenalty` (from MERI).
+- **Penalty terms:** `CoordinationPenalty` (from MFCI), `HarmfulTensionRisk` (from Hodge), `RedundancyPenalty` (from MERI). (`HolonomyRisk` from PHI was removed in v0.7.3 — PHI is realized as the per-user diversification constraint, not a per-item penalty.)
 - **Baseline components:** `freshness_decay` (float, time-based), `source_reliability` (float, from source history), `topic_relevance` (float, user interest match).
 - **Supporting invariants:** `Hodge_harmonic_tension` (float), `TropicalCascade_rank` (float), `BraidAgenda_entropy` (float), `ReebLandscape_basin_id` (string), `CID_defect` (float), `PathSignature_wellbeing` (float).
 - **Metadata:** `item_id`, `item_type`, `room_id`, `topic_ids`, `source_id`, `created_at`, `feature_version`, `invariant_versions` (map of `invariant_name` to version string).
@@ -363,6 +363,8 @@ Implement the PWAtt score computation as defined in the spec. The scoring functi
 
 The five positive weights (wA, wP, wE, wS, wC) are normalized to sum to 100% per ranking profile. Weight ranges are enforced: wA 20-30%, wP 25-40%, wE 10-20%, wS 5-15%, wC 5-15%. A deployed profile must choose shares within those ranges that jointly sum to 100% (e.g., 30/40/15/10/5). Weights vary by surface, topic sensitivity, freshness, age group, jurisdiction, and risk state. Each ranking profile is a named configuration specifying weights within the allowed ranges. The penalty coefficients (pM, pH, pT, pR) are NOT part of the convex combination; they are handled in WS-I.2.3b.
 
+> **Post-launch update (v0.7.3):** the served composite drops the per-item `- pH*HolonomyRisk` term (and the `pH` profile coefficient). Holonomy is a per-**user**/session signal, so PHI is realized as the per-user `holonomy_limits` diversification constraint (below), never a per-item penalty; the served composite is `− pM*Coordination − pT*HarmfulTension − pR*Redundancy`. See SPEC §5.4 and `docs/ranking/README.md`.
+
 **Acceptance criteria:**
 - The PWAtt function accepts a feature vector and a ranking profile, returns a score.
 - Positive weights sum to exactly 100% for every ranking profile.
@@ -395,7 +397,7 @@ The five positive weights (wA, wP, wE, wS, wC) are normalized to sum to 100% per
 Implement the four penalty terms as separate nonnegative subtractive components. Each penalty is computed from its corresponding invariant signal:
 
 - **pM (CoordinationPenalty):** derived from MFCI score and tropical cascade signals. Higher MFCI risk states produce larger penalties. Severe coordination freezes trend acceleration.
-- **pH (HolonomyRisk):** derived from PHI. High-holonomy loops produce increasing penalties. Sensitive topics (self-harm, eating disorders, medical misinformation, extremist ideology) use stricter thresholds.
+- **pH (HolonomyRisk):** ~~derived from PHI. High-holonomy loops produce increasing penalties. Sensitive topics (self-harm, eating disorders, medical misinformation, extremist ideology) use stricter thresholds.~~ **REMOVED (v0.7.3):** holonomy has no meaningful per-item value (it is a per-user/session signal), so PHI is realized as the per-user diversification constraint, not a per-item penalty. See SPEC §5.4.
 - **pT (HarmfulTensionRisk):** derived from Hodge harmonic tension combined with safety classifiers. Harmonic tension alone never penalizes legitimate sustained disagreement -- the penalty requires both high tension and hostility/safety signals.
 - **pR (RedundancyPenalty):** derived from MERI redundancy rank. Repeated copies of the same claim from the same source lineage accumulate increasing penalties.
 
@@ -882,7 +884,7 @@ Templates:
 - "This thread is temporarily under integrity review." (MFCI severe)
 - "Reporting impact is delayed because report timing is unusual." (coordinated-reporting detection)
 - "This topic is receiving unusual synchronized activity. Distribution is slowed while reviewed." (tropical cascade)
-- "Your recent feed has become narrow around this topic. See broader context?" (PHI holonomy)
+- "Your recent feed has become narrow around this topic. See broader context?" (PHI holonomy) — *replaced (v0.7.3) by the silent, in-browser topic-frequency dampener; no explanation is shown for it. See SPEC §11.6.*
 
 Explanations for slowed distribution are shown to all users viewing the item, not just the author. Users do not see raw statistical values or accusatory language.
 

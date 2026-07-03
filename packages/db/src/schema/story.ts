@@ -145,7 +145,19 @@ export const stories = pgTable(
     ),
     /** BCP 47 (canonical casing); null until detected. */
     language: text('language'),
+    /**
+     * TRUSTED topics — the story's real subjects, written ONLY by the WS-K
+     * validator after confirming content support (SPEC §24.1). Every ranking /
+     * search / invariant / PHI-loop consumer reads THIS. Never empty (the
+     * validator writes the `UNCLASSIFIED` sentinel when it classifies nothing).
+     */
     topicIds: uuid('topic_ids').array().notNull(),
+    /**
+     * The author's PROPOSED topics from the composer (SPEC §14.1) — UNTRUSTED
+     * validation input, never read by ranking/similarity. Defaults to empty for
+     * pre-migration rows (migration 0052, additive).
+     */
+    proposedTopicIds: uuid('proposed_topic_ids').array().notNull().default(sql`'{}'::uuid[]`),
     locationScope: jsonb('location_scope').$type<LocationScope>(),
     sensitivityLabels: text('sensitivity_labels').array().notNull().default(sql`'{}'::text[]`),
     lifecycleState: storyLifecycleStateEnum('lifecycle_state').notNull().default('submitted'),

@@ -6,7 +6,7 @@
 // bodies. The ingestion bundle's `settle()` makes the detached pipeline
 // deterministic in tests.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID, type StoryCreateRequest } from '@licio/shared';
+import { COMMONS_ROOM_ID, type StoryCreateRequest, topicIdForSlug } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import {
   createInMemoryForumServices,
@@ -25,6 +25,10 @@ import {
 import { freshEventServices, seedUserWithSession } from './event-test-helpers.js';
 
 export { seedUserWithSession };
+
+/** A valid, selectable catalog topic id for submission-body helpers (the wire
+ *  schema rejects off-catalog ids, so tests must PROPOSE a real topic). */
+export const TEST_TOPIC_ID = topicIdForSlug('local-community');
 
 export interface IngestionServicesFixture {
   identity: IdentityServices;
@@ -98,7 +102,7 @@ export function linkSubmission(url: string, over: Partial<StoryCreateRequest> = 
     url,
     reason: 'Primary source for the development',
     title: `Linked story ${randomUUID().slice(0, 8)}`,
-    topic_ids: [randomUUID()],
+    topic_ids: [TEST_TOPIC_ID],
     // WS-Q — every submission picks a home room (Commons by default; the
     // in-memory store self-seeds it and the public+open room auto-joins).
     room_id: COMMONS_ROOM_ID,
@@ -111,7 +115,7 @@ export function briefSubmission(over: Record<string, unknown> = {}) {
     submission_type: 'original_brief',
     body: 'The council voted 7 to 2 to approve the new reservoir bond on Tuesday evening.',
     title: `Brief ${randomUUID().slice(0, 8)}`,
-    topic_ids: [randomUUID()],
+    topic_ids: [TEST_TOPIC_ID],
     room_id: COMMONS_ROOM_ID,
     ...over,
   };

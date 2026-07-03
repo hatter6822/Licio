@@ -81,6 +81,7 @@ import type {
   SignatureStore,
   SourceRecord,
   SourceStore,
+  StoryCreateInput,
   StoryCreateOutcome,
   StoryDedupTier,
   StoryRecord,
@@ -137,6 +138,7 @@ export class DrizzleStoryStore implements StoryStore {
       canonicalPublicStoryId: row.canonicalPublicStoryId,
       language: row.language,
       topicIds: row.topicIds,
+      proposedTopicIds: row.proposedTopicIds,
       locationScope: row.locationScope ?? null,
       sensitivityLabels: row.sensitivityLabels as StoryRecord['sensitivityLabels'],
       lifecycleState: row.lifecycleState,
@@ -250,10 +252,7 @@ export class DrizzleStoryStore implements StoryStore {
     return rows.map((row) => this.#toThread(row.threads));
   }
 
-  async createWithThread(
-    story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
-    threadId: string,
-  ): Promise<StoryCreateOutcome> {
+  async createWithThread(story: StoryCreateInput, threadId: string): Promise<StoryCreateOutcome> {
     try {
       // Explicit millisecond-precision timestamps (not SQL now()): keyset
       // cursors round-trip created_at through JS Dates/ISO strings, which
@@ -277,6 +276,7 @@ export class DrizzleStoryStore implements StoryStore {
             canonicalPublicStoryId: story.canonicalPublicStoryId,
             language: story.language,
             topicIds: story.topicIds,
+            proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
             locationScope: story.locationScope,
             sensitivityLabels: story.sensitivityLabels,
             lifecycleState: story.lifecycleState,

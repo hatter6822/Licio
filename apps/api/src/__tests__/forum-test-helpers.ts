@@ -70,6 +70,10 @@ export async function seedThread(
     title?: string;
     visibility?: 'public' | 'room_only';
     submittedBy?: string;
+    /** Trusted topics (defaults to a random id). */
+    topicIds?: string[];
+    /** Author-proposed topics (defaults to the trusted set / random). */
+    proposedTopicIds?: string[];
   } = {},
 ): Promise<{ storyId: string; threadId: string }> {
   const storyId = options.storyId ?? randomUUID();
@@ -88,7 +92,10 @@ export async function seedThread(
       mediaUploadRef: null,
       canonicalPublicStoryId: null,
       language: 'en',
-      topicIds: [randomUUID()],
+      topicIds: options.topicIds ?? [randomUUID()],
+      ...(options.proposedTopicIds !== undefined
+        ? { proposedTopicIds: options.proposedTopicIds }
+        : {}),
       locationScope: null,
       sensitivityLabels: [],
       lifecycleState: 'gathering_attention',
