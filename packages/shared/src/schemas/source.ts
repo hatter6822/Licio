@@ -8,8 +8,21 @@
 // substitute for reader judgment (§14.3 doctrine). A schema-shape test plus
 // the db-layer assertion enforce that absence structurally.
 import { z } from 'zod';
+import { isSelectableTopicId } from '../constants/topics.js';
 import { evidenceRelationshipTypeSchema } from './claim.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
+
+/**
+ * A source's `typical_topics` entry on a STEWARD EDIT: it must be a selectable
+ * catalog SUBJECT topic (SPEC §24.1) — never an off-catalog / pre-catalog random
+ * UUID or the UNCLASSIFIED sentinel (which is not a "typical topic"). This is the
+ * write-boundary counterpart to the migration-`0052` backfill: without it a
+ * steward PATCH could reintroduce a non-catalog id that `GET /v1/sources/:id`
+ * would then expose.
+ */
+const typicalTopicIdSchema = z
+  .string()
+  .refine(isSelectableTopicId, { message: 'not a selectable catalog topic' });
 
 /** One step of the ownership/publisher lineage chain, when known. */
 export const publisherLineageEntrySchema = z
@@ -86,7 +99,7 @@ export const sourceEditRequestSchema = z
   .object({
     name: z.string().min(1).max(200).optional(),
     publisher_lineage: z.array(publisherLineageEntrySchema).max(10).nullable().optional(),
-    typical_topics: z.array(uuidSchema).max(50).optional(),
+    typical_topics: z.array(typicalTopicIdSchema).max(50).optional(),
     display_restrictions: displayRestrictionsSchema.optional(),
     community_notes: z.array(sourceCommunityNoteSchema).max(100).optional(),
     /** Required audit reason for every steward edit. */
