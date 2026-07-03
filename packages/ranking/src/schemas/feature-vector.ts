@@ -35,7 +35,10 @@ import { z } from 'zod';
 import { findDeniedFields } from '../denylist.js';
 
 /** Bump on any change to the feature-vector field set (WS-I.2.1c). */
-export const FEATURE_SCHEMA_VERSION = 1;
+// v2: the WS-I topic-validation cut — the PHI penalty inputs (`phi_risk`,
+// `holonomy_risk`) were removed and `sensitivity_labels` added, changing the
+// stored field set, so serve/replay cohorts stay distinguishable by version.
+export const FEATURE_SCHEMA_VERSION = 2;
 
 /** MFCI risk states as ranking features (SPEC §8.5). */
 export const MFCI_RISK_STATE_FEATURES = ['normal', 'elevated', 'high', 'severe'] as const;

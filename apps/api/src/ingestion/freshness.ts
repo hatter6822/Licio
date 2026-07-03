@@ -13,6 +13,7 @@ import {
   FRESHNESS_FEATURE_VERSION,
   type FreshnessConfig,
 } from '@licio/invariants';
+import { isSentinelTopicId } from '@licio/shared';
 import type { FreshnessStore, StoryRecord, StoryStore } from './stores.js';
 
 /** Cadence window the topic baseline is measured over. */
@@ -65,7 +66,11 @@ export async function recomputeFreshness(
   nowMs: number,
   config: FreshnessConfig = DEFAULT_FRESHNESS_CONFIG,
 ): Promise<void> {
-  const topicBaselineMs = await topicCadenceBaseline(stories, story.topicIds, nowMs);
+  // The UNCLASSIFIED sentinel is not a real shared topic — exclude it so two
+  // unclassified stories never derive a common topic-cadence baseline and
+  // distort each other's freshness (SPEC §24.1).
+  const realTopicIds = story.topicIds.filter((id) => !isSentinelTopicId(id));
+  const topicBaselineMs = await topicCadenceBaseline(stories, realTopicIds, nowMs);
   const score = computeFreshnessScore(
     {
       nowMs,

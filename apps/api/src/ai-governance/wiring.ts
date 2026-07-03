@@ -144,6 +144,11 @@ export function buildRuntimeMonitorDeps(ai: AiGovernanceServices): RuntimeMonito
 export function registerAiGovernanceConsumers(
   events: EventPipelineServices,
   ai: AiGovernanceServices,
+  // Composition-root hook: after a story's topics are validated, refresh its
+  // ranking feature vector so the validated topics/sensitivity reach scoring
+  // without waiting for the hourly batch (WS-I cold-start staleness). Optional
+  // — a domain-pure seam; only the boot wiring knows about the ranking domain.
+  onStoryClassified?: (storyId: string) => Promise<void>,
 ): void {
   events.router.register({
     name: 'ai-governance-classification',
@@ -159,6 +164,15 @@ export function registerAiGovernanceConsumers(
       const story = await ai.ingestion.stories.getById(storyId);
       if (story === null) return;
       await classifyStoryTopics(deps, storyId);
+      // Push the validated topics/sensitivity into the ranking feature store now
+      // (best-effort; the batch path is the backstop).
+      if (onStoryClassified !== undefined) {
+        try {
+          await onStoryClassified(storyId);
+        } catch {
+          ai.metrics.increment('ai.topic.classification.feature_refresh_skipped');
+        }
+      }
       // Extraction over the available body text (excerpt; a backend carries the
       // full normalized text). Best-effort — a failure never blocks ingestion.
       const body = story.excerpt ?? story.title;

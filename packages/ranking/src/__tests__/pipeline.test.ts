@@ -14,7 +14,7 @@ import {
   rankFeasibleSet,
   SHADOW_RANKING_ENFORCEMENT,
 } from '../pipeline.js';
-import type { FeatureVector } from '../schemas/feature-vector.js';
+import { FEATURE_SCHEMA_VERSION, type FeatureVector } from '../schemas/feature-vector.js';
 import { BREAKING_NEWS_PROFILE, EVERGREEN_PROFILE } from '../schemas/profile.js';
 import { makeCandidate, makeContext, makeFeatures, T0, uuidOf } from './fixtures.js';
 
@@ -201,6 +201,12 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
     expect(vector.sensitivity_labels).toEqual(['crisis']);
     // Absent on the candidate ⇒ absent on the vector (⇒ not sensitive).
     expect(emptyFeatureVector(makeCandidate(8), T0).sensitivity_labels).toBeUndefined();
+  });
+
+  it('cold-start vectors carry the current feature schema version (WS-I cohort audit)', () => {
+    // The cold-start path must write the CURRENT schema version so serve/replay
+    // cohorts stay distinguishable across a field-set change.
+    expect(emptyFeatureVector(makeCandidate(7), T0).feature_version).toBe(FEATURE_SCHEMA_VERSION);
   });
 
   it('MERI clusters are capped and expansions reported', () => {

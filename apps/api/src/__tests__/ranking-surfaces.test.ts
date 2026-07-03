@@ -17,7 +17,11 @@ import {
   MINHASH_SHINGLE_K,
 } from '@licio/invariants';
 import { EVERGREEN_PROFILE, rankingDecisionLogSchema } from '@licio/ranking';
-import { DEFAULT_ROOM_NOTIFICATION_PREFERENCES, feedResponseSchema } from '@licio/shared';
+import {
+  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
+  feedResponseSchema,
+  topicIdForSlug,
+} from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { signatureStory } from '../ingestion/dedup.js';
@@ -245,6 +249,21 @@ describe('topic feed surface (GET /v1/feed?topic=…)', () => {
     expect(body.items.map((item) => item.story_id)).not.toContain(transit.storyId);
     const log = await fixture.ranking.decisionLogs.getByRequestId(body.request_id as string);
     expect(log?.surface).toBe('topic');
+  });
+
+  it('resolves a `?topic=<slug>` to its catalog UUID so catalog-backed stories surface', async () => {
+    // Real stories carry trusted catalog UUID topic ids; the public `?topic=`
+    // form is the slug. The surface must resolve the slug to the UUID or it
+    // would filter out every catalog-backed story.
+    const climate = topicIdForSlug('climate-environment');
+    const inTopic = await seedStory(fixture.ingestion, { topicIds: [climate] });
+    const other = await seedStory(fixture.ingestion, { topicIds: [topicIdForSlug('health')] });
+    const app = new Hono().route('/v1', createV1Routes());
+    const response = await app.request('/v1/feed?topic=climate-environment');
+    expect(response.status).toBe(200);
+    const body = feedResponseSchema.parse(await response.json());
+    expect(body.items.map((item) => item.story_id)).toContain(inTopic.storyId);
+    expect(body.items.map((item) => item.story_id)).not.toContain(other.storyId);
   });
 
   it('a sensitive topic selects the conservative profile even for a breaking pool', async () => {

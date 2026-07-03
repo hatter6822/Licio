@@ -41,6 +41,7 @@ import {
   type TranslationDeps,
   translateContent,
 } from '../ai-governance/translation.js';
+import { recomputeFreshness } from '../ingestion/freshness.js';
 import { freshForumServices, seedThread } from './forum-test-helpers.js';
 
 const NOW = () => Date.parse('2026-06-19T00:00:00.000Z');
@@ -175,6 +176,28 @@ describe('WS-K.1.3a topic classification', () => {
     // instead of being rejected for lack of a fetched excerpt.
     expect(story?.topicIds).toContain(climate);
     expect(story?.topicIds).not.toContain(UNCLASSIFIED_TOPIC_ID);
+  });
+
+  it('an unclassified story derives no topic-cadence freshness baseline (sentinel excluded)', async () => {
+    const f = fresh();
+    // Two stories both carrying ONLY the UNCLASSIFIED sentinel.
+    const a = await seedThread(f.forum, {
+      title: 'A',
+      topicIds: [UNCLASSIFIED_TOPIC_ID],
+    });
+    await seedThread(f.forum, { title: 'B', topicIds: [UNCLASSIFIED_TOPIC_ID] });
+    const storyA = await f.forum.ingestion.stories.getById(a.storyId);
+    if (storyA === null) throw new Error('seed failed');
+    // Window anchored to the story's own creation so both stories fall inside.
+    await recomputeFreshness(
+      f.forum.ingestion.stories,
+      f.forum.ingestion.freshness,
+      storyA,
+      Date.parse(storyA.createdAt) + 1000,
+    );
+    // The sentinel is excluded, so two unclassified stories never derive a
+    // common topic-cadence baseline (it would be non-null without the filter).
+    expect((await f.forum.ingestion.freshness.get(a.storyId))?.topicBaselineMs).toBeNull();
   });
 
   it('returns null for an unknown story', async () => {

@@ -182,6 +182,7 @@ import { createDefaultModerationStateProvider } from './ranking/safety-filter.js
 import { RANKING_SCHEDULER_INTERVAL_MS, startRankingScheduler } from './ranking/scheduler.js';
 import {
   createInMemoryRankingServices,
+  refreshStoryFeatures,
   registerRankingConsumers,
   setRankingServices,
 } from './ranking/services.js';
@@ -784,7 +785,9 @@ aiGovernanceServices.ingestion = ingestionServices;
 aiGovernanceServices.forum = forumServices;
 await aiGovernanceServices.reloadConfig();
 setAiGovernanceServices(aiGovernanceServices);
-registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+registerAiGovernanceConsumers(eventServices, aiGovernanceServices, (storyId) =>
+  refreshStoryFeatures(rankingServices, storyId),
+);
 
 // WS-U AI-governed rooms: bind the GovernanceService process singleton to the
 // production Drizzle stores (the isolated `knomosis` context) when a database is

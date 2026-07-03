@@ -34,6 +34,7 @@ import {
 import {
   type FeatureAssemblyDeps,
   pwattRowForRanking,
+  refreshFeatures,
   registerFeatureStoreConsumer,
 } from './features.js';
 import type { ClassificationPorts } from './orchestrator.js';
@@ -415,8 +416,8 @@ export function createInMemoryRankingServices(
 }
 
 /** Register the WS-I durable consumers (feature-store real-time path). */
-export function registerRankingConsumers(services: RankingServices): void {
-  const deps: FeatureAssemblyDeps = {
+function featureAssemblyDeps(services: RankingServices): FeatureAssemblyDeps {
+  return {
     events: services.events,
     ingestion: services.ingestion,
     invariants: services.invariants,
@@ -424,7 +425,25 @@ export function registerRankingConsumers(services: RankingServices): void {
     log: services.log,
     now: services.now,
   };
-  registerFeatureStoreConsumer(deps);
+}
+
+export function registerRankingConsumers(services: RankingServices): void {
+  registerFeatureStoreConsumer(featureAssemblyDeps(services));
+}
+
+/**
+ * Refresh ONE story's ranking feature vector on demand — e.g. after the WS-K
+ * topic-validation pass promotes the trusted topics — so a cold-start empty
+ * revision (written when the story was served while classification was still
+ * pending) does not shadow the validated topics + sensitivity labels until the
+ * hourly batch. Assembles from the CURRENT story, so it picks up the validated
+ * state. Best-effort; a failure leaves the batch path to catch up.
+ */
+export async function refreshStoryFeatures(
+  services: RankingServices,
+  storyId: string,
+): Promise<void> {
+  await refreshFeatures(featureAssemblyDeps(services), storyId);
 }
 
 // --- Module singleton (house pattern) ---------------------------------------

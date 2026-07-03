@@ -21,7 +21,7 @@ import { applyBalancing, type BalancingInput } from './diversify/balancing.js';
 import { applyMatroidDedup, type DedupInput } from './diversify/dedup.js';
 import { type Candidate, mergeCandidates } from './schemas/candidate.js';
 import type { ConstraintApplication } from './schemas/decision-log.js';
-import type { FeatureVector } from './schemas/feature-vector.js';
+import { FEATURE_SCHEMA_VERSION, type FeatureVector } from './schemas/feature-vector.js';
 import type { RankingProfileConfig } from './schemas/profile.js';
 import { type ConstraintFlag, type ScoredItem, scoredItemSchema } from './schemas/scored-item.js';
 import { computeBaseline, freshnessFromAge } from './scoring/baseline.js';
@@ -271,7 +271,7 @@ export function emptyFeatureVector(candidate: Candidate, nowMs: number): Feature
       : {}),
     source_id: candidate.source_id,
     created_at: candidate.freshness_timestamp,
-    feature_version: 1,
+    feature_version: FEATURE_SCHEMA_VERSION,
     revision: 0,
     invariant_versions: {},
     updated_at: now,

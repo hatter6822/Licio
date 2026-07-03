@@ -36,6 +36,7 @@ import {
   emptyFeatureVector,
   explainItem,
   type FallbackReason,
+  FEATURE_SCHEMA_VERSION,
   type FeatureVector,
   fallbackExplanation,
   type GeneratedExplanation,
@@ -61,6 +62,7 @@ import {
   type FeedMode,
   feedItemSchema,
   rankingDecisionLoggedEventSchema,
+  TOPIC_ID_BY_SLUG,
   TOPIC_REGISTRY,
   uuidSchema,
 } from '@licio/shared';
@@ -581,7 +583,11 @@ export async function serveFeed(
   if (request.surface === 'room' && request.surfaceRoomId !== null) {
     surfacePool = surfacePool.filter((c) => c.room_id === request.surfaceRoomId);
   } else if (request.surface === 'topic' && request.surfaceTopicId !== null) {
-    const topicId = request.surfaceTopicId;
+    // `?topic=` may be a catalog SLUG (the canonical public form) or a raw
+    // catalog UUID; resolve a known slug to its UUID so it matches candidates'
+    // trusted catalog topic ids (UUIDs). An unknown value passes through
+    // unchanged (already a UUID, or a test/legacy slug the seed used directly).
+    const topicId = TOPIC_ID_BY_SLUG.get(request.surfaceTopicId) ?? request.surfaceTopicId;
     surfacePool = surfacePool.filter((c) => c.topic_ids.includes(topicId));
   }
   // WS-Q.4.2a — the always-on distribution gate runs BEFORE the ranked/fallback
@@ -885,7 +891,7 @@ export async function serveFeed(
     timestamp: nowIso,
     profile_id: profile.profile_id,
     profile_version: profile.profile_version,
-    feature_version: 1,
+    feature_version: FEATURE_SCHEMA_VERSION,
     fallback: false,
     fallback_reason: null,
     replay_inputs: {
@@ -1025,7 +1031,7 @@ async function serveFallback(
     timestamp: args.nowIso,
     profile_id: args.profile.profile_id,
     profile_version: args.profile.profile_version,
-    feature_version: 1,
+    feature_version: FEATURE_SCHEMA_VERSION,
     fallback: true,
     fallback_reason: args.reason,
     replay_inputs: null,
