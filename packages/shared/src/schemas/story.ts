@@ -318,7 +318,10 @@ export const storyPublicSchema = z
     canonical_public_story_id: uuidSchema.nullable(),
     submitted_by: uuidSchema,
     language: bcp47Schema.nullable(),
-    topic_ids: z.array(uuidSchema).min(1).max(20),
+    // Subject topics only — the wire strips the UNCLASSIFIED sentinel, so an
+    // unclassified story carries NO topic here (the DB still holds the sentinel,
+    // satisfying its own non-empty CHECK). Hence min 0, not 1.
+    topic_ids: z.array(uuidSchema).max(20),
     location_scope: locationScopeSchema.nullable(),
     sensitivity_labels: z.array(sensitivityLabelSchema).max(5),
     lifecycle_state: storyLifecycleStateSchema,

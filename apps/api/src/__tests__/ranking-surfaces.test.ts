@@ -21,6 +21,7 @@ import {
   DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   feedResponseSchema,
   topicIdForSlug,
+  UNCLASSIFIED_TOPIC_ID,
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -249,6 +250,24 @@ describe('topic feed surface (GET /v1/feed?topic=…)', () => {
     expect(body.items.map((item) => item.story_id)).not.toContain(transit.storyId);
     const log = await fixture.ranking.decisionLogs.getByRequestId(body.request_id as string);
     expect(log?.surface).toBe('topic');
+  });
+
+  it('never surfaces the UNCLASSIFIED sentinel as a topic on a feed item (WS-I wire)', async () => {
+    const unclassified = await seedStory(fixture.ingestion, {
+      topicIds: [UNCLASSIFIED_TOPIC_ID],
+    });
+    const feed = await serveFeed(fixture.ranking, {
+      userId: null,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    const item = feed.items.find((i) => i.story_id === unclassified.storyId);
+    expect(item).toBeDefined();
+    // The sentinel is stripped from the wire, so the card shows no topic chip
+    // and no per-topic repeats control for an unclassified story.
+    expect(item?.topic_ids).toEqual([]);
   });
 
   it('resolves a `?topic=<slug>` to its catalog UUID so catalog-backed stories surface', async () => {

@@ -12,7 +12,11 @@ import { minhashSignature } from '@licio/invariants';
 import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
-import { assembleMeriCandidates, assembleTopicCascade } from '../invariants/data.js';
+import {
+  assembleMeriCandidates,
+  assemblePhiTopicData,
+  assembleTopicCascade,
+} from '../invariants/data.js';
 import {
   HealthRecorder,
   hourWindow,
@@ -263,6 +267,18 @@ describe('MERI assembly through real MinHash signatures', () => {
     await seedStory(fixture, { topicIds: [UNCLASSIFIED_TOPIC_ID] });
     await seedStory(fixture, { topicIds: [UNCLASSIFIED_TOPIC_ID] });
     expect(await assembleTopicCascade(fixture.ingestion, UNCLASSIFIED_TOPIC_ID)).toEqual([]);
+  });
+
+  it('assemblePhiTopicData never builds a PHI cluster for the sentinel', async () => {
+    const fixture = freshInvariantServices();
+    // Several unclassified stories must not form a synthetic PHI topic cluster;
+    // the sentinel is filtered from `wanted` regardless of what the caller asks.
+    for (let i = 0; i < 4; i += 1) {
+      await seedStory(fixture, { topicIds: [UNCLASSIFIED_TOPIC_ID] });
+    }
+    const data = await assemblePhiTopicData(fixture.ingestion, [UNCLASSIFIED_TOPIC_ID]);
+    expect(data.structures.size).toBe(0);
+    expect(data.sensitive.has(UNCLASSIFIED_TOPIC_ID)).toBe(false);
   });
 });
 

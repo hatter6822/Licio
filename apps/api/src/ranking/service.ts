@@ -61,6 +61,7 @@ import {
   type FeedItem,
   type FeedMode,
   feedItemSchema,
+  isSentinelTopicId,
   rankingDecisionLoggedEventSchema,
   TOPIC_ID_BY_SLUG,
   TOPIC_REGISTRY,
@@ -275,7 +276,9 @@ async function buildFeedItems(
         exposure_label: exposureLabel,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
         context_card: entry.contextCard,
-        topic_ids: story.topicIds.slice(0, 8),
+        // Never surface the UNCLASSIFIED sentinel as a topic on the wire — it
+        // would drive a topic-repeats control for a non-subject "topic".
+        topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 8),
       }),
     );
   }
