@@ -227,9 +227,12 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   cluster_member: {
     id: 'cluster_member',
-    // Idle in organic scenarios; the coordinated_burst scenario multiplies
-    // these into a synchronized hammer on one focus story.
-    rates: { story: 0, comment: 0.02, attention: 0.05, join: 0.005, report: 0.002 },
+    // Idle in organic scenarios (never provisioned outside coordinated_burst);
+    // that scenario multiplies these into a synchronized hammer on one focus
+    // story. The report rate is set so that, with the burst multiplier, every
+    // member files within the WS-J coordination window (300s) even at the
+    // default speed of 1 — so all 12 distinct reporters cross the detector.
+    rates: { story: 0, comment: 0.02, attention: 0.05, join: 0.005, report: 0.02 },
     dwell: dw(4, 4, 2, 0, 0),
     replyDepth: rd(7, 3, 0, 0),
     returns: rv(2, 4, 3, 1),
@@ -305,8 +308,13 @@ export const BASE_ROSTER: readonly PersonaSpec[] = [
 ] as const;
 
 /** The adversarial cluster (provisioned lazily by coordinated_burst so the
- *  accounts are genuinely FRESH when the burst begins). */
-export const CLUSTER_ROSTER: readonly PersonaSpec[] = Array.from({ length: 8 }, (_, i) =>
+ *  accounts are genuinely FRESH when the burst begins). Sized to 12 so the
+ *  synchronized reports deterministically cross the WS-J coordinated-report
+ *  detector, which needs BOTH >= coordinationMinReports (default 10) AND
+ *  >= coordinationMinDistinctReporters (default 8): each member files one
+ *  non-idempotent report on the focus story, so 12 distinct reporters clear
+ *  both thresholds with headroom. */
+export const CLUSTER_ROSTER: readonly PersonaSpec[] = Array.from({ length: 12 }, (_, i) =>
   P(100 + i, `cluster_relay_${i + 1}`, `Relay ${i + 1}`, 'cluster_member', ['climate']),
 );
 

@@ -922,13 +922,19 @@ export class DevTrafficSimulator {
       story.submittedBy,
     );
     if (outcome.ok) {
-      this.#counters.reports_filed += 1;
-      this.#record({
-        kind: 'report',
-        actor: this.#handleFor(action.personaUserId),
-        summary: 'filed a report',
-        outcome: 'ok',
-      });
+      // A repeat (reporter, target, reason) within the cooldown returns ok but
+      // is IDEMPOTENT — no new report row is created. Counting it would overstate
+      // the real report pressure (the panel tally must be honest), so only count
+      // a genuinely new report.
+      if (!outcome.response.idempotent) {
+        this.#counters.reports_filed += 1;
+        this.#record({
+          kind: 'report',
+          actor: this.#handleFor(action.personaUserId),
+          summary: 'filed a report',
+          outcome: 'ok',
+        });
+      }
     } else {
       this.#recordRejection(
         'report',
@@ -1007,9 +1013,14 @@ export class DevTrafficSimulator {
       createdAtMs,
     );
     // One fake platform passkey so accountVerified is true (some service paths
-    // gate on verification), mirroring the test-helper pattern.
+    // gate on verification). The id MUST be a valid base64url string whose bytes
+    // are unique per user: the Drizzle store decodes `credentialId` with
+    // Buffer.from(id,'base64url') as its primary key, and a raw `sim-cred-<uuid>`
+    // is not base64url — distinct uuids decode to the SAME bytes, collapsing
+    // every persona onto one credential row (leaving them unverified on a
+    // Postgres-backed dev boot). Encode the readable id so it round-trips.
     await identity.store.addWebauthn({
-      credentialId: `sim-cred-${spec.userId}`,
+      credentialId: Buffer.from(`sim-cred-${spec.userId}`, 'utf8').toString('base64url'),
       userId: spec.userId,
       publicKey: new Uint8Array([1, 2, 3]),
       counter: 0,

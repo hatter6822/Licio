@@ -9,6 +9,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CommentFrame } from '../../forum/comment-broadcaster.js';
 import { serveFeed } from '../../ranking/service.js';
+import { CLUSTER_ROSTER } from '../personas.js';
 import { DevTrafficSimulator } from '../runtime.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
 import { req } from './sim-test-util.js';
@@ -135,18 +136,39 @@ describe('DevTrafficSimulator runtime', () => {
     });
     await sim.start();
     const organic = sim.status().personas_active;
-    for (let i = 0; i < 8; i += 1) await sim.tick();
+    for (let i = 0; i < 10; i += 1) await sim.tick();
     await sim.forceSignalRefresh();
     const status = sim.status();
-    // The fresh 8-account cluster actually provisioned (grew the roster) — the
-    // scenario is not silently running with only organic users.
-    expect(status.personas_active).toBe(organic + 8);
+    // The fresh cluster actually provisioned (grew the roster by CLUSTER_ROSTER)
+    // — the scenario is not silently running with only organic users.
+    expect(status.personas_active).toBe(organic + CLUSTER_ROSTER.length);
     // and drove attention + reports at the focus story (the integrity pipeline
     // consumes these without crashing).
     expect(
       status.counters.attention_events_accepted + status.counters.reports_filed,
     ).toBeGreaterThan(0);
     expect(status.counters.errors).toBe(0);
+  });
+
+  it('coordinated_burst files enough distinct reports to cross the WS-J detector, without double-counting', async () => {
+    const graph = await buildSimTestGraph();
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'coordinated_burst',
+      seed: 'reports',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    for (let i = 0; i < 20; i += 1) await sim.tick();
+    const filed = sim.status().counters.reports_filed;
+    // Crosses the detector minimum (10 reports). Idempotent repeats — every
+    // cluster member hammers the SAME focus story with the SAME reason each tick
+    // — are NOT counted, so the tally plateaus near the distinct reporter count
+    // (12 cluster + a few organic) rather than climbing into the hundreds it
+    // would without the idempotency guard.
+    expect(filed).toBeGreaterThanOrEqual(10);
+    expect(filed).toBeLessThanOrEqual(CLUSTER_ROSTER.length + 6);
   });
 
   it('never generates attention against a private room_only story (visibility bar)', async () => {

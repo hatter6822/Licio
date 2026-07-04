@@ -90,7 +90,10 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     focusBias: 0.2,
     kickoffStory: true,
     repostAfterMs: null,
-    cluster: { attention: 40, comment: 15, report: 20 },
+    // report multiplier × the cluster_member base (0.02) = ~1 report/min per
+    // member at speed 1, so all 12 members file within the 300s coordination
+    // window and the report count crosses the detector's minimum (10).
+    cluster: { attention: 40, comment: 15, report: 50 },
     newcomersPerMinute: 0,
   },
   influx: {
