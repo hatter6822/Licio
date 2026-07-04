@@ -50,6 +50,17 @@ export function evaluateTreasuryAction(
     };
   }
 
+  // Self-guard the proof-carrying contract independent of any front-door schema:
+  // a non-finite (NaN/±Infinity) or negative amount would make every cap
+  // comparison silently pass, so reject it up front (fail-closed).
+  if (!Number.isFinite(action.amount) || action.amount < 0) {
+    return {
+      accepted: false,
+      code: 'invalid_amount',
+      reason: 'The treasury action amount must be a finite, non-negative number.',
+    };
+  }
+
   const checks: ProofCheck[] = [];
   const cap = bounds.caps.find((c) => c.category === action.category);
   if (!cap) {
@@ -131,6 +142,23 @@ export function evaluateTreasuryAction(
       }
     }
     checks.push({ name: 'investment_interval', passed: true });
+
+    // Enforce the community-voted per-asset allocation bands (fail-closed): a room
+    // that has voted an investment policy requires the rebalance to declare a
+    // target allocation that satisfies every band. Without this the voted bands
+    // would be structurally unenforceable (a rebalance could move 100% into a
+    // volatile asset). `checkInvestmentBands` is the machine-checkable proof.
+    if (action.targetAllocation === null) {
+      return {
+        accepted: false,
+        code: 'investment_band_required',
+        reason:
+          'This room has voted an investment policy; a target allocation is required for a rebalance.',
+      };
+    }
+    const bandVerdict = checkInvestmentBands(action.targetAllocation, bounds.investment);
+    if (!bandVerdict.accepted) return bandVerdict;
+    checks.push({ name: 'investment_bands', passed: true });
   }
 
   return { accepted: true, evidence: { checks } };

@@ -85,6 +85,15 @@ export interface RatificationVoteRecord {
   opensAt: string;
   closesAt: string;
   minQuorum: number;
+  /**
+   * The room's eligible-voter count SNAPSHOTTED at open — the FROZEN turnout
+   * denominator. `minQuorum` was already frozen at open; freezing the electorate
+   * too makes the whole adoption bound (quorum + turnout) fixed for the life of
+   * the vote, so membership churn between open and the settle tick can no longer
+   * flip the outcome by shrinking the denominator. (`minTurnout` needs no snapshot:
+   * it comes from the vote's IMMUTABLE bound law-pack, so it is already stable.)
+   */
+  eligibleCount: number;
   openedByUserId: string | null;
   tally: RatificationResult | null;
   outcome: RatificationOutcome | null;
@@ -112,6 +121,14 @@ export interface BindingRecord {
   approvedByElectionId: string | null;
   capabilityDescriptor: CapabilityDescriptor;
   active: boolean;
+  /**
+   * True when the platform floor (a WS-J safety steward) has frozen this room's
+   * agent. This is DURABLE and distinct from `active`: a member ratification may
+   * flip `active`, but it must NEVER clear `floorFrozen` — only the WS-J-gated
+   * unfreeze does. While frozen, no re-adoption re-activates the agent, so the
+   * platform legal floor stays non-overridable by any community vote.
+   */
+  floorFrozen: boolean;
   approvedAt: string;
 }
 export interface AgentActionRecord {
@@ -144,7 +161,9 @@ export interface SeatStore {
   clear(): Promise<void>;
 }
 export interface ElectionStore {
-  insert(election: ElectionRecord): Promise<ElectionRecord>;
+  /** Insert an election; returns null when an OPEN election already exists for the
+   *  room (the one-open-per-room invariant — a DB partial unique index in prod). */
+  insert(election: ElectionRecord): Promise<ElectionRecord | null>;
   get(electionId: string): Promise<ElectionRecord | null>;
   listByRoom(roomId: string): Promise<ElectionRecord[]>;
   patch(electionId: string, fields: Partial<ElectionRecord>): Promise<ElectionRecord | null>;
@@ -199,7 +218,9 @@ export interface RatificationBallotStore {
 export interface BindingStore {
   get(roomId: string): Promise<BindingRecord | null>;
   put(binding: BindingRecord): Promise<BindingRecord>;
-  setActive(roomId: string, active: boolean): Promise<BindingRecord | null>;
+  /** Set the binding's active + durable floor-frozen state together (the platform
+   *  floor freeze/unfreeze); returns null when the room has no binding. */
+  setActive(roomId: string, active: boolean, floorFrozen: boolean): Promise<BindingRecord | null>;
   clear(): Promise<void>;
 }
 export interface AgentActionStore {
@@ -236,6 +257,13 @@ export class InMemorySeatStore implements SeatStore {
 export class InMemoryElectionStore implements ElectionStore {
   private readonly elections = new Map<string, ElectionRecord>();
   async insert(election: ElectionRecord) {
+    // Enforce one OPEN election per room atomically (mirrors the DB partial unique
+    // index), so two concurrent opens cannot both succeed.
+    if (election.status === 'open') {
+      for (const e of this.elections.values()) {
+        if (e.roomId === election.roomId && e.status === 'open') return null;
+      }
+    }
     this.elections.set(election.electionId, election);
     return election;
   }
@@ -402,10 +430,10 @@ export class InMemoryBindingStore implements BindingStore {
     this.bindings.set(binding.roomId, binding);
     return binding;
   }
-  async setActive(roomId: string, active: boolean) {
+  async setActive(roomId: string, active: boolean, floorFrozen: boolean) {
     const cur = this.bindings.get(roomId);
     if (!cur) return null;
-    const next = { ...cur, active };
+    const next = { ...cur, active, floorFrozen };
     this.bindings.set(roomId, next);
     return next;
   }

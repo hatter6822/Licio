@@ -104,6 +104,33 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     expect((await h.svc.getSeat('r1'))?.bootstrap).toBe(false);
   });
 
+  it('never seats an election winner who is no longer a room member (fail-safe to incumbent)', async () => {
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+    // 'cand' wins the ballots but has since LEFT/been removed from the room.
+    await h.svc.castVote('r1', eid, 'v1', 'cand', true);
+    await h.svc.castVote('r1', eid, 'v2', 'cand', true);
+    const isRoomMember = async (userId: string) => userId !== 'cand';
+    const settled = await h.svc.settleElection(eid, 3, isRoomMember);
+    // Fail-safe: the incumbent continues, the outsider is NOT seated.
+    expect(settled.ok && settled.value.settled).toBe(false);
+    expect(settled.ok && settled.value.winnerUserId).toBe('creator');
+    expect((await h.svc.getSeat('r1'))?.holderUserId).toBe('creator');
+  });
+
+  it('rejects a ballot for a non-member candidate at the service (defense-in-depth)', async () => {
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+    // Voter is a member, but the candidate is not (candidateEligible=false).
+    const denied = await h.svc.castVote('r1', eid, 'v1', 'outsider', true, false);
+    expect(denied.ok).toBe(false);
+    expect(!denied.ok && denied.code).toBe('invalid_candidate');
+  });
+
   it('rejects a vote on a non-open election', async () => {
     expect((await h.svc.castVote('r1', 'missing', 'v', 'c', true)).ok).toBe(false);
   });

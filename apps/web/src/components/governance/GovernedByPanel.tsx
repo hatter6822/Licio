@@ -7,6 +7,9 @@
 // platform's human stewards — the non-overridable legal floor). Read-only; the
 // steward's propose/approve powers live elsewhere. No applause primitives.
 
+import { useState } from 'react';
+import { useT } from '../../i18n/index.js';
+import { ApiClientError } from '../../lib/api.js';
 import { downloadGovernanceModel } from '../../lib/governance-api.js';
 import { downloadModelBundle } from '../../lib/governance-download.js';
 import { useGovernedByQuery } from '../../lib/queries.js';
@@ -33,56 +36,76 @@ const CAPABILITY_LABELS: Readonly<Record<string, string>> = {
   'gateway.submit_signed_action': 'Submit treasury actions',
 };
 
-function capabilityLabel(capability: string): string {
-  return CAPABILITY_LABELS[capability] ?? capability;
+function capabilityLabel(t: ReturnType<typeof useT>, capability: string): string {
+  return t(`room.governance.capability.${capability}`, CAPABILITY_LABELS[capability] ?? capability);
 }
 
 export interface GovernedByPanelProps {
   roomId: string;
   /** Defer the fetch until the reader has passed the room's read bar. */
   enabled?: boolean;
+  /** Render inside the governance modal's tab: no card chrome or duplicate
+   *  heading (the modal title + tab supply the section name). */
+  embedded?: boolean;
 }
 
 export function GovernedByPanel({
   roomId,
   enabled = true,
+  embedded = false,
 }: GovernedByPanelProps): React.ReactElement {
+  const t = useT();
   const query = useGovernedByQuery(roomId, enabled);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   async function handleDownload(modelId: string): Promise<void> {
-    downloadModelBundle(await downloadGovernanceModel(roomId, modelId));
+    setDownloadError(null);
+    try {
+      downloadModelBundle(await downloadGovernanceModel(roomId, modelId));
+    } catch (e) {
+      setDownloadError(
+        e instanceof ApiClientError
+          ? e.message
+          : t('room.governance.download.error', 'Could not download the model.'),
+      );
+    }
   }
 
-  return (
-    <Card as="section">
-      <h2 className="text-base font-semibold">How this room is governed</h2>
-
+  const content = (
+    <>
       {query.isLoading ? (
-        <LoadingState label="Loading room governance" />
+        <LoadingState label={t('room.governance.loading', 'Loading room governance')} />
       ) : query.isError || !query.data ? (
         <ErrorState
-          title="Couldn't load room governance"
-          description="The governance view is unavailable right now."
+          title={t('room.governance.error.title', "Couldn't load room governance")}
+          description={t(
+            'room.governance.error.desc',
+            'The governance view is unavailable right now.',
+          )}
         />
       ) : query.data.frozen ? (
         <div className="mt-2 flex flex-col gap-2">
-          <Badge tone="warning">Agent paused by the platform floor</Badge>
+          <Badge tone="warning">
+            {t('room.governance.frozen.badge', 'Agent paused by the platform floor')}
+          </Badge>
           <p className="text-sm text-ink-muted">
-            A community-approved AI agent governs this room, but Licio's platform stewards — the
-            non-overridable legal floor — have paused it. The room runs on the platform moderation
-            baseline until the floor restores the agent.
+            {t(
+              'room.governance.frozen.body',
+              "A community-approved AI agent governs this room, but Licio's platform stewards — the non-overridable legal floor — have paused it. The room runs on the platform moderation baseline until the floor restores the agent.",
+            )}
           </p>
         </div>
       ) : !query.data.active ? (
         <p className="mt-2 text-sm text-ink-muted">
-          This room runs on Licio's platform moderation baseline. Members can elect a steward to
-          propose a community-approved AI model that moderates the room within community-voted,
-          kernel-enforced limits.
+          {t(
+            'room.governance.baseline',
+            "This room runs on Licio's platform moderation baseline. Members can elect a steward to propose a community-approved AI model that moderates the room within community-voted, kernel-enforced limits.",
+          )}
         </p>
       ) : (
         <div className="mt-2 flex flex-col gap-4">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge tone="info">Community-governed</Badge>
+            <Badge tone="info">{t('room.governance.active.badge', 'Community-governed')}</Badge>
             {query.data.model_id ? (
               <Button
                 variant="ghost"
@@ -90,26 +113,36 @@ export function GovernedByPanel({
                   if (query.data.model_id) void handleDownload(query.data.model_id);
                 }}
               >
-                Download the governing model
+                {t('room.governance.download', 'Download the governing model')}
               </Button>
             ) : null}
           </div>
 
+          {downloadError ? <p className="text-error-on-soft text-xs">{downloadError}</p> : null}
+
           <p className="text-sm text-ink-muted">
-            An elected community has approved an in-room AI agent. It acts only within powers the
-            community granted, holds no keys, and every action is appealable to Licio's human
-            stewards — the platform's non-overridable legal floor.
+            {t(
+              'room.governance.active.body',
+              "An elected community has approved an in-room AI agent. It acts only within powers the community granted, holds no keys, and every action is appealable to Licio's human stewards — the platform's non-overridable legal floor.",
+            )}
           </p>
 
           <div>
-            <h3 className="text-sm font-medium">Powers the community granted</h3>
+            <h3 className="text-sm font-medium">
+              {t('room.governance.powers.heading', 'Powers the community granted')}
+            </h3>
             {query.data.granted.length === 0 ? (
-              <p className="mt-1 text-sm text-ink-muted">None.</p>
+              <p className="mt-1 text-sm text-ink-muted">
+                {t('room.governance.powers.none', 'None.')}
+              </p>
             ) : (
-              <ul className="mt-1 flex flex-wrap gap-2" aria-label="Granted agent powers">
+              <ul
+                className="mt-1 flex flex-wrap gap-2"
+                aria-label={t('room.governance.powers.label', 'Granted agent powers')}
+              >
                 {query.data.granted.map((capability) => (
                   <li key={capability}>
-                    <Badge tone="neutral">{capabilityLabel(capability)}</Badge>
+                    <Badge tone="neutral">{capabilityLabel(t, capability)}</Badge>
                   </li>
                 ))}
               </ul>
@@ -117,10 +150,15 @@ export function GovernedByPanel({
           </div>
 
           <div>
-            <h3 className="text-sm font-medium">Recent agent actions</h3>
+            <h3 className="text-sm font-medium">
+              {t('room.governance.actions.heading', 'Recent agent actions')}
+            </h3>
             {query.data.recent_actions.length === 0 ? (
               <p className="mt-1 text-sm text-ink-muted">
-                The agent has taken no moderation actions yet.
+                {t(
+                  'room.governance.actions.none',
+                  'The agent has taken no moderation actions yet.',
+                )}
               </p>
             ) : (
               <ul className="mt-1 flex flex-col gap-2">
@@ -128,7 +166,11 @@ export function GovernedByPanel({
                   <li key={action.action_id} className="neu-inset rounded-lg p-3 text-sm">
                     <div className="flex items-center gap-2">
                       <Badge tone="neutral">{action.action_type}</Badge>
-                      {!action.reversible ? <Badge tone="warning">Irreversible</Badge> : null}
+                      {!action.reversible ? (
+                        <Badge tone="warning">
+                          {t('room.governance.actions.irreversible', 'Irreversible')}
+                        </Badge>
+                      ) : null}
                     </div>
                     <p className="mt-1 text-ink-muted">{action.statement_of_reasons}</p>
                   </li>
@@ -138,6 +180,19 @@ export function GovernedByPanel({
           </div>
         </div>
       )}
+    </>
+  );
+
+  if (embedded) {
+    return <div className="flex flex-col gap-2">{content}</div>;
+  }
+
+  return (
+    <Card as="section">
+      <h2 className="text-base font-semibold">
+        {t('room.governance.heading', 'How this room is governed')}
+      </h2>
+      {content}
     </Card>
   );
 }

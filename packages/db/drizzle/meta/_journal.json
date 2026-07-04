@@ -365,6 +365,20 @@
       "when": 1782198500000,
       "tag": "0052_topic_catalog_proposed_topics",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1782198600000,
+      "tag": "0053_ws_u_governance_floor_frozen",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1782198700000,
+      "tag": "0054_ws_u_governance_electorate_and_election_lock",
+      "breakpoints": true
     }
   ]
 }

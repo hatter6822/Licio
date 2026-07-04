@@ -50,6 +50,7 @@ function action(over: Partial<TreasuryAction> = {}): TreasuryAction {
     proposedAt: NOW,
     coiDeclared: false,
     proposalRef: null,
+    targetAllocation: null,
     ...over,
   };
 }
@@ -116,6 +117,65 @@ describe('evaluateTreasuryAction', () => {
     const rebal = action({ category: 'investment_rebalance', amount: 0, coiDeclared: true });
     expect(evaluateTreasuryAction(rebal, bounds, history, opts)).toMatchObject({
       code: 'investment_interval_violated',
+    });
+  });
+
+  it('rejects a non-finite (NaN/Infinity) or negative amount fail-closed', () => {
+    expect(evaluateTreasuryAction(action({ amount: Number.NaN }), bounds, [], opts)).toMatchObject({
+      accepted: false,
+      code: 'invalid_amount',
+    });
+    expect(
+      evaluateTreasuryAction(action({ amount: Number.POSITIVE_INFINITY }), bounds, [], opts),
+    ).toMatchObject({ code: 'invalid_amount' });
+    expect(evaluateTreasuryAction(action({ amount: -1 }), bounds, [], opts)).toMatchObject({
+      code: 'invalid_amount',
+    });
+  });
+
+  it('requires a target allocation for a rebalance when the room voted an investment policy', () => {
+    // A rebalance with a configured investment policy but NO declared allocation
+    // is rejected fail-closed — the voted bands must be machine-checked, never
+    // silently waved through (a rebalance could otherwise move 100% into a
+    // volatile asset).
+    const rebal = action({
+      category: 'investment_rebalance',
+      amount: 0,
+      coiDeclared: true,
+      targetAllocation: null,
+    });
+    expect(evaluateTreasuryAction(rebal, bounds, [], opts)).toMatchObject({
+      accepted: false,
+      code: 'investment_band_required',
+    });
+  });
+
+  it('enforces the voted allocation bands on a rebalance and records the proof', () => {
+    const compliant = action({
+      category: 'investment_rebalance',
+      amount: 0,
+      coiDeclared: true,
+      targetAllocation: [
+        { asset: 'STABLE', fraction: 0.7 },
+        { asset: 'ETH', fraction: 0.3 },
+      ],
+    });
+    const okVerdict = evaluateTreasuryAction(compliant, bounds, [], opts);
+    expect(okVerdict.accepted).toBe(true);
+    if (okVerdict.accepted) {
+      expect(okVerdict.evidence.checks.map((c) => c.name)).toContain('investment_bands');
+    }
+
+    const overVolatile = action({
+      category: 'investment_rebalance',
+      amount: 0,
+      coiDeclared: true,
+      // ETH beyond its 0.5 band ceiling — must be rejected.
+      targetAllocation: [{ asset: 'ETH', fraction: 0.9 }],
+    });
+    expect(evaluateTreasuryAction(overVolatile, bounds, [], opts)).toMatchObject({
+      accepted: false,
+      code: 'investment_band_violated',
     });
   });
 });

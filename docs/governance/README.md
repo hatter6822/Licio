@@ -242,3 +242,76 @@ hypothetical `knomosis → public.rooms` FK is caught.
   the only residual.
 - **Pluggable LLM provider seam** (ADR-3) — the deterministic default ships;
   the governed provider port for real-LLM summaries is the upgrade path.
+
+## Security & correctness audit (2026-07)
+
+A deep multi-agent audit (domain, API, DB, web, spec conformance) surfaced 21
+adversarially-verified findings. The following were **fixed** in this pass (each
+with a regression test):
+
+- **Non-overridable platform floor is now durable** (H1/M5). A room binding
+  carries a `floor_frozen` flag distinct from `active` (migration `0053`): the
+  WS-J-gated freeze sets it and only the unfreeze clears it, `approveModel` binds
+  a re-ratified model **inactive** while frozen, and both freeze/unfreeze are
+  written to the append-only agent audit log. A member re-vote can no longer
+  resurrect a floor-frozen agent.
+- **Moderation capability sandbox** (H2/M8). `MODERATION_ACTIONS` is reordered so
+  severity is monotonic with content-hiding impact (`warn` < `flag_for_review`),
+  and `gateDecision` now falls back to the strongest *granted* action ≤ the decided
+  one (else `allow`) — the agent can never drive content to `under_review`/`removed`
+  without the community-granted capability, and never escalates a visible action.
+- **Kernel-enforced treasury bounds** (M1/M2/L1). The kernel enforces the voted
+  investment allocation bands fail-closed (`checkInvestmentBands`, a required
+  `targetAllocation`), rejects non-finite/negative amounts (`invalid_amount`), and
+  `executeTreasuryAction` gates each action on its per-category `treasury.*`
+  capability (not just the gateway cap).
+- **Election/ratification integrity** (M3/L3). The election winner is re-validated
+  as a current room member at seat assignment (fail-safe to the incumbent), the
+  cast-time candidate-eligibility is enforced on the service, and both tallies clamp
+  turnout to `[0,1]`.
+- **Route/authz hardening** (M6/L6). `GET …/steward` applies the WS-Q content bar
+  (no private-room steward-identity leak), and `candidate_user_id` is uuid-validated
+  (controlled 422, not a Postgres 500).
+- **Member offline verification** (M7). The downloaded model bundle is written as the
+  exact canonical (key-sorted) bytes, so `sha256(file) === artifact_digest`.
+- **Store parity + UI polish** (L5/L9). The Drizzle ratification `patch` covers the
+  full mutable surface (parity with the in-memory adapter), and the "governed by"
+  panel handles a download failure instead of an unhandled rejection.
+
+A follow-up pass then closed the remaining deferred items (each with a regression
+test):
+
+- **M4 — the ratification electorate is FROZEN at open.** `openRatification`
+  snapshots the room's member count onto `eligible_count` (migration `0054`); the
+  settle tally divides by that frozen denominator, not a live read (`minTurnout`
+  needs no snapshot — it comes from the vote's immutable bound law-pack). Membership
+  churn during the window can no longer flip the outcome. `runRatificationLifecycle`
+  no longer takes a live count.
+- **L4 — one-open-election atomicity.** A `steward_election(room_id) WHERE
+  status='open'` partial unique index (migration `0054`) + a nullable
+  `ElectionStore.insert` (in-memory guard + Drizzle `onConflictDoNothing`) makes
+  `scheduleElection` race-safe, mirroring the ratification guard.
+- **L7 — the legacy `/rooms/$roomId/governance` route is no longer a dead end.** It
+  redirects to the room with the governance modal deep-linked open
+  (`?governance=<tab>`, validated by `roomDetailSearchSchema`); the modal opens to
+  the linked tab. The "Governance unavailable" stub is gone.
+- **L8 — the two governance panels are internationalized.** `GovernedByPanel` and
+  `StewardModelManager` route every user-facing string (including the capability and
+  status label maps) through `t(key, fallback)`, matching the `RoomGovernanceDialog`
+  shell — localizable and catalog-ready.
+
+**Deferred (tracked debt, closure target):**
+
+- **L2 — a bounded `moderate.restore` action.** The capability is no longer granted
+  by default (removed from `defaultModerationLawPack`), so nothing claims the agent
+  can restore. Wiring an ACTUAL restore that reverses ONLY the agent's own prior
+  in-room holds — never a platform-floor or human-steward removal — requires a
+  **`moderation_source` field on the core `contributions` table** (the model today
+  records only `moderation_state`, with no provenance), set on the create/edit
+  moderation paths and cleared by every human-console action, plus a `restore`
+  branch in the edit re-moderation flow gated on `moderation_source='agent'` +
+  `moderate.restore` + a fresh-clear floor verdict. Shipping this without the
+  provenance field would risk the agent reversing a floor/human removal (a
+  floor-safety regression strictly worse than not having restore), so it is a
+  deliberately-separate, security-reviewed slice. *Closure: the WS-U.3.1
+  forum-integration slice (add `moderation_source` + the audited restore path).*

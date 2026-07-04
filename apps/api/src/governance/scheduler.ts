@@ -22,6 +22,9 @@ export interface GovernanceSchedulerDeps {
   service: GovernanceService;
   /** Eligible voters for a room's election/ratification quorum (soft cross-context read). */
   eligibleVoterCount: (roomId: string) => Promise<number>;
+  /** Whether a user is currently a member of a room (soft cross-context read) — used
+   *  to re-validate an election winner is still a member before seating them. */
+  isRoomMember?: (roomId: string, userId: string) => Promise<boolean>;
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
 }
@@ -36,6 +39,7 @@ export async function runGovernanceTick(
     const { scheduled, settled } = await deps.service.runElectionLifecycle(
       deps.eligibleVoterCount,
       nowMs,
+      deps.isRoomMember,
     );
     if (scheduled > 0 || settled > 0) {
       deps.log('governance.election_lifecycle', { scheduled, settled });
@@ -44,10 +48,7 @@ export async function runGovernanceTick(
     onError(err, 'election_lifecycle');
   }
   try {
-    const { settled, activated } = await deps.service.runRatificationLifecycle(
-      deps.eligibleVoterCount,
-      nowMs,
-    );
+    const { settled, activated } = await deps.service.runRatificationLifecycle(nowMs);
     if (settled > 0) {
       deps.log('governance.ratification_lifecycle', { settled, activated });
     }

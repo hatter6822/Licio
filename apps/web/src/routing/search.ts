@@ -48,3 +48,16 @@ export const storyCommentsSearchSchema = z.object({
   root: uuidSchema.optional().catch(undefined),
 });
 export type StoryCommentsSearch = z.infer<typeof storyCommentsSearchSchema>;
+
+/**
+ * Room detail (WS-U §24.6): `?governance=<tab>` deep-links the room-governance
+ * modal OPEN to a tab (a shareable link; the legacy `/rooms/:id/governance` route
+ * redirects here). Absent ⇒ the modal starts closed; an unknown value coerces to
+ * undefined, never silently accepted.
+ */
+export const roomGovernanceTabSchema = z.enum(['overview', 'models', 'settings']);
+export type RoomGovernanceTab = z.infer<typeof roomGovernanceTabSchema>;
+export const roomDetailSearchSchema = z.object({
+  governance: roomGovernanceTabSchema.optional().catch(undefined),
+});
+export type RoomDetailSearch = z.infer<typeof roomDetailSearchSchema>;

@@ -90,6 +90,21 @@ describe('GovernedByPanel', () => {
     await checkA11y(container);
   });
 
+  it('renders the embedded variant without the card heading (modal tab supplies it)', () => {
+    mockUseGovernedBy.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: { active: false, frozen: false, model_id: null, granted: [], recent_actions: [] },
+    });
+    render(<GovernedByPanel roomId="r1" embedded />);
+    // The transparency content still renders…
+    expect(screen.getByText(/platform moderation baseline/i)).toBeInTheDocument();
+    // …but the standalone card heading is dropped (no duplicate section name).
+    expect(
+      screen.queryByRole('heading', { name: /how this room is governed/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it('downloads the governing model on click', async () => {
     mockUseGovernedBy.mockReturnValue({
       isLoading: false,
@@ -108,5 +123,19 @@ describe('GovernedByPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /download the governing model/i }));
     await waitFor(() => expect(downloadGovernanceModel).toHaveBeenCalledWith('r1', 'm-1'));
     expect(createObjectURL).toHaveBeenCalled();
+  });
+
+  it('surfaces a download failure instead of an unhandled rejection', async () => {
+    mockUseGovernedBy.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: { active: true, model_id: 'm-1', granted: [], recent_actions: [] },
+    });
+    vi.mocked(downloadGovernanceModel).mockRejectedValue(new Error('network'));
+    render(<GovernedByPanel roomId="r1" />);
+    fireEvent.click(screen.getByRole('button', { name: /download the governing model/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/could not download the model/i)).toBeInTheDocument(),
+    );
   });
 });

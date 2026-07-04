@@ -978,6 +978,13 @@ startGovernanceScheduler(
   {
     service: getGovernanceService(),
     eligibleVoterCount: (roomId) => forumServices.rooms.countMembers(roomId),
+    // Re-validate an election winner is still a room member before seating them
+    // (active subscription OR steward role — mirrors the ratification/vote gate).
+    isRoomMember: async (roomId, userId) => {
+      const subscription = await forumServices.rooms.getSubscription(roomId, userId);
+      if (subscription?.status === 'active') return true;
+      return (await forumServices.rooms.stewardRolesFor(roomId, userId)).length > 0;
+    },
     log: (event, meta) => logger.info(meta, event),
     now: () => Date.now(),
   },

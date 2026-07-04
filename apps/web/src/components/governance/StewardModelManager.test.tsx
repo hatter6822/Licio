@@ -98,6 +98,17 @@ describe('StewardModelManager (WS-U §16.6)', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('embedded: always renders the shell (honest empty registry, no card heading)', () => {
+    // Non-steward, no proposals, no vote → the standalone variant renders null,
+    // but the modal-embedded variant renders an honest empty registry instead.
+    const { container } = render(<StewardModelManager roomId="r1" embedded />);
+    expect(container).not.toBeEmptyDOMElement();
+    expect(screen.getByText(/no models have been proposed yet/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: /community governance models/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it('shows the registry (read-only) to a member once proposals exist', () => {
     seatHeldBy('someone-else');
     modelsList([eligibleModel()]);

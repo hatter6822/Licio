@@ -69,7 +69,9 @@ const proposeBodySchema = z
   })
   .strict();
 
-const voteBodySchema = z.object({ candidate_user_id: z.string().min(1).max(128) }).strict();
+// `candidate_user_id` is used as a uuid store key (a knomosis uuid column), so it
+// must be uuid-validated for a controlled 422 rather than a Postgres 22P02 / 500.
+const voteBodySchema = z.object({ candidate_user_id: uuidSchema }).strict();
 const ratificationOpenBodySchema = z
   .object({
     /** Bind a community-proposed law-pack (the agent's bounds); null ⇒ default. */
@@ -108,8 +110,15 @@ export function createGovernanceRoutes() {
       .use('/rooms/:roomId/*', zValidator('param', z.object({ roomId: uuidSchema })))
       // --- Steward seat + elections ---------------------------------------
       .get('/rooms/:roomId/steward', authMiddleware(), async (c) => {
+        const roomId = c.req.param('roomId');
+        // Apply the WS-Q content read bar (parity with the other governance reads):
+        // a PRIVATE room's steward identity/term is members/stewards-only, so an
+        // authenticated non-member cannot enumerate who governs a private room.
+        if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
+          return c.json(deny('not_found', 'Room governance not found.'), 404);
+        }
         const svc = getGovernanceService();
-        const seat = await svc.getSeat(c.req.param('roomId'));
+        const seat = await svc.getSeat(roomId);
         if (!seat) return c.json({ seat: null }, 200);
         return c.json({
           seat: {
@@ -143,7 +152,8 @@ export function createGovernanceRoutes() {
               403,
             );
           }
-          if (!(await isRoomMember(roomId, candidate_user_id))) {
+          const candidateEligible = await isRoomMember(roomId, candidate_user_id);
+          if (!candidateEligible) {
             return c.json(
               deny('invalid_candidate', 'The candidate is not a member of this room.'),
               422,
@@ -155,6 +165,7 @@ export function createGovernanceRoutes() {
             auth.userId,
             candidate_user_id,
             eligible,
+            candidateEligible,
           );
           if (!result.ok) {
             return c.json(
@@ -248,11 +259,16 @@ export function createGovernanceRoutes() {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
           const { law_pack_id } = c.req.valid('json');
+          const roomId = c.req.param('roomId');
+          // Snapshot the room's electorate at OPEN as the frozen turnout
+          // denominator (M4) — a soft cross-context membership read.
+          const eligibleCount = await getForumServices().rooms.countMembers(roomId);
           const result = await getGovernanceService().openRatification(
-            c.req.param('roomId'),
+            roomId,
             auth.userId,
             c.req.param('modelId'),
             law_pack_id,
+            eligibleCount,
           );
           if (!result.ok) {
             return c.json(
