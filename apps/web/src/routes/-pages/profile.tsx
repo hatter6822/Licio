@@ -225,6 +225,23 @@ export function ProfilePage(): React.ReactElement {
         },
       ],
     },
+    // DEVELOPMENT-ONLY tools. `import.meta.env.DEV` is a compile-time constant,
+    // so this group is tree-shaken out of production builds entirely.
+    ...(import.meta.env.DEV
+      ? [
+          {
+            heading: 'Developer tools',
+            links: [
+              {
+                to: '/dev/simulator',
+                label: 'Traffic simulator',
+                description: 'Continuous synthetic activity so you can watch the feed react.',
+                icon: 'sliders' as IconName,
+              },
+            ],
+          },
+        ]
+      : []),
   ];
 
   return (

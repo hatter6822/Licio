@@ -36,6 +36,7 @@ import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
 import { Route as ProfileModeRouteImport } from './routes/profile_.mode'
 import { Route as PrivateRoomIdRouteImport } from './routes/private_.$roomId'
 import { Route as PrivateMigrateRouteImport } from './routes/private.migrate'
+import { Route as DevSimulatorRouteImport } from './routes/dev.simulator'
 import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
 
@@ -164,6 +165,11 @@ const PrivateMigrateRoute = PrivateMigrateRouteImport.update({
   path: '/migrate',
   getParentRoute: () => PrivateRoute,
 } as any)
+const DevSimulatorRoute = DevSimulatorRouteImport.update({
+  id: '/dev/simulator',
+  path: '/dev/simulator',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const StoriesStoryIdCommentsRoute = StoriesStoryIdCommentsRouteImport.update({
   id: '/stories/$storyId_/comments',
   path: '/stories/$storyId/comments',
@@ -185,6 +191,7 @@ export interface FileRoutesByFullPath {
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/dev/simulator': typeof DevSimulatorRoute
   '/private/migrate': typeof PrivateMigrateRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
   '/profile/mode': typeof ProfileModeRoute
@@ -213,6 +220,7 @@ export interface FileRoutesByTo {
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/dev/simulator': typeof DevSimulatorRoute
   '/private/migrate': typeof PrivateMigrateRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
   '/profile/mode': typeof ProfileModeRoute
@@ -243,6 +251,7 @@ export interface FileRoutesById {
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/dev/simulator': typeof DevSimulatorRoute
   '/private/migrate': typeof PrivateMigrateRoute
   '/private_/$roomId': typeof PrivateRoomIdRoute
   '/profile_/mode': typeof ProfileModeRoute
@@ -274,6 +283,7 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/dev/simulator'
     | '/private/migrate'
     | '/private/$roomId'
     | '/profile/mode'
@@ -302,6 +312,7 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/dev/simulator'
     | '/private/migrate'
     | '/private/$roomId'
     | '/profile/mode'
@@ -331,6 +342,7 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/dev/simulator'
     | '/private/migrate'
     | '/private_/$roomId'
     | '/profile_/mode'
@@ -361,6 +373,7 @@ export interface RootRouteChildren {
   StyleguideRoute: typeof StyleguideRoute
   SubmitRoute: typeof SubmitRoute
   SupportRoute: typeof SupportRoute
+  DevSimulatorRoute: typeof DevSimulatorRoute
   PrivateRoomIdRoute: typeof PrivateRoomIdRoute
   ProfileModeRoute: typeof ProfileModeRoute
   ProfileNoticesRoute: typeof ProfileNoticesRoute
@@ -556,6 +569,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PrivateMigrateRouteImport
       parentRoute: typeof PrivateRoute
     }
+    '/dev/simulator': {
+      id: '/dev/simulator'
+      path: '/dev/simulator'
+      fullPath: '/dev/simulator'
+      preLoaderRoute: typeof DevSimulatorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/stories/$storyId_/comments': {
       id: '/stories/$storyId_/comments'
       path: '/stories/$storyId/comments'
@@ -596,6 +616,7 @@ const rootRouteChildren: RootRouteChildren = {
   StyleguideRoute: StyleguideRoute,
   SubmitRoute: SubmitRoute,
   SupportRoute: SupportRoute,
+  DevSimulatorRoute: DevSimulatorRoute,
   PrivateRoomIdRoute: PrivateRoomIdRoute,
   ProfileModeRoute: ProfileModeRoute,
   ProfileNoticesRoute: ProfileNoticesRoute,

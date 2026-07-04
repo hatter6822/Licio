@@ -510,6 +510,8 @@ licio/
 │   │       │   │                           AI-classified/AI-draft/AI-translated + revisions)
 │   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
 │   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
+│   │       │   ├── dev/                 -- DEV-ONLY SimulatorPanel (traffic-simulator control;
+│   │       │   │                           import.meta.env.DEV-gated, tree-shaken in production)
 │   │       │   ├── composer/            -- StoryComposer (author topic picker) + shared affordances (Attachment,
 │   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
 │   │       │   ├── comments/            -- Inline CommentSection + comment composer/media (WS-T)
@@ -828,6 +830,18 @@ licio/
 │           │   │                             pack-import POST /packs (CSRF-exempt, rate-limited;
 │           │   │                             §22.1.1 status), mounted at /api/lcap/v2 (WS-R.12.4)
 │           │   └── service.ts            --   the process-wide ingestion-server singleton
+│           ├── simulator/                -- DEV-ONLY traffic simulator (NEVER in production):
+│           │   ├── prng.ts               --   deterministic mulberry32 seeded PRNG
+│           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster
+│           │   ├── content.ts            --   deterministic story/comment/evidence generators
+│           │   ├── scenarios.ts          --   the six scenario presets (steady…coordinated_burst)
+│           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
+│           │   ├── link-fixtures.ts      --   dev fetchDocument for reserved `.example` hosts
+│           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY I/O module — drives the
+│           │   │                              REAL submission/contribution/attention/report paths +
+│           │   │                              on-demand PWAtt/WS-H/feature scoring; tick loop
+│           │   └── routes.ts             --   dev control routes (mounted in front of createApp,
+│           │                                  never in the production AppType; header-guarded)
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)

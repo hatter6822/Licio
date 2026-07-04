@@ -141,6 +141,7 @@ import { LCAP_SCHEDULER_INTERVAL_MS, startLcapScheduler } from './lcap/scheduler
 import { getLcapIngestServer } from './lcap/service.js';
 import { demoStory } from './lib/demo-data.js';
 import {
+  seedDevRankingEnforcement,
   seedForumDemoData,
   seedGovernanceDemo,
   seedModerationDemo,
@@ -311,6 +312,16 @@ if (embeddingProvider === undefined && env.NODE_ENV === 'production') {
     'EMBEDDING_* env group is not set: embeddings use the deterministic LEXICAL provider — fine for dedup, NOT a semantic model (MERI/SCOI semantic conclusions are gated on a self-hosted model, WS-F.3.2a).',
   );
 }
+// DEV ONLY: the traffic simulator (below) submits synthetic LINK stories on
+// reserved `.example` outlet hosts. Give the ingestion pipeline a deterministic
+// fetcher for those hosts so those stories EXTRACT (real robots→fetch→normalize
+// →topic-classify path) instead of deferring forever on unreachable DNS. Every
+// other URL falls through to the real SSRF-hardened fetcher. Loaded only in
+// development; production constructs the container without this override.
+const simulatorFetchDocument =
+  env.NODE_ENV === 'development'
+    ? (await import('./simulator/link-fixtures.js')).createSimulatorFetchDocument()
+    : undefined;
 const ingestionServices = createInMemoryIngestionServices({
   events: eventServices,
   // DEV/TEST ONLY: drop the account-age ("account too new") submission gate so a
@@ -321,6 +332,7 @@ const ingestionServices = createInMemoryIngestionServices({
   // API with NODE_ENV=development, so the local relaxation applies there.
   skipAccountAgeGate: env.NODE_ENV === 'development' || env.NODE_ENV === 'test',
   ...(embeddingProvider !== undefined ? { embeddingProvider } : {}),
+  ...(simulatorFetchDocument !== undefined ? { fetchDocument: simulatorFetchDocument } : {}),
   log: (event, meta) => logger.info(meta, event),
 });
 if (env.REDIS_URL !== undefined) {
@@ -869,6 +881,11 @@ if (env.NODE_ENV !== 'production') {
       identityServices,
       ingestionServices,
     );
+    // DEV-only: enable the MERI ranking effect (soft_constraint) so the WS-H
+    // batch outputs the dev boot + the traffic simulator compute actually
+    // reorder the served feed — a near-duplicate repost is demoted below its
+    // original (§7.1), rather than the effect being silently shadow-gated.
+    await seedDevRankingEnforcement(invariantServices);
     // WS-J: a small report queue so the dev console shows real data on boot.
     await seedModerationDemo(moderationServices);
     // WS-K: register + DEPLOY the governed models through the real gate, and seed
@@ -1017,7 +1034,66 @@ startRendezvousScheduler(
   { lease: makeJobLease() },
 );
 
-const app = createApp();
+// DEV ONLY: the continuous traffic simulator. It drives the REAL pipelines with
+// deterministic, persona-shaped synthetic activity so a local tester can watch
+// the feed react to new posts, live discussion, and reading signals. NEVER
+// constructed in production (guarded by NODE_ENV) — the control routes are
+// mounted IN FRONT of the CSRF-protected app, exactly like the E2E test-auth
+// route, and are never part of the production AppType. Set LICIO_SIM=off (or 0)
+// to boot dev without it; LICIO_SIM=<scenario> selects the opening scenario
+// (default 'steady'); LICIO_SIM=idle boots it stopped for manual control.
+const baseApp = createApp();
+// `serve` needs only the fetch handler; capturing it (rather than the app
+// object) sidesteps typing the two differently-shaped Hono instances.
+let appFetch: typeof baseApp.fetch = baseApp.fetch;
+if (
+  env.NODE_ENV === 'development' &&
+  process.env['LICIO_SIM'] !== 'off' &&
+  process.env['LICIO_SIM'] !== '0'
+) {
+  try {
+    const { DevTrafficSimulator } = await import('./simulator/runtime.js');
+    const { createSimulatorRoutes } = await import('./simulator/routes.js');
+    const { SIMULATOR_SCENARIO_IDS } = await import('@licio/shared');
+    const { Hono } = await import('hono');
+    const requested = process.env['LICIO_SIM'];
+    const scenario =
+      requested !== undefined && (SIMULATOR_SCENARIO_IDS as readonly string[]).includes(requested)
+        ? (requested as (typeof SIMULATOR_SCENARIO_IDS)[number])
+        : 'steady';
+    const simulator = new DevTrafficSimulator({
+      graph: {
+        identity: identityServices,
+        events: eventServices,
+        ingestion: ingestionServices,
+        forum: forumServices,
+        invariants: invariantServices,
+        ranking: rankingServices,
+        moderation: moderationServices,
+      },
+      scenario,
+      seed: process.env['LICIO_SIM_SEED'] ?? 'licio-sim',
+      log: (event, meta) => logger.info(meta, event),
+    });
+    // Mount the control routes ahead of the CSRF-protected app (sessionless),
+    // the same placement the E2E test-auth route uses.
+    appFetch = new Hono()
+      .route('/v1/dev/simulator', createSimulatorRoutes(simulator))
+      .route('/', baseApp).fetch;
+    if (requested !== 'idle') {
+      // Autostart best-effort so `pnpm dev` shows live traffic immediately.
+      void simulator
+        .start({ scenario })
+        .catch((err) => logger.warn({ err }, 'dev traffic simulator failed to start'));
+    }
+    logger.warn(
+      { scenario, autostart: requested !== 'idle' },
+      'DEV traffic simulator mounted at /v1/dev/simulator (development only; never in production).',
+    );
+  } catch (err) {
+    logger.warn({ err }, 'dev traffic simulator wiring skipped (non-fatal)');
+  }
+}
 
 const currentDir = resolve(fileURLToPath(import.meta.url), '..');
 
@@ -1033,7 +1109,7 @@ const httpsOptions = getHttpsOptions();
 
 serve(
   {
-    fetch: app.fetch,
+    fetch: appFetch,
     port: env.PORT,
     ...(httpsOptions !== undefined
       ? { createServer: createHttpsServer, serverOptions: httpsOptions }

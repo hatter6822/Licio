@@ -2017,6 +2017,39 @@ export async function seedOperationalSignals(
 }
 
 /**
+ * DEVELOPMENT-only: lift the MERI invariant to `soft_constraint` so its ranking
+ * effect actually applies on the dev server (NEVER in production — this is
+ * called only from the NODE_ENV-guarded dev boot).
+ *
+ * Every WS-H invariant is persisted SHADOW-only and gated behind the promotion
+ * store; with no promotion records (the default) the ranking pipeline computes
+ * the invariant values but applies zero effect, so a near-duplicate repost is
+ * never demoted below its original. Seeding a single MERI promotion makes the
+ * §7.1 duplicate demotion visible in the served feed — the behaviour the demo
+ * corpus (the S21↔S25 collision) and the dev traffic simulator's
+ * `breaking_news` repost both rely on. Scoped to MERI on purpose: it is a pure
+ * redundancy penalty (a demotion), so it carries none of the whole-feed
+ * fallback risk of the GWEI deployment gate or the content-exclusion risk of an
+ * MFCI severe state. Idempotent (a re-run finds the record already present).
+ */
+export async function seedDevRankingEnforcement(
+  invariants: InvariantPlatformServices,
+): Promise<void> {
+  const existing = await invariants.promotions.listForInvariant('MERI');
+  if (existing.some((r) => r.toStatus === 'soft_constraint')) return;
+  await invariants.promotions.append({
+    invariantType: 'MERI',
+    fromStatus: 'shadow',
+    toStatus: 'soft_constraint',
+    evidence: {
+      note: 'development-only enforcement so the §7.1 duplicate demotion is visible',
+    },
+    owner: 'dev-boot',
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/**
  * Seed a small WS-J moderation demo: two distinct reporters file a report
  * against one demo story, so a fresh dev console shows a non-empty report queue
  * (one standard case, report_count 2) that an authorized steward can review and
