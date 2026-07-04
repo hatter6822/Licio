@@ -134,16 +134,96 @@ describe('DevTrafficSimulator runtime', () => {
       autoLoop: false,
     });
     await sim.start();
+    const organic = sim.status().personas_active;
     for (let i = 0; i < 8; i += 1) await sim.tick();
     await sim.forceSignalRefresh();
     const status = sim.status();
-    // The fresh cluster was provisioned and drove attention + reports at the
-    // focus story (the integrity pipeline consumes these without crashing).
-    expect(status.counters.users_provisioned).toBeGreaterThan(0);
+    // The fresh 8-account cluster actually provisioned (grew the roster) — the
+    // scenario is not silently running with only organic users.
+    expect(status.personas_active).toBe(organic + 8);
+    // and drove attention + reports at the focus story (the integrity pipeline
+    // consumes these without crashing).
     expect(
       status.counters.attention_events_accepted + status.counters.reports_filed,
     ).toBeGreaterThan(0);
     expect(status.counters.errors).toBe(0);
+  });
+
+  it('never generates attention against a private room_only story (visibility bar)', async () => {
+    const graph = await buildSimTestGraph();
+    // A private room + a room_only story owned by a non-simulator user: no
+    // synthetic persona is a member, so it must never enter the world nor
+    // receive simulator attention.
+    const privateRoomId = 'b0000000-0000-4000-8000-000000000001';
+    await graph.forum.rooms.insert({
+      roomId: privateRoomId,
+      name: 'Private Working Group',
+      slug: 'private-working-group',
+      description: 'members only',
+      roomType: 'professional_domain',
+      visibility: 'private',
+      joinModel: 'request_approval',
+      postingPolicy: 'all_members',
+      storageMode: 'server',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const privateStoryId = 'b0000000-0000-4000-8000-0000000000ff';
+    await graph.ingestion.stories.createWithThread(
+      {
+        storyId: privateStoryId,
+        canonicalUrl: null,
+        title: 'Members-only working note',
+        titleHash: `sim-private-${privateStoryId}`,
+        submittedBy: '5f5e0000-0000-4000-8000-000000000001',
+        sourceId: null,
+        roomId: privateRoomId,
+        visibility: 'room_only',
+        mediaUploadRef: null,
+        canonicalPublicStoryId: null,
+        language: 'en',
+        topicIds: [],
+        proposedTopicIds: [],
+        locationScope: null,
+        sensitivityLabels: [],
+        lifecycleState: 'gathering_attention',
+        submissionType: 'original_brief',
+        submissionMetadata: { submission_type: 'original_brief', body: 'members only' },
+        excerpt: 'members only',
+        publisher: null,
+        author: null,
+        publishedAt: null,
+        mediaType: null,
+        extractionState: 'not_applicable',
+        hiddenState: null,
+      },
+      'b0000000-0000-4000-8000-0000000000fe',
+    );
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'steady',
+      seed: 'private',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    for (let i = 0; i < 12; i += 1) await sim.tick();
+    // No attention.aggregate event references the private story.
+    const events = await graph.events.eventStore.listByTopicsBetween(
+      ['attention.aggregate'],
+      new Date(0).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    const touchedPrivate = events.some((e) => {
+      const payload = e.payload as { items?: Array<{ story_id?: string }> };
+      return (payload.items ?? []).some((it) => it.story_id === privateStoryId);
+    });
+    expect(touchedPrivate).toBe(false);
+    // Sanity: the simulator DID generate attention (against public stories).
+    expect(events.length).toBeGreaterThan(0);
   });
 
   it('honours the story cap: authors idle once reached', async () => {

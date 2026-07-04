@@ -410,6 +410,11 @@ export class DevTrafficSimulator {
     const recentTitles = new Set<string>();
     for (const story of rawStories) {
       if (story.hiddenState !== null || story.lifecycleState === 'archived') continue;
+      // Only PUBLIC stories enter the simulator world. Synthetic actors are not
+      // members of any private room, so they must never read (nor generate
+      // attention/Signal-Ledger input against) room_only content they could not
+      // have viewed — the same visibility bar the front-page feed applies.
+      if (story.visibility !== 'public') continue;
       const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
       const claims = await ingestion.claims.listByStory(story.storyId);
       const meta = SIM_STORY_META.get(story.storyId);
@@ -785,6 +790,24 @@ export class DevTrafficSimulator {
   async #executeAttention(action: Extract<SimAction, { kind: 'attention' }>): Promise<void> {
     const { events, identity } = this.#graph;
     const nowMs = this.#now();
+    // Apply the per-account attention ingest rate limit that the HTTP route
+    // enforces before accepting an upload, so a high-speed or coordinated-burst
+    // run cannot over-report accepted PWAtt input — a real client would be 429'd.
+    // (Story/comment submission already rate-limit at the service layer; this
+    // brings attention to parity and surfaces the rejection honestly.)
+    const rateKey = accountRef(identity.config.masterSecret, action.personaUserId);
+    const decision = await events.ingestLimiter.hit(rateKey, nowMs);
+    if (!decision.allowed) {
+      this.#counters.rejected_rate_limited += 1;
+      this.#record({
+        kind: 'attention',
+        actor: this.#handleFor(action.personaUserId),
+        summary: 'attention rate-limited',
+        outcome: 'rejected',
+        detail: 'rate_limited',
+      });
+      return;
+    }
     const items = action.items.map((item) => ({
       story_id: item.storyId,
       active_dwell_bucket: item.dwell,
@@ -867,7 +890,7 @@ export class DevTrafficSimulator {
   }
 
   async #executeReport(action: Extract<SimAction, { kind: 'report' }>): Promise<void> {
-    const { moderation } = this.#graph;
+    const { moderation, ingestion } = this.#graph;
     // Parse through the wire schema so the engine's `string` reason code is
     // validated + narrowed to a ratified WS-A code before the service call.
     const parsed = createReportRequestSchema.safeParse({
@@ -881,7 +904,23 @@ export class DevTrafficSimulator {
       this.#counters.rejected_other += 1;
       return;
     }
-    const outcome = await submitReport(moderation, action.personaUserId, parsed.data);
+    // The report intake route resolves the authoritative content kind + the
+    // subject (the reported content's owner) and threads them into submitReport,
+    // so the moderation case carries a subjectUserId and the integrity/console
+    // views reflect a real report. The story is always a PUBLIC world story
+    // (readability satisfied), so resolve its author directly and mirror that.
+    const story = await ingestion.stories.getById(action.storyId);
+    if (story === null) {
+      this.#counters.rejected_other += 1;
+      return;
+    }
+    const outcome = await submitReport(
+      moderation,
+      action.personaUserId,
+      parsed.data,
+      'story',
+      story.submittedBy,
+    );
     if (outcome.ok) {
       this.#counters.reports_filed += 1;
       this.#record({

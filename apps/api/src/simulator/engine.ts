@@ -288,10 +288,15 @@ export function planTick(input: PlanTickInput): SimAction[] {
   let storySerial = input.storySerial;
 
   // --- Scenario orchestration ------------------------------------------------
-  const clusterUnprovisioned = personas.some(
-    (p) => p.spec.archetype === 'cluster_member' && !p.provisioned,
+  // A cluster scenario provisions its fresh accounts when NO cluster member is
+  // provisioned yet — including the first tick, when the persona list holds
+  // only the organic roster (the runtime appends the cluster on the
+  // provision_cluster action). Keying off "an unprovisioned cluster member
+  // exists" would deadlock: the cluster is never in the list to be seen.
+  const clusterProvisioned = personas.some(
+    (p) => p.spec.archetype === 'cluster_member' && p.provisioned,
   );
-  if (scenario.cluster !== null && clusterUnprovisioned) {
+  if (scenario.cluster !== null && !clusterProvisioned) {
     provisioning.push({ kind: 'provision_cluster' });
   }
   if (scenario.newcomersPerMinute > 0 && input.newcomersProvisioned < NEWCOMER_CAP) {

@@ -149,19 +149,16 @@ describe('simulator engine planTick', () => {
     expect(plan.length).toBeLessThanOrEqual(MAX_ACTIONS_PER_TICK);
   });
 
-  it('coordinated_burst provisions the fresh cluster and targets the focus story', () => {
-    const withUnprovisionedCluster: EnginePersona[] = [
-      ...personas(BASE_ROSTER),
-      ...CLUSTER_ROSTER.map((spec) => ({
-        spec,
-        provisioned: false,
-        joinedRoomIds: new Set<string>(),
-      })),
-    ];
+  it('coordinated_burst provisions the fresh cluster on the first tick (only the base roster present)', () => {
+    // The real runtime starts with ONLY the organic roster — the cluster is
+    // appended by the runtime on the provision_cluster action. The engine must
+    // therefore emit provision_cluster when no cluster member is provisioned,
+    // even though none is present yet (the bug: keying off an unprovisioned
+    // cluster member deadlocked because the cluster was never in the list).
     const plan = planTick({
       scenario: SCENARIOS.coordinated_burst,
       world: baseWorld({ focusStoryId: 's1' }),
-      personas: withUnprovisionedCluster,
+      personas: personas(BASE_ROSTER),
       newcomersProvisioned: 0,
       prng: createPrng('cluster'),
       scenarioElapsedMs: 10_000,
@@ -172,6 +169,33 @@ describe('simulator engine planTick', () => {
       repostDone: false,
     });
     expect(plan.some((a) => a.kind === 'provision_cluster')).toBe(true);
+  });
+
+  it('coordinated_burst stops provisioning once the cluster is present + provisioned', () => {
+    const withProvisionedCluster: EnginePersona[] = [
+      ...personas(BASE_ROSTER),
+      ...CLUSTER_ROSTER.map((spec) => ({
+        spec,
+        provisioned: true,
+        joinedRoomIds: new Set<string>(),
+      })),
+    ];
+    const plan = planTick({
+      scenario: SCENARIOS.coordinated_burst,
+      world: baseWorld({ focusStoryId: 's1' }),
+      personas: withProvisionedCluster,
+      newcomersProvisioned: 0,
+      prng: createPrng('cluster2'),
+      scenarioElapsedMs: 20_000,
+      tickMs: 5_000,
+      speed: 5,
+      storySerial: 1,
+      kickoffDone: true,
+      repostDone: false,
+    });
+    expect(plan.some((a) => a.kind === 'provision_cluster')).toBe(false);
+    // With the cluster provisioned, the burst now hammers the focus story.
+    expect(plan.some((a) => a.kind === 'attention')).toBe(true);
   });
 
   it('quiet scenario produces far less activity than breaking_news', () => {

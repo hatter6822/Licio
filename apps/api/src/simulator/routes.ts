@@ -43,6 +43,27 @@ export function createSimulatorRoutes(sim: DevTrafficSimulator) {
   const controlLimiter = rateLimit({ limit: 60, windowMs: 60_000 });
   return (
     new Hono()
+      // These routes are mounted IN FRONT of createApp()'s corsMiddleware, so
+      // when the web app runs cross-origin (a `VITE_API_URL` pointing at the
+      // API host rather than the Vite proxy) they must carry their own CORS —
+      // including the custom control header in the preflight allow-list, or the
+      // browser blocks even GET /status. Scoped to the allow-listed dev origins.
+      .use('*', async (c, next) => {
+        const origin = c.req.header('origin');
+        if (origin !== undefined && getAllowedOrigins().has(origin)) {
+          c.res.headers.set('Access-Control-Allow-Origin', origin);
+          c.res.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+          c.res.headers.set(
+            'Access-Control-Allow-Headers',
+            `Content-Type, ${SIMULATOR_CONTROL_HEADER}`,
+          );
+          c.res.headers.set('Access-Control-Max-Age', '600');
+        }
+        if (c.req.method === 'OPTIONS') {
+          return new Response(null, { status: 204, headers: c.res.headers });
+        }
+        await next();
+      })
       // Status is a read: no header, no rate limit — the panel polls it.
       .get('/status', (c) => c.json(simulatorStatusSchema.parse(sim.status())))
       .post('/start', controlLimiter, async (c) => {
