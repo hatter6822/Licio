@@ -9,6 +9,11 @@ import {
   useState,
 } from 'react';
 import { cn } from '../../../lib/cn.js';
+import {
+  listboxOptionClasses,
+  listboxTriggerClasses,
+  popoverPanelClasses,
+} from '../../../lib/controls.js';
 import { Icon } from '../Icon/index.js';
 
 export interface SelectOption {
@@ -39,12 +44,6 @@ export interface SelectProps {
   disabled?: boolean;
   className?: string;
 }
-
-const triggerBase =
-  'flex min-h-touch w-full items-center justify-between gap-2 rounded-md border bg-canvas px-3 py-2 text-start text-base text-ink neu-raised-sm transition active:neu-pressed-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
-
-const optionBase =
-  'flex min-h-touch cursor-pointer items-center justify-between gap-2 px-3 py-2 text-base text-ink';
 
 export function Select({
   label,
@@ -106,6 +105,12 @@ export function Select({
   const closeListbox = useCallback((returnFocus: boolean) => {
     setOpen(false);
     setActiveIndex(-1);
+    // Reset the type-ahead buffer so a stale prefix never leaks into the next
+    // open session (a keystroke after a quick close→reopen must start fresh).
+    if (typeahead.current.timer !== undefined) {
+      window.clearTimeout(typeahead.current.timer);
+    }
+    typeahead.current = { text: '', timer: undefined };
     if (returnFocus) {
       triggerRef.current?.focus();
     }
@@ -277,7 +282,7 @@ export function Select({
           onClick={() => (open ? closeListbox(false) : openListbox(selectedIndex))}
           onKeyDown={handleTriggerKeyDown}
           className={cn(
-            triggerBase,
+            listboxTriggerClasses,
             error ? 'border-error' : 'border-line-strong',
             disabled && 'cursor-not-allowed opacity-60',
           )}
@@ -294,7 +299,7 @@ export function Select({
             role="listbox"
             aria-labelledby={labelId}
             tabIndex={-1}
-            className="z-dropdown absolute inset-x-0 top-full mt-1 max-h-64 overflow-auto rounded-md border border-line-strong bg-surface py-1 shadow-md"
+            className={cn(popoverPanelClasses, 'max-h-64 overflow-auto py-1')}
           >
             {options.map((option, index) => {
               const isSelected = option.value === selectedValue;
@@ -319,7 +324,11 @@ export function Select({
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setActiveIndex(index)}
                   onClick={() => commit(index)}
-                  className={cn(optionBase, isActive && 'bg-primary-soft text-primary-on-soft')}
+                  className={cn(
+                    listboxOptionClasses,
+                    'cursor-pointer',
+                    isActive && 'bg-primary-soft text-primary-on-soft',
+                  )}
                 >
                   <span className="truncate">{option.label}</span>
                   {isSelected ? <Icon name="check" className="size-5 text-primary" /> : null}

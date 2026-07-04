@@ -136,8 +136,10 @@ describe('StoryComposer draft restore (WS-Q.5.1b)', () => {
     await user.type(screen.getByLabelText(/^title/i), 'Half-written post');
     await user.type(screen.getByLabelText(/link url/i), 'https://example.org/q');
     await user.type(screen.getByLabelText(/why this matters/i), 'Worth keeping');
-    // A topic proposal is required before submit (WS-K §24.1).
-    await user.click(screen.getByRole('button', { name: 'Technology' }));
+    // A topic proposal is required before submit (WS-K §24.1). Topics are a
+    // searchable MultiSelect: open the picker, then toggle the option.
+    await user.click(screen.getByRole('button', { name: 'Topics' }));
+    await user.click(screen.getByRole('option', { name: 'Technology' }));
     await user.click(screen.getByRole('button', { name: /post/i }));
 
     await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
