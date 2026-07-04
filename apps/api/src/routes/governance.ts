@@ -257,8 +257,10 @@ export function createGovernanceRoutes() {
           const { law_pack_id } = c.req.valid('json');
           const roomId = c.req.param('roomId');
           // Snapshot the room's electorate at OPEN as the frozen turnout
-          // denominator (M4) — a soft cross-context membership read.
-          const eligibleCount = await getForumServices().rooms.countMembers(roomId);
+          // denominator (M4) — the SAME set that may cast a ballot (active
+          // subscribers ∪ stewards, matching isRoomMember), so a steward-role voter
+          // is counted and turnout can be met.
+          const eligibleCount = await getForumServices().rooms.countEligibleVoters(roomId);
           const result = await getGovernanceService().openRatification(
             roomId,
             auth.userId,

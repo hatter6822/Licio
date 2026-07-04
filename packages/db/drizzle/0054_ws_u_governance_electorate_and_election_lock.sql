@@ -6,15 +6,20 @@
 -- churn between open and the settle tick can no longer flip the outcome by
 -- shrinking the denominator. Existing rows default to 0.
 ALTER TABLE "knomosis"."model_ratification" ADD COLUMN "eligible_count" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
--- Backfill the frozen electorate for any ALREADY-OPEN ratification from current
--- ACTIVE room membership, so the new frozen-denominator settle path does not
--- mis-reject an in-flight vote (which would otherwise inherit eligible_count=0 and
--- compute 0 turnout under a law-pack with minTurnout > 0).
+-- Backfill the frozen electorate for any ALREADY-OPEN ratification from the current
+-- eligible-voter set — active subscribers UNION stewards (matching isRoomMember, so
+-- a steward-role voter is counted) — so the new frozen-denominator settle path does
+-- not mis-reject an in-flight vote (which would otherwise inherit eligible_count=0
+-- and compute 0 turnout under a law-pack with minTurnout > 0).
 UPDATE "knomosis"."model_ratification" mr
 SET "eligible_count" = (
-  SELECT count(*)::int
-  FROM "public"."room_subscriptions" rs
-  WHERE rs."room_id" = mr."room_id" AND rs."status" = 'active'
+  SELECT count(*)::int FROM (
+    SELECT rs."user_id" FROM "public"."room_subscriptions" rs
+    WHERE rs."room_id" = mr."room_id" AND rs."status" = 'active'
+    UNION
+    SELECT st."user_id" FROM "public"."room_stewards" st
+    WHERE st."room_id" = mr."room_id"
+  ) voters
 )
 WHERE mr."status" = 'open';--> statement-breakpoint
 -- L4 — at most ONE open steward election per room (mirrors the ratification guard).

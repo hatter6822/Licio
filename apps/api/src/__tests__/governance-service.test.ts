@@ -133,7 +133,11 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     // The departed incumbent is NOT reseated — the seat is left vacant.
     expect(settled.ok && settled.value.settled).toBe(false);
     expect(settled.ok && settled.value.winnerUserId).toBeNull();
-    expect((await h.svc.getSeat('r1'))?.holderUserId).toBeNull();
+    const seat = await h.svc.getSeat('r1');
+    expect(seat?.holderUserId).toBeNull();
+    // The vacated seat's term is already elapsed, so the next scheduler tick opens a
+    // replacement election immediately (not a full term with no steward).
+    expect(seat?.termEnd).toBe(seat?.termStart);
   });
 
   it('rejects a ballot for a non-member candidate at the service (defense-in-depth)', async () => {

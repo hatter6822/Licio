@@ -67,6 +67,32 @@ describe('GovernanceService residual branches', () => {
     expect((await svc.scheduleElection('r')).ok).toBe(false); // election_open
   });
 
+  it('repairs an orphaned open election by repointing the seat (crash recovery)', async () => {
+    const { svc, stores, advance } = make();
+    await svc.bootstrapSeat('r', 'c');
+    advance(5000); // the bootstrap term (1s) has elapsed
+    // Simulate a crash between elections.insert and seats.put: an open election
+    // exists but the seat's currentElectionId was never updated (still null).
+    await stores.elections.insert({
+      electionId: 'orphan-e',
+      roomId: 'r',
+      status: 'open',
+      opensAt: 't',
+      closesAt: 't',
+      weightModel: 'one_civic_account_one_vote',
+      winnerUserId: null,
+      tally: null,
+      mode: 'simulated',
+      createdAt: 't',
+      settledAt: null,
+    });
+    // scheduleElection's insert collides on the one-open guard; instead of failing,
+    // it repairs by repointing the seat at the existing open election.
+    const res = await svc.scheduleElection('r');
+    expect(res.ok && res.value).toBe('orphan-e');
+    expect((await svc.getSeat('r'))?.currentElectionId).toBe('orphan-e');
+  });
+
   it('enforces one OPEN election per room at the store (atomic guard, L4)', async () => {
     const stores = createInMemoryGovernanceStores();
     const base = {

@@ -182,7 +182,28 @@ export class GovernanceService {
       createdAt: opensAt.toISOString(),
       settledAt: null,
     });
-    if (!inserted) return err('election_open', 'An election is already open.');
+    if (!inserted) {
+      // An open election already exists for the room. If the seat's
+      // currentElectionId does not point at it (e.g. a crash landed between the
+      // insert and the seats.put below, leaving currentElectionId null while the
+      // election row exists), REPAIR by repointing the seat at that open election —
+      // otherwise runElectionLifecycle (which only settles seat.currentElectionId)
+      // could never settle the orphan, blocking all future scheduling for the room.
+      const existingOpen = (await this.deps.stores.elections.listByRoom(roomId)).find(
+        (e) => e.status === 'open',
+      );
+      if (existingOpen) {
+        if (seat.currentElectionId !== existingOpen.electionId) {
+          await this.deps.stores.seats.put({
+            ...seat,
+            currentElectionId: existingOpen.electionId,
+            updatedAt: this.iso(),
+          });
+        }
+        return ok(existingOpen.electionId);
+      }
+      return err('election_open', 'An election is already open.');
+    }
     await this.deps.stores.seats.put({
       ...seat,
       currentElectionId: electionId,
@@ -293,7 +314,12 @@ export class GovernanceService {
     });
     if (seat) {
       const start = this.deps.now();
-      const end = new Date(start.getTime() + rules.termSeconds * 1000);
+      // A VACATED seat (no valid member to hold it) gets an already-elapsed term, so
+      // the next scheduler tick immediately opens a REPLACEMENT election rather than
+      // leaving the room without a steward for a full term (default one year), which
+      // would block all steward-only governance. A seated holder gets a normal term.
+      const end =
+        winnerUserId === null ? start : new Date(start.getTime() + rules.termSeconds * 1000);
       await this.deps.stores.seats.put({
         ...seat,
         // A departed holder is never retained: seat exactly the re-validated winner

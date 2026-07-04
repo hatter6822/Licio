@@ -863,6 +863,30 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0]?.value ?? 0;
   }
 
+  async countEligibleVoters(roomId: string): Promise<number> {
+    // Distinct users who may vote: active subscribers ∪ stewards (deduped in JS —
+    // a steward can vote via their role without an active subscription).
+    const [subs, stewards] = await Promise.all([
+      this.#db
+        .select({ userId: roomSubscriptionsTable.userId })
+        .from(roomSubscriptionsTable)
+        .where(
+          and(
+            eq(roomSubscriptionsTable.roomId, roomId),
+            eq(roomSubscriptionsTable.status, 'active'),
+          ),
+        ),
+      this.#db
+        .select({ userId: roomStewardsTable.userId })
+        .from(roomStewardsTable)
+        .where(eq(roomStewardsTable.roomId, roomId)),
+    ]);
+    const ids = new Set<string>();
+    for (const row of subs) ids.add(row.userId);
+    for (const row of stewards) ids.add(row.userId);
+    return ids.size;
+  }
+
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {
     const rows = await this.#db
       .select()
