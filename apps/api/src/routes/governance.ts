@@ -69,7 +69,9 @@ const proposeBodySchema = z
   })
   .strict();
 
-const voteBodySchema = z.object({ candidate_user_id: z.string().min(1).max(128) }).strict();
+// `candidate_user_id` is used as a uuid store key (a knomosis uuid column), so it
+// must be uuid-validated for a controlled 422 rather than a Postgres 22P02 / 500.
+const voteBodySchema = z.object({ candidate_user_id: uuidSchema }).strict();
 const ratificationOpenBodySchema = z
   .object({
     /** Bind a community-proposed law-pack (the agent's bounds); null ⇒ default. */
@@ -108,8 +110,15 @@ export function createGovernanceRoutes() {
       .use('/rooms/:roomId/*', zValidator('param', z.object({ roomId: uuidSchema })))
       // --- Steward seat + elections ---------------------------------------
       .get('/rooms/:roomId/steward', authMiddleware(), async (c) => {
+        const roomId = c.req.param('roomId');
+        // Apply the WS-Q content read bar (parity with the other governance reads):
+        // a PRIVATE room's steward identity/term is members/stewards-only, so an
+        // authenticated non-member cannot enumerate who governs a private room.
+        if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
+          return c.json(deny('not_found', 'Room governance not found.'), 404);
+        }
         const svc = getGovernanceService();
-        const seat = await svc.getSeat(c.req.param('roomId'));
+        const seat = await svc.getSeat(roomId);
         if (!seat) return c.json({ seat: null }, 200);
         return c.json({
           seat: {
@@ -133,9 +142,12 @@ export function createGovernanceRoutes() {
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
           const roomId = c.req.param('roomId');
           const { candidate_user_id } = c.req.valid('json');
-          // Membership-gate the voter (the soft cross-context read), then require
-          // the candidate to be a room member too — a steward is elected from
-          // among the room's own members, never an outsider.
+          // Membership-gate the voter (the soft cross-context read); the candidate
+          // must be a room member too — a steward is elected from among the room's
+          // own members, never an outsider. The candidate check is passed INTO
+          // castVote so it runs AFTER the election is validated, so a bogus/foreign
+          // election id can't turn this endpoint into a membership oracle (it 404s
+          // regardless of whether the candidate is a member).
           const eligible = await isRoomMember(roomId, auth.userId);
           if (!eligible) {
             return c.json(
@@ -143,24 +155,19 @@ export function createGovernanceRoutes() {
               403,
             );
           }
-          if (!(await isRoomMember(roomId, candidate_user_id))) {
-            return c.json(
-              deny('invalid_candidate', 'The candidate is not a member of this room.'),
-              422,
-            );
-          }
+          const candidateEligible = await isRoomMember(roomId, candidate_user_id);
           const result = await getGovernanceService().castVote(
             roomId,
             c.req.param('electionId'),
             auth.userId,
             candidate_user_id,
             eligible,
+            candidateEligible,
           );
           if (!result.ok) {
-            return c.json(
-              deny(result.code, result.message),
-              result.code === 'not_found' ? 404 : 409,
-            );
+            const status =
+              result.code === 'not_found' ? 404 : result.code === 'invalid_candidate' ? 422 : 409;
+            return c.json(deny(result.code, result.message), status);
           }
           return c.json({ ok: true });
         },
@@ -248,11 +255,18 @@ export function createGovernanceRoutes() {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
           const { law_pack_id } = c.req.valid('json');
+          const roomId = c.req.param('roomId');
+          // Pass the electorate reader as a callback so the service invokes it ONLY
+          // after its steward/model/law-pack checks pass — an unauthorized caller
+          // can never force the count query. It counts the SAME set that may vote
+          // (active subscribers ∪ stewards, matching isRoomMember), frozen as the
+          // turnout denominator (M4).
           const result = await getGovernanceService().openRatification(
-            c.req.param('roomId'),
+            roomId,
             auth.userId,
             c.req.param('modelId'),
             law_pack_id,
+            () => getForumServices().rooms.countEligibleVoters(roomId),
           );
           if (!result.ok) {
             return c.json(

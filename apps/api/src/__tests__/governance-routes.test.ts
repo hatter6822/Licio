@@ -175,7 +175,7 @@ describe('WS-U governance routes', () => {
       'approve',
       true,
     );
-    const settled = await svc.settleRatification(vote_id, 1);
+    const settled = await svc.settleRatification(vote_id);
     expect(settled.ok && settled.value.activated).toBe(true);
 
     // "Governed by" view shows the active agent.

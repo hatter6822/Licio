@@ -148,6 +148,7 @@ function toRatification(row: typeof modelRatifications.$inferSelect): Ratificati
     opensAt: row.opensAt.toISOString(),
     closesAt: row.closesAt.toISOString(),
     minQuorum: row.minQuorum,
+    eligibleCount: row.eligibleCount,
     openedByUserId: row.openedByUserId,
     tally: (row.tally as RatificationResult | null) ?? null,
     outcome: row.outcome,
@@ -176,6 +177,7 @@ function toBinding(row: typeof roomAgentBindings.$inferSelect): BindingRecord {
     approvedByElectionId: row.approvedByElectionId,
     capabilityDescriptor: row.capabilityDescriptor as CapabilityDescriptor,
     active: row.active,
+    floorFrozen: row.floorFrozen,
     approvedAt: row.approvedAt.toISOString(),
   };
 }
@@ -202,6 +204,8 @@ function toTreasury(row: typeof agentTreasuryActions.$inferSelect): TreasuryActi
     category: row.category,
     amount: Number(row.amount),
     asset: row.asset,
+    targetAllocation:
+      (row.targetAllocation as TreasuryActionRecord['targetAllocation'] | null) ?? null,
     accepted: row.accepted,
     verdict: row.verdict as Verdict,
     executedAt: row.executedAt.toISOString(),
@@ -257,21 +261,30 @@ export class DrizzleElectionStore implements ElectionStore {
     this.#db = db;
   }
 
-  async insert(election: ElectionRecord): Promise<ElectionRecord> {
-    await this.#db.insert(stewardElections).values({
-      electionId: election.electionId,
-      roomId: election.roomId,
-      status: election.status,
-      opensAt: new Date(election.opensAt),
-      closesAt: new Date(election.closesAt),
-      weightModel: election.weightModel,
-      winnerUserId: election.winnerUserId,
-      tally: election.tally,
-      mode: election.mode,
-      createdAt: new Date(election.createdAt),
-      settledAt: election.settledAt ? new Date(election.settledAt) : null,
-    });
-    return election;
+  async insert(election: ElectionRecord): Promise<ElectionRecord | null> {
+    // A second OPEN election for the room collides on the partial unique index
+    // (one-open-per-room) and returns [] — the atomic guard against two opens.
+    const rows = await this.#db
+      .insert(stewardElections)
+      .values({
+        electionId: election.electionId,
+        roomId: election.roomId,
+        status: election.status,
+        opensAt: new Date(election.opensAt),
+        closesAt: new Date(election.closesAt),
+        weightModel: election.weightModel,
+        winnerUserId: election.winnerUserId,
+        tally: election.tally,
+        mode: election.mode,
+        createdAt: new Date(election.createdAt),
+        settledAt: election.settledAt ? new Date(election.settledAt) : null,
+      })
+      .onConflictDoNothing({
+        target: stewardElections.roomId,
+        where: sql`${stewardElections.status} = 'open'`,
+      })
+      .returning();
+    return rows[0] ? toElection(rows[0]) : null;
   }
 
   async get(electionId: string): Promise<ElectionRecord | null> {
@@ -518,6 +531,7 @@ export class DrizzleBindingStore implements BindingStore {
       approvedByElectionId: binding.approvedByElectionId,
       capabilityDescriptor: binding.capabilityDescriptor,
       active: binding.active,
+      floorFrozen: binding.floorFrozen,
       approvedAt: new Date(binding.approvedAt),
     };
     await this.#db
@@ -527,10 +541,14 @@ export class DrizzleBindingStore implements BindingStore {
     return binding;
   }
 
-  async setActive(roomId: string, active: boolean): Promise<BindingRecord | null> {
+  async setActive(
+    roomId: string,
+    active: boolean,
+    floorFrozen: boolean,
+  ): Promise<BindingRecord | null> {
     const rows = await this.#db
       .update(roomAgentBindings)
-      .set({ active })
+      .set({ active, floorFrozen })
       .where(eq(roomAgentBindings.roomId, roomId))
       .returning();
     return rows[0] ? toBinding(rows[0]) : null;
@@ -591,6 +609,7 @@ export class DrizzleTreasuryActionStore implements TreasuryActionStore {
       category: action.category,
       amount: String(action.amount),
       asset: action.asset,
+      targetAllocation: action.targetAllocation ?? null,
       accepted: action.accepted,
       verdict: action.verdict,
       executedAt: new Date(action.executedAt),
@@ -632,6 +651,7 @@ export class DrizzleRatificationVoteStore implements RatificationVoteStore {
         opensAt: new Date(vote.opensAt),
         closesAt: new Date(vote.closesAt),
         minQuorum: vote.minQuorum,
+        eligibleCount: vote.eligibleCount,
         openedByUserId: vote.openedByUserId,
         tally: vote.tally,
         outcome: vote.outcome,
@@ -677,11 +697,20 @@ export class DrizzleRatificationVoteStore implements RatificationVoteStore {
     voteId: string,
     fields: Partial<RatificationVoteRecord>,
   ): Promise<RatificationVoteRecord | null> {
+    // Translate the FULL mutable surface (parity with the in-memory adapter, which
+    // spreads every field) so a patch of any field is honoured by both adapters.
     const set: Partial<typeof modelRatifications.$inferInsert> = {};
     if (fields.status !== undefined) set.status = fields.status;
     if (fields.outcome !== undefined) set.outcome = fields.outcome;
     if (fields.tally !== undefined) set.tally = fields.tally;
     if (fields.lawPackId !== undefined) set.lawPackId = fields.lawPackId;
+    if (fields.roomId !== undefined) set.roomId = fields.roomId;
+    if (fields.modelId !== undefined) set.modelId = fields.modelId;
+    if (fields.minQuorum !== undefined) set.minQuorum = fields.minQuorum;
+    if (fields.openedByUserId !== undefined) set.openedByUserId = fields.openedByUserId;
+    if (fields.opensAt !== undefined) set.opensAt = new Date(fields.opensAt);
+    if (fields.closesAt !== undefined) set.closesAt = new Date(fields.closesAt);
+    if (fields.createdAt !== undefined) set.createdAt = new Date(fields.createdAt);
     if (fields.settledAt !== undefined) {
       set.settledAt = fields.settledAt === null ? null : new Date(fields.settledAt);
     }

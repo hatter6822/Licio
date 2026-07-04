@@ -32,7 +32,11 @@ export function tallyElection(
     }
   }
   const distinctVoters = unique.length;
-  const turnout = ctx.eligibleCount > 0 ? distinctVoters / ctx.eligibleCount : 0;
+  // Clamp to the schema's [0,1] contract: `eligibleCount` is a membership read at
+  // settle time while ballots were cast earlier, so a membership shrink can make
+  // distinctVoters exceed eligibleCount — a turnout > 1 would violate
+  // `electionResultSchema` and always over-satisfy the turnout gate.
+  const turnout = ctx.eligibleCount > 0 ? Math.min(1, distinctVoters / ctx.eligibleCount) : 0;
   const weightPerVote = Math.min(1, rules.perAccountCap);
 
   const tallyMap = new Map<string, number>();

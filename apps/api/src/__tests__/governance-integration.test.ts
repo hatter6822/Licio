@@ -342,12 +342,15 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       approvedByElectionId: null,
       capabilityDescriptor: { granted: ['moderate.flag'] },
       active: true,
+      floorFrozen: false,
       approvedAt: t,
     });
     expect((await bindings.get(roomId))?.capabilityDescriptor.granted).toEqual(['moderate.flag']);
-    // setActive flips the flag (the platform-floor freeze).
-    expect((await bindings.setActive(roomId, false))?.active).toBe(false);
-    expect((await bindings.get(roomId))?.active).toBe(false);
+    // The platform-floor freeze deactivates AND sets the durable floor-frozen flag.
+    const frozen = await bindings.setActive(roomId, false, true);
+    expect(frozen?.active).toBe(false);
+    expect(frozen?.floorFrozen).toBe(true);
+    expect((await bindings.get(roomId))?.floorFrozen).toBe(true);
   });
 
   it('appends agent actions newest-first and filters accepted treasury actions', async () => {
@@ -382,6 +385,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       category: 'grant',
       amount: 10,
       asset: null,
+      targetAllocation: null,
       accepted: true,
       verdict: accepted,
       executedAt: new Date(base).toISOString(),
@@ -392,6 +396,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       category: 'grant',
       amount: 5,
       asset: null,
+      targetAllocation: null,
       accepted: false,
       verdict: rejected,
       executedAt: new Date(base + 1_000).toISOString(),
@@ -425,6 +430,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       opensAt: t,
       closesAt: t,
       minQuorum: 1,
+      eligibleCount: 0,
       openedByUserId: stewardId,
       tally: null,
       outcome: null,
@@ -444,6 +450,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       opensAt: t,
       closesAt: t,
       minQuorum: 1,
+      eligibleCount: 0,
       openedByUserId: stewardId,
       tally: null,
       outcome: null,

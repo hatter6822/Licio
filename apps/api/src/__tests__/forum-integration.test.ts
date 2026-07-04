@@ -567,6 +567,10 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(activated.requestId).toBe(requestId);
     expect(activated.notificationPreferences.new_evidence).toBe(true);
     expect(await roomsStore.countMembers(room.roomId)).toBe(1);
+    // Eligible voters = active subscribers ∪ stewards: authorId (active sub) +
+    // secondUserId (community_steward, no active subscription) = 2 distinct, so a
+    // steward-role voter is counted even though countMembers (active only) is 1.
+    expect(await roomsStore.countEligibleVoters(room.roomId)).toBe(2);
     expect(await roomsStore.listJoinRequests(room.roomId)).toEqual([]);
     expect((await roomsStore.listSubscriptionsByUser(authorId)).map((s) => s.roomId)).toContain(
       room.roomId,

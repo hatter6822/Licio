@@ -34,7 +34,9 @@ export function tallyRatification(
     else reject += 1;
   }
   const distinctVoters = approve + reject;
-  const turnout = ctx.eligibleCount > 0 ? distinctVoters / ctx.eligibleCount : 0;
+  // Clamp to [0,1]: `eligibleCount` is sampled at settle while ballots were cast
+  // earlier, so a membership shrink can push distinctVoters past eligibleCount.
+  const turnout = ctx.eligibleCount > 0 ? Math.min(1, distinctVoters / ctx.eligibleCount) : 0;
 
   if (distinctVoters < rules.minQuorum || turnout < rules.minTurnout) {
     return {

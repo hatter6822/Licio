@@ -58,15 +58,21 @@ export const moderationConditionSchema: z.ZodType<ModerationCondition> = z.lazy(
 );
 
 /**
- * The closed action enum, ordered by severity (index = severity). Only in-room,
+ * The closed action enum, ordered by severity (index = severity) so that severity
+ * is MONOTONIC with real content impact — the visibility state each action maps to
+ * (see `ACTION_TO_STATE`): `allow`/`warn` keep content published, `flag_for_review`/
+ * `restrict` route it to human review (hidden), and `remove` removes it. A `warn`
+ * (visible) is therefore LESS severe than `flag_for_review` (hidden), which keeps
+ * "most-severe-wins" resolution, the admission severity bands, and the capability
+ * downgrade from ever turning a visible action into a content hide. Only in-room,
  * appealable actions; NO floor-reserved action is expressible. `flag_for_review`
  * routes to a human rather than auto-removing (preserves the human-review-at-the
  * -floor invariant for ambiguous cases).
  */
 export const MODERATION_ACTIONS = [
   'allow',
-  'flag_for_review',
   'warn',
+  'flag_for_review',
   'restrict',
   'remove',
 ] as const;

@@ -863,6 +863,23 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0]?.value ?? 0;
   }
 
+  async countEligibleVoters(roomId: string): Promise<number> {
+    // Distinct users who may vote: active subscribers ∪ stewards (a steward can vote
+    // via their role without an active subscription). The UNION dedups in Postgres
+    // and returns a SCALAR count — no materialising every member/steward user id.
+    const rows = (await this.#db.execute(sql`
+      SELECT count(*)::int AS value FROM (
+        SELECT ${roomSubscriptionsTable.userId} FROM ${roomSubscriptionsTable}
+          WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
+            AND ${roomSubscriptionsTable.status} = 'active'
+        UNION
+        SELECT ${roomStewardsTable.userId} FROM ${roomStewardsTable}
+          WHERE ${roomStewardsTable.roomId} = ${roomId}
+      ) voters
+    `)) as unknown as Array<{ value: number }>;
+    return rows[0]?.value ?? 0;
+  }
+
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {
     const rows = await this.#db
       .select()

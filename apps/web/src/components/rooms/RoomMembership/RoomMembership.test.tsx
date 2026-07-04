@@ -79,9 +79,13 @@ afterEach(() => {
 });
 
 describe('RoomMembership (WS-Q.5.3a / WS-U §16.6)', () => {
-  it('prompts an anonymous reader to sign in (no join button)', () => {
+  it('prompts an anonymous reader to sign in as a button-styled link (no join button)', () => {
     render(<RoomMembership roomId="r1" room={baseRoom({})} />);
-    expect(screen.getByRole('link', { name: /^sign in$/i })).toHaveAttribute('href', '/login');
+    // Rendered as a Button with href → a link styled as a button (role=link), the
+    // href carrying the post-login redirect back to the room.
+    const signIn = screen.getByRole('link', { name: /^sign in$/i });
+    expect(signIn.getAttribute('href')).toContain('/login');
+    expect(signIn.getAttribute('href')).toContain('redirect');
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 

@@ -30,10 +30,18 @@ test.describe('routing (WS-C.1.1)', () => {
     await expect(page).toHaveURL(/\/login/);
   });
 
-  test('renders RestrictedState for a flag-gated route (fail-closed)', async ({ page }) => {
+  test('redirects the legacy governance route to the room governance deep link', async ({
+    page,
+  }) => {
+    // WS-U §24.6 (L7): the room-governance surface is now a modal ON the room page.
+    // The legacy /rooms/:id/governance route no longer renders an inert
+    // "unavailable" stub — it redirects to the room with the governance modal
+    // deep-linked open (?governance=<tab>).
     await page.goto('/rooms/11111111-1111-4111-8111-111111111111/governance');
-    await expect(page.getByRole('heading', { level: 1, name: /Room governance/i })).toBeVisible();
-    await expect(page.getByText(/Governance features are not enabled/i)).toBeVisible();
+    await expect(page).toHaveURL(
+      /\/rooms\/11111111-1111-4111-8111-111111111111\?governance=overview/,
+    );
+    await expect(page.getByText(/Governance features are not enabled/i)).toHaveCount(0);
   });
 
   test('renders a not-found state inside the shell for an unknown path', async ({ page }) => {

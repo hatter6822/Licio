@@ -81,7 +81,13 @@ export const stewardElections = knomosisSchema.table(
     createdAt: tz('created_at').notNull().defaultNow(),
     settledAt: tz('settled_at'),
   },
-  (t) => [index('steward_election_room_idx').on(t.roomId)],
+  (t) => [
+    index('steward_election_room_idx').on(t.roomId),
+    // At most ONE open election per room (mirrors the ratification guard): a second
+    // concurrent open collides on this partial unique index rather than racing a
+    // read-then-write, so the scheduler can never seat two winners for one room.
+    uniqueIndex('steward_election_one_open_per_room').on(t.roomId).where(sql`${t.status} = 'open'`),
+  ],
 );
 export type StewardElectionRow = typeof stewardElections.$inferSelect;
 
@@ -185,6 +191,10 @@ export const modelRatifications = knomosisSchema.table(
     opensAt: tz('opens_at').notNull(),
     closesAt: tz('closes_at').notNull(),
     minQuorum: integer('min_quorum').notNull(),
+    // The eligible-voter count SNAPSHOTTED at open — the FROZEN turnout denominator
+    // (M4). Freezing it (alongside min_quorum) makes the adoption bound fixed for
+    // the life of the vote, so membership churn cannot flip the outcome.
+    eligibleCount: integer('eligible_count').notNull().default(0),
     openedByUserId: uuid('opened_by_user_id').references(() => users.userId, {
       onDelete: 'set null',
     }),
@@ -251,6 +261,11 @@ export const roomAgentBindings = knomosisSchema.table('room_agent_binding', {
   approvedByElectionId: uuid('approved_by_election_id'), // soft intra-context ref
   capabilityDescriptor: jsonb('capability_descriptor').notNull(), // the derived descriptor
   active: boolean('active').notNull().default(false),
+  // Durable platform-floor freeze (WS-U.3.3b): distinct from `active`, set ONLY by
+  // the WS-J-gated floor freeze and cleared ONLY by the floor unfreeze. A member
+  // ratification may flip `active` but must never clear this, so a community vote
+  // can never re-activate a floor-frozen agent (the legal floor is non-overridable).
+  floorFrozen: boolean('floor_frozen').notNull().default(false),
   approvedAt: tz('approved_at').notNull().defaultNow(),
 });
 export type RoomAgentBindingRow = typeof roomAgentBindings.$inferSelect;
@@ -283,6 +298,9 @@ export const agentTreasuryActions = knomosisSchema.table(
     category: text('category').notNull(),
     amount: numeric('amount').notNull(),
     asset: text('asset'),
+    // The per-asset target allocation for an investment_rebalance (null otherwise),
+    // persisted so an accepted rebalance is auditable/replayable against the bands.
+    targetAllocation: jsonb('target_allocation'),
     accepted: boolean('accepted').notNull(),
     verdict: jsonb('verdict').notNull(), // the kernel Verdict (evidence or rejection)
     executedAt: tz('executed_at').notNull().defaultNow(),

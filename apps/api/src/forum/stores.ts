@@ -381,6 +381,11 @@ export interface RoomStore {
   deleteSubscription(roomId: string, userId: string): Promise<boolean>;
   listSubscriptionsByUser(userId: string): Promise<RoomSubscriptionRecord[]>;
   countMembers(roomId: string): Promise<number>;
+  /** Distinct count of users ELIGIBLE TO VOTE in the room's governance — active
+   *  subscribers ∪ stewards, the exact electorate `isRoomMember` admits (a steward
+   *  role holder can vote without an active subscription). Used as the governance
+   *  quorum/turnout denominator so it matches who can actually cast a ballot. */
+  countEligibleVoters(roomId: string): Promise<number>;
   listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]>;
   getJoinRequest(requestId: string): Promise<RoomSubscriptionRecord | null>;
   /** Remove every subscription and steward row for a user (WS-D.2.4
@@ -990,6 +995,19 @@ export class InMemoryRoomStore implements RoomStore {
       if (sub.roomId === roomId && sub.status === 'active') count += 1;
     }
     return count;
+  }
+
+  async countEligibleVoters(roomId: string): Promise<number> {
+    // Distinct users who may vote: active subscribers ∪ stewards (a steward can
+    // vote via their role without an active subscription).
+    const ids = new Set<string>();
+    for (const sub of this.#subscriptions.values()) {
+      if (sub.roomId === roomId && sub.status === 'active') ids.add(sub.userId);
+    }
+    for (const steward of this.#stewards) {
+      if (steward.roomId === roomId) ids.add(steward.userId);
+    }
+    return ids.size;
   }
 
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {

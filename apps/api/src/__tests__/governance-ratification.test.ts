@@ -81,6 +81,23 @@ describe('GovernanceService ratification', () => {
     expect((await svc.castRatificationBallot('r', voteId, 'v1', 'reject', true)).ok).toBe(false); // already_voted
   });
 
+  it('reads the electorate ONLY after authorization passes (no unauth count)', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    const modelId = await proposeEligible(svc, 'r', 's');
+    let counted = 0;
+    const count = async () => {
+      counted += 1;
+      return 5;
+    };
+    // A non-steward is rejected WITHOUT the (potentially expensive) electorate count.
+    expect((await svc.openRatification('r', 'intruder', modelId, null, count)).ok).toBe(false);
+    expect(counted).toBe(0);
+    // The elected steward opening a valid vote reads it exactly once.
+    expect((await svc.openRatification('r', 's', modelId, null, count)).ok).toBe(true);
+    expect(counted).toBe(1);
+  });
+
   it('settles an approving majority into an ACTIVE agent', async () => {
     const { svc } = make();
     await svc.bootstrapSeat('r', 's');
@@ -89,7 +106,7 @@ describe('GovernanceService ratification', () => {
     const voteId = open.ok ? open.value.voteId : '';
     await svc.castRatificationBallot('r', voteId, 'v1', 'approve', true);
     await svc.castRatificationBallot('r', voteId, 'v2', 'approve', true);
-    const settled = await svc.settleRatification(voteId, 3);
+    const settled = await svc.settleRatification(voteId);
     expect(settled.ok && settled.value.outcome).toBe('approved');
     expect(settled.ok && settled.value.activated).toBe(true);
     const binding = await svc.getBinding('r');
@@ -104,7 +121,7 @@ describe('GovernanceService ratification', () => {
     const open = await svc.openRatification('r', 's', modelId, null);
     const voteId = open.ok ? open.value.voteId : '';
     await svc.castRatificationBallot('r', voteId, 'v1', 'reject', true);
-    const settled = await svc.settleRatification(voteId, 3);
+    const settled = await svc.settleRatification(voteId);
     expect(settled.ok && settled.value.outcome).toBe('rejected');
     expect(settled.ok && settled.value.activated).toBe(false);
     expect(await svc.getBinding('r')).toBeNull();
@@ -124,7 +141,7 @@ describe('GovernanceService ratification', () => {
     const open = await svc.openRatification('r', 's', second, null);
     const voteId = open.ok ? open.value.voteId : '';
     await svc.castRatificationBallot('r', voteId, 'v1', 'approve', true);
-    await svc.settleRatification(voteId, 1);
+    await svc.settleRatification(voteId);
     expect((await svc.getModel(second))?.status).toBe('approved');
     expect((await svc.getModel(first))?.status).toBe('superseded'); // the prior is demoted
     expect((await svc.getBinding('r'))?.modelId).toBe(second);
@@ -136,15 +153,15 @@ describe('GovernanceService ratification', () => {
     // Open on a non-existent model.
     expect((await svc.openRatification('r', 's', 'no-such-model', null)).ok).toBe(false); // not_found
     // Settle a non-existent vote.
-    expect((await svc.settleRatification('no-such-vote', 1)).ok).toBe(false); // not_found
+    expect((await svc.settleRatification('no-such-vote')).ok).toBe(false); // not_found
     // Cast on a settled vote.
     const modelId = await proposeEligible(svc, 'r', 's');
     const open = await svc.openRatification('r', 's', modelId, null);
     const voteId = open.ok ? open.value.voteId : '';
-    await svc.settleRatification(voteId, 1);
+    await svc.settleRatification(voteId);
     expect((await svc.castRatificationBallot('r', voteId, 'v1', 'approve', true)).ok).toBe(false); // not_open
     // Re-settling a settled vote is refused.
-    expect((await svc.settleRatification(voteId, 1)).ok).toBe(false); // not_open
+    expect((await svc.settleRatification(voteId)).ok).toBe(false); // not_open
   });
 
   it('the scheduler settles a vote whose window has closed', async () => {
@@ -155,12 +172,12 @@ describe('GovernanceService ratification', () => {
     const voteId = open.ok ? open.value.voteId : '';
     await svc.castRatificationBallot('r', voteId, 'v1', 'approve', true);
     // Before the window closes: the lifecycle is a no-op.
-    expect(await svc.runRatificationLifecycle(async () => 1, now())).toEqual({
+    expect(await svc.runRatificationLifecycle(now())).toEqual({
       settled: 0,
       activated: 0,
     });
     advance(51_000);
-    const result = await svc.runRatificationLifecycle(async () => 1, now());
+    const result = await svc.runRatificationLifecycle(now());
     expect(result).toEqual({ settled: 1, activated: 1 });
     expect((await svc.getBinding('r'))?.active).toBe(true);
 
@@ -239,5 +256,51 @@ describe('GovernanceService ratification', () => {
     const second = await svc.openRatification('r', 's', m2, null);
     expect(second.ok).toBe(false);
     expect(!second.ok && second.code).toBe('vote_open');
+  });
+
+  it('freezes the turnout electorate at open (M4) — the denominator is fixed for the vote', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    // A law-pack requiring 50% turnout, quorum 1.
+    const lp = await svc.proposeLawPack('r', 's', {
+      lawPackId: 'x',
+      version: '1',
+      allowedProposalTypes: ['model_prompt_approval'],
+      permittedCapabilities: ['moderate.flag'],
+      treasury: {
+        caps: [],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 0,
+        requireCoiFor: [],
+        investment: null,
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        perAccountCap: 1,
+        minQuorum: 1,
+        minTurnout: 0.5,
+        termSeconds: 1,
+      },
+    });
+    const lawPackId = lp.ok ? lp.value.lawPackId : '';
+
+    // Frozen electorate of 2; one approving ballot ⇒ turnout 1/2 = 0.5 ✓ (adopted).
+    const m1 = await proposeEligible(svc, 'r', 's');
+    const open1 = await svc.openRatification('r', 's', m1, lawPackId, () => Promise.resolve(2));
+    const v1 = open1.ok ? open1.value.voteId : '';
+    await svc.castRatificationBallot('r', v1, 'a', 'approve', true);
+    expect((await svc.settleRatification(v1)).ok && (await svc.getBinding('r'))?.active).toBe(true);
+
+    // A SECOND vote with a frozen electorate of 10; the same single ballot ⇒
+    // turnout 1/10 = 0.1 < 0.5 ⇒ FAIL-SAFE, no matter what membership does later.
+    const m2 = await proposeEligible(svc, 'r', 's', { bundleId: 'b2', name: 'n2' });
+    const open2 = await svc.openRatification('r', 's', m2, lawPackId, () => Promise.resolve(10));
+    const v2 = open2.ok ? open2.value.voteId : '';
+    await svc.castRatificationBallot('r', v2, 'a', 'approve', true);
+    const s2 = await svc.settleRatification(v2);
+    expect(s2.ok && s2.value.outcome).toBe('rejected');
+    // The first model stays bound (the under-turnout second vote did not supersede).
+    expect((await svc.getBinding('r'))?.modelId).toBe(m1);
   });
 });

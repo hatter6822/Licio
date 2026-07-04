@@ -14,9 +14,10 @@ import { createInMemoryGovernanceStores } from '../governance/stores.js';
 function make(cryptoEnabled = false) {
   let t = Date.parse('2026-06-19T00:00:00.000Z');
   let n = 0;
+  const stores = createInMemoryGovernanceStores();
   return {
     svc: createGovernanceService({
-      stores: createInMemoryGovernanceStores(),
+      stores,
       config: resolveGovernanceConfig({
         cryptoEnabled,
         electionTermSeconds: 1,
@@ -25,6 +26,7 @@ function make(cryptoEnabled = false) {
       now: () => new Date(t),
       uuid: () => `id-${++n}`,
     }),
+    stores,
     advance: (ms: number) => {
       t += ms;
     },
@@ -65,6 +67,54 @@ describe('GovernanceService residual branches', () => {
     expect((await svc.scheduleElection('r')).ok).toBe(false); // election_open
   });
 
+  it('repairs an orphaned open election by repointing the seat (crash recovery)', async () => {
+    const { svc, stores, advance } = make();
+    await svc.bootstrapSeat('r', 'c');
+    advance(5000); // the bootstrap term (1s) has elapsed
+    // Simulate a crash between elections.insert and seats.put: an open election
+    // exists but the seat's currentElectionId was never updated (still null).
+    await stores.elections.insert({
+      electionId: 'orphan-e',
+      roomId: 'r',
+      status: 'open',
+      opensAt: 't',
+      closesAt: 't',
+      weightModel: 'one_civic_account_one_vote',
+      winnerUserId: null,
+      tally: null,
+      mode: 'simulated',
+      createdAt: 't',
+      settledAt: null,
+    });
+    // scheduleElection's insert collides on the one-open guard; instead of failing,
+    // it repairs by repointing the seat at the existing open election.
+    const res = await svc.scheduleElection('r');
+    expect(res.ok && res.value).toBe('orphan-e');
+    expect((await svc.getSeat('r'))?.currentElectionId).toBe('orphan-e');
+  });
+
+  it('enforces one OPEN election per room at the store (atomic guard, L4)', async () => {
+    const stores = createInMemoryGovernanceStores();
+    const base = {
+      roomId: 'r',
+      status: 'open' as const,
+      opensAt: 't',
+      closesAt: 't',
+      weightModel: 'one_civic_account_one_vote',
+      winnerUserId: null,
+      tally: null,
+      mode: 'simulated' as const,
+      createdAt: 't',
+      settledAt: null,
+    };
+    expect(await stores.elections.insert({ ...base, electionId: 'e1' })).not.toBeNull();
+    // A second OPEN election for the same room collides (the atomic one-open guard).
+    expect(await stores.elections.insert({ ...base, electionId: 'e2' })).toBeNull();
+    // Settling the first frees the room to open a new one.
+    await stores.elections.patch('e1', { status: 'settled' });
+    expect(await stores.elections.insert({ ...base, electionId: 'e3' })).not.toBeNull();
+  });
+
   it('rejects approving a model that belongs to a different room', async () => {
     const { svc } = make();
     await svc.bootstrapSeat('rA', 's');
@@ -75,7 +125,12 @@ describe('GovernanceService residual branches', () => {
     expect((await svc.approveModel('rB', id, null, null)).ok).toBe(false); // roomId mismatch
   });
 
-  it('keeps a flag decision unchanged when flag itself is not granted (no over-downgrade)', async () => {
+  it('never hides content when the deciding capability was not granted (deny-by-default)', async () => {
+    // A model that decides flag_for_review but was granted NO content-affecting
+    // capability must NOT hide content: flag_for_review maps to under_review, and
+    // the community granted the agent no capability to hide, so the effective
+    // action is `allow` (no effect, no agent action logged). This is the WS-U
+    // capability sandbox — the agent can never exceed community-voted bounds.
     const { svc } = make();
     await svc.bootstrapSeat('r', 's');
     const p = await svc.proposeModel(
@@ -98,7 +153,87 @@ describe('GovernanceService residual branches', () => {
     await svc.evaluateModel(id);
     await svc.approveModel('r', id, null, null);
     const dec = await svc.moderate('r', spamCtx, 'c');
+    expect(dec.ok && dec.value?.action).toBe('allow');
+    // No content-affecting action ⇒ nothing appended to the agent action log.
+    expect(await svc.recentAgentActions('r', 10)).toHaveLength(0);
+  });
+
+  it('falls back to the strongest GRANTED action and never escalates a visible one', async () => {
+    // Decides `remove` but is granted only moderate.flag ⇒ falls back to
+    // flag_for_review (the strongest granted action no more severe than remove) —
+    // routes to the human floor rather than removing, and never escalates.
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    const p = await svc.proposeModel(
+      'r',
+      's',
+      bundle({
+        moderationRules: [
+          {
+            id: 'remove',
+            when: { kind: 'link_count_gte', value: 3 },
+            action: 'remove',
+            reason: 'x',
+          },
+        ],
+        requestedCapabilities: ['moderate.flag'],
+      }),
+      'p',
+    );
+    const id = p.ok ? p.value.modelId : '';
+    await svc.evaluateModel(id);
+    await svc.approveModel('r', id, null, null);
+    const dec = await svc.moderate('r', spamCtx, 'c');
     expect(dec.ok && dec.value?.action).toBe('flag_for_review');
+  });
+
+  it('keeps a floor-frozen agent paused across a member re-ratification (durable floor)', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    // Adopt an initial model → active agent that removes the spam contribution.
+    const p1 = await svc.proposeModel('r', 's', bundle(), 'p');
+    const m1 = p1.ok ? p1.value.modelId : '';
+    await svc.evaluateModel(m1);
+    await svc.approveModel('r', m1, null, null);
+    const first = await svc.moderate('r', spamCtx, 'c');
+    expect(first.ok && first.value?.action).toBe('remove');
+    expect((await svc.getBinding('r'))?.active).toBe(true);
+
+    // The platform floor freezes the agent (durable) — it stops moderating.
+    expect((await svc.freezeAgent('r')).ok).toBe(true);
+    let binding = await svc.getBinding('r');
+    expect(binding?.active).toBe(false);
+    expect(binding?.floorFrozen).toBe(true);
+    const paused = await svc.moderate('r', spamCtx, 'c2');
+    expect(paused.ok && paused.value).toBeNull();
+
+    // A member ratification adopts a DIFFERENT model — but must NOT re-activate the
+    // floor-frozen agent (the legal floor is non-overridable by a community vote).
+    const p2 = await svc.proposeModel('r', 's', bundle({ name: 'n2' }), 'p2');
+    const m2 = p2.ok ? p2.value.modelId : '';
+    await svc.evaluateModel(m2);
+    const adopt = await svc.approveModel('r', m2, 'vote-1', null);
+    expect(adopt.ok && adopt.value.active).toBe(false); // adopted but NOT activated
+    binding = await svc.getBinding('r');
+    expect(binding?.active).toBe(false);
+    expect(binding?.floorFrozen).toBe(true);
+    expect(binding?.modelId).toBe(m2); // the new model IS bound…
+    const stillPaused = await svc.moderate('r', spamCtx, 'c3');
+    expect(stillPaused.ok && stillPaused.value).toBeNull(); // …but the agent is still paused.
+
+    // Only a WS-J-gated unfreeze restores the agent (and clears the durable flag).
+    expect((await svc.reactivateAgent('r')).ok).toBe(true);
+    binding = await svc.getBinding('r');
+    expect(binding?.active).toBe(true);
+    expect(binding?.floorFrozen).toBe(false);
+    const restored = await svc.moderate('r', spamCtx, 'c4');
+    expect(restored.ok && restored.value?.action).toBe('remove');
+
+    // Both floor interventions are recorded in the append-only agent audit log.
+    const actions = await svc.recentAgentActions('r', 50);
+    const types = actions.map((a) => a.actionType);
+    expect(types).toContain('governance.freeze');
+    expect(types).toContain('governance.unfreeze');
   });
 
   it('rejects a malformed treasury action category (crypto on, gateway granted)', async () => {
@@ -146,6 +281,160 @@ describe('GovernanceService residual branches', () => {
       proposedAt: '2026-06-19T00:00:00.000Z',
     });
     expect(bad.ok).toBe(false); // invalid_action
+  });
+
+  it('refuses a treasury category the room did not grant, even with a configured cap', async () => {
+    // The room grants only treasury.report; a `grant`-category action is refused
+    // (no_capability) even though a grant cap is configured — the per-category
+    // capability is enforced, not just whether a cap row exists.
+    const { svc } = make(true);
+    await svc.bootstrapSeat('r', 's');
+    const lp = await svc.proposeLawPack('r', 's', {
+      lawPackId: 'x',
+      version: '1',
+      allowedProposalTypes: ['t'],
+      permittedCapabilities: ['gateway.submit_signed_action', 'treasury.report'],
+      treasury: {
+        caps: [
+          {
+            category: 'transparency_report',
+            perActionMax: 10,
+            perWindowMax: 10,
+            windowSeconds: 60,
+          },
+          // A grant cap IS configured — but treasury.grant is NOT permitted.
+          { category: 'grant', perActionMax: 1000, perWindowMax: 1000, windowSeconds: 60 },
+        ],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 100_000,
+        requireCoiFor: [],
+        investment: null,
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        minQuorum: 1,
+        minTurnout: 0,
+        termSeconds: 1,
+      },
+    });
+    const lawPackId = lp.ok ? lp.value.lawPackId : '';
+    const p = await svc.proposeModel(
+      'r',
+      's',
+      bundle({ requestedCapabilities: ['gateway.submit_signed_action', 'treasury.report'] }),
+      'p',
+    );
+    const id = p.ok ? p.value.modelId : '';
+    await svc.evaluateModel(id);
+    await svc.approveModel('r', id, null, lawPackId);
+
+    const grant = await svc.executeTreasuryAction('r', {
+      category: 'grant',
+      amount: 500,
+      asset: null,
+      coiDeclared: false,
+      proposedAt: '2026-06-19T00:00:00.000Z',
+    });
+    expect(grant.ok).toBe(false);
+    expect(grant.ok === false && grant.code).toBe('no_capability');
+
+    // The granted category (transparency_report) is accepted by the kernel.
+    const report = await svc.executeTreasuryAction('r', {
+      category: 'transparency_report',
+      amount: 1,
+      asset: null,
+      coiDeclared: false,
+      proposedAt: '2026-06-19T00:00:00.000Z',
+    });
+    expect(report.ok).toBe(true);
+  });
+
+  it('threads a target allocation through an investment rebalance and enforces the bands', async () => {
+    const { svc, stores } = make(true);
+    await svc.bootstrapSeat('r', 's');
+    const lp = await svc.proposeLawPack('r', 's', {
+      lawPackId: 'x',
+      version: '1',
+      allowedProposalTypes: ['t'],
+      permittedCapabilities: ['gateway.submit_signed_action', 'treasury.invest'],
+      treasury: {
+        caps: [
+          {
+            category: 'investment_rebalance',
+            perActionMax: 1000,
+            perWindowMax: 1000,
+            windowSeconds: 60,
+          },
+        ],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 100_000,
+        requireCoiFor: [],
+        investment: {
+          allocationBands: [
+            { asset: 'STABLE', minFraction: 0.5, maxFraction: 1 },
+            { asset: 'ETH', minFraction: 0, maxFraction: 0.5 },
+          ],
+          rebalanceMinIntervalSeconds: 1,
+        },
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        minQuorum: 1,
+        minTurnout: 0,
+        termSeconds: 1,
+      },
+    });
+    const lawPackId = lp.ok ? lp.value.lawPackId : '';
+    const p = await svc.proposeModel(
+      'r',
+      's',
+      bundle({ requestedCapabilities: ['gateway.submit_signed_action', 'treasury.invest'] }),
+      'p',
+    );
+    const id = p.ok ? p.value.modelId : '';
+    await svc.evaluateModel(id);
+    await svc.approveModel('r', id, null, lawPackId);
+
+    // A rebalance with NO allocation (a room that voted an investment policy) is
+    // rejected fail-closed rather than silently waved through. (Run first: it is
+    // rejected, so it records no accepted history and cannot trip the interval
+    // check for the compliant rebalance below.)
+    const noAlloc = await svc.executeTreasuryAction('r', {
+      category: 'investment_rebalance',
+      amount: 0,
+      asset: null,
+      coiDeclared: false,
+      proposedAt: '2026-06-19T00:00:00.000Z',
+    });
+    expect(noAlloc.ok && noAlloc.value.accepted).toBe(false);
+    expect(noAlloc.ok && !noAlloc.value.accepted && noAlloc.value.code).toBe(
+      'investment_band_required',
+    );
+
+    // A rebalance WITH a compliant target allocation is accepted by the kernel.
+    const okRebal = await svc.executeTreasuryAction('r', {
+      category: 'investment_rebalance',
+      amount: 0,
+      asset: null,
+      coiDeclared: false,
+      proposedAt: '2026-06-19T00:00:00.000Z',
+      targetAllocation: [
+        { asset: 'STABLE', fraction: 0.6 },
+        { asset: 'ETH', fraction: 0.4 },
+      ],
+    });
+    expect(okRebal.ok && okRebal.value.accepted).toBe(true);
+
+    // The accepted rebalance persists its allocation in the treasury log, so it can
+    // be audited/replayed to prove which allocation satisfied the voted bands.
+    const logged = await stores.treasuryActions.acceptedByRoom('r');
+    const rebalance = logged.find((a) => a.category === 'investment_rebalance');
+    expect(rebalance?.targetAllocation).toEqual([
+      { asset: 'STABLE', fraction: 0.6 },
+      { asset: 'ETH', fraction: 0.4 },
+    ]);
   });
 
   it('binds a custom law-pack that restricts the agent below the model request', async () => {

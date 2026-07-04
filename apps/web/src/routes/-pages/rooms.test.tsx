@@ -6,13 +6,14 @@
 // items (public items carry no chip).
 import type { FeedItem, RoomDetail } from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '../../stores/auth.js';
 import { checkA11y } from '../../test/axe.js';
 import { RoomDetailBody } from './rooms.js';
 
+const searchMock = vi.hoisted(() => vi.fn((): Record<string, unknown> => ({})));
 vi.mock('@tanstack/react-router', () => ({
   // Forward className + aria-label so StoryFeedLink's stretched overlay link
   // keeps an accessible name in the test DOM (axe link-name).
@@ -30,6 +31,7 @@ vi.mock('@tanstack/react-router', () => ({
     </a>
   ),
   useParams: () => ({ roomId: 'r1' }),
+  useSearch: () => searchMock(),
 }));
 
 const roomFeed = vi.hoisted(() => vi.fn());
@@ -117,6 +119,7 @@ beforeEach(() => {
   // RoomMembership shows the join/leave affordance only to a signed-in reader (an
   // anonymous one is prompted to sign in); these cases test signed-in members.
   useAuthStore.setState({ status: 'authenticated', user: { id: 'u1' } } as never);
+  searchMock.mockReturnValue({});
 });
 afterEach(() => {
   roomFeed.mockReset();
@@ -170,6 +173,75 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     expect(screen.getByText('Public item')).toBeInTheDocument();
     expect(screen.getByText('In-room item')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /join/i })).not.toBeInTheDocument();
+  });
+
+  it('opens the governance surface in a modal from the compact chrome row (WS-U)', () => {
+    roomFeed.mockReturnValue({ isPending: false, data: undefined });
+    // A public room a member can read → the governance chrome row renders.
+    renderBody(baseRoom({ visibility: 'public', joined: true }));
+
+    // The governance surface opens from a single compact button (shares the
+    // membership action row); the modal is closed until the reader opens it.
+    const trigger = screen.getByRole('button', { name: /^governance$/i });
+    expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+
+    const dialog = screen.getByRole('dialog', { name: /governance, transparency & settings/i });
+    expect(dialog).toBeInTheDocument();
+    // Tabs separate the three concerns; Overview is the default and shows the
+    // "governed by" transparency view (mocked as the platform baseline).
+    expect(screen.getByRole('tablist', { name: /room governance sections/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /how it's governed/i })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByText(/platform moderation baseline/i)).toBeInTheDocument();
+    // A non-steward with the flag off sees no Settings tab.
+    expect(screen.queryByRole('tab', { name: /^settings$/i })).not.toBeInTheDocument();
+  });
+
+  it('auto-opens the governance modal from the ?governance deep link (WS-U)', () => {
+    roomFeed.mockReturnValue({ isPending: false, data: undefined });
+    // The legacy /rooms/:id/governance route redirects here with ?governance=…;
+    // the modal opens on render to the deep-linked tab.
+    searchMock.mockReturnValue({ governance: 'models' });
+    renderBody(baseRoom({ visibility: 'public', joined: true }));
+
+    expect(
+      screen.getByRole('dialog', { name: /governance, transparency & settings/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /models & voting/i })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+  });
+
+  it('opens the modal when the ?governance param appears while already mounted (WS-U)', () => {
+    roomFeed.mockReturnValue({ isPending: false, data: undefined });
+    // Reader is already on the room page with the modal closed…
+    searchMock.mockReturnValue({});
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const room = baseRoom({ visibility: 'public', joined: true });
+    const { rerender } = render(
+      <QueryClientProvider client={client}>
+        <RoomDetailBody roomId="r1" room={room} />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    // …then follows the legacy /governance link, which redirects to change only the
+    // search param on this already-mounted component; the modal must open.
+    searchMock.mockReturnValue({ governance: 'overview' });
+    rerender(
+      <QueryClientProvider client={client}>
+        <RoomDetailBody roomId="r1" room={room} />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByRole('dialog', { name: /governance, transparency & settings/i }),
+    ).toBeInTheDocument();
   });
 
   it('has no accessibility violations (tier-one shell + member feed)', async () => {

@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Rooms (WS-C.1.1a/b). The /rooms tab lists topic/local rooms and community
-// lenses; the detail route shows a room. Room governance is a flag-gated
-// sub-route that renders RestrictedState when `governanceEnabled` is off
-// (fail-closed, WS-C.1.1d) — the URL stays shareable but inert.
+// lenses; the detail route shows a room. The WS-U room-governance surface opens
+// in a modal ON the room page (deep-linkable via `?governance=<tab>`); the legacy
+// `/rooms/:id/governance` route redirects here rather than showing an inert stub.
 import type { RoomDetail } from '@licio/shared';
-import { Link, useNavigate, useParams } from '@tanstack/react-router';
+import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
-import { ProgressiveDisclosure } from '../../components/cognitive/ProgressiveDisclosure/index.js';
 import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
-import { GovernedByPanel } from '../../components/governance/GovernedByPanel.js';
-import { StewardModelManager } from '../../components/governance/StewardModelManager.js';
+import { RoomGovernanceDialog } from '../../components/governance/RoomGovernanceDialog.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
 import { RoomMembership } from '../../components/rooms/RoomMembership/index.js';
-import { RoomSettingsForm } from '../../components/rooms/RoomSettingsForm/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { Dialog } from '../../components/ui/Dialog/index.js';
@@ -30,13 +27,8 @@ import {
   useRoomsQuery,
 } from '../../lib/queries.js';
 import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
-import { track } from '../../lib/telemetry.js';
 import { isValidUuidParam } from '../../routing/guards.js';
-import {
-  selectContentSurface,
-  selectGovernanceEnabled,
-  useFeatureFlagStore,
-} from '../../stores/index.js';
+import { selectContentSurface, useFeatureFlagStore } from '../../stores/index.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
@@ -175,6 +167,33 @@ export function RoomDetailBody({
   // agent governs the room, the summary says so even before it is expanded.
   const governedBy = useGovernedByQuery(roomId, contentVisible);
   const agentActive = governedBy.data?.active === true;
+  // WS-U §24.6 — the governance surface opens in a focused modal. Its trigger is a
+  // COMPACT button that shares the membership action row (passed to RoomMembership
+  // as `trailing`), so the room's CONTENT leads and the two controls no longer
+  // stack as two full-width blocks. The "AI agent active" badge keeps at-a-glance
+  // transparency without opening the modal. A `?governance=<tab>` deep link (the
+  // legacy /governance route redirects here) opens the modal to that tab.
+  const governanceParam = useSearch({ from: '/rooms_/$roomId' }).governance;
+  const [governanceOpen, setGovernanceOpen] = useState(() => governanceParam != null);
+  // Open the modal when the deep-link param appears — INCLUDING a param change
+  // while this component is already mounted (the legacy /governance route redirects
+  // to `?governance=…`; a reader already on the room page keeps this component, so
+  // the mount-time initializer above would otherwise miss it and the modal would
+  // stay closed despite the advertised deep link).
+  useEffect(() => {
+    if (governanceParam != null) setGovernanceOpen(true);
+  }, [governanceParam]);
+  const governanceButton = contentVisible ? (
+    <Button variant="secondary" onClick={() => setGovernanceOpen(true)} aria-haspopup="dialog">
+      <Icon name="check-badge" className="size-4 text-ink-muted" />
+      {t('room.governance.button', 'Governance')}
+      {agentActive ? (
+        <span className="inline-flex items-center rounded-full bg-info-soft px-2 py-0.5 font-medium text-info-on-soft text-xs">
+          {t('room.governance.agentActive', 'AI agent active')}
+        </span>
+      ) : null}
+    </Button>
+  ) : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -197,20 +216,38 @@ export function RoomDetailBody({
           the gate room governance voting enforces. Public rooms join immediately;
           private rooms by request/invite. Handles every state (incl. leave) and
           is independent of content visibility (a public room reads without it). */}
-      <RoomMembership roomId={roomId} room={room} />
+      {/* WS-Q.5.3a + WS-U §24.6 — the compact room action bar: the membership
+          button (Join/Leave) and the governance-modal button share ONE row (the
+          governance button is passed as `trailing`), placed ABOVE the feed so
+          neither control is buried under a long list of story cards. */}
+      <RoomMembership roomId={roomId} room={room} trailing={governanceButton} />
 
       {room.governance !== null ? (
         <Link
           to="/rooms/$roomId/governance"
           params={{ roomId }}
-          className="text-primary-on-soft underline"
+          className="text-primary-on-soft text-sm underline"
         >
           {t('room.governance.link', 'Room governance')}
         </Link>
       ) : null}
 
+      {/* WS-U §24.6/§16.6 — the governance modal (opened by the compact button
+          above). Tabs separate the "governed by" transparency view, the steward's
+          model powers + member vote, and the steward-only settings. */}
+      {contentVisible ? (
+        <RoomGovernanceDialog
+          open={governanceOpen}
+          onClose={() => setGovernanceOpen(false)}
+          roomId={roomId}
+          room={room}
+          showSettings={room.is_steward === true && binaryVisibilityUi}
+          {...(governanceParam ? { defaultTab: governanceParam } : {})}
+        />
+      ) : null}
+
       {/* Tier two: the room feed is the PRIMARY content, so it leads (in-room chip
-          on every room_only item). The governance/steward chrome collapses below. */}
+          on every room_only item). */}
       {contentVisible ? (
         feed.isPending ? (
           <p className="text-ink-muted text-sm">{t('room.feed.loading', 'Loading room…')}</p>
@@ -239,76 +276,6 @@ export function RoomDetailBody({
           </p>
         )
       ) : null}
-
-      {/* WS-U §24.6/§16.6 — governance, transparency & steward controls. Collapsed
-          by default (WS-B.2.13 progressive disclosure) so the room's CONTENT leads;
-          the "governed by" transparency view, the steward's model powers, and the
-          steward-only settings are all one tap away. The summary keeps at-a-glance
-          transparency: when an AI agent governs the room, it says so unexpanded. */}
-      {contentVisible ? (
-        <ProgressiveDisclosure
-          summary={
-            <span className="inline-flex flex-wrap items-center gap-2">
-              {t('room.governance.disclosure', 'Governance, transparency & settings')}
-              {agentActive ? (
-                <span className="inline-flex items-center rounded-full bg-info-soft px-2 py-0.5 font-medium text-info-on-soft text-xs">
-                  {t('room.governance.agentActive', 'AI agent active')}
-                </span>
-              ) : null}
-            </span>
-          }
-        >
-          <div className="flex flex-col gap-4">
-            {/* WS-Q.5.3c — steward-only room settings (join/posting) + the audited
-                public⇄private visibility cascade (gated by the rollout flag). */}
-            {room.is_steward && binaryVisibilityUi ? (
-              <RoomSettingsForm roomId={roomId} room={room} />
-            ) : null}
-
-            {/* WS-U §24.6 — the in-room "governed by" transparency view (active
-                agent, granted powers, recent actions, member-downloadable model). */}
-            <GovernedByPanel roomId={roomId} />
-
-            {/* WS-U §16.6 — the elected steward's two powers (propose a model +
-                prompt; record the community's ratified decision) + the proposal
-                registry. The member ratification vote is gated on membership: an
-                active subscription (`joined`) OR a room steward role (`is_steward`),
-                matching the backend `isRoomMember` gate so an unsubscribed room
-                steward can still vote. */}
-            <StewardModelManager
-              roomId={roomId}
-              joined={room.joined}
-              isRoomSteward={room.is_steward === true}
-            />
-          </div>
-        </ProgressiveDisclosure>
-      ) : null}
     </div>
-  );
-}
-
-export function RoomGovernancePage(): React.ReactElement {
-  const t = useT();
-  usePageFocus(t('room.governance.title', 'Room governance'));
-  const governanceEnabled = useFeatureFlagStore(selectGovernanceEnabled);
-  // Observe reaching the flag-gated governance page (route PATTERN only, no PII).
-  useEffect(() => {
-    track({ name: 'route_guard', metric: 'restricted', bucket: '/rooms/$roomId/governance' });
-  }, []);
-
-  return (
-    <>
-      <PageHeader title={t('room.governance.title', 'Room governance')} />
-      <div className="mx-auto w-full max-w-2xl p-4">
-        <RestrictedState
-          title={t('room.governance.unavailable', 'Governance unavailable')}
-          reason={
-            governanceEnabled
-              ? t('room.governance.soon', 'Room governance is not yet available here.')
-              : t('room.governance.disabled', 'Governance features are not enabled.')
-          }
-        />
-      </div>
-    </>
   );
 }
