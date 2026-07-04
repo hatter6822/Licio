@@ -256,17 +256,17 @@ export function createGovernanceRoutes() {
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
           const { law_pack_id } = c.req.valid('json');
           const roomId = c.req.param('roomId');
-          // Snapshot the room's electorate at OPEN as the frozen turnout
-          // denominator (M4) — the SAME set that may cast a ballot (active
-          // subscribers ∪ stewards, matching isRoomMember), so a steward-role voter
-          // is counted and turnout can be met.
-          const eligibleCount = await getForumServices().rooms.countEligibleVoters(roomId);
+          // Pass the electorate reader as a callback so the service invokes it ONLY
+          // after its steward/model/law-pack checks pass — an unauthorized caller
+          // can never force the count query. It counts the SAME set that may vote
+          // (active subscribers ∪ stewards, matching isRoomMember), frozen as the
+          // turnout denominator (M4).
           const result = await getGovernanceService().openRatification(
             roomId,
             auth.userId,
             c.req.param('modelId'),
             law_pack_id,
-            eligibleCount,
+            () => getForumServices().rooms.countEligibleVoters(roomId),
           );
           if (!result.ok) {
             return c.json(

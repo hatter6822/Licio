@@ -81,6 +81,23 @@ describe('GovernanceService ratification', () => {
     expect((await svc.castRatificationBallot('r', voteId, 'v1', 'reject', true)).ok).toBe(false); // already_voted
   });
 
+  it('reads the electorate ONLY after authorization passes (no unauth count)', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    const modelId = await proposeEligible(svc, 'r', 's');
+    let counted = 0;
+    const count = async () => {
+      counted += 1;
+      return 5;
+    };
+    // A non-steward is rejected WITHOUT the (potentially expensive) electorate count.
+    expect((await svc.openRatification('r', 'intruder', modelId, null, count)).ok).toBe(false);
+    expect(counted).toBe(0);
+    // The elected steward opening a valid vote reads it exactly once.
+    expect((await svc.openRatification('r', 's', modelId, null, count)).ok).toBe(true);
+    expect(counted).toBe(1);
+  });
+
   it('settles an approving majority into an ACTIVE agent', async () => {
     const { svc } = make();
     await svc.bootstrapSeat('r', 's');
@@ -270,7 +287,7 @@ describe('GovernanceService ratification', () => {
 
     // Frozen electorate of 2; one approving ballot ⇒ turnout 1/2 = 0.5 ✓ (adopted).
     const m1 = await proposeEligible(svc, 'r', 's');
-    const open1 = await svc.openRatification('r', 's', m1, lawPackId, 2);
+    const open1 = await svc.openRatification('r', 's', m1, lawPackId, () => Promise.resolve(2));
     const v1 = open1.ok ? open1.value.voteId : '';
     await svc.castRatificationBallot('r', v1, 'a', 'approve', true);
     expect((await svc.settleRatification(v1)).ok && (await svc.getBinding('r'))?.active).toBe(true);
@@ -278,7 +295,7 @@ describe('GovernanceService ratification', () => {
     // A SECOND vote with a frozen electorate of 10; the same single ballot ⇒
     // turnout 1/10 = 0.1 < 0.5 ⇒ FAIL-SAFE, no matter what membership does later.
     const m2 = await proposeEligible(svc, 'r', 's', { bundleId: 'b2', name: 'n2' });
-    const open2 = await svc.openRatification('r', 's', m2, lawPackId, 10);
+    const open2 = await svc.openRatification('r', 's', m2, lawPackId, () => Promise.resolve(10));
     const v2 = open2.ok ? open2.value.voteId : '';
     await svc.castRatificationBallot('r', v2, 'a', 'approve', true);
     const s2 = await svc.settleRatification(v2);

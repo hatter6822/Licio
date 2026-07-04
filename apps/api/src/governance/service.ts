@@ -499,17 +499,19 @@ export class GovernanceService {
 
   /**
    * Open a member ratification vote on an eligible model (seat holder only).
-   * `eligibleCount` is the room's member count at open (the route's soft
-   * cross-context read); it is SNAPSHOTTED onto the vote as the frozen turnout
-   * denominator, so membership churn during the window cannot flip the outcome
-   * (M4). Defaults to 0 for direct/test callers.
+   * `countEligibleVoters` is a soft cross-context reader for the room's eligible-
+   * voter count (active subscribers ∪ stewards). It is invoked ONLY AFTER the
+   * steward/model/law-pack checks pass — so an unauthorized caller can never force
+   * the (potentially expensive) count — and its result is SNAPSHOTTED onto the vote
+   * as the frozen turnout denominator, so membership churn during the window cannot
+   * flip the outcome (M4). Omitted ⇒ 0 for direct/test callers.
    */
   async openRatification(
     roomId: string,
     userId: string,
     modelId: string,
     lawPackId: string | null,
-    eligibleCount = 0,
+    countEligibleVoters?: () => Promise<number>,
   ): Promise<GovernanceResult<{ voteId: string }>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat || seat.holderUserId !== userId) {
@@ -523,6 +525,9 @@ export class GovernanceService {
     const lawCheck = await this.assertLawPackInRoom(roomId, lawPackId);
     if (!lawCheck.ok) return lawCheck;
     const lawPack = await this.resolveLawPack(roomId, lawPackId);
+    // Only NOW — after authorization + validation — read the electorate, so a
+    // non-steward cannot force the count query by hammering the endpoint.
+    const eligibleCount = countEligibleVoters ? Math.max(0, await countEligibleVoters()) : 0;
     const opensAt = this.deps.now();
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
     const voteId = this.deps.uuid();
@@ -540,7 +545,7 @@ export class GovernanceService {
       minQuorum: Math.max(1, lawPack.election.minQuorum),
       // Freeze the turnout electorate at open (M4) — the settle tally divides by
       // this, not a fresh membership read, so churn cannot flip the outcome.
-      eligibleCount: Math.max(0, eligibleCount),
+      eligibleCount,
       openedByUserId: userId,
       tally: null,
       outcome: null,
