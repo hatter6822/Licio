@@ -440,8 +440,11 @@ server's bars, it does not re-decide them.
   non-postable rooms shown with the reason, submit disabled); a public/in-room
   visibility control whose displayed value equals the SHARED
   `deriveStoryVisibility` output and is LOCKED to in-room for private rooms; a
-  REQUIRED topic picker (multi-select chips from the shared canonical topic
-  catalog, capped at `MAX_PROPOSED_TOPICS`) whose selections are author
+  REQUIRED topic picker (the shared searchable `MultiSelect` primitive — a
+  `Select`-styled trigger opens a popover with a SEARCH box over the 100+-topic
+  canonical catalog; matches, arrow-navigable via `aria-activedescendant`, toggle
+  in place and the chosen topics show as removable chips below, capped at
+  `MAX_PROPOSED_TOPICS`) whose selections are author
   PROPOSALS — the server validates them against the content before any become
   the story's trusted topics (SPEC §14.1/§24.1), so the composer never mints a
   random/placeholder topic; and four modes — link, brief, image post (alt text

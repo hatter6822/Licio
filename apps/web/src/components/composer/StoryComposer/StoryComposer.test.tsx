@@ -107,7 +107,9 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     // The body is the Markdown editor (labelled "Text"), not a bare input.
     await user.type(screen.getByRole('textbox', { name: /^text/i }), 'Some **observed** context.');
     // At least one topic PROPOSAL is required before submitting (WS-K §24.1).
-    await user.click(screen.getByRole('button', { name: 'Technology' }));
+    // Topics are a searchable MultiSelect: open the picker, then toggle the option.
+    await user.click(screen.getByRole('button', { name: 'Topics' }));
+    await user.click(screen.getByRole('option', { name: 'Technology' }));
     await user.click(screen.getByRole('button', { name: /post/i }));
     await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
     expect(createStory.mock.calls[0]?.[0]).toMatchObject({
@@ -175,7 +177,9 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     await user.type(screen.getByLabelText(/^title/i), 'Reservoir report');
     await user.type(screen.getByLabelText(/link url/i), 'https://example.org/a');
     await user.type(screen.getByLabelText(/why this matters/i), 'Primary source');
-    await user.click(screen.getByRole('button', { name: 'Technology' }));
+    // Topics are a searchable MultiSelect: open the picker, then toggle the option.
+    await user.click(screen.getByRole('button', { name: 'Topics' }));
+    await user.click(screen.getByRole('option', { name: 'Technology' }));
     await user.click(screen.getByRole('button', { name: /post/i }));
     await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
     const request = createStory.mock.calls[0]?.[0];

@@ -24,7 +24,6 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
 import { mintObjectUrl, sanitizeBlobUrl } from '../../../lib/blob-url.js';
-import { cn } from '../../../lib/cn.js';
 import { fileInputClasses } from '../../../lib/controls.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
 import {
@@ -37,6 +36,7 @@ import {
 import { selectContentSurface, useFeatureFlagStore } from '../../../stores/index.js';
 import { Button } from '../../ui/Button/index.js';
 import { Input } from '../../ui/Input/index.js';
+import { MultiSelect, type MultiSelectOption } from '../../ui/MultiSelect/index.js';
 import { RadioGroup } from '../../ui/RadioGroup/index.js';
 import { Select } from '../../ui/Select/index.js';
 import { TextArea } from '../../ui/TextArea/index.js';
@@ -58,6 +58,13 @@ export interface StoryComposerProps {
 
 /** Trailing autosave debounce (WS-Q.5.1b): one encrypt+write per pause. */
 const DRAFT_DEBOUNCE_MS = 800;
+
+/** The catalog subject topics as MultiSelect options (stable — the catalog is a
+ *  static SSOT, so this is built once at module load, not per render). */
+const TOPIC_OPTIONS: MultiSelectOption[] = SELECTABLE_TOPICS.map((topic) => ({
+  value: topic.id,
+  label: topic.name,
+}));
 
 function newStoryDraftId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -114,12 +121,10 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
   // the server stores them as `proposed_topic_ids` and the AI validator decides
   // which become the story's real `topic_ids` after checking the content.
   const [topics, setTopics] = useState<string[]>([]);
-  const toggleTopic = (id: string): void => {
-    setTopics((prev) => {
-      if (prev.includes(id)) return prev.filter((t) => t !== id);
-      if (prev.length >= MAX_PROPOSED_TOPICS) return prev; // bounded proposals
-      return [...prev, id];
-    });
+  // The MultiSelect owns the toggle + MAX_PROPOSED_TOPICS cap; the composer only
+  // records the new selection and clears any pending "choose a topic" error.
+  const onChangeTopics = (next: string[]): void => {
+    setTopics(next);
     setErrors((prev) => {
       if (prev['topics'] === undefined) return prev;
       const { topics: _dropped, ...rest } = prev;
@@ -565,47 +570,39 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
 
       {/* WS-K §24.1 — topic PROPOSALS. Author picks are confirmed against the
           content server-side before they take effect, so this is framed as a
-          proposal, not a final label. */}
-      <fieldset className="flex flex-col gap-2">
-        <legend className="font-medium text-ink text-sm">
-          {t('storyComposer.topics.label', 'Topics')}
-        </legend>
-        <p id={`${formId}-topics-help`} className="text-ink-muted text-sm">
-          {t(
-            'storyComposer.topics.help',
-            'Pick up to {max} topics this is about. We confirm them against your content before they take effect.',
-            { max: MAX_PROPOSED_TOPICS },
-          )}
-        </p>
-        <div
-          className="flex flex-wrap gap-2"
-          role="group"
-          aria-label={t('storyComposer.topics.label', 'Topics')}
-          aria-describedby={`${formId}-topics-help`}
-        >
-          {SELECTABLE_TOPICS.map((topic) => {
-            const selected = topics.includes(topic.id);
-            const atCap = !selected && topics.length >= MAX_PROPOSED_TOPICS;
-            return (
-              <button
-                key={topic.id}
-                type="button"
-                aria-pressed={selected}
-                disabled={atCap}
-                onClick={() => toggleTopic(topic.id)}
-                className={cn(
-                  'rounded-full border border-line px-3 py-1 text-sm transition-colors',
-                  selected ? 'neu-pressed text-ink' : 'neu-raised text-ink-muted',
-                  atCap && 'cursor-not-allowed opacity-50',
-                )}
-              >
-                {topic.name}
-              </button>
-            );
-          })}
-        </div>
-        {errors['topics'] ? <p className="text-error-on-soft text-sm">{errors['topics']}</p> : null}
-      </fieldset>
+          proposal, not a final label. The MultiSelect keeps this compact: a token
+          field that grows only with the chosen topics (never the full catalog),
+          with the whole vocabulary one click away, and enforces the
+          MAX_PROPOSED_TOPICS cap in one place. */}
+      <MultiSelect
+        label={t('storyComposer.topics.label', 'Topics')}
+        required
+        value={topics}
+        onChange={onChangeTopics}
+        options={TOPIC_OPTIONS}
+        max={MAX_PROPOSED_TOPICS}
+        placeholder={t('storyComposer.topics.placeholder', 'Choose up to {max} topics', {
+          max: MAX_PROPOSED_TOPICS,
+        })}
+        summaryLabel={(selected, cap) =>
+          t('storyComposer.topics.count', '{selected} of {max} topics', {
+            selected,
+            max: cap ?? MAX_PROPOSED_TOPICS,
+          })
+        }
+        searchPlaceholder={t('storyComposer.topics.search', 'Search topics…')}
+        searchLabel={t('storyComposer.topics.searchLabel', 'Search topics')}
+        noResultsLabel={t('storyComposer.topics.noResults', 'No matching topics')}
+        helperText={t(
+          'storyComposer.topics.help',
+          'Pick up to {max} topics this is about. We confirm them against your content before they take effect.',
+          { max: MAX_PROPOSED_TOPICS },
+        )}
+        selectionsLabel={t('storyComposer.topics.selected', 'Selected topics')}
+        removeLabel={(name) => t('storyComposer.topics.remove', 'Remove {name}', { name })}
+        capNote={t('storyComposer.topics.cap', 'Remove a topic to add another.')}
+        {...(errors['topics'] ? { error: errors['topics'] } : {})}
+      />
 
       {mode === 'link' ? (
         <>
