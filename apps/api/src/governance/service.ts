@@ -212,9 +212,6 @@ export class GovernanceService {
     candidateEligible = true,
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote in a steward election.');
-    if (!candidateEligible) {
-      return err('invalid_candidate', 'The candidate is not a member of this room.');
-    }
     const election = await this.deps.stores.elections.get(electionId);
     // The election must belong to THIS room: the membership/candidate gate was
     // computed for the URL room, so a foreign election id must never be voted on
@@ -226,6 +223,12 @@ export class GovernanceService {
     // scheduler tick, so the window must be enforced here too.
     if (election.status !== 'open' || this.deps.now().getTime() >= Date.parse(election.closesAt)) {
       return err('not_open', 'Election is not open.');
+    }
+    // Candidate membership is checked AFTER the election is validated, so a bogus or
+    // foreign election id returns not_found/not_open regardless of the candidate —
+    // the endpoint is never a room-membership oracle for an invalid election.
+    if (!candidateEligible) {
+      return err('invalid_candidate', 'The candidate is not a member of this room.');
     }
     const cast = await this.deps.stores.votes.cast({
       electionId,
@@ -268,15 +271,18 @@ export class GovernanceService {
     const incumbent = seat?.holderUserId ?? null;
     let winnerUserId = result.winnerUserId;
     let settled = result.settled;
-    // Fail-safe if the elected winner is no longer a room member at seat time.
-    if (
-      settled &&
-      winnerUserId !== null &&
-      winnerUserId !== incumbent &&
-      isRoomMember &&
-      !(await isRoomMember(winnerUserId))
-    ) {
-      winnerUserId = incumbent;
+    // Re-validate that whoever is about to HOLD the seat is still a room member —
+    // the INCUMBENT included: the tally's fail-safe returns the incumbent, who may
+    // themselves have left/been removed during the window (the case a `winner ===
+    // incumbent` short-circuit would wrongly skip). If the winner is no longer a
+    // member, fall back to the incumbent ONLY when they are a DIFFERENT, still-member
+    // holder; otherwise VACATE the seat (holderUserId = null) — a non-member is never
+    // seated or retained (the invariant: the steward is a room member).
+    if (isRoomMember && winnerUserId !== null && !(await isRoomMember(winnerUserId))) {
+      winnerUserId =
+        incumbent !== null && incumbent !== winnerUserId && (await isRoomMember(incumbent))
+          ? incumbent
+          : null;
       settled = false;
     }
     await this.deps.stores.elections.patch(electionId, {
@@ -290,7 +296,9 @@ export class GovernanceService {
       const end = new Date(start.getTime() + rules.termSeconds * 1000);
       await this.deps.stores.seats.put({
         ...seat,
-        holderUserId: winnerUserId ?? seat.holderUserId,
+        // A departed holder is never retained: seat exactly the re-validated winner
+        // (which may be null ⇒ a vacant seat until the next election).
+        holderUserId: winnerUserId,
         termStart: start.toISOString(),
         termEnd: end.toISOString(),
         bootstrap: false,
@@ -932,6 +940,7 @@ export class GovernanceService {
       category: input.category,
       amount: input.amount,
       asset: input.asset,
+      targetAllocation: action.data.targetAllocation,
       accepted: verdict.accepted,
       verdict,
       executedAt: this.iso(),

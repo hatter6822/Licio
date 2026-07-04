@@ -149,6 +149,10 @@ export interface TreasuryActionRecord {
   category: string;
   amount: number;
   asset: string | null;
+  /** The per-asset target allocation for an `investment_rebalance` (null for other
+   *  categories) — persisted so an accepted rebalance can be AUDITED / replayed to
+   *  prove which allocation satisfied the community-voted investment bands. */
+  targetAllocation: readonly { asset: string; fraction: number }[] | null;
   accepted: boolean;
   verdict: Verdict;
   executedAt: string;

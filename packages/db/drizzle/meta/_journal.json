@@ -379,6 +379,13 @@
       "when": 1782198700000,
       "tag": "0054_ws_u_governance_electorate_and_election_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1782198800000,
+      "tag": "0055_ws_u_treasury_target_allocation",
+      "breakpoints": true
     }
   ]
 }

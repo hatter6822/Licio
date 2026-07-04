@@ -298,6 +298,9 @@ export const agentTreasuryActions = knomosisSchema.table(
     category: text('category').notNull(),
     amount: numeric('amount').notNull(),
     asset: text('asset'),
+    // The per-asset target allocation for an investment_rebalance (null otherwise),
+    // persisted so an accepted rebalance is auditable/replayable against the bands.
+    targetAllocation: jsonb('target_allocation'),
     accepted: boolean('accepted').notNull(),
     verdict: jsonb('verdict').notNull(), // the kernel Verdict (evidence or rejection)
     executedAt: tz('executed_at').notNull().defaultNow(),

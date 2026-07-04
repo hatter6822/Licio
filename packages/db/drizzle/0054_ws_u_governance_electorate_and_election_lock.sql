@@ -30,4 +30,18 @@ WHERE "status" = 'open' AND "election_id" NOT IN (
   WHERE "status" = 'open'
   ORDER BY "room_id", "created_at" ASC
 );--> statement-breakpoint
+-- Repoint any seat whose current_election_id referenced a duplicate just cancelled
+-- above to the KEPT open election for its room, so no seat is left pointing at a
+-- cancelled election (which runElectionLifecycle could not settle, orphaning the
+-- kept-open election and leaving the room unable to progress).
+UPDATE "knomosis"."room_steward_seat" s
+SET "current_election_id" = (
+  SELECT e."election_id" FROM "knomosis"."steward_election" e
+  WHERE e."room_id" = s."room_id" AND e."status" = 'open'
+  ORDER BY e."created_at" ASC LIMIT 1
+)
+WHERE s."current_election_id" IS NOT NULL
+  AND s."current_election_id" NOT IN (
+    SELECT "election_id" FROM "knomosis"."steward_election" WHERE "status" = 'open'
+  );--> statement-breakpoint
 CREATE UNIQUE INDEX "steward_election_one_open_per_room" ON "knomosis"."steward_election" USING btree ("room_id") WHERE "knomosis"."steward_election"."status" = 'open';

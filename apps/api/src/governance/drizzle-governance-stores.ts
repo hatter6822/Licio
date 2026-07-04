@@ -204,6 +204,8 @@ function toTreasury(row: typeof agentTreasuryActions.$inferSelect): TreasuryActi
     category: row.category,
     amount: Number(row.amount),
     asset: row.asset,
+    targetAllocation:
+      (row.targetAllocation as TreasuryActionRecord['targetAllocation'] | null) ?? null,
     accepted: row.accepted,
     verdict: row.verdict as Verdict,
     executedAt: row.executedAt.toISOString(),
@@ -607,6 +609,7 @@ export class DrizzleTreasuryActionStore implements TreasuryActionStore {
       category: action.category,
       amount: String(action.amount),
       asset: action.asset,
+      targetAllocation: action.targetAllocation ?? null,
       accepted: action.accepted,
       verdict: action.verdict,
       executedAt: new Date(action.executedAt),

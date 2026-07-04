@@ -142,9 +142,12 @@ export function createGovernanceRoutes() {
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
           const roomId = c.req.param('roomId');
           const { candidate_user_id } = c.req.valid('json');
-          // Membership-gate the voter (the soft cross-context read), then require
-          // the candidate to be a room member too — a steward is elected from
-          // among the room's own members, never an outsider.
+          // Membership-gate the voter (the soft cross-context read); the candidate
+          // must be a room member too — a steward is elected from among the room's
+          // own members, never an outsider. The candidate check is passed INTO
+          // castVote so it runs AFTER the election is validated, so a bogus/foreign
+          // election id can't turn this endpoint into a membership oracle (it 404s
+          // regardless of whether the candidate is a member).
           const eligible = await isRoomMember(roomId, auth.userId);
           if (!eligible) {
             return c.json(
@@ -153,12 +156,6 @@ export function createGovernanceRoutes() {
             );
           }
           const candidateEligible = await isRoomMember(roomId, candidate_user_id);
-          if (!candidateEligible) {
-            return c.json(
-              deny('invalid_candidate', 'The candidate is not a member of this room.'),
-              422,
-            );
-          }
           const result = await getGovernanceService().castVote(
             roomId,
             c.req.param('electionId'),
@@ -168,10 +165,9 @@ export function createGovernanceRoutes() {
             candidateEligible,
           );
           if (!result.ok) {
-            return c.json(
-              deny(result.code, result.message),
-              result.code === 'not_found' ? 404 : 409,
-            );
+            const status =
+              result.code === 'not_found' ? 404 : result.code === 'invalid_candidate' ? 422 : 409;
+            return c.json(deny(result.code, result.message), status);
           }
           return c.json({ ok: true });
         },

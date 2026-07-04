@@ -120,6 +120,22 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     expect((await h.svc.getSeat('r1'))?.holderUserId).toBe('creator');
   });
 
+  it('vacates the seat when the winning INCUMBENT has left (never retains a departed holder)', async () => {
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+    // The incumbent 'creator' wins re-election but has since LEFT the room.
+    await h.svc.castVote('r1', eid, 'v1', 'creator', true);
+    await h.svc.castVote('r1', eid, 'v2', 'creator', true);
+    const isRoomMember = async (userId: string) => userId !== 'creator';
+    const settled = await h.svc.settleElection(eid, 3, isRoomMember);
+    // The departed incumbent is NOT reseated — the seat is left vacant.
+    expect(settled.ok && settled.value.settled).toBe(false);
+    expect(settled.ok && settled.value.winnerUserId).toBeNull();
+    expect((await h.svc.getSeat('r1'))?.holderUserId).toBeNull();
+  });
+
   it('rejects a ballot for a non-member candidate at the service (defense-in-depth)', async () => {
     await h.svc.bootstrapSeat('r1', 'creator');
     h.advance(YEAR_MS);
@@ -129,6 +145,14 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     const denied = await h.svc.castVote('r1', eid, 'v1', 'outsider', true, false);
     expect(denied.ok).toBe(false);
     expect(!denied.ok && denied.code).toBe('invalid_candidate');
+  });
+
+  it('validates the election BEFORE the candidate (no membership oracle for a bogus election)', async () => {
+    // A non-member candidate on a NON-EXISTENT election returns not_found, not
+    // invalid_candidate — so the endpoint cannot be used to probe room membership
+    // when there is no valid election.
+    const res = await h.svc.castVote('r1', 'no-such-election', 'v1', 'outsider', true, false);
+    expect(!res.ok && res.code).toBe('not_found');
   });
 
   it('rejects a vote on a non-open election', async () => {

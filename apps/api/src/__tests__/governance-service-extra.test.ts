@@ -14,9 +14,10 @@ import { createInMemoryGovernanceStores } from '../governance/stores.js';
 function make(cryptoEnabled = false) {
   let t = Date.parse('2026-06-19T00:00:00.000Z');
   let n = 0;
+  const stores = createInMemoryGovernanceStores();
   return {
     svc: createGovernanceService({
-      stores: createInMemoryGovernanceStores(),
+      stores,
       config: resolveGovernanceConfig({
         cryptoEnabled,
         electionTermSeconds: 1,
@@ -25,6 +26,7 @@ function make(cryptoEnabled = false) {
       now: () => new Date(t),
       uuid: () => `id-${++n}`,
     }),
+    stores,
     advance: (ms: number) => {
       t += ms;
     },
@@ -323,7 +325,7 @@ describe('GovernanceService residual branches', () => {
   });
 
   it('threads a target allocation through an investment rebalance and enforces the bands', async () => {
-    const { svc } = make(true);
+    const { svc, stores } = make(true);
     await svc.bootstrapSeat('r', 's');
     const lp = await svc.proposeLawPack('r', 's', {
       lawPackId: 'x',
@@ -398,6 +400,15 @@ describe('GovernanceService residual branches', () => {
       ],
     });
     expect(okRebal.ok && okRebal.value.accepted).toBe(true);
+
+    // The accepted rebalance persists its allocation in the treasury log, so it can
+    // be audited/replayed to prove which allocation satisfied the voted bands.
+    const logged = await stores.treasuryActions.acceptedByRoom('r');
+    const rebalance = logged.find((a) => a.category === 'investment_rebalance');
+    expect(rebalance?.targetAllocation).toEqual([
+      { asset: 'STABLE', fraction: 0.6 },
+      { asset: 'ETH', fraction: 0.4 },
+    ]);
   });
 
   it('binds a custom law-pack that restricts the agent below the model request', async () => {
