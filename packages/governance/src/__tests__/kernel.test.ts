@@ -214,4 +214,26 @@ describe('checkInvestmentBands', () => {
       ),
     ).toMatchObject({ code: 'investment_band_violated' });
   });
+
+  it('rejects when a band MINIMUM is unmet by an omitted asset', () => {
+    // STABLE has min 0.5 but is omitted ⇒ its effective 0 allocation fails the band
+    // (a policy floor cannot be evaded by simply leaving the asset out).
+    expect(checkInvestmentBands([{ asset: 'ETH', fraction: 0.4 }], policy)).toMatchObject({
+      code: 'investment_band_violated',
+    });
+  });
+
+  it('aggregates duplicate asset entries before checking the band', () => {
+    // Two ETH entries each within band sum to 0.6 > its 0.5 max ⇒ rejected.
+    expect(
+      checkInvestmentBands(
+        [
+          { asset: 'STABLE', fraction: 0.5 },
+          { asset: 'ETH', fraction: 0.3 },
+          { asset: 'ETH', fraction: 0.3 },
+        ],
+        policy,
+      ),
+    ).toMatchObject({ code: 'investment_band_violated' });
+  });
 });

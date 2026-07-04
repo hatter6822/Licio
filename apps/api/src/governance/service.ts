@@ -663,17 +663,19 @@ export class GovernanceService {
   /**
    * The platform floor's room-governance-freeze: deactivate the agent at once AND
    * set the DURABLE `floorFrozen` flag, so no community re-adoption can silently
-   * re-activate it (H1). The freeze is recorded in the append-only agent audit log
-   * (M5 — a floor intervention leaves a who/when trail).
+   * re-activate it (H1). The append-only audit entry is written BEFORE the binding
+   * mutation (M5): if the audit append fails we throw here and the binding is never
+   * mutated, so a freeze can never take effect without its who/when trail.
    */
   async freezeAgent(roomId: string): Promise<GovernanceResult<{ frozen: boolean }>> {
-    const updated = await this.deps.stores.bindings.setActive(roomId, false, true);
-    if (updated === null) return ok({ frozen: false });
+    const binding = await this.deps.stores.bindings.get(roomId);
+    if (binding === null) return ok({ frozen: false });
     await this.auditFloorAction(
-      updated,
+      binding,
       'governance.freeze',
       'Platform floor froze the room agent.',
     );
+    await this.deps.stores.bindings.setActive(roomId, false, true);
     return ok({ frozen: true });
   }
 
@@ -685,15 +687,17 @@ export class GovernanceService {
    * existed to reactivate (`false` ⇒ the room has no agent).
    */
   async reactivateAgent(roomId: string): Promise<GovernanceResult<{ reactivated: boolean }>> {
-    const updated = await this.deps.stores.bindings.setActive(roomId, true, false);
-    if (updated !== null) {
-      await this.auditFloorAction(
-        updated,
-        'governance.unfreeze',
-        'Platform floor restored the room agent.',
-      );
-    }
-    return ok({ reactivated: updated !== null });
+    const binding = await this.deps.stores.bindings.get(roomId);
+    if (binding === null) return ok({ reactivated: false });
+    // Audit BEFORE mutating (parity with freezeAgent): a failed append throws
+    // before the binding is reactivated.
+    await this.auditFloorAction(
+      binding,
+      'governance.unfreeze',
+      'Platform floor restored the room agent.',
+    );
+    await this.deps.stores.bindings.setActive(roomId, true, false);
+    return ok({ reactivated: true });
   }
 
   /** Append a platform-floor freeze/unfreeze to the append-only agent audit log. */
@@ -877,6 +881,10 @@ export class GovernanceService {
       asset: string | null;
       coiDeclared: boolean;
       proposedAt: string;
+      /** Required for an `investment_rebalance` in a room with a voted investment
+       *  policy — the per-asset target allocation the kernel checks against the
+       *  community-voted bands. */
+      targetAllocation?: readonly { asset: string; fraction: number }[] | null;
     },
   ): Promise<GovernanceResult<Verdict>> {
     if (!this.deps.config.cryptoEnabled)
@@ -898,6 +906,7 @@ export class GovernanceService {
       proposedAt: input.proposedAt,
       coiDeclared: input.coiDeclared,
       proposalRef: null,
+      targetAllocation: input.targetAllocation ?? null,
     });
     if (!action.success) return err('invalid_action', 'The treasury action is malformed.');
     // Per-category capability gate (in addition to the gateway cap above): the

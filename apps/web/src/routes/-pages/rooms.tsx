@@ -6,7 +6,7 @@
 // `/rooms/:id/governance` route redirects here rather than showing an inert stub.
 import type { RoomDetail } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
 import { RoomGovernanceDialog } from '../../components/governance/RoomGovernanceDialog.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
@@ -175,6 +175,14 @@ export function RoomDetailBody({
   // legacy /governance route redirects here) opens the modal to that tab.
   const governanceParam = useSearch({ from: '/rooms_/$roomId' }).governance;
   const [governanceOpen, setGovernanceOpen] = useState(() => governanceParam != null);
+  // Open the modal when the deep-link param appears — INCLUDING a param change
+  // while this component is already mounted (the legacy /governance route redirects
+  // to `?governance=…`; a reader already on the room page keeps this component, so
+  // the mount-time initializer above would otherwise miss it and the modal would
+  // stay closed despite the advertised deep link).
+  useEffect(() => {
+    if (governanceParam != null) setGovernanceOpen(true);
+  }, [governanceParam]);
   const governanceButton = contentVisible ? (
     <Button variant="secondary" onClick={() => setGovernanceOpen(true)} aria-haspopup="dialog">
       <Icon name="check-badge" className="size-4 text-ink-muted" />

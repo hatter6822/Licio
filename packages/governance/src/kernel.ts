@@ -170,26 +170,45 @@ export interface TargetAllocation {
 }
 
 /**
- * Validate a proposed treasury allocation against the investment policy bands
- * (each asset within [min,max], total ≤ 1). Used when an investment rebalance
- * specifies a target allocation (ADR-4 — room-treasury scope only).
+ * Validate a proposed treasury allocation against the investment policy bands.
+ * The proposed entries are AGGREGATED per asset first (duplicate entries for the
+ * same asset sum), then EVERY policy band is checked — an asset absent from the
+ * allocation has an effective total of 0, which must still satisfy the band's
+ * minimum (so a policy floor like `STABLE >= 0.5` cannot be evaded by simply
+ * omitting the asset). An allocated asset with no matching band, a per-asset total
+ * outside its [min,max], or a grand total above 1 all reject. Used when an
+ * investment rebalance specifies a target allocation (ADR-4 — room-treasury scope).
  */
 export function checkInvestmentBands(
   allocation: readonly TargetAllocation[],
   policy: InvestmentPolicy,
 ): Verdict {
-  let sum = 0;
+  // Aggregate the proposed entries per asset (duplicates sum), rejecting any asset
+  // the policy does not define a band for.
+  const totals = new Map<string, number>();
   for (const a of allocation) {
-    const band = policy.allocationBands.find((b) => b.asset === a.asset);
-    if (!band || a.fraction < band.minFraction || a.fraction > band.maxFraction) {
+    if (!policy.allocationBands.some((b) => b.asset === a.asset)) {
       return {
         accepted: false,
         code: 'investment_band_violated',
-        reason: `Asset ${a.asset} allocation ${a.fraction} is outside its permitted band.`,
+        reason: `Asset ${a.asset} is not in the room's investment policy.`,
       };
     }
-    sum += a.fraction;
+    totals.set(a.asset, (totals.get(a.asset) ?? 0) + a.fraction);
   }
+  // EVERY band must hold — including minimums for assets omitted from the proposal.
+  let sum = 0;
+  for (const band of policy.allocationBands) {
+    const total = totals.get(band.asset) ?? 0;
+    if (total < band.minFraction || total > band.maxFraction) {
+      return {
+        accepted: false,
+        code: 'investment_band_violated',
+        reason: `Asset ${band.asset} allocation ${total} is outside its permitted band [${band.minFraction}, ${band.maxFraction}].`,
+      };
+    }
+  }
+  for (const total of totals.values()) sum += total;
   if (sum > 1 + 1e-9) {
     return {
       accepted: false,

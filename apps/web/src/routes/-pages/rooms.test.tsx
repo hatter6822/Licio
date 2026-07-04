@@ -218,6 +218,32 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     );
   });
 
+  it('opens the modal when the ?governance param appears while already mounted (WS-U)', () => {
+    roomFeed.mockReturnValue({ isPending: false, data: undefined });
+    // Reader is already on the room page with the modal closed…
+    searchMock.mockReturnValue({});
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const room = baseRoom({ visibility: 'public', joined: true });
+    const { rerender } = render(
+      <QueryClientProvider client={client}>
+        <RoomDetailBody roomId="r1" room={room} />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    // …then follows the legacy /governance link, which redirects to change only the
+    // search param on this already-mounted component; the modal must open.
+    searchMock.mockReturnValue({ governance: 'overview' });
+    rerender(
+      <QueryClientProvider client={client}>
+        <RoomDetailBody roomId="r1" room={room} />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByRole('dialog', { name: /governance, transparency & settings/i }),
+    ).toBeInTheDocument();
+  });
+
   it('has no accessibility violations (tier-one shell + member feed)', async () => {
     roomFeed.mockReturnValue({ isPending: false, data: undefined });
     const shell = renderBody(baseRoom({ visibility: 'private', joined: false }));

@@ -322,6 +322,84 @@ describe('GovernanceService residual branches', () => {
     expect(report.ok).toBe(true);
   });
 
+  it('threads a target allocation through an investment rebalance and enforces the bands', async () => {
+    const { svc } = make(true);
+    await svc.bootstrapSeat('r', 's');
+    const lp = await svc.proposeLawPack('r', 's', {
+      lawPackId: 'x',
+      version: '1',
+      allowedProposalTypes: ['t'],
+      permittedCapabilities: ['gateway.submit_signed_action', 'treasury.invest'],
+      treasury: {
+        caps: [
+          {
+            category: 'investment_rebalance',
+            perActionMax: 1000,
+            perWindowMax: 1000,
+            windowSeconds: 60,
+          },
+        ],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 100_000,
+        requireCoiFor: [],
+        investment: {
+          allocationBands: [
+            { asset: 'STABLE', minFraction: 0.5, maxFraction: 1 },
+            { asset: 'ETH', minFraction: 0, maxFraction: 0.5 },
+          ],
+          rebalanceMinIntervalSeconds: 1,
+        },
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        minQuorum: 1,
+        minTurnout: 0,
+        termSeconds: 1,
+      },
+    });
+    const lawPackId = lp.ok ? lp.value.lawPackId : '';
+    const p = await svc.proposeModel(
+      'r',
+      's',
+      bundle({ requestedCapabilities: ['gateway.submit_signed_action', 'treasury.invest'] }),
+      'p',
+    );
+    const id = p.ok ? p.value.modelId : '';
+    await svc.evaluateModel(id);
+    await svc.approveModel('r', id, null, lawPackId);
+
+    // A rebalance with NO allocation (a room that voted an investment policy) is
+    // rejected fail-closed rather than silently waved through. (Run first: it is
+    // rejected, so it records no accepted history and cannot trip the interval
+    // check for the compliant rebalance below.)
+    const noAlloc = await svc.executeTreasuryAction('r', {
+      category: 'investment_rebalance',
+      amount: 0,
+      asset: null,
+      coiDeclared: false,
+      proposedAt: '2026-06-19T00:00:00.000Z',
+    });
+    expect(noAlloc.ok && noAlloc.value.accepted).toBe(false);
+    expect(noAlloc.ok && !noAlloc.value.accepted && noAlloc.value.code).toBe(
+      'investment_band_required',
+    );
+
+    // A rebalance WITH a compliant target allocation is accepted by the kernel.
+    const okRebal = await svc.executeTreasuryAction('r', {
+      category: 'investment_rebalance',
+      amount: 0,
+      asset: null,
+      coiDeclared: false,
+      proposedAt: '2026-06-19T00:00:00.000Z',
+      targetAllocation: [
+        { asset: 'STABLE', fraction: 0.6 },
+        { asset: 'ETH', fraction: 0.4 },
+      ],
+    });
+    expect(okRebal.ok && okRebal.value.accepted).toBe(true);
+  });
+
   it('binds a custom law-pack that restricts the agent below the model request', async () => {
     const { svc } = make();
     await svc.bootstrapSeat('r', 's');
