@@ -38,7 +38,11 @@ test.describe('WS-Q content-room (authenticated, BFF-in-the-loop)', () => {
     await page.getByLabel(/link url/i).fill(`https://example.org/e2e-water-report-${nonce}`);
     await page.getByLabel(/why this matters/i).fill('Links the full dataset, not a summary.');
     // At least one topic PROPOSAL is required before submitting (WS-K §24.1).
-    await page.getByRole('button', { name: 'Climate & Environment' }).click();
+    // Topics are a searchable multi-select: open the picker, filter, toggle, close.
+    await page.getByRole('button', { name: 'Topics' }).click();
+    await page.getByRole('combobox', { name: /search topics/i }).fill('Climate');
+    await page.getByRole('option', { name: 'Climate & Environment' }).click();
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: /^post$/i }).click();
     // onSubmitted navigates to the new story's page.
     await expect(page).toHaveURL(/\/stories\//, { timeout: 15_000 });
