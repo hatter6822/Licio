@@ -43,4 +43,15 @@ describe('capability model (structural floor guarantee)', () => {
     const descriptor = deriveCapabilityDescriptor(['treasury.invest'], lawPack([]));
     expect(descriptor.granted).toEqual([]);
   });
+
+  it('treats debate.judge as an ordinary grantable, floor-disjoint capability (WS-T)', () => {
+    expect(GRANTABLE_CAPABILITIES).toContain('debate.judge');
+    expect(new Set<string>(FLOOR_RESERVED_ACTIONS).has('debate.judge')).toBe(false);
+    // Deny-by-default: unrequested or unpermitted ⇒ not granted.
+    expect(deriveCapabilityDescriptor(['debate.judge'], lawPack([])).granted).toEqual([]);
+    // Requested AND law-pack-permitted ⇒ granted; the runtime gate then sees it.
+    const descriptor = deriveCapabilityDescriptor(['debate.judge'], lawPack(['debate.judge']));
+    expect(descriptor.granted).toEqual(['debate.judge']);
+    expect(hasCapability(descriptor, 'debate.judge')).toBe(true);
+  });
 });
