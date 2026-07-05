@@ -47,6 +47,7 @@ export function buildDebateSchedulerDeps(): DebateDeps {
       await ingestion.stories.update(sid, { disputeStatus: status });
     },
     runJudge: buildDebateJudgeRunner(forum.now),
+    broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),
     now: forum.now,
     log: forum.log,
   };

@@ -16,6 +16,7 @@ import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-b
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
 import type { DebateJudgeRunner } from './debate.js';
+import { type DebateBroadcaster, InMemoryDebateBroadcaster } from './debate-broadcaster.js';
 import { type DebateStore, InMemoryDebateStore } from './debate-store.js';
 import {
   type ContributionSafetyClassifier,
@@ -136,6 +137,8 @@ export interface ForumServices {
   agentModerator: RoomAgentModerator | null;
   /** WS-T debate arena store (sourced-correction adjudication). */
   debates: DebateStore;
+  /** WS-T live arena fan-out (co-visible position drafts + verdict + resolution). */
+  debateBroadcaster: DebateBroadcaster;
   /** WS-T governed-adjudicator runner (assigned at boot over the ai-governance
    *  guard + neural model + AIOutputRecord; the default is fail-closed → a null
    *  verdict resolves inconclusive, so an unwired forum never tags anything). */
@@ -209,6 +212,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     autoModerationSink: options.autoModerationSink ?? null,
     agentModerator: options.agentModerator ?? null,
     debates: options.debates ?? new InMemoryDebateStore(now),
+    debateBroadcaster: new InMemoryDebateBroadcaster(),
     debateJudge: options.debateJudge ?? (async () => null),
     metrics,
     config: () => config,

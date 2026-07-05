@@ -36,6 +36,7 @@ let debates: InMemoryDebateStore;
 let deps: DebateDeps;
 let corrected: DebateJudgeRunner;
 let storyDisputes: Map<string, string>;
+let broadcasts: string[];
 
 const citation = { url: 'https://example.org/source' } as const;
 
@@ -108,6 +109,7 @@ beforeEach(() => {
     outputId: `out:${randomUUID()}`,
   });
   storyDisputes = new Map();
+  broadcasts = [];
   deps = {
     debates,
     contributions,
@@ -117,6 +119,9 @@ beforeEach(() => {
       storyDisputes.set(storyId, status);
     },
     runJudge: corrected,
+    broadcast: (id) => {
+      broadcasts.push(id);
+    },
     now,
     log: () => {},
   };
@@ -374,6 +379,30 @@ describe('WS-T debate arena lifecycle', () => {
     clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
     await finalizeDebate(deps, debateId);
     expect(storyDisputes.get(STORY)).toBe('incorrect');
+  });
+
+  it('broadcasts a live frame on each position edit / verdict / resolution', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    broadcasts = [];
+    // A position edit broadcasts (co-visibility).
+    await postDebatePosition(deps, debateId, INCUMBENT, {
+      summary: 'The transcript confirms it.',
+      citations: [citation],
+    });
+    expect(broadcasts).toContain(debateId);
+    // The verdict + the resolution broadcast too.
+    broadcasts = [];
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    await judgeDebateArena(deps, debateId);
+    clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
+    await finalizeDebate(deps, debateId);
+    expect(broadcasts.filter((id) => id === debateId).length).toBeGreaterThanOrEqual(2);
   });
 
   it('maps an under_debate comment to its active arena (active_debate_id source)', async () => {

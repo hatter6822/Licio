@@ -14,6 +14,7 @@ import type { DebateArenaPublic, DebatePosition, DebateWinner } from '@licio/sha
 import { citationUrlSchema, DEBATE_POSITION_BODY_LIMIT } from '@licio/shared';
 import { useState } from 'react';
 import { cn } from '../../lib/cn.js';
+import { useDebateStream } from '../../lib/debate-stream.js';
 import {
   useDebateQuery,
   useOverrideDebateMutation,
@@ -307,6 +308,10 @@ export function DebateArena({
   storyId: string;
 }): React.ReactElement {
   const query = useDebateQuery(debateId);
+  // Live co-visibility: stream while the arena is still active (a resolved arena
+  // is static).  Each frame re-fetches the viewer's role-scoped view, so each
+  // side sees the other's current draft as they edit (backs up the poll).
+  useDebateStream(debateId, query.data?.debate.state !== 'resolved');
 
   if (query.isLoading) return <p className="text-sm text-ink-muted">Loading the debate…</p>;
   if (query.isError || !query.data) {

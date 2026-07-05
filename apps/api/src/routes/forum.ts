@@ -77,6 +77,7 @@ import {
   postDebatePosition,
   toDebateArenaPublic,
 } from '../forum/debate.js';
+import { sseDebateFrame } from '../forum/debate-broadcaster.js';
 import { stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
@@ -200,6 +201,7 @@ function debateDepsFromBundle(bundle: ReturnType<typeof bundles>): DebateDeps {
       await bundle.ingestion.stories.update(sid, { disputeStatus: status });
     },
     runJudge: bundle.forum.debateJudge,
+    broadcast: (id, arena) => bundle.forum.debateBroadcaster.publish(id, arena),
     now: bundle.forum.now,
     log: bundle.forum.log,
   };
@@ -1381,6 +1383,75 @@ export function createForumRoutes() {
             isSteward,
           );
           return c.json(debateArenaResponseSchema.parse({ debate: projected }));
+        },
+      )
+      // Live arena stream (WS-T): pushes the co-visible position drafts, verdict,
+      // and resolution so each side sees the other's draft AS THEY EDIT.  The
+      // frame is the OBSERVER projection — a nudge; the client re-fetches its own
+      // role-scoped view for its edit affordances.
+      .get(
+        '/debates/:debateId/stream',
+        rateLimit({ limit: 250, windowMs: 60_000 }),
+        authMiddleware(),
+        zValidator('param', z.object({ debateId: uuidSchema })),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { debateId } = c.req.valid('param');
+          const current = await bundle.forum.debates.getById(debateId);
+          if (current === null) return c.json(notFound, 404);
+          const observer = async () => {
+            const arena = await bundle.forum.debates.getById(debateId);
+            return arena ? toDebateArenaPublic(arena, null, async () => null, false) : null;
+          };
+          const encoder = new TextEncoder();
+          let cleanup = () => {};
+          const readable = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              let unsubscribe = () => {};
+              let heartbeat: ReturnType<typeof setInterval> | null = null;
+              const write = (chunk: string): void => {
+                try {
+                  controller.enqueue(encoder.encode(chunk));
+                } catch {
+                  unsubscribe();
+                  if (heartbeat) clearInterval(heartbeat);
+                }
+              };
+              const close = (): void => {
+                unsubscribe();
+                if (heartbeat) clearInterval(heartbeat);
+                try {
+                  controller.close();
+                } catch {
+                  // Already closed by the client.
+                }
+              };
+              unsubscribe = bundle.forum.debateBroadcaster.subscribe(debateId, (frame) => {
+                write(sseDebateFrame(frame));
+              });
+              heartbeat = setInterval(() => write(': heartbeat\n\n'), SSE_HEARTBEAT_MS);
+              cleanup = close;
+              c.req.raw.signal.addEventListener('abort', close, { once: true });
+              write(': heartbeat\n\n');
+              // Prime with the current arena so a late joiner has the latest state.
+              const initial = await observer();
+              if (initial) write(sseDebateFrame({ eventId: initial.updated_at, arena: initial }));
+            },
+            cancel() {
+              cleanup();
+            },
+          });
+          return new Response(readable, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-store, no-transform',
+              Connection: 'keep-alive',
+              'X-Accel-Buffering': 'no',
+            },
+          });
         },
       )
       // Post/replace the caller's co-visible position (incumbent/challenger only,
