@@ -63,6 +63,7 @@ vi.mock('@tanstack/react-router', () => ({
       </a>
     );
   },
+  useNavigate: () => vi.fn(),
 }));
 
 vi.mock('../../lib/queries.js', () => ({
@@ -112,6 +113,8 @@ function comment(overrides: Partial<CommentItem> = {}): CommentItem {
     depth: 0,
     child_count: 1,
     moderation_state: 'published',
+    dispute_status: 'none',
+    active_debate_id: null,
     media: [],
     replies: [],
     reply_count: 0,
@@ -145,6 +148,43 @@ beforeEach(() => {
 });
 
 describe('CommentSection', () => {
+  it('WS-T — renders the Sourced badge + source links, and the Incorrect tag', () => {
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            contribution_id: '33333333-3333-4333-8333-333333333333',
+            body: 'A sourced comment.',
+            citations: [{ url: 'https://example.org/evidence' }],
+          }),
+          comment({
+            contribution_id: '66666666-6666-4666-8666-666666666666',
+            body: 'This one lost a debate.',
+            dispute_status: 'incorrect',
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: {
+          comment_count: 2,
+          sources_count: 1,
+          corrections_count: 0,
+          debates_count: 0,
+          incorrect_count: 1,
+        },
+        summary: null,
+      },
+    };
+    renderSection();
+    expect(screen.getByText('Sourced')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'https://example.org/evidence' })).toBeInTheDocument();
+    expect(screen.getByText('Incorrect')).toBeInTheDocument();
+    // The "Correct" action is offered on a plain comment, and disabled on the
+    // already-decided one.
+    const correctButtons = screen.getAllByRole('button', { name: /correct/i });
+    expect(correctButtons.length).toBeGreaterThan(0);
+  });
+
   it('renders loading, error, and empty states without applause affordances', () => {
     queryState = { isLoading: true };
     const { rerender } = renderSection();

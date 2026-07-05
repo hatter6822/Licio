@@ -19,6 +19,8 @@ export const queryKeys = {
     } = {},
   ) => ['story', storyId, 'comments', options] as const,
   thread: (threadId: string) => ['thread', threadId] as const,
+  /** WS-T debate arena. */
+  debate: (debateId: string) => ['debate', debateId] as const,
   rooms: () => ['rooms'] as const,
   room: (roomId: string) => ['room', roomId] as const,
   roomFeed: (roomId: string) => ['room', roomId, 'feed'] as const,

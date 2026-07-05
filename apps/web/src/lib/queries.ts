@@ -6,6 +6,8 @@
 // (validated inside the RPC client), so nothing unvalidated reaches the cache.
 import type {
   ContributionWriteCreate,
+  DebateOverrideRequest,
+  DebatePositionUpdate,
   FeedMode,
   NotificationPreferences,
   RoomCreateRequest,
@@ -387,6 +389,38 @@ export function useCreateCommentMutation(storyId: string) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.storyComments(storyId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.story(storyId) });
     },
+  });
+}
+
+// --- WS-T debate arena --------------------------------------------------------
+
+/**
+ * The live debate arena.  Polls while the arena is still `open` (the co-visible
+ * editing window) so each side sees the other's current draft as they write; a
+ * judged/resolved arena is static and stops polling.
+ */
+export function useDebateQuery(debateId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.debate(debateId ?? 'none'),
+    enabled: debateId !== null,
+    queryFn: () => api.fetchDebate(debateId as string),
+    refetchInterval: (query) => (query.state.data?.debate.state === 'open' ? 5_000 : false),
+  });
+}
+
+export function usePostDebatePositionMutation(debateId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: DebatePositionUpdate) => api.postDebatePosition(debateId, body),
+    onSuccess: (data) => queryClient.setQueryData(queryKeys.debate(debateId), data),
+  });
+}
+
+export function useOverrideDebateMutation(debateId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: DebateOverrideRequest) => api.overrideDebate(debateId, body),
+    onSuccess: (data) => queryClient.setQueryData(queryKeys.debate(debateId), data),
   });
 }
 
