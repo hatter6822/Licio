@@ -157,7 +157,7 @@ export async function seedClaim(
 export function contributionBody(
   type: ContributionCreate['type'],
   threadId: string,
-  extra: { claimId?: string; parentId?: string; targetId?: string } = {},
+  extra: { claimId?: string; parentId?: string; targetId?: string; storyId?: string } = {},
 ): Record<string, unknown> {
   const base = { thread_id: threadId, client_draft_id: `draft-${randomUUID()}` };
   const citation = { url: 'https://example.org/source' };
@@ -181,11 +181,15 @@ export function contributionBody(
         evidence_type: 'dataset',
       };
     case 'correction':
+      // WS-T — a correction targets a comment (targetId) or the story (storyId);
+      // exactly one. Callers that pass neither target the story via `storyId`.
       return {
         ...base,
         type,
         body: 'The date is wrong; the vote was on Wednesday.',
-        target_claim_id: extra.claimId,
+        ...(extra.targetId !== undefined
+          ? { target_contribution_id: extra.targetId }
+          : { target_story_id: extra.storyId }),
         citations: [citation],
         target_text_excerpt: 'on Tuesday evening',
       };

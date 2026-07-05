@@ -69,6 +69,9 @@ export const ORIGIN_LABEL_BY_USE_CASE: Readonly<Record<AiUseCaseId, AiOriginLabe
   translation: 'AI-translated',
   // Governance summaries are machine-generated summaries (§24.5).
   governance_assistance: 'machine-generated',
+  // The debate verdict + rationale shown in the arena is a machine-generated
+  // artifact (steward-overrulable), labelled as such (§24.6).
+  debate_adjudication: 'machine-generated',
   // These use cases produce no user-facing labelled artifact (MERI handles
   // dedup; embeddings/triage are internal), so they have no origin label.
   duplicate_detection: null,

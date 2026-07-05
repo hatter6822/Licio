@@ -48,6 +48,8 @@ import {
 } from './events/services.js';
 import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
 import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
+import { DEBATE_SCHEDULER_INTERVAL_MS, startDebateScheduler } from './forum/debate-scheduler.js';
+import { DrizzleDebateStore } from './forum/drizzle-debate-store.js';
 import {
   DrizzleContributionStore,
   DrizzleLensStore,
@@ -381,6 +383,8 @@ if (db) {
   forumServices.lenses = new DrizzleLensStore(db);
   forumServices.summaries = new DrizzleSummaryStore(db);
   forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
+  // WS-T — the debate arena store over migration 0056.
+  forumServices.debates = new DrizzleDebateStore(db);
 }
 await forumServices.reloadConfig();
 setForumServices(forumServices);
@@ -972,6 +976,15 @@ startRankingScheduler(
   rankingServices,
   (err, task) => logger.error({ err, task }, 'ranking scheduler task failed'),
   RANKING_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// WS-T debate arenas: judge every arena past its 12h edit window (through the
+// governed adjudicator) and finalize every arena past its 24h steward-override
+// window (tagging the loser `incorrect`) — under its own Postgres job lease.
+startDebateScheduler(
+  (err) => logger.error({ err }, 'debate scheduler task failed'),
+  DEBATE_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

@@ -15,6 +15,9 @@ import type { IngestionServices } from '../ingestion/services.js';
 import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-broadcaster.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
+import type { DebateJudgeRunner } from './debate.js';
+import { type DebateBroadcaster, InMemoryDebateBroadcaster } from './debate-broadcaster.js';
+import { type DebateStore, InMemoryDebateStore } from './debate-store.js';
 import {
   type ContributionSafetyClassifier,
   HeuristicContributionSafety,
@@ -132,6 +135,14 @@ export interface ForumServices {
   autoModerationSink: AutoModerationSink | null;
   /** WS-U bounded in-room agent seam (assigned at boot; null = no agent). */
   agentModerator: RoomAgentModerator | null;
+  /** WS-T debate arena store (sourced-correction adjudication). */
+  debates: DebateStore;
+  /** WS-T live arena fan-out (co-visible position drafts + verdict + resolution). */
+  debateBroadcaster: DebateBroadcaster;
+  /** WS-T governed-adjudicator runner (assigned at boot over the ai-governance
+   *  guard + neural model + AIOutputRecord; the default is fail-closed → a null
+   *  verdict resolves inconclusive, so an unwired forum never tags anything). */
+  debateJudge: DebateJudgeRunner;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;
@@ -154,6 +165,8 @@ export interface InMemoryForumOptions {
   relationshipReader?: ViewerRelationshipReader;
   autoModerationSink?: AutoModerationSink;
   agentModerator?: RoomAgentModerator;
+  debates?: DebateStore;
+  debateJudge?: DebateJudgeRunner;
   limiterStore?: SlidingWindowStore;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
@@ -198,6 +211,9 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     relationshipReader: options.relationshipReader ?? null,
     autoModerationSink: options.autoModerationSink ?? null,
     agentModerator: options.agentModerator ?? null,
+    debates: options.debates ?? new InMemoryDebateStore(now),
+    debateBroadcaster: new InMemoryDebateBroadcaster(),
+    debateJudge: options.debateJudge ?? (async () => null),
     metrics,
     config: () => config,
     reloadConfig: async () => config,

@@ -22,6 +22,10 @@ import {
   type CreateReportRequest,
   contentSavedAggregateEventSchema,
   contributionCreateResponseSchema,
+  type DebateArenaResponse,
+  type DebateOverrideRequest,
+  type DebatePositionUpdate,
+  debateArenaResponseSchema,
   type FeatureFlags,
   type FeedMode,
   type FeedPreferences,
@@ -337,6 +341,35 @@ export async function createContribution(
 }
 
 export const createComment = createContribution;
+
+// --- WS-T debate arena --------------------------------------------------------
+
+export async function fetchDebate(debateId: string): Promise<DebateArenaResponse> {
+  const response = await apiFetch(`${API_BASE}/v1/debates/${encodeURIComponent(debateId)}`);
+  return parseResponse(response, debateArenaResponseSchema);
+}
+
+export async function postDebatePosition(
+  debateId: string,
+  body: DebatePositionUpdate,
+): Promise<DebateArenaResponse> {
+  const response = await client.v1.debates[':debateId'].position.$post({
+    param: { debateId },
+    json: body,
+  });
+  return parseResponse(response, debateArenaResponseSchema);
+}
+
+export async function overrideDebate(
+  debateId: string,
+  body: DebateOverrideRequest,
+): Promise<DebateArenaResponse> {
+  const response = await client.v1.debates[':debateId'].override.$post({
+    param: { debateId },
+    json: body,
+  });
+  return parseResponse(response, debateArenaResponseSchema);
+}
 
 export async function createReport(request: CreateReportRequest): Promise<ReportCreatedResponse> {
   const response = await client.v1.reports.$post({ json: request });

@@ -53,6 +53,8 @@ export const profilePenaltiesSchema = z
     pM: z.number().nonnegative(),
     pT: z.number().nonnegative(),
     pR: z.number().nonnegative(),
+    /** WS-T dispute penalty (a `corrected` story sinks); optional, defaults strong. */
+    pD: z.number().nonnegative().optional(),
   })
   .strict();
 
@@ -317,7 +319,7 @@ export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
   profile_id: 'breaking_news',
   profile_version: '1.2.0',
   weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 },
-  penalties: { pM: 1.0, pT: 0.75, pR: 0.5 },
+  penalties: { pM: 1.0, pT: 0.75, pR: 0.5, pD: 1.0 },
   constraints: DEFAULT_CONSTRAINTS,
   // Timeliness-weighted baseline: freshness carries more of B.
   baseline_weights: { freshness: 60, reliability: 25, relevance: 15 },
@@ -350,7 +352,7 @@ export const EVERGREEN_PROFILE: RankingProfileConfig = {
   profile_id: 'evergreen',
   profile_version: '1.2.0',
   weights: { wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 },
-  penalties: { pM: 1.0, pT: 0.75, pR: 0.75 },
+  penalties: { pM: 1.0, pT: 0.75, pR: 0.75, pD: 1.0 },
   constraints: DEFAULT_CONSTRAINTS,
   baseline_weights: { freshness: 50, reliability: 30, relevance: 20 },
   decay_curves: {

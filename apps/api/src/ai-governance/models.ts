@@ -7,7 +7,12 @@
 // version, prompt-template id, config — all logged into the AIOutputRecord). Real
 // model backends are a seam that swaps in behind the same registry/evaluation/
 // guard machinery without changing any governance code.
-import { type AiModality, type AiUseCaseId, tokenize } from '@licio/ai-governance';
+import {
+  type AiModality,
+  type AiUseCaseId,
+  DEBATE_JUDGE_WEIGHTS_VERSION,
+  tokenize,
+} from '@licio/ai-governance';
 import { TOPIC_KEYWORDS } from '@licio/shared';
 
 /** The governance identity every governed model carries. */
@@ -69,6 +74,22 @@ export const GOVERNANCE_SUMMARIZER: ModelIdentity = {
   config: { method: 'deterministic-field-citation' },
 };
 
+/**
+ * The WS-T debate adjudicator — a probabilistic neural model (an MLP + softmax
+ * over content-structural features; @licio/ai-governance debate-judge).  A
+ * CLASSIFICATION model (argmax over {incumbent, challenger, inconclusive}).  The
+ * weights version is folded into `config`, so the AIOutputRecord config hash
+ * pins the exact decision surface each verdict was rendered by.
+ */
+export const DEBATE_ADJUDICATOR: ModelIdentity = {
+  name: 'debate-adjudicator',
+  version: '1.0.0',
+  useCaseId: 'debate_adjudication',
+  modalities: ['classification'],
+  promptTemplateId: 'debate-adjudicator/mlp-v1',
+  config: { method: 'neural-mlp-softmax', weights_version: DEBATE_JUDGE_WEIGHTS_VERSION },
+};
+
 /** Every governed model identity, in registry order. */
 export const GOVERNED_MODELS: readonly ModelIdentity[] = [
   TOPIC_CLASSIFIER,
@@ -76,6 +97,7 @@ export const GOVERNED_MODELS: readonly ModelIdentity[] = [
   THREAD_SUMMARIZER,
   CONTENT_TRANSLATOR,
   GOVERNANCE_SUMMARIZER,
+  DEBATE_ADJUDICATOR,
 ];
 
 // --- the deterministic topic classifier / validator ------------------------

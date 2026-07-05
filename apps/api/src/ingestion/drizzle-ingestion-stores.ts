@@ -151,6 +151,7 @@ export class DrizzleStoryStore implements StoryStore {
       mediaType: row.mediaType,
       extractionState: row.extractionState,
       hiddenState: row.hiddenState,
+      disputeStatus: row.disputeStatus,
       lastMaterialUpdateAt: iso(row.lastMaterialUpdateAt),
       createdAt: iso(row.createdAt),
       updatedAt: iso(row.updatedAt),
@@ -498,6 +499,7 @@ export class DrizzleStoryStore implements StoryStore {
       values['canonicalPublicStoryId'] = patch.canonicalPublicStoryId;
     }
     if (patch.mediaUploadRef !== undefined) values['mediaUploadRef'] = patch.mediaUploadRef;
+    if (patch.disputeStatus !== undefined) values['disputeStatus'] = patch.disputeStatus;
     if (Object.keys(values).length === 0) return this.getById(storyId);
     const rows = await this.#db
       .update(storiesTable)

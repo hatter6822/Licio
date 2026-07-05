@@ -61,6 +61,9 @@ export const AI_USE_CASE_IDS = [
   'translation',
   'embedding_generation',
   'governance_assistance',
+  // WS-T — the sourced-correction debate adjudicator (a governed probabilistic
+  // neural model that scores which of two sourced positions prevails).
+  'debate_adjudication',
 ] as const;
 export type AiUseCaseId = (typeof AI_USE_CASE_IDS)[number];
 export const aiUseCaseIdSchema = z.enum(AI_USE_CASE_IDS);

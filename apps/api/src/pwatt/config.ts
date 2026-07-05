@@ -114,6 +114,7 @@ const v0Schema = z
         rapidThreshold: z.number().min(1),
         rapidDampening: z.number().min(0).max(1),
         accusationDownweight: z.number().min(0).max(1),
+        citationBonus: z.number().min(0).max(1),
         burstPlaceholderDampening: z.number().min(0).max(1),
         halfSaturationActors: z.number().positive(),
       })
@@ -166,6 +167,7 @@ const v1Schema = z
       .object({ returns: dimensionSchema, saves: dimensionSchema, contributions: dimensionSchema })
       .strict(),
     accusationDownweight: z.number().min(0).max(1),
+    citationBonus: z.number().min(0).max(1),
     rapidThreshold: z.number().min(1),
     rapidDampening: z.number().min(0).max(1),
     antiSignalAttenuation: antiSignalAttenuationSchema,
@@ -196,7 +198,8 @@ export type PwattConfigKey = (typeof PWATT_CONFIG_KEYS)[number];
  * row untouched. (New WRITES still go through the strict `validatePwattConfigValue`.)
  */
 function upgradeStoredV0Config(raw: Record<string, unknown>): Record<string, unknown> {
-  const attention = raw['activeAttention'];
+  let next = raw;
+  const attention = next['activeAttention'];
   if (
     typeof attention === 'object' &&
     attention !== null &&
@@ -204,8 +207,8 @@ function upgradeStoredV0Config(raw: Record<string, unknown>): Record<string, unk
     (attention as { weights?: Record<string, unknown> }).weights !== null &&
     !('traversalPct' in (attention as { weights: Record<string, unknown> }).weights)
   ) {
-    return {
-      ...raw,
+    next = {
+      ...next,
       activeAttention: {
         ...(attention as Record<string, unknown>),
         // The old 3-weight split cannot absorb `traversal` without breaking the
@@ -215,7 +218,23 @@ function upgradeStoredV0Config(raw: Record<string, unknown>): Record<string, unk
       },
     };
   }
-  return raw;
+  // WS-T — a row written before the sourced-comment citation bonus lacks it;
+  // fill it from the reviewed default (preserving the steward's other tuning).
+  const participation = next['participation'];
+  if (
+    typeof participation === 'object' &&
+    participation !== null &&
+    !('citationBonus' in participation)
+  ) {
+    next = {
+      ...next,
+      participation: {
+        ...(participation as Record<string, unknown>),
+        citationBonus: DEFAULT_PWATT_V0_CONFIG.participation.citationBonus,
+      },
+    };
+  }
+  return next;
 }
 
 function upgradeStoredV1Config(raw: Record<string, unknown>): Record<string, unknown> {
@@ -234,6 +253,10 @@ function upgradeStoredV1Config(raw: Record<string, unknown>): Record<string, unk
       ...next,
       antiSignalAttenuation: { ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG.antiSignalAttenuation },
     };
+  }
+  // WS-T — fill the sourced-comment citation bonus for a pre-bonus row.
+  if (!('citationBonus' in next)) {
+    next = { ...next, citationBonus: DEFAULT_PWATT_V1_COMPONENTS_CONFIG.citationBonus };
   }
   return next;
 }

@@ -43,6 +43,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import { maybeEnterDebate } from './debate.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord, ForumEvidenceCardInput } from './stores.js';
 import { maybeDeepenConversation } from './transitions.js';
@@ -154,6 +155,15 @@ export function metadataFromRequest(
       if (evidenceCardId !== null) metadata.evidence_id = evidenceCardId;
       break;
     case 'correction':
+      // WS-T — a correction targets EXACTLY ONE of a comment or the story root
+      // (the create guard validates existence/same-thread); the target's author
+      // becomes the incumbent when the debate arena opens.
+      if (request.target_contribution_id !== undefined) {
+        metadata.target_contribution_id = request.target_contribution_id;
+      }
+      if (request.target_story_id !== undefined) {
+        metadata.target_story_id = request.target_story_id;
+      }
       if (request.target_text_excerpt !== undefined) {
         metadata.target_text_excerpt = request.target_text_excerpt;
       }
@@ -464,6 +474,46 @@ export async function createContribution(
     }
   }
 
+  // WS-T — a correction targets EXACTLY ONE of a comment (same thread) or the
+  // story root (the thread's story).  The schema's superRefine guarantees the
+  // exactly-one shape; here we validate existence/consistency.  A correction may
+  // not target its own author's tombstone or a removed row.
+  if (request.type === 'correction') {
+    if (request.target_contribution_id !== undefined) {
+      const target = await forum.contributions.getById(request.target_contribution_id);
+      if (!target || target.threadId !== request.thread_id) {
+        return invalid('invalid_target', 'A correction must target a comment in the same thread.');
+      }
+      if (target.moderationState === 'removed' || target.moderationState === 'hidden') {
+        return invalid('invalid_target', 'The targeted comment is no longer available.');
+      }
+      // WS-T — refuse a challenge against a comment already under debate or already
+      // adjudicated `incorrect` (the UI disables this, but a direct API caller must
+      // not open a second arena / re-litigate a settled outcome).
+      if (target.disputeStatus === 'under_debate') {
+        return invalid('target_under_debate', 'This comment is already under debate.');
+      }
+      if (target.disputeStatus === 'incorrect') {
+        return invalid('target_already_incorrect', 'This comment was already found incorrect.');
+      }
+    } else if (request.target_story_id !== undefined) {
+      if (request.target_story_id !== thread.storyId) {
+        return invalid('invalid_target', "A story correction must target the thread's story.");
+      }
+      const targetStory = await ingestion.stories.getById(request.target_story_id);
+      if (!targetStory) {
+        return invalid('invalid_target', 'The targeted story no longer exists.');
+      }
+      const storyDispute = targetStory.disputeStatus ?? 'none';
+      if (storyDispute === 'under_debate') {
+        return invalid('target_under_debate', 'This story is already under debate.');
+      }
+      if (storyDispute === 'incorrect') {
+        return invalid('target_already_incorrect', 'This story was already found incorrect.');
+      }
+    }
+  }
+
   if (request.lens_id !== undefined) {
     const lens = await forum.lenses.getById(request.lens_id);
     if (!lens || lens.roomId !== thread.roomId) {
@@ -578,6 +628,13 @@ export async function createContribution(
   const citations: Citation[] =
     'citations' in request && request.citations ? request.citations : [];
   const metadata = metadataFromRequest(request, evidenceCard?.evidenceId ?? null);
+  // WS-T — a PUBLISHED sourced correction opens a debate arena.  The id is minted
+  // here so `maybeEnterDebate` can open the arena under it; `debate_arena_id` is
+  // written onto the RETURNED contribution's metadata ONLY after the arena is
+  // confirmed open (below) — never speculatively, so the client is never handed
+  // an id that resolves to nothing (SPEC §15.4).
+  const debateArenaId =
+    request.type === 'correction' && moderationState === 'published' ? randomUUID() : null;
   const inserted = await forum.contributions.insert(
     {
       contributionId,
@@ -853,6 +910,58 @@ export async function createContribution(
       contribution.path.length,
     ),
   );
+
+  // WS-T — open the debate arena for a published sourced correction.  This is
+  // AWAITED (not detached): the arena row must exist before the response returns
+  // its id, or the challenger's client would navigate to a 404.  `debate_arena_id`
+  // is written onto the returned metadata ONLY when the arena actually opened, so
+  // a race that fails to open one (e.g. a concurrent challenge won) never hands
+  // the client a dangling id.  A failure here never fails the (already-created)
+  // correction — it just means no arena opened.
+  if (debateArenaId !== null) {
+    try {
+      const openedArena = await maybeEnterDebate(
+        {
+          debates: forum.debates,
+          contributions: forum.contributions,
+          storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
+          isSteward: async (roomId, uid) =>
+            (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
+          setStoryDispute: async (sid, status) => {
+            await ingestion.stories.update(sid, { disputeStatus: status });
+            // Keep the ranking feature vector in sync so a story's dispute-driven
+            // feed penalty applies now (lazy import avoids a static forum→ranking
+            // module cycle).
+            const ranking = await import('../ranking/services.js');
+            await ranking.refreshStoryFeaturesBestEffort(sid);
+          },
+          runJudge: forum.debateJudge,
+          broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),
+          now: forum.now,
+          log: forum.log,
+        },
+        {
+          contributionId: contribution.contributionId,
+          threadId: contribution.threadId,
+          storyId: thread.storyId,
+          roomId: thread.roomId,
+          userId,
+          body: contribution.body,
+          citations: contribution.citations,
+          metadata: contribution.metadata,
+        },
+        debateArenaId,
+      );
+      if (openedArena !== null) {
+        contribution.metadata.debate_arena_id = openedArena.debateId;
+      }
+    } catch (err) {
+      forum.log('forum.debate_open_failed', {
+        contribution_id: contribution.contributionId,
+        error: String(err),
+      });
+    }
+  }
 
   forum.metrics.increment(`contributions.created.${request.type}`);
   forum.log('forum.contribution_created', {

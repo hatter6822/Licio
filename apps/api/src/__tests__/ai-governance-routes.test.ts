@@ -83,7 +83,8 @@ describe('WS-K routes', () => {
     );
     expect(ok.status).toBe(200);
     const body = (await ok.json()) as { inventory: { use_cases: unknown[] } };
-    expect(body.inventory.use_cases).toHaveLength(8);
+    // The nine canonical use cases (the eight WS-K + the WS-T debate adjudicator).
+    expect(body.inventory.use_cases).toHaveLength(9);
   });
 
   it('lets the AI team deprecate a model and read the blocked-invocation audit', async () => {

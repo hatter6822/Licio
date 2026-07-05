@@ -60,6 +60,17 @@ export const CONTRIBUTION_MODERATION_STATES = [
 export type ContributionModerationState = (typeof CONTRIBUTION_MODERATION_STATES)[number];
 export const contributionModerationStateSchema = z.enum(CONTRIBUTION_MODERATION_STATES);
 
+/**
+ * Dispute posture of a contribution (the sourced-correction debate outcome).
+ * ORTHOGONAL to `moderation_state`: an `incorrect` contribution stays fully
+ * VISIBLE (it is not hidden/removed) but sinks to the bottom of its comment
+ * section and carries an "incorrect" tag — the transparency remedy, never a
+ * tombstone.  `under_debate` means an open debate arena is challenging it.
+ */
+export const CONTRIBUTION_DISPUTE_STATES = ['none', 'under_debate', 'incorrect'] as const;
+export type ContributionDisputeStatus = (typeof CONTRIBUTION_DISPUTE_STATES)[number];
+export const contributionDisputeStatusSchema = z.enum(CONTRIBUTION_DISPUTE_STATES);
+
 /** Maximum tree depth (WS-G.1.2d-1).  Roots are depth 0; a parent at depth
  *  MAX yields a child at MAX+1 → rejected. */
 export const MAX_CONTRIBUTION_DEPTH = 10;
@@ -141,6 +152,14 @@ export const commentCreateSchema = z
     ...createBaseShape,
     type: z.literal('comment'),
     body: z.string().trim().max(CONTRIBUTION_BODY_LIMITS.comment).optional().default(''),
+    /**
+     * Attached source links (WS-T sourced comments).  OPTIONAL — a comment may
+     * carry none — but a sourced comment counts as strictly greater
+     * participation than an unsourced one (the PWAtt citation weight).  Never a
+     * requirement on a plain comment (availability > friction); the composer
+     * simply encourages it.
+     */
+    citations: z.array(citationSchema).max(MAX_CITATIONS).optional(),
   })
   .strict()
   .transform((value) => ({ ...value, body: value.body.trim() }))
@@ -205,19 +224,46 @@ export const evidenceCreateSchema = z
   })
   .strict();
 
+/**
+ * A correction is a sourced challenge to a specific comment or to the story
+ * root.  It MUST carry at least one supporting citation (a source is
+ * mandatory — the whole point) and MUST target EXACTLY ONE of a comment
+ * (`target_contribution_id`, same thread) or the story (`target_story_id`).
+ * A successful correction opens a live debate arena; the target's author is
+ * the incumbent, the correction's author the challenger.  `target_claim_id`
+ * stays as an OPTIONAL extra linkage to a specific claim, never the primary
+ * target (WS-T corrections retarget from claims to comments/stories).
+ */
 export const correctionCreateSchema = z
   .object({
     ...createBaseShape,
     type: z.literal('correction'),
     body: bodySchema('correction', 'Correction text is required.'),
-    target_claim_id: uuidSchema,
+    /** The challenged comment (in the same thread). */
+    target_contribution_id: uuidSchema.optional(),
+    /** The challenged story root (the correction targets the story itself). */
+    target_story_id: uuidSchema.optional(),
+    /** Optional additional linkage to a specific claim (context, not the target). */
+    target_claim_id: uuidSchema.optional(),
     citations: z
       .array(citationSchema)
-      .min(1, 'Corrections require at least one supporting citation.')
-      .max(5, 'Corrections take at most five supporting citations.'),
+      .min(1, 'Corrections require at least one supporting source.')
+      .max(5, 'Corrections take at most five supporting sources.'),
     target_text_excerpt: z.string().min(1).max(500).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    const targets = [value.target_contribution_id, value.target_story_id].filter(
+      (id): id is string => id !== undefined,
+    );
+    if (targets.length !== 1) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['target_contribution_id'],
+        message: 'A correction must target exactly one comment or story.',
+      });
+    }
+  });
 
 /** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const synthesisCreateSchema = z
@@ -382,6 +428,10 @@ export const contributionMetadataSchema = z
     reason_code: contributionReasonCodeSchema.optional(),
     urgency: moderationUrgencySchema.optional(),
     target_contribution_id: uuidSchema.optional(),
+    /** A correction that targets the story root (rather than a comment). */
+    target_story_id: uuidSchema.optional(),
+    /** The debate arena a correction opened (back-reference for the challenger). */
+    debate_arena_id: uuidSchema.optional(),
     attachment_ids: z.array(uuidSchema).max(4).optional(),
     lens_id: uuidSchema.optional(),
   })
@@ -423,6 +473,10 @@ export const contributionPublicSchema = z
     depth: z.number().int().min(0).max(MAX_CONTRIBUTION_DEPTH),
     child_count: z.number().int().min(0),
     moderation_state: contributionModerationStateSchema,
+    /** Dispute posture (default `none`).  `incorrect` stays visible-but-sunk. */
+    dispute_status: contributionDisputeStatusSchema.default('none'),
+    /** The open debate arena challenging this contribution, if any. */
+    active_debate_id: uuidSchema.nullable().default(null),
     edited: z.boolean(),
     created_at: isoTimestampSchema,
     updated_at: isoTimestampSchema,

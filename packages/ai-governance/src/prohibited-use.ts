@@ -33,6 +33,9 @@ export const CAPABILITY_CLASSIFICATION: Readonly<Record<AiCapability, Capability
   generate_embedding: { kind: 'permitted', governance: false },
   triage_safety: { kind: 'permitted', governance: false },
   detect_duplicate: { kind: 'permitted', governance: false },
+  // WS-T debate adjudication — permitted content pipeline; the verdict is
+  // advisory (steward-overrulable), never autonomous, and reads no wealth signal.
+  adjudicate_debate: { kind: 'permitted', governance: false },
   // §24.5 permitted governance capabilities.
   gov_summarize_proposal: { kind: 'permitted', governance: true },
   gov_identify_missing_fields: { kind: 'permitted', governance: true },

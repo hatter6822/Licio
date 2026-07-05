@@ -81,6 +81,42 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
     );
   });
 
+  it('WS-T — a `corrected` story sinks BELOW a clean story even with stronger signal', () => {
+    // Item 1: a clean, LOW-signal story.  Item 2: a disputed (`dispute_penalty=1`)
+    // story with MAXED positive signal AND an SCOI distribution multiplier — the
+    // exact case a within-multiplier penalty term would fail to bottom out.
+    const clean = makeCandidate(1);
+    const disputed = makeCandidate(2);
+    const features = featureMap([
+      makeFeatures(1, { active_attention: 0.05 }),
+      makeFeatures(2, {
+        active_attention: 1,
+        constructive_participation: 1,
+        exposure_independence: 1,
+        source_evidence_completeness: 1,
+        context_coherence_gain: 1,
+        source_reliability: 1,
+        dispute_penalty: 1,
+      }),
+    ]);
+    const ranked = rankFeasibleSet(
+      [disputed, clean],
+      features,
+      EVERGREEN_PROFILE,
+      FULL_ENFORCEMENT,
+      makeContext(),
+    );
+    // The disputed story ranks LAST despite its stronger positive score, and its
+    // score is strictly below the clean story's.
+    expect(ranked.selected.map((s) => s.item_id)).toEqual([clean.item_id, disputed.item_id]);
+    const scoreOf = (id: string) => ranked.selected.find((s) => s.item_id === id)?.pwatt_score ?? 0;
+    expect(scoreOf(disputed.item_id)).toBeLessThan(scoreOf(clean.item_id));
+    // The `dispute` penalty term is still RECORDED (decision-log transparency).
+    const disputedItem = ranked.selected.find((s) => s.item_id === disputed.item_id);
+    expect(disputedItem?.penalty_components.dispute.enforced).toBe(true);
+    expect(disputedItem?.penalty_components.dispute.value).toBe(1);
+  });
+
   it('input order does not change the result (deterministic merge)', () => {
     const candidates = [1, 2, 3].map((n) => makeCandidate(n));
     const features = featureMap([1, 2, 3].map((n) => makeFeatures(n)));

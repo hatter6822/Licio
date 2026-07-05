@@ -55,6 +55,11 @@ export function toContributionPublic(
     depth: record.path.length,
     child_count: childCount,
     moderation_state: record.moderationState,
+    // WS-T dispute posture (visible-but-sunk); a tombstone carries none. The open
+    // arena id (active_debate_id) is threaded in by the comment/thread readers
+    // that hold the debate store; a bare projection defaults to null.
+    dispute_status: tombstone ? 'none' : record.disputeStatus,
+    active_debate_id: null,
     edited: record.editHistoryRef !== null,
     created_at: record.createdAt,
     updated_at: record.updatedAt,

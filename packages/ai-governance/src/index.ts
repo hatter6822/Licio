@@ -12,6 +12,7 @@
 export * from './accuracy.js';
 export * from './bias-audit.js';
 export * from './canonical-json.js';
+export * from './debate-judge.js';
 export * from './hallucination.js';
 export * from './harness.js';
 export * from './inventory.js';

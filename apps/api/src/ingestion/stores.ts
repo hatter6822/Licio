@@ -10,6 +10,7 @@
 import type {
   ClaimExtractionSource,
   ClaimRecordStatus,
+  ContributionDisputeStatus,
   DisplayRestrictions,
   EvidenceCardType,
   EvidenceRelationshipType,
@@ -83,6 +84,10 @@ export interface StoryRecord {
     | 'disallowed_robots'
     | 'not_applicable';
   hiddenState: 'takedown' | 'safety' | null;
+  /** WS-T dispute posture (a corrected-story debate outcome); absent ⇒ `none`.
+   *  ORTHOGONAL to `hiddenState`: an `incorrect` story stays VISIBLE but is
+   *  penalized to the bottom of the feed by ranking. */
+  disputeStatus?: ContributionDisputeStatus;
   lastMaterialUpdateAt: string;
   createdAt: string;
   updatedAt: string;
@@ -373,6 +378,7 @@ export interface StoryStore {
         | 'visibility'
         | 'canonicalPublicStoryId'
         | 'mediaUploadRef'
+        | 'disputeStatus'
       >
     >,
   ): Promise<StoryRecord | null>;

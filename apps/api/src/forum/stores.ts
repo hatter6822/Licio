@@ -11,6 +11,7 @@
 
 import type {
   Citation,
+  ContributionDisputeStatus,
   ContributionMetadata,
   ContributionModerationState,
   ContributionType,
@@ -50,6 +51,9 @@ export interface ContributionRecord {
   path: string[];
   editHistoryRef: string | null;
   moderationState: ContributionModerationState;
+  /** WS-T dispute posture (default `none`); `incorrect` stays visible-but-sunk,
+   *  ORTHOGONAL to `moderationState`. */
+  disputeStatus: ContributionDisputeStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -192,10 +196,15 @@ export interface ForumEvidenceCardInput {
   contributionId: string | null;
 }
 
-/** Keyset cursor over `(created_at, id)` ascending. */
+/** Keyset cursor over `(created_at, id)` ascending.  For a comment SECTION read
+ *  (roots/children) it also carries the cursor row's dispute sink so `incorrect`
+ *  rows stay pinned to the bottom across pagination (WS-T); other reads leave it
+ *  unset (treated as 0 — no effect). */
 export interface CreatedAtCursor {
   createdAt: string;
   id: string;
+  /** 0 = non-incorrect (sorts first), 1 = incorrect (pinned last). */
+  disputeSink?: 0 | 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +223,10 @@ export interface ContributionStore {
    * `duplicate: true` (idempotent create, WS-G.3.1).
    */
   insert(
-    record: Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'>,
+    record: Omit<
+      ContributionRecord,
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+    >,
     evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome>;
   getById(contributionId: string): Promise<ContributionRecord | null>;
@@ -236,6 +248,10 @@ export interface ContributionStore {
     opts: {
       types?: readonly ContributionType[];
       states?: readonly ContributionModerationState[];
+      /** WS-T — restrict to SOURCED roots (an `evidence` card, or a comment that
+       *  carries ≥1 citation): the "Sources" view, which is more than just the
+       *  `evidence` type. */
+      sourced?: boolean;
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
@@ -265,6 +281,11 @@ export interface ContributionStore {
     threadId: string,
     states: readonly ContributionModerationState[],
   ): Promise<Partial<Record<ContributionType, number>>>;
+  /** WS-T — count a thread's contributions in the given dispute status. */
+  countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number>;
+  /** WS-T — count a thread's SOURCED contributions (evidence cards + comments
+   *  carrying ≥1 citation) in the given states — the "Sources" overview count. */
+  countSourced(threadId: string, states: readonly ContributionModerationState[]): Promise<number>;
   /** Child counts for the given parents (published children only). */
   childCounts(contributionIds: readonly string[]): Promise<Map<string, number>>;
   /** Update body/citations/metadata, snapshotting the previous values into
@@ -279,6 +300,12 @@ export interface ContributionStore {
   setModerationState(
     contributionId: string,
     state: ContributionModerationState,
+  ): Promise<ContributionRecord | null>;
+  /** WS-T — set the dispute posture (a debate outcome).  ORTHOGONAL to
+   *  moderation: never hides the row.  Returns null for an unknown id. */
+  setDisputeStatus(
+    contributionId: string,
+    status: ContributionDisputeStatus,
   ): Promise<ContributionRecord | null>;
   /** WS-J.2.6 compensation: HARD-delete a just-created contribution (and its
    *  co-created evidence card) when the safety intake that should hide it fails.
@@ -480,6 +507,54 @@ function beforeCursor(row: { createdAt: string }, id: string, cursor: CreatedAtC
   return row.createdAt < cursor.createdAt || (row.createdAt === cursor.createdAt && id < cursor.id);
 }
 
+// --- WS-T: `incorrect` comments sink to the bottom of a section --------------
+
+/** The dispute sink rank: `incorrect` sorts LAST; everything else first. */
+function disputeSinkOf(record: { disputeStatus: ContributionDisputeStatus }): 0 | 1 {
+  return record.disputeStatus === 'incorrect' ? 1 : 0;
+}
+
+/**
+ * WS-T — a row belongs to the "Sources" view when it is an `evidence` card OR a
+ * comment carrying at least one citation (the exact predicate the client's
+ * "Sourced" badge uses).  A sourced comment is first-class source participation,
+ * not just the dedicated `evidence` type. */
+function isSourcedRow(record: Pick<ContributionRecord, 'type' | 'citations'>): boolean {
+  return record.type === 'evidence' || (record.type === 'comment' && record.citations.length > 0);
+}
+
+/**
+ * Section ordering: `incorrect` rows ALWAYS after non-incorrect ones, then the
+ * chosen chronological direction WITHIN each sink group (newest → descending,
+ * oldest/default → ascending).  Keeps a debate's loser visible-but-sunk.
+ */
+function bySinkThenOrder(
+  a: ContributionRecord,
+  b: ContributionRecord,
+  order: 'newest' | 'oldest' | undefined,
+): number {
+  const delta = disputeSinkOf(a) - disputeSinkOf(b);
+  if (delta !== 0) return delta;
+  const chrono = byCreatedAtThenId(a, b, a.contributionId, b.contributionId);
+  return order === 'newest' ? -chrono : chrono;
+}
+
+/** Composite keyset: is `row` strictly after the cursor in sink-then-order? */
+function afterSinkCursor(
+  row: ContributionRecord,
+  after: CreatedAtCursor,
+  order: 'newest' | 'oldest' | undefined,
+): boolean {
+  const s = disputeSinkOf(row);
+  const cs = after.disputeSink ?? 0;
+  // A row in a LATER sink group is always after the cursor (the whole earlier
+  // group precedes it); an earlier group is never after.
+  if (s !== cs) return s > cs;
+  return order === 'newest'
+    ? beforeCursor(row, row.contributionId, after)
+    : afterCursor(row, row.contributionId, after);
+}
+
 /** The forum's view of the evidence-card store (implemented by ingestion). */
 export interface EvidenceCardSink {
   insertForumCard(card: ForumEvidenceCardInput, createdAt: string): Promise<void>;
@@ -503,7 +578,10 @@ export class InMemoryContributionStore implements ContributionStore {
   }
 
   async insert(
-    record: Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'>,
+    record: Omit<
+      ContributionRecord,
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+    >,
     evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome> {
     if (record.userId !== null) {
@@ -520,6 +598,7 @@ export class InMemoryContributionStore implements ContributionStore {
       metadata: { ...record.metadata },
       path: [...record.path],
       editHistoryRef: null,
+      disputeStatus: 'none',
       createdAt: at,
       updatedAt: at,
     };
@@ -592,6 +671,7 @@ export class InMemoryContributionStore implements ContributionStore {
     opts: {
       types?: readonly ContributionType[];
       states?: readonly ContributionModerationState[];
+      sourced?: boolean;
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
@@ -606,13 +686,11 @@ export class InMemoryContributionStore implements ContributionStore {
           row.parentContributionId === null &&
           (types === null || types.has(row.type)) &&
           (states === null || states.has(row.moderationState)) &&
-          (!opts.after ||
-            (opts.order === 'newest'
-              ? beforeCursor(row, row.contributionId, opts.after)
-              : afterCursor(row, row.contributionId, opts.after))),
+          (opts.sourced !== true || isSourcedRow(row)) &&
+          (!opts.after || afterSinkCursor(row, opts.after, opts.order)),
       )
-      .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId));
-    if (opts.order === 'newest') rows.reverse();
+      // `incorrect` roots sink to the bottom (WS-T), then chronological per order.
+      .sort((a, b) => bySinkThenOrder(a, b, opts.order));
     return rows.slice(0, opts.limit);
   }
 
@@ -626,20 +704,16 @@ export class InMemoryContributionStore implements ContributionStore {
     },
   ): Promise<ContributionRecord[]> {
     const states = opts.states ? new Set(opts.states) : null;
-    const oldestFirst = opts.order === 'oldest';
+    const order = opts.order ?? 'newest';
     const rows = [...this.#rows.values()]
       .filter(
         (row) =>
           row.parentContributionId === parentContributionId &&
           (states === null || states.has(row.moderationState)) &&
-          (!opts.after ||
-            (oldestFirst
-              ? afterCursor(row, row.contributionId, opts.after)
-              : beforeCursor(row, row.contributionId, opts.after))),
+          (!opts.after || afterSinkCursor(row, opts.after, order)),
       )
-      .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId));
-    // Ascending sort above; reverse for the default newest-first preview.
-    if (!oldestFirst) rows.reverse();
+      // A nested `incorrect` reply sinks among its siblings too (WS-T).
+      .sort((a, b) => bySinkThenOrder(a, b, order));
     return rows.slice(0, opts.limit);
   }
 
@@ -654,6 +728,28 @@ export class InMemoryContributionStore implements ContributionStore {
       counts[row.type] = (counts[row.type] ?? 0) + 1;
     }
     return counts;
+  }
+
+  async countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number> {
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.threadId === threadId && row.disputeStatus === status) count += 1;
+    }
+    return count;
+  }
+
+  async countSourced(
+    threadId: string,
+    states: readonly ContributionModerationState[],
+  ): Promise<number> {
+    const wanted = new Set(states);
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.threadId === threadId && wanted.has(row.moderationState) && isSourcedRow(row)) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async childCounts(contributionIds: readonly string[]): Promise<Map<string, number>> {
@@ -711,6 +807,17 @@ export class InMemoryContributionStore implements ContributionStore {
     const row = this.#rows.get(contributionId);
     if (!row) return null;
     row.moderationState = state;
+    row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async setDisputeStatus(
+    contributionId: string,
+    status: ContributionDisputeStatus,
+  ): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return null;
+    row.disputeStatus = status;
     row.updatedAt = iso(this.#now);
     return row;
   }

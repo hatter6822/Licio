@@ -35,6 +35,7 @@ function actor(overrides: Partial<ActorItemSummary> = {}): ActorItemSummary {
     returnVisitBucket: 'none',
     contributions: {},
     uncitedAccusationsByType: {},
+    citedContributionsByType: {},
     savedForLater: 0,
     ...overrides,
   };

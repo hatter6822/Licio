@@ -807,8 +807,10 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
     const questionItem = randomUUID();
     const { userId } = await seedUserWithSession(fixture.identity);
     await fixture.events.eventStore.insertMany([
+      // BOTH sourced, so the WS-T citation bonus is identical and the only
+      // difference is the contribution TYPE (isolating the hierarchy).
       contributionRow(evidenceItem, userId, 'evidence', { hasCitation: true }),
-      contributionRow(questionItem, userId, 'question'),
+      contributionRow(questionItem, userId, 'question', { hasCitation: true }),
     ]);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt_v1', evidenceItem);
@@ -861,6 +863,7 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
         contributions: { weightPct: 10, curve },
       },
       accusationDownweight: 0.25,
+      citationBonus: 0.35,
       rapidThreshold: 5,
       rapidDampening: 0.3,
       antiSignalAttenuation: { coordinatedBurstMax: 0.5, harassmentCascade: 0.3 },

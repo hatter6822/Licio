@@ -39,6 +39,7 @@ import { Route as PrivateMigrateRouteImport } from './routes/private.migrate'
 import { Route as DevSimulatorRouteImport } from './routes/dev.simulator'
 import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
+import { Route as StoriesStoryIdDebateDebateIdRouteImport } from './routes/stories.$storyId.debate.$debateId'
 
 const SupportRoute = SupportRouteImport.update({
   id: '/support',
@@ -180,6 +181,12 @@ const RoomsRoomIdGovernanceRoute = RoomsRoomIdGovernanceRouteImport.update({
   path: '/rooms/$roomId/governance',
   getParentRoute: () => rootRouteImport,
 } as any)
+const StoriesStoryIdDebateDebateIdRoute =
+  StoriesStoryIdDebateDebateIdRouteImport.update({
+    id: '/debate/$debateId',
+    path: '/debate/$debateId',
+    getParentRoute: () => StoriesStoryIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -205,11 +212,12 @@ export interface FileRoutesByFullPath {
   '/profile/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile/wallet': typeof ProfileWalletRoute
   '/rooms/$roomId': typeof RoomsRoomIdRoute
-  '/stories/$storyId': typeof StoriesStoryIdRoute
+  '/stories/$storyId': typeof StoriesStoryIdRouteWithChildren
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/private/': typeof PrivateIndexRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
+  '/stories/$storyId/debate/$debateId': typeof StoriesStoryIdDebateDebateIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -234,11 +242,12 @@ export interface FileRoutesByTo {
   '/profile/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile/wallet': typeof ProfileWalletRoute
   '/rooms/$roomId': typeof RoomsRoomIdRoute
-  '/stories/$storyId': typeof StoriesStoryIdRoute
+  '/stories/$storyId': typeof StoriesStoryIdRouteWithChildren
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/private': typeof PrivateIndexRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
+  '/stories/$storyId/debate/$debateId': typeof StoriesStoryIdDebateDebateIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -265,11 +274,12 @@ export interface FileRoutesById {
   '/profile_/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile_/wallet': typeof ProfileWalletRoute
   '/rooms_/$roomId': typeof RoomsRoomIdRoute
-  '/stories/$storyId': typeof StoriesStoryIdRoute
+  '/stories/$storyId': typeof StoriesStoryIdRouteWithChildren
   '/threads_/$threadId': typeof ThreadsThreadIdRoute
   '/private/': typeof PrivateIndexRoute
   '/rooms_/$roomId_/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId_/comments': typeof StoriesStoryIdCommentsRoute
+  '/stories/$storyId/debate/$debateId': typeof StoriesStoryIdDebateDebateIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -302,6 +312,7 @@ export interface FileRouteTypes {
     | '/private/'
     | '/rooms/$roomId/governance'
     | '/stories/$storyId/comments'
+    | '/stories/$storyId/debate/$debateId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -331,6 +342,7 @@ export interface FileRouteTypes {
     | '/private'
     | '/rooms/$roomId/governance'
     | '/stories/$storyId/comments'
+    | '/stories/$storyId/debate/$debateId'
   id:
     | '__root__'
     | '/'
@@ -361,6 +373,7 @@ export interface FileRouteTypes {
     | '/private/'
     | '/rooms_/$roomId_/governance'
     | '/stories/$storyId_/comments'
+    | '/stories/$storyId/debate/$debateId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -386,7 +399,7 @@ export interface RootRouteChildren {
   ProfileSignalLedgerRoute: typeof ProfileSignalLedgerRoute
   ProfileWalletRoute: typeof ProfileWalletRoute
   RoomsRoomIdRoute: typeof RoomsRoomIdRoute
-  StoriesStoryIdRoute: typeof StoriesStoryIdRoute
+  StoriesStoryIdRoute: typeof StoriesStoryIdRouteWithChildren
   ThreadsThreadIdRoute: typeof ThreadsThreadIdRoute
   RoomsRoomIdGovernanceRoute: typeof RoomsRoomIdGovernanceRoute
   StoriesStoryIdCommentsRoute: typeof StoriesStoryIdCommentsRoute
@@ -590,6 +603,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RoomsRoomIdGovernanceRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/stories/$storyId/debate/$debateId': {
+      id: '/stories/$storyId/debate/$debateId'
+      path: '/debate/$debateId'
+      fullPath: '/stories/$storyId/debate/$debateId'
+      preLoaderRoute: typeof StoriesStoryIdDebateDebateIdRouteImport
+      parentRoute: typeof StoriesStoryIdRoute
+    }
   }
 }
 
@@ -605,6 +625,18 @@ const PrivateRouteChildren: PrivateRouteChildren = {
 
 const PrivateRouteWithChildren =
   PrivateRoute._addFileChildren(PrivateRouteChildren)
+
+interface StoriesStoryIdRouteChildren {
+  StoriesStoryIdDebateDebateIdRoute: typeof StoriesStoryIdDebateDebateIdRoute
+}
+
+const StoriesStoryIdRouteChildren: StoriesStoryIdRouteChildren = {
+  StoriesStoryIdDebateDebateIdRoute: StoriesStoryIdDebateDebateIdRoute,
+}
+
+const StoriesStoryIdRouteWithChildren = StoriesStoryIdRoute._addFileChildren(
+  StoriesStoryIdRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
@@ -629,7 +661,7 @@ const rootRouteChildren: RootRouteChildren = {
   ProfileSignalLedgerRoute: ProfileSignalLedgerRoute,
   ProfileWalletRoute: ProfileWalletRoute,
   RoomsRoomIdRoute: RoomsRoomIdRoute,
-  StoriesStoryIdRoute: StoriesStoryIdRoute,
+  StoriesStoryIdRoute: StoriesStoryIdRouteWithChildren,
   ThreadsThreadIdRoute: ThreadsThreadIdRoute,
   RoomsRoomIdGovernanceRoute: RoomsRoomIdGovernanceRoute,
   StoriesStoryIdCommentsRoute: StoriesStoryIdCommentsRoute,

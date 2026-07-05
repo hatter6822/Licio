@@ -57,12 +57,18 @@ export interface CommentPageResult {
   rootFound: boolean;
 }
 
-function filterTypes(
-  filter: CommentFilter | undefined,
-): readonly ('evidence' | 'correction')[] | undefined {
-  if (filter === 'sources') return ['evidence'];
-  if (filter === 'corrections') return ['correction'];
-  return undefined;
+/**
+ * Map a section filter to `listRoots` options.  The "Sources" view is NOT just
+ * the `evidence` type — it is every SOURCED root (an evidence card OR a comment
+ * carrying ≥1 citation), matching the client's "Sourced" badge; the store's
+ * `sourced` predicate expresses that.  "Corrections" stays a plain type filter. */
+function rootFilterOptions(filter: CommentFilter | undefined): {
+  types?: readonly ('evidence' | 'correction')[];
+  sourced?: boolean;
+} {
+  if (filter === 'sources') return { sourced: true };
+  if (filter === 'corrections') return { types: ['correction'] };
+  return {};
 }
 
 export function commentMediaOf(
@@ -157,6 +163,8 @@ interface ProjectCtx {
   childCounts: ReadonlyMap<string, number>;
   authors: ReadonlyMap<string, { handle: string; displayName: string } | null>;
   media: ReadonlyMap<string, NonNullable<ContributionPublic['media']>>;
+  /** WS-T — contribution id → the open debate arena challenging it (if any). */
+  activeDebates: ReadonlyMap<string, string>;
 }
 
 async function buildProjectCtx(
@@ -180,12 +188,27 @@ async function buildProjectCtx(
   const authorIds = [
     ...new Set(rendered.map((record) => record.userId).filter((id): id is string => id !== null)),
   ];
-  const [childCounts, authorEntries, media] = await Promise.all([
+  // WS-T — the open arena (if any) challenging a comment under debate; only rows
+  // marked `under_debate` can have one, so query just those (bounded).
+  const disputedIds = rendered
+    .filter((record) => record.disputeStatus === 'under_debate')
+    .map((record) => record.contributionId);
+  const [childCounts, authorEntries, media, activeDebates] = await Promise.all([
     bundle.forum.contributions.childCounts(unique.map((record) => record.contributionId)),
     Promise.all(authorIds.map(async (id) => [id, await resolveAuthor(id)] as const)),
     resolveMedia(bundle, rendered, opts.mintMediaUrl, opts.restrictedMedia),
+    disputedIds.length > 0
+      ? bundle.forum.debates.activeDebateIdsForContributions(disputedIds)
+      : Promise.resolve(new Map<string, string>()),
   ]);
-  return { requesterUserId, visible, childCounts, authors: new Map(authorEntries), media };
+  return {
+    requesterUserId,
+    visible,
+    childCounts,
+    authors: new Map(authorEntries),
+    media,
+    activeDebates,
+  };
 }
 
 function projectNode(node: RawNode, ctx: ProjectCtx): CommentItem | null {
@@ -201,8 +224,12 @@ function projectNode(node: RawNode, ctx: ProjectCtx): CommentItem | null {
     ctx.requesterUserId,
     tombstone,
   );
+  const activeDebateId = tombstone
+    ? null
+    : (ctx.activeDebates.get(node.record.contributionId) ?? null);
+  const withDebate = activeDebateId !== null ? { ...base, active_debate_id: activeDebateId } : base;
   const media = tombstone ? undefined : ctx.media.get(node.record.contributionId);
-  const head = media ? { ...base, media } : base;
+  const head = media ? { ...withDebate, media } : withDebate;
   const replies = node.children
     .map((child) => projectNode(child, ctx))
     .filter((child): child is CommentItem => child !== null);
@@ -238,11 +265,17 @@ export async function commentPage(
   });
 
   // Keyset position (an unknown / foreign cursor restarts — defensive, never an error).
+  // The cursor row's dispute sink is carried so `incorrect` comments stay pinned to
+  // the bottom of the section across pagination (WS-T).
   let after: CreatedAtCursor | null = null;
   if (opts.cursor !== null) {
     const last = await bundle.forum.contributions.getById(opts.cursor);
     if (last && last.threadId === threadId)
-      after = { createdAt: last.createdAt, id: last.contributionId };
+      after = {
+        createdAt: last.createdAt,
+        id: last.contributionId,
+        disputeSink: last.disputeStatus === 'incorrect' ? 1 : 0,
+      };
   }
 
   // Focused mode: the anchor must exist and belong to the thread.  A removed or
@@ -258,7 +291,7 @@ export async function commentPage(
     anchorRecord = record;
   }
 
-  const types = filterTypes(opts.filter);
+  const rootFilter = rootFilterOptions(opts.filter);
   const rootRecords = anchorRecord
     ? await bundle.forum.contributions.listChildren(anchorRecord.contributionId, {
         states: RENDERABLE_STATES,
@@ -267,7 +300,7 @@ export async function commentPage(
         order: opts.order,
       })
     : await bundle.forum.contributions.listRoots(threadId, {
-        ...(types !== undefined ? { types } : {}),
+        ...rootFilter,
         states: RENDERABLE_STATES,
         after,
         limit: pageSize + 1,

@@ -42,6 +42,9 @@ export interface ParticipationConfig {
   rapidDampening: number;
   /** Fraction of unit weight an uncited accusation keeps (WS-E.2.2b). */
   accusationDownweight: number;
+  /** WS-T sourced-comment bonus in [0, 1]: extra unit weight a sourced
+   *  contribution earns over an unsourced one (v0/ledger parity with v1). */
+  citationBonus: number;
   /** v0 SHADOW placeholder multiplier for a detected coordinated burst. */
   burstPlaceholderDampening: number;
   /** Half-saturation constant for the item-level score. Must be > 0. */
@@ -89,6 +92,7 @@ export const DEFAULT_PARTICIPATION_CONFIG: ParticipationConfig = {
   rapidThreshold: 5,
   rapidDampening: 0.3,
   accusationDownweight: 0.25,
+  citationBonus: 0.35,
   burstPlaceholderDampening: 0.9,
   halfSaturationActors: 5,
 };
@@ -108,6 +112,7 @@ export function validateParticipationConfig(config: ParticipationConfig): void {
   for (const [name, factor] of [
     ['rapidDampening', config.rapidDampening],
     ['accusationDownweight', config.accusationDownweight],
+    ['citationBonus', config.citationBonus],
     ['burstPlaceholderDampening', config.burstPlaceholderDampening],
   ] as const) {
     if (!(factor >= 0 && factor <= 1)) throw new Error(`${name} must be in [0, 1]`);
@@ -126,7 +131,11 @@ export interface ActorParticipationResult {
 
 type ActorParticipationInput = Pick<
   ActorItemSummary,
-  'returnVisitBucket' | 'contributions' | 'uncitedAccusationsByType' | 'savedForLater'
+  | 'returnVisitBucket'
+  | 'contributions'
+  | 'uncitedAccusationsByType'
+  | 'citedContributionsByType'
+  | 'savedForLater'
 >;
 
 /** One actor's bounded participation contribution, with annotations. */
@@ -143,6 +152,7 @@ export function actorParticipation(
   let units = 0;
   let totalContributions = 0;
   let uncitedTotal = 0;
+  let citedTotal = 0;
   for (const [type, count] of Object.entries(actor.contributions) as Array<
     [EventContributionType, number | undefined]
   >) {
@@ -151,10 +161,20 @@ export function actorParticipation(
     const typeWeight = V0_CONTRIBUTION_WEIGHTS[type] ?? 0;
     const uncited = Math.min(toNonNegative(actor.uncitedAccusationsByType[type] ?? 0), n);
     uncitedTotal += uncited;
-    units += typeWeight * (n - uncited) + typeWeight * config.accusationDownweight * uncited;
+    // WS-T — a sourced contribution earns the citation bonus (v0/ledger parity
+    // with the served v1 weight, so the honest Signal Ledger reflects it).
+    const cited = Math.min(toNonNegative(actor.citedContributionsByType[type] ?? 0), n);
+    citedTotal += cited;
+    units +=
+      typeWeight * (n - uncited) +
+      typeWeight * config.accusationDownweight * uncited +
+      typeWeight * config.citationBonus * cited;
   }
   if (uncitedTotal > 0) {
     annotations.push('source_free_accusation_downweight');
+  }
+  if (citedTotal > 0) {
+    annotations.push('sourced_contribution_weighted');
   }
 
   let contrib = clamp01(units / config.contribSaturation);

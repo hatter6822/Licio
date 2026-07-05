@@ -19,6 +19,11 @@ import {
   contributionUpdateSchema,
   contributionWriteCreateSchema,
 } from '../schemas/contribution.js';
+import {
+  debateOverrideRequestSchema,
+  debatePositionUpdateSchema,
+  isLegalDebateTransition,
+} from '../schemas/debate.js';
 import { mapLegacyRoomVisibility, roomCreateRequestSchema } from '../schemas/room.js';
 import { summaryCreateRequestSchema, summaryPublicSchema } from '../schemas/summary.js';
 import {
@@ -31,6 +36,8 @@ import {
 const uuidOf = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const THREAD = uuidOf(1);
 const CLAIM = uuidOf(2);
+const TARGET_COMMENT = uuidOf(3);
+const TARGET_STORY = uuidOf(4);
 
 const base = { thread_id: THREAD, client_draft_id: 'draft-1' } as const;
 const citation = { url: 'https://example.org/source' } as const;
@@ -49,7 +56,7 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     ...base,
     type: 'correction',
     body: 'The date is wrong.',
-    target_claim_id: CLAIM,
+    target_contribution_id: TARGET_COMMENT,
     citations: [citation],
     target_text_excerpt: 'on June 3',
   } as const;
@@ -108,6 +115,80 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     expect(
       contributionWriteCreateSchema.safeParse({ ...validCorrection, citations: [] }).success,
     ).toBe(false);
+  });
+
+  it('lets a plain comment attach optional source links', () => {
+    expect(
+      contributionWriteCreateSchema.safeParse({ ...validComment, citations: [citation] }).success,
+    ).toBe(true);
+    // Sources stay OPTIONAL — an unsourced comment is still valid.
+    expect(contributionWriteCreateSchema.safeParse(validComment).success).toBe(true);
+    // But a malformed source URL is rejected at the boundary.
+    expect(
+      contributionWriteCreateSchema.safeParse({
+        ...validComment,
+        citations: [{ url: 'javascript:alert(1)' }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('requires a correction to target exactly one comment or story', () => {
+    // A story target is accepted.
+    expect(
+      contributionWriteCreateSchema.safeParse({
+        ...base,
+        type: 'correction',
+        body: 'The headline overstates it.',
+        target_story_id: TARGET_STORY,
+        citations: [citation],
+      }).success,
+    ).toBe(true);
+    // Zero targets is rejected.
+    const zero = contributionWriteCreateSchema.safeParse({
+      ...base,
+      type: 'correction',
+      body: 'No target.',
+      citations: [citation],
+    });
+    expect(zero.success).toBe(false);
+    // Two targets is rejected.
+    expect(
+      contributionWriteCreateSchema.safeParse({
+        ...base,
+        type: 'correction',
+        body: 'Two targets.',
+        target_contribution_id: TARGET_COMMENT,
+        target_story_id: TARGET_STORY,
+        citations: [citation],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('defaults dispute posture to none on the public projection', () => {
+    const parsed = contributionPublicSchema.safeParse({
+      contribution_id: uuidOf(20),
+      thread_id: THREAD,
+      type: 'comment',
+      body: 'A sourced comment.',
+      citations: [citation],
+      metadata: {},
+      target_claim_id: null,
+      parent_contribution_id: null,
+      author_handle: 'mara',
+      author_display_name: 'Mara',
+      is_author: false,
+      depth: 0,
+      child_count: 0,
+      moderation_state: 'published',
+      edited: false,
+      created_at: '2026-06-11T00:00:00.000Z',
+      updated_at: '2026-06-11T00:00:00.000Z',
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.dispute_status).toBe('none');
+      expect(parsed.data.active_debate_id).toBeNull();
+    }
   });
 
   it('keeps legacy contribution types readable on the public projection', () => {
@@ -172,6 +253,45 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
         has_more_replies: false,
       }).success,
     ).toBe(true);
+  });
+});
+
+describe('WS-T debate arena contracts', () => {
+  it('validates a position update (summary + at least one source)', () => {
+    expect(
+      debatePositionUpdateSchema.safeParse({ summary: 'My case.', citations: [citation] }).success,
+    ).toBe(true);
+    // A position with no source is rejected — a debate is always sourced.
+    expect(
+      debatePositionUpdateSchema.safeParse({ summary: 'My case.', citations: [] }).success,
+    ).toBe(false);
+    // An empty summary is rejected.
+    expect(
+      debatePositionUpdateSchema.safeParse({ summary: '   ', citations: [citation] }).success,
+    ).toBe(false);
+  });
+
+  it('validates a steward override (winner + reason)', () => {
+    expect(
+      debateOverrideRequestSchema.safeParse({ winner: 'challenger', reason: 'Sources hold.' })
+        .success,
+    ).toBe(true);
+    expect(debateOverrideRequestSchema.safeParse({ winner: 'nobody', reason: 'x' }).success).toBe(
+      false,
+    );
+    expect(debateOverrideRequestSchema.safeParse({ winner: 'incumbent', reason: '' }).success).toBe(
+      false,
+    );
+  });
+
+  it('enforces the arena state graph (open→awaiting_verdict→judged→resolved, terminal)', () => {
+    expect(isLegalDebateTransition('open', 'awaiting_verdict')).toBe(true);
+    expect(isLegalDebateTransition('awaiting_verdict', 'judged')).toBe(true);
+    expect(isLegalDebateTransition('judged', 'resolved')).toBe(true);
+    // Illegal skips and terminal state.
+    expect(isLegalDebateTransition('open', 'judged')).toBe(false);
+    expect(isLegalDebateTransition('open', 'resolved')).toBe(false);
+    expect(isLegalDebateTransition('resolved', 'open')).toBe(false);
   });
 });
 

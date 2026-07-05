@@ -30,7 +30,11 @@ import {
   evaluateItemConstraints,
   phiDiversification,
 } from './scoring/constraints.js';
-import { computePenalties, type PenaltyEnforcement } from './scoring/penalties.js';
+import {
+  computePenalties,
+  disputeOrderingSink,
+  type PenaltyEnforcement,
+} from './scoring/penalties.js';
 import { computePositiveScore } from './scoring/pwatt.js';
 
 export { mergeCandidates };
@@ -135,9 +139,15 @@ export function scoreItem(
   });
   const positive = computePositiveScore(features, profile, baseline);
   const penalties = computePenalties(features, profile, enforcement, { sensitiveTopic });
+  // WS-T — a `corrected` story sinks BELOW every non-disputed story: the sink is
+  // subtracted OUTSIDE the distribution multiplier (which is in (0, 1] and would
+  // otherwise shrink an in-multiplier penalty toward 0), so strong baseline /
+  // participation can never rescue it (SPEC §5.4; the comment-section analogue).
+  const rawScore =
+    (positive.components.positive - penalties.total_applied) * distributionMultiplier;
   return scoredItemSchema.parse({
     item_id: candidate.item_id,
-    pwatt_score: (positive.components.positive - penalties.total_applied) * distributionMultiplier,
+    pwatt_score: rawScore - disputeOrderingSink(features, profile),
     score_components: positive.components,
     penalty_components: penalties,
     baseline,

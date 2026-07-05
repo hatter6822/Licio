@@ -15,6 +15,7 @@ import {
   validateForumConfigValue,
 } from '../forum/config.js';
 import { FORUM_TO_EVENT_TYPE, mapCardTypeToEventType } from '../forum/contributions.js';
+import { InMemoryDebateBroadcaster, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import {
   matchesMagic,
   parseGifBlocks,
@@ -76,6 +77,8 @@ const publicContribution: ContributionPublic = {
   depth: 0,
   child_count: 0,
   moderation_state: 'published',
+  dispute_status: 'none',
+  active_debate_id: null,
 };
 
 describe('WS-G.1.1 — transition service (audit + events)', () => {
@@ -301,6 +304,75 @@ describe('WS-T.5.1 — live comment broadcaster', () => {
         contribution: { ...publicContribution, score: 99 } as never,
       }),
     ).toThrow();
+  });
+});
+
+describe('WS-T — live debate arena broadcaster', () => {
+  const position = (side: 'incumbent' | 'challenger') => ({
+    side,
+    author_handle: 'u',
+    author_display_name: 'U',
+    is_author: false,
+    summary: 'my case',
+    citations: [],
+    updated_at: '2026-07-05T00:00:00.000Z',
+    submitted: true,
+  });
+  const publicDebate = {
+    debate_id: '00000000-0000-4000-8000-0000000000f1',
+    story_id: '00000000-0000-4000-8000-0000000000f2',
+    thread_id: '00000000-0000-4000-8000-0000000000f3',
+    room_id: null,
+    target_type: 'comment' as const,
+    target_contribution_id: '00000000-0000-4000-8000-0000000000f4',
+    challenger_contribution_id: '00000000-0000-4000-8000-0000000000f5',
+    state: 'open' as const,
+    incumbent: position('incumbent'),
+    challenger: position('challenger'),
+    edit_deadline_at: '2026-07-05T12:00:00.000Z',
+    verdict: null,
+    winner: null,
+    decided_by: null,
+    rationale: null,
+    confidence: null,
+    ai_output_id: null,
+    verdict_at: null,
+    override_deadline_at: null,
+    overridden_by_handle: null,
+    override_reason: null,
+    resolved_at: null,
+    viewer_role: 'observer' as const,
+    created_at: '2026-07-05T00:00:00.000Z',
+    updated_at: '2026-07-05T00:00:00.000Z',
+  };
+
+  it('fans out arena frames by debate id and fully unsubscribes', () => {
+    const broadcaster = new InMemoryDebateBroadcaster();
+    const received: string[] = [];
+    const unsubscribe = broadcaster.subscribe(publicDebate.debate_id, (frame) => {
+      received.push(frame.arena.debate_id);
+    });
+    broadcaster.publish(publicDebate.debate_id, publicDebate);
+    // A frame for a DIFFERENT debate does not reach this subscriber.
+    broadcaster.publish('00000000-0000-4000-8000-0000000000e9', {
+      ...publicDebate,
+      debate_id: '00000000-0000-4000-8000-0000000000e9',
+    });
+    unsubscribe();
+    broadcaster.publish(publicDebate.debate_id, publicDebate);
+    expect(received).toEqual([publicDebate.debate_id]);
+  });
+
+  it('validates frames at the observer boundary + serializes a clean SSE frame', () => {
+    const broadcaster = new InMemoryDebateBroadcaster();
+    expect(() =>
+      broadcaster.publish(publicDebate.debate_id, { ...publicDebate, pwatt_score: 9 } as never),
+    ).toThrow();
+    const frame = sseDebateFrame({ eventId: publicDebate.updated_at, arena: publicDebate });
+    expect(frame).toContain('event: debate');
+    for (const forbidden of ['pwatt_score', 'wallet_address', 'dwell_ms', 'score":']) {
+      expect(frame).not.toContain(forbidden);
+    }
   });
 });
 

@@ -34,11 +34,12 @@ import {
 } from '@licio/db';
 import type {
   Citation,
+  ContributionDisputeStatus,
   ContributionMetadata,
   ContributionModerationState,
   ContributionType,
 } from '@licio/shared';
-import { and, asc, count, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
 import { sha256Hex } from '../identity/crypto.js';
 import type { S3ObjectStoreConfig } from '../identity/object-store-s3.js';
 import { type SigV4Credentials, signRequest, uriEncode } from '../identity/sigv4.js';
@@ -100,6 +101,38 @@ function uniqueViolationConstraint(error: unknown): string {
   return '';
 }
 
+// WS-T: the section sink key (`incorrect` = 1, else 0).  `incorrect` comments
+// sort AFTER everything else so a debate's loser stays visible-but-sunk.
+const SINK_EXPR = sql`(case when ${contributionsTable.disputeStatus} = 'incorrect' then 1 else 0 end)`;
+
+// WS-T: a SOURCED root — an `evidence` card OR a comment carrying ≥1 citation
+// (the "Sources" view is more than the `evidence` type).  Mirrors `isSourcedRow`
+// in the in-memory adapter exactly.
+const SOURCED_EXPR = sql`(${contributionsTable.type} = 'evidence' or (${contributionsTable.type} = 'comment' and coalesce(jsonb_array_length(${contributionsTable.citations}), 0) > 0))`;
+
+/** Composite keyset over (sink, created_at, id): rows strictly after `after`.
+ *  Mixed directions (sink asc, chronological per order) can't be a single
+ *  row-value tuple, so the cursor decomposes into sink-then-chronological. */
+function sinkKeyset(after: CreatedAtCursor, order: 'newest' | 'oldest' | undefined): SQL {
+  const cs = after.disputeSink ?? 0;
+  const chrono =
+    order === 'newest'
+      ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${after.createdAt}::timestamptz, ${after.id}::uuid)`
+      : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${after.createdAt}::timestamptz, ${after.id}::uuid)`;
+  return sql`(${SINK_EXPR} > ${cs} or (${SINK_EXPR} = ${cs} and ${chrono}))`;
+}
+
+/** Section ORDER BY: sink asc (incorrect last), then chronological per order. */
+function sinkOrderBy(order: 'newest' | 'oldest' | undefined): SQL[] {
+  const created =
+    order === 'newest' ? desc(contributionsTable.createdAt) : asc(contributionsTable.createdAt);
+  const id =
+    order === 'newest'
+      ? desc(contributionsTable.contributionId)
+      : asc(contributionsTable.contributionId);
+  return [sql`${SINK_EXPR} asc`, created, id];
+}
+
 // ---------------------------------------------------------------------------
 // Contributions.
 // ---------------------------------------------------------------------------
@@ -126,13 +159,17 @@ export class DrizzleContributionStore implements ContributionStore {
       path: row.path,
       editHistoryRef: row.editHistoryRef,
       moderationState: row.moderationState,
+      disputeStatus: row.disputeStatus,
       createdAt: iso(row.createdAt),
       updatedAt: iso(row.updatedAt),
     };
   }
 
   async insert(
-    record: Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'>,
+    record: Omit<
+      ContributionRecord,
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+    >,
     evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome> {
     try {
@@ -270,6 +307,7 @@ export class DrizzleContributionStore implements ContributionStore {
     opts: {
       types?: readonly ContributionType[];
       states?: readonly ContributionModerationState[];
+      sourced?: boolean;
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
@@ -281,22 +319,17 @@ export class DrizzleContributionStore implements ContributionStore {
     ];
     if (opts.types) conditions.push(inArray(contributionsTable.type, [...opts.types]));
     if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
-    if (opts.after) {
-      conditions.push(
-        opts.order === 'newest'
-          ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`
-          : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
-      );
-    }
-    const order =
-      opts.order === 'newest'
-        ? [desc(contributionsTable.createdAt), desc(contributionsTable.contributionId)]
-        : [asc(contributionsTable.createdAt), asc(contributionsTable.contributionId)];
+    if (opts.sourced === true) conditions.push(SOURCED_EXPR);
+    // WS-T: `incorrect` roots sink to the bottom of the section — the composite
+    // keyset is (sink, created_at, id); the (thread, dispute_status, created) index
+    // supports it.  Mixed directions (sink asc, chronological per order) cannot be
+    // one row-value tuple, so the cursor decomposes into sink-then-chronological.
+    if (opts.after) conditions.push(sinkKeyset(opts.after, opts.order));
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(...order)
+      .orderBy(...sinkOrderBy(opts.order))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -312,22 +345,14 @@ export class DrizzleContributionStore implements ContributionStore {
   ): Promise<ContributionRecord[]> {
     const conditions = [eq(contributionsTable.parentContributionId, parentContributionId)];
     if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
-    if (opts.after) {
-      conditions.push(
-        opts.order === 'oldest'
-          ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`
-          : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
-      );
-    }
-    const order =
-      opts.order === 'oldest'
-        ? [asc(contributionsTable.createdAt), asc(contributionsTable.contributionId)]
-        : [desc(contributionsTable.createdAt), desc(contributionsTable.contributionId)];
+    // A nested `incorrect` reply sinks among its siblings too (default newest).
+    const order = opts.order ?? 'newest';
+    if (opts.after) conditions.push(sinkKeyset(opts.after, order));
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(...order)
+      .orderBy(...sinkOrderBy(order))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -349,6 +374,36 @@ export class DrizzleContributionStore implements ContributionStore {
     const counts: Partial<Record<ContributionType, number>> = {};
     for (const row of rows) counts[row.type] = row.value;
     return counts;
+  }
+
+  async countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number> {
+    const rows = await this.#db
+      .select({ value: count() })
+      .from(contributionsTable)
+      .where(
+        and(
+          eq(contributionsTable.threadId, threadId),
+          eq(contributionsTable.disputeStatus, status),
+        ),
+      );
+    return rows[0]?.value ?? 0;
+  }
+
+  async countSourced(
+    threadId: string,
+    states: readonly ContributionModerationState[],
+  ): Promise<number> {
+    const rows = await this.#db
+      .select({ value: count() })
+      .from(contributionsTable)
+      .where(
+        and(
+          eq(contributionsTable.threadId, threadId),
+          inArray(contributionsTable.moderationState, [...states]),
+          SOURCED_EXPR,
+        ),
+      );
+    return rows[0]?.value ?? 0;
   }
 
   async childCounts(contributionIds: readonly string[]): Promise<Map<string, number>> {
@@ -432,6 +487,18 @@ export class DrizzleContributionStore implements ContributionStore {
     const rows = await this.#db
       .update(contributionsTable)
       .set({ moderationState: state, updatedAt: new Date() })
+      .where(eq(contributionsTable.contributionId, contributionId))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async setDisputeStatus(
+    contributionId: string,
+    status: ContributionDisputeStatus,
+  ): Promise<ContributionRecord | null> {
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({ disputeStatus: status, updatedAt: new Date() })
       .where(eq(contributionsTable.contributionId, contributionId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;

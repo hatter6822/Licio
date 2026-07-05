@@ -22,6 +22,7 @@ import {
 import {
   computePenalties,
   coordinationInput,
+  disputeOrderingSink,
   harmfulTensionInput,
   MFCI_RISK_PENALTY,
   SHADOW_ENFORCEMENT,
@@ -30,6 +31,26 @@ import { computePositiveScore } from '../scoring/pwatt.js';
 import { makeFeatures, PROFILE } from './fixtures.js';
 
 const FULL_ENFORCEMENT = { mfci: true, phi: true, hodge: true, meri: true, tropical: true };
+
+describe('WS-T disputeOrderingSink', () => {
+  it('is 0 for a non-disputed item (absent or zero signal)', () => {
+    expect(disputeOrderingSink({}, PROFILE)).toBe(0);
+    expect(disputeOrderingSink({ dispute_penalty: 0 }, PROFILE)).toBe(0);
+  });
+
+  it('dominates the whole non-sink score span for a disputed item', () => {
+    const sink = disputeOrderingSink({ dispute_penalty: 1 }, PROFILE);
+    // Max positive is 2 (baseline ≤ 1 + convex ≤ 1); the sink must exceed the
+    // full span (positive + every penalty coefficient) so it always bottoms out.
+    const { pM, pT, pR, pD } = PROFILE.penalties;
+    expect(sink).toBeGreaterThan(2 + pM + pT + pR + (pD ?? 1));
+  });
+
+  it('falls back to pD = 1 when the profile omits the dispute coefficient', () => {
+    const noPd = { ...PROFILE, penalties: { pM: 1, pT: 0.75, pR: 0.5 } };
+    expect(disputeOrderingSink({ dispute_penalty: 1 }, noPd)).toBe(2 + 1 + 0.75 + 0.5 + 1 + 1);
+  });
+});
 
 describe('WS-I.2.3d baseline', () => {
   it('freshness decays exponentially with the half-life', () => {
@@ -328,6 +349,27 @@ describe('WS-I.2.3b penalties', () => {
       value: 0.5,
     });
     expect(positive.components.positive - penalties.total_applied).toBeLessThan(0);
+  });
+
+  it('WS-T — a corrected story is penalized, and it applies even under shadow', () => {
+    const features = makeFeatures(8, { dispute_penalty: 1 });
+    const coeff = PROFILE.penalties.pD ?? 1;
+    const enforced = computePenalties(features, PROFILE, FULL_ENFORCEMENT, {
+      sensitiveTopic: false,
+    });
+    expect(enforced.dispute.value).toBe(1);
+    expect(enforced.dispute.applied).toBeCloseTo(coeff, 12);
+    // A resolved sourced-correction debate is authoritative — no shadow invariant
+    // gates it, so the dispute penalty applies even under SHADOW enforcement.
+    const shadow = computePenalties(features, PROFILE, SHADOW_ENFORCEMENT, {
+      sensitiveTopic: false,
+    });
+    expect(shadow.dispute.applied).toBeCloseTo(coeff, 12);
+    // An undisputed story carries no dispute penalty.
+    const clean = computePenalties(makeFeatures(9), PROFILE, FULL_ENFORCEMENT, {
+      sensitiveTopic: false,
+    });
+    expect(clean.dispute.applied).toBe(0);
   });
 
   it('UNPROMOTED penalties are computed and recorded but never applied (WS-H.1.2e)', () => {

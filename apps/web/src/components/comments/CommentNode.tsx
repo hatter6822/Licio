@@ -12,7 +12,7 @@
 // buttons.  When a thread continues past the view's depth budget the node links
 // into the dedicated page re-rooted at that comment instead of nesting further.
 import type { CommentItem as CommentItemType } from '@licio/shared';
-import { Link } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { cn } from '../../lib/cn.js';
@@ -22,6 +22,8 @@ import {
   CommentComposer,
   CommentHeader,
   CommentMedia,
+  CommentSources,
+  CorrectionComposer,
   commentActionClass,
 } from './CommentParts.js';
 
@@ -69,6 +71,9 @@ export function CommentNode({
   maxDepthInView,
 }: CommentNodeProps): React.ReactElement {
   const [replying, setReplying] = useState(false);
+  const [correcting, setCorrecting] = useState(false);
+  const navigate = useNavigate();
+  const disputed = comment.dispute_status !== 'none';
 
   // Record the ABSOLUTE reply depth for §5.3 traversal bucketing only once the
   // comment is actually SEEN (visibility-gated; see the hook). The in-view depth
@@ -85,7 +90,12 @@ export function CommentNode({
       className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}
     >
       <CommentHeader comment={comment} />
-      {comment.body.length > 0 ? <UgcBody markdown={comment.body} compact /> : null}
+      {comment.body.length > 0 ? (
+        <div className={disputed ? 'opacity-75' : undefined}>
+          <UgcBody markdown={comment.body} compact />
+        </div>
+      ) : null}
+      <CommentSources comment={comment} />
       <CommentMedia comment={comment} />
 
       {/* Compact action row. A leaf (past the view's depth budget) carries its
@@ -100,6 +110,34 @@ export function CommentNode({
         >
           Reply
         </button>
+        {/* Raise a sourced correction → opens the debate arena. Disabled while an
+            arena is already open or the comment was already found incorrect. */}
+        {comment.type !== 'correction' ? (
+          <button
+            type="button"
+            className={cn(commentActionClass, disputed && 'cursor-not-allowed opacity-50')}
+            aria-expanded={correcting}
+            disabled={disputed}
+            title={disputed ? 'This comment already has a debate outcome.' : undefined}
+            onClick={() => setCorrecting((value) => !value)}
+          >
+            <Icon name="flag" className="size-3.5" aria-hidden />
+            Correct
+          </button>
+        ) : null}
+        {/* An open arena is challenging this comment: anyone — especially the
+            incumbent author returning to post their 12-hour position — reaches it
+            here (the `Correct` button is disabled while under debate). */}
+        {comment.active_debate_id ? (
+          <Link
+            to="/stories/$storyId/debate/$debateId"
+            params={{ storyId, debateId: comment.active_debate_id }}
+            className={commentActionClass}
+          >
+            <Icon name="chevron-right" className="size-3.5" aria-hidden />
+            View debate
+          </Link>
+        ) : null}
         {!canNestDeeper && replyCount > 0 ? (
           <ContinueThreadLink
             storyId={storyId}
@@ -108,6 +146,22 @@ export function CommentNode({
           />
         ) : null}
       </div>
+
+      {correcting ? (
+        <CorrectionComposer
+          storyId={storyId}
+          threadId={comment.thread_id}
+          target={{ commentId: comment.contribution_id }}
+          onCancel={() => setCorrecting(false)}
+          onOpened={(debateId) => {
+            setCorrecting(false);
+            void navigate({
+              to: '/stories/$storyId/debate/$debateId',
+              params: { storyId, debateId },
+            });
+          }}
+        />
+      ) : null}
 
       {replying ? (
         <CommentComposer

@@ -25,6 +25,12 @@ export const capabilitySchema = z.enum([
   'moderate.restrict',
   'moderate.remove',
   'moderate.restore',
+  // WS-T — adjudicate a sourced-correction debate. A bounded in-room judgement
+  // (the governed adjudicator scores which sourced position prevails); the agent
+  // holds no keys, the verdict is advisory + fully steward-overrulable, and it is
+  // subordinate to the platform floor. NOT a vote/tally (ADR-8): an adjudication,
+  // never a member count.
+  'debate.judge',
   // Lawmaking facilitation (Stage 4) — NO vote/tally/weight capability exists,
   // so the agent is structurally unable to compute or bias an outcome (ADR-8).
   'lawmaking.summarize',

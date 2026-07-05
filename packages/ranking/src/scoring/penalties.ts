@@ -101,9 +101,40 @@ export function redundancyInput(features: Pick<FeatureVector, 'redundancy_penalt
   return clamp01(features.redundancy_penalty ?? 0);
 }
 
+/** WS-T dispute input: 1 when the story was adjudicated `incorrect` by a sourced-
+ *  correction debate, else 0 — a content-quality signal (uniform, non-financial). */
+export function disputeInput(features: Pick<FeatureVector, 'dispute_penalty'>): number {
+  return clamp01(features.dispute_penalty ?? 0);
+}
+
 function term(value: number, coefficient: number, enforced: boolean): PenaltyTerm {
   const applied = enforced ? coefficient * value : 0;
   return { value, coefficient, applied, enforced };
+}
+
+/**
+ * WS-T — the dispute demotion is realized as an ORDERING-LEVEL SINK (the exact
+ * analogue of the comment-section sink), not merely a within-convex penalty
+ * term.  A convex/penalty term is subtracted INSIDE the distribution multiplier
+ * and its magnitude is bounded by the positive score (≤ 2, SPEC §5.4); a story
+ * with strong baseline/participation could therefore still outscore a clean
+ * low-signal story even after `pD` subtracts.  This constant is subtracted
+ * OUTSIDE the multiplier and exceeds the entire achievable non-sink score range
+ * (positive ∈ [0, 2] minus the profile's bounded penalty coefficients) by a wide
+ * margin, so a `corrected` story sorts strictly BELOW every non-disputed story —
+ * deterministically and independent of the SCOI distribution multiplier.  It is
+ * a content-quality ordering signal (uniform across authors/topics, never
+ * financial — neutrality-safe), never a hidden/removed state. */
+export function disputeOrderingSink(
+  features: Pick<FeatureVector, 'dispute_penalty'>,
+  profile: RankingProfileConfig,
+): number {
+  if (disputeInput(features) <= 0) return 0;
+  const { pM, pT, pR, pD } = profile.penalties;
+  // Max positive is 2 (baseline ≤ 1 + convex ≤ 1); the penalty coefficients bound
+  // the most-negative non-sink score.  Exceed the full span (+1 margin) so the
+  // sink strictly dominates any profile configuration, not just the defaults.
+  return 2 + pM + pT + pR + (pD ?? 1) + 1;
 }
 
 /** The topic-sensitivity context the penalty stage needs. */
@@ -127,10 +158,18 @@ export function computePenalties(
   const coordinationTerm = term(coordination.value, profile.penalties.pM, coordination.enforced);
   const tensionTerm = term(harmfulTensionInput(features), profile.penalties.pT, enforcement.hodge);
   const redundancyTerm = term(redundancyInput(features), profile.penalties.pR, enforcement.meri);
+  // WS-T — the dispute penalty is ALWAYS enforced: a resolved sourced-correction
+  // debate is authoritative (no shadow invariant gates it).  It is RECORDED here
+  // as a first-class term for decision-log transparency; the guaranteed bottom-out
+  // is applied by the pipeline as `disputeOrderingSink` (a multiplier-immune
+  // ordering sink), so a `corrected` story cannot be rescued by strong signal.
+  const disputeTerm = term(disputeInput(features), profile.penalties.pD ?? 1, true);
   return {
     coordination: coordinationTerm,
     harmful_tension: tensionTerm,
     redundancy: redundancyTerm,
-    total_applied: coordinationTerm.applied + tensionTerm.applied + redundancyTerm.applied,
+    dispute: disputeTerm,
+    total_applied:
+      coordinationTerm.applied + tensionTerm.applied + redundancyTerm.applied + disputeTerm.applied,
   };
 }
