@@ -154,6 +154,15 @@ export function metadataFromRequest(
       if (evidenceCardId !== null) metadata.evidence_id = evidenceCardId;
       break;
     case 'correction':
+      // WS-T — a correction targets EXACTLY ONE of a comment or the story root
+      // (the create guard validates existence/same-thread); the target's author
+      // becomes the incumbent when the debate arena opens.
+      if (request.target_contribution_id !== undefined) {
+        metadata.target_contribution_id = request.target_contribution_id;
+      }
+      if (request.target_story_id !== undefined) {
+        metadata.target_story_id = request.target_story_id;
+      }
       if (request.target_text_excerpt !== undefined) {
         metadata.target_text_excerpt = request.target_text_excerpt;
       }
@@ -461,6 +470,27 @@ export async function createContribution(
           'The targeted contribution must belong to the same thread.',
         );
       }
+    }
+  }
+
+  // WS-T — a correction targets EXACTLY ONE of a comment (same thread) or the
+  // story root (the thread's story).  The schema's superRefine guarantees the
+  // exactly-one shape; here we validate existence/consistency.  A correction may
+  // not target its own author's tombstone or a removed row.
+  if (request.type === 'correction') {
+    if (request.target_contribution_id !== undefined) {
+      const target = await forum.contributions.getById(request.target_contribution_id);
+      if (!target || target.threadId !== request.thread_id) {
+        return invalid('invalid_target', 'A correction must target a comment in the same thread.');
+      }
+      if (target.moderationState === 'removed' || target.moderationState === 'hidden') {
+        return invalid('invalid_target', 'The targeted comment is no longer available.');
+      }
+    } else if (
+      request.target_story_id !== undefined &&
+      request.target_story_id !== thread.storyId
+    ) {
+      return invalid('invalid_target', "A story correction must target the thread's story.");
     }
   }
 

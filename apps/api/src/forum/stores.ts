@@ -11,6 +11,7 @@
 
 import type {
   Citation,
+  ContributionDisputeStatus,
   ContributionMetadata,
   ContributionModerationState,
   ContributionType,
@@ -50,6 +51,9 @@ export interface ContributionRecord {
   path: string[];
   editHistoryRef: string | null;
   moderationState: ContributionModerationState;
+  /** WS-T dispute posture (default `none`); `incorrect` stays visible-but-sunk,
+   *  ORTHOGONAL to `moderationState`. */
+  disputeStatus: ContributionDisputeStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -214,7 +218,10 @@ export interface ContributionStore {
    * `duplicate: true` (idempotent create, WS-G.3.1).
    */
   insert(
-    record: Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'>,
+    record: Omit<
+      ContributionRecord,
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+    >,
     evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome>;
   getById(contributionId: string): Promise<ContributionRecord | null>;
@@ -279,6 +286,12 @@ export interface ContributionStore {
   setModerationState(
     contributionId: string,
     state: ContributionModerationState,
+  ): Promise<ContributionRecord | null>;
+  /** WS-T — set the dispute posture (a debate outcome).  ORTHOGONAL to
+   *  moderation: never hides the row.  Returns null for an unknown id. */
+  setDisputeStatus(
+    contributionId: string,
+    status: ContributionDisputeStatus,
   ): Promise<ContributionRecord | null>;
   /** WS-J.2.6 compensation: HARD-delete a just-created contribution (and its
    *  co-created evidence card) when the safety intake that should hide it fails.
@@ -503,7 +516,10 @@ export class InMemoryContributionStore implements ContributionStore {
   }
 
   async insert(
-    record: Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'>,
+    record: Omit<
+      ContributionRecord,
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+    >,
     evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome> {
     if (record.userId !== null) {
@@ -520,6 +536,7 @@ export class InMemoryContributionStore implements ContributionStore {
       metadata: { ...record.metadata },
       path: [...record.path],
       editHistoryRef: null,
+      disputeStatus: 'none',
       createdAt: at,
       updatedAt: at,
     };
@@ -711,6 +728,17 @@ export class InMemoryContributionStore implements ContributionStore {
     const row = this.#rows.get(contributionId);
     if (!row) return null;
     row.moderationState = state;
+    row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async setDisputeStatus(
+    contributionId: string,
+    status: ContributionDisputeStatus,
+  ): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return null;
+    row.disputeStatus = status;
     row.updatedAt = iso(this.#now);
     return row;
   }

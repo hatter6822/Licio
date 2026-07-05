@@ -68,7 +68,11 @@ function passingHarnessInput(model: ModelIdentity, riskLevel: AiRiskLevel): Harn
       datasetVersions,
     },
   };
-  if (generation) {
+  // A generation model always needs the hallucination eval; a high/critical-risk
+  // model needs the FULL set regardless of modality (harness requiredEvaluations),
+  // so supply passing hallucination input for it too (e.g. the high-risk
+  // classification debate adjudicator).
+  if (generation || riskLevel === 'high' || riskLevel === 'critical') {
     input.hallucination = {
       input: {
         statements: [{ text: 'the report covers revenue growth', cited_ids: ['c1'] }],
@@ -92,6 +96,8 @@ const PURPOSE: Record<AiUseCaseId, string> = {
   duplicate_detection: 'Flag near-duplicate content (MERI owns the decision).',
   toxicity_safety_triage: 'Pre-screen content for safety review; flags only, never enforcement.',
   embedding_generation: 'Produce embeddings for similarity and search.',
+  debate_adjudication:
+    'Score which of two sourced positions prevails in a correction debate — advisory, steward-overrulable (§24.6).',
 };
 
 function buildCard(

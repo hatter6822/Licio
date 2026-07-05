@@ -76,6 +76,8 @@ const publicContribution: ContributionPublic = {
   depth: 0,
   child_count: 0,
   moderation_state: 'published',
+  dispute_status: 'none',
+  active_debate_id: null,
 };
 
 describe('WS-G.1.1 — transition service (audit + events)', () => {

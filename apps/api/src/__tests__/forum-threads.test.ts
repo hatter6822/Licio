@@ -71,7 +71,7 @@ describe('WS-T.3.3 — thread overview (comment counts)', () => {
     await createOk(contributionBody('comment', threadId, { parentId: question.contribution_id }));
     await createOk(contributionBody('evidence', threadId, { claimId }));
     await createOk(contributionBody('comment', threadId, { claimId }));
-    await createOk(contributionBody('correction', threadId, { claimId }));
+    await createOk(contributionBody('correction', threadId, { storyId }));
     await createOk(contributionBody('comment', threadId));
     await createOk(contributionBody('comment', threadId));
     await createOk(contributionBody('comment', threadId));
@@ -87,6 +87,8 @@ describe('WS-T.3.3 — thread overview (comment counts)', () => {
       comment_count: 8,
       sources_count: 1,
       corrections_count: 1,
+      debates_count: 0,
+      incorrect_count: 0,
     });
     expect(detail.contribution_count).toBe(8);
     expect(detail.summary_status).toBe('none');
@@ -612,6 +614,7 @@ describe('orderDepthFirst (pure)', () => {
       path: parent === null ? [] : [parent],
       editHistoryRef: null,
       moderationState: 'published',
+      disputeStatus: 'none',
       createdAt,
       updatedAt: createdAt,
     });

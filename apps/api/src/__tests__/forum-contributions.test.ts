@@ -60,7 +60,10 @@ describe('WS-T.3.2 — comment-first write surface', () => {
   it('creates comment, evidence, and correction writes and projects the public shape', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
     const evidence = await createOk(contributionBody('evidence', threadId, { claimId }));
-    const correction = await createOk(contributionBody('correction', threadId, { claimId }));
+    // WS-T — a correction now challenges a comment (or the story), not a claim.
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
     for (const created of [comment, evidence, correction]) {
       expect(['comment', 'evidence', 'correction']).toContain(created.type);
       expect(created.is_author).toBe(true);
@@ -121,7 +124,7 @@ describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
       { type: 'evidence', body: 'x', citations: [], target_claim_id: true },
     ],
     [
-      'correction without target claim',
+      'correction without a comment/story target',
       { type: 'correction', body: 'x', citations: [{ url: 'https://e.org' }] },
     ],
     ['synthesis with one branch', { type: 'synthesis', body: 'x', included_branch_ids: 'one' }],

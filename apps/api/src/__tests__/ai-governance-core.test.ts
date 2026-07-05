@@ -5,6 +5,7 @@
 // gate, prohibited-use guard, output records, and data lineage enforce their
 // doctrine.
 import {
+  AI_USE_CASE_IDS,
   type AiInvocation,
   buildRiskAssessment,
   type ModelCard,
@@ -64,13 +65,17 @@ describe('WS-K seed (end-to-end deployment gate)', () => {
     }
   });
 
-  it('publishes an inventory of all eight use cases with model links', async () => {
+  it('publishes an inventory of every use case with model links', async () => {
     const inventory = await services.inventory.latest();
-    expect(inventory?.use_cases).toHaveLength(8);
+    expect(inventory?.use_cases).toHaveLength(AI_USE_CASE_IDS.length);
     const topic = inventory?.use_cases.find((u) => u.use_case_id === 'topic_classification');
     expect(topic?.model_names).toContain('topic-classifier');
     const governance = inventory?.use_cases.find((u) => u.use_case_id === 'governance_assistance');
     expect(governance?.never_autonomous).toBe(true);
+    // The WS-T debate adjudicator is registered + linked to its use case.
+    const debate = inventory?.use_cases.find((u) => u.use_case_id === 'debate_adjudication');
+    expect(debate?.model_names).toContain('debate-adjudicator');
+    expect(debate?.never_autonomous).toBe(true);
   });
 
   it('resolves every model card risk assessment and lineage', async () => {

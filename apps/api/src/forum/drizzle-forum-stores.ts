@@ -34,6 +34,7 @@ import {
 } from '@licio/db';
 import type {
   Citation,
+  ContributionDisputeStatus,
   ContributionMetadata,
   ContributionModerationState,
   ContributionType,
@@ -126,13 +127,17 @@ export class DrizzleContributionStore implements ContributionStore {
       path: row.path,
       editHistoryRef: row.editHistoryRef,
       moderationState: row.moderationState,
+      disputeStatus: row.disputeStatus,
       createdAt: iso(row.createdAt),
       updatedAt: iso(row.updatedAt),
     };
   }
 
   async insert(
-    record: Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'>,
+    record: Omit<
+      ContributionRecord,
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+    >,
     evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome> {
     try {
@@ -432,6 +437,18 @@ export class DrizzleContributionStore implements ContributionStore {
     const rows = await this.#db
       .update(contributionsTable)
       .set({ moderationState: state, updatedAt: new Date() })
+      .where(eq(contributionsTable.contributionId, contributionId))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async setDisputeStatus(
+    contributionId: string,
+    status: ContributionDisputeStatus,
+  ): Promise<ContributionRecord | null> {
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({ disputeStatus: status, updatedAt: new Date() })
       .where(eq(contributionsTable.contributionId, contributionId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;

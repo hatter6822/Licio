@@ -106,8 +106,10 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
   }
 
   function contributionInput(
-    over: Partial<Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'>> = {},
-  ): Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef'> {
+    over: Partial<
+      Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'>
+    > = {},
+  ): Omit<ContributionRecord, 'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'> {
     return {
       contributionId: randomUUID(),
       threadId,
