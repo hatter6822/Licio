@@ -75,8 +75,8 @@ describe('SourcesDialog', () => {
         })}
       />,
     );
-    // A bare legacy citation shows its URL as the statement.
-    expect(screen.getAllByText(/a\.example/).length).toBeGreaterThan(0);
+    // A bare legacy citation shows its URL as the statement + an expanded host.
+    expect(screen.getByText('a.example')).toBeInTheDocument();
     expect(screen.getByRole('link')).toHaveAttribute('href', 'https://a.example/x');
   });
 

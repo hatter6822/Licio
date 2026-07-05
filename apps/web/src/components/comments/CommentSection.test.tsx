@@ -172,9 +172,9 @@ describe('CommentSection', () => {
     renderSection();
     expect(screen.getByText('Sourced')).toBeInTheDocument();
     expect(screen.getByText('Incorrect')).toBeInTheDocument();
-    // Sources are NOT an always-visible inline list; they are reached via the
-    // compact "Sources (N)" footnote affordance → a modal.
-    expect(screen.queryByRole('link', { name: /example\.org\/evidence/i })).not.toBeInTheDocument();
+    // Sources are NOT shown as an always-visible list; the footnote modal is
+    // closed until the compact "Sources (N)" affordance is used.
+    expect(screen.queryByRole('dialog', { name: 'Sources' })).not.toBeInTheDocument();
     const sourcesButton = screen.getByRole('button', { name: 'Sources (1)' });
     await userEvent.click(sourcesButton);
     const dialog = screen.getByRole('dialog', { name: 'Sources' });
