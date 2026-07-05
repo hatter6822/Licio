@@ -165,13 +165,7 @@ describe('CommentSection', () => {
         ],
         next_cursor: null,
         anchor: null,
-        overview: {
-          comment_count: 2,
-          sources_count: 1,
-          corrections_count: 0,
-          debates_count: 0,
-          incorrect_count: 1,
-        },
+        overview: { comment_count: 2, sources_count: 1, corrections_count: 0 },
         summary: null,
       },
     };

@@ -100,6 +100,8 @@ function node(id: string, overrides: Partial<CommentItem> = {}): CommentItem {
     depth: 0,
     child_count: 0,
     moderation_state: 'published',
+    dispute_status: 'none',
+    active_debate_id: null,
     media: [],
     replies: [],
     reply_count: 0,
