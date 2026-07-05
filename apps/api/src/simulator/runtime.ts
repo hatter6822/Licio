@@ -652,7 +652,12 @@ export class DevTrafficSimulator {
           ...base,
           submission_type: 'local_update',
           location_scope: { type: 'city', value: story.locationValue ?? 'Riverside' },
-          source_or_experience_disclosure: story.disclosure ?? 'Source: the public briefing.',
+          // Cap at the schema's 2 000-char disclosure limit (the generator packs
+          // the diverse per-story body in here so near-dup signing stays honest).
+          source_or_experience_disclosure: truncate(
+            story.disclosure ?? 'Source: the public briefing.',
+            2_000,
+          ),
         };
         break;
       default:
@@ -1006,11 +1011,31 @@ export class DevTrafficSimulator {
   }
 
   async #provisionNewcomer(): Promise<void> {
+    // Retry-completing (mirrors #provisionCluster): advance the newcomer INDEX
+    // only once this account is actually provisioned, so a transient store
+    // failure retries the SAME account next tick instead of permanently skipping
+    // it. Advancing on every attempt (success OR failure) would let
+    // #newcomersProvisioned reach NEWCOMER_CAP while fewer real accounts exist —
+    // the engine gates newcomer emission on that counter, so the influx run
+    // would understate the new-account load it is meant to exercise.
     const spec = newcomerSpec(this.#newcomersProvisioned);
-    this.#newcomersProvisioned += 1;
-    if (this.#personas.some((p) => p.spec.userId === spec.userId)) return;
-    const provisioned = await this.#provisionUser(spec);
-    this.#personas.push({ spec, provisioned, joinedRoomIds: new Set<string>() });
+    const existing = this.#personas.find((p) => p.spec.userId === spec.userId);
+    if (existing?.provisioned) {
+      this.#newcomersProvisioned += 1; // already done — move to the next index
+      return;
+    }
+    try {
+      const provisioned = await this.#provisionUser(spec);
+      if (existing) existing.provisioned = provisioned;
+      else this.#personas.push({ spec, provisioned, joinedRoomIds: new Set<string>() });
+      if (provisioned) this.#newcomersProvisioned += 1;
+    } catch (err) {
+      this.#counters.errors += 1;
+      this.#log('dev-sim: newcomer provisioning failed', { handle: spec.handle, err: String(err) });
+      if (!existing) {
+        this.#personas.push({ spec, provisioned: false, joinedRoomIds: new Set<string>() });
+      }
+    }
   }
 
   async #provisionUser(spec: PersonaSpec): Promise<boolean> {

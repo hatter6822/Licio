@@ -183,6 +183,20 @@ describe('simulator content generation', () => {
     expect(maxPairwiseJaccard(texts)).toBeLessThan(0.7);
   });
 
+  it('distinct local_update stories stay below 0.7 under their SIGNED text (title + disclosure)', () => {
+    // WS-F signs `${title} ${source_or_experience_disclosure}` for a local_update
+    // (submissionBodyText reads ONLY the disclosure — the request carries no
+    // `body`), so the generator packs the diverse per-story body into the
+    // disclosure. A fixed disclosure would collide every same-template update.
+    const prng = createPrng('local');
+    const texts: string[] = [];
+    for (let serial = 0; serial < 40; serial += 1) {
+      const story = generateStory('health', 'local_update', serial, prng);
+      texts.push(`${story.title} ${req(story.disclosure)}`);
+    }
+    expect(maxPairwiseJaccard(texts)).toBeLessThan(0.7);
+  });
+
   it('evidence generation returns a body and a fresh citation reference', () => {
     const prng = createPrng('evidence');
     const a = generateEvidence('health', 1, prng);

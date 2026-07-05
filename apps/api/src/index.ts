@@ -885,7 +885,13 @@ if (env.NODE_ENV !== 'production') {
     // batch outputs the dev boot + the traffic simulator compute actually
     // reorder the served feed — a near-duplicate repost is demoted below its
     // original (§7.1), rather than the effect being silently shadow-gated.
-    await seedDevRankingEnforcement(invariantServices);
+    // IN-MEMORY ONLY: a promotion record has no environment scope, so appending
+    // it to a durable Postgres store (a staging/preview boot with DATABASE_URL
+    // set, NODE_ENV !== 'production') would leave that database MERI-enforced
+    // across restarts and every later boot. Gate to the ephemeral in-memory
+    // store — the standard `pnpm dev` flow this demo effect is for; a
+    // Postgres-backed boot re-derives its own promotions through the real gate.
+    if (!db) await seedDevRankingEnforcement(invariantServices);
     // WS-J: a small report queue so the dev console shows real data on boot.
     await seedModerationDemo(moderationServices);
     // WS-K: register + DEPLOY the governed models through the real gate, and seed

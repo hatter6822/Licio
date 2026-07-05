@@ -493,7 +493,12 @@ export function generateStory(
       question: null,
       questionContext: null,
       locationValue: bank.localValue ?? 'Riverside',
-      disclosure: 'Source: the public briefing calendar and the posted agenda.',
+      // The disclosure IS the local_update's content text (what WS-F signs for
+      // near-dup, alongside the title — submissionBodyText reads only this
+      // field). Carry the per-story diverse `body` so distinct local updates
+      // stay below the 0.7 threshold, exactly as original_brief signs its body;
+      // a fixed disclosure here would collide every same-template update.
+      disclosure: `${body} Source: the public briefing calendar and the posted agenda.`,
     };
   }
   return {

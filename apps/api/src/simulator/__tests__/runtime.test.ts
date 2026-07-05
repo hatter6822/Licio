@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CommentFrame } from '../../forum/comment-broadcaster.js';
 import { serveFeed } from '../../ranking/service.js';
-import { CLUSTER_ROSTER } from '../personas.js';
+import { CLUSTER_ROSTER, newcomerSpec } from '../personas.js';
 import { DevTrafficSimulator } from '../runtime.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
 import { req } from './sim-test-util.js';
@@ -379,6 +379,40 @@ describe('DevTrafficSimulator runtime', () => {
     const after = sim.status();
     expect(after.personas_active).toBeGreaterThan(base);
     expect(after.counters.users_provisioned).toBeGreaterThan(base);
+  });
+
+  it('the influx scenario RETRIES a newcomer after a transient provisioning failure', async () => {
+    const graph = await buildSimTestGraph();
+    // The newcomer index advances only on success, so a transient createUser
+    // failure must be retried on the SAME account (not skipped, which would let
+    // the counter reach the cap while fewer real accounts exist).
+    const newcomerIds = new Set(Array.from({ length: 12 }, (_, i) => newcomerSpec(i).userId));
+    const failedOnce = new Set<string>();
+    const realCreate = graph.identity.store.createUser.bind(graph.identity.store);
+    graph.identity.store.createUser = async (...args) => {
+      const userId = args[0].userId;
+      // Fail the FIRST createUser for each newcomer (transient); succeed on retry.
+      if (userId !== undefined && newcomerIds.has(userId) && !failedOnce.has(userId)) {
+        failedOnce.add(userId);
+        throw new Error('simulated transient store failure');
+      }
+      return realCreate(...args);
+    };
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'influx',
+      seed: 'newcomer-retry',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    for (let i = 0; i < 16; i += 1) await sim.tick();
+    // At least one newcomer hit the transient failure, and EVERY such newcomer
+    // was retried through to a real, provisioned account (no permanent skip).
+    expect(failedOnce.size).toBeGreaterThan(0);
+    for (const userId of failedOnce) {
+      expect(await graph.identity.store.getUser(userId)).not.toBeNull();
+    }
   });
 
   it('a long mixed run moves the high-frequency counters and produces varied submission types', async () => {
