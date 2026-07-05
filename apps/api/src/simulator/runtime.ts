@@ -196,6 +196,11 @@ export class DevTrafficSimulator {
   #scenario: SimulatorScenarioId;
   #speed: number;
   #running = false;
+  // Bumped on every fresh (stopped→)start. A tick captures it and abandons its
+  // remaining plan if it changes — so a stop()→start() that flips #running back
+  // to true while an old tick is awaiting a slow pipeline call cannot let that
+  // stale plan (previous scenario/seed) bleed into the new run.
+  #runGeneration = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #ticking = false;
   #tickCount = 0;
@@ -283,6 +288,7 @@ export class DevTrafficSimulator {
     if (config.scenario !== undefined) this.#applyScenario(config.scenario);
     if (config.speed !== undefined) this.#speed = config.speed;
     this.#running = true;
+    this.#runGeneration += 1; // a fresh run — supersede any in-flight prior tick
     this.#startedAtMs ??= this.#now();
     this.#scenarioStartedAtMs = this.#now();
     this.#lastSignalRefreshMs = this.#now();
@@ -383,6 +389,10 @@ export class DevTrafficSimulator {
   }
 
   async #tickOnce(): Promise<void> {
+    // The run this tick belongs to. A stop()→start() during any await below
+    // bumps #runGeneration, and every guard here bails — so this tick's plan
+    // (built under the prior scenario/seed) never executes against the new run.
+    const generation = this.#runGeneration;
     this.#tickCount += 1;
     const world = await this.#buildWorld();
     const scenario = SCENARIOS[this.#scenario];
@@ -405,18 +415,25 @@ export class DevTrafficSimulator {
       repostDone: this.#repostDone,
     });
     for (const action of plan.slice(0, MAX_ACTIONS_PER_TICK)) {
-      // A stop() mid-tick takes effect immediately: abandon the rest of the plan
-      // rather than keep writing content after the run was halted.
-      if (!this.#running) return;
+      // A stop() (or a stop→restart that superseded this tick) takes effect
+      // immediately: abandon the rest of the plan rather than keep writing
+      // content after the run was halted or replaced.
+      if (!this.#running || this.#runGeneration !== generation) return;
       await this.#execute(action);
     }
+    // A stop→restart during the action loop supersedes this tick's tail too.
+    if (this.#runGeneration !== generation) return;
     // Let detached pipeline work (extraction/topic-classification/fan-out) settle
     // so the next world snapshot sees fully-normalized stories.
     await this.#graph.ingestion.settle();
     await this.#graph.forum.settle();
     // Periodic real-signal refresh so the feed reacts to accumulated attention —
     // skipped if a stop() landed during this tick.
-    if (this.#running && this.#now() - this.#lastSignalRefreshMs >= SIGNAL_REFRESH_EVERY_MS) {
+    if (
+      this.#running &&
+      this.#runGeneration === generation &&
+      this.#now() - this.#lastSignalRefreshMs >= SIGNAL_REFRESH_EVERY_MS
+    ) {
       await this.#refreshSignals();
     }
   }
@@ -872,6 +889,19 @@ export class DevTrafficSimulator {
   async #executeAttention(action: Extract<SimAction, { kind: 'attention' }>): Promise<void> {
     const { events, identity } = this.#graph;
     const nowMs = this.#now();
+    // authMiddleware denies a suspended/deactivated account before /attention/
+    // aggregates ever ingests; the direct service call must mirror it, or a
+    // non-authenticable persona would still generate accepted PWAtt input.
+    if (!(await this.#accountMayAuthenticate(action.personaUserId))) {
+      this.#recordRejection(
+        'attention',
+        action.personaUserId,
+        'account not authenticable',
+        'account_suspended',
+        403,
+      );
+      return;
+    }
     // Apply the per-account attention ingest rate limit that the HTTP route
     // enforces before accepting an upload, so a high-speed or coordinated-burst
     // run cannot over-report accepted PWAtt input — a real client would be 429'd.
@@ -973,6 +1003,19 @@ export class DevTrafficSimulator {
 
   async #executeReport(action: Extract<SimAction, { kind: 'report' }>): Promise<void> {
     const { moderation, ingestion } = this.#graph;
+    // authMiddleware denies a suspended/deactivated account before /reports ever
+    // reaches submitReport; mirror it so an account-state experiment cannot open
+    // moderation cases from an account a real client could not authenticate with.
+    if (!(await this.#accountMayAuthenticate(action.personaUserId))) {
+      this.#recordRejection(
+        'report',
+        action.personaUserId,
+        'account not authenticable',
+        'account_suspended',
+        403,
+      );
+      return;
+    }
     // Parse through the wire schema so the engine's `string` reason code is
     // validated + narrowed to a ratified WS-A code before the service call.
     const parsed = createReportRequestSchema.safeParse({
@@ -1313,6 +1356,17 @@ export class DevTrafficSimulator {
   async #accountMayPostContent(userId: string): Promise<boolean> {
     const user = await this.#graph.identity.store.getUser(userId);
     return user?.accountState === 'active';
+  }
+
+  /** Mirror authMiddleware's account-state gate (the ONLY guard the attention +
+   *  report routes apply): a `restricted` account may still authenticate to read,
+   *  report, and upload attention; only suspended/deleted/deactivated are denied
+   *  outright. The simulator calls those services directly, so without this a
+   *  non-authenticable synthetic account would still generate PWAtt/Signal-Ledger
+   *  input and open moderation cases a real client never could. */
+  async #accountMayAuthenticate(userId: string): Promise<boolean> {
+    const state = (await this.#graph.identity.store.getUser(userId))?.accountState;
+    return state === 'active' || state === 'restricted';
   }
 
   status(): SimulatorStatus {

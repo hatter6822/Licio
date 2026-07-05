@@ -478,6 +478,68 @@ describe('DevTrafficSimulator runtime', () => {
     expect(after.counters.comments_posted).toBe(0);
   });
 
+  it('a suspended synthetic account generates no NEW attention or reports (mirrors authMiddleware)', async () => {
+    const graph = await buildSimTestGraph();
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'steady',
+      seed: 'suspend',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    // Active phase: create stories + accumulate reading so there IS content to
+    // read/report in the suspended phase (avoids a vacuous pass).
+    for (let i = 0; i < 4; i += 1) await sim.tick();
+    // A moderation experiment suspends every persona — a state that cannot even
+    // authenticate (unlike `restricted`, which may still read/report/upload).
+    for (const spec of BASE_ROSTER) {
+      await graph.identity.store.updateUser(spec.userId, { accountState: 'suspended' });
+    }
+    const att = sim.status().counters.attention_events_accepted;
+    const rep = sim.status().counters.reports_filed;
+    for (let i = 0; i < 8; i += 1) await sim.tick();
+    const after = sim.status();
+    // Stories still exist to read, but every persona is now non-authenticable, so
+    // the direct attention/report calls surface the same 403 a real client gets.
+    expect(after.counters.attention_events_accepted).toBe(att);
+    expect(after.counters.reports_filed).toBe(rep);
+  });
+
+  it('a stop()→start() during an in-flight tick abandons the stale plan (run-generation guard)', async () => {
+    const graph = await buildSimTestGraph();
+    // Park the very first #buildWorld so we can stop()+start() mid-tick.
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realListRecent = graph.ingestion.stories.listRecent.bind(graph.ingestion.stories);
+    let calls = 0;
+    graph.ingestion.stories.listRecent = async (...args) => {
+      calls += 1;
+      if (calls === 1) await gate;
+      return realListRecent(...args);
+    };
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'breaking_news',
+      seed: 'gen',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    const stale = sim.tick(); // enters #tickOnce (generation 1), parks in #buildWorld
+    // Stop and restart while the old tick is parked — #running flips back to true,
+    // but the run generation advances, so the parked tick must not resume its plan.
+    sim.stop();
+    await sim.start();
+    release();
+    await stale;
+    // The superseded tick executed no actions (no breaking_news kickoff landed);
+    // the new run has not ticked yet (autoLoop:false), so nothing was submitted.
+    expect(sim.status().counters.stories_submitted).toBe(0);
+  });
+
   it('rebinds SIM_STORY_META for a duplicate kickoff on a fresh-process rerun', async () => {
     const graph = await buildSimTestGraph();
     const run1 = new DevTrafficSimulator({
