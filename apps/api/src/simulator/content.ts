@@ -2,12 +2,15 @@
 //
 // Deterministic content generation for the DEV traffic simulator. Every story,
 // comment, and citation is produced from combinatorial sentence banks driven
-// by the seeded PRNG plus a monotonic serial, so a run is reproducible and no
-// two artefacts collide with the real submission guards by accident:
-//   • titles are combinatorial (the engine additionally re-rolls against the
-//     recent-title set so the duplicate-title spam gate never fires by chance);
-//   • link URLs embed the serial, so the exact-URL dedup gate only fires when
-//     the repost behaviour INTENDS a duplicate (the MERI near-dup demo);
+// by a seeded PRNG plus a monotonic serial, so a run is reproducible and no two
+// artefacts collide with the real submission guards by accident:
+//   • each story carries a per-serial UNIQUE SUBJECT that dominates its title
+//     and body, so unrelated stories stay well below the WS-F near-duplicate
+//     threshold while the engine's ONE deliberate repost is a verbatim twin;
+//   • link stories embed the serial in the URL, and their FETCHED article
+//     (link-fixtures.ts) is derived from the title so it is unique per distinct
+//     story but identical for a repost of the same story — the pipeline signs a
+//     link over the fetched article, so this is what makes near-dup honest;
 //   • bodies weave the canonical topic-catalog keywords for the proposed
 //     topics, so the WS-K deterministic validator promotes them to TRUSTED
 //     topic ids (feeding topic surfaces, PHI, and the topic-shaped invariants);
@@ -16,8 +19,8 @@
 // Synthetic link stories live on reserved `.example` origins (RFC 2606) that
 // the link-fixtures module resolves deterministically in development.
 
-import { topicIdForSlug } from '@licio/shared';
-import type { Prng } from './prng.js';
+import { TOPIC_KEYWORDS, topicIdForSlug } from '@licio/shared';
+import { createPrng, type Prng } from './prng.js';
 
 export type DomainId = 'health' | 'local' | 'climate' | 'elections' | 'science';
 
@@ -34,7 +37,8 @@ interface DomainBank {
   readonly topicSlug: string;
   /** Occasional secondary slug (also keyword-supported by the banks). */
   readonly secondarySlug?: string;
-  readonly entities: readonly string[];
+  // Non-empty so `entities[0]` is a definite fallback for the modulo pick.
+  readonly entities: readonly [string, ...string[]];
   readonly objects: readonly string[];
   readonly scopes: readonly string[];
   readonly methods: readonly string[];
@@ -250,18 +254,98 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
   },
 };
 
-const TITLE_TEMPLATES: ReadonlyArray<(entity: string, object: string, period: string) => string> = [
-  (e, o, p) => `${e} publishes ${o} for ${p}`,
-  (e, o, p) => `${e} releases the updated ${o} (${p})`,
-  (e, o, p) => `New ${o} from the ${e.toLowerCase()}: what changed in ${p}`,
-  (e, o, p) => `${e} opens public comment on its ${o} for ${p}`,
-  (e, o, p) => `${e} adds station-level detail to the ${o} covering ${p}`,
+// A large combinatorial UNIQUE SUBJECT keeps distinct stories genuinely
+// different — the tiny entity×object×period space made two "different" stories
+// (e.g. "…for week 8" vs "…for week 15") ~90% identical, which the WS-F 0.7
+// near-duplicate detector correctly flagged. The subject is woven into every
+// title (and, via the title, the fetched article body), so unrelated stories
+// fall well below the threshold while the deliberate repost — which reuses the
+// full title — stays an exact twin. 24 × 24 = 576 distinct (qualifier, subject)
+// pairs; the two indices key off independent parts of the serial so any two
+// distinct serials differ in at least one — usually both — of the two words.
+const SUBJECT_QUALIFIERS = [
+  'quarterly',
+  'preliminary',
+  'revised',
+  'district-level',
+  'year-end',
+  'mid-cycle',
+  'independent',
+  'consolidated',
+  'itemized',
+  'region-wide',
+  'provisional',
+  'audited',
+  'baseline',
+  'comparative',
+  'longitudinal',
+  'cross-checked',
+  'annotated',
+  'machine-readable',
+  'anonymized',
+  'geocoded',
+  'time-stamped',
+  'peer-reviewed',
+  'ratified',
+  'reconciled',
+] as const;
+
+const SUBJECT_SUBJECTS = [
+  'spending ledger',
+  'safety inspection',
+  'capacity survey',
+  'permit backlog',
+  'emissions inventory',
+  'ridership tally',
+  'wage schedule',
+  'complaint log',
+  'inspection roster',
+  'procurement record',
+  'incident register',
+  'coverage map',
+  'staffing plan',
+  'maintenance calendar',
+  'enrollment census',
+  'turnout breakdown',
+  'water-quality panel',
+  'noise survey',
+  'shelter-capacity table',
+  'grant disbursement',
+  'license-renewal batch',
+  'zoning-variance docket',
+  'transit-headway study',
+  'energy-demand curve',
+] as const;
+
+/** A unique multi-word subject for a story serial (576 distinct combinations
+ *  before wrap-around). The qualifier keys off the low part of the serial and
+ *  the subject off a decorrelated combination, so CONSECUTIVE serials differ in
+ *  BOTH words (not just one) while every serial in 0..575 stays unique. */
+export function uniqueSubject(serial: number): string {
+  const n = SUBJECT_QUALIFIERS.length; // == SUBJECT_SUBJECTS.length == 24
+  const q = serial % n;
+  // (7q + k) mod n is a bijection over k for fixed q (7 is coprime with 24), so
+  // (q, subjectIndex) is unique across 0..n²-1 AND both indices move with serial.
+  const subjectIndex = (7 * q + Math.floor(serial / n)) % n;
+  return `${SUBJECT_QUALIFIERS[q] ?? 'quarterly'} ${SUBJECT_SUBJECTS[subjectIndex] ?? 'spending ledger'}`;
+}
+
+type TitleTemplate = (entity: string, subject: string, period: string) => string;
+// A non-empty tuple type so `TITLE_TEMPLATES[0]` is definite (the modulo pick's
+// `?? [0]` fallback then needs no non-null assertion under noUncheckedIndexedAccess).
+const TITLE_TEMPLATES: readonly [TitleTemplate, ...TitleTemplate[]] = [
+  (e, s, p) => `${e} publishes the ${s} for ${p}`,
+  (e, s, p) => `${e} releases the updated ${s} (${p})`,
+  (e, s, p) => `New ${s} from the ${e.toLowerCase()}: what changed in ${p}`,
+  (e, s, p) => `${e} opens public comment on the ${s} for ${p}`,
+  (e, s, p) => `${e} adds line-level detail to the ${s} covering ${p}`,
 ];
 
-const QUESTION_TEMPLATES: ReadonlyArray<(object: string, period: string) => string> = [
-  (o, p) => `What does the new ${o} for ${p} actually measure?`,
-  (o, p) => `How should readers interpret the ${o} covering ${p}?`,
-  (o, p) => `Which parts of the ${o} for ${p} are comparable to last cycle?`,
+type QuestionTemplate = (subject: string, period: string) => string;
+const QUESTION_TEMPLATES: readonly [QuestionTemplate, ...QuestionTemplate[]] = [
+  (s, p) => `What does the new ${s} for ${p} actually measure?`,
+  (s, p) => `How should readers interpret the ${s} covering ${p}?`,
+  (s, p) => `Which parts of the ${s} for ${p} are comparable to last cycle?`,
 ];
 
 const PERIODS = [
@@ -321,12 +405,16 @@ export function isSimulatedUrl(rawUrl: string): boolean {
   }
 }
 
-function storyBody(bank: DomainBank, object: string, prng: Prng): string {
-  const scope = prng.pick(bank.scopes);
-  const method = prng.pick(bank.methods);
-  const caveat = prng.pick(bank.caveats);
+function storyBody(bank: DomainBank, subject: string, prng: Prng): string {
+  // Draw the bulk of the body from the LARGE shared pool, seeded by the unique
+  // subject — the small per-domain banks (4 scopes/methods, 3 keywords/caveats)
+  // collide too often to keep two different-subject briefs below the near-dup
+  // threshold on their own. A domain keyword sentence + a GUARANTEED primary-
+  // topic catalog keyword keep the WS-K classifier able to promote the topic.
+  const topicWord = TOPIC_KEYWORDS.get(topicIdForSlug(bank.topicSlug))?.[0] ?? '';
   const keyword = prng.pick(bank.keywordSentences);
-  return `The ${object} covers ${scope}, with ${method}. ${keyword} ${caveat}`;
+  const chosen = poolSentences(`sim-brief:${subject}`, 7);
+  return `The ${subject} is out. ${chosen.join(' ')} It concerns ${topicWord} reporting. ${keyword}`;
 }
 
 /**
@@ -341,16 +429,23 @@ export function generateStory(
   prng: Prng,
 ): GeneratedStory {
   const bank = domainBank(domain);
-  const entity = prng.pick(bank.entities);
-  const object = prng.pick(bank.objects);
-  const period = prng.pick(PERIODS);
+  // Derive the title's dimensions from INDEPENDENT parts of the (unique) serial
+  // rather than the shared PRNG, so two distinct stories differ across several
+  // title words — not just the subject — and stay well below the near-duplicate
+  // threshold. The subject (24×24 combinations) is the dominant discriminator.
+  const entity = bank.entities[Math.floor(serial / 5) % bank.entities.length] ?? bank.entities[0];
+  const subject = uniqueSubject(serial);
+  const period = PERIODS[Math.floor(serial / 25) % PERIODS.length] ?? PERIODS[0];
+  const titleTemplate = TITLE_TEMPLATES[serial % TITLE_TEMPLATES.length] ?? TITLE_TEMPLATES[0];
+  const questionTemplate =
+    QUESTION_TEMPLATES[serial % QUESTION_TEMPLATES.length] ?? QUESTION_TEMPLATES[0];
   const slugs =
     bank.secondarySlug !== undefined && prng.chance(0.35)
       ? [bank.topicSlug, bank.secondarySlug]
       : [bank.topicSlug];
-  const body = storyBody(bank, object, prng);
+  const body = storyBody(bank, subject, prng);
   if (kind === 'question') {
-    const question = prng.pick(QUESTION_TEMPLATES)(object, period);
+    const question = questionTemplate(subject, period);
     return {
       kind,
       title: question,
@@ -360,14 +455,17 @@ export function generateStory(
       url: null,
       reason: null,
       question,
-      questionContext: `Asking before interpretations settle. ${prng.pick(bank.keywordSentences)}`,
+      questionContext: `Asking about the ${subject} before interpretations settle. ${prng.pick(bank.keywordSentences)}`,
       locationValue: null,
       disclosure: null,
     };
   }
-  const title = prng.pick(TITLE_TEMPLATES)(entity, object, period);
+  const title = titleTemplate(entity, subject, period);
   if (kind === 'link') {
     const outlet = prng.pick(bank.outlets);
+    // The serial makes the URL unique; the slug carries the (unique-subject)
+    // title so the fetched article — derived from the recovered title — is
+    // unique per story and identical for a repost of the same story.
     const url = `https://${outlet}.example/${domain}/${slugify(title)}-${serial}`;
     return {
       kind,
@@ -376,7 +474,7 @@ export function generateStory(
       topicIds: slugs.map(topicIdForSlug),
       body,
       url,
-      reason: `The full ${object}, not the press summary.`,
+      reason: `A link to the ${subject}.`,
       question: null,
       questionContext: null,
       locationValue: null,
@@ -414,11 +512,15 @@ export function generateStory(
 }
 
 /**
- * The intentional near-duplicate (repost) of an existing story: the SAME local
- * text (title + body) as the original, a fresh URL — so the WS-F MinHash/LSH
- * near-dup pass genuinely groups them (the MERI duplicate-grouping demo,
- * mirroring the demo-seed S21↔S25 collision). Only the canonical URL and the
- * reason differ, which is what a verbatim repost looks like.
+ * The intentional near-duplicate (repost): a verbatim LINK repost of the focus
+ * link story — the SAME title, a DIFFERENT URL. The pipeline signs a link over
+ * its FETCHED article, and the article (link-fixtures.ts) is derived from the
+ * title recovered from the URL slug — with the `repost-` prefix stripped — so
+ * the repost recovers the SAME title as its original and fetches an IDENTICAL
+ * article. Its extracted signature therefore matches ⇒ the MERI near-duplicate
+ * grouping fires deterministically (through the REAL pipeline, not a hand-
+ * authored signature), while every unrelated link — distinct title ⇒ distinct
+ * article — stays below the threshold.
  */
 export function generateRepost(
   originalTitle: string,
@@ -442,6 +544,134 @@ export function generateRepost(
     locationValue: null,
     disclosure: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Fetched-article fixtures (the text the WS-F extraction pipeline signs for a
+// link's near-duplicate detection)
+// ---------------------------------------------------------------------------
+//
+// A link is signed for near-dup over its FETCHED article (not the submitted
+// text). So the dev fetcher's article must be UNIQUE per distinct story — else
+// unrelated links would be grouped as duplicates — while a repost's article
+// must MATCH its original's. Both are achieved by deriving the article from the
+// TITLE recovered from the URL slug (stripping the `repost-` prefix and trailing
+// serial), seeded deterministically and drawn from a LARGE sentence pool: two
+// distinct titles pick disjoint-enough sentences (well below the 0.7 threshold),
+// and a repost recovers the same title ⇒ the same picks ⇒ an identical article.
+
+const KNOWN_DOMAINS: ReadonlySet<string> = new Set(DOMAIN_IDS);
+
+/** Recover the human title words from a URL path's last segment: strip a
+ *  leading `repost-` and a trailing `-<serial>`, then de-slug. Shared by the
+ *  <title> tag and the article seed so a repost and its original agree. */
+export function titleFromArticleUrl(url: URL): string {
+  const last = url.pathname.split('/').filter(Boolean).pop() ?? 'simulated-article';
+  const words = last
+    .replace(/^repost-/, '')
+    .replace(/-\d+$/, '')
+    .split('-')
+    .filter(Boolean);
+  const text = words.join(' ');
+  return text.length > 0 ? text.charAt(0).toUpperCase() + text.slice(1) : 'Simulated article';
+}
+
+function articleDomain(url: URL): DomainId {
+  const first = url.pathname.split('/').filter(Boolean)[0] ?? '';
+  return KNOWN_DOMAINS.has(first) ? (first as DomainId) : 'local';
+}
+
+// A large, generic pool of article sentences. A title-seeded RANDOM PERMUTATION
+// of this pool, sliced to a fixed length, gives distinct titles largely-disjoint
+// article text (keeping unrelated links below the near-duplicate threshold)
+// while a repost — same recovered title, same seed — reproduces the exact same
+// slice. A pool this size keeps the expected overlap of two independent slices
+// small AND its variance low, so there are no coincidental near-duplicates.
+const ARTICLE_SENTENCES: readonly string[] = [
+  'The document runs to several sections, each opening with a short summary of what changed.',
+  'A methodology note explains how every figure was collected, cleaned, and cross-checked before release.',
+  'An appendix lists the exclusions and the reasons each row was set aside during validation.',
+  'Officials say the accompanying data dictionary defines every column and denominator explicitly.',
+  'The release keeps the earlier field definitions and adds a revision history for traceability.',
+  'Reviewers can compare this cycle against the previous one directly using the mapped line items.',
+  'A public comment window opens alongside the release and closes at the end of the reporting period.',
+  'Provisional rows are flagged until a second validation pass confirms them next cycle.',
+  'The raw tables and the processed series are both published so independent analysts can reproduce the work.',
+  'A short list of frequently asked questions addresses points raised during the last comment period.',
+  'The office notes two entries were corrected after the original posting and marks them clearly.',
+  'Each figure links back to the underlying record so a reader can trace it to its source.',
+  'The summary separates measurement from interpretation, leaving conclusions to the discussion section.',
+  'A change log at the end records every edit made since the draft was first circulated.',
+  'The publishing team says a machine-readable export is available for anyone who prefers the data.',
+  'An independent reviewer signed off on the sampling frame before the numbers were finalized.',
+  'The report cautions that small cells are aggregated to protect the privacy of the people counted.',
+  'A companion map shows how the totals break down across the districts covered by the release.',
+  'The authors flag one segment as still under review and promise an update in the next cycle.',
+  'Footnotes explain where a definition shifted and how that affects year-over-year comparisons.',
+  'The release was timed to the regular reporting calendar rather than any single event.',
+  'A glossary at the front defines the technical terms the rest of the document relies on.',
+  'The office invited three outside groups to check the figures ahead of publication.',
+  'The final section sets out what the next release will add and when it is expected.',
+  'A one-page overview distils the headline numbers for readers short on time.',
+  'The team published the code that produced every chart so the pipeline can be audited end to end.',
+  'Late submissions were held to a supplementary file rather than folded into the main totals.',
+  'The dataset carries a version tag so downstream users can pin to an exact snapshot.',
+  'Reviewers noted that a handful of categories were merged this cycle to reduce noise.',
+  'The office set out a correction policy describing how errors are logged and re-published.',
+  'A sensitivity check shows how the headline figure moves under two alternative assumptions.',
+  'The appendix records the response rate and how non-responses were handled in the totals.',
+  'Contact details for the analysts are listed so readers can raise questions directly.',
+  'The release includes a checksum for each file so a downloader can verify integrity.',
+  'A short history explains how the measure evolved from the pilot to the current standard.',
+  'The office committed to publishing the underlying survey instrument alongside the results.',
+  'Two independent labs re-ran a sample of the calculations and reported matching figures.',
+  'The document distinguishes preliminary estimates from the values certified after review.',
+  'A companion notebook walks through one worked example from raw input to final number.',
+  'The team flagged one outlier for follow-up and left it in the series with a note.',
+];
+
+const ARTICLE_SENTENCE_COUNT = 14;
+
+/** A deterministic, largely-disjoint selection from the large article pool: a
+ *  Fisher–Yates shuffle seeded by `seed`, sliced to `count`. Distinct seeds ⇒
+ *  largely-disjoint selections (kept below the near-dup threshold by the pool
+ *  size); identical seeds ⇒ an identical selection. Used for both the fetched
+ *  link article (seeded by the recovered title) and the inline brief body
+ *  (seeded by the story's unique subject) — both need genuine per-story
+ *  diversity that the small per-domain sentence banks cannot provide. */
+function poolSentences(seed: string, count: number): readonly string[] {
+  const prng = createPrng(seed);
+  const idx = ARTICLE_SENTENCES.map((_, i) => i);
+  for (let i = idx.length - 1; i > 0; i -= 1) {
+    const j = prng.int(i + 1);
+    const a = idx[i];
+    const b = idx[j];
+    if (a === undefined || b === undefined) continue;
+    idx[i] = b;
+    idx[j] = a;
+  }
+  return idx
+    .slice(0, count)
+    .map((i) => ARTICLE_SENTENCES[i])
+    .filter((s): s is string => s !== undefined);
+}
+
+/**
+ * A deterministic article body for the dev fetcher, derived from the title
+ * recovered from the URL. A title-seeded permutation of the large pool, sliced
+ * to a fixed length, makes distinct titles largely-disjoint (unique) while a
+ * repost recovers the same title ⇒ the same slice ⇒ an identical article.
+ */
+export function simulatedArticleBody(url: URL): string {
+  const domain = articleDomain(url);
+  const title = titleFromArticleUrl(url);
+  const bank = domainBank(domain);
+  const chosen = poolSentences(`sim-article:${title.toLowerCase()}`, ARTICLE_SENTENCE_COUNT);
+  // A domain KEYWORD sentence (title-seeded) so the WS-K classifier still sees
+  // the domain keywords in the fetched excerpt.
+  const kwPrng = createPrng(`sim-article-kw:${title.toLowerCase()}`);
+  const keyword = bank.keywordSentences[kwPrng.int(bank.keywordSentences.length)] ?? '';
+  return `${title}. ${chosen.join(' ')} ${keyword}`;
 }
 
 // ---------------------------------------------------------------------------

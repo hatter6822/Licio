@@ -315,9 +315,9 @@ if (embeddingProvider === undefined && env.NODE_ENV === 'production') {
 // DEV ONLY: the traffic simulator (below) submits synthetic LINK stories on
 // reserved `.example` outlet hosts. Give the ingestion pipeline a deterministic
 // fetcher for those hosts so those stories EXTRACT (real robots→fetch→normalize
-// →topic-classify path) instead of deferring forever on unreachable DNS. Every
-// other URL falls through to the real SSRF-hardened fetcher. Loaded only in
-// development; production constructs the container without this override.
+// →topic-classify + post-fetch near-dup path) instead of deferring forever on
+// unreachable DNS. Every other URL falls through to the real SSRF-hardened
+// fetcher. Loaded only in development; production builds the container without it.
 const simulatorFetchDocument =
   env.NODE_ENV === 'development'
     ? (await import('./simulator/link-fixtures.js')).createSimulatorFetchDocument()

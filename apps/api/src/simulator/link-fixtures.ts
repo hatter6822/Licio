@@ -1,27 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// DEV-ONLY link fixtures for the traffic simulator. Simulated link stories
-// live on reserved `.example` outlet hosts (RFC 2606 — never routable). This
-// module gives the WS-F extraction pipeline a deterministic document for those
-// hosts, so a simulated link story runs the REAL robots gate → fetch →
-// extraction → normalization → topic-classification path instead of deferring
-// forever on unreachable DNS (which would also flood the steward review queue
-// with extraction_failure items). Every other URL — anything a human tester
-// submits in dev — falls through to the real SSRF-hardened fetcher unchanged.
+// DEV-ONLY link fixtures for the traffic simulator. Simulated link stories live
+// on reserved `.example` outlet hosts (RFC 2606 — never routable). This module
+// gives the WS-F extraction pipeline a deterministic document for those hosts,
+// so a simulated link story runs the REAL robots gate → fetch → extraction →
+// normalization → topic-classification path (and the post-fetch near-duplicate
+// signature) instead of deferring forever on unreachable DNS. Every other URL —
+// anything a human tester submits in dev — falls through to the real
+// SSRF-hardened fetcher unchanged.
+//
+// The article title AND body are derived from the title recovered from the URL
+// (content.ts `titleFromArticleUrl` / `simulatedArticleBody`), so the fetched
+// document — the text the pipeline actually signs for a link — is unique per
+// distinct story and identical for a repost of the same story.
 //
 // Wired ONLY by the development boot path in index.ts (dynamic import behind a
 // NODE_ENV === 'development' check); production constructs its ingestion
 // container without this override.
 
 import { type SafeFetchLimits, type SafeFetchResult, safeFetch } from '../ingestion/safe-fetch.js';
-import { isSimulatedUrl } from './content.js';
-
-function titleFromSlug(pathname: string): string {
-  const last = pathname.split('/').filter(Boolean).pop() ?? 'simulated-article';
-  const words = last.replace(/-\d+$/, '').split('-').filter(Boolean);
-  const text = words.join(' ');
-  return text.length > 0 ? text.charAt(0).toUpperCase() + text.slice(1) : 'Simulated article';
-}
+import { isSimulatedUrl, simulatedArticleBody, titleFromArticleUrl } from './content.js';
 
 function escapeHtml(text: string): string {
   return text
@@ -33,9 +31,12 @@ function escapeHtml(text: string): string {
 
 /** Deterministic article HTML for one simulated URL. */
 export function simulatedArticleHtml(url: URL): string {
-  const title = escapeHtml(titleFromSlug(url.pathname));
-  const section = escapeHtml(url.pathname.split('/').filter(Boolean)[0] ?? 'news');
+  const title = escapeHtml(titleFromArticleUrl(url));
   const description = `${title} — the full release, published with its methodology and field definitions.`;
+  const bodyParagraphs = simulatedArticleBody(url)
+    .split('\n')
+    .map((p) => `<p>${escapeHtml(p)}</p>`)
+    .join('\n');
   return [
     '<!doctype html>',
     '<html lang="en">',
@@ -48,9 +49,7 @@ export function simulatedArticleHtml(url: URL): string {
     '<body>',
     '<article>',
     `<h1>${title}</h1>`,
-    `<p>The office published the complete ${section} release today, including the raw tables, the processed series, and the methodology appendix that documents how each field was collected.</p>`,
-    '<p>Reviewers can compare this cycle against the previous one directly: the release keeps the earlier field definitions and adds a revision history, so every corrected figure is traceable to the page that changed.</p>',
-    '<p>The publishing office says the accompanying data dictionary defines each denominator explicitly, and that provisional rows are flagged until validation completes at the end of the reporting window.</p>',
+    bodyParagraphs,
     '</article>',
     '</body>',
     '</html>',

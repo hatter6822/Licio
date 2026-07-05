@@ -288,15 +288,16 @@ export function planTick(input: PlanTickInput): SimAction[] {
   let storySerial = input.storySerial;
 
   // --- Scenario orchestration ------------------------------------------------
-  // A cluster scenario provisions its fresh accounts when NO cluster member is
-  // provisioned yet — including the first tick, when the persona list holds
-  // only the organic roster (the runtime appends the cluster on the
-  // provision_cluster action). Keying off "an unprovisioned cluster member
-  // exists" would deadlock: the cluster is never in the list to be seen.
-  const clusterProvisioned = personas.some(
-    (p) => p.spec.archetype === 'cluster_member' && p.provisioned,
-  );
-  if (scenario.cluster !== null && !clusterProvisioned) {
+  // A cluster scenario provisions its fresh accounts until the cluster is fully
+  // present AND provisioned. Emit provision_cluster when no cluster member is
+  // present yet (the first tick — the runtime appends the cluster on the
+  // action) OR any present member is still unprovisioned (retry after a partial
+  // provisioning failure). Keying only off "no provisioned member exists" would
+  // stop after the first success and strand the remaining accounts.
+  const clusterMembers = personas.filter((p) => p.spec.archetype === 'cluster_member');
+  const clusterNeedsProvisioning =
+    clusterMembers.length === 0 || clusterMembers.some((p) => !p.provisioned);
+  if (scenario.cluster !== null && clusterNeedsProvisioning) {
     provisioning.push({ kind: 'provision_cluster' });
   }
   if (scenario.newcomersPerMinute > 0 && input.newcomersProvisioned < NEWCOMER_CAP) {
@@ -326,6 +327,9 @@ export function planTick(input: PlanTickInput): SimAction[] {
       const domain = domainForPersona(author.spec, prng);
       const room = pickRoom(world, domain, false, prng);
       if (room) {
+        // The kickoff (the scenario's focus story) is a LINK so its deliberate
+        // repost is a verbatim link repost the WS-F near-dup pass groups over
+        // the FETCHED article (see content.ts generateRepost).
         const generated = uniqueTitle(
           generateStory(domain, 'link', storySerial, prng),
           world,

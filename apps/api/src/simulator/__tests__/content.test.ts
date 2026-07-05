@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { lshBandHashes, minhashSignature } from '@licio/invariants';
+import { minhashSignature } from '@licio/invariants';
 import { TOPIC_KEYWORDS, topicIdForSlug } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import {
@@ -11,9 +11,27 @@ import {
   generateStory,
   isSimulatedUrl,
   type StoryKind,
+  simulatedArticleBody,
+  uniqueSubject,
 } from '../content.js';
 import { createPrng } from '../prng.js';
 import { req } from './sim-test-util.js';
+
+/** Estimated Jaccard similarity — the fraction of matching MinHash values, the
+ *  metric the WS-F near-duplicate detector thresholds at 0.7. */
+function jaccard(a: string, b: string): number {
+  const x = minhashSignature(a);
+  const y = minhashSignature(b);
+  let match = 0;
+  for (let i = 0; i < x.length; i += 1) if (x[i] === y[i]) match += 1;
+  return match / x.length;
+}
+
+/** What the WS-F pipeline signs for a LINK: story.title + the FETCHED article. */
+const fetchedText = (title: string, url: string): string =>
+  `${title} ${simulatedArticleBody(new URL(url))}`;
+/** What it signs for an inline-content story: title + body. */
+const submitted = (title: string, body: string): string => `${title} ${body}`;
 
 const pickDomain = (index: number) => req(DOMAIN_IDS[index % DOMAIN_IDS.length]);
 
@@ -30,8 +48,7 @@ describe('simulator content generation', () => {
     const urls = new Set<string>();
     const prng = createPrng('urls');
     for (let serial = 0; serial < 200; serial += 1) {
-      const domain = pickDomain(serial);
-      const story = generateStory(domain, 'link', serial, prng);
+      const story = generateStory(pickDomain(serial), 'link', serial, prng);
       expect(story.url).not.toBeNull();
       expect(story.url).toContain(String(serial));
       urls.add(req(story.url));
@@ -39,7 +56,7 @@ describe('simulator content generation', () => {
     expect(urls.size).toBe(200);
   });
 
-  it('link URLs resolve as simulated hosts (isSimulatedUrl) so the dev fetcher serves them', () => {
+  it('link URLs resolve as simulated hosts so the dev fetcher serves them', () => {
     const prng = createPrng('hosts');
     for (const domain of DOMAIN_IDS) {
       const story = generateStory(domain, 'link', 1, prng);
@@ -49,6 +66,18 @@ describe('simulator content generation', () => {
     expect(isSimulatedUrl('not a url')).toBe(false);
   });
 
+  it('uniqueSubject yields distinct subjects for distinct serials (576 combinations)', () => {
+    const seen = new Set<string>();
+    for (let s = 0; s < 576; s += 1) seen.add(uniqueSubject(s));
+    expect(seen.size).toBe(576);
+    for (let s = 0; s < 100; s += 1) {
+      const [qA, ...restA] = uniqueSubject(s).split(' ');
+      const [qB, ...restB] = uniqueSubject(s + 1).split(' ');
+      expect(qA).not.toBe(qB);
+      expect(restA.join(' ')).not.toBe(restB.join(' '));
+    }
+  });
+
   it('weaves topic keywords so the WS-K classifier can promote the proposed topic', () => {
     const prng = createPrng('kw');
     for (const domain of DOMAIN_IDS) {
@@ -56,9 +85,7 @@ describe('simulator content generation', () => {
       const primaryId = topicIdForSlug(req(story.topicSlugs[0]));
       const keywords = TOPIC_KEYWORDS.get(primaryId) ?? [];
       const haystack = `${story.title} ${story.body}`.toLowerCase();
-      const matches = keywords.filter((kw) => haystack.includes(kw));
-      // At least one catalog keyword present so classification can occur.
-      expect(matches.length).toBeGreaterThan(0);
+      expect(keywords.filter((kw) => haystack.includes(kw)).length).toBeGreaterThan(0);
     }
   });
 
@@ -91,35 +118,66 @@ describe('simulator content generation', () => {
     }
   });
 
-  it('distinct link stories do not collide under MinHash/LSH (except intentional reposts)', () => {
-    // The submission dedup uses LSH band-hash collisions on title+body. Generate
-    // a spread of distinct stories and assert their band signatures are diverse.
-    const prng = createPrng('minhash');
-    const bandSets: string[] = [];
-    for (let serial = 0; serial < 30; serial += 1) {
-      const domain = pickDomain(serial);
-      const story = generateStory(domain, 'link', serial, prng);
-      const sig = minhashSignature(`${story.title} ${story.body}`);
-      bandSets.push(lshBandHashes(sig).join(','));
+  it('distinct link stories stay below 0.7 under MinHash of the FETCHED article', () => {
+    // A link is signed for near-dup over its fetched article; distinct stories
+    // must produce distinct fetched documents (even in the same domain) so
+    // unrelated links are never grouped as duplicates.
+    const prng = createPrng('links');
+    const texts: string[] = [];
+    for (let serial = 0; serial < 24; serial += 1) {
+      const story = generateStory('science', 'link', serial, prng);
+      texts.push(fetchedText(story.title, req(story.url)));
     }
-    // No two distinct generated stories share an identical full band vector.
-    expect(new Set(bandSets).size).toBe(bandSets.length);
+    let max = 0;
+    for (let i = 0; i < texts.length; i += 1) {
+      for (let j = i + 1; j < texts.length; j += 1) {
+        max = Math.max(max, jaccard(req(texts[i]), req(texts[j])));
+      }
+    }
+    expect(max).toBeLessThan(0.7);
   });
 
-  it('an intentional repost DOES collide with the original under MinHash (the MERI demo)', () => {
+  it('a link repost is a verbatim twin of its original under the FETCHED article', () => {
+    // The repost reuses the original title, and its URL recovers the same title,
+    // so the fetched article is identical (Jaccard 1.0) — the MERI duplicate
+    // demo — while an unrelated link in the same domain stays below the threshold.
     const prng = createPrng('repost');
     const original = generateStory('climate', 'link', 1, prng);
     const repost = generateRepost(original.title, original.body, 'climate', 2, prng);
-    // Same title → the near-duplicate detector should see high similarity: at
-    // least one shared LSH band (the dedup trigger).
-    const origBands = lshBandHashes(minhashSignature(`${original.title} ${original.body}`));
-    const repostBands = lshBandHashes(minhashSignature(`${repost.title} ${repost.body}`));
-    const shared = origBands.some((band, i) => band === repostBands[i]);
-    expect(shared).toBe(true);
+    const other = generateStory('climate', 'link', 3, prng);
+    expect(repost.kind).toBe('link');
     expect(repost.url).not.toBe(original.url);
+    expect(
+      jaccard(
+        fetchedText(original.title, req(original.url)),
+        fetchedText(repost.title, req(repost.url)),
+      ),
+    ).toBe(1);
+    expect(
+      jaccard(
+        fetchedText(original.title, req(original.url)),
+        fetchedText(other.title, req(other.url)),
+      ),
+    ).toBeLessThan(0.7);
   });
 
-  it('evidence generation returns a body and a fresh citation URL', () => {
+  it('distinct inline-content stories stay below 0.7 under their submitted text', () => {
+    const prng = createPrng('briefs');
+    const texts: string[] = [];
+    for (let serial = 0; serial < 40; serial += 1) {
+      const story = generateStory('health', 'original_brief', serial, prng);
+      texts.push(submitted(story.title, story.body));
+    }
+    let max = 0;
+    for (let i = 0; i < texts.length; i += 1) {
+      for (let j = i + 1; j < texts.length; j += 1) {
+        max = Math.max(max, jaccard(req(texts[i]), req(texts[j])));
+      }
+    }
+    expect(max).toBeLessThan(0.7);
+  });
+
+  it('evidence generation returns a body and a fresh citation reference', () => {
     const prng = createPrng('evidence');
     const a = generateEvidence('health', 1, prng);
     const b = generateEvidence('health', 2, prng);

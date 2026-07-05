@@ -265,7 +265,11 @@ export class DevTrafficSimulator {
       if (live.scenario !== undefined || live.speed !== undefined) this.configure(live);
       return;
     }
-    if (config.scenario !== undefined) this.#scenario = config.scenario;
+    // A stopped restart with a new scenario must also reset the scenario state
+    // (kickoff/repost/focus) — otherwise a stop after a kickoff scenario, then a
+    // start of a different one, would keep the old focus story and skip the new
+    // scenario's kickoff. Route it through the same reset path as a live switch.
+    if (config.scenario !== undefined) this.#applyScenario(config.scenario);
     if (config.speed !== undefined) this.#speed = config.speed;
     this.#running = true;
     this.#startedAtMs ??= this.#now();
@@ -325,14 +329,21 @@ export class DevTrafficSimulator {
    *  decay curve restarts, and clears the focus (each scenario re-picks). */
   configure(config: SimulatorConfigureRequest): void {
     if (config.scenario !== undefined && config.scenario !== this.#scenario) {
-      this.#scenario = config.scenario;
-      this.#scenarioStartedAtMs = this.#now();
-      this.#kickoffDone = false;
-      this.#repostDone = false;
-      this.#focusStoryId = null;
+      this.#applyScenario(config.scenario);
     }
     if (config.speed !== undefined) this.#speed = config.speed;
     this.#log('dev-sim: configured', { scenario: this.#scenario, speed: this.#speed });
+  }
+
+  /** Switch to a scenario and reset its run state (phase clock, kickoff, repost,
+   *  focus) — the single reset path used by both start() and configure() so a
+   *  scenario never inherits the previous one's kickoff/focus/decay state. */
+  #applyScenario(scenario: SimulatorScenarioId): void {
+    this.#scenario = scenario;
+    this.#scenarioStartedAtMs = this.#now();
+    this.#kickoffDone = false;
+    this.#repostDone = false;
+    this.#focusStoryId = null;
   }
 
   #now(): number {
@@ -625,7 +636,7 @@ export class DevTrafficSimulator {
           ...base,
           submission_type: 'link',
           url: story.url,
-          reason: story.reason ?? 'The full release.',
+          reason: story.reason ?? 'A link to the release.',
         };
         break;
       case 'question':
@@ -969,10 +980,28 @@ export class DevTrafficSimulator {
   }
 
   async #provisionCluster(): Promise<void> {
+    // Idempotent + retry-completing: a member that failed on an earlier tick
+    // (pushed with provisioned=false) is retried here, and a per-member failure
+    // never aborts the rest — so a transient store failure cannot leave the
+    // coordinated burst permanently short of its cluster (the engine keeps
+    // emitting provision_cluster until every member is provisioned).
     for (const spec of CLUSTER_ROSTER) {
-      if (this.#personas.some((p) => p.spec.userId === spec.userId)) continue;
-      const provisioned = await this.#provisionUser(spec);
-      this.#personas.push({ spec, provisioned, joinedRoomIds: new Set<string>() });
+      const existing = this.#personas.find((p) => p.spec.userId === spec.userId);
+      if (existing?.provisioned) continue;
+      try {
+        const provisioned = await this.#provisionUser(spec);
+        if (existing) existing.provisioned = provisioned;
+        else this.#personas.push({ spec, provisioned, joinedRoomIds: new Set<string>() });
+      } catch (err) {
+        this.#counters.errors += 1;
+        this.#log('dev-sim: cluster provisioning failed', {
+          handle: spec.handle,
+          err: String(err),
+        });
+        if (!existing) {
+          this.#personas.push({ spec, provisioned: false, joinedRoomIds: new Set<string>() });
+        }
+      }
     }
   }
 
