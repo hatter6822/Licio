@@ -196,6 +196,9 @@ function debateDepsFromBundle(bundle: ReturnType<typeof bundles>): DebateDeps {
     storyAuthor: async (sid) => (await bundle.ingestion.stories.getById(sid))?.submittedBy ?? null,
     isSteward: async (roomId, uid) =>
       (await bundle.forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
+    setStoryDispute: async (sid, status) => {
+      await bundle.ingestion.stories.update(sid, { disputeStatus: status });
+    },
     runJudge: bundle.forum.debateJudge,
     now: bundle.forum.now,
     log: bundle.forum.log,
@@ -483,8 +486,10 @@ export function createForumRoutes() {
           if (!story || !thread) return c.json(notFound, 404);
           if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const resolveAuthor = makeAuthorResolver(identity);
-          const counts = await bundle.forum.contributions.countByType(thread.threadId, [
-            'published',
+          const [counts, debatesCount, incorrectCount] = await Promise.all([
+            bundle.forum.contributions.countByType(thread.threadId, ['published']),
+            bundle.forum.debates.countActiveForStory(storyId),
+            bundle.forum.contributions.countByDisputeStatus(thread.threadId, 'incorrect'),
           ]);
           const summaries = await bundle.forum.summaries.listByThread(thread.threadId);
           const current =
@@ -514,6 +519,8 @@ export function createForumRoutes() {
                 comment_count: Object.values(counts).reduce((sum, value) => sum + (value ?? 0), 0),
                 sources_count: counts.evidence ?? 0,
                 corrections_count: counts.correction ?? 0,
+                debates_count: debatesCount,
+                incorrect_count: incorrectCount,
               },
               summary: current ? await toSummaryPublic(current, resolveAuthor) : null,
             }),

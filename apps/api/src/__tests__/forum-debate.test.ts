@@ -35,6 +35,7 @@ let contributions: InMemoryContributionStore;
 let debates: InMemoryDebateStore;
 let deps: DebateDeps;
 let corrected: DebateJudgeRunner;
+let storyDisputes: Map<string, string>;
 
 const citation = { url: 'https://example.org/source' } as const;
 
@@ -106,11 +107,15 @@ beforeEach(() => {
     },
     outputId: `out:${randomUUID()}`,
   });
+  storyDisputes = new Map();
   deps = {
     debates,
     contributions,
     storyAuthor: async () => INCUMBENT,
     isSteward: async (roomId, userId) => roomId === ROOM && userId === STEWARD,
+    setStoryDispute: async (storyId, status) => {
+      storyDisputes.set(storyId, status);
+    },
     runJudge: corrected,
     now,
     log: () => {},
@@ -283,6 +288,104 @@ describe('WS-T debate arena lifecycle', () => {
     expect(await runDebateLifecycle(deps)).toEqual({ judged: 0, finalized: 1 });
     expect((await debates.getById(debateId))?.state).toBe('resolved');
     expect((await contributions.getById(targetId))?.disputeStatus).toBe('incorrect');
+  });
+
+  it('sinks an incorrect root to the bottom of the section, both orderings + paged', async () => {
+    // Three roots at distinct times a < b < c.
+    const a = await seedComment(INCUMBENT, 'first');
+    clock.ms += 1000;
+    const b = await seedComment(INCUMBENT, 'second');
+    clock.ms += 1000;
+    const c = await seedComment(INCUMBENT, 'third');
+    await contributions.setDisputeStatus(b, 'incorrect');
+
+    const ids = (rows: { contributionId: string }[]) => rows.map((r) => r.contributionId);
+    const newest = await contributions.listRoots(THREAD, {
+      states: ['published'],
+      limit: 10,
+      order: 'newest',
+    });
+    // non-incorrect newest-first (c, a), then the incorrect one (b) LAST.
+    expect(ids(newest)).toEqual([c, a, b]);
+    const oldest = await contributions.listRoots(THREAD, {
+      states: ['published'],
+      limit: 10,
+      order: 'oldest',
+    });
+    expect(ids(oldest)).toEqual([a, c, b]);
+
+    // Keyset pagination respects the sink: page 1 (limit 2) then page-2 by cursor.
+    const page1 = await contributions.listRoots(THREAD, {
+      states: ['published'],
+      limit: 2,
+      order: 'newest',
+    });
+    expect(ids(page1)).toEqual([c, a]);
+    const cursorRow = page1[page1.length - 1];
+    const page2 = await contributions.listRoots(THREAD, {
+      states: ['published'],
+      limit: 2,
+      order: 'newest',
+      after: {
+        createdAt: cursorRow?.createdAt ?? '',
+        id: cursorRow?.contributionId ?? '',
+        disputeSink: cursorRow?.disputeStatus === 'incorrect' ? 1 : 0,
+      },
+    });
+    expect(ids(page2)).toEqual([b]); // the incorrect root, after the clean ones
+  });
+
+  it('opens a story-target debate, marks the story under_debate, and tags it on corrected', async () => {
+    const correctionId = randomUUID();
+    await contributions.insert({
+      contributionId: correctionId,
+      threadId: THREAD,
+      userId: CHALLENGER,
+      type: 'correction',
+      body: 'The headline is wrong.',
+      citations: [citation],
+      metadata: { target_story_id: STORY },
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: `draft-${correctionId}`,
+      path: [],
+      moderationState: 'published',
+    });
+    const debateId = randomUUID();
+    const arena = await maybeEnterDebate(
+      deps,
+      {
+        contributionId: correctionId,
+        threadId: THREAD,
+        storyId: STORY,
+        roomId: ROOM,
+        userId: CHALLENGER,
+        body: 'The headline is wrong.',
+        citations: [citation],
+        metadata: { target_story_id: STORY },
+      },
+      debateId,
+    );
+    expect(arena?.targetType).toBe('story');
+    expect(storyDisputes.get(STORY)).toBe('under_debate');
+
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    await judgeDebateArena(deps, debateId); // fake judge → corrected
+    clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
+    await finalizeDebate(deps, debateId);
+    expect(storyDisputes.get(STORY)).toBe('incorrect');
+  });
+
+  it('maps an under_debate comment to its active arena (active_debate_id source)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    const map = await debates.activeDebateIdsForContributions([targetId, randomUUID()]);
+    expect(map.get(targetId)).toBe(debateId);
   });
 
   it('projects a role-scoped public arena', async () => {

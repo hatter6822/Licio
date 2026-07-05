@@ -903,6 +903,9 @@ export async function createContribution(
           storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
           isSteward: async (roomId, uid) =>
             (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
+          setStoryDispute: async (sid, status) => {
+            await ingestion.stories.update(sid, { disputeStatus: status });
+          },
           runJudge: forum.debateJudge,
           now: forum.now,
           log: forum.log,

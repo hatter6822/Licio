@@ -49,6 +49,7 @@ function scored(partial: {
         applied: redundancy.enforced ? redundancy.value : 0,
         enforced: redundancy.enforced,
       },
+      dispute: { value: 0, coefficient: 1, applied: 0, enforced: false },
       total_applied: redundancy.enforced ? redundancy.value : 0,
     },
     baseline: {

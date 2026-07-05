@@ -115,6 +115,10 @@ export const featureVectorSchema = z
     coordination_penalty: unit.optional(),
     harmful_tension_risk: unit.optional(),
     redundancy_penalty: unit.optional(),
+    // WS-T — a story adjudicated `incorrect` by a sourced-correction debate is
+    // penalized to the bottom of the feed (a content-quality signal, uniform
+    // across authors/topics, never financial — neutrality-safe).
+    dispute_penalty: unit.optional(),
 
     // --- Baseline components ------------------------------------------------
     freshness_decay: unit.optional(),

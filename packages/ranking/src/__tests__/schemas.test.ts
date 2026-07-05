@@ -75,6 +75,7 @@ describe('WS-I.2.1a feature vector schema', () => {
         'context_coherence_gain',
         'coordination_penalty',
         'created_at',
+        'dispute_penalty',
         'duplicate_cluster_id',
         'exposure_independence',
         'feature_version',

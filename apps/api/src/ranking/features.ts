@@ -165,6 +165,12 @@ export async function assembleFeatureVector(
   if (typeof redundancy === 'number' && Number.isFinite(redundancy)) {
     vector.redundancy_penalty = clamp01(redundancy);
   }
+  // WS-T dispute penalty: a story adjudicated `incorrect` by a sourced-correction
+  // debate sinks to the bottom of the feed (visible-but-demoted; a content-quality
+  // signal, uniform across authors/topics — never financial, neutrality-safe).
+  if ((story.disputeStatus ?? 'none') === 'incorrect') {
+    vector.dispute_penalty = 1;
+  }
 
   // --- SCOI: context coherence + gating level ------------------------------
   const scoiRow = usable(await events.invariantStore.latest('SCOI', storyId));

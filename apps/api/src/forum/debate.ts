@@ -49,11 +49,19 @@ export type StoryAuthorReader = (storyId: string) => Promise<string | null>;
 /** True iff the user is a steward of the room (drives override authority). */
 export type StewardReader = (roomId: string, userId: string) => Promise<boolean>;
 
+/** Set a STORY's dispute posture (story-target debates); the ranking feed reads
+ *  it to penalize a corrected story to the bottom of the feed. */
+export type StoryDisputeSetter = (
+  storyId: string,
+  status: 'none' | 'under_debate' | 'incorrect',
+) => Promise<void>;
+
 export interface DebateDeps {
   debates: DebateStore;
   contributions: ContributionStore;
   storyAuthor: StoryAuthorReader;
   isSteward: StewardReader;
+  setStoryDispute: StoryDisputeSetter;
   runJudge: DebateJudgeRunner;
   /** Fan-out a live arena frame (co-visible drafts / verdict / resolution). */
   broadcast?: (debateId: string, arena: DebateArenaPublic) => void;
@@ -141,6 +149,8 @@ export async function maybeEnterDebate(
   // Mark the challenged target `under_debate` (visible; not hidden).
   if (targetType === 'comment' && targetContributionId !== null) {
     await deps.contributions.setDisputeStatus(targetContributionId, 'under_debate');
+  } else if (targetType === 'story') {
+    await deps.setStoryDispute(correction.storyId, 'under_debate');
   }
   deps.log('forum.debate_opened', {
     debate_id: debateId,
@@ -311,6 +321,10 @@ export async function finalizeDebate(
       arena.targetContributionId,
       targetIncorrect ? 'incorrect' : 'none',
     );
+  } else if (arena.targetType === 'story') {
+    // A corrected story is penalized to the bottom of the feed by ranking; an
+    // upheld/inconclusive one is cleared back to `none`.
+    await deps.setStoryDispute(arena.storyId, targetIncorrect ? 'incorrect' : 'none');
   }
   const updated = await deps.debates.setState(debateId, 'resolved', resolvedAt);
   if (updated === null) return null;

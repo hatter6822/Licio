@@ -101,6 +101,12 @@ export function redundancyInput(features: Pick<FeatureVector, 'redundancy_penalt
   return clamp01(features.redundancy_penalty ?? 0);
 }
 
+/** WS-T dispute input: 1 when the story was adjudicated `incorrect` by a sourced-
+ *  correction debate, else 0 — a content-quality signal (uniform, non-financial). */
+export function disputeInput(features: Pick<FeatureVector, 'dispute_penalty'>): number {
+  return clamp01(features.dispute_penalty ?? 0);
+}
+
 function term(value: number, coefficient: number, enforced: boolean): PenaltyTerm {
   const applied = enforced ? coefficient * value : 0;
   return { value, coefficient, applied, enforced };
@@ -127,10 +133,16 @@ export function computePenalties(
   const coordinationTerm = term(coordination.value, profile.penalties.pM, coordination.enforced);
   const tensionTerm = term(harmfulTensionInput(features), profile.penalties.pT, enforcement.hodge);
   const redundancyTerm = term(redundancyInput(features), profile.penalties.pR, enforcement.meri);
+  // WS-T — the dispute penalty is ALWAYS enforced: a resolved sourced-correction
+  // debate is authoritative (no shadow invariant gates it).  `pD` defaults strong
+  // so a `corrected` story sinks to the bottom of the feed.
+  const disputeTerm = term(disputeInput(features), profile.penalties.pD ?? 1, true);
   return {
     coordination: coordinationTerm,
     harmful_tension: tensionTerm,
     redundancy: redundancyTerm,
-    total_applied: coordinationTerm.applied + tensionTerm.applied + redundancyTerm.applied,
+    dispute: disputeTerm,
+    total_applied:
+      coordinationTerm.applied + tensionTerm.applied + redundancyTerm.applied + disputeTerm.applied,
   };
 }

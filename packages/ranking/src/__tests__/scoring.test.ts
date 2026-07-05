@@ -330,6 +330,27 @@ describe('WS-I.2.3b penalties', () => {
     expect(positive.components.positive - penalties.total_applied).toBeLessThan(0);
   });
 
+  it('WS-T — a corrected story is penalized, and it applies even under shadow', () => {
+    const features = makeFeatures(8, { dispute_penalty: 1 });
+    const coeff = PROFILE.penalties.pD ?? 1;
+    const enforced = computePenalties(features, PROFILE, FULL_ENFORCEMENT, {
+      sensitiveTopic: false,
+    });
+    expect(enforced.dispute.value).toBe(1);
+    expect(enforced.dispute.applied).toBeCloseTo(coeff, 12);
+    // A resolved sourced-correction debate is authoritative — no shadow invariant
+    // gates it, so the dispute penalty applies even under SHADOW enforcement.
+    const shadow = computePenalties(features, PROFILE, SHADOW_ENFORCEMENT, {
+      sensitiveTopic: false,
+    });
+    expect(shadow.dispute.applied).toBeCloseTo(coeff, 12);
+    // An undisputed story carries no dispute penalty.
+    const clean = computePenalties(makeFeatures(9), PROFILE, FULL_ENFORCEMENT, {
+      sensitiveTopic: false,
+    });
+    expect(clean.dispute.applied).toBe(0);
+  });
+
   it('UNPROMOTED penalties are computed and recorded but never applied (WS-H.1.2e)', () => {
     const features = makeFeatures(7, {
       mfci_risk_state: 'severe',

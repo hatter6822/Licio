@@ -71,6 +71,10 @@ export const penaltyComponentsSchema = z
     coordination: penaltyTermSchema,
     harmful_tension: penaltyTermSchema,
     redundancy: penaltyTermSchema,
+    /** WS-T — a story adjudicated `incorrect` by a sourced-correction debate.
+     *  DEFAULTED so decision-log snapshots written before this term still parse
+     *  + replay with identical arithmetic (the term was 0 for them). */
+    dispute: penaltyTermSchema.default({ value: 0, coefficient: 0, applied: 0, enforced: false }),
     /** Sum of the applied (enforced) penalties. */
     total_applied: z.number().nonnegative(),
   })
