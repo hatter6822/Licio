@@ -17,14 +17,32 @@ import {
 import { createPrng } from '../prng.js';
 import { req } from './sim-test-util.js';
 
-/** Estimated Jaccard similarity — the fraction of matching MinHash values, the
- *  metric the WS-F near-duplicate detector thresholds at 0.7. */
-function jaccard(a: string, b: string): number {
-  const x = minhashSignature(a);
-  const y = minhashSignature(b);
+/** Estimated Jaccard similarity between two MinHash signatures — the fraction of
+ *  matching values, the metric the WS-F near-duplicate detector thresholds at
+ *  0.7. Takes precomputed signatures so a pairwise sweep signs each text ONCE. */
+function jaccardOf(x: Uint32Array, y: Uint32Array): number {
   let match = 0;
   for (let i = 0; i < x.length; i += 1) if (x[i] === y[i]) match += 1;
   return match / x.length;
+}
+
+/** Estimated Jaccard between two texts (signs both once). */
+function jaccard(a: string, b: string): number {
+  return jaccardOf(minhashSignature(a), minhashSignature(b));
+}
+
+/** The largest pairwise estimated Jaccard across a set of texts. Signs each text
+ *  exactly once (O(n) signatures + O(n²) cheap Hamming compares), so the sweep
+ *  stays fast even under coverage instrumentation. */
+function maxPairwiseJaccard(texts: readonly string[]): number {
+  const sigs = texts.map((t) => minhashSignature(t));
+  let max = 0;
+  for (let i = 0; i < sigs.length; i += 1) {
+    for (let j = i + 1; j < sigs.length; j += 1) {
+      max = Math.max(max, jaccardOf(req(sigs[i]), req(sigs[j])));
+    }
+  }
+  return max;
 }
 
 /** What the WS-F pipeline signs for a LINK: story.title + the FETCHED article. */
@@ -128,13 +146,7 @@ describe('simulator content generation', () => {
       const story = generateStory('science', 'link', serial, prng);
       texts.push(fetchedText(story.title, req(story.url)));
     }
-    let max = 0;
-    for (let i = 0; i < texts.length; i += 1) {
-      for (let j = i + 1; j < texts.length; j += 1) {
-        max = Math.max(max, jaccard(req(texts[i]), req(texts[j])));
-      }
-    }
-    expect(max).toBeLessThan(0.7);
+    expect(maxPairwiseJaccard(texts)).toBeLessThan(0.7);
   });
 
   it('a link repost is a verbatim twin of its original under the FETCHED article', () => {
@@ -168,13 +180,7 @@ describe('simulator content generation', () => {
       const story = generateStory('health', 'original_brief', serial, prng);
       texts.push(submitted(story.title, story.body));
     }
-    let max = 0;
-    for (let i = 0; i < texts.length; i += 1) {
-      for (let j = i + 1; j < texts.length; j += 1) {
-        max = Math.max(max, jaccard(req(texts[i]), req(texts[j])));
-      }
-    }
-    expect(max).toBeLessThan(0.7);
+    expect(maxPairwiseJaccard(texts)).toBeLessThan(0.7);
   });
 
   it('evidence generation returns a body and a fresh citation reference', () => {
