@@ -480,6 +480,32 @@ export async function processSubmittedStory(
 
   if (!fetched.ok || fetched.status >= 400) {
     await ingestion.stories.update(story.storyId, { extractionState: 'failed' });
+    // The fetch failed on THIS attempt, and the retry (scheduled below) may never
+    // succeed for a permanently-unfetchable link. Persist the submitted
+    // title+reason as a FALLBACK signature — idempotent across retries — so the
+    // story is still a groupable candidate rather than having no signature row
+    // (repeated inaccessible submissions must be group-able by near-dup/MERI even
+    // when no fetch ever succeeds). Screen it ONCE (first attempt) so a repeated
+    // inaccessible link is flagged, without inserting a duplicate review item on
+    // every retry; a later SUCCESSFUL retry re-signs `extracted` and re-screens
+    // authoritatively (the one benign edge: a fail-then-succeed link that has a
+    // pre-existing duplicate can produce a second near-dup review item).
+    const { signature, bands } = await signatureStory(
+      ingestion.signatures,
+      story.storyId,
+      submissionText(story),
+      'submitted',
+    );
+    if (attempt === 0) {
+      await screenNearDuplicates(
+        ingestion,
+        story,
+        signature,
+        bands,
+        config.nearDuplicateThreshold,
+        null,
+      );
+    }
     await ingestion.reviewQueue.insert({
       kind: 'extraction_failure',
       storyId: story.storyId,

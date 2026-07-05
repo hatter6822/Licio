@@ -395,6 +395,11 @@ export class DevTrafficSimulator {
     const generation = this.#runGeneration;
     this.#tickCount += 1;
     const world = await this.#buildWorld();
+    // Re-check BEFORE planning: a stop()→start() during #buildWorld's awaits
+    // supersedes this tick, and planTick would otherwise consume the NEW run's
+    // #prng stream — after which the new run no longer replays the same traffic
+    // for its seed/scenario. Bail before touching the PRNG.
+    if (this.#runGeneration !== generation) return;
     const scenario = SCENARIOS[this.#scenario];
     const personas: RuntimePersona[] = this.#personas.map((p) => ({
       spec: p.spec,
@@ -434,7 +439,7 @@ export class DevTrafficSimulator {
       this.#runGeneration === generation &&
       this.#now() - this.#lastSignalRefreshMs >= SIGNAL_REFRESH_EVERY_MS
     ) {
-      await this.#refreshSignals();
+      await this.#refreshSignals(generation);
     }
   }
 
@@ -970,6 +975,21 @@ export class DevTrafficSimulator {
 
   async #executeJoin(action: Extract<SimAction, { kind: 'join_room' }>): Promise<void> {
     const { forum } = this.#graph;
+    // authMiddleware (+ requireVerifiedAccount) stops a suspended/deactivated
+    // account before /rooms/:id/join reaches joinRoom; mirror the auth-state gate
+    // so a non-authenticable persona cannot still create room subscriptions.
+    // (Every provisioned persona carries a platform passkey, so verification is
+    // already satisfied — see #provisionUser's passkey backfill.)
+    if (!(await this.#accountMayAuthenticate(action.personaUserId))) {
+      this.#recordRejection(
+        'join',
+        action.personaUserId,
+        'account not authenticable',
+        'account_suspended',
+        403,
+      );
+      return;
+    }
     const persona = this.#personas.find((p) => p.spec.userId === action.personaUserId);
     // Already a member (e.g. auto-joined by an earlier story submission): a
     // repeat joinRoom would return the existing subscription as ok — do not
@@ -1170,6 +1190,11 @@ export class DevTrafficSimulator {
           nowMs,
         );
       }
+      // A durable dev DB may hold this user WITHOUT a valid passkey (an earlier
+      // run before the credential-id fix, or after credential cleanup), which
+      // would leave it UNVERIFIED — contradicting "real verified accounts" and
+      // blocking the verified-account routes (e.g. room join). Backfill one.
+      await this.#ensureSimPasskey(spec.userId, createdAtMs);
       this.#counters.users_provisioned += 1;
       return true;
     }
@@ -1190,24 +1215,8 @@ export class DevTrafficSimulator {
       createdAtMs,
     );
     // One fake platform passkey so accountVerified is true (some service paths
-    // gate on verification). The id MUST be a valid base64url string whose bytes
-    // are unique per user: the Drizzle store decodes `credentialId` with
-    // Buffer.from(id,'base64url') as its primary key, and a raw `sim-cred-<uuid>`
-    // is not base64url — distinct uuids decode to the SAME bytes, collapsing
-    // every persona onto one credential row (leaving them unverified on a
-    // Postgres-backed dev boot). Encode the readable id so it round-trips.
-    await identity.store.addWebauthn({
-      credentialId: Buffer.from(`sim-cred-${spec.userId}`, 'utf8').toString('base64url'),
-      userId: spec.userId,
-      publicKey: new Uint8Array([1, 2, 3]),
-      counter: 0,
-      deviceType: 'platform',
-      deviceName: 'sim',
-      transports: [],
-      backedUp: false,
-      createdAt: new Date(createdAtMs).toISOString(),
-      lastUsedAt: null,
-    });
+    // gate on verification).
+    await this.#ensureSimPasskey(spec.userId, createdAtMs);
     this.#counters.users_provisioned += 1;
     this.#record({
       kind: 'provision',
@@ -1218,11 +1227,35 @@ export class DevTrafficSimulator {
     return true;
   }
 
+  /** Ensure a persona carries a fake platform passkey (idempotent). The id MUST
+   *  be a valid base64url string whose bytes are unique per user: the Drizzle
+   *  store decodes `credentialId` with Buffer.from(id,'base64url') as its primary
+   *  key, and a raw `sim-cred-<uuid>` is not base64url — distinct uuids would
+   *  decode to the SAME bytes, collapsing every persona onto one credential row
+   *  (leaving them unverified on a Postgres-backed dev boot). Encode the readable
+   *  id so it round-trips. No-op when the account already has any credential. */
+  async #ensureSimPasskey(userId: string, createdAtMs: number): Promise<void> {
+    const { identity } = this.#graph;
+    if ((await identity.store.listWebauthn(userId)).length > 0) return;
+    await identity.store.addWebauthn({
+      credentialId: Buffer.from(`sim-cred-${userId}`, 'utf8').toString('base64url'),
+      userId,
+      publicKey: new Uint8Array([1, 2, 3]),
+      counter: 0,
+      deviceType: 'platform',
+      deviceName: 'sim',
+      transports: [],
+      backedUp: false,
+      createdAt: new Date(createdAtMs).toISOString(),
+      lastUsedAt: null,
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Signal refresh (the REAL scorers).
   // -------------------------------------------------------------------------
 
-  async #refreshSignals(): Promise<void> {
+  async #refreshSignals(generation?: number): Promise<void> {
     const { events, identity, ingestion, invariants, ranking } = this.#graph;
     this.#lastSignalRefreshMs = this.#now();
     this.#refreshCount += 1;
@@ -1246,6 +1279,11 @@ export class DevTrafficSimulator {
       for (const storyId of touched) {
         await refreshStoryFeatures(ranking, storyId);
       }
+      // A stop()→start() during the slow scoring above supersedes this refresh:
+      // its counter bump, feed snapshot, and activity line must NOT land in the
+      // new run's status. (forceSignalRefresh passes no generation ⇒ apply
+      // unconditionally — it is the explicit on-demand/test seam.)
+      if (generation !== undefined && this.#runGeneration !== generation) return;
       this.#counters.signal_refreshes += 1;
       await this.#snapshotFeed();
       this.#record({

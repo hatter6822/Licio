@@ -92,6 +92,23 @@ describe('WS-F link near-duplicate — deferred to the fetched article', () => {
     expect(await queueCount('syndication_candidate')).toBe(0);
   });
 
+  it("a link whose fetch FAILS (HTTP 500) still gets a fallback 'submitted' signature", async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    // robots allows (no entry ⇒ 404 ⇒ allowed), but the fetch returns HTTP 500 —
+    // the retryable failed path, which may never succeed for a dead link. It must
+    // still leave a signature row so the story is a groupable near-dup candidate.
+    fixture.pages.set('https://broken.example/report', { status: 500, body: '' });
+    const res = await app().request(
+      post('/v1/stories', linkSubmission('https://broken.example/report'), cookie),
+    );
+    expect(res.status).toBe(201);
+    const { story_id } = (await res.json()) as { story_id: string };
+    await fixture.ingestion.settle();
+    const sig = await fixture.ingestion.signatures.getByStoryId(story_id);
+    expect(sig).not.toBeNull();
+    expect(sig?.textSource).toBe('submitted');
+  });
+
   it("a robots-disallowed link (no fetched article) still gets a fallback 'submitted' signature", async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);
     // Disallow crawling for this origin so the pipeline degrades to link-only

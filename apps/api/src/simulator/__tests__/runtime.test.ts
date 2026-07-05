@@ -498,12 +498,44 @@ describe('DevTrafficSimulator runtime', () => {
     }
     const att = sim.status().counters.attention_events_accepted;
     const rep = sim.status().counters.reports_filed;
+    const joins = sim.status().counters.room_joins;
     for (let i = 0; i < 8; i += 1) await sim.tick();
     const after = sim.status();
     // Stories still exist to read, but every persona is now non-authenticable, so
-    // the direct attention/report calls surface the same 403 a real client gets.
+    // the direct attention/report/join calls surface the same 403 a real client
+    // gets — no new attention, reports, OR room subscriptions land.
     expect(after.counters.attention_events_accepted).toBe(att);
     expect(after.counters.reports_filed).toBe(rep);
+    expect(after.counters.room_joins).toBe(joins);
+  });
+
+  it('backfills a platform passkey for an existing persona that lost its credential', async () => {
+    const graph = await buildSimTestGraph();
+    const run1 = new DevTrafficSimulator({
+      graph,
+      scenario: 'steady',
+      seed: 'passkey',
+      autoLoop: false,
+    });
+    await run1.start();
+    run1.stop();
+    const member = req(BASE_ROSTER[0]).userId;
+    const creds = await graph.identity.store.listWebauthn(member);
+    expect(creds.length).toBeGreaterThan(0);
+    // Simulate a durable DB whose credential was cleaned up / predates the fix.
+    for (const cred of creds) await graph.identity.store.deleteWebauthn(cred.credentialId);
+    expect(await graph.identity.store.listWebauthn(member)).toHaveLength(0);
+    // A second run re-provisions the SAME existing users and must backfill the
+    // passkey so they stay verified (the verified-account routes depend on it).
+    const run2 = new DevTrafficSimulator({
+      graph,
+      scenario: 'steady',
+      seed: 'passkey',
+      autoLoop: false,
+    });
+    await run2.start();
+    run2.stop();
+    expect((await graph.identity.store.listWebauthn(member)).length).toBeGreaterThan(0);
   });
 
   it('a stop()→start() during an in-flight tick abandons the stale plan (run-generation guard)', async () => {
