@@ -312,6 +312,46 @@ describe('WS-Q.2.4 author visibility transitions', () => {
     expect(((await again.json()) as { changed: boolean }).changed).toBe(false);
   });
 
+  it('widening a room_only LINK keeps its fetched (extracted) signature, not the thin submitted note', async () => {
+    const room = await makeRoom('public');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'wl' });
+    await joinAsMember(room, author.userId);
+    const url = 'https://widen.example/reservoir-report';
+    fixture.pages.set(url, {
+      status: 200,
+      body: articleHtml({
+        title: 'Reservoir level fell twelve percent in May',
+        body: 'The reservoir level fell by twelve percent in May according to the utility report, which the city council reviewed across three budget cycles before approving the pipeline replacement funding for the coming year.',
+      }),
+    });
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission(url, { room_id: room, visibility: 'room_only', reason: 'A link.' }),
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const { story_id } = (await created.json()) as { story_id: string };
+    await fixture.ingestion.settle();
+    // The link extracted while room_only: its single signature is over the ARTICLE.
+    const before = await fixture.ingestion.signatures.getByStoryId(story_id);
+    expect(before?.textSource).toBe('extracted');
+    // Widen to public: the near-dup screen must REUSE that extracted signature,
+    // never overwrite it with the thin submitted title+reason note (which would
+    // make the first public screen miss real article duplicates).
+    const widen = await app().request(
+      new Request(`http://local/v1/stories/${story_id}/visibility`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: author.cookie },
+        body: JSON.stringify({ visibility: 'public' }),
+      }),
+    );
+    expect(widen.status).toBe(200);
+    const after = await fixture.ingestion.signatures.getByStoryId(story_id);
+    expect(after?.textSource).toBe('extracted'); // preserved, not clobbered
+  });
+
   it('widen in a PRIVATE room is rejected with 422', async () => {
     const room = await makeRoom('private');
     const author = await seedUserWithSession(fixture.identity, { handle: 'pw' });

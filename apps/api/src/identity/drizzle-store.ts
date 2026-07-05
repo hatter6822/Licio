@@ -246,6 +246,11 @@ export class DrizzleIdentityStore implements IdentityStore {
       set.personalizationSettings = patch.personalizationSettings;
     if (patch.reputationSummary !== undefined)
       set.reputationSummaryPrivate = patch.reputationSummary;
+    // createdAt is normally immutable and no product flow patches it; honoring
+    // it here (parity with the in-memory store, which applies the whole patch)
+    // lets an explicit re-stamp take effect on Postgres — the dev traffic
+    // simulator re-freshening a persistent fresh persona across reruns.
+    if (patch.createdAt !== undefined) set.createdAt = new Date(patch.createdAt);
     // updated_at is trigger-maintained; touching it here only guarantees a
     // non-empty SET clause (the trigger overwrites the value server-side).
     set.updatedAt = new Date();

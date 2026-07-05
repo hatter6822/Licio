@@ -50,6 +50,24 @@ export async function signatureStory(
 }
 
 /**
+ * Load a story's ALREADY-STORED signature as the `{ signature, bands }` pair a
+ * near-dup screen needs, without re-deriving it from text. Returns null when no
+ * signature exists (never signed) or it predates the pinned hash family (not
+ * comparable). Callers reuse this so they DON'T overwrite an accurate stored
+ * signature with a weaker re-signature — critically the widen path, where a
+ * link's stored `extracted` article signature must not be clobbered by its thin
+ * submitted title+reason note (WS-F.1.3c).
+ */
+export async function loadStoredSignature(
+  signatures: SignatureStore,
+  storyId: string,
+): Promise<{ signature: Uint32Array; bands: Uint32Array } | null> {
+  const record = await signatures.getByStoryId(storyId);
+  if (!record || record.familyVersion !== MINHASH_FAMILY_VERSION) return null;
+  return { signature: record.minhash, bands: lshBandHashes(record.minhash) };
+}
+
+/**
  * LSH candidates → estimate filter (WS-F.1.3c): sub-linear retrieval, then
  * the configurable Jaccard threshold decides. Only candidates signed with
  * the SAME family version are comparable (re-signature safety).

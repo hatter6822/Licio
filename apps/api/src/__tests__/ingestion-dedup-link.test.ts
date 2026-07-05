@@ -92,6 +92,37 @@ describe('WS-F link near-duplicate — deferred to the fetched article', () => {
     expect(await queueCount('syndication_candidate')).toBe(0);
   });
 
+  it("a robots-disallowed link (no fetched article) still gets a fallback 'submitted' signature", async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    // Disallow crawling for this origin so the pipeline degrades to link-only
+    // (no article is ever fetched).
+    fixture.robots.set('https://blocked.example', 'User-agent: *\nDisallow: /');
+    const { storyId } = await submitLink(cookie, 'https://blocked.example/report', RESERVOIR, {
+      reason: 'The quarterly reservoir report, first posting, with the full utility figures.',
+    });
+    // A link normally defers signing to its article, but with no reachable
+    // article the submitted title+reason is signed as a fallback — so the story
+    // is still groupable rather than having no signature row at all.
+    const sig = await fixture.ingestion.signatures.getByStoryId(storyId);
+    expect(sig).not.toBeNull();
+    expect(sig?.textSource).toBe('submitted');
+  });
+
+  it('two identical robots-disallowed links are grouped by their fallback signatures', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    fixture.robots.set('https://wall.example', 'User-agent: *\nDisallow: /');
+    const reason =
+      'The identical inaccessible-link reason note, repeated verbatim across both submissions of this same blocked utility report for the near-duplicate screen.';
+    await submitLink(cookie, 'https://wall.example/a', RESERVOIR, { reason });
+    await submitLink(cookie, 'https://wall.example/b', RESERVOIR, {
+      reason,
+      title: 'The identical inaccessible-link reason note, second posting',
+    });
+    // The link-only path runs the SAME public near-dup screen the fetched path
+    // runs, over the fallback signatures — so repeated inaccessible links group.
+    expect(await queueCount('near_duplicate')).toBeGreaterThanOrEqual(1);
+  });
+
   it('a same-source link whose fetched article DUPLICATES another is grouped as a near-duplicate', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);
     // Same origin (same source) + the same article text, a different URL/title —

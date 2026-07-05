@@ -1063,16 +1063,30 @@ export class DevTrafficSimulator {
 
   async #provisionUser(spec: PersonaSpec): Promise<boolean> {
     const { identity } = this.#graph;
-    if (await identity.store.getUser(spec.userId)) {
-      this.#counters.users_provisioned += 1;
-      return true;
-    }
     const archetype = archetypeOf(spec);
     // Fresh cluster/newcomer accounts are created "now" (so the anti-signal
     // trust weighting sees a brand-new account, as intended); organic personas
     // are backdated so they clear the account-age gate and read as aged.
     const nowMs = this.#now();
     const createdAtMs = nowMs - archetype.accountAgeDays * 24 * 60 * 60 * 1000;
+    if (await identity.store.getUser(spec.userId)) {
+      // A durable dev DB keeps this stable-id account across reruns. Re-stamp a
+      // FRESH archetype's createdAt so it stays genuinely new — otherwise, once
+      // the account ages past coordinationNewAccountDays, the coordinated-report
+      // and new-account anti-signal detectors stop treating the "fresh" cluster/
+      // influx personas as new and those scenarios silently stop exercising the
+      // new-account paths (the panel still reports them provisioned). Aged
+      // organic personas keep their backdated createdAt — they should read aged.
+      if (archetype.accountAgeDays === 0) {
+        await identity.store.updateUser(
+          spec.userId,
+          { createdAt: new Date(createdAtMs).toISOString() },
+          nowMs,
+        );
+      }
+      this.#counters.users_provisioned += 1;
+      return true;
+    }
     await identity.store.createUser(
       {
         userId: spec.userId,

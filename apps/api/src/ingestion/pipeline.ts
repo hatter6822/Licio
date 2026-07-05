@@ -243,7 +243,11 @@ async function emitLinkOnlyClassified(
   ingestion: IngestionServices,
   events: EventPipelineServices,
   story: StoryRecord,
-  config: { claimConfidenceFloor: number; claimDedupSimilarity: number },
+  config: {
+    claimConfidenceFloor: number;
+    claimDedupSimilarity: number;
+    nearDuplicateThreshold: number;
+  },
   metric: string,
 ): Promise<void> {
   const bodyText = submissionBodyText(story);
@@ -266,15 +270,111 @@ async function emitLinkOnlyClassified(
     extractionState: 'disallowed_robots',
   });
   const current = updated ?? story;
+  // A link-only story has NO fetched article, so its post-fetch `extracted`
+  // signature is never written (a link defers signing to its article,
+  // WS-F.1.3c). Sign the submitted title+reason as a FALLBACK — the only
+  // complete text such a story has — so repeated inaccessible-link submissions
+  // stay groupable by findNearDuplicates/MERI, and run the SAME public near-dup
+  // screen the fetched path runs. No fetched source ⇒ no source auto-link.
+  const { signature, bands } = await signatureStory(
+    ingestion.signatures,
+    story.storyId,
+    submissionText(current),
+    'submitted',
+  );
+  const duplicateGroupId = await screenNearDuplicates(
+    ingestion,
+    current,
+    signature,
+    bands,
+    config.nearDuplicateThreshold,
+    null,
+  );
   await recomputeFreshness(ingestion.stories, ingestion.freshness, current, ingestion.now());
   ingestion.metrics.increment(metric);
   await emitNormalized(ingestion, events, current, {
     sourceId: story.sourceId,
     language,
     sensitivityLabels,
-    duplicateGroupId: null,
+    duplicateGroupId,
     claimIds: [...claims.created, ...claims.linked].map((c) => c.claimId),
   });
+}
+
+/**
+ * The PUBLIC near-duplicate / syndication screen over an already-stored
+ * signature (WS-F.1.3c/d). Shared by BOTH the fetched-article path and the
+ * degraded link-only path so the two are symmetric: each screens the story's
+ * single accurate signature (the extracted article, or — when no article is
+ * reachable — the submitted title+reason). Returns the duplicate group id (the
+ * strongest hit's existing story) or null. `autoLink` is the fetched source used
+ * for a confirmed-syndication source auto-link; a link-only story has no fetched
+ * source, so it passes null and a `syndicated_known` hit is queued for review
+ * rather than silently linked. Non-public stories are never screened (the stored
+ * signature still lets a later widen join the public cluster without a recompute).
+ */
+async function screenNearDuplicates(
+  ingestion: IngestionServices,
+  story: StoryRecord,
+  signature: Uint32Array,
+  bands: Uint32Array,
+  nearDuplicateThreshold: number,
+  autoLink: { readonly sourceId: string; readonly canonicalUrl: string | null } | null,
+): Promise<string | null> {
+  if (story.visibility !== 'public') return null;
+  const hits = await findNearDuplicates(
+    ingestion.signatures,
+    ingestion.stories,
+    story.storyId,
+    signature,
+    bands,
+    nearDuplicateThreshold,
+    5,
+  );
+  for (const hit of hits) {
+    const classification = await classifyDuplicate(
+      ingestion.stories,
+      ingestion.syndications,
+      story,
+      hit,
+    );
+    if (classification === null) continue;
+    if (classification.kind === 'syndicated_known' && autoLink !== null) {
+      // Known CONFIRMED partner: auto-link this copy's source onto the EXISTING
+      // story's source list (no new MERI exposure; the original is never
+      // replaced — WS-F.1.3d acceptance).
+      await ingestion.stories.addSourceLink(
+        classification.existing.storyId,
+        autoLink.sourceId,
+        'syndicated',
+        autoLink.canonicalUrl,
+      );
+      ingestion.metrics.increment('dedup.syndicated_auto_linked');
+    } else {
+      await ingestion.reviewQueue.insert({
+        kind: classification.kind === 'near_duplicate' ? 'near_duplicate' : 'syndication_candidate',
+        storyId: story.storyId,
+        context: {
+          existing_story_id: classification.existing.storyId,
+          estimated_jaccard: classification.estimate,
+          ...(autoLink !== null
+            ? {
+                new_source_id: autoLink.sourceId,
+                existing_source_id: classification.existing.sourceId,
+              }
+            : { text_source: 'submitted' }),
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
+      ingestion.metrics.increment(`dedup.flagged_${classification.kind}`);
+    }
+    return classification.existing.storyId; // the strongest hit decides the grouping
+  }
+  return null;
 }
 
 /**
@@ -485,66 +585,21 @@ export async function processSubmittedStory(
   // Near-duplicate detection on the FETCHED text (WS-F.1.3c/d). WS-Q.2.2c — the
   // signature is stored for EVERY story (so a later widen joins the public
   // cluster without a recompute), but the public near-dup / syndication
-  // clustering runs only for PUBLIC stories.
-  let duplicateGroupId: string | null = null;
+  // clustering runs only for PUBLIC stories (see screenNearDuplicates).
   const { signature, bands } = await signatureStory(
     ingestion.signatures,
     story.storyId,
     text,
     'extracted',
   );
-  const hits =
-    current.visibility === 'public'
-      ? await findNearDuplicates(
-          ingestion.signatures,
-          ingestion.stories,
-          story.storyId,
-          signature,
-          bands,
-          config.nearDuplicateThreshold,
-          5,
-        )
-      : [];
-  for (const hit of hits) {
-    const classification = await classifyDuplicate(
-      ingestion.stories,
-      ingestion.syndications,
-      current,
-      hit,
-    );
-    if (classification === null) continue;
-    duplicateGroupId = classification.existing.storyId;
-    if (classification.kind === 'syndicated_known') {
-      // Known CONFIRMED partner: auto-link this copy's source onto the
-      // EXISTING story's source list (no new MERI exposure; the original is
-      // never replaced — WS-F.1.3d acceptance).
-      await ingestion.stories.addSourceLink(
-        classification.existing.storyId,
-        source.sourceId,
-        'syndicated',
-        current.canonicalUrl,
-      );
-      ingestion.metrics.increment('dedup.syndicated_auto_linked');
-    } else {
-      await ingestion.reviewQueue.insert({
-        kind: classification.kind === 'near_duplicate' ? 'near_duplicate' : 'syndication_candidate',
-        storyId: story.storyId,
-        context: {
-          existing_story_id: classification.existing.storyId,
-          estimated_jaccard: classification.estimate,
-          new_source_id: source.sourceId,
-          existing_source_id: classification.existing.sourceId,
-        },
-        status: 'pending',
-        resolution: null,
-        resolvedBy: null,
-        resolvedAt: null,
-        notBefore: null,
-      });
-      ingestion.metrics.increment(`dedup.flagged_${classification.kind}`);
-    }
-    break; // the strongest hit decides the grouping
-  }
+  const duplicateGroupId = await screenNearDuplicates(
+    ingestion,
+    current,
+    signature,
+    bands,
+    config.nearDuplicateThreshold,
+    { sourceId: source.sourceId, canonicalUrl: current.canonicalUrl },
+  );
 
   // Candidate claims from the fetched text (WS-F.1.2b).
   const claims = await persistCandidateClaims(

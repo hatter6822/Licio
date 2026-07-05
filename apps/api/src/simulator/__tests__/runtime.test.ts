@@ -415,6 +415,41 @@ describe('DevTrafficSimulator runtime', () => {
     }
   });
 
+  it('re-stamps a FRESH persona createdAt on a durable rerun (stays new for the anti-signal paths)', async () => {
+    const graph = await buildSimTestGraph();
+    const run1 = new DevTrafficSimulator({
+      graph,
+      scenario: 'coordinated_burst',
+      seed: 'fresh',
+      speed: 20,
+      autoLoop: false,
+    });
+    await run1.start();
+    await run1.tick(); // the burst provisions the fresh cluster
+    run1.stop();
+    const member = req(CLUSTER_ROSTER[0]).userId;
+    expect(await graph.identity.store.getUser(member)).not.toBeNull();
+    // Simulate the durable account having aged well past the coordination
+    // new-account window, as a Postgres-backed dev DB would over time.
+    const staleIso = new Date(graph.events.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    await graph.identity.store.updateUser(member, { createdAt: staleIso });
+
+    const run2 = new DevTrafficSimulator({
+      graph,
+      scenario: 'coordinated_burst',
+      seed: 'fresh',
+      speed: 20,
+      autoLoop: false,
+    });
+    await run2.start();
+    await run2.tick(); // re-provisions the SAME ids → re-stamps them fresh
+    run2.stop();
+    const refreshed = await graph.identity.store.getUser(member);
+    // createdAt is recent again (well after the staled value), so the fresh-
+    // account anti-signal + coordinated-report paths still see it as new.
+    expect(Date.parse(req(refreshed).createdAt)).toBeGreaterThan(Date.parse(staleIso));
+  });
+
   it('a second same-seed run over a persistent store still produces NEW stories (no duplicate loop)', async () => {
     // A durable dev DB keeps a prior same-seed run's stories, so a replay
     // regenerates identical (deterministic) URLs that now already exist and are
