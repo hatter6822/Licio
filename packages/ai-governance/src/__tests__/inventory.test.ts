@@ -18,9 +18,9 @@ import {
 const NOW = '2026-06-19T00:00:00.000Z';
 
 describe('WS-K.1.1c AI inventory', () => {
-  it('documents all eight use cases', () => {
+  it('documents every canonical use case', () => {
     const inventory = buildInventory(1, NOW);
-    expect(inventory.use_cases).toHaveLength(8);
+    expect(inventory.use_cases).toHaveLength(AI_USE_CASE_IDS.length);
     expect(inventory.use_cases.map((u) => u.use_case_id).sort()).toEqual(
       [...AI_USE_CASE_IDS].sort(),
     );
@@ -43,6 +43,7 @@ describe('WS-K.1.1c AI inventory', () => {
       translation: { risk: 'medium', oversight: 'review' },
       embedding_generation: { risk: 'low', oversight: 'none' },
       governance_assistance: { risk: 'high', oversight: 'approval' },
+      debate_adjudication: { risk: 'high', oversight: 'approval' },
     };
     for (const id of ALL_USE_CASE_IDS) {
       const entry = buildUseCaseEntry(id);

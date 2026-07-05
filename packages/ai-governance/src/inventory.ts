@@ -254,6 +254,52 @@ export const CANONICAL_USE_CASES: Readonly<Record<AiUseCaseId, UseCaseSpec>> = {
     nist_rmf_functions: ['MAP', 'MANAGE'],
     iso_42001_controls: ['ISO42001 A.6.2 (AI system lifecycle)'],
   },
+  debate_adjudication: {
+    name: 'Debate adjudication',
+    description:
+      'Scores which of two sourced positions prevails in a correction debate — a probabilistic neural model over content-structural features; advisory, steward-overrulable (§24.6).',
+    risk_level: 'high',
+    human_oversight: 'approval',
+    never_autonomous: true,
+    identified_harms: [
+      {
+        harm: 'An erroneous verdict marks correct content "incorrect" and sinks it',
+        likelihood: 'medium',
+        impact: 'high',
+      },
+      {
+        harm: 'Systematic bias against a viewpoint if features encoded identity',
+        likelihood: 'low',
+        impact: 'high',
+      },
+      {
+        harm: 'Rewards link volume over source quality (gaming)',
+        likelihood: 'medium',
+        impact: 'medium',
+      },
+    ],
+    affected_populations: [
+      'minority-viewpoint holders',
+      'authors citing under-indexed / non-English sources',
+      'authors of correct-but-lightly-sourced claims',
+    ],
+    mitigations: [
+      'content-structural features only — no author/topic/viewpoint/wealth signal (neutrality)',
+      'the room steward may fully overrule the verdict for 24h (human-in-the-loop, §24.6)',
+      'the loser is tagged "incorrect" but stays VISIBLE — never hidden/removed',
+      'independent-domain count weighted over raw link count (anti-gaming)',
+      'every verdict writes an immutable, replayable AIOutputRecord (deterministic weights)',
+    ],
+    residual_risk:
+      'Residual adjudication error, bounded by the mandatory steward-override window, the visible-not-hidden remedy, and the deterministic replayable record (§24.6).',
+    responsible_owner: OWNER,
+    nist_rmf_functions: ['GOVERN', 'MAP', 'MEASURE', 'MANAGE'],
+    iso_42001_controls: [
+      'ISO42001 A.5.2 (AI system impact assessment)',
+      'ISO42001 A.9.2 (responsible use)',
+      'ISO42001 A.9.4 (human oversight)',
+    ],
+  },
   governance_assistance: {
     name: 'AI around governance',
     description:

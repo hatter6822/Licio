@@ -40,6 +40,8 @@ export const AI_CAPABILITIES = [
   'generate_embedding',
   'triage_safety',
   'detect_duplicate',
+  // WS-T — score a sourced-correction debate (advisory; steward-overrulable).
+  'adjudicate_debate',
   // §24.5 permitted governance capabilities (advisory to stewards).
   'gov_summarize_proposal',
   'gov_identify_missing_fields',
