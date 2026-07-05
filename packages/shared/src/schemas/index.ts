@@ -14,6 +14,7 @@ export * from './auth-api.js';
 export * from './claim.js';
 export * from './common.js';
 export * from './contribution.js';
+export * from './debate.js';
 export * from './dev-simulator.js';
 export * from './events/index.js';
 export * from './feature-flags.js';

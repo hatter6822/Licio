@@ -76,6 +76,10 @@ export const storyCommentsResponseSchema = z
         comment_count: z.number().int().min(0),
         sources_count: z.number().int().min(0),
         corrections_count: z.number().int().min(0),
+        /** Open debate arenas challenging this story's content (display only). */
+        debates_count: z.number().int().min(0).default(0),
+        /** Contributions tagged `incorrect` by a resolved correction (display only). */
+        incorrect_count: z.number().int().min(0).default(0),
       })
       .strict(),
     summary: summaryPublicSchema.nullable(),
