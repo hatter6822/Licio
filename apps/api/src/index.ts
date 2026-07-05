@@ -49,6 +49,7 @@ import {
 import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
 import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import { DEBATE_SCHEDULER_INTERVAL_MS, startDebateScheduler } from './forum/debate-scheduler.js';
+import { DrizzleDebateStore } from './forum/drizzle-debate-store.js';
 import {
   DrizzleContributionStore,
   DrizzleLensStore,
@@ -382,6 +383,8 @@ if (db) {
   forumServices.lenses = new DrizzleLensStore(db);
   forumServices.summaries = new DrizzleSummaryStore(db);
   forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
+  // WS-T — the debate arena store over migration 0056.
+  forumServices.debates = new DrizzleDebateStore(db);
 }
 await forumServices.reloadConfig();
 setForumServices(forumServices);

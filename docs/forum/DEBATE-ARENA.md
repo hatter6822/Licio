@@ -76,14 +76,33 @@ boundary + `UgcBody`); WS-K bounds (deploy gate + prohibited-use guard + output
 record); steward power bounded (24h, audited, subordinate to the non-overridable
 platform legal floor).
 
+## Read-side, reorder, and feed integration
+
+- Comment projections carry `active_debate_id` (from the debate store's
+  `activeDebateIdsForContributions`), so a comment `under_debate` links straight
+  to its arena; the story-comments `overview` reports `debates_count` +
+  `incorrect_count`.
+- `incorrect` comments SINK to the bottom of their section — a composite keyset
+  `(sink, created_at, id)` that holds across pagination, both orderings, and
+  recursively among children (in-memory + Drizzle; the `(thread, dispute_status,
+  created)` index supports the ORDER BY).  No wire-format change: the cursor is
+  the contribution id and the sink is derived at lookup.
+- A `corrected` STORY sinks in the ranking feed via an always-enforced
+  `dispute_penalty` term (a content-derived, uniform, non-financial signal —
+  `check:neutrality` green); `finalizeDebate` sets the story's `dispute_status`.
+- Live co-visibility is push-based: a `DebateBroadcaster` fans out the observer
+  arena projection over `GET /v1/debates/:id/stream` (SSE), and the web
+  `useDebateStream` nudges an immediate role-scoped refetch on each frame (the 5s
+  poll is the fallback).
+- The gated Drizzle `debate_arenas` adapter (over migration 0056) is bound at
+  production boot and proven by the parameterized `DebateStore` contract test
+  (in-memory always; live Postgres under `DATABASE_URL`).
+
 ## Residuals
 
-- The comment-level `active_debate_id` projection + the read-time reorder that
-  physically sinks an `incorrect` root to the bottom of a paginated section, and
-  the story-level feed ranking penalty for a `corrected` story, are tracked
-  follow-ups (the `dispute_status` signal is already on the wire + the arena is
-  reachable via the correction's `debate_arena_id`).
-- Live SSE co-visibility currently rides client polling (the broadcaster port
-  exists on the arena service for a later push transport).
-- The gated Drizzle adapter for `debate_arenas` (the in-memory store + the
-  migration are shipped; production boot binds the Postgres adapter later).
+- Multi-process SSE fan-out uses the in-memory broadcaster; a Redis pub/sub
+  adapter (the `DebateBroadcaster` port already abstracts this) is the horizontal-
+  scale follow-up, mirroring the comment broadcaster.
+- Field confirmation of the live stream on physical browsers at scale (the
+  headless path — broadcaster fan-out + the SSE route + the client hook — is
+  covered).
