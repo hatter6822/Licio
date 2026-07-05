@@ -386,6 +386,13 @@
       "when": 1782198800000,
       "tag": "0055_ws_u_treasury_target_allocation",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1782198900000,
+      "tag": "0056_ws_t_debate_arena",
+      "breakpoints": true
     }
   ]
 }

@@ -57,6 +57,19 @@ export const contributionModerationStateEnum = pgEnum('contribution_moderation_s
   'removed',
 ]);
 
+/**
+ * Dispute posture — the sourced-correction debate outcome (WS-T).  ORTHOGONAL
+ * to `moderation_state`: an `incorrect` contribution stays fully VISIBLE (it is
+ * never hidden/removed) but sinks to the bottom of its comment section and
+ * carries an "incorrect" tag.  `under_debate` marks a contribution challenged by
+ * an open debate arena.  Mirrors the shared `contributionDisputeStatusSchema`.
+ */
+export const contributionDisputeStatusEnum = pgEnum('contribution_dispute_status', [
+  'none',
+  'under_debate',
+  'incorrect',
+]);
+
 export const contributions = pgTable(
   'contributions',
   {
@@ -89,6 +102,9 @@ export const contributions = pgTable(
     moderationState: contributionModerationStateEnum('moderation_state')
       .notNull()
       .default('published'),
+    /** Dispute posture (WS-T sourced-correction debate); default `none`.  An
+     *  `incorrect` row stays visible but sinks to the bottom of its section. */
+    disputeStatus: contributionDisputeStatusEnum('dispute_status').notNull().default('none'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -99,6 +115,9 @@ export const contributions = pgTable(
     index('contributions_type_idx').on(t.type),
     index('contributions_moderation_idx').on(t.moderationState),
     index('contributions_created_idx').on(t.createdAt),
+    /** WS-T read-time reorder: `incorrect` roots sink to the bottom of a
+     *  thread's section without a per-query CASE scan. */
+    index('contributions_thread_dispute_created_idx').on(t.threadId, t.disputeStatus, t.createdAt),
     /** Structured-section reads (WS-G.1.2a acceptance). */
     index('contributions_thread_type_created_idx').on(t.threadId, t.type, t.createdAt),
     index('contributions_citations_gin').using('gin', t.citations),

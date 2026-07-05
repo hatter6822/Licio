@@ -99,6 +99,18 @@ export const extractionStateEnum = pgEnum('story_extraction_state', [
  *  safety hiding both exclude the story from search and read surfaces. */
 export const storyHiddenStateEnum = pgEnum('story_hidden_state', ['takedown', 'safety']);
 
+/**
+ * WS-T dispute posture — the sourced-correction debate outcome, ORTHOGONAL to
+ * `hidden_state`.  An `incorrect` story stays VISIBLE (not hidden/taken down)
+ * but is penalized to the bottom of the feed and tagged "incorrect".
+ * `under_debate` marks a story challenged by an open debate arena.
+ */
+export const storyDisputeStatusEnum = pgEnum('story_dispute_status', [
+  'none',
+  'under_debate',
+  'incorrect',
+]);
+
 export const stories = pgTable(
   'stories',
   {
@@ -172,6 +184,8 @@ export const stories = pgTable(
     mediaType: mediaTypeEnum('media_type'),
     extractionState: extractionStateEnum('extraction_state').notNull().default('pending'),
     hiddenState: storyHiddenStateEnum('hidden_state'),
+    /** WS-T dispute posture (default `none`); `incorrect` sinks in the feed. */
+    disputeStatus: storyDisputeStatusEnum('dispute_status').notNull().default('none'),
     /** Last material update (new contribution/evidence/claim) — freshness input. */
     lastMaterialUpdateAt: timestamp('last_material_update_at', { withTimezone: true })
       .notNull()

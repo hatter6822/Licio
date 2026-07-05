@@ -9,6 +9,7 @@ export * from './ai-governance.js';
 export * from './audit-log.js';
 export * from './claim.js';
 export * from './contribution.js';
+export * from './debate.js';
 export * from './embedding.js';
 export * from './events.js';
 export * from './governance.js';
