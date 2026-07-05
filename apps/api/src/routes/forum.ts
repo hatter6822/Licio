@@ -17,6 +17,9 @@ import {
   contributionSubtreeSchema,
   contributionUpdateSchema,
   contributionWriteCreateSchema,
+  debateArenaResponseSchema,
+  debateOverrideRequestSchema,
+  debatePositionUpdateSchema,
   evidenceAddedEventSchema,
   evidenceCreateRequestSchema,
   evidenceCreateResponseSchema,
@@ -68,6 +71,12 @@ import {
   threadOnGlobalDirectory,
   threadReadableToUser,
 } from '../forum/contributions.js';
+import {
+  type DebateDeps,
+  overrideDebateVerdict,
+  postDebatePosition,
+  toDebateArenaPublic,
+} from '../forum/debate.js';
 import { stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
@@ -176,6 +185,20 @@ function bundles() {
     forum: getForumServices(),
     ingestion: getIngestionServices(),
     events: getEventPipelineServices(),
+  };
+}
+
+/** Assemble the WS-T debate-arena service deps from the request bundle. */
+function debateDepsFromBundle(bundle: ReturnType<typeof bundles>): DebateDeps {
+  return {
+    debates: bundle.forum.debates,
+    contributions: bundle.forum.contributions,
+    storyAuthor: async (sid) => (await bundle.ingestion.stories.getById(sid))?.submittedBy ?? null,
+    isSteward: async (roomId, uid) =>
+      (await bundle.forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
+    runJudge: bundle.forum.debateJudge,
+    now: bundle.forum.now,
+    log: bundle.forum.log,
   };
 }
 
@@ -1326,7 +1349,127 @@ export function createForumRoutes() {
       .get('/forum/admin/metrics', authMiddleware(), requireSteward(), (c) => {
         return c.json({ counters: getForumServices().metrics.snapshot() });
       })
+      // --- WS-T debate arena (sourced-correction adjudication) ----------------
+      // Read the arena (role-scoped: the caller sees whether they are the
+      // incumbent, challenger, steward, or an observer).
+      .get(
+        '/debates/:debateId',
+        authMiddleware(),
+        zValidator('param', z.object({ debateId: uuidSchema })),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { debateId } = c.req.valid('param');
+          const arena = await bundle.forum.debates.getById(debateId);
+          if (arena === null) return c.json(notFound, 404);
+          const identity = getIdentityServices();
+          const isSteward =
+            arena.roomId !== null &&
+            (await bundle.forum.rooms.stewardRolesFor(arena.roomId, auth.userId)).length > 0;
+          const projected = await toDebateArenaPublic(
+            arena,
+            auth.userId,
+            makeAuthorResolver(identity),
+            isSteward,
+          );
+          return c.json(debateArenaResponseSchema.parse({ debate: projected }));
+        },
+      )
+      // Post/replace the caller's co-visible position (incumbent/challenger only,
+      // within the 12h edit window).
+      .post(
+        '/debates/:debateId/position',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        requireUnrestricted(),
+        zValidator('param', z.object({ debateId: uuidSchema })),
+        zValidator('json', debatePositionUpdateSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { debateId } = c.req.valid('param');
+          const outcome = await postDebatePosition(
+            debateDepsFromBundle(bundle),
+            debateId,
+            auth.userId,
+            c.req.valid('json'),
+          );
+          if (!outcome.ok) {
+            const status =
+              outcome.reason === 'not_found' ? 404 : outcome.reason === 'not_a_party' ? 403 : 409;
+            return c.json(deny(outcome.reason, positionErrorMessage(outcome.reason)), status);
+          }
+          const identity = getIdentityServices();
+          const isSteward =
+            outcome.arena.roomId !== null &&
+            (await bundle.forum.rooms.stewardRolesFor(outcome.arena.roomId, auth.userId)).length >
+              0;
+          const projected = await toDebateArenaPublic(
+            outcome.arena,
+            auth.userId,
+            makeAuthorResolver(identity),
+            isSteward,
+          );
+          return c.json(debateArenaResponseSchema.parse({ debate: projected }));
+        },
+      )
+      // The room steward fully overrules the AI verdict (either direction), within
+      // 24h, audited (the service enforces the steward-only + window guard).
+      .post(
+        '/debates/:debateId/override',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        requireUnrestricted(),
+        zValidator('param', z.object({ debateId: uuidSchema })),
+        zValidator('json', debateOverrideRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { debateId } = c.req.valid('param');
+          const { winner, reason } = c.req.valid('json');
+          const outcome = await overrideDebateVerdict(
+            debateDepsFromBundle(bundle),
+            debateId,
+            auth.userId,
+            winner,
+            reason,
+          );
+          if (!outcome.ok) {
+            const status =
+              outcome.reason === 'not_found' ? 404 : outcome.reason === 'not_steward' ? 403 : 409;
+            return c.json(deny(outcome.reason, overrideErrorMessage(outcome.reason)), status);
+          }
+          // The override is durably recorded on the arena row (overridden_by +
+          // override_reason) and the service audit log; no separate identity-
+          // audit taxonomy entry is minted here.
+          const projected = await toDebateArenaPublic(
+            outcome.arena,
+            auth.userId,
+            makeAuthorResolver(getIdentityServices()),
+            true,
+          );
+          return c.json(debateArenaResponseSchema.parse({ debate: projected }));
+        },
+      )
   );
+}
+
+function positionErrorMessage(reason: 'not_found' | 'not_a_party' | 'window_closed'): string {
+  if (reason === 'not_found') return 'The debate no longer exists.';
+  if (reason === 'not_a_party') return 'Only the incumbent or challenger may post a position.';
+  return 'The 12-hour editing window has closed.';
+}
+
+function overrideErrorMessage(
+  reason: 'not_found' | 'not_steward' | 'not_judged' | 'window_closed',
+): string {
+  if (reason === 'not_found') return 'The debate no longer exists.';
+  if (reason === 'not_steward') return 'Only the room steward may overrule the verdict.';
+  if (reason === 'not_judged') return 'The debate has no verdict to overrule yet.';
+  return 'The 24-hour override window has closed.';
 }
 
 function toUploadPublic(record: UploadRecord) {

@@ -43,6 +43,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import { maybeEnterDebate } from './debate.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord, ForumEvidenceCardInput } from './stores.js';
 import { maybeDeepenConversation } from './transitions.js';
@@ -608,6 +609,13 @@ export async function createContribution(
   const citations: Citation[] =
     'citations' in request && request.citations ? request.citations : [];
   const metadata = metadataFromRequest(request, evidenceCard?.evidenceId ?? null);
+  // WS-T — a PUBLISHED sourced correction opens a debate arena.  The id is
+  // minted here and back-referenced on the correction's metadata, so the
+  // challenger reaches the arena from their own contribution; the arena itself
+  // opens detached (below) after the row + events land.
+  const debateArenaId =
+    request.type === 'correction' && moderationState === 'published' ? randomUUID() : null;
+  if (debateArenaId !== null) metadata.debate_arena_id = debateArenaId;
   const inserted = await forum.contributions.insert(
     {
       contributionId,
@@ -883,6 +891,36 @@ export async function createContribution(
       contribution.path.length,
     ),
   );
+
+  // WS-T — open the debate arena for a published sourced correction (detached:
+  // the response never waits on it; fail-closed if the target vanished).
+  if (debateArenaId !== null) {
+    forum.trackBackground(
+      maybeEnterDebate(
+        {
+          debates: forum.debates,
+          contributions: forum.contributions,
+          storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
+          isSteward: async (roomId, uid) =>
+            (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
+          runJudge: forum.debateJudge,
+          now: forum.now,
+          log: forum.log,
+        },
+        {
+          contributionId: contribution.contributionId,
+          threadId: contribution.threadId,
+          storyId: thread.storyId,
+          roomId: thread.roomId,
+          userId,
+          body: contribution.body,
+          citations: contribution.citations,
+          metadata: contribution.metadata,
+        },
+        debateArenaId,
+      ),
+    );
+  }
 
   forum.metrics.increment(`contributions.created.${request.type}`);
   forum.log('forum.contribution_created', {
