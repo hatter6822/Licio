@@ -9,8 +9,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CommentFrame } from '../../forum/comment-broadcaster.js';
 import { serveFeed } from '../../ranking/service.js';
-import { CLUSTER_ROSTER, newcomerSpec } from '../personas.js';
-import { DevTrafficSimulator } from '../runtime.js';
+import { BASE_ROSTER, CLUSTER_ROSTER, newcomerSpec } from '../personas.js';
+import {
+  __resetSimStoryMetaForTest,
+  __simStoryMetaSizeForTest,
+  DevTrafficSimulator,
+} from '../runtime.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
 import { req } from './sim-test-util.js';
 
@@ -448,6 +452,65 @@ describe('DevTrafficSimulator runtime', () => {
     // createdAt is recent again (well after the staled value), so the fresh-
     // account anti-signal + coordinated-report paths still see it as new.
     expect(Date.parse(req(refreshed).createdAt)).toBeGreaterThan(Date.parse(staleIso));
+  });
+
+  it('a restricted synthetic account cannot post content (mirrors the write-route guard)', async () => {
+    const graph = await buildSimTestGraph();
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'steady',
+      seed: 'restrict',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    // A moderation experiment restricts every provisioned persona. The simulator
+    // calls submitStory/createContribution DIRECTLY (past the route middleware),
+    // so without the account-state guard a restricted account would still post.
+    for (const spec of BASE_ROSTER) {
+      await graph.identity.store.updateUser(spec.userId, { accountState: 'restricted' });
+    }
+    for (let i = 0; i < 12; i += 1) await sim.tick();
+    const after = sim.status();
+    // No content lands from barred accounts (other steady tests prove an ACTIVE
+    // roster does produce stories + comments, so 0 here is the guard biting).
+    expect(after.counters.stories_submitted).toBe(0);
+    expect(after.counters.comments_posted).toBe(0);
+  });
+
+  it('rebinds SIM_STORY_META for a duplicate kickoff on a fresh-process rerun', async () => {
+    const graph = await buildSimTestGraph();
+    const run1 = new DevTrafficSimulator({
+      graph,
+      scenario: 'breaking_news',
+      seed: 'meta',
+      speed: 20,
+      autoLoop: false,
+    });
+    await run1.start();
+    // Several ticks so run1's serial range covers run2's first-tick serials —
+    // every regenerated run2 story is then a duplicate, isolating the rebind.
+    for (let i = 0; i < 3; i += 1) await run1.tick();
+    run1.stop();
+    // Simulate a FRESH PROCESS: the durable store keeps the stories, but the
+    // in-memory SIM_STORY_META is empty.
+    __resetSimStoryMetaForTest();
+    expect(__simStoryMetaSizeForTest()).toBe(0);
+
+    const run2 = new DevTrafficSimulator({
+      graph,
+      scenario: 'breaking_news',
+      seed: 'meta',
+      speed: 20,
+      autoLoop: false,
+    });
+    await run2.start();
+    await run2.tick(); // the kickoff regenerates the SAME url → duplicate_story
+    run2.stop();
+    // On a same-seed rerun every regenerated story is a duplicate, so the ONLY
+    // way SIM_STORY_META gets repopulated is the duplicate-kickoff focus rebind —
+    // which restores the focus story's domain so the repost gate can still fire.
+    expect(__simStoryMetaSizeForTest()).toBeGreaterThanOrEqual(1);
   });
 
   it('a second same-seed run over a persistent store still produces NEW stories (no duplicate loop)', async () => {

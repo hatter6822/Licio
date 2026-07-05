@@ -178,6 +178,17 @@ interface SimStoryMeta {
 }
 const SIM_STORY_META = new Map<string, SimStoryMeta>();
 
+/** Test-only: SIM_STORY_META is a module-level map (it survives a
+ *  DevTrafficSimulator instance the way a durable DB survives a process). These
+ *  let a test simulate a FRESH PROCESS — an empty map over an existing store —
+ *  to exercise the duplicate-focus metadata rebind. Not used in production. */
+export function __resetSimStoryMetaForTest(): void {
+  SIM_STORY_META.clear();
+}
+export function __simStoryMetaSizeForTest(): number {
+  return SIM_STORY_META.size;
+}
+
 export class DevTrafficSimulator {
   readonly #graph: SimulatorServiceGraph;
   #prng: Prng;
@@ -565,6 +576,18 @@ export class DevTrafficSimulator {
     // several stories at once), so enforce the ceiling per-action too — authors
     // idle precisely once the budget is reached, never overshoot it.
     if (this.#storiesSubmitted >= this.#storyCap) return;
+    // Mirror the write routes' account-state gate the direct service call skips:
+    // a non-active (restricted/suspended/…) synthetic account cannot post.
+    if (!(await this.#accountMayPostContent(action.personaUserId))) {
+      this.#recordRejection(
+        'story',
+        action.personaUserId,
+        'account barred from posting',
+        'account_restricted',
+        403,
+      );
+      return;
+    }
     const request = this.#buildStoryRequest(action);
     if (request === null) {
       this.#counters.rejected_other += 1;
@@ -582,14 +605,7 @@ export class DevTrafficSimulator {
       this.#storiesSubmitted += 1;
       this.#storySerial += 1;
       this.#counters.stories_submitted += 1;
-      SIM_STORY_META.set(outcome.story.storyId, {
-        domain: this.#domainFromSlug(action.story.topicSlugs),
-        body: action.story.body,
-      });
-      if (SIM_STORY_META.size > 2000) {
-        const oldest = SIM_STORY_META.keys().next().value;
-        if (oldest !== undefined) SIM_STORY_META.delete(oldest);
-      }
+      this.#rememberStoryMeta(outcome.story.storyId, action.story);
       this.#touchedStories.add(outcome.story.storyId);
       // submitStory auto-joins the author to a public room (a real side effect).
       // Record it in the persona's joined set so the engine does not later
@@ -629,6 +645,11 @@ export class DevTrafficSimulator {
         if (action.isKickoff) {
           this.#kickoffDone = true;
           this.#focusStoryId = rejection.existingStoryId;
+          // The existing row is from a prior run, so SIM_STORY_META has no entry
+          // for it after a fresh process — repopulate from THIS action's (same-
+          // seed, regenerated) story so #buildWorld exposes a non-null domain and
+          // the breaking_news repost gate can still fire.
+          this.#rememberStoryMeta(rejection.existingStoryId, action.story);
         }
         if (action.isRepost) this.#repostDone = true;
       }
@@ -696,6 +717,17 @@ export class DevTrafficSimulator {
 
   async #executeComment(action: Extract<SimAction, { kind: 'comment' }>): Promise<void> {
     const { forum, ingestion, events, identity } = this.#graph;
+    // Mirror the contribution route's account-state gate the direct call skips.
+    if (!(await this.#accountMayPostContent(action.personaUserId))) {
+      this.#recordRejection(
+        'comment',
+        action.personaUserId,
+        'account barred from posting',
+        'account_restricted',
+        403,
+      );
+      return;
+    }
     const thread = await ingestion.stories.getThreadByStoryId(action.storyId);
     if (thread === null) {
       this.#counters.rejected_other += 1;
@@ -752,6 +784,17 @@ export class DevTrafficSimulator {
 
   async #executeEvidence(action: Extract<SimAction, { kind: 'evidence' }>): Promise<void> {
     const { forum, ingestion, events, identity } = this.#graph;
+    // Mirror the contribution route's account-state gate the direct call skips.
+    if (!(await this.#accountMayPostContent(action.personaUserId))) {
+      this.#recordRejection(
+        'comment',
+        action.personaUserId,
+        'account barred from posting',
+        'account_restricted',
+        403,
+      );
+      return;
+    }
     const thread = await ingestion.stories.getThreadByStoryId(action.storyId);
     if (thread === null) {
       this.#counters.rejected_other += 1;
@@ -1239,6 +1282,37 @@ export class DevTrafficSimulator {
     if (slug.includes('election') || slug.includes('democracy')) return 'elections';
     if (slug.includes('science') || slug.includes('research')) return 'science';
     return 'local';
+  }
+
+  /** Record the domain + body #buildWorld exposes for a story, evicting the
+   *  oldest entry past the cap. SIM_STORY_META is in-memory (not durable), so
+   *  this is repopulated both when a story is freshly submitted AND when a
+   *  duplicate collides with an existing row on a same-seed rerun — otherwise
+   *  #buildWorld would expose that focus story with a null domain and the
+   *  breaking_news repost gate (focusStory.domain !== null) would never fire. */
+  #rememberStoryMeta(
+    storyId: string,
+    story: { topicSlugs: readonly string[]; body: string },
+  ): void {
+    SIM_STORY_META.set(storyId, {
+      domain: this.#domainFromSlug(story.topicSlugs),
+      body: story.body,
+    });
+    if (SIM_STORY_META.size > 2000) {
+      const oldest = SIM_STORY_META.keys().next().value;
+      if (oldest !== undefined) SIM_STORY_META.delete(oldest);
+    }
+  }
+
+  /** Mirror the write routes' account-state gate: authMiddleware denies a
+   *  suspended/deleted/deactivated account outright, and requireUnrestricted
+   *  denies a `restricted` account's contributions — so only an ACTIVE account
+   *  may post content. The simulator calls the services DIRECTLY (bypassing the
+   *  route middleware), so a moderation/restriction experiment that leaves a
+   *  synthetic account non-active must not still produce content from it. */
+  async #accountMayPostContent(userId: string): Promise<boolean> {
+    const user = await this.#graph.identity.store.getUser(userId);
+    return user?.accountState === 'active';
   }
 
   status(): SimulatorStatus {
