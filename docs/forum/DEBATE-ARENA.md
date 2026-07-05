@@ -16,7 +16,10 @@ pay-to-rank neutrality firewall holds (`check:neutrality`).
 **Corrections target a comment or story and MUST be sourced.**
 `correctionCreateSchema` retargets from a claim to **exactly one** of a comment
 (`target_contribution_id`, same thread) or the story root (`target_story_id`),
-keeping the 1–5 mandatory-source floor.
+keeping the 1–5 mandatory-source floor.  The create guard refuses a correction
+against a target already `under_debate` or already adjudicated `incorrect`
+(`target_under_debate` / `target_already_incorrect`), so a direct API caller
+cannot open a second arena or re-litigate a settled outcome.
 
 **A sourced correction opens a live debate arena** (`debate_arenas`, migration
 `0056`; `apps/api/src/forum/debate.ts` + `debate-store.ts`):
@@ -41,7 +44,10 @@ softmax** over *content-structural* features only — independent-domain source
 count (weighted over raw link count, anti-gaming), link-safety pass rate, WS-F
 source reliability, evidence substance, direct rebuttal. There is **no**
 author/topic/viewpoint/wealth feature, so it cannot encode viewpoint preference
-(neutrality) and is not a member vote/tally (no-applause).
+(neutrality) and is not a member vote/tally (no-applause). The independence
+feature counts distinct **registrable domains** (eTLD+1 via `domainOf`, with a
+curated two-label public-suffix set), so a challenger cannot inflate it by citing
+sibling subdomains (`a.example.com`, `b.example.com`) of one domain.
 
 The *model* is probabilistic + neural; the *shell* is deterministic, auditable,
 verifiable: the weights are a **pinned, versioned artifact** (`DEBATE_JUDGE_WEIGHTS`),
@@ -57,13 +63,21 @@ governed room route adjudication through its own agent under its law-pack bounds
 
 ## Surfaces
 
-- **API:** `POST /v1/contributions` (a sourced correction opens the arena,
-  back-referencing `metadata.debate_arena_id`); `GET /v1/debates/:id`,
-  `POST /v1/debates/:id/position` (12h window), `POST /v1/debates/:id/override`
+- **API:** `POST /v1/contributions` (a sourced correction opens the arena
+  SYNCHRONOUSLY — `maybeEnterDebate` is awaited, so `metadata.debate_arena_id` is
+  set on the response ONLY when the arena actually opened and always resolves, no
+  navigate-to-404 race); `GET /v1/debates/:id` + `GET /v1/debates/:id/stream`
+  (both **thread-readability-gated** — knowing a debate id never reveals a
+  restricted-room conversation, 404-over-403); `POST /v1/debates/:id/position`
+  (12h window; the store update is `state = 'open'`-guarded so a write racing the
+  judge tick can't mutate a judged arena); `POST /v1/debates/:id/override`
   (steward, 24h window).
 - **Web:** source capture + render + a "Sourced" badge on comments
-  (`CommentParts`/`CommentNode`); the "Correct" action → `CorrectionComposer`;
-  the `/stories/$storyId/debate/$debateId` arena (`components/debate/DebateArena`)
+  (`CommentParts`/`CommentNode`).  Source/citation links render through
+  `SafeExternalLink` (the WS-G.4.2c drainer-blocklist + interstitial check, the
+  same posture as in-body links).  The "Correct" action → `CorrectionComposer`;
+  a "View debate" link on `under_debate` comments; the
+  `/stories/$storyId/debate/$debateId` arena (`components/debate/DebateArena`)
   with co-visible positions, countdowns, the verdict banner, and the steward
   override; "Under debate" / "Incorrect" dispute tags.
 
@@ -80,16 +94,30 @@ platform legal floor).
 
 - Comment projections carry `active_debate_id` (from the debate store's
   `activeDebateIdsForContributions`), so a comment `under_debate` links straight
-  to its arena; the story-comments `overview` reports `debates_count` +
+  to its arena — the `CommentNode` action row renders a **"View debate"** link so
+  the incumbent author (and everyone else) can reach it to post their 12-hour
+  position; the story-comments `overview` reports `debates_count` +
   `incorrect_count`.
+- The **"Sources" view is every SOURCED root** — an `evidence` card OR a comment
+  carrying ≥1 citation (the exact predicate the "Sourced" badge uses), not just
+  the `evidence` type — via the store's `sourced` predicate (`listRoots` +
+  `countSourced`, in-memory + Drizzle); `overview.sources_count` counts the same
+  set.
 - `incorrect` comments SINK to the bottom of their section — a composite keyset
   `(sink, created_at, id)` that holds across pagination, both orderings, and
   recursively among children (in-memory + Drizzle; the `(thread, dispute_status,
   created)` index supports the ORDER BY).  No wire-format change: the cursor is
   the contribution id and the sink is derived at lookup.
-- A `corrected` STORY sinks in the ranking feed via an always-enforced
-  `dispute_penalty` term (a content-derived, uniform, non-financial signal —
-  `check:neutrality` green); `finalizeDebate` sets the story's `dispute_status`.
+- A `corrected` STORY sinks in the ranking feed.  The `dispute_penalty` is
+  RECORDED as an always-enforced decision-log term, but the guaranteed bottom-out
+  is an **ordering-level sink** (`disputeOrderingSink`, subtracted OUTSIDE the
+  SCOI distribution multiplier and exceeding the whole non-sink score span), so a
+  corrected story with strong baseline/participation still sorts strictly below
+  every non-disputed story — the feed analogue of the comment sink (a
+  content-derived, uniform, non-financial signal — `check:neutrality` green).
+  `finalizeDebate` sets the story's `dispute_status` AND refreshes its ranking
+  feature vector (`refreshStoryFeaturesBestEffort`) so the penalty applies
+  immediately, not only on the next unrelated invariant event / hourly batch.
 - Live co-visibility is push-based: a `DebateBroadcaster` fans out the observer
   arena projection over `GET /v1/debates/:id/stream` (SSE), and the web
   `useDebateStream` nudges an immediate role-scoped refetch on each frame (the 5s

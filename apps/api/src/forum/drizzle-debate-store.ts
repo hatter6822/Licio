@@ -181,14 +181,18 @@ export class DrizzleDebateStore implements DebateStore {
     position: DebateSidePosition,
   ): Promise<DebateArenaRecord | null> {
     // jsonb_set ONLY the edited side, so it can never clobber the other side's
-    // concurrent draft (co-visible editing is concurrent by design).
+    // concurrent draft (co-visible editing is concurrent by design).  The
+    // `state = 'open'` guard makes the write ATOMIC against the scheduler: if the
+    // lifecycle tick judged the arena between `postDebatePosition`'s pre-read and
+    // this write, no row matches and the stale position is dropped (never mutating
+    // an already-judged arena's positions out from under its recorded verdict).
     const rows = await this.#db
       .update(debateArenasTable)
       .set({
         positions: sql`jsonb_set(${debateArenasTable.positions}, ${`{${side}}`}, ${JSON.stringify(position)}::jsonb, true)`,
         updatedAt: new Date(),
       })
-      .where(eq(debateArenasTable.debateId, debateId))
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'open')))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }

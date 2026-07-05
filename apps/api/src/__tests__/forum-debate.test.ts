@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   type DebateDeps,
   type DebateJudgeRunner,
+  domainOf,
   finalizeDebate,
   judgeDebateArena,
   maybeEnterDebate,
@@ -436,5 +437,92 @@ describe('WS-T debate arena lifecycle', () => {
     expect(asSteward.viewer_role).toBe('steward');
     const asObserver = await toDebateArenaPublic(arena, randomUUID(), resolveAuthor, false);
     expect(asObserver.viewer_role).toBe('observer');
+  });
+
+  it('drops a position write that races the judge tick (state-guarded update)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // The scheduler judges the arena (state → judged) BEFORE the racing write.
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    await judgeDebateArena(deps, debateId);
+    // A direct store write can no longer mutate the now-judged arena's positions.
+    const stale = await debates.updatePosition(debateId, 'incumbent', {
+      summary: 'A stale edit that raced the verdict.',
+      citations: [citation],
+      updatedAt: new Date(clock.ms).toISOString(),
+    });
+    expect(stale).toBeNull();
+    const arena = await debates.getById(debateId);
+    expect(arena?.positions.incumbent.summary).toBe(''); // never overwritten
+  });
+});
+
+describe('WS-T domainOf — registrable-domain extraction (anti-gaming)', () => {
+  it('collapses sibling subdomains to ONE registrable domain', () => {
+    expect(domainOf('https://a.example.com/path')).toBe('example.com');
+    expect(domainOf('https://b.example.com')).toBe('example.com');
+    expect(domainOf('https://example.com')).toBe('example.com');
+    expect(domainOf('https://www.example.com')).toBe('example.com');
+    expect(domainOf('https://deep.nested.example.com')).toBe('example.com');
+  });
+
+  it('honours common two-label public suffixes (eTLD+1)', () => {
+    expect(domainOf('https://sub.example.co.uk')).toBe('example.co.uk');
+    expect(domainOf('https://example.co.uk')).toBe('example.co.uk');
+    expect(domainOf('https://news.bbc.co.uk/x')).toBe('bbc.co.uk');
+    expect(domainOf('https://a.b.example.com.au')).toBe('example.com.au');
+  });
+
+  it('returns null for a non-http(s) or opaque URL', () => {
+    expect(domainOf('doi:10.1000/xyz')).toBeNull();
+    expect(domainOf('mailto:x@y.com')).toBeNull();
+    expect(domainOf('not a url')).toBeNull();
+  });
+});
+
+describe('WS-T sourced roots — filter + count include sourced comments', () => {
+  async function seedTyped(
+    type: 'comment' | 'evidence' | 'correction',
+    citations: { url: string }[],
+  ): Promise<string> {
+    const id = randomUUID();
+    await contributions.insert({
+      contributionId: id,
+      threadId: THREAD,
+      userId: INCUMBENT,
+      type,
+      body: `${type} body`,
+      citations,
+      metadata: type === 'correction' ? { target_story_id: STORY } : type === 'evidence' ? {} : {},
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: `draft-${id}`,
+      path: [],
+      moderationState: 'published',
+    });
+    return id;
+  }
+
+  it('the "Sources" view is evidence OR a comment carrying ≥1 citation', async () => {
+    await seedTyped('comment', []); // plain comment — NOT sourced
+    const sourcedComment = await seedTyped('comment', [citation]); // sourced comment
+    const evidence = await seedTyped('evidence', [citation]); // evidence — sourced
+    await seedTyped('correction', [citation]); // correction — its own tab, NOT here
+
+    const sourced = await contributions.listRoots(THREAD, {
+      sourced: true,
+      states: ['published'],
+      limit: 10,
+      order: 'oldest',
+    });
+    expect(new Set(sourced.map((r) => r.contributionId))).toEqual(
+      new Set([sourcedComment, evidence]),
+    );
+    expect(await contributions.countSourced(THREAD, ['published'])).toBe(2);
   });
 });

@@ -105,6 +105,11 @@ function uniqueViolationConstraint(error: unknown): string {
 // sort AFTER everything else so a debate's loser stays visible-but-sunk.
 const SINK_EXPR = sql`(case when ${contributionsTable.disputeStatus} = 'incorrect' then 1 else 0 end)`;
 
+// WS-T: a SOURCED root — an `evidence` card OR a comment carrying ≥1 citation
+// (the "Sources" view is more than the `evidence` type).  Mirrors `isSourcedRow`
+// in the in-memory adapter exactly.
+const SOURCED_EXPR = sql`(${contributionsTable.type} = 'evidence' or (${contributionsTable.type} = 'comment' and coalesce(jsonb_array_length(${contributionsTable.citations}), 0) > 0))`;
+
 /** Composite keyset over (sink, created_at, id): rows strictly after `after`.
  *  Mixed directions (sink asc, chronological per order) can't be a single
  *  row-value tuple, so the cursor decomposes into sink-then-chronological. */
@@ -302,6 +307,7 @@ export class DrizzleContributionStore implements ContributionStore {
     opts: {
       types?: readonly ContributionType[];
       states?: readonly ContributionModerationState[];
+      sourced?: boolean;
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
@@ -313,6 +319,7 @@ export class DrizzleContributionStore implements ContributionStore {
     ];
     if (opts.types) conditions.push(inArray(contributionsTable.type, [...opts.types]));
     if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
+    if (opts.sourced === true) conditions.push(SOURCED_EXPR);
     // WS-T: `incorrect` roots sink to the bottom of the section — the composite
     // keyset is (sink, created_at, id); the (thread, dispute_status, created) index
     // supports it.  Mixed directions (sink asc, chronological per order) cannot be
@@ -377,6 +384,23 @@ export class DrizzleContributionStore implements ContributionStore {
         and(
           eq(contributionsTable.threadId, threadId),
           eq(contributionsTable.disputeStatus, status),
+        ),
+      );
+    return rows[0]?.value ?? 0;
+  }
+
+  async countSourced(
+    threadId: string,
+    states: readonly ContributionModerationState[],
+  ): Promise<number> {
+    const rows = await this.#db
+      .select({ value: count() })
+      .from(contributionsTable)
+      .where(
+        and(
+          eq(contributionsTable.threadId, threadId),
+          inArray(contributionsTable.moderationState, [...states]),
+          SOURCED_EXPR,
         ),
       );
     return rows[0]?.value ?? 0;

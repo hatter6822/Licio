@@ -57,12 +57,18 @@ export interface CommentPageResult {
   rootFound: boolean;
 }
 
-function filterTypes(
-  filter: CommentFilter | undefined,
-): readonly ('evidence' | 'correction')[] | undefined {
-  if (filter === 'sources') return ['evidence'];
-  if (filter === 'corrections') return ['correction'];
-  return undefined;
+/**
+ * Map a section filter to `listRoots` options.  The "Sources" view is NOT just
+ * the `evidence` type — it is every SOURCED root (an evidence card OR a comment
+ * carrying ≥1 citation), matching the client's "Sourced" badge; the store's
+ * `sourced` predicate expresses that.  "Corrections" stays a plain type filter. */
+function rootFilterOptions(filter: CommentFilter | undefined): {
+  types?: readonly ('evidence' | 'correction')[];
+  sourced?: boolean;
+} {
+  if (filter === 'sources') return { sourced: true };
+  if (filter === 'corrections') return { types: ['correction'] };
+  return {};
 }
 
 export function commentMediaOf(
@@ -285,7 +291,7 @@ export async function commentPage(
     anchorRecord = record;
   }
 
-  const types = filterTypes(opts.filter);
+  const rootFilter = rootFilterOptions(opts.filter);
   const rootRecords = anchorRecord
     ? await bundle.forum.contributions.listChildren(anchorRecord.contributionId, {
         states: RENDERABLE_STATES,
@@ -294,7 +300,7 @@ export async function commentPage(
         order: opts.order,
       })
     : await bundle.forum.contributions.listRoots(threadId, {
-        ...(types !== undefined ? { types } : {}),
+        ...rootFilter,
         states: RENDERABLE_STATES,
         after,
         limit: pageSize + 1,

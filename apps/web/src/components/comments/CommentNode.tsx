@@ -125,6 +125,19 @@ export function CommentNode({
             Correct
           </button>
         ) : null}
+        {/* An open arena is challenging this comment: anyone — especially the
+            incumbent author returning to post their 12-hour position — reaches it
+            here (the `Correct` button is disabled while under debate). */}
+        {comment.active_debate_id ? (
+          <Link
+            to="/stories/$storyId/debate/$debateId"
+            params={{ storyId, debateId: comment.active_debate_id }}
+            className={commentActionClass}
+          >
+            <Icon name="chevron-right" className="size-3.5" aria-hidden />
+            View debate
+          </Link>
+        ) : null}
         {!canNestDeeper && replyCount > 0 ? (
           <ContinueThreadLink
             storyId={storyId}

@@ -179,6 +179,31 @@ describe('CommentSection', () => {
     expect(correctButtons.length).toBeGreaterThan(0);
   });
 
+  it('WS-T — an under-debate comment links to its live arena', () => {
+    const debateId = '88888888-8888-4888-8888-888888888888';
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            body: 'This claim is being challenged.',
+            dispute_status: 'under_debate',
+            active_debate_id: debateId,
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+    renderSection();
+    // Anyone — especially the incumbent author — reaches the arena to post their
+    // 12-hour position, even though the `Correct` button is disabled here.
+    const link = screen.getByRole('link', { name: /view debate/i });
+    expect(link).toHaveAttribute('href', `/stories/${storyId}/debate/${debateId}`);
+    expect(screen.getByRole('button', { name: 'Correct' })).toBeDisabled();
+  });
+
   it('renders loading, error, and empty states without applause affordances', () => {
     queryState = { isLoading: true };
     const { rerender } = renderSection();

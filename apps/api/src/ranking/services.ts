@@ -452,6 +452,22 @@ export async function refreshStoryFeatures(
   await refreshFeatures(featureAssemblyDeps(services), storyId);
 }
 
+/**
+ * WS-T — refresh a story's ranking feature vector by id, resolving the ranking
+ * singleton internally.  Used when a debate changes a story's `dispute_status`
+ * (`finalizeDebate`) so the feed's `dispute_penalty` applies IMMEDIATELY rather
+ * than waiting for the next unrelated invariant/integrity event or the hourly
+ * batch.  Best-effort: if ranking is not booted (dev/test) or the write races,
+ * the caller (a debate transition) must still commit — the batch reconciles.
+ */
+export async function refreshStoryFeaturesBestEffort(storyId: string): Promise<void> {
+  try {
+    await refreshStoryFeatures(getRankingServices(), storyId);
+  } catch {
+    // Ranking not initialized or a transient failure; the hourly batch catches up.
+  }
+}
+
 // --- Module singleton (house pattern) ---------------------------------------
 
 let _services: RankingServices | undefined;

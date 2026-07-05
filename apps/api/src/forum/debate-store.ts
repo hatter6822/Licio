@@ -203,6 +203,10 @@ export class InMemoryDebateStore implements DebateStore {
   ): Promise<DebateArenaRecord | null> {
     const row = this.#rows.get(debateId);
     if (!row) return null;
+    // Mirror the Drizzle adapter's atomic `state = 'open'` guard: a position may
+    // only be written while the arena is still open, so a write that races the
+    // judge tick can never mutate an already-judged arena's positions.
+    if (row.state !== 'open') return null;
     row.positions[side] = { ...position, citations: [...position.citations] };
     row.updatedAt = this.#iso();
     return row;

@@ -16,6 +16,7 @@
 import { renderUGC } from '@licio/shared';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { checkLinkSafety } from '../../lib/link-safety.js';
+import { openExternal } from '../../lib/open-external.js';
 import { LinkInterstitial } from './LinkInterstitial.js';
 
 export interface UgcBodyProps {
@@ -23,26 +24,6 @@ export interface UgcBodyProps {
   markdown: string;
   /** Compact typography for nested/inline contexts. */
   compact?: boolean;
-}
-
-/**
- * Open an external destination in a new tab with the opener severed.  The
- * `noopener` FEATURE STRING is deliberately not used: per spec it makes
- * `window.open` return null even on success, which would make popup
- * blocking undetectable — instead the opener is nulled on the returned
- * proxy (the same security property), and an actual block (null return)
- * falls back to the caller (the interstitial offers a fresh user gesture
- * instead of failing silently).
- */
-function openExternal(href: string, onBlocked: () => void): void {
-  const opened = window.open(href, '_blank');
-  // Falsy (not just null) covers environments whose open() returns
-  // undefined — jsdom, some embedders — as well as spec-compliant blocking.
-  if (!opened) {
-    onBlocked();
-    return;
-  }
-  opened.opener = null;
 }
 
 export function UgcBody({ markdown, compact = false }: UgcBodyProps): React.ReactElement {

@@ -45,6 +45,13 @@ export function buildDebateSchedulerDeps(): DebateDeps {
     isSteward: async (roomId, uid) => (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
     setStoryDispute: async (sid, status) => {
       await ingestion.stories.update(sid, { disputeStatus: status });
+      // WS-T — when `finalizeDebate` tags a story `incorrect` (or clears it), the
+      // feed's `dispute_penalty` reads the STORED ranking feature vector, which is
+      // otherwise only refreshed on an invariant/integrity event or the hourly
+      // batch.  Refresh it now so the demotion takes effect immediately (lazy
+      // import avoids a static forum→ranking module cycle).
+      const ranking = await import('../ranking/services.js');
+      await ranking.refreshStoryFeaturesBestEffort(sid);
     },
     runJudge: buildDebateJudgeRunner(forum.now),
     broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),

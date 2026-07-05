@@ -22,6 +22,7 @@ import {
 import {
   computePenalties,
   coordinationInput,
+  disputeOrderingSink,
   harmfulTensionInput,
   MFCI_RISK_PENALTY,
   SHADOW_ENFORCEMENT,
@@ -30,6 +31,26 @@ import { computePositiveScore } from '../scoring/pwatt.js';
 import { makeFeatures, PROFILE } from './fixtures.js';
 
 const FULL_ENFORCEMENT = { mfci: true, phi: true, hodge: true, meri: true, tropical: true };
+
+describe('WS-T disputeOrderingSink', () => {
+  it('is 0 for a non-disputed item (absent or zero signal)', () => {
+    expect(disputeOrderingSink({}, PROFILE)).toBe(0);
+    expect(disputeOrderingSink({ dispute_penalty: 0 }, PROFILE)).toBe(0);
+  });
+
+  it('dominates the whole non-sink score span for a disputed item', () => {
+    const sink = disputeOrderingSink({ dispute_penalty: 1 }, PROFILE);
+    // Max positive is 2 (baseline ≤ 1 + convex ≤ 1); the sink must exceed the
+    // full span (positive + every penalty coefficient) so it always bottoms out.
+    const { pM, pT, pR, pD } = PROFILE.penalties;
+    expect(sink).toBeGreaterThan(2 + pM + pT + pR + (pD ?? 1));
+  });
+
+  it('falls back to pD = 1 when the profile omits the dispute coefficient', () => {
+    const noPd = { ...PROFILE, penalties: { pM: 1, pT: 0.75, pR: 0.5 } };
+    expect(disputeOrderingSink({ dispute_penalty: 1 }, noPd)).toBe(2 + 1 + 0.75 + 0.5 + 1 + 1);
+  });
+});
 
 describe('WS-I.2.3d baseline', () => {
   it('freshness decays exponentially with the half-life', () => {

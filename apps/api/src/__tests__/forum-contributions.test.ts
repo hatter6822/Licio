@@ -7,9 +7,16 @@
 // stored-XSS persistence half (bodies stored VERBATIM; render-time
 // sanitization is proven in @licio/shared's XSS suite against the same
 // stored value).
-import { type ContributionPublic, contributionPublicSchema } from '@licio/shared';
+import { randomUUID } from 'node:crypto';
+import {
+  type ContributionPublic,
+  contributionPublicSchema,
+  DEBATE_EDIT_WINDOW_MS,
+  DEBATE_OVERRIDE_WINDOW_MS,
+} from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { runDebateSchedulerTick } from '../forum/debate-scheduler.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   contributionBody,
@@ -114,6 +121,137 @@ describe('WS-T.3.2 — comment-first write surface', () => {
     const stored = await fixture.forum.contributions.getById(created.contribution_id);
     expect(stored?.body).toBe(hostile);
     expect(created.body).toBe(hostile); // the wire carries raw markdown too
+  });
+});
+
+describe('WS-T — a sourced correction opens the arena + refuses a disputed target', () => {
+  async function errorCode(res: Response): Promise<string> {
+    return ((await res.json()) as { error: { code: string } }).error.code;
+  }
+
+  it('opens the arena SYNCHRONOUSLY and back-references a resolvable id', async () => {
+    const comment = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    // #2 — the id is on the response and the arena EXISTS before it returned
+    // (the client can navigate straight to it without a 404 race).
+    const debateId = correction.metadata.debate_arena_id;
+    expect(debateId).toBeDefined();
+    const arena = await fixture.forum.debates.getById(debateId ?? '');
+    expect(arena).not.toBeNull();
+    expect(arena?.targetContributionId).toBe(comment.contribution_id);
+    const target = await fixture.forum.contributions.getById(comment.contribution_id);
+    expect(target?.disputeStatus).toBe('under_debate');
+  });
+
+  it('refuses a second correction against a comment already under debate (422)', async () => {
+    const comment = await createOk(contributionBody('comment', threadId));
+    await createOk(contributionBody('correction', threadId, { targetId: comment.contribution_id }));
+    const res = await create(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    expect(res.status).toBe(422);
+    expect(await errorCode(res)).toBe('target_under_debate');
+  });
+
+  it('refuses a correction against a comment already found incorrect (422)', async () => {
+    const comment = await createOk(contributionBody('comment', threadId));
+    await fixture.forum.contributions.setDisputeStatus(comment.contribution_id, 'incorrect');
+    const res = await create(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    expect(res.status).toBe(422);
+    expect(await errorCode(res)).toBe('target_already_incorrect');
+  });
+
+  it('refuses a story correction when the story is already under debate (422)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    await fixture.ingestion.stories.update(storyId, { disputeStatus: 'under_debate' });
+    const res = await create(contributionBody('correction', threadId, { storyId }));
+    expect(res.status).toBe(422);
+    expect(await errorCode(res)).toBe('target_under_debate');
+  });
+
+  it('the Sources view + count include sourced comments, not just evidence', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    await createOk(contributionBody('comment', threadId)); // plain — NOT sourced
+    const sourced = await createOk({
+      ...contributionBody('comment', threadId),
+      citations: [{ url: 'https://example.org/s' }],
+    });
+    const evidence = await createOk(contributionBody('evidence', threadId, { claimId }));
+
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=sources`, {
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      comments: { contribution_id: string }[];
+      overview: { sources_count: number };
+    };
+    const ids = new Set(body.comments.map((c) => c.contribution_id));
+    expect(ids.has(sourced.contribution_id)).toBe(true);
+    expect(ids.has(evidence.contribution_id)).toBe(true);
+    expect(body.overview.sources_count).toBe(2); // sourced comment + evidence
+    // The corrections filter path also resolves.
+    const corr = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections`, {
+        headers: { cookie },
+      }),
+    );
+    expect(corr.status).toBe(200);
+  });
+
+  it('a story correction opens a story arena, marks the story under_debate, and reads back', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    const debateId = correction.metadata.debate_arena_id;
+    expect(debateId).toBeDefined();
+    // The story is marked under_debate (its feed feature is refreshed too).
+    const story = await fixture.ingestion.stories.getById(storyId);
+    expect(story?.disputeStatus).toBe('under_debate');
+    // The arena is READABLE via the thread-readability-gated GET (authed user).
+    const ok = await app().request(
+      new Request(`http://local/v1/debates/${debateId}`, { headers: { cookie } }),
+    );
+    expect(ok.status).toBe(200);
+    const body = (await ok.json()) as { debate: { target_type: string; story_id: string } };
+    expect(body.debate.target_type).toBe('story');
+    expect(body.debate.story_id).toBe(storyId);
+    // An unknown debate id 404s.
+    const missing = await app().request(
+      new Request(`http://local/v1/debates/${randomUUID()}`, { headers: { cookie } }),
+    );
+    expect(missing.status).toBe(404);
+  });
+
+  it('the debate scheduler judges + finalizes a story arena past its deadlines', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    const rethrow = (err: unknown): never => {
+      throw err;
+    };
+
+    // Past the 12h edit window: the tick judges (fail-closed inconclusive — no AI
+    // governance is booted in this fixture, so the runner returns null).
+    nowMs += DEBATE_EDIT_WINDOW_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+
+    // Past the 24h override window: the tick finalizes and refreshes the story's
+    // ranking feature; an inconclusive verdict clears the story dispute to none.
+    nowMs += DEBATE_OVERRIDE_WINDOW_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('resolved');
+    expect((await fixture.ingestion.stories.getById(storyId))?.disputeStatus).toBe('none');
   });
 });
 

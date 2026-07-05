@@ -488,8 +488,9 @@ export function createForumRoutes() {
           if (!story || !thread) return c.json(notFound, 404);
           if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const resolveAuthor = makeAuthorResolver(identity);
-          const [counts, debatesCount, incorrectCount] = await Promise.all([
+          const [counts, sourcesCount, debatesCount, incorrectCount] = await Promise.all([
             bundle.forum.contributions.countByType(thread.threadId, ['published']),
+            bundle.forum.contributions.countSourced(thread.threadId, ['published']),
             bundle.forum.debates.countActiveForStory(storyId),
             bundle.forum.contributions.countByDisputeStatus(thread.threadId, 'incorrect'),
           ]);
@@ -519,7 +520,7 @@ export function createForumRoutes() {
               next_cursor: page.nextCursor,
               overview: {
                 comment_count: Object.values(counts).reduce((sum, value) => sum + (value ?? 0), 0),
-                sources_count: counts.evidence ?? 0,
+                sources_count: sourcesCount,
                 corrections_count: counts.correction ?? 0,
                 debates_count: debatesCount,
                 incorrect_count: incorrectCount,
@@ -1372,6 +1373,14 @@ export function createForumRoutes() {
           const { debateId } = c.req.valid('param');
           const arena = await bundle.forum.debates.getById(debateId);
           if (arena === null) return c.json(notFound, 404);
+          // WS-T — a debate exposes the full arena (both sides' positions + their
+          // sources).  Gate it behind the SAME thread-readability check the
+          // comment reads use, so knowing a debate id does not reveal a
+          // restricted-room conversation to a non-member (404-over-403).
+          const thread = await bundle.ingestion.stories.getThreadByStoryId(arena.storyId);
+          if (!thread || !(await threadReadableToUser(bundle, thread, auth.userId))) {
+            return c.json(notFound, 404);
+          }
           const identity = getIdentityServices();
           const isSteward =
             arena.roomId !== null &&
@@ -1401,6 +1410,12 @@ export function createForumRoutes() {
           const { debateId } = c.req.valid('param');
           const current = await bundle.forum.debates.getById(debateId);
           if (current === null) return c.json(notFound, 404);
+          // WS-T — the live stream carries the same full-arena projection, so it
+          // is gated on thread readability exactly like the one-shot read above.
+          const streamThread = await bundle.ingestion.stories.getThreadByStoryId(current.storyId);
+          if (!streamThread || !(await threadReadableToUser(bundle, streamThread, auth.userId))) {
+            return c.json(notFound, 404);
+          }
           const observer = async () => {
             const arena = await bundle.forum.debates.getById(debateId);
             return arena ? toDebateArenaPublic(arena, null, async () => null, false) : null;

@@ -17,6 +17,7 @@ import { useCreateCommentMutation } from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { relativeTimeShort } from '../../lib/time.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
+import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { Button } from '../ui/Button/index.js';
 import { Icon } from '../ui/Icon/index.js';
 
@@ -86,14 +87,12 @@ export function CommentSources({
       {comment.citations.map((citation) => (
         <li key={citation.url} className="flex items-start gap-1.5 text-sm">
           <Icon name="quote" className="mt-0.5 size-3.5 shrink-0 text-ink-muted" aria-hidden />
-          <a
+          <SafeExternalLink
             href={citation.url}
-            target="_blank"
-            rel="noreferrer nofollow"
             className="break-all font-medium text-primary-on-soft underline hover:no-underline"
           >
             {citation.title ?? citation.url}
-          </a>
+          </SafeExternalLink>
         </li>
       ))}
     </ul>

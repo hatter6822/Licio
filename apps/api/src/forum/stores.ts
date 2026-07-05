@@ -248,6 +248,10 @@ export interface ContributionStore {
     opts: {
       types?: readonly ContributionType[];
       states?: readonly ContributionModerationState[];
+      /** WS-T — restrict to SOURCED roots (an `evidence` card, or a comment that
+       *  carries ≥1 citation): the "Sources" view, which is more than just the
+       *  `evidence` type. */
+      sourced?: boolean;
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
@@ -279,6 +283,9 @@ export interface ContributionStore {
   ): Promise<Partial<Record<ContributionType, number>>>;
   /** WS-T — count a thread's contributions in the given dispute status. */
   countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number>;
+  /** WS-T — count a thread's SOURCED contributions (evidence cards + comments
+   *  carrying ≥1 citation) in the given states — the "Sources" overview count. */
+  countSourced(threadId: string, states: readonly ContributionModerationState[]): Promise<number>;
   /** Child counts for the given parents (published children only). */
   childCounts(contributionIds: readonly string[]): Promise<Map<string, number>>;
   /** Update body/citations/metadata, snapshotting the previous values into
@@ -508,6 +515,15 @@ function disputeSinkOf(record: { disputeStatus: ContributionDisputeStatus }): 0 
 }
 
 /**
+ * WS-T — a row belongs to the "Sources" view when it is an `evidence` card OR a
+ * comment carrying at least one citation (the exact predicate the client's
+ * "Sourced" badge uses).  A sourced comment is first-class source participation,
+ * not just the dedicated `evidence` type. */
+function isSourcedRow(record: Pick<ContributionRecord, 'type' | 'citations'>): boolean {
+  return record.type === 'evidence' || (record.type === 'comment' && record.citations.length > 0);
+}
+
+/**
  * Section ordering: `incorrect` rows ALWAYS after non-incorrect ones, then the
  * chosen chronological direction WITHIN each sink group (newest → descending,
  * oldest/default → ascending).  Keeps a debate's loser visible-but-sunk.
@@ -655,6 +671,7 @@ export class InMemoryContributionStore implements ContributionStore {
     opts: {
       types?: readonly ContributionType[];
       states?: readonly ContributionModerationState[];
+      sourced?: boolean;
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
@@ -669,6 +686,7 @@ export class InMemoryContributionStore implements ContributionStore {
           row.parentContributionId === null &&
           (types === null || types.has(row.type)) &&
           (states === null || states.has(row.moderationState)) &&
+          (opts.sourced !== true || isSourcedRow(row)) &&
           (!opts.after || afterSinkCursor(row, opts.after, opts.order)),
       )
       // `incorrect` roots sink to the bottom (WS-T), then chronological per order.
@@ -716,6 +734,20 @@ export class InMemoryContributionStore implements ContributionStore {
     let count = 0;
     for (const row of this.#rows.values()) {
       if (row.threadId === threadId && row.disputeStatus === status) count += 1;
+    }
+    return count;
+  }
+
+  async countSourced(
+    threadId: string,
+    states: readonly ContributionModerationState[],
+  ): Promise<number> {
+    const wanted = new Set(states);
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.threadId === threadId && wanted.has(row.moderationState) && isSourcedRow(row)) {
+        count += 1;
+      }
     }
     return count;
   }

@@ -374,12 +374,51 @@ function sideOf(arena: DebateArenaRecord, userId: string): 'incumbent' | 'challe
   return null;
 }
 
-/** Extract the registrable-ish domain from a citation URL (null for doi:/opaque). */
+/**
+ * A curated set of common two-label public suffixes (`example.co.uk` →
+ * registrable `example.co.uk`, not `co.uk`).  This is a deliberately BOUNDED
+ * heuristic, not the full Mozilla Public Suffix List (which would be a large
+ * versioned dependency): it covers the widely-abused registry suffixes so the
+ * judge's independent-source count cannot be trivially inflated with sibling
+ * subdomains.  An unknown multi-label suffix falls back to last-two-labels — a
+ * conservative default that treats sibling subdomains as ONE registrable domain
+ * (never over-counting), the property the anti-gaming feature needs.
+ */
+const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set(
+  (
+    'co.uk org.uk gov.uk ac.uk me.uk net.uk sch.uk ltd.uk plc.uk ' +
+    'com.au net.au org.au edu.au gov.au id.au ' +
+    'co.nz net.nz org.nz govt.nz ac.nz ' +
+    'co.jp or.jp ne.jp go.jp ac.jp co.kr or.kr go.kr ' +
+    'co.in net.in org.in gen.in firm.in gov.in ac.in ' +
+    'com.br net.br org.br gov.br edu.br com.cn net.cn org.cn gov.cn edu.cn ' +
+    'co.za org.za gov.za net.za ac.za com.mx org.mx gob.mx edu.mx ' +
+    'com.sg edu.sg gov.sg org.sg com.hk org.hk gov.hk edu.hk ' +
+    'com.tr gov.tr org.tr edu.tr com.ar gob.ar org.ar edu.ar ' +
+    'co.il org.il gov.il ac.il com.tw org.tw gov.tw edu.tw ' +
+    'com.ua gov.ua org.ua com.ph gov.ph edu.ph com.my gov.my org.my edu.my'
+  ).split(' '),
+);
+
+/**
+ * Extract the REGISTRABLE domain (eTLD+1) from a citation URL (null for
+ * doi:/opaque).  `a.example.com`, `b.example.com`, and `example.com` all resolve
+ * to `example.com` — so a challenger cannot inflate the judge's distinct-source
+ * feature by citing sibling subdomains of one registrable domain.
+ */
 export function domainOf(url: string): string | null {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-    return parsed.hostname.replace(/^www\./, '').toLowerCase();
+    const host = parsed.hostname.replace(/\.$/, '').toLowerCase();
+    if (host.length === 0) return null;
+    const labels = host.split('.');
+    if (labels.length <= 2) return host;
+    const lastTwo = labels.slice(-2).join('.');
+    // A known two-label registry suffix means the registrable domain is the
+    // last THREE labels (`example` + `co.uk`); otherwise it is the last two.
+    const take = TWO_LABEL_PUBLIC_SUFFIXES.has(lastTwo) ? 3 : 2;
+    return labels.slice(-take).join('.');
   } catch {
     return null;
   }

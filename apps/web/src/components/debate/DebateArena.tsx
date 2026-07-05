@@ -22,6 +22,7 @@ import {
 } from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
+import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { UgcBody } from '../ugc/UgcBody.js';
 import { Button } from '../ui/Button/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
@@ -190,14 +191,12 @@ function PositionCard({
                     className="mt-0.5 size-3.5 shrink-0 text-ink-muted"
                     aria-hidden
                   />
-                  <a
+                  <SafeExternalLink
                     href={c.url}
-                    target="_blank"
-                    rel="noreferrer nofollow"
                     className="break-all font-medium text-primary-on-soft underline hover:no-underline"
                   >
                     {c.title ?? c.url}
-                  </a>
+                  </SafeExternalLink>
                 </li>
               ))}
             </ul>
