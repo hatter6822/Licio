@@ -21,6 +21,8 @@ export const queryKeys = {
   thread: (threadId: string) => ['thread', threadId] as const,
   /** WS-T debate arena. */
   debate: (debateId: string) => ['debate', debateId] as const,
+  /** WS-T story-level active-debate discovery list. */
+  storyDebates: (storyId: string) => ['story', storyId, 'debates'] as const,
   rooms: () => ['rooms'] as const,
   room: (roomId: string) => ['room', roomId] as const,
   roomFeed: (roomId: string) => ['room', roomId, 'feed'] as const,

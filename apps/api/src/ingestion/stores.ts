@@ -112,7 +112,6 @@ export interface ThreadShellRecord {
   /** WS-Q.1.5 — NOT NULL, denormalized from (and equal to) the story's room. */
   roomId: string;
   branchIndex: number;
-  currentSummaryId: string | null;
   /** WS-G.1.1 canonical vocabularies (the 0008 migration retired the WS-F
    *  shell values: empty|emerging->active, dormant->archived,
    *  caution->elevated). */
@@ -325,14 +324,12 @@ export interface StoryStore {
   getStoryIdByThreadId(threadId: string): Promise<string | null>;
   // -- WS-G thread ownership (the forum module reads/writes through these) --
   getThreadById(threadId: string): Promise<ThreadShellRecord | null>;
-  /** Patch room/summary/state fields; bumps updated_at.  State LEGALITY is
-   *  the transition service's concern (forum/transitions.ts) — the store is
+  /** Patch room/state fields; bumps updated_at.  State LEGALITY is the
+   *  transition service's concern (forum/transitions.ts) — the store is
    *  mechanism, not policy. */
   updateThread(
     threadId: string,
-    patch: Partial<
-      Pick<ThreadShellRecord, 'roomId' | 'currentSummaryId' | 'conversationState' | 'safetyState'>
-    >,
+    patch: Partial<Pick<ThreadShellRecord, 'roomId' | 'conversationState' | 'safetyState'>>,
   ): Promise<ThreadShellRecord | null>;
   /** Keyset page of a room's threads, `(created_at, thread_id)` DESCENDING
    *  (most recent first, WS-G.2.3b). */
@@ -706,7 +703,6 @@ export class InMemoryStoryStore implements StoryStore {
       // WS-Q.1.5 — the thread's room is the story's room (both-or-neither stamp).
       roomId: story.roomId,
       branchIndex: 0,
-      currentSummaryId: null,
       conversationState: 'active',
       safetyState: 'normal',
       createdAt: at,
@@ -817,9 +813,7 @@ export class InMemoryStoryStore implements StoryStore {
 
   async updateThread(
     threadId: string,
-    patch: Partial<
-      Pick<ThreadShellRecord, 'roomId' | 'currentSummaryId' | 'conversationState' | 'safetyState'>
-    >,
+    patch: Partial<Pick<ThreadShellRecord, 'roomId' | 'conversationState' | 'safetyState'>>,
   ): Promise<ThreadShellRecord | null> {
     const thread = await this.getThreadById(threadId);
     if (!thread) return null;

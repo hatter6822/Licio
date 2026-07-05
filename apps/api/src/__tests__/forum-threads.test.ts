@@ -94,31 +94,7 @@ describe('WS-T.3.3 — thread overview (comment counts)', () => {
       incorrect_count: 0,
     });
     expect(detail.contribution_count).toBe(8);
-    expect(detail.summary_status).toBe('none');
     expect(detail.conversation_state).toBe('active');
-  });
-
-  it('surfaces the current summary with §24.3 uncertainty through the wire', async () => {
-    const summaryRes = await app().request(
-      jsonRequest(
-        `/v1/threads/${threadId}/summaries`,
-        'POST',
-        {
-          thread_id: threadId,
-          layer: 'community_synthesis',
-          body: 'Branches agree on provenance.',
-          unresolved_uncertainty: 'The sampling window.',
-        },
-        cookie,
-      ),
-    );
-    expect(summaryRes.status).toBe(201);
-    const detail = threadDetailSchema.parse(
-      await (await app().request(`http://local/v1/threads/${threadId}`)).json(),
-    );
-    expect(detail.summary_status).toBe('community_synthesis');
-    expect(detail.current_summary?.unresolved_uncertainty).toBe('The sampling window.');
-    expect(detail.current_summary?.machine_generated).toBe(false);
   });
 });
 

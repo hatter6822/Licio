@@ -4,8 +4,7 @@
 // the SAME transaction as its story (WS-F.1.4d — no orphan shells, no
 // thread-less stories); WS-G owns the full model: the canonical
 // conversation/safety vocabularies, multiple branches per story
-// (`(story_id, branch_index)` unique), the room link, and the
-// current-summary pointer.
+// (`(story_id, branch_index)` unique), and the room link.
 //
 // State machines: the legal graphs live in @licio/shared
 // (`isLegalConversationTransition` / `isLegalThreadSafetyTransition`) and are
@@ -54,9 +53,6 @@ export const threads = pgTable(
       .notNull()
       .references(() => rooms.roomId),
     branchIndex: integer('branch_index').notNull().default(0),
-    /** FK added by the 0008 migration (summaries table; avoids a TS module
-     *  cycle thread→summary→thread — the constraint lives in SQL). */
-    currentSummaryId: uuid('current_summary_id'),
     conversationState: threadConversationStateEnum('conversation_state')
       .notNull()
       .default('active'),

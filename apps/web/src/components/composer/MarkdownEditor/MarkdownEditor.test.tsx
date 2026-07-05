@@ -108,3 +108,84 @@ describe('MarkdownEditor', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 });
+
+function SourceHarness({ initial = '' }: { initial?: string }): React.ReactElement {
+  const [value, setValue] = useState(initial);
+  return (
+    <MarkdownEditor
+      label="Your text"
+      value={value}
+      onChange={setValue}
+      enableSourceLink
+      maxLength={500}
+    />
+  );
+}
+
+describe('MarkdownEditor — inline sourcing (enableSourceLink)', () => {
+  it('shows the generic Link button and no "Add source" affordance by default', () => {
+    render(<Harness />);
+    expect(screen.getByRole('button', { name: 'Link' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add source' })).not.toBeInTheDocument();
+  });
+
+  it('replaces the generic Link button with "Add source" when inline sourcing is on', () => {
+    render(<SourceHarness />);
+    // Exactly one link mechanism — the source flow — never a second generic link.
+    expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Link' })).not.toBeInTheDocument();
+  });
+
+  it('opens the "Add source" prompt on the ⌘/Ctrl+K link shortcut', () => {
+    render(<SourceHarness initial="the earth is round" />);
+    const ta = editor();
+    ta.setSelectionRange(4, 9); // "earth"
+    fireEvent.keyDown(ta, { key: 'k', ctrlKey: true });
+    // The prompt opens (no generic `[](https://)` placeholder is inserted).
+    expect(screen.getByRole('textbox', { name: /source url/i })).toBeInTheDocument();
+    expect(ta).toHaveValue('the earth is round');
+  });
+
+  it('wraps the captured selection as a Markdown link to the entered source URL', async () => {
+    render(<SourceHarness initial="the earth is round" />);
+    const ta = editor();
+    ta.setSelectionRange(4, 9); // select "earth"
+    await userEvent.click(screen.getByRole('button', { name: 'Add source' }));
+    const urlField = screen.getByRole('textbox', { name: /source url/i });
+    await userEvent.type(urlField, 'https://example.org/x');
+    await userEvent.click(screen.getByRole('button', { name: 'Link source' }));
+    expect(ta).toHaveValue('the [earth](https://example.org/x) is round');
+    // The sub-form closes after a successful link.
+    expect(screen.queryByRole('textbox', { name: /source url/i })).not.toBeInTheDocument();
+  });
+
+  it('resolves a doi: reference to a doi.org link', async () => {
+    render(<SourceHarness initial="see the study" />);
+    editor().setSelectionRange(8, 13); // "study"
+    await userEvent.click(screen.getByRole('button', { name: 'Add source' }));
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /source url/i }),
+      'doi:10.1000/xyz123',
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Link source' }));
+    expect(editor()).toHaveValue('see the [study](https://doi.org/10.1000/xyz123)');
+  });
+
+  it('rejects an invalid URL without mutating the body', async () => {
+    render(<SourceHarness initial="text" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Add source' }));
+    await userEvent.type(screen.getByRole('textbox', { name: /source url/i }), 'not-a-url');
+    await userEvent.click(screen.getByRole('button', { name: 'Link source' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/valid http/i);
+    expect(editor()).toHaveValue('text');
+  });
+
+  it('cancels the sub-form without changing the body', async () => {
+    render(<SourceHarness initial="text" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Add source' }));
+    expect(screen.getByRole('textbox', { name: /source url/i })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('textbox', { name: /source url/i })).not.toBeInTheDocument();
+    expect(editor()).toHaveValue('text');
+  });
+});

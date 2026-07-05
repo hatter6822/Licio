@@ -89,7 +89,6 @@ export function buildPipelineDeps(ai: AiGovernanceServices): PipelineDeps {
 export function buildSummaryDeps(ai: AiGovernanceServices): SummaryPipelineDeps {
   return {
     contributions: requireForum(ai).contributions,
-    forumSummaries: requireForum(ai).summaries,
     stories: requireIngestion(ai).stories,
     aiSummaries: ai.summaries,
     outputRecords: ai.outputRecords,

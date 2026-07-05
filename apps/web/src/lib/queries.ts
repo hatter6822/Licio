@@ -130,7 +130,6 @@ export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOpt
             // The focused anchor (dedicated page) is stable across reply pages.
             anchor: pages[0]?.anchor ?? null,
             overview: pages[0]?.overview,
-            summary: pages[0]?.summary ?? null,
           }
         : undefined,
     loadMore: () => query.fetchNextPage(),
@@ -393,6 +392,20 @@ export function useCreateCommentMutation(storyId: string) {
 }
 
 // --- WS-T debate arena --------------------------------------------------------
+
+/**
+ * The story's ACTIVE debate arenas (the discovery list).  Light polling keeps
+ * the countdowns + newly-opened arenas fresh while the reader is on the story;
+ * a story with no live debate simply returns an empty list.
+ */
+export function useStoryDebatesQuery(storyId: string) {
+  return useQuery({
+    queryKey: queryKeys.storyDebates(storyId),
+    enabled: storyId.length > 0,
+    queryFn: () => api.fetchStoryDebates(storyId),
+    refetchInterval: (query) => (query.state.data?.debates.length ? 60_000 : false),
+  });
+}
 
 /**
  * The live debate arena.  Polls while the arena is still `open` (the co-visible

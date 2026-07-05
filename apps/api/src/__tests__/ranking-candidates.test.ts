@@ -347,23 +347,14 @@ describe('WS-I.1.1a retrievers', () => {
     });
   });
 
-  it('expert explanations surface human-summary threads', async () => {
-    const summarized = await seedStory(fixture.ingestion);
+  it('expert-explanation retriever surfaces nothing (human summaries were removed)', async () => {
+    // The §24.3 thread-summary feature was removed, so `hasHumanSummary` is now
+    // always false and this retriever never surfaces a candidate (the retriever +
+    // port remain to keep the WS-I candidate-source set stable).
     await seedStory(fixture.ingestion);
-    await fixture.forum.summaries.insert({
-      summaryId: randomUUID(),
-      threadId: summarized.threadId,
-      layer: 'steward_summary',
-      body: 'A careful synthesis.',
-      citedBranchIds: [],
-      citedEvidenceIds: [],
-      unresolvedUncertainty: 'Open question on methods.',
-      minorityViewsNote: null,
-      authoredBy: randomUUID(),
-      approvedBy: null,
-    });
+    await seedStory(fixture.ingestion);
     const candidates = await new ExpertExplanationsRetriever(ports()).retrieve(retrieveContext());
-    expect(candidates.map((c) => c.item_id)).toEqual([summarized.storyId]);
+    expect(candidates).toEqual([]);
   });
 
   it('chronological catch-up skips seen stories and respects the per-room mark', async () => {

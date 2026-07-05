@@ -6,7 +6,6 @@
 //     applicant sees the room exists but reads no threads/lenses;
 //   • a safety-relevant EDIT re-runs the classifier and holds for review;
 //   • a held contribution emits NO events and bumps no room activity;
-//   • summary provenance: cited evidence must be real and thread-scoped;
 //   • the standalone /v1/evidence path emits the durable `evidence.added`;
 //   • room thread counts exclude hidden stories (no hidden oracle);
 //   • branch pagination walks arbitrarily large sections exactly once;
@@ -242,8 +241,8 @@ describe('held contributions are invisible to every downstream system', () => {
   });
 });
 
-describe('summary provenance + the standalone evidence event', () => {
-  it('standalone /v1/evidence emits evidence.added; summaries may cite it but never a foreign id', async () => {
+describe('the standalone evidence event', () => {
+  it('standalone /v1/evidence emits evidence.added scoped to the thread', async () => {
     const seeded = await seedThread(fixture);
     const seededClaim = await seedClaim(fixture, seeded.storyId);
     const evidenceRes = await app().request(
@@ -261,7 +260,6 @@ describe('summary provenance + the standalone evidence event', () => {
       ),
     );
     expect(evidenceRes.status).toBe(201);
-    const card = (await evidenceRes.json()) as { evidence: { evidence_id: string } };
     await fixture.settleAll();
     const emitted = await fixture.events.eventStore.listByTopicsBetween(
       ['evidence.added'],
@@ -270,42 +268,6 @@ describe('summary provenance + the standalone evidence event', () => {
     );
     expect(emitted).toHaveLength(1);
     expect((emitted[0]?.payload as { thread_id: string }).thread_id).toBe(seeded.threadId);
-
-    // The summary may cite the real, story-scoped card…
-    const okSummary = await app().request(
-      jsonRequest(
-        `/v1/threads/${seeded.threadId}/summaries`,
-        'POST',
-        {
-          thread_id: seeded.threadId,
-          layer: 'community_synthesis',
-          body: 'Both branches agree.',
-          cited_branch_ids: [],
-          cited_evidence_ids: [card.evidence.evidence_id],
-          unresolved_uncertainty: 'Whether the revision changed methods.',
-        },
-        cookie,
-      ),
-    );
-    expect(okSummary.status).toBe(201);
-
-    // …but never an arbitrary or foreign id (§24.3 provenance).
-    const badSummary = await app().request(
-      jsonRequest(
-        `/v1/threads/${seeded.threadId}/summaries`,
-        'POST',
-        {
-          thread_id: seeded.threadId,
-          layer: 'community_synthesis',
-          body: 'Citing nothing real.',
-          cited_branch_ids: [],
-          cited_evidence_ids: [randomUUID()],
-          unresolved_uncertainty: 'n/a',
-        },
-        cookie,
-      ),
-    );
-    expect(badSummary.status).toBe(422);
   });
 });
 

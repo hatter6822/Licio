@@ -106,6 +106,10 @@ export interface DebateStore {
   activeDebateIdsForContributions(ids: readonly string[]): Promise<Map<string, string>>;
   /** Count active arenas for a story's threads (the overview `debates_count`). */
   countActiveForStory(storyId: string): Promise<number>;
+  /** Active (non-resolved) arenas for a story — comment- AND story-target —
+   *  ordered by their edit deadline (soonest first): the story-level "active
+   *  debates" discovery list.  Bounded by `limit`. */
+  listActiveForStory(storyId: string, limit: number): Promise<DebateArenaRecord[]>;
   clear(): Promise<void>;
 }
 
@@ -305,6 +309,15 @@ export class InMemoryDebateStore implements DebateStore {
       if (row.storyId === storyId && NON_RESOLVED.has(row.state)) count += 1;
     }
     return count;
+  }
+
+  async listActiveForStory(storyId: string, limit: number): Promise<DebateArenaRecord[]> {
+    const rows: DebateArenaRecord[] = [];
+    for (const row of this.#rows.values()) {
+      if (row.storyId === storyId && NON_RESOLVED.has(row.state)) rows.push(row);
+    }
+    rows.sort((a, b) => Date.parse(a.editDeadlineAt) - Date.parse(b.editDeadlineAt));
+    return rows.slice(0, Math.max(0, limit));
   }
 
   async clear(): Promise<void> {

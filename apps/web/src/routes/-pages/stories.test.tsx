@@ -90,7 +90,7 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
   it('embeds the comment section when thread_id is present', async () => {
     vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: THREAD_ID });
     renderWithThreadRoute();
-    expect(await screen.findByRole('heading', { name: 'Conversation' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Conversation' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Write a comment' })).toBeInTheDocument();
   });
 
@@ -100,6 +100,6 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
     // The story content has loaded…
     expect(await screen.findByText(STORY.body_summary)).toBeInTheDocument();
     // …but there is no embedded conversation affordance.
-    expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Conversation' })).not.toBeInTheDocument();
   });
 });

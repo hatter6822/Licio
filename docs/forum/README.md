@@ -27,12 +27,12 @@ defense-in-depth pipeline; the server stores raw Markdown-lite only.
 |---|---|
 | `packages/shared/src/schemas/contribution.ts` | The 11-type create union (WS-G.1.2c), citation schema, update/public projections, anchors |
 | `packages/shared/src/schemas/thread.ts` | Conversation/safety state machines + thread wire contracts |
-| `packages/shared/src/schemas/room.ts`, `summary.ts`, `forum-api.ts` | Room/lens/steward/subscription, summary layers, endpoint wire contracts |
+| `packages/shared/src/schemas/room.ts`, `forum-api.ts` | Room/lens/steward/subscription + endpoint wire contracts |
 | `packages/shared/src/constants/moderation.ts` | The 51 ratified WS-A.1.2 reason codes (pinned by test) |
 | `packages/shared/src/ugc/` | The WS-G.4 pipeline: Markdown-lite parser → serializer → DOMPurify (`licio-ugc`) → `renderUGC`; drainer-link detection |
-| `packages/db/src/schema/` | `contribution.ts`, `room.ts`, `summary.ts`, `upload.ts`, the WS-G-owned `thread.ts`, the dual-dimension `claim.ts` evidence cards |
+| `packages/db/src/schema/` | `contribution.ts`, `room.ts`, `upload.ts`, the WS-G-owned `thread.ts`, the dual-dimension `claim.ts` evidence cards |
 | `packages/db/drizzle/0008_ws_g_forum.sql` | The WS-G migration (validated against live Postgres 16) |
-| `apps/api/src/forum/` | Stores (in-memory + interfaces), services container, contribution guard chain, story comment reads, live broadcaster, compatibility thread reads, rooms, summaries, transitions, safety seam, GIF/EXIF stripping, config, Drizzle adapters |
+| `apps/api/src/forum/` | Stores (in-memory + interfaces), services container, contribution guard chain, story comment reads, live broadcaster, compatibility thread reads, rooms, transitions, safety seam, GIF/EXIF stripping, config, Drizzle adapters |
 | `apps/api/src/routes/forum.ts`, `routes/rooms.ts` | The §23.2 endpoint surface |
 | `apps/web/src/components/comments/` | Inline one-layer comment section + the shared recursive `CommentNode` (depth-capped per view, "continue"/"show more" links onward) and `CommentParts` (header/media/composer), reused by the dedicated comment page (`routes/-pages/story-comments.tsx`, route `stories.$storyId_.comments.tsx`). Compact density: a single-line meta header (`Author · 3h`, compact relative time from `lib/time.ts` with the full timestamp on the `<time>` title), top-level comments as `neu-raised-sm` tiles, nested replies as flat left-rail threads (no card-in-card), and inline text-link actions (`commentActionClass`) instead of touch-height buttons |
 | `apps/web/src/components/ugc/` | `UgcBody` (THE sanctioned render sink) + the drainer interstitial |
@@ -122,12 +122,14 @@ deletion; `submitted_by` tombstones; `contribution_id` links the introducing
 contribution (the SQL FK avoids a TS module cycle).  Verification-state
 changes are audited (`evidence_verification_change`).
 
-**Summaries** (WS-G.1.4).  Three layers; §24.3's unresolved-uncertainty
-requirement for community/steward layers is CHECK-enforced at the storage
-layer below the zod boundary.  The current-summary pointer follows the layer
-ladder: automated drafts can NEVER become current; steward supersedes
-community.  Steward summaries require a steward role (platform RBAC or any
-WS-A.2.2 room-steward role in the thread's room) validated at write time.
+**Summaries** — *removed.*  The §24.3 layered thread-summary / conversation
+"Overview" feature was withdrawn end to end: the `summaries` table, the
+`thread.current_summary_id` pointer, the `POST /v1/threads/:id/summaries`
+endpoint, the `SummaryStore`, the demo seed, and the reader-facing Overview UI
+are all gone (migration `0057`).  The WS-K AI summarization pipeline is retained
+only as an eval/audit substrate (it still generates a draft, runs the §24.3
+quality + grounding checks, and records an AIOutputRecord) but no longer
+publishes a thread Overview.
 
 ## WS-G.2 Rooms and lenses
 
@@ -171,7 +173,6 @@ SCOI divergence summary is absent gracefully until WS-H.4 produces it.
 | `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (`thread_id` + subtree root) for legacy/shared contribution links. |
 | `PATCH/DELETE /v1/contributions/:id` | Author-only edit (history snapshot; citation floors survive edits; the safety classifier RE-RUNS on the edited content and a flag holds it for review) and tombstone removal; 404-over-403 |
 | `POST /v1/evidence` | Standalone cards with explicit material + relationship types; emits the same durable `evidence.added` as the co-create path (resolved through the claim's story thread) so embeddings/lifecycle see every card |
-| `POST /v1/threads/:id/summaries` | Community/steward layers (§24.3 uncertainty required); cited contributions AND cited evidence are validated as real, thread-scoped records — provenance can never point at arbitrary ids |
 | `GET/PATCH /v1/feed/preferences` | The §23.2 canonical veneer over the WS-D settings stores (single source of truth; clamped/audited); the five §13 modes |
 | `POST /v1/uploads`, `GET /v1/uploads/:id` | See uploads below |
 | `GET /v1/security/link-blocklist` | Drainer blocklist, steward-tunable, content-hash version for cache busting |
@@ -345,7 +346,7 @@ proves all five Drizzle forum adapters against the real migration chain:
 drizzle-wrapped unique-violation mapping (the 23505 code lives down the
 error `cause` chain), transactional evidence co-create rollback, GIN
 path-containment subtree reads WITH keyset continuation, storage-layer
-CHECK enforcement (depth cap, path/parent consistency, §24.3 uncertainty,
+CHECK enforcement (depth cap, path/parent consistency,
 content-type allow-list), draft-key dedup + tombstone semantics, DSAR
 `listByOwner`, descending `listThreadsByRoom` pagination, exact
 keyset-cursor walks (the adapters write millisecond-precision timestamps so

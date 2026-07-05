@@ -326,6 +326,21 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0]?.value ?? 0;
   }
 
+  async listActiveForStory(storyId: string, limit: number): Promise<DebateArenaRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(debateArenasTable)
+      .where(
+        and(
+          eq(debateArenasTable.storyId, storyId),
+          inArray(debateArenasTable.state, [...NON_RESOLVED]),
+        ),
+      )
+      .orderBy(asc(debateArenasTable.editDeadlineAt))
+      .limit(Math.max(0, limit));
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(debateArenasTable).where(ne(debateArenasTable.debateId, ''));
   }

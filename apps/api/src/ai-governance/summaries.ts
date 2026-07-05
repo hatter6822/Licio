@@ -16,18 +16,13 @@ import {
   checkSummaryQuality,
   detectHallucination,
   type GroundingStatement,
-  renderSummaryDraft,
   type SummaryReport,
   type SummaryReportReason,
   sentenceSplit,
   summaryReportSchema,
   type ThreadQualitySignals,
 } from '@licio/ai-governance';
-import type {
-  ContributionRecord,
-  ContributionStore,
-  SummaryStore as ForumSummaryStore,
-} from '../forum/stores.js';
+import type { ContributionRecord, ContributionStore } from '../forum/stores.js';
 import type { StoryStore } from '../ingestion/stores.js';
 import type { ProhibitedUseGuard } from './guard.js';
 import type { AiGovernanceMetrics } from './metrics.js';
@@ -43,7 +38,6 @@ const ROOT_CAP = 12;
 
 export interface SummaryPipelineDeps {
   contributions: ContributionStore;
-  forumSummaries: ForumSummaryStore;
   stories: StoryStore;
   aiSummaries: SummaryStore;
   outputRecords: AiOutputRecordStore;
@@ -210,27 +204,14 @@ export async function generateThreadSummary(
     return { ok: true, published: false, summaryId };
   }
 
-  // Publish as the WS-G automated_draft layer (machine-generated, never final).
-  const rendered = renderSummaryDraft(draft);
-  await deps.forumSummaries.insert({
-    summaryId,
-    threadId,
-    layer: 'automated_draft',
-    body: rendered.body,
-    citedBranchIds: rendered.cited_contribution_ids,
-    citedContributionIds: rendered.cited_contribution_ids,
-    citedEvidenceIds: rendered.cited_evidence_ids,
-    unresolvedUncertainty: rendered.unresolved_uncertainty,
-    minorityViewsNote: rendered.minority_views_note,
-    authoredBy: null,
-    approvedBy: null,
-  });
+  // The §24.3 thread-summary Overview feature was removed, so a passing draft is
+  // no longer published to a reader-facing surface — the pipeline still evaluates
+  // + records it (AIOutputRecord + the AI draft store) for governance/audit.
   deps.metrics.increment('ai.summary.generated');
   deps.metrics.gauge('ai.summary.branch_coverage', draft.covered_contribution_ids.length);
   deps.log('summary.generated', {
     thread_id: threadId,
     branches: draft.covered_contribution_ids.length,
-    citations: rendered.cited_contribution_ids.length + rendered.cited_evidence_ids.length,
   });
   deps.log('summary.quality.evaluated', { thread_id: threadId, passed: true });
   return { ok: true, published: true, summaryId };

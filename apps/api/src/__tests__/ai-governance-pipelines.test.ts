@@ -295,7 +295,6 @@ describe('WS-K.1.4a summary generation', () => {
   function summaryDeps(f: Fixture): SummaryPipelineDeps {
     return {
       contributions: f.forum.forum.contributions,
-      forumSummaries: f.forum.forum.summaries,
       stories: f.forum.ingestion.stories,
       aiSummaries: f.ai.summaries,
       outputRecords: f.ai.outputRecords,
@@ -329,7 +328,7 @@ describe('WS-K.1.4a summary generation', () => {
     }
   }
 
-  it('publishes an automated draft that passes quality + grounding', async () => {
+  it('records an automated draft that passes quality + grounding', async () => {
     const f = fresh();
     const { threadId } = await seedThread(f.forum);
     await seedRoots(f, threadId, [
@@ -339,9 +338,13 @@ describe('WS-K.1.4a summary generation', () => {
     ]);
     const outcome = await generateThreadSummary(summaryDeps(f), threadId);
     expect(outcome.ok).toBe(true);
-    if (outcome.ok) expect(outcome.published).toBe(true);
-    const summaries = await f.forum.forum.summaries.listByThread(threadId);
-    expect(summaries.some((s) => s.layer === 'automated_draft')).toBe(true);
+    if (outcome.ok) {
+      // The §24.3 thread-summary Overview was removed, so a passing draft is no
+      // longer published to a reader surface — it is recorded (AI draft store +
+      // AIOutputRecord) for governance/audit only.
+      expect(outcome.published).toBe(true);
+      expect(await f.ai.summaries.getDraft(outcome.summaryId)).not.toBeNull();
+    }
   });
 
   it('skips a thread below the activity threshold', async () => {

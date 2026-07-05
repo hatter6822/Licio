@@ -25,7 +25,6 @@ import {
   isLegalDebateTransition,
 } from '../schemas/debate.js';
 import { mapLegacyRoomVisibility, roomCreateRequestSchema } from '../schemas/room.js';
-import { summaryCreateRequestSchema, summaryPublicSchema } from '../schemas/summary.js';
 import {
   isLegalConversationTransition,
   isLegalThreadSafetyTransition,
@@ -538,85 +537,5 @@ describe('WS-Q.1.1a binary visibility + join/posting coherence', () => {
     for (const legacy of ['restricted', 'expert_led'] as const) {
       expect(mapLegacyRoomVisibility(legacy).visibility).not.toBe('public');
     }
-  });
-});
-
-describe('WS-G.1.4 summary schemas', () => {
-  const summary = {
-    summary_id: uuidOf(7),
-    thread_id: THREAD,
-    layer: 'community_synthesis',
-    body: 'Comments A and B agree on the dataset provenance.',
-    cited_contribution_ids: [uuidOf(5)],
-    cited_evidence_ids: [],
-    unresolved_uncertainty: 'Whether the sampling window was representative.',
-    minority_views_note: null,
-    machine_generated: false,
-    authored_by_handle: 'mara',
-    approved_by_handle: null,
-    created_at: '2026-06-11T00:00:00.000Z',
-    updated_at: '2026-06-11T00:00:00.000Z',
-  };
-
-  it('requires unresolved uncertainty for community/steward layers (§24.3)', () => {
-    expect(summaryPublicSchema.safeParse(summary).success).toBe(true);
-    expect(
-      summaryPublicSchema.safeParse({ ...summary, unresolved_uncertainty: null }).success,
-    ).toBe(false);
-    expect(
-      summaryPublicSchema.safeParse({
-        ...summary,
-        layer: 'automated_draft',
-        machine_generated: true,
-        unresolved_uncertainty: null,
-      }).success,
-    ).toBe(true);
-  });
-
-  it('pins the machine-generated label to automated drafts exactly', () => {
-    expect(summaryPublicSchema.safeParse({ ...summary, machine_generated: true }).success).toBe(
-      false,
-    );
-    expect(
-      summaryPublicSchema.safeParse({
-        ...summary,
-        layer: 'automated_draft',
-        machine_generated: false,
-      }).success,
-    ).toBe(false);
-  });
-
-  it('accepts deprecated cited_branch_ids on create and emits cited_contribution_ids publicly', () => {
-    const created = summaryCreateRequestSchema.parse({
-      thread_id: THREAD,
-      layer: 'community_synthesis',
-      body: 'x',
-      cited_branch_ids: [uuidOf(5)],
-      unresolved_uncertainty: 'y',
-    });
-    expect(created.cited_contribution_ids).toEqual([uuidOf(5)]);
-    expect('cited_branch_ids' in created).toBe(false);
-    expect(summaryPublicSchema.safeParse(summary).success).toBe(true);
-    expect(
-      summaryPublicSchema.safeParse({ ...summary, cited_branch_ids: [uuidOf(5)] }).success,
-    ).toBe(false);
-  });
-
-  it('user creation contract refuses automated_draft and demands uncertainty', () => {
-    expect(
-      summaryCreateRequestSchema.safeParse({
-        thread_id: THREAD,
-        layer: 'automated_draft',
-        body: 'x',
-        unresolved_uncertainty: 'y',
-      }).success,
-    ).toBe(false);
-    expect(
-      summaryCreateRequestSchema.safeParse({
-        thread_id: THREAD,
-        layer: 'community_synthesis',
-        body: 'x',
-      }).success,
-    ).toBe(false);
   });
 });

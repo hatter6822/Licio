@@ -484,7 +484,7 @@ describe('WS-G steward admin surface', () => {
 });
 
 describe('Dev demo seed (real stores, idempotent)', () => {
-  it('creates rooms/threads/contributions/summary through the production paths', async () => {
+  it('creates rooms/threads/contributions through the production paths', async () => {
     await seedForumDemoData(fixture.forum, fixture.ingestion, fixture.identity.store);
     await seedForumDemoData(fixture.forum, fixture.ingestion, fixture.identity.store); // idempotent
 
@@ -492,11 +492,7 @@ describe('Dev demo seed (real stores, idempotent)', () => {
     expect(room?.name).toBe('Public Health');
     const thread = await app().request(`http://local/v1/threads/${DEMO_IDS.THREAD_1}`);
     expect(thread.status).toBe(200);
-    const detail = (await thread.json()) as {
-      summary_status: string;
-      sections: { questions: number };
-    };
-    expect(detail.summary_status).toBe('community_synthesis');
+    const detail = (await thread.json()) as { sections: { questions: number } };
     expect(detail.sections.questions).toBeGreaterThan(0);
     const rooms = await app().request('http://local/v1/rooms');
     const { items } = (await rooms.json()) as { items: Array<{ name: string }> };

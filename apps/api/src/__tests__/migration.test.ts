@@ -5,7 +5,7 @@
 // FROZEN room rejects every write (submission + contribution, fail-closed); purge
 // is GATED on the freeze; an `anonymize` detaches ONLY the actor (non-vacuously —
 // a second member's content is untouched); a `purge` IRREVERSIBLY minimizes EVERY
-// §24.2 category (stories/threads/contributions incl. OTHER members'/summaries/
+// §24.2 category (stories/threads/contributions incl. OTHER members'/
 // media uploads/lenses, with the search index following); and the full
 // export→freeze→purge flow runs end to end over multi-member seeded content.
 import { randomUUID } from 'node:crypto';
@@ -351,7 +351,7 @@ describe('WS-S.9 purge — gated on the freeze; minimizes content', () => {
 
 /**
  * Seed a fully-populated server room: a story (with media upload), a thread with
- * a steward comment AND a second member's comment, a derived summary, and a lens.
+ * a steward comment AND a second member's comment, and a lens.
  * Returns the ids so a purge can assert each §24.2 category is removed.
  */
 async function seedPopulatedRoom(
@@ -364,7 +364,6 @@ async function seedPopulatedRoom(
   threadId: string;
   stewardCommentId: string;
   memberCommentId: string;
-  summaryId: string;
   lensId: string;
   uploadId: string;
 }> {
@@ -403,18 +402,6 @@ async function seedPopulatedRoom(
     body: "Another member's comment.",
   });
   if (!sc.ok || !mc.ok) throw new Error('seedPopulatedRoom: contribution failed');
-  const summary = await fx.forum.summaries.insert({
-    summaryId: randomUUID(),
-    threadId,
-    layer: 'community_synthesis',
-    body: 'Both branches agree the dataset is authentic.',
-    citedBranchIds: [sc.contribution.contributionId],
-    citedEvidenceIds: [],
-    unresolvedUncertainty: 'Whether the 2024 revision changed the method.',
-    minorityViewsNote: null,
-    authoredBy: steward,
-    approvedBy: null,
-  });
   const lens = await fx.forum.lenses.insert({
     lensId: randomUUID(),
     roomId,
@@ -429,14 +416,13 @@ async function seedPopulatedRoom(
     threadId,
     stewardCommentId: sc.contribution.contributionId,
     memberCommentId: mc.contribution.contributionId,
-    summaryId: summary.summaryId,
     lensId: lens.lens.lensId,
     uploadId,
   };
 }
 
 describe('WS-S.9 purge — IRREVERSIBLY minimizes EVERY §24.2 category', () => {
-  it("removes stories, threads, ALL members' contributions, summaries, media bytes + lenses", async () => {
+  it("removes stories, threads, ALL members' contributions, media bytes + lenses", async () => {
     const { userId: steward } = await seedUserWithSession(fixture.identity, { steward: true });
     const { userId: member } = await seedUserWithSession(fixture.identity);
     const seeded = await seedPopulatedRoom(fixture, steward, member);
@@ -464,7 +450,6 @@ describe('WS-S.9 purge — IRREVERSIBLY minimizes EVERY §24.2 category', () => 
     expect(out.counts.stories).toBe(1);
     expect(out.counts.threads).toBe(1);
     expect(out.counts.contributions).toBe(2); // BOTH members' comments
-    expect(out.counts.summaries).toBe(1);
     expect(out.counts.uploads).toBe(1);
     expect(out.counts.lenses).toBe(1);
 
@@ -484,10 +469,7 @@ describe('WS-S.9 purge — IRREVERSIBLY minimizes EVERY §24.2 category', () => 
       (await fixture.forum.contributions.listByThread(seeded.threadId, { limit: 50 })).length,
     ).toBe(0);
 
-    // 4. Summary — hard-deleted.
-    expect(await fixture.forum.summaries.getById(seeded.summaryId)).toBe(null);
-
-    // 5. Media — record AND bytes destroyed.
+    // 4. Media — record AND bytes destroyed.
     expect(await fixture.forum.uploads.getRecord(seeded.uploadId)).toBe(null);
     expect(await fixture.forum.uploads.getBytes(seeded.uploadId)).toBe(null);
 
@@ -566,7 +548,6 @@ describe('WS-S.9 purge — IRREVERSIBLY minimizes EVERY §24.2 category', () => 
       stories: 0,
       threads: 0,
       contributions: 0,
-      summaries: 0,
       uploads: 0,
       lenses: 0,
     });

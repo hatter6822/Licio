@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Interaction-budget release gate (WS-C.5.1, SPEC §6.10). WS-T retired the
-// branch reader, so the browser budget now exercises the inline comment-section
-// filter interaction on a story page. The preview server serves static assets
-// only; API reads are stubbed at the network layer and the service worker is
-// blocked so the stub is deterministic.
+// branch reader and the comment-filter tabs, so the browser budget now exercises
+// opening the comment composer's inline "Add source" sub-form on a story page —
+// an always-present control, independent of fetched comment content. The preview
+// server serves static assets only; API reads are stubbed at the network layer
+// and the service worker is blocked so the stub is deterministic.
 import { expect, test } from '@playwright/test';
 
 const STORY = '5f5e1000-0000-4000-8000-000000000001';
 const THREAD = '5f5e2000-0000-4000-8000-000000000001';
-const COMMENT_FILTER_BUDGET_MS = 500;
+const COMMENT_INTERACTION_BUDGET_MS = 500;
 
 test.use({ serviceWorkers: 'block' });
 
 test.describe('interaction budgets (WS-C.5.1)', () => {
-  test('switching comment filters stays within the 500ms budget', async ({ page }) => {
+  test('opening the composer’s Add-source sub-form stays within the 500ms budget', async ({
+    page,
+  }) => {
     await page.route('**/v1/feature-flags', async (route) => {
       await route.fulfill({ json: { flags: {} } });
     });
@@ -64,15 +67,19 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
           comments: [],
           next_cursor: null,
           overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
-          summary: null,
         },
       });
     });
+    await page.route(`**/v1/stories/${STORY}/debates`, async (route) => {
+      await route.fulfill({ json: { debates: [] } });
+    });
 
     await page.goto(`/stories/${STORY}`);
-    await expect(page.getByRole('heading', { name: 'Conversation' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Conversation' })).toBeVisible();
 
-    const duration = await page.getByRole('button', { name: 'Sources' }).evaluate((button) => {
+    const addSourceButton = page.getByRole('button', { name: 'Add source' });
+    await expect(addSourceButton).toBeVisible();
+    const duration = await addSourceButton.evaluate((button) => {
       const started = performance.now();
       (button as HTMLButtonElement).click();
       return new Promise<number>((resolve) => {
@@ -81,11 +88,8 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
         });
       });
     });
-    await expect(page.getByRole('button', { name: 'Sources' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    await expect(page.getByRole('textbox', { name: /source url/i })).toBeVisible();
     expect(duration).toBeGreaterThanOrEqual(0);
-    expect(duration).toBeLessThanOrEqual(COMMENT_FILTER_BUDGET_MS);
+    expect(duration).toBeLessThanOrEqual(COMMENT_INTERACTION_BUDGET_MS);
   });
 });

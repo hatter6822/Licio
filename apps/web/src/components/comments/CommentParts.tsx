@@ -9,17 +9,14 @@ import {
   type Citation,
   type CommentItem as CommentItemType,
   type ContributionWriteCreate,
-  citationUrlSchema,
+  deriveCitationsFromBody,
 } from '@licio/shared';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useCreateCommentMutation } from '../../lib/queries.js';
-import { raisedSurface } from '../../lib/surfaces.js';
 import { relativeTimeShort } from '../../lib/time.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
-import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { Button } from '../ui/Button/index.js';
-import { Icon } from '../ui/Icon/index.js';
 
 export function authorName(comment: CommentItemType): string {
   return comment.author_display_name ?? comment.author_handle ?? 'Deleted account';
@@ -71,31 +68,6 @@ export function CommentHeader({ comment }: { comment: CommentItemType }): React.
         <span className={cn(badgeBase, 'border-error/60 text-error')}>Incorrect</span>
       ) : null}
     </div>
-  );
-}
-
-/** The source links attached to a comment (WS-T sourced comments).  Renders each
- *  citation as a safe external link; empty for an unsourced comment. */
-export function CommentSources({
-  comment,
-}: {
-  comment: CommentItemType;
-}): React.ReactElement | null {
-  if (comment.citations.length === 0) return null;
-  return (
-    <ul className="flex flex-col gap-1" aria-label="Attached sources">
-      {comment.citations.map((citation) => (
-        <li key={citation.url} className="flex items-start gap-1.5 text-sm">
-          <Icon name="quote" className="mt-0.5 size-3.5 shrink-0 text-ink-muted" aria-hidden />
-          <SafeExternalLink
-            href={citation.url}
-            className="break-all font-medium text-primary-on-soft underline hover:no-underline"
-          >
-            {citation.title ?? citation.url}
-          </SafeExternalLink>
-        </li>
-      ))}
-    </ul>
   );
 }
 
@@ -151,28 +123,14 @@ export function CommentComposer({
   onCancel?: () => void;
 }): React.ReactElement {
   const [body, setBody] = useState('');
-  const [sources, setSources] = useState<string[]>([]);
-  const [sourceDraft, setSourceDraft] = useState('');
-  const [sourceError, setSourceError] = useState<string | null>(null);
   const mutation = useCreateCommentMutation(storyId);
   const trimmed = body.trim();
-
-  const addSource = (): void => {
-    const url = sourceDraft.trim();
-    if (url.length === 0) return;
-    const parsed = citationUrlSchema.safeParse(url);
-    if (!parsed.success) {
-      setSourceError('Enter a valid http(s) or doi: link.');
-      return;
-    }
-    if (!sources.includes(url)) setSources((prev) => [...prev, url]);
-    setSourceDraft('');
-    setSourceError(null);
-  };
+  // Sources are the INLINE links in the body — derived, not a separate list.
+  const derivedSources = useMemo(() => deriveCitationsFromBody(trimmed), [trimmed]);
 
   const submit = (): void => {
     if (trimmed.length === 0 || mutation.isPending) return;
-    const citations: Citation[] = sources.map((url) => ({ url }));
+    const citations = derivedSources;
     const payload: ContributionWriteCreate = {
       type: 'comment',
       thread_id: threadId,
@@ -184,8 +142,6 @@ export function CommentComposer({
     mutation.mutate(payload, {
       onSuccess: () => {
         setBody('');
-        setSources([]);
-        setSourceDraft('');
         onCancel?.();
       },
     });
@@ -228,65 +184,17 @@ export function CommentComposer({
           compact
           maxLength={5000}
           placeholder="Add a comment with context…"
+          enableSourceLink
+          helperText="Select a phrase and choose “Add source” to link it to its evidence — a sourced comment carries more participation weight."
         />
       )}
-      {/* Attach source links — a sourced comment counts as greater participation. */}
-      <div className="flex flex-col gap-1.5">
-        {sources.length > 0 ? (
-          <ul className="flex flex-col gap-1" aria-label="Attached sources">
-            {sources.map((url) => (
-              <li key={url} className="flex items-center gap-1.5 text-sm">
-                <Icon name="quote" className="size-3.5 shrink-0 text-ink-muted" aria-hidden />
-                <span className="min-w-0 flex-1 break-all text-ink-muted">{url}</span>
-                <button
-                  type="button"
-                  onClick={() => setSources((prev) => prev.filter((s) => s !== url))}
-                  className="shrink-0 rounded px-1 text-sm text-ink-muted hover:text-error focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                  aria-label={`Remove source ${url}`}
-                >
-                  Remove
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        <div className="flex items-end gap-2">
-          <label className="flex-1">
-            <span className="sr-only">Add a source link</span>
-            <input
-              type="url"
-              inputMode="url"
-              value={sourceDraft}
-              onChange={(event) => {
-                setSourceDraft(event.currentTarget.value);
-                if (sourceError) setSourceError(null);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  addSource();
-                }
-              }}
-              placeholder="Add a source link (optional)"
-              className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-            />
-          </label>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={addSource}
-            disabled={sourceDraft.trim().length === 0}
-          >
-            <Icon name="quote" className="size-4" />
-            Add source
-          </Button>
-        </div>
-        {sourceError ? (
-          <p role="alert" className="text-sm text-error">
-            {sourceError}
-          </p>
-        ) : null}
-      </div>
+      {derivedSources.length > 0 ? (
+        <p className="text-sm text-ink-muted">
+          {derivedSources.length === 1
+            ? '1 source linked in this comment.'
+            : `${derivedSources.length} sources linked in this comment.`}
+        </p>
+      ) : null}
       <div className={cn('flex items-center gap-3', isReply ? 'justify-between' : 'justify-end')}>
         {isReply ? (
           <p className="text-sm text-ink-muted">{trimmed.length}/5000 characters</p>
@@ -338,31 +246,21 @@ export function CorrectionComposer({
   onCancel: () => void;
 }): React.ReactElement {
   const [body, setBody] = useState('');
-  const [sources, setSources] = useState<string[]>([]);
-  const [sourceDraft, setSourceDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const mutation = useCreateCommentMutation(storyId);
   const trimmed = body.trim();
-
-  const addSource = (): void => {
-    const url = sourceDraft.trim();
-    if (url.length === 0) return;
-    if (!citationUrlSchema.safeParse(url).success) {
-      setError('Enter a valid http(s) or doi: link.');
-      return;
-    }
-    if (!sources.includes(url)) setSources((prev) => [...prev, url]);
-    setSourceDraft('');
-    setError(null);
-  };
+  // A correction MUST carry ≥1 source — the sources are the inline links in the
+  // correction text (a correction takes at most five).
+  const derivedSources = useMemo(() => deriveCitationsFromBody(trimmed).slice(0, 5), [trimmed]);
+  const hasSource = derivedSources.length > 0;
 
   const submit = (): void => {
     if (trimmed.length === 0 || mutation.isPending) return;
-    if (sources.length === 0) {
-      setError('A correction must cite at least one source.');
+    if (!hasSource) {
+      setError('A correction must cite at least one source — link the key phrase to its evidence.');
       return;
     }
-    const citations = sources.slice(0, 5).map((url) => ({ url })) as [Citation, ...Citation[]];
+    const citations = derivedSources as [Citation, ...Citation[]];
     const payload: ContributionWriteCreate = {
       type: 'correction',
       thread_id: threadId,
@@ -384,7 +282,7 @@ export function CorrectionComposer({
 
   return (
     <form
-      className={cn('flex flex-col gap-2 p-3', raisedSurface)}
+      className="flex flex-col gap-3"
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -403,55 +301,16 @@ export function CorrectionComposer({
         compact
         maxLength={2000}
         placeholder="Explain what is incorrect and why…"
+        enableSourceLink
+        helperText="Select the key phrase and choose “Add source” to link it to its evidence — a correction requires at least one source."
       />
-      {sources.length > 0 ? (
-        <ul className="flex flex-col gap-1" aria-label="Correction sources">
-          {sources.map((url) => (
-            <li key={url} className="flex items-center gap-1.5 text-sm">
-              <Icon name="quote" className="size-3.5 shrink-0 text-ink-muted" aria-hidden />
-              <span className="min-w-0 flex-1 break-all text-ink-muted">{url}</span>
-              <button
-                type="button"
-                onClick={() => setSources((prev) => prev.filter((s) => s !== url))}
-                className="shrink-0 rounded px-1 text-sm text-ink-muted hover:text-error focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                aria-label={`Remove source ${url}`}
-              >
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      <div className="flex items-end gap-2">
-        <label className="flex-1">
-          <span className="sr-only">Add a supporting source (required)</span>
-          <input
-            type="url"
-            inputMode="url"
-            value={sourceDraft}
-            onChange={(event) => {
-              setSourceDraft(event.currentTarget.value);
-              if (error) setError(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                addSource();
-              }
-            }}
-            placeholder="Add a supporting source (required)"
-            className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-          />
-        </label>
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={addSource}
-          disabled={sourceDraft.trim().length === 0}
-        >
-          Add source
-        </Button>
-      </div>
+      <p className="text-sm text-ink-muted">
+        {hasSource
+          ? derivedSources.length === 1
+            ? '1 source linked.'
+            : `${derivedSources.length} sources linked.`
+          : 'No source linked yet — turn the key phrase into a link to its source.'}
+      </p>
       {error ? (
         <p role="alert" className="text-sm text-error">
           {error}
@@ -465,7 +324,7 @@ export function CorrectionComposer({
           type="submit"
           variant="primary"
           loading={mutation.isPending}
-          disabled={trimmed.length === 0 || sources.length === 0}
+          disabled={trimmed.length === 0 || !hasSource}
         >
           Open debate
         </Button>

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-G unit tests: thread state transitions (audit + thread.state.changed
-// events), summary layer rules, the EXIF/metadata strippers on real binary
-// fixtures, the forum runtime config (fail-closed), the scoring-taxonomy
-// mappings (pinned), and the steward thread-state route.
+// events), the EXIF/metadata strippers on real binary fixtures, the forum
+// runtime config (fail-closed), the scoring-taxonomy mappings (pinned), and the
+// steward thread-state route.
 import type { ContributionPublic } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -25,7 +25,6 @@ import {
   stripUploadMetadata,
   stripWebp,
 } from '../forum/exif.js';
-import { supersedesCurrent } from '../forum/summaries.js';
 import { applyConversationTransition, applyThreadSafetyTransition } from '../forum/transitions.js';
 import { sseCommentFrame } from '../routes/forum.js';
 import { createV1Routes } from '../routes/v1.js';
@@ -176,69 +175,6 @@ describe('WS-G.1.1 — transition service (audit + events)', () => {
       ),
     );
     expect(illegal.status).toBe(422);
-  });
-});
-
-describe('WS-G.1.4 — summary layer ladder', () => {
-  it('automated drafts can never become current; steward supersedes community', () => {
-    expect(supersedesCurrent('automated_draft', null)).toBe(false);
-    expect(supersedesCurrent('community_synthesis', null)).toBe(true);
-    expect(supersedesCurrent('community_synthesis', 'steward_summary')).toBe(false);
-    expect(supersedesCurrent('steward_summary', 'community_synthesis')).toBe(true);
-    expect(supersedesCurrent('community_synthesis', 'community_synthesis')).toBe(true);
-  });
-
-  it('steward summaries require a steward role through the route (403)', async () => {
-    const user = await seedUserWithSession(fixture.identity, { handle: 'writer' });
-    const res = await app().request(
-      jsonRequest(
-        `/v1/threads/${threadId}/summaries`,
-        'POST',
-        {
-          thread_id: threadId,
-          layer: 'steward_summary',
-          body: 'Summary.',
-          unresolved_uncertainty: 'Things.',
-        },
-        user.cookie,
-      ),
-    );
-    expect(res.status).toBe(403);
-  });
-
-  it('cited branches must belong to the same thread (422)', async () => {
-    const user = await seedUserWithSession(fixture.identity, { handle: 'writer2' });
-    const other = await seedThread(fixture);
-    const foreign = await fixture.forum.contributions.insert({
-      contributionId: '99999999-9999-4999-8999-999999999991',
-      threadId: other.threadId,
-      userId: user.userId,
-      type: 'question',
-      body: 'foreign',
-      citations: [],
-      metadata: {},
-      targetClaimId: null,
-      parentContributionId: null,
-      clientDraftId: 'foreign-1',
-      path: [],
-      moderationState: 'published',
-    });
-    expect(foreign.ok).toBe(true);
-    const res = await app().request(
-      jsonRequest(
-        `/v1/threads/${threadId}/summaries`,
-        'POST',
-        {
-          thread_id: threadId,
-          layer: 'community_synthesis',
-          body: 'Summary.',
-          cited_branch_ids: ['99999999-9999-4999-8999-999999999991'],
-          unresolved_uncertainty: 'Things.',
-        },
-        user.cookie,
-      ),
-    );
-    expect(res.status).toBe(422);
   });
 });
 

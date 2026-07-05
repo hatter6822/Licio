@@ -216,11 +216,11 @@ export function createCandidateDataPorts(
       const windows = await events.windowStore.listForItemBefore(itemId, '24h', nowIso, 1);
       return windows[0] ?? null;
     },
-    async hasHumanSummary(threadId) {
-      const summaries = await forum.summaries.listByThread(threadId);
-      return summaries.some(
-        (s) => s.layer === 'steward_summary' || s.layer === 'community_synthesis',
-      );
+    // The §24.3 thread-summary feature was removed, so no thread carries a human
+    // summary — this retriever signal is now always false (the retriever + port
+    // remain to keep the WS-I candidate-source set stable).
+    async hasHumanSummary() {
+      return false;
     },
     async evidenceCountByStory(storyId) {
       let count = 0;

@@ -35,8 +35,7 @@ import {
   privacyNotificationPreferencesSchema,
   privacySettingsSchema,
   storyCommentsResponseSchema,
-  summaryCreateRequestSchema,
-  summaryPublicSchema,
+  storyDebatesResponseSchema,
   type ThreadSafetyState,
   type ThreadSummary,
   TOPIC_REGISTRY,
@@ -76,18 +75,17 @@ import {
   overrideDebateVerdict,
   postDebatePosition,
   toDebateArenaPublic,
+  toDebateArenaSummary,
 } from '../forum/debate.js';
 import { sseDebateFrame } from '../forum/debate-broadcaster.js';
 import { stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
-import { createSummary } from '../forum/summaries.js';
 import {
   contributionAnchor,
   subtreeContent,
   threadOverview,
   toContributionPublic,
-  toSummaryPublic,
   viewerHideSet,
   visibleRows,
 } from '../forum/threads.js';
@@ -494,11 +492,6 @@ export function createForumRoutes() {
             bundle.forum.debates.countActiveForStory(storyId),
             bundle.forum.contributions.countByDisputeStatus(thread.threadId, 'incorrect'),
           ]);
-          const summaries = await bundle.forum.summaries.listByThread(thread.threadId);
-          const current =
-            thread.currentSummaryId !== null
-              ? (summaries.find((s) => s.summaryId === thread.currentSummaryId) ?? null)
-              : null;
           const page = await commentPage(bundle, thread.threadId, userId, resolveAuthor, {
             cursor: cursor ?? null,
             order,
@@ -525,9 +518,45 @@ export function createForumRoutes() {
                 debates_count: debatesCount,
                 incorrect_count: incorrectCount,
               },
-              summary: current ? await toSummaryPublic(current, resolveAuthor) : null,
             }),
           );
+        },
+      )
+
+      // --- Story active-debate discovery (WS-T) ------------------------------
+      // A PUBLIC, display-only list of a story's ACTIVE (non-resolved) debate
+      // arenas so anyone reading a story can find + watch a live debate as it
+      // happens.  Soft-auth + the SAME thread-readability gate the comment reads
+      // use (404-over-403), so it can never leak a restricted-room conversation.
+      // Not a stream: the arena's own /debates/:id/stream carries live frames;
+      // this list is a poll-on-open + a client-side countdown.
+      .get(
+        '/stories/:storyId/debates',
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        async (c) => {
+          const { storyId } = c.req.valid('param');
+          const bundle = bundles();
+          const identity = getIdentityServices();
+          const userId = await softUserId(c.req.header('cookie'), identity);
+          const [story, thread] = await Promise.all([
+            bundle.ingestion.stories.getById(storyId),
+            bundle.ingestion.stories.getThreadByStoryId(storyId),
+          ]);
+          if (!story || !thread) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          const resolveAuthor = makeAuthorResolver(identity);
+          const arenas = await bundle.forum.debates.listActiveForStory(storyId, 50);
+          const debates = await Promise.all(
+            arenas.map(async (arena) => {
+              let excerpt: string | null = story.title;
+              if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
+                const target = await bundle.forum.contributions.getById(arena.targetContributionId);
+                excerpt = target ? target.body : null;
+              }
+              return toDebateArenaSummary(arena, resolveAuthor, excerpt);
+            }),
+          );
+          return c.json(storyDebatesResponseSchema.parse({ debates }));
         },
       )
 
@@ -545,12 +574,7 @@ export function createForumRoutes() {
           if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const story = await bundle.ingestion.stories.getById(thread.storyId);
           if (!story) return c.json(notFound, 404);
-          const overview = await threadOverview(
-            bundle,
-            thread,
-            story.title,
-            makeAuthorResolver(identity),
-          );
+          const overview = await threadOverview(bundle, thread, story.title);
           return c.json(threadDetailSchema.parse(overview));
         },
       )
@@ -906,56 +930,6 @@ export function createForumRoutes() {
                 created_at: card.createdAt,
               },
             }),
-            201,
-          );
-        },
-      )
-
-      // --- Summaries (WS-G.1.4) ----------------------------------------------
-      .post(
-        '/threads/:threadId/summaries',
-        authMiddleware(),
-        requireVerifiedAccount(),
-        requireUnrestricted(),
-        zValidator('param', z.object({ threadId: uuidSchema })),
-        zValidator('json', summaryCreateRequestSchema),
-        async (c) => {
-          const auth = getAuth(c);
-          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-          const { threadId } = c.req.valid('param');
-          const request = c.req.valid('json');
-          if (request.thread_id !== threadId) {
-            return c.json(deny('id_mismatch', 'Body and path ids must match'), 422);
-          }
-          const bundle = bundles();
-          const identity = getIdentityServices();
-          const thread = await bundle.ingestion.stories.getThreadById(threadId);
-          if (!thread || !(await threadReadableToUser(bundle, thread, auth.userId))) {
-            return c.json(notFound, 404);
-          }
-          // Steward check: platform steward role OR any WS-A.2.2 room-steward
-          // role in the thread's room (WS-G.1.4 "role source WS-A.2.2 / WS-J").
-          const platformSteward = auth.roles.includes('steward') || auth.roles.includes('admin');
-          const roomSteward =
-            thread.roomId !== null
-              ? (await bundle.forum.rooms.stewardRolesFor(thread.roomId, auth.userId)).length > 0
-              : false;
-          const outcome = await createSummary(
-            {
-              forum: bundle.forum,
-              stories: bundle.ingestion.stories,
-              evidence: bundle.ingestion.evidence,
-              audit: identity.audit,
-            },
-            request,
-            auth.userId,
-            platformSteward || roomSteward,
-          );
-          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
-          return c.json(
-            summaryPublicSchema.parse(
-              await toSummaryPublic(outcome.summary, makeAuthorResolver(identity)),
-            ),
             201,
           );
         },

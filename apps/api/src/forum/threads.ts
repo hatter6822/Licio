@@ -9,17 +9,11 @@
 // `published` rows; the AUTHOR also sees their own under_review rows
 // (labeled); hidden/removed/under_review rows with published descendants
 // render as empty TOMBSTONES so subtrees never orphan.
-import type {
-  ContributionAnchor,
-  ContributionPublic,
-  SummaryPublic,
-  ThreadDetail,
-  ThreadSummaryStatus,
-} from '@licio/shared';
+import type { ContributionAnchor, ContributionPublic, ThreadDetail } from '@licio/shared';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { ThreadShellRecord } from '../ingestion/stores.js';
 import type { ForumServices } from './services.js';
-import type { ContributionRecord, SummaryRecord } from './stores.js';
+import type { ContributionRecord } from './stores.js';
 import { orderDepthFirst, subtreeRootId } from './tree.js';
 
 interface Bundle {
@@ -115,56 +109,16 @@ export async function viewerHideSet(
   return hide.size > 0 ? hide : undefined;
 }
 
-function summaryStatus(summaries: readonly SummaryRecord[]): ThreadSummaryStatus {
-  if (summaries.some((s) => s.layer === 'steward_summary')) return 'steward_summary';
-  if (summaries.some((s) => s.layer === 'community_synthesis')) return 'community_synthesis';
-  if (summaries.some((s) => s.layer === 'automated_draft')) return 'automated_draft';
-  return 'none';
-}
-
-export async function toSummaryPublic(
-  summary: SummaryRecord,
-  resolveAuthor: AuthorResolver,
-): Promise<SummaryPublic> {
-  const author = await resolveAuthor(summary.authoredBy);
-  const approver = await resolveAuthor(summary.approvedBy);
-  return {
-    summary_id: summary.summaryId,
-    thread_id: summary.threadId,
-    layer: summary.layer,
-    body: summary.body,
-    cited_contribution_ids:
-      (summary.citedContributionIds?.length ?? 0) > 0
-        ? (summary.citedContributionIds ?? [])
-        : summary.citedBranchIds,
-    cited_evidence_ids: summary.citedEvidenceIds,
-    unresolved_uncertainty: summary.unresolvedUncertainty,
-    minority_views_note: summary.minorityViewsNote,
-    machine_generated: summary.layer === 'automated_draft',
-    authored_by_handle: author?.handle ?? null,
-    approved_by_handle: approver?.handle ?? null,
-    created_at: summary.createdAt,
-    updated_at: summary.updatedAt,
-  };
-}
-
-/** Thread overview (WS-G.3.3): branch index + summary status. */
+/** Thread overview (WS-G.3.3): the branch index. */
 export async function threadOverview(
   bundle: Bundle,
   thread: ThreadShellRecord,
   title: string,
-  resolveAuthor: AuthorResolver,
 ): Promise<ThreadDetail> {
   const counts = await bundle.forum.contributions.countByType(thread.threadId, ['published']);
   const total = Object.values(counts).reduce((sum, n) => sum + (n ?? 0), 0);
   const section = (types: readonly string[]): number =>
     types.reduce((sum, type) => sum + (counts[type as keyof typeof counts] ?? 0), 0);
-
-  const summaries = await bundle.forum.summaries.listByThread(thread.threadId);
-  const current =
-    thread.currentSummaryId !== null
-      ? (summaries.find((s) => s.summaryId === thread.currentSummaryId) ?? null)
-      : null;
 
   return {
     thread_id: thread.threadId,
@@ -185,9 +139,6 @@ export async function threadOverview(
       lenses: section(['local_context', 'direct_experience']),
       chronology: total,
     },
-    summary_status: summaryStatus(summaries),
-    current_summary: current ? await toSummaryPublic(current, resolveAuthor) : null,
-    summary_layers: [...new Set(summaries.map((s) => s.layer))],
   };
 }
 

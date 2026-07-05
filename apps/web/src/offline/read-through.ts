@@ -129,7 +129,6 @@ export async function cacheStoryCommentsSnapshot(
       comments: response.comments,
       nextCursor: response.next_cursor,
       overview: response.overview,
-      summary: response.summary,
       cachedAt: Date.now(),
     }),
   );
@@ -146,16 +145,15 @@ export async function readStoryCommentsSnapshot(
   }
 }
 
-// --- Thread snapshots (lossy summary for offline reading) -----------------
+// --- Thread snapshots (title for offline reading) --------------------------
 
-/** Cache a thread's title + current summary for offline reading. */
+/** Cache a thread's title for offline reading. */
 export async function cacheThreadSnapshot(detail: ThreadDetail): Promise<void> {
   await bestEffort(() =>
     threadSnapshots.put({
       schemaVersion: RECORD_SCHEMA_VERSION,
       threadId: detail.thread_id,
       title: detail.title,
-      summary: detail.current_summary?.body ?? '',
       cachedAt: Date.now(),
     }),
   );

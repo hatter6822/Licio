@@ -109,12 +109,11 @@ export const draftStoryRecordSchema = z
   });
 export type DraftStoryRecord = z.infer<typeof draftStoryRecordSchema>;
 
-/** A cached thread summary for offline reading (key: threadId). */
+/** A cached thread title for offline reading (key: threadId). */
 export const threadSnapshotRecordSchema = z.object({
   schemaVersion,
   threadId: z.string().uuid(),
   title: z.string().min(1),
-  summary: z.string(),
   cachedAt: z.number().int().nonnegative(),
 });
 export type ThreadSnapshotRecord = z.infer<typeof threadSnapshotRecordSchema>;
@@ -128,7 +127,6 @@ export const storyCommentsSnapshotRecordSchema = z.object({
   comments: z.array(commentItemSchema).max(100),
   nextCursor: z.string().min(1).max(512).nullable(),
   overview: storyCommentsResponseSchema.shape.overview,
-  summary: storyCommentsResponseSchema.shape.summary,
   cachedAt: z.number().int().nonnegative(),
 });
 export type StoryCommentsSnapshotRecord = z.infer<typeof storyCommentsSnapshotRecordSchema>;

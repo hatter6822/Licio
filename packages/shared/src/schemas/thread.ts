@@ -15,7 +15,6 @@
 import { z } from 'zod';
 import { isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 import { contributionPublicSchema } from './contribution.js';
-import { summaryLayerSchema, summaryPublicSchema } from './summary.js';
 
 // ---------------------------------------------------------------------------
 // Conversation state (WS-G.1.1).
@@ -122,19 +121,10 @@ export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 export const threadListResponseSchema = paginatedSchema(threadSummarySchema);
 export type ThreadListResponse = z.infer<typeof threadListResponseSchema>;
 
-/** Current-summary status shown in the overview (§15.4 three layers). */
-export const threadSummaryStatusSchema = z.enum([
-  'none',
-  'automated_draft',
-  'community_synthesis',
-  'steward_summary',
-]);
-export type ThreadSummaryStatus = z.infer<typeof threadSummaryStatusSchema>;
-
 /**
  * Thread overview (WS-G.3.3 `GET /v1/threads/:id`): the branch index — each
- * structured section with its contribution count — plus the current summary.
- * Section contents load lazily through the branch endpoint.
+ * structured section with its contribution count.  Section contents load
+ * lazily through the branch endpoint.
  */
 export const threadDetailSchema = threadSummarySchema
   .extend({
@@ -148,10 +138,6 @@ export const threadDetailSchema = threadSummarySchema
         chronology: z.number().int().min(0),
       })
       .strict(),
-    summary_status: threadSummaryStatusSchema,
-    current_summary: summaryPublicSchema.nullable(),
-    /** All summary layers present on this thread (§15.4). */
-    summary_layers: z.array(summaryLayerSchema),
   })
   .strict();
 export type ThreadDetail = z.infer<typeof threadDetailSchema>;

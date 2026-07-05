@@ -178,6 +178,15 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     const commentArena = await store.open(makeArena(ctx));
     const map = await store.activeDebateIdsForContributions([ctx.targetId, randomUUID()]);
     expect(map.get(ctx.targetId)).toBe(commentArena?.debateId);
+    // The story-level discovery list surfaces BOTH the story- and comment-target
+    // active arenas (the resolved/none ones are excluded by state).
+    const active = await store.listActiveForStory(ctx.storyId, 10);
+    const activeIds = active.map((a) => a.debateId);
+    expect(activeIds).toContain(storyArena?.debateId);
+    expect(activeIds).toContain(commentArena?.debateId);
+    expect(active.every((a) => a.state !== 'resolved')).toBe(true);
+    // …and a different story sees none of them.
+    expect(await store.listActiveForStory(randomUUID(), 10)).toHaveLength(0);
   });
 }
 

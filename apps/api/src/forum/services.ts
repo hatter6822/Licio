@@ -29,11 +29,9 @@ import {
   InMemoryContributionStore,
   InMemoryLensStore,
   InMemoryRoomStore,
-  InMemorySummaryStore,
   InMemoryUploadStore,
   type LensStore,
   type RoomStore,
-  type SummaryStore,
   type UploadStore,
 } from './stores.js';
 import { escalateThreadOnIntegritySignal } from './transitions.js';
@@ -121,7 +119,6 @@ export interface ForumServices {
   contributions: ContributionStore;
   rooms: RoomStore;
   lenses: LensStore;
-  summaries: SummaryStore;
   uploads: UploadStore;
   contributionLimiter: ContributionRateLimiter;
   safety: ContributionSafetyClassifier;
@@ -196,7 +193,6 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     contributions: new InMemoryContributionStore(now, evidenceSink),
     rooms: new InMemoryRoomStore(now),
     lenses: new InMemoryLensStore(now),
-    summaries: new InMemorySummaryStore(now),
     uploads: new InMemoryUploadStore(now),
     contributionLimiter: new ContributionRateLimiter(
       options.limiterStore ?? new InMemorySlidingWindowStore(),

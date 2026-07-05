@@ -16,6 +16,7 @@ import {
   DEBATE_EDIT_WINDOW_MS,
   DEBATE_OVERRIDE_WINDOW_MS,
   type DebateArenaPublic,
+  type DebateArenaSummary,
   type DebateJudgeInput,
   type DebateJudgeSideInput,
   type DebatePosition,
@@ -23,6 +24,7 @@ import {
   type DebateViewerRole,
   type DebateWinner,
   debateArenaPublicSchema,
+  debateArenaSummarySchema,
 } from '@licio/shared';
 import type { DebateArenaRecord, DebateSidePosition, DebateStore } from './debate-store.js';
 import type { ContributionStore } from './stores.js';
@@ -521,6 +523,39 @@ export async function toDebateArenaPublic(
     override_reason: arena.overrideReason,
     resolved_at: arena.resolvedAt,
     viewer_role: viewerRole,
+    created_at: arena.createdAt,
+    updated_at: arena.updatedAt,
+  });
+}
+
+/**
+ * Compact, display-only summary for the story-level active-debates list — no
+ * per-viewer role and no both-sides' sources (those load on the arena page).
+ */
+export async function toDebateArenaSummary(
+  arena: DebateArenaRecord,
+  resolveAuthor: DebateAuthorResolver,
+  targetExcerpt: string | null,
+): Promise<DebateArenaSummary> {
+  const [incumbent, challenger] = await Promise.all([
+    resolveAuthor(arena.incumbentUserId),
+    resolveAuthor(arena.challengerUserId),
+  ]);
+  const trimmed = targetExcerpt?.trim() ?? '';
+  return debateArenaSummarySchema.parse({
+    debate_id: arena.debateId,
+    story_id: arena.storyId,
+    target_type: arena.targetType,
+    target_contribution_id: arena.targetContributionId,
+    challenger_contribution_id: arena.challengerContributionId,
+    state: arena.state,
+    edit_deadline_at: arena.editDeadlineAt,
+    override_deadline_at: arena.overrideDeadlineAt,
+    verdict: arena.verdict,
+    winner: arena.winner,
+    incumbent_display_name: incumbent?.displayName ?? null,
+    challenger_display_name: challenger?.displayName ?? null,
+    target_excerpt: trimmed.length > 0 ? trimmed.slice(0, 280) : null,
     created_at: arena.createdAt,
     updated_at: arena.updatedAt,
   });

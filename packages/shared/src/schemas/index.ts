@@ -36,7 +36,6 @@ export * from './signal-ledger.js';
 export * from './source.js';
 export * from './steward-roles.js';
 export * from './story.js';
-export * from './summary.js';
 export * from './takedown.js';
 export * from './telemetry.js';
 export * from './thread.js';

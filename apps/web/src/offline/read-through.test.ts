@@ -60,23 +60,6 @@ const THREAD: ThreadDetail = {
   created_at: '2026-06-09T12:00:00.000Z',
   updated_at: '2026-06-09T12:00:00.000Z',
   sections: { overview: 1, questions: 0, evidence: 1, challenges: 0, lenses: 0, chronology: 2 },
-  summary_status: 'community_synthesis',
-  current_summary: {
-    summary_id: '44444444-4444-4444-8444-444444444444',
-    thread_id: '33333333-3333-4333-8333-333333333333',
-    layer: 'community_synthesis',
-    body: 'Where the conversation stands.',
-    cited_contribution_ids: [],
-    cited_evidence_ids: [],
-    unresolved_uncertainty: 'Open question.',
-    minority_views_note: null,
-    machine_generated: false,
-    authored_by_handle: 'mara',
-    approved_by_handle: null,
-    created_at: '2026-06-09T12:00:00.000Z',
-    updated_at: '2026-06-09T12:00:00.000Z',
-  },
-  summary_layers: ['community_synthesis'],
 };
 
 beforeEach(async () => {
@@ -138,17 +121,10 @@ describe('signal ledger cache (non-lossy round-trip)', () => {
 });
 
 describe('thread snapshot cache', () => {
-  it('caches a thread summary and reads it back', async () => {
+  it('caches a thread title and reads it back', async () => {
     await cacheThreadSnapshot(THREAD);
     const record = await readThreadSnapshot(THREAD.thread_id);
     expect(record?.title).toBe(THREAD.title);
-    expect(record?.summary).toBe(THREAD.current_summary?.body);
-  });
-
-  it('stores an empty summary when the thread has none', async () => {
-    await cacheThreadSnapshot({ ...THREAD, current_summary: null });
-    const record = await readThreadSnapshot(THREAD.thread_id);
-    expect(record?.summary).toBe('');
   });
 
   it('returns undefined for an uncached thread', async () => {
