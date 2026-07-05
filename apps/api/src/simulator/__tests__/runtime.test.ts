@@ -415,6 +415,43 @@ describe('DevTrafficSimulator runtime', () => {
     }
   });
 
+  it('a second same-seed run over a persistent store still produces NEW stories (no duplicate loop)', async () => {
+    // A durable dev DB keeps a prior same-seed run's stories, so a replay
+    // regenerates identical (deterministic) URLs that now already exist and are
+    // rejected as duplicate_story. The run must burn the serial and move on
+    // rather than loop on the same duplicate — here one persistent in-memory
+    // graph stands in for that durable store across two simulator instances.
+    const graph = await buildSimTestGraph();
+    const run1 = new DevTrafficSimulator({
+      graph,
+      scenario: 'breaking_news',
+      seed: 'persist',
+      speed: 20,
+      autoLoop: false,
+    });
+    await run1.start();
+    for (let i = 0; i < 3; i += 1) await run1.tick();
+    run1.stop();
+    const afterRun1 = (await graph.ingestion.stories.listRecent(200)).length;
+    expect(afterRun1).toBeGreaterThan(0);
+
+    const run2 = new DevTrafficSimulator({
+      graph,
+      scenario: 'breaking_news',
+      seed: 'persist',
+      speed: 20,
+      autoLoop: false,
+    });
+    await run2.start();
+    for (let i = 0; i < 12; i += 1) await run2.tick();
+    run2.stop();
+    // The replay cleared the prior serial range and landed fresh stories instead
+    // of spinning on the duplicate kickoff (which would leave the count flat).
+    const afterRun2 = (await graph.ingestion.stories.listRecent(400)).length;
+    expect(afterRun2).toBeGreaterThan(afterRun1);
+    expect(run2.status().counters.stories_submitted).toBeGreaterThan(0);
+  });
+
   it('a long mixed run moves the high-frequency counters and produces varied submission types', async () => {
     const graph = await buildSimTestGraph();
     sim = new DevTrafficSimulator({

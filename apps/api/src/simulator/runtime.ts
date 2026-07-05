@@ -609,12 +609,35 @@ export class DevTrafficSimulator {
         outcome: 'ok',
       });
     } else {
+      // Burn the serial on rejection too: a generated story is DETERMINISTIC in
+      // its serial (a link's URL, an inline story's title dimensions), so leaving
+      // #storySerial unadvanced regenerates the SAME story next tick and loops —
+      // most visibly on a durable dev DB that already holds a prior same-seed run
+      // (every kickoff/link re-submits as duplicate_story). Advancing guarantees
+      // the next tick attempts a FRESH story, so traffic keeps flowing.
+      this.#storySerial += 1;
+      // A kickoff/repost that collided with an EXISTING VISIBLE story (a prior
+      // run under the same seed) still has to anchor the run, or breaking/
+      // coordinated scenarios would re-propose the kickoff every tick and never
+      // produce the follow-on traffic. Bind the existing duplicate as the focus
+      // and mark the beat done. duplicate_story is the one rejection that carries
+      // the existing story id (a hidden-duplicate rejection is non-identifying —
+      // held_for_review, no id — so it just falls through to the fresh-serial
+      // retry above, which lands a new story next tick).
+      const rejection = outcome.rejection;
+      if (rejection.status === 409 && rejection.code === 'duplicate_story') {
+        if (action.isKickoff) {
+          this.#kickoffDone = true;
+          this.#focusStoryId = rejection.existingStoryId;
+        }
+        if (action.isRepost) this.#repostDone = true;
+      }
       this.#recordRejection(
         'story',
         action.personaUserId,
         `story rejected`,
-        outcome.rejection.code,
-        outcome.rejection.status,
+        rejection.code,
+        rejection.status,
       );
     }
   }
