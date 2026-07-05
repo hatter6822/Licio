@@ -75,6 +75,9 @@ interface ActorFold {
   saved: boolean;
   contributions: Partial<Record<EventContributionType, number>>;
   uncitedAccusationsByType: Partial<Record<EventContributionType, number>>;
+  /** WS-T — contributions WITH an attached source, by type (the positive
+   *  citation weight; the structural inverse of the uncited downweight). */
+  citedContributionsByType: Partial<Record<EventContributionType, number>>;
 }
 
 export interface ItemAggregation {
@@ -110,6 +113,7 @@ function emptyActor(): ActorFold {
     saved: false,
     contributions: {},
     uncitedAccusationsByType: {},
+    citedContributionsByType: {},
   };
 }
 
@@ -207,6 +211,12 @@ export async function computeAggregationWindow(
         actor.uncitedAccusationsByType[payload.contribution_type] =
           (actor.uncitedAccusationsByType[payload.contribution_type] ?? 0) + 1;
       }
+      // WS-T — a SOURCED contribution earns the positive citation weight (the
+      // inverse of the downweight above), tracked at its own contribution type.
+      if (payload.has_citation) {
+        actor.citedContributionsByType[payload.contribution_type] =
+          (actor.citedContributionsByType[payload.contribution_type] ?? 0) + 1;
+      }
     } else if (row.topic === 'evidence.added') {
       // Evidence cards count toward window volume; the participation credit
       // flows through the matching contribution.created event (the composer
@@ -298,6 +308,7 @@ export function toActorSummary(
     replyDepthBucket: fold.branchDepthBucket,
     contributions: fold.contributions,
     uncitedAccusationsByType: fold.uncitedAccusationsByType,
+    citedContributionsByType: fold.citedContributionsByType,
     // §5.3 "Save for later" (SIG-ATT-SAVE): 1 when the actor saved the item in
     // the window, else 0. Private by default (the saved COLLECTION never leaves
     // the browser); only this deduped, privacy-leveled boolean is scored.

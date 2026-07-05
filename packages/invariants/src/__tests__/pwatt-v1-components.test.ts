@@ -30,6 +30,7 @@ function actor(overrides: Partial<ActorItemSummary> = {}): ActorItemSummary {
     returnVisitBucket: 'none',
     contributions: {},
     uncitedAccusationsByType: {},
+    citedContributionsByType: {},
     savedForLater: 0,
     ...overrides,
   };
@@ -53,6 +54,19 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
     }
     expect(actorV1Contribution(actor({ contributions: { low_info_reply: 5 } })).value).toBe(0);
     expect(actorV1Contribution(actor({ contributions: { flag: 5 } })).value).toBe(0);
+  });
+
+  it('WS-T — a SOURCED contribution outscores an identical UNSOURCED one', () => {
+    const unsourced = actorV1Contribution(actor({ contributions: { explanation: 1 } }));
+    const sourced = actorV1Contribution(
+      actor({
+        contributions: { explanation: 1 },
+        citedContributionsByType: { explanation: 1 },
+      }),
+    );
+    expect(sourced.value).toBeGreaterThan(unsourced.value);
+    expect(sourced.annotations).toContain('sourced_contribution_weighted');
+    expect(unsourced.annotations).not.toContain('sourced_contribution_weighted');
   });
 
   it('per-user saturation: the Nth same-type contribution adds less than the (N-1)th', () => {

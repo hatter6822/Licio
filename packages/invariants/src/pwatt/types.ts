@@ -74,6 +74,16 @@ export interface ActorItemSummary {
    * the downweight at the accusing contribution's own weight.
    */
   uncitedAccusationsByType: Partial<Record<EventContributionType, number>>;
+  /**
+   * The actor's contributions WITH at least one attached source, by type (WS-T
+   * sourced comments).  Per-type counts never exceed `contributions[type]` — the
+   * scoring functions clamp defensively.  A sourced contribution earns a positive
+   * citation weight (the exact structural inverse of the uncited-accusation
+   * downweight): a sourced comment counts as strictly greater participation than
+   * an unsourced one.  This is an EVIDENCE signal, never applause (it derives
+   * only from whether the content carries a source, uniformly across authors).
+   */
+  citedContributionsByType: Partial<Record<EventContributionType, number>>;
   /** Private saves within the window (0 until a save topic exists; low weight). */
   savedForLater: number;
   /**

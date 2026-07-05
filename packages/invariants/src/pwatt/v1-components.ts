@@ -118,6 +118,13 @@ export interface PwattV1ComponentsConfig {
   >;
   /** Fraction of its type weight an uncited accusation keeps (WS-E.2.2b). */
   accusationDownweight: number;
+  /**
+   * WS-T sourced-comment bonus in [0, 1]: the extra weight a FULLY-sourced type
+   * earns over an unsourced one, applied to the SATURATED per-type value (so the
+   * concave curve + the ≤50% dimension cap bound it — a link-spam cannot run
+   * away).  0 disables it.  An evidence signal, not applause.
+   */
+  citationBonus: number;
   /** Window contribution count beyond which rapid-repetition dampening applies. */
   rapidThreshold: number;
   /** Multiplier (< 1) applied to a rapid actor's contribution score (§5.3). */
@@ -146,6 +153,9 @@ export const DEFAULT_PWATT_V1_COMPONENTS_CONFIG: PwattV1ComponentsConfig = {
     contributions: { weightPct: 50, curve: LOG_CURVE_DEFAULT },
   },
   accusationDownweight: 0.25,
+  // A fully-sourced contribution earns +35% over an unsourced one, on the
+  // saturated per-type value (reviewed default; fail-closed tunable).
+  citationBonus: 0.35,
   rapidThreshold: 5,
   rapidDampening: 0.3,
   antiSignalAttenuation: DEFAULT_ANTI_SIGNAL_ATTENUATION,
@@ -167,6 +177,7 @@ export function validatePwattV1ComponentsConfig(config: PwattV1ComponentsConfig)
   validateSaturationDimensions(config.participationDimensions);
   for (const [name, factor] of [
     ['accusationDownweight', config.accusationDownweight],
+    ['citationBonus', config.citationBonus],
     ['rapidDampening', config.rapidDampening],
   ] as const) {
     if (!(factor >= 0 && factor <= 1)) throw new Error(`${name} must be in [0, 1]`);
@@ -190,13 +201,17 @@ export interface ActorV1ContributionResult {
  * raises it (the transparency remedy, WS-E.2.2b).
  */
 export function actorV1Contribution(
-  actor: Pick<ActorItemSummary, 'contributions' | 'uncitedAccusationsByType'>,
+  actor: Pick<
+    ActorItemSummary,
+    'contributions' | 'uncitedAccusationsByType' | 'citedContributionsByType'
+  >,
   config: PwattV1ComponentsConfig = DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
 ): ActorV1ContributionResult {
   const annotations: string[] = [];
   let weighted = 0;
   let totalContributions = 0;
   let uncitedTotal = 0;
+  let citedTotal = 0;
   for (const [type, count] of Object.entries(actor.contributions) as Array<
     [EventContributionType, number | undefined]
   >) {
@@ -207,9 +222,17 @@ export function actorV1Contribution(
     const uncited = Math.min(toNonNegative(actor.uncitedAccusationsByType[type] ?? 0), n);
     uncitedTotal += uncited;
     const effectiveCount = n - uncited + config.accusationDownweight * uncited;
-    weighted += typeWeight * saturate(effectiveCount, config.contributionCurve);
+    const base = saturate(effectiveCount, config.contributionCurve);
+    // WS-T — a sourced contribution earns a bonus on the SATURATED per-type value
+    // (the structural inverse of the uncited-accusation downweight): the fraction
+    // of this type that carries a source scales a `(1 + citationBonus)` multiplier.
+    const cited = Math.min(toNonNegative(actor.citedContributionsByType[type] ?? 0), n);
+    citedTotal += cited;
+    const citedFraction = n > 0 ? cited / n : 0;
+    weighted += typeWeight * base * (1 + config.citationBonus * citedFraction);
   }
   if (uncitedTotal > 0) annotations.push('source_free_accusation_downweight');
+  if (citedTotal > 0) annotations.push('sourced_contribution_weighted');
   let value = clamp01(weighted);
   if (totalContributions > config.rapidThreshold) {
     value *= config.rapidDampening;
