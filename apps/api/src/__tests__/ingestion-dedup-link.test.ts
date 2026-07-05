@@ -111,13 +111,19 @@ describe('WS-F link near-duplicate — deferred to the fetched article', () => {
   it('two identical robots-disallowed links are grouped by their fallback signatures', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);
     fixture.robots.set('https://wall.example', 'User-agent: *\nDisallow: /');
-    const reason =
-      'The identical inaccessible-link reason note, repeated verbatim across both submissions of this same blocked utility report for the near-duplicate screen.';
-    await submitLink(cookie, 'https://wall.example/a', RESERVOIR, { reason });
-    await submitLink(cookie, 'https://wall.example/b', RESERVOIR, {
-      reason,
-      title: 'The identical inaccessible-link reason note, second posting',
-    });
+    // Pin BOTH the title AND the reason so the signed fallback text (title +
+    // reason — submissionBodyText for a link is its reason) is IDENTICAL across
+    // the two submissions: a verbatim repost of the same blocked link. (The
+    // default linkSubmission title is randomised per call, which would make the
+    // MinHash estimate — and thus the pass/fail — non-deterministic.) Only the
+    // URL differs, so these are two distinct stories the screen must group.
+    const shared = {
+      title: 'The blocked utility report on the reservoir figures, verbatim repost',
+      reason:
+        'The identical inaccessible-link reason note, repeated verbatim across both submissions of this same blocked utility report for the near-duplicate screen.',
+    };
+    await submitLink(cookie, 'https://wall.example/a', RESERVOIR, shared);
+    await submitLink(cookie, 'https://wall.example/b', RESERVOIR, shared);
     // The link-only path runs the SAME public near-dup screen the fetched path
     // runs, over the fallback signatures — so repeated inaccessible links group.
     expect(await queueCount('near_duplicate')).toBeGreaterThanOrEqual(1);
