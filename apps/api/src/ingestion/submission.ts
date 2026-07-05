@@ -723,47 +723,60 @@ export async function submitStory(
     ingestion.trackBackground(events.router.publish(evidenceEvent));
   }
 
-  // 7. SYNC near-duplicate pass on the locally available text (WS-F.1.3c):
-  //    informs the submitter immediately; link stories re-check post-fetch.
-  // WS-Q.2.2c — ALWAYS sign (so a later widen joins the public cluster without
-  // a recompute), but only run the PUBLIC near-dup pass for PUBLIC submissions:
-  // a room_only twin is neither flagged nor flags others (room-tier dedup is
-  // out of v1 scope).
-  const localText = submissionText(created.story);
-  const { signature, bands } = await signatureStory(
-    ingestion.signatures,
-    created.story.storyId,
-    localText,
-    'submitted',
-  );
+  // 7. SYNC near-duplicate pass — ONLY for stories whose text is COMPLETE at
+  //    submission (WS-F.1.3c). A LINK's submitted text is just its title + a
+  //    short reason NOTE, not the article, so signing + near-dup-matching it
+  //    here would (a) compare a thin note against other stories' full CONTENT
+  //    signatures — MinHash Jaccard across incomparable text bases, which is
+  //    meaningless — and (b) be immediately superseded by the post-fetch
+  //    `extracted` signature (only ONE signature per story). A link's single,
+  //    accurate signature + near-dup pass is written over the FETCHED article by
+  //    the extraction pipeline (processLinkStory); defer entirely to it.
+  //    Inline-content stories (original_brief/question/local_update/…) are
+  //    signed + matched here — their submitted text IS their content — so every
+  //    signature the near-dup pass ever compares is over actual story content.
+  // WS-Q.2.2c — sign inline-content stories regardless of visibility (so a later
+  // widen joins the public cluster without a recompute), but only run the near-
+  // dup MATCHING for PUBLIC submissions: a room_only twin is neither flagged nor
+  // flags others (room-tier dedup is out of v1 scope).
+  const contentCompleteAtSubmission = created.story.submissionType !== 'link';
   const reviewFlags: Array<'near_duplicate' | 'syndicated_copy_candidate'> = [];
   let similar: Awaited<ReturnType<typeof findNearDuplicates>> = [];
-  if (created.story.visibility === 'public') {
-    similar = await findNearDuplicates(
+  if (contentCompleteAtSubmission) {
+    const localText = submissionText(created.story);
+    const { signature, bands } = await signatureStory(
       ingestion.signatures,
-      ingestion.stories,
       created.story.storyId,
-      signature,
-      bands,
-      config.nearDuplicateThreshold,
-      5,
+      localText,
+      'submitted',
     );
-    if (similar.length > 0) {
-      reviewFlags.push('near_duplicate');
-      await ingestion.reviewQueue.insert({
-        kind: 'near_duplicate',
-        storyId: created.story.storyId,
-        context: {
-          similar: similar.map((s) => ({ story_id: s.storyId, estimate: s.estimatedJaccard })),
-          text_source: 'submitted',
-        },
-        status: 'pending',
-        resolution: null,
-        resolvedBy: null,
-        resolvedAt: null,
-        notBefore: null,
-      });
-      ingestion.metrics.increment('dedup.flagged_near_duplicate_sync');
+    if (created.story.visibility === 'public') {
+      similar = await findNearDuplicates(
+        ingestion.signatures,
+        ingestion.stories,
+        created.story.storyId,
+        signature,
+        bands,
+        config.nearDuplicateThreshold,
+        5,
+      );
+      if (similar.length > 0) {
+        reviewFlags.push('near_duplicate');
+        await ingestion.reviewQueue.insert({
+          kind: 'near_duplicate',
+          storyId: created.story.storyId,
+          context: {
+            similar: similar.map((s) => ({ story_id: s.storyId, estimate: s.estimatedJaccard })),
+            text_source: 'submitted',
+          },
+          status: 'pending',
+          resolution: null,
+          resolvedBy: null,
+          resolvedAt: null,
+          notBefore: null,
+        });
+        ingestion.metrics.increment('dedup.flagged_near_duplicate_sync');
+      }
     }
   }
 

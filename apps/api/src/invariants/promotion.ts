@@ -36,14 +36,19 @@ export interface PromotionService {
 }
 
 export function createPromotionService(
-  store: PromotionStore,
+  // Accept either the store or a getter for it. A getter lets the service read
+  // the CURRENT store even after a post-construction swap (the production boot
+  // replaces the in-memory promotions store with the Drizzle one AFTER this
+  // service is built) — the same lazy pattern the rest of the container uses.
+  store: PromotionStore | (() => PromotionStore),
   cardFor: (invariantType: string) => InvariantCard | null,
   log: (event: string, meta: Record<string, unknown>) => void,
   regressionGate: () => { pass: boolean; failures: Array<{ invariant: string }> } = () =>
     runRegressionSuite(),
 ): PromotionService {
+  const resolveStore = (): PromotionStore => (typeof store === 'function' ? store() : store);
   const history = async (invariantType: string): Promise<PromotionRecord[]> => {
-    const rows = await store.listForInvariant(invariantType);
+    const rows = await resolveStore().listForInvariant(invariantType);
     return rows.map((row) => ({
       invariantType: row.invariantType,
       fromStatus: row.fromStatus as ShadowStatus,
@@ -96,7 +101,7 @@ export function createPromotionService(
           return reason;
         }
       }
-      await store.append({
+      await resolveStore().append({
         invariantType: record.invariantType,
         fromStatus: record.fromStatus,
         toStatus: record.toStatus,

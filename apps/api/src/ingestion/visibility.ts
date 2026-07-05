@@ -24,7 +24,7 @@ import {
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
-import { findNearDuplicates, signatureStory } from './dedup.js';
+import { findNearDuplicates, loadStoredSignature, signatureStory } from './dedup.js';
 import { submissionText } from './pipeline.js';
 import type { IngestionServices } from './services.js';
 
@@ -125,12 +125,18 @@ export async function changeStoryVisibility(
   // routing — it never enters the public tier unscreened.
   if (target === 'public') {
     const config = ingestion.config();
-    const { signature, bands } = await signatureStory(
-      ingestion.signatures,
-      storyId,
-      submissionText(updated),
-      'submitted',
-    );
+    // REUSE the story's existing accurate signature rather than re-signing.
+    // WS-Q.2.2c stores a signature for every story, so widening a LINK that
+    // already completed extraction finds its `extracted` article signature
+    // here — re-signing from submissionText (a link's thin title+reason NOTE)
+    // would clobber it and make this first public screen miss real article
+    // duplicates or flag note-similar links. Sign the submitted text only when
+    // no signature exists yet (an inline story always has its submitted one;
+    // a link whose extraction is still pending gets a stopgap, and the later
+    // `extracted` screen re-runs the accurate public pass once the article lands).
+    const { signature, bands } =
+      (await loadStoredSignature(ingestion.signatures, storyId)) ??
+      (await signatureStory(ingestion.signatures, storyId, submissionText(updated), 'submitted'));
     const similar = await findNearDuplicates(
       ingestion.signatures,
       ingestion.stories,

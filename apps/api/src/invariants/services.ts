@@ -149,8 +149,11 @@ export function createInMemoryInvariantServices(
     scoiActions: new InMemoryScoiContextActionStore(),
     bridgeAttempts: new InMemoryBridgeAttemptStore(),
     sessions,
+    // Pass a GETTER so a post-construction store swap (the production boot
+    // replaces `promotions` with the Drizzle adapter) is honoured — otherwise
+    // the service would keep reading the orphaned in-memory store.
     promotionService: createPromotionService(
-      promotions,
+      () => services.promotions,
       (invariantType) =>
         Object.values(INVARIANT_CARDS).find((c) => c.invariant_type === invariantType) ?? null,
       log,

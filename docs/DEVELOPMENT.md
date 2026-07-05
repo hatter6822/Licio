@@ -772,6 +772,69 @@ flow end to end. The crypto/protocol cores load only via dynamic import (the
 `private-p2p` / `lcap-p2p` lazy chunks), so the initial bundle is unaffected — open
 DevTools → Network to watch the chunk load when you first enter `/private`.
 
+### Continuous traffic simulation (watch the feed react live)
+
+The seed gives you a static corpus. To see how the platform behaves under
+**continuous, unique traffic** — new stories arriving, discussions cascading,
+readers accumulating attention, the ranked feed reordering — run the
+**development traffic simulator**. It drives the **real** WS-E/F/G/H/I/J
+pipelines with deterministic, persona-shaped synthetic activity: synthetic
+users submit stories, reply in threads, read (as bucketed attention
+aggregates), join rooms, and file reports, exactly as a real client would. It
+calls the same service functions the HTTP routes call, so everything flows
+through the production read paths and the feed reacts the same way it would to
+real people.
+
+It is **development-only** and never runs, mounts, or is reachable in
+production (guarded by `NODE_ENV === 'development'`; the control routes are
+mounted in front of the CSRF layer, never in the production API type, and the
+web panel is tree-shaken from production builds).
+
+**Turn it on.** It autostarts with `pnpm dev` on the `steady` scenario. Control
+it from the environment:
+
+```sh
+pnpm dev                        # simulator autostarts (steady)
+LICIO_SIM=breaking_news pnpm dev  # open on a specific scenario
+LICIO_SIM=idle pnpm dev         # boot it stopped (start it from the panel)
+LICIO_SIM=off pnpm dev          # disable it entirely
+LICIO_SIM_SEED=my-seed pnpm dev # pin the deterministic seed (same seed ⇒ same run)
+```
+
+**Drive it from the UI.** Sign in, then open **Profile → Developer tools →
+Traffic simulator** (or go to `/dev/simulator`). The panel shows the run state,
+honest activity counters (stories, comments, reads, reports, plus real pipeline
+rejections such as rate limits and duplicate detection — surfaced, never
+hidden), a front-page **feed-movement** view with per-story position deltas,
+and a live activity ticker. From there you can start/stop, switch scenarios,
+and change the speed multiplier. To watch the effect, keep the front page (or a
+story's comment section) open in a second tab: the feed refreshes on tab focus
+or after its 30-second staleness window, and an open story's comment section
+streams new comments over SSE in real time.
+
+**Scenarios.**
+
+| Scenario | What it demonstrates |
+|----------|----------------------|
+| **Steady community** | A balanced day: stories every few minutes, continuous reading, threaded discussion, the occasional report. |
+| **Breaking story** | A developing story lands; reading surges then decays; follow-ups and one verbatim repost arrive — watch early scoring and the MERI duplicate fold. |
+| **Runaway thread** | One discussion cascades into deep nested replies with readers returning — watch thread depth and participation signals. |
+| **Coordinated burst** | A cluster of **fresh** accounts hammers one story with synchronized reading, near-identical replies, and reports — watch the WS-E anti-signal dampening and the WS-J coordinated-report intake respond. |
+| **New-user influx** | A stream of brand-new accounts joins rooms and posts lightly — watch new-account handling across the pipelines. |
+| **Quiet night** | Near-silence — a baseline to compare the others against. |
+
+**How it stays honest.** Synthetic users are real, active, verified accounts in
+the identity store (ids in the reserved `5f5ed000-…` family, distinct from the
+seed's `licio_*` authors). Attention only ever leaves as coarse §22.1 buckets —
+never raw traces. Organic personas are backdated so they read as aged accounts;
+the coordinated-burst cluster is intentionally fresh so it genuinely trips the
+anti-signal detectors. A per-boot story budget caps how much it creates. The
+whole run is deterministic: the same seed and scenario replay the same traffic,
+which is what makes a tester's session reproducible.
+
+The simulator's engine, personas, scenarios, and content generators live in
+`apps/api/src/simulator/`; the control panel is `apps/web/src/components/dev/`.
+
 ---
 
 ## 11. Local HTTPS (optional)
