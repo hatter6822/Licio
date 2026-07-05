@@ -64,7 +64,6 @@ const R = (n: number): string => `5f5e3000-0000-4000-8000-${String(n).padStart(1
 const S = (n: number): string => `5f5e1000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const T = (n: number): string => `5f5e2000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const LENS = (n: number): string => `5f5e5000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const SUM = (n: number): string => `5f5e7000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const SUB = (n: number): string => `5f5e8000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const CLAIM = (n: number): string => `5f5e9000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const EVID = (n: number): string => `5f5ea000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -391,20 +390,6 @@ export async function seedForumDemoData(
     path: [],
     moderationState: 'published',
   });
-
-  const summary = await forum.summaries.insert({
-    summaryId: '5f5e7000-0000-4000-8000-000000000001',
-    threadId: DEMO_IDS.THREAD_1,
-    layer: 'community_synthesis',
-    body: 'Readers corroborated the official dataset against an independent lab report.',
-    citedBranchIds: [C(1)],
-    citedEvidenceIds: [],
-    unresolvedUncertainty: 'Whether the sampling window was representative.',
-    minorityViewsNote: null,
-    authoredBy: author,
-    approvedBy: null,
-  });
-  await ingestion.stories.updateThread(DEMO_IDS.THREAD_1, { currentSummaryId: summary.summaryId });
 
   // -------------------------------------------------------------------------
   // Richer demo corpus (for local development + bug discovery): several more
@@ -1727,53 +1712,6 @@ export async function seedForumDemoData(
       body: 'Partly seasonal, but the post-cleanup readings are above the same months last year.',
     },
   ]);
-
-  // A couple of community syntheses on the richer new threads.
-  const briefSummary = await forum.summaries.insert({
-    summaryId: SUM(2),
-    threadId: T(9),
-    layer: 'community_synthesis',
-    body: 'Two absolute demand peaks this week; flat once weather-normalized. A one-day chart-labeling error was corrected.',
-    citedBranchIds: [C(141), C(143)],
-    citedEvidenceIds: [],
-    unresolvedUncertainty: 'How sensitive the normalization is to the baseline period.',
-    minorityViewsNote: null,
-    authoredBy: nadia,
-    approvedBy: null,
-  });
-  await ingestion.stories.updateThread(T(9), { currentSummaryId: briefSummary.summaryId });
-
-  const turnoutSummary = await forum.summaries.insert({
-    summaryId: SUM(3),
-    threadId: T(11),
-    layer: 'community_synthesis',
-    body: 'Turnout is reported as a share of registered voters; a spot-check against certified totals matched.',
-    citedBranchIds: [C(181)],
-    citedEvidenceIds: [],
-    unresolvedUncertainty:
-      'Whether the registered-voter denominator is comparable across precincts with recent roll updates.',
-    minorityViewsNote: null,
-    authoredBy: raj,
-    approvedBy: null,
-  });
-  await ingestion.stories.updateThread(T(11), { currentSummaryId: turnoutSummary.summaryId });
-
-  // The archived recall-petition write-up (S20) carries the high-quality
-  // synthesis that makes "Resolved Context" honest.
-  const recallSummary = await forum.summaries.insert({
-    summaryId: SUM(4),
-    threadId: T(20),
-    layer: 'community_synthesis',
-    body: 'Signatures were verified against the voter file; duplicates and out-of-district entries were rejected with reasons; the certified total cleared the threshold.',
-    citedBranchIds: [],
-    citedEvidenceIds: [],
-    unresolvedUncertainty:
-      'Whether the same rejection criteria were applied consistently across every signature batch.',
-    minorityViewsNote: null,
-    authoredBy: admin,
-    approvedBy: null,
-  });
-  await ingestion.stories.updateThread(T(20), { currentSummaryId: recallSummary.summaryId });
 
   // MinHash signatures for every seeded story (over the title + excerpt). These
   // are the SAME signatures the WS-F dedup pipeline writes, so the REAL MERI

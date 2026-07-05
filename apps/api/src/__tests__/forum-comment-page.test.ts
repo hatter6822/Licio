@@ -5,7 +5,7 @@
 // a focused (`root=`) read returns a single comment as `anchor` with its replies
 // paginated as the comment list — so a reader drills arbitrarily deep one view at
 // a time.
-import { storyCommentsResponseSchema } from '@licio/shared';
+import { storyCommentsResponseSchema, storyDebatesResponseSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ensureCommonsRoom } from '../forum/rooms.js';
@@ -249,6 +249,65 @@ describe('WS-T.7.2 — story comment depth', () => {
       body: 'also gone',
     });
     const res = await getComments(`?root=${parent.id}&depth=1`);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('WS-T — story active-debate discovery route', () => {
+  async function getDebates() {
+    return app().request(
+      new Request(`http://local/v1/stories/${storyId}/debates`, { headers: { cookie } }),
+    );
+  }
+
+  it('is empty for a story with no open debates', async () => {
+    const res = await getDebates();
+    expect(res.status).toBe(200);
+    const body = storyDebatesResponseSchema.parse(await res.json());
+    expect(body.debates).toEqual([]);
+  });
+
+  it('lists a comment-target arena a sourced correction opened, with its excerpt', async () => {
+    const targetId = await createOk({
+      type: 'comment',
+      thread_id: threadId,
+      client_draft_id: 'draft-target-route-1',
+      body: 'The vote passed 5-4.',
+    });
+    const correctionRes = await app().request(
+      jsonRequest(
+        '/v1/contributions',
+        'POST',
+        {
+          type: 'correction',
+          thread_id: threadId,
+          client_draft_id: 'draft-correction-route-1',
+          body: 'That figure is wrong; the record disagrees.',
+          citations: [{ url: 'https://example.gov/record' }],
+          target_contribution_id: targetId,
+        },
+        cookie,
+      ),
+    );
+    expect(correctionRes.status).toBe(201);
+
+    const res = await getDebates();
+    expect(res.status).toBe(200);
+    const body = storyDebatesResponseSchema.parse(await res.json());
+    expect(body.debates).toHaveLength(1);
+    const debate = body.debates[0];
+    expect(debate?.target_type).toBe('comment');
+    expect(debate?.target_contribution_id).toBe(targetId);
+    expect(debate?.state).toBe('open');
+    expect(debate?.target_excerpt).toBe('The vote passed 5-4.');
+  });
+
+  it('404s a debate list for an unknown story', async () => {
+    const res = await app().request(
+      new Request('http://local/v1/stories/00000000-0000-4000-8000-0000000000ff/debates', {
+        headers: { cookie },
+      }),
+    );
     expect(res.status).toBe(404);
   });
 });

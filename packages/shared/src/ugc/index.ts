@@ -6,3 +6,4 @@ export * from './html.js';
 export * from './link-safety.js';
 export * from './markdown.js';
 export * from './render.js';
+export * from './sources.js';

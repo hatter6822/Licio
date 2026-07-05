@@ -20,6 +20,7 @@ import {
   postDebatePosition,
   runDebateLifecycle,
   toDebateArenaPublic,
+  toDebateArenaSummary,
 } from '../forum/debate.js';
 import { InMemoryDebateStore } from '../forum/debate-store.js';
 import { InMemoryContributionStore } from '../forum/stores.js';
@@ -459,6 +460,58 @@ describe('WS-T debate arena lifecycle', () => {
     expect(stale).toBeNull();
     const arena = await debates.getById(debateId);
     expect(arena?.positions.incumbent.summary).toBe(''); // never overwritten
+  });
+});
+
+describe('WS-T story-level active-debate discovery (listActiveForStory + summary)', () => {
+  const resolveAuthor = async (userId: string | null) =>
+    userId === null
+      ? null
+      : { handle: `u-${userId.slice(0, 4)}`, displayName: `User ${userId.slice(0, 4)}` };
+
+  it('lists a story’s active arenas and projects a compact, display-only summary', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+
+    const active = await debates.listActiveForStory(STORY, 50);
+    expect(active.map((a) => a.debateId)).toContain(debateId);
+
+    const arena = active[0];
+    if (!arena) throw new Error('no active arena');
+    const target = await contributions.getById(targetId);
+    const summary = await toDebateArenaSummary(arena, resolveAuthor, target?.body ?? null);
+    expect(summary.debate_id).toBe(debateId);
+    expect(summary.target_type).toBe('comment');
+    expect(summary.target_contribution_id).toBe(targetId);
+    expect(summary.state).toBe('open');
+    expect(summary.incumbent_display_name).toBe(`User ${INCUMBENT.slice(0, 4)}`);
+    expect(summary.challenger_display_name).toBe(`User ${CHALLENGER.slice(0, 4)}`);
+    expect(summary.target_excerpt).toBe('The vote passed 5-4.');
+    // Display-only: no vote/tally/score field anywhere on the summary.
+    expect(summary).not.toHaveProperty('votes');
+  });
+
+  it('excludes a resolved arena from the discovery list', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // Judge + finalize → resolved.
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    await judgeDebateArena(deps, debateId);
+    clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
+    await finalizeDebate(deps, debateId);
+    expect((await debates.listActiveForStory(STORY, 50)).map((a) => a.debateId)).not.toContain(
+      debateId,
+    );
   });
 });
 

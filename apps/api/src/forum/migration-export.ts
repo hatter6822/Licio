@@ -230,8 +230,6 @@ export interface MigrationPurgeCounts {
   threads: number;
   /** Contributions hard-deleted (ALL members', any state). */
   contributions: number;
-  /** Derived summaries hard-deleted. */
-  summaries: number;
   /** Media uploads (records + bytes) destroyed. */
   uploads: number;
   /** Lenses hard-deleted. */
@@ -256,7 +254,6 @@ const EMPTY_COUNTS: MigrationPurgeCounts = {
   stories: 0,
   threads: 0,
   contributions: 0,
-  summaries: 0,
   uploads: 0,
   lenses: 0,
 };
@@ -353,11 +350,10 @@ export async function purgeRoomForMigration(
       if (thread !== null) threadIds.push(thread.threadId);
     }
 
-    // Forum-owned content (hard delete): contributions (ALL members'), derived
-    // summaries, and media uploads.  Order is irrelevant — each is independent.
+    // Forum-owned content (hard delete): contributions (ALL members') and media
+    // uploads.  Order is irrelevant — each is independent.
     if (threadIds.length > 0) {
       counts.contributions += await forum.contributions.purgeByThreads(threadIds);
-      counts.summaries += await forum.summaries.deleteByThreads(threadIds);
     }
     counts.uploads += await forum.uploads.purgeByStories(storyIds);
 
@@ -389,7 +385,6 @@ export async function purgeRoomForMigration(
     stories_affected: counts.stories,
     threads_archived: counts.threads,
     contributions_deleted: counts.contributions,
-    summaries_deleted: counts.summaries,
     uploads_deleted: counts.uploads,
     lenses_deleted: counts.lenses,
   });

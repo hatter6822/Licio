@@ -394,7 +394,7 @@ Each feed card contains: story title; source and origin badge; home-room chip (w
 
 ## 6.4 Thread layout
 
-The comment section is embedded directly in the content page. Comments are lightly nested: top-level comments, one collapsible reply preview level, and a "continue thread" link for deeper subthreads. The default read is chronological, with newest/oldest ordering and optional, de-emphasized filters for **Sources** and **Corrections** derived from contribution type. The **Overview** is the Section 24.3 summary shown above the comments. Inline controls open the comment composer in place rather than sending the reader to a separate contribution page.
+The comment section is embedded directly in the content page. Comments are lightly nested: top-level comments, one collapsible reply preview level, and a "continue thread" link for deeper subthreads. The default read is chronological, with newest/oldest ordering. Sources attached to a comment are authored inline (a sourced phrase becomes a footnoted link) and read through a per-comment "Sources" footnote modal; active correction debates surface in an active-debates panel above the conversation. Inline controls open the comment composer in place rather than sending the reader to a separate contribution page. (The reader-facing thread **Overview** — the layered thread summary — was **removed**; see Section 24.3.)
 
 ## 6.5 Context cards
 
@@ -1072,7 +1072,7 @@ A thread carries two orthogonal, audited state dimensions, evolved only through 
 - **Conversation state** — the discourse lifecycle: `active → {deepening, tense, under_review, resolved}`; `tense ⇄ under_review`; `under_review → {active, resolved}`; any non-archived state → `archived` (terminal). `deepening` is entered structurally on sustained, multi-level participation with evidence (volume, evidence, and live-depth thresholds). A review that ends in restriction moves the safety dimension, not the conversation dimension.
 - **Safety state** — the trust-and-safety posture: `normal`, `elevated`, `under_review`, `restricted`. Escalation may move one step or jump straight to `restricted` for imminent harm (Section 18.3); de-escalation always passes through review (`restricted → under_review` is the appeal path). Every change is audit-logged and emits `thread.state.changed` (Section 21.3).
 
-Summaries come in three layers: an **automated draft summary** (generated, labeled machine-generated, never final); a **community synthesis** (user-written, citing comments and evidence); and a **steward summary** (moderator-approved, for high-impact threads). A human layer always supersedes the automated draft, and summaries include unresolved uncertainty and relevant minority views (Section 24.3).
+**Layered thread summaries were removed.** The reader-facing thread "Overview" — the community-synthesis / steward / automated-draft summary shown above a conversation — is no longer part of the product: the `summaries` table, the `thread.current_summary_id` pointer, the summary-creation endpoint, and the Overview surface have all been withdrawn. The AI summarization pipeline is retained only as a governance/evaluation substrate (it still generates a draft, runs the Section 24.3 quality + grounding checks, and records an immutable AIOutputRecord for audit), but its output is never published as a thread Overview.
 
 ## 15.5 Comments and replies
 
@@ -1397,7 +1397,7 @@ Knomosis is an isolated bounded context: ranking services read only sanitized, a
             topic_ids, location_scope, sensitivity_labels, lifecycle_state,
             created_at, updated_at }
 
-    Thread { thread_id, story_id, room_id, branch_index, current_summary_id,
+    Thread { thread_id, story_id, room_id, branch_index,
              conversation_state, safety_state, created_at }
 
     Contribution { contribution_id, thread_id, user_id, type, body, citations,
@@ -1599,7 +1599,9 @@ For **community-uploaded room-governance models** (§16.6, §24.6), additionally
 
 ## 24.3 Summarization constraints
 
-Summaries must cite source comments and evidence cards; distinguish facts, claims, and interpretations; preserve uncertainty; identify unresolved questions; avoid synthesizing harassment or slurs unnecessarily; avoid presenting the majority view as truth merely because it is common; and support correction workflows.
+The reader-facing **layered thread summary / conversation Overview was removed** (no `summaries` table, `current_summary_id` pointer, summary-creation endpoint, or Overview surface). The constraints below are retained only for the **AI summarization evaluation substrate** — the pipeline still generates a draft and runs these checks to record an auditable AIOutputRecord, but the result is never published to readers.
+
+When an AI summary is generated (for governance/evaluation), it must cite source comments and evidence cards; distinguish facts, claims, and interpretations; preserve uncertainty; identify unresolved questions; avoid synthesizing harassment or slurs unnecessarily; avoid presenting the majority view as truth merely because it is common; and support correction workflows.
 
 ## 24.4 Ranking-ML constraints
 

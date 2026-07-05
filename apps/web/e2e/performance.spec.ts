@@ -1,20 +1,46 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Interaction-budget release gate (WS-C.5.1, SPEC §6.10). WS-T retired the
-// branch reader, so the browser budget now exercises the inline comment-section
-// filter interaction on a story page. The preview server serves static assets
-// only; API reads are stubbed at the network layer and the service worker is
-// blocked so the stub is deterministic.
+// branch reader and the comment-filter tabs, so the browser budget now exercises
+// opening a comment's "Sources" footnote modal on a story page. The preview
+// server serves static assets only; API reads are stubbed at the network layer
+// and the service worker is blocked so the stub is deterministic.
 import { expect, test } from '@playwright/test';
 
 const STORY = '5f5e1000-0000-4000-8000-000000000001';
 const THREAD = '5f5e2000-0000-4000-8000-000000000001';
-const COMMENT_FILTER_BUDGET_MS = 500;
+const COMMENT_INTERACTION_BUDGET_MS = 500;
+
+const SOURCED_COMMENT = {
+  contribution_id: '5f5e3000-0000-4000-8000-000000000001',
+  thread_id: THREAD,
+  type: 'comment',
+  body: 'The [official record](https://example.org/record) disagrees with that figure.',
+  citations: [{ url: 'https://example.org/record', title: 'official record' }],
+  metadata: {},
+  target_claim_id: null,
+  parent_contribution_id: null,
+  author_handle: 'alice',
+  author_display_name: 'Alice',
+  is_author: false,
+  depth: 0,
+  child_count: 0,
+  moderation_state: 'published',
+  dispute_status: 'none',
+  active_debate_id: null,
+  edited: false,
+  created_at: '2026-06-18T00:00:00.000Z',
+  updated_at: '2026-06-18T00:00:00.000Z',
+  media: [],
+  replies: [],
+  reply_count: 0,
+  has_more_replies: false,
+};
 
 test.use({ serviceWorkers: 'block' });
 
 test.describe('interaction budgets (WS-C.5.1)', () => {
-  test('switching comment filters stays within the 500ms budget', async ({ page }) => {
+  test('opening a comment’s Sources modal stays within the 500ms budget', async ({ page }) => {
     await page.route('**/v1/feature-flags', async (route) => {
       await route.fulfill({ json: { flags: {} } });
     });
@@ -61,18 +87,23 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
     await page.route(`**/v1/stories/${STORY}/comments**`, async (route) => {
       await route.fulfill({
         json: {
-          comments: [],
+          comments: [SOURCED_COMMENT],
           next_cursor: null,
-          overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
+          overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
           summary: null,
         },
       });
     });
+    await page.route(`**/v1/stories/${STORY}/debates`, async (route) => {
+      await route.fulfill({ json: { debates: [] } });
+    });
 
     await page.goto(`/stories/${STORY}`);
-    await expect(page.getByRole('heading', { name: 'Conversation' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Conversation' })).toBeVisible();
 
-    const duration = await page.getByRole('button', { name: 'Sources' }).evaluate((button) => {
+    const sourcesButton = page.getByRole('button', { name: 'Sources (1)' });
+    await expect(sourcesButton).toBeVisible();
+    const duration = await sourcesButton.evaluate((button) => {
       const started = performance.now();
       (button as HTMLButtonElement).click();
       return new Promise<number>((resolve) => {
@@ -81,11 +112,8 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
         });
       });
     });
-    await expect(page.getByRole('button', { name: 'Sources' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    await expect(page.getByRole('dialog', { name: 'Sources' })).toBeVisible();
     expect(duration).toBeGreaterThanOrEqual(0);
-    expect(duration).toBeLessThanOrEqual(COMMENT_FILTER_BUDGET_MS);
+    expect(duration).toBeLessThanOrEqual(COMMENT_INTERACTION_BUDGET_MS);
   });
 });

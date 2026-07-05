@@ -9,77 +9,40 @@
 // via each comment's "Continue this thread" / "Show all replies" link.  More
 // TOP-LEVEL comments load in place ("Load more comments") — there is no separate
 // "show more" jump that duplicated the per-thread continuation.
-import { useMemo, useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useCommentStream } from '../../lib/comment-stream.js';
-import { useStoryCommentsQuery } from '../../lib/queries.js';
+import { useStoryCommentsQuery, useStoryDebatesQuery } from '../../lib/queries.js';
 import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
-import { UgcBody } from '../ugc/UgcBody.js';
 import { Button } from '../ui/Button/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
 import { Icon } from '../ui/Icon/index.js';
 import { CommentNode } from './CommentNode.js';
 import { CommentComposer } from './CommentParts.js';
+import { DebatePanel } from './DebatePanel.js';
 
 export interface CommentSectionProps {
   storyId: string;
   threadId: string;
 }
 
-type CommentFilter = 'all' | 'sources' | 'corrections';
-
 /** The inline section renders up to two nested reply layers (parent → reply →
  *  reply-to-reply); anything deeper links into the dedicated comment page. */
 const INLINE_MAX_DEPTH = 2;
 
 export function CommentSection({ storyId, threadId }: CommentSectionProps): React.ReactElement {
-  const [filter, setFilter] = useState<CommentFilter>('all');
-  const comments = useStoryCommentsQuery(
-    storyId,
-    filter === 'all' ? { depth: INLINE_MAX_DEPTH } : { filter, depth: INLINE_MAX_DEPTH },
-  );
+  // No type filter tabs: sources are read per-comment via the "Sources" footnote
+  // modal, and live corrections/debates surface in the active-debates panel — so
+  // a top-level Sources/Corrections filter would be redundant.
+  const comments = useStoryCommentsQuery(storyId, { depth: INLINE_MAX_DEPTH });
   const stream = useCommentStream(storyId);
-  const options = useMemo(
-    () => [
-      { id: 'all' as const, label: 'All' },
-      { id: 'sources' as const, label: 'Sources' },
-      { id: 'corrections' as const, label: 'Corrections' },
-    ],
-    [],
-  );
+  const debates = useStoryDebatesQuery(storyId);
 
   const visible = comments.data?.comments ?? [];
 
   return (
-    <section id="comments" className="mt-6 flex flex-col gap-4" aria-labelledby="comments-heading">
-      <div className="flex flex-col gap-2">
-        <h2 id="comments-heading" className="text-2xl font-semibold text-ink">
-          Conversation
-        </h2>
-        <p className="text-sm text-ink-muted">
-          Comments are weighted by context, evidence, and reply depth — never by applause.
-        </p>
-      </div>
-      {comments.data?.summary ? (
-        <aside className={cn('p-4', raisedSurface)} aria-label="Conversation overview">
-          <h3 className="font-semibold text-ink">Overview</h3>
-          <UgcBody markdown={comments.data.summary.body} compact />
-        </aside>
-      ) : null}
+    <section id="comments" className="mt-6 flex flex-col gap-4" aria-label="Conversation">
+      {debates.data ? <DebatePanel storyId={storyId} debates={debates.data.debates} /> : null}
       <CommentComposer storyId={storyId} threadId={threadId} />
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Comment filters">
-        {options.map((option) => (
-          <Button
-            key={option.id}
-            type="button"
-            variant={filter === option.id ? 'primary' : 'secondary'}
-            aria-pressed={filter === option.id}
-            onClick={() => setFilter(option.id)}
-          >
-            {option.label}
-          </Button>
-        ))}
-      </div>
       {stream.newComments.length > 0 ? (
         <button
           type="button"

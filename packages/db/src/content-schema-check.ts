@@ -32,7 +32,6 @@ import {
   storySignatures,
   storySourceLinks,
 } from './schema/story.js';
-import { summaries } from './schema/summary.js';
 import { takedownRequests } from './schema/takedown.js';
 import { threads } from './schema/thread.js';
 import { uploads } from './schema/upload.js';
@@ -60,7 +59,6 @@ export const WS_F_CONTENT_TABLES: Readonly<Record<string, Table>> = {
   room_stewards: roomStewards,
   room_subscriptions: roomSubscriptions,
   lenses,
-  summaries,
   uploads,
   // WS-I ranking surfaces (WS-I.2.1b at the table layer): the feature store
   // and decision logs are THE pay-to-rank boundary — no financial column can

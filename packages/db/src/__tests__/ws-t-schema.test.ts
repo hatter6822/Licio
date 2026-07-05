@@ -4,7 +4,6 @@ import { getTableConfig, PgDialect } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import { contributions, contributionTypeEnum } from '../schema/contribution.js';
 import { attentionAggregates, replyDepthBucketEnum } from '../schema/events.js';
-import { summaries } from '../schema/summary.js';
 
 function renderedChecks(table: Parameters<typeof getTableConfig>[0]) {
   const { checks } = getTableConfig(table);
@@ -20,12 +19,6 @@ describe('WS-T.2 database schema parity', () => {
   it('allows media-only contribution bodies at the DB ceiling layer', () => {
     const check = renderedChecks(contributions).get('contributions_body_len');
     expect(check).toContain('between 0 and 5000');
-  });
-
-  it('adds cited_contribution_ids while retaining cited_branch_ids as an alias', () => {
-    const checks = renderedChecks(summaries);
-    expect(checks.get('summaries_branch_ids_array')).toContain('cited_branch_ids');
-    expect(checks.get('summaries_contribution_ids_array')).toContain('cited_contribution_ids');
   });
 
   it('adds a durable reply_depth_bucket column with the same bucket domain', () => {

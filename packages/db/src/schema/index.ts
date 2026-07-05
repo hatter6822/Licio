@@ -25,7 +25,6 @@ export * from './room.js';
 export * from './session.js';
 export * from './source.js';
 export * from './story.js';
-export * from './summary.js';
 export * from './takedown.js';
 export * from './thread.js';
 export * from './upload.js';

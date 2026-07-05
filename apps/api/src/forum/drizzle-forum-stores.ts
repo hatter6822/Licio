@@ -29,7 +29,6 @@ import {
   roomStewards as roomStewardsTable,
   roomSubscriptions as roomSubscriptionsTable,
   rooms as roomsTable,
-  summaries as summariesTable,
   uploads as uploadsTable,
 } from '@licio/db';
 import type {
@@ -59,12 +58,9 @@ import type {
   RoomStewardRecord,
   RoomStore,
   RoomSubscriptionRecord,
-  SummaryRecord,
-  SummaryStore,
   UploadRecord,
   UploadStore,
 } from './stores.js';
-import { assertSummaryUncertainty } from './stores.js';
 
 // The base client OR an open transaction, so a store can be bound to one
 // `db.transaction(...)` (the atomic development seed) as well as run standalone.
@@ -1054,91 +1050,6 @@ export class DrizzleLensStore implements LensStore {
 
   async clear(): Promise<void> {
     await this.#db.delete(lensesTable);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Summaries.
-// ---------------------------------------------------------------------------
-
-export class DrizzleSummaryStore implements SummaryStore {
-  readonly #db: Db;
-
-  constructor(db: Db) {
-    this.#db = db;
-  }
-
-  #toSummary(row: typeof summariesTable.$inferSelect): SummaryRecord {
-    return {
-      summaryId: row.summaryId,
-      threadId: row.threadId,
-      layer: row.layer,
-      body: row.body,
-      citedBranchIds: row.citedBranchIds,
-      citedContributionIds:
-        row.citedContributionIds.length > 0 ? row.citedContributionIds : row.citedBranchIds,
-      citedEvidenceIds: row.citedEvidenceIds,
-      unresolvedUncertainty: row.unresolvedUncertainty,
-      minorityViewsNote: row.minorityViewsNote,
-      authoredBy: row.authoredBy,
-      approvedBy: row.approvedBy,
-      createdAt: iso(row.createdAt),
-      updatedAt: iso(row.updatedAt),
-    };
-  }
-
-  async insert(record: Omit<SummaryRecord, 'createdAt' | 'updatedAt'>): Promise<SummaryRecord> {
-    assertSummaryUncertainty(record);
-    const rows = await this.#db
-      .insert(summariesTable)
-      .values({
-        summaryId: record.summaryId,
-        threadId: record.threadId,
-        layer: record.layer,
-        body: record.body,
-        citedBranchIds: record.citedBranchIds,
-        citedContributionIds: record.citedContributionIds ?? record.citedBranchIds,
-        citedEvidenceIds: record.citedEvidenceIds,
-        unresolvedUncertainty: record.unresolvedUncertainty,
-        minorityViewsNote: record.minorityViewsNote,
-        authoredBy: record.authoredBy,
-        approvedBy: record.approvedBy,
-      })
-      .returning();
-    const row = rows[0];
-    if (!row) throw new Error('summary insert returned no row');
-    return this.#toSummary(row);
-  }
-
-  async getById(summaryId: string): Promise<SummaryRecord | null> {
-    const rows = await this.#db
-      .select()
-      .from(summariesTable)
-      .where(eq(summariesTable.summaryId, summaryId))
-      .limit(1);
-    return rows[0] ? this.#toSummary(rows[0]) : null;
-  }
-
-  async listByThread(threadId: string): Promise<SummaryRecord[]> {
-    const rows = await this.#db
-      .select()
-      .from(summariesTable)
-      .where(eq(summariesTable.threadId, threadId))
-      .orderBy(asc(summariesTable.createdAt));
-    return rows.map((row) => this.#toSummary(row));
-  }
-
-  async deleteByThreads(threadIds: readonly string[]): Promise<number> {
-    if (threadIds.length === 0) return 0;
-    const rows = await this.#db
-      .delete(summariesTable)
-      .where(inArray(summariesTable.threadId, [...threadIds]))
-      .returning({ id: summariesTable.summaryId });
-    return rows.length;
-  }
-
-  async clear(): Promise<void> {
-    await this.#db.delete(summariesTable);
   }
 }
 

@@ -26,7 +26,6 @@ import type {
   RoomStorageMode,
   RoomType,
   RoomVisibility,
-  SummaryLayer,
 } from '@licio/shared';
 import { COMMONS_ROOM_ID, COMMONS_SLUG } from '@licio/shared';
 
@@ -125,44 +124,6 @@ export interface LensRecord {
   description: string | null;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface SummaryRecord {
-  summaryId: string;
-  threadId: string;
-  layer: SummaryLayer;
-  body: string;
-  /** Retained read alias for pre-WS-T rows. */
-  citedBranchIds: string[];
-  citedContributionIds?: string[];
-  citedEvidenceIds: string[];
-  unresolvedUncertainty: string | null;
-  minorityViewsNote: string | null;
-  authoredBy: string | null;
-  approvedBy: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/**
- * §24.3 invariant, enforced at EVERY summary-insert path (defense in depth
- * below the wire schema's `.refine` and the Postgres `summaries_uncertainty`
- * CHECK): a community/steward summary MUST carry a non-empty unresolved-
- * uncertainty note.  Without this, a direct store writer (e.g. the dev seed)
- * could persist a summary the in-memory store accepts but the thread-overview
- * read schema later rejects — turning a bad write into an HTTP 500 on every
- * read of that thread.  Asserting here makes the write fail loudly at its
- * source instead, symmetric with the validated `createSummary` service path.
- */
-export function assertSummaryUncertainty(
-  record: Pick<SummaryRecord, 'layer' | 'unresolvedUncertainty'>,
-): void {
-  if (
-    record.layer !== 'automated_draft' &&
-    (record.unresolvedUncertainty === null || record.unresolvedUncertainty.trim().length === 0)
-  ) {
-    throw new Error('Community and steward summaries must state unresolved uncertainty (§24.3)');
-  }
 }
 
 export interface UploadRecord {
@@ -432,17 +393,6 @@ export interface LensStore {
   /** WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY delete every lens of a room.
    *  Returns the number removed; idempotent. */
   deleteByRoom(roomId: string): Promise<number>;
-  clear(): Promise<void>;
-}
-
-export interface SummaryStore {
-  insert(record: Omit<SummaryRecord, 'createdAt' | 'updatedAt'>): Promise<SummaryRecord>;
-  getById(summaryId: string): Promise<SummaryRecord | null>;
-  listByThread(threadId: string): Promise<SummaryRecord[]>;
-  /** WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY delete every derived summary
-   *  of the given threads (the §24.2 "derived summaries" category). Returns the
-   *  number removed; idempotent. */
-  deleteByThreads(threadIds: readonly string[]): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -1185,56 +1135,6 @@ export class InMemoryLensStore implements LensStore {
     for (const lens of [...this.#rows.values()]) {
       if (lens.roomId === roomId) {
         this.#rows.delete(lens.lensId);
-        count += 1;
-      }
-    }
-    return count;
-  }
-
-  async clear(): Promise<void> {
-    this.#rows.clear();
-  }
-}
-
-export class InMemorySummaryStore implements SummaryStore {
-  readonly #rows = new Map<string, SummaryRecord>();
-  readonly #now: Clock;
-
-  constructor(now: Clock = Date.now) {
-    this.#now = now;
-  }
-
-  async insert(record: Omit<SummaryRecord, 'createdAt' | 'updatedAt'>): Promise<SummaryRecord> {
-    assertSummaryUncertainty(record);
-    const at = iso(this.#now);
-    const full: SummaryRecord = {
-      ...record,
-      citedBranchIds: [...record.citedBranchIds],
-      citedEvidenceIds: [...record.citedEvidenceIds],
-      createdAt: at,
-      updatedAt: at,
-    };
-    this.#rows.set(full.summaryId, full);
-    return full;
-  }
-
-  async getById(summaryId: string): Promise<SummaryRecord | null> {
-    return this.#rows.get(summaryId) ?? null;
-  }
-
-  async listByThread(threadId: string): Promise<SummaryRecord[]> {
-    return [...this.#rows.values()]
-      .filter((row) => row.threadId === threadId)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  }
-
-  async deleteByThreads(threadIds: readonly string[]): Promise<number> {
-    const wanted = new Set(threadIds);
-    if (wanted.size === 0) return 0;
-    let count = 0;
-    for (const row of [...this.#rows.values()]) {
-      if (wanted.has(row.threadId)) {
-        this.#rows.delete(row.summaryId);
         count += 1;
       }
     }

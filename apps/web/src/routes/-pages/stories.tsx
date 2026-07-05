@@ -7,7 +7,7 @@
 import { isSentinelTopicId, type StoryDetail } from '@licio/shared';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
-import { CommentSection } from '../../components/comments/index.js';
+import { CommentSection, CorrectionComposer } from '../../components/comments/index.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
@@ -15,7 +15,9 @@ import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.
 import { StoryMedia } from '../../components/story/StoryMedia/index.js';
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
+import { Dialog } from '../../components/ui/Dialog/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
+import { Icon } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
@@ -51,6 +53,47 @@ function SaveStoryButton({ story }: { story: StoryDetail }): React.ReactElement 
     >
       {isSaved ? t('story.saved', 'Saved for offline') : t('story.save', 'Save for offline')}
     </Button>
+  );
+}
+
+/** Raise a sourced correction against the STORY itself (WS-T story-root
+ *  challenge) — opens the debate arena on success. */
+function StoryCorrectionButton({
+  storyId,
+  threadId,
+}: {
+  storyId: string;
+  threadId: string;
+}): React.ReactElement {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+  return (
+    <>
+      <Button variant="secondary" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+        <Icon name="pencil" className="size-4" aria-hidden />
+        {t('story.correct', 'Correct')}
+      </Button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={t('story.correct.title', 'Correct this story')}
+      >
+        <CorrectionComposer
+          storyId={storyId}
+          threadId={threadId}
+          target={{ storyRoot: true }}
+          onCancel={() => setOpen(false)}
+          onOpened={(debateId) => {
+            setOpen(false);
+            void navigate({
+              to: '/stories/$storyId/debate/$debateId',
+              params: { storyId, debateId },
+            });
+          }}
+        />
+      </Dialog>
+    </>
   );
 }
 
@@ -143,6 +186,10 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 needsContext={interpretations.data?.needs_context ?? false}
                 contextStatusPending={interpretations.isPending}
               />
+              {/* WS-T — raise a sourced correction against the story (opens a debate). */}
+              {data.thread_id ? (
+                <StoryCorrectionButton storyId={data.story_id} threadId={data.thread_id} />
+              ) : null}
               {/* WS-J.1.1 — report this story (the two-tap sheet). */}
               <ReportButton targetType="content" targetId={data.story_id} contentKind="story" />
             </div>

@@ -15,8 +15,7 @@ test.describe('WS-T comment flow (BFF-in-the-loop)', () => {
     page,
   }) => {
     await page.goto(`/stories/${PUBLIC_STORY_ID}`);
-    await expect(page.getByRole('heading', { name: 'Conversation', level: 2 })).toBeVisible();
-    await expect(page.getByLabel('Comment filters')).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Conversation' })).toBeVisible();
     await expect(page.getByLabel('Write a comment')).toBeVisible();
 
     const results = await new AxeBuilder({ page }).withTags(A11Y_TAGS).analyze();
@@ -27,7 +26,7 @@ test.describe('WS-T comment flow (BFF-in-the-loop)', () => {
     const story = (await threadResponse.json()) as { thread_id: string };
     await page.goto(`/threads/${story.thread_id}`);
     await expect(page).toHaveURL(new RegExp(`/stories/${PUBLIC_STORY_ID}#comments$`));
-    await expect(page.getByRole('heading', { name: 'Conversation', level: 2 })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Conversation' })).toBeVisible();
   });
 
   test('the dedicated comment page opens as a comments-only reading view and returns to the story', async ({
@@ -44,6 +43,6 @@ test.describe('WS-T comment flow (BFF-in-the-loop)', () => {
     // section (the duplicate lower "Back to the story" link was removed).
     await page.getByRole('button', { name: /go back/i }).click();
     await expect(page).toHaveURL(new RegExp(`/stories/${PUBLIC_STORY_ID}#comments$`));
-    await expect(page.getByRole('heading', { name: 'Conversation', level: 2 })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Conversation' })).toBeVisible();
   });
 });

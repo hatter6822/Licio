@@ -21,7 +21,6 @@ import {
   DrizzleContributionStore,
   DrizzleLensStore,
   DrizzleRoomStore,
-  DrizzleSummaryStore,
   DrizzleUploadStore,
 } from '../forum/drizzle-forum-stores.js';
 import type { ContributionRecord, RoomRecord } from '../forum/stores.js';
@@ -40,7 +39,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
   let contributions: DrizzleContributionStore;
   let roomsStore: DrizzleRoomStore;
   let lenses: DrizzleLensStore;
-  let summaries: DrizzleSummaryStore;
   let uploads: DrizzleUploadStore;
 
   /** Stories/rooms this suite created (row-scoped cleanup). */
@@ -161,7 +159,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     contributions = new DrizzleContributionStore(db);
     roomsStore = new DrizzleRoomStore(db);
     lenses = new DrizzleLensStore(db);
-    summaries = new DrizzleSummaryStore(db);
     uploads = new DrizzleUploadStore(db, null);
     const stories = new DrizzleStoryStore(db);
     // WS-Q — seedThread's stories need a home room (FK + NOT NULL).
@@ -618,54 +615,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       'expert',
     ]);
     if (first.ok) expect((await lenses.getById(first.lens.lensId))?.name).toBe('Local residents');
-  });
-
-  it('stores summaries and the §24.3 uncertainty CHECK holds at the storage layer', async () => {
-    const summary = await summaries.insert({
-      summaryId: randomUUID(),
-      threadId,
-      layer: 'community_synthesis',
-      body: 'Both branches agree the dataset is authentic.',
-      citedBranchIds: [randomUUID()],
-      citedEvidenceIds: [],
-      unresolvedUncertainty: 'Whether the 2024 revision changed the method.',
-      minorityViewsNote: null,
-      authoredBy: authorId,
-      approvedBy: null,
-    });
-    expect((await summaries.getById(summary.summaryId))?.layer).toBe('community_synthesis');
-    expect((await summaries.listByThread(threadId)).map((s) => s.summaryId)).toContain(
-      summary.summaryId,
-    );
-    // A community summary with no unresolved uncertainty violates the CHECK.
-    await expect(
-      summaries.insert({
-        summaryId: randomUUID(),
-        threadId,
-        layer: 'community_synthesis',
-        body: 'No uncertainty stated.',
-        citedBranchIds: [],
-        citedEvidenceIds: [],
-        unresolvedUncertainty: null,
-        minorityViewsNote: null,
-        authoredBy: authorId,
-        approvedBy: null,
-      }),
-    ).rejects.toThrow();
-    // Automated drafts are exempt (uncertainty may be null).
-    const draft = await summaries.insert({
-      summaryId: randomUUID(),
-      threadId,
-      layer: 'automated_draft',
-      body: 'Machine draft.',
-      citedBranchIds: [],
-      citedEvidenceIds: [],
-      unresolvedUncertainty: null,
-      minorityViewsNote: null,
-      authoredBy: null,
-      approvedBy: null,
-    });
-    expect(draft.summaryId).toBeDefined();
   });
 
   it('round-trips upload records/bytes and tombstones the owner on anonymize', async () => {

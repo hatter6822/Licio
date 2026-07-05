@@ -54,7 +54,6 @@ import {
   DrizzleContributionStore,
   DrizzleLensStore,
   DrizzleRoomStore,
-  DrizzleSummaryStore,
   DrizzleUploadStore,
 } from './forum/drizzle-forum-stores.js';
 import { storyReadableByUser } from './forum/rooms.js';
@@ -381,7 +380,6 @@ if (db) {
   forumServices.contributions = new DrizzleContributionStore(db);
   forumServices.rooms = new DrizzleRoomStore(db);
   forumServices.lenses = new DrizzleLensStore(db);
-  forumServices.summaries = new DrizzleSummaryStore(db);
   forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
   // WS-T — the debate arena store over migration 0056.
   forumServices.debates = new DrizzleDebateStore(db);
@@ -857,7 +855,6 @@ if (env.NODE_ENV !== 'production') {
           rooms: new DrizzleRoomStore(tx),
           lenses: new DrizzleLensStore(tx),
           contributions: new DrizzleContributionStore(tx),
-          summaries: new DrizzleSummaryStore(tx),
         };
         const txIngestion: IngestionServices = {
           ...ingestionServices,

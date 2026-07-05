@@ -164,7 +164,6 @@ export class DrizzleStoryStore implements StoryStore {
       storyId: row.storyId,
       roomId: row.roomId,
       branchIndex: row.branchIndex,
-      currentSummaryId: row.currentSummaryId,
       conversationState: row.conversationState,
       safetyState: row.safetyState,
       createdAt: iso(row.createdAt),
@@ -183,9 +182,7 @@ export class DrizzleStoryStore implements StoryStore {
 
   async updateThread(
     threadId: string,
-    patch: Partial<
-      Pick<ThreadShellRecord, 'roomId' | 'currentSummaryId' | 'conversationState' | 'safetyState'>
-    >,
+    patch: Partial<Pick<ThreadShellRecord, 'roomId' | 'conversationState' | 'safetyState'>>,
   ): Promise<ThreadShellRecord | null> {
     const rows = await this.#db
       .update(threadsTable)

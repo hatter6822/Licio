@@ -121,14 +121,13 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
   'public.takedown_requests',
   'public.ingestion_review_items',
   'public.embeddings',
-  // WS-G forum content (contributions, rooms, lenses, summaries, uploads).
+  // WS-G forum content (contributions, rooms, lenses, uploads).
   'public.contributions',
   'public.contribution_edit_history',
   'public.rooms',
   'public.room_stewards',
   'public.room_subscriptions',
   'public.lenses',
-  'public.summaries',
   'public.uploads',
   // WS-I ranking (the feature store and the decision-log audit record):
   // THE pay-to-rank surfaces — no FK/view join path may ever connect them

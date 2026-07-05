@@ -13,7 +13,6 @@ import {
   MAX_TOPIC_PREFERENCES,
   privacyNotificationPreferencesSchema,
 } from './privacy-settings.js';
-import { summaryPublicSchema } from './summary.js';
 
 // ---------------------------------------------------------------------------
 // POST /v1/contributions (WS-G.3.1) — response.
@@ -82,7 +81,6 @@ export const storyCommentsResponseSchema = z
         incorrect_count: z.number().int().min(0).default(0),
       })
       .strict(),
-    summary: summaryPublicSchema.nullable(),
   })
   .strict();
 export type StoryCommentsResponse = z.infer<typeof storyCommentsResponseSchema>;

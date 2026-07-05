@@ -168,6 +168,44 @@ export const debateArenaResponseSchema = z.object({ debate: debateArenaPublicSch
 export type DebateArenaResponse = z.infer<typeof debateArenaResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// Story-level active-debates list (GET /v1/stories/:id/debates).  A COMPACT,
+// display-only projection so anyone reading a story can discover + watch its
+// live debates — deliberately NOT the full arena (no per-viewer role, no both
+// sides' sources): those load on the arena page itself.  Still no vote/tally.
+// ---------------------------------------------------------------------------
+
+export const debateArenaSummarySchema = z
+  .object({
+    debate_id: uuidSchema,
+    story_id: uuidSchema,
+    target_type: debateTargetTypeSchema,
+    /** The challenged comment; null for a story-root challenge. */
+    target_contribution_id: uuidSchema.nullable(),
+    /** The correction contribution that opened this arena (the deep-link anchor). */
+    challenger_contribution_id: uuidSchema,
+    state: debateStateSchema,
+    edit_deadline_at: isoTimestampSchema,
+    /** verdict + 24h; null until judged. */
+    override_deadline_at: isoTimestampSchema.nullable(),
+    verdict: debateVerdictSchema.nullable(),
+    winner: debateWinnerSchema.nullable(),
+    incumbent_display_name: z.string().min(1).nullable(),
+    challenger_display_name: z.string().min(1).nullable(),
+    /** A short preview of the CHALLENGED content (the comment body / story title)
+     *  so a reader knows the subject of the debate at a glance. */
+    target_excerpt: z.string().max(280).nullable(),
+    created_at: isoTimestampSchema,
+    updated_at: isoTimestampSchema,
+  })
+  .strict();
+export type DebateArenaSummary = z.infer<typeof debateArenaSummarySchema>;
+
+export const storyDebatesResponseSchema = z
+  .object({ debates: z.array(debateArenaSummarySchema).max(100) })
+  .strict();
+export type StoryDebatesResponse = z.infer<typeof storyDebatesResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // Requests.  (The arena OPENS automatically from the correction create; there
 // is no explicit open request.)
 // ---------------------------------------------------------------------------

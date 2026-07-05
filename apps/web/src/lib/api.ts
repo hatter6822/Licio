@@ -55,11 +55,13 @@ import {
   type StoryCommentsResponse,
   type StoryCreateRequest,
   type StoryCreateResponse,
+  type StoryDebatesResponse,
   type StoryDetail,
   type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
   storyCommentsResponseSchema,
   storyCreateResponseSchema,
+  storyDebatesResponseSchema,
   storyDetailSchema,
   storyDuplicateResponseSchema,
   storyInterpretationsResponseSchema,
@@ -343,6 +345,13 @@ export async function createContribution(
 export const createComment = createContribution;
 
 // --- WS-T debate arena --------------------------------------------------------
+
+/** The story's ACTIVE (non-resolved) debate arenas — the discovery list surfaced
+ *  on the story's conversation so anyone can find + watch a live debate. */
+export async function fetchStoryDebates(storyId: string): Promise<StoryDebatesResponse> {
+  const response = await apiFetch(`${API_BASE}/v1/stories/${encodeURIComponent(storyId)}/debates`);
+  return parseResponse(response, storyDebatesResponseSchema);
+}
 
 export async function fetchDebate(debateId: string): Promise<DebateArenaResponse> {
   const response = await apiFetch(`${API_BASE}/v1/debates/${encodeURIComponent(debateId)}`);

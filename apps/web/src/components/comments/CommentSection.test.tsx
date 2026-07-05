@@ -4,8 +4,8 @@
 // thread that continues deeper (or a comment with more direct replies than shown)
 // links to the dedicated comment-centric page rather than nesting further, and
 // more TOP-LEVEL comments load in place via "Load more comments".
-import type { CommentItem } from '@licio/shared';
-import { render, screen } from '@testing-library/react';
+import type { CommentItem, DebateArenaSummary } from '@licio/shared';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,7 +23,6 @@ let queryState: {
     next_cursor: string | null;
     anchor: CommentItem | null;
     overview: { comment_count: number; sources_count: number; corrections_count: number };
-    summary: { body: string } | null;
   };
   isError?: boolean;
   isLoading?: boolean;
@@ -32,6 +31,7 @@ let queryState: {
 };
 let streamState: { newComments: unknown[] };
 let mutationState: { isPending?: boolean; isError?: boolean };
+let debatesState: { debates: DebateArenaSummary[] };
 
 // Render the router Link as a real anchor whose href reflects `to` with the
 // params interpolated and the search serialized, so destinations are assertable.
@@ -76,6 +76,7 @@ vi.mock('../../lib/queries.js', () => ({
     loadMore,
     refetch,
   })),
+  useStoryDebatesQuery: vi.fn(() => ({ data: debatesState })),
   useCreateCommentMutation: vi.fn(() => ({
     isPending: mutationState.isPending ?? false,
     isError: mutationState.isError ?? false,
@@ -134,11 +135,11 @@ beforeEach(() => {
       next_cursor: null,
       anchor: null,
       overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
-      summary: null,
     },
   };
   streamState = { newComments: [] };
   mutationState = {};
+  debatesState = { debates: [] };
   mutate.mockReset();
   refetch.mockReset();
   loadMore.mockReset();
@@ -148,14 +149,14 @@ beforeEach(() => {
 });
 
 describe('CommentSection', () => {
-  it('WS-T — renders the Sourced badge + source links, and the Incorrect tag', () => {
+  it('WS-T — the Sourced badge + a Sources footnote modal, and the Incorrect tag', async () => {
     queryState = {
       data: {
         comments: [
           comment({
             contribution_id: '33333333-3333-4333-8333-333333333333',
-            body: 'A sourced comment.',
-            citations: [{ url: 'https://example.org/evidence' }],
+            body: 'The [official record](https://example.org/evidence) disagrees.',
+            citations: [{ url: 'https://example.org/evidence', title: 'official record' }],
           }),
           comment({
             contribution_id: '66666666-6666-4666-8666-666666666666',
@@ -166,17 +167,61 @@ describe('CommentSection', () => {
         next_cursor: null,
         anchor: null,
         overview: { comment_count: 2, sources_count: 1, corrections_count: 0 },
-        summary: null,
       },
     };
     renderSection();
     expect(screen.getByText('Sourced')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'https://example.org/evidence' })).toBeInTheDocument();
     expect(screen.getByText('Incorrect')).toBeInTheDocument();
+    // Sources are NOT an always-visible inline list; they are reached via the
+    // compact "Sources (N)" footnote affordance → a modal.
+    expect(screen.queryByRole('link', { name: /example\.org\/evidence/i })).not.toBeInTheDocument();
+    const sourcesButton = screen.getByRole('button', { name: 'Sources (1)' });
+    await userEvent.click(sourcesButton);
+    const dialog = screen.getByRole('dialog', { name: 'Sources' });
+    expect(within(dialog).getByText('official record')).toBeInTheDocument();
+    expect(within(dialog).getByRole('link')).toHaveAttribute(
+      'href',
+      'https://example.org/evidence',
+    );
     // The "Correct" action is offered on a plain comment, and disabled on the
     // already-decided one.
     const correctButtons = screen.getAllByRole('button', { name: /correct/i });
     expect(correctButtons.length).toBeGreaterThan(0);
+    // Every comment is reportable (mirrors stories).
+    expect(screen.getAllByRole('button', { name: 'Report' }).length).toBeGreaterThan(0);
+  });
+
+  it('WS-T — lists the story’s active debates so a reader can watch one', () => {
+    const debateId = '99999999-9999-4999-8999-999999999999';
+    debatesState = {
+      debates: [
+        {
+          debate_id: debateId,
+          story_id: storyId,
+          target_type: 'comment',
+          target_contribution_id: '33333333-3333-4333-8333-333333333333',
+          challenger_contribution_id: '44444444-4444-4444-8444-444444444444',
+          state: 'open',
+          edit_deadline_at: '2999-01-01T00:00:00.000Z',
+          override_deadline_at: null,
+          verdict: null,
+          winner: null,
+          incumbent_display_name: 'Alice',
+          challenger_display_name: 'Bob',
+          target_excerpt: 'The vote passed 5-4.',
+          created_at: '2026-06-18T00:00:00.000Z',
+          updated_at: '2026-06-18T00:00:00.000Z',
+        },
+      ],
+    };
+    renderSection();
+    const panel = screen.getByRole('complementary', { name: 'Active debates' });
+    expect(within(panel).getByText('1 active debate')).toBeInTheDocument();
+    expect(within(panel).getByText(/The vote passed 5-4\./)).toBeInTheDocument();
+    expect(within(panel).getByRole('link', { name: /view debate/i })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/debate/${debateId}`,
+    );
   });
 
   it('WS-T — an under-debate comment links to its live arena', () => {
@@ -193,7 +238,6 @@ describe('CommentSection', () => {
         next_cursor: null,
         anchor: null,
         overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
-        summary: null,
       },
     };
     renderSection();
@@ -219,7 +263,6 @@ describe('CommentSection', () => {
         next_cursor: null,
         anchor: null,
         overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
-        summary: null,
       },
     };
     rerender(<CommentSection storyId={storyId} threadId={threadId} />);
@@ -274,14 +317,12 @@ describe('CommentSection', () => {
         next_cursor: null,
         anchor: null,
         overview: { comment_count: 3, sources_count: 1, corrections_count: 0 },
-        summary: { body: 'Summary **with context**.' },
       },
     };
     streamState = { newComments: [{ contribution_id: 'new' }, { contribution_id: 'newer' }] };
 
     renderSection();
 
-    expect(screen.getByLabelText('Conversation overview')).toBeInTheDocument();
     expect(screen.getByText('Source')).toBeInTheDocument();
     expect(screen.getByAltText('Chart from source')).toBeInTheDocument();
     // BOTH nested layers ARE shown (reply + reply-to-reply)…
@@ -328,7 +369,6 @@ describe('CommentSection', () => {
         next_cursor: null,
         anchor: null,
         overview: { comment_count: 3, sources_count: 0, corrections_count: 0 },
-        summary: null,
       },
     };
     renderSection();
@@ -348,7 +388,6 @@ describe('CommentSection', () => {
         next_cursor: 'next',
         anchor: null,
         overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
-        summary: null,
       },
     };
     renderSection();
@@ -367,7 +406,6 @@ describe('CommentSection', () => {
         next_cursor: null,
         anchor: null,
         overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
-        summary: null,
       },
     };
     streamState = { newComments: [{ contribution_id: 'new' }] };
@@ -385,7 +423,6 @@ describe('CommentSection', () => {
         next_cursor: null,
         anchor: null,
         overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
-        summary: null,
       },
     };
     mutate.mockImplementation((_payload, options) => options?.onSuccess?.());

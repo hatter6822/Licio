@@ -8,10 +8,12 @@
 // field with a formatting toolbar that inserts Markdown-lite syntax and a
 // Write/Preview toggle whose preview renders through the SAME `UgcBody` sink the
 // reader will see — so what the author writes is exactly what ships.
+import { citationUrlSchema } from '@licio/shared';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { UgcBody } from '../../ugc/UgcBody.js';
+import { Button } from '../../ui/Button/index.js';
 import { Icon, type IconName } from '../../ui/Icon/index.js';
 
 export interface MarkdownEditorProps {
@@ -28,6 +30,13 @@ export interface MarkdownEditorProps {
   maxLength?: number;
   /** A shorter authoring surface for dense contexts (e.g. a comment composer). */
   compact?: boolean;
+  /**
+   * Show an "Add source" affordance (WS-T sourced comments): it turns the
+   * current selection into a Markdown link to a citation-valid URL, so a
+   * sourced statement is authored INLINE (and the citations are derived from
+   * those links).  Off by default — the story composer is unaffected.
+   */
+  enableSourceLink?: boolean;
 }
 
 /** Fraction of the limit at which the count starts warning (mirrors TextArea). */
@@ -59,6 +68,7 @@ export function MarkdownEditor({
   placeholder,
   maxLength,
   compact = false,
+  enableSourceLink = false,
 }: MarkdownEditorProps): React.ReactElement {
   const t = useT();
   const generatedId = useId();
@@ -72,9 +82,24 @@ export function MarkdownEditor({
   // A selection to restore AFTER the controlled value commits (a toolbar action
   // rewrites `value`, so the caret must be re-placed on the next render).
   const pendingSelection = useRef<[number, number] | null>(null);
+  // The "Add source" sub-form (WS-T inline sourcing): a captured selection range
+  // + the URL the author is entering for it.  The range MUST be captured the
+  // moment the button is pressed, before the URL <input> steals focus.
+  const [sourceFormOpen, setSourceFormOpen] = useState(false);
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const capturedRange = useRef<[number, number] | null>(null);
+  const sourceInputRef = useRef<HTMLInputElement>(null);
+  const sourceFieldId = `${fieldId}-source`;
 
-  const buttons = useMemo<ToolbarButton[]>(
-    () => [
+  // Move focus into the URL field when the sub-form opens (keyboard operability
+  // without a JSX autofocus attribute).
+  useEffect(() => {
+    if (sourceFormOpen) sourceInputRef.current?.focus();
+  }, [sourceFormOpen]);
+
+  const buttons = useMemo<ToolbarButton[]>(() => {
+    const base: ToolbarButton[] = [
       { id: 'bold', icon: 'bold', label: t('markdown.bold', 'Bold'), apply: 'bold', shortcut: 'B' },
       {
         id: 'italic',
@@ -85,10 +110,21 @@ export function MarkdownEditor({
       },
       { id: 'quote', icon: 'quote', label: t('markdown.quote', 'Quote'), apply: 'quote' },
       { id: 'list', icon: 'list', label: t('markdown.list', 'Bulleted list'), apply: 'list' },
-      { id: 'link', icon: 'link', label: t('markdown.link', 'Link'), apply: 'link', shortcut: 'K' },
-    ],
-    [t],
-  );
+    ];
+    // With inline sourcing on (comment/correction composers), the "Add source"
+    // affordance IS the only way to add a link — so the generic link button is
+    // omitted to avoid two competing link controls.
+    if (!enableSourceLink) {
+      base.push({
+        id: 'link',
+        icon: 'link',
+        label: t('markdown.link', 'Link'),
+        apply: 'link',
+        shortcut: 'K',
+      });
+    }
+    return base;
+  }, [t, enableSourceLink]);
 
   // The platform's PRIMARY formatting modifier — ⌘ on Apple, Ctrl elsewhere —
   // drives BOTH the live shortcut handler and its tooltip so they never diverge.
@@ -197,6 +233,36 @@ export function MarkdownEditor({
     }
   }
 
+  /** Open the "Add source" sub-form, capturing the selection BEFORE the URL
+   *  input takes focus (the selection is otherwise lost). */
+  function openSourceForm(): void {
+    const el = textareaRef.current;
+    capturedRange.current = [el?.selectionStart ?? value.length, el?.selectionEnd ?? value.length];
+    setSourceUrl('');
+    setSourceError(null);
+    setSourceFormOpen(true);
+  }
+
+  /** Wrap the captured selection as a Markdown link to the entered source URL.
+   *  A `doi:` reference is resolved to `https://doi.org/…` so it renders as a
+   *  clickable link (and still derives as a valid citation). */
+  function confirmSource(): void {
+    const raw = sourceUrl.trim();
+    if (!citationUrlSchema.safeParse(raw).success) {
+      setSourceError(t('markdown.source.invalid', 'Enter a valid http(s) or doi: link.'));
+      return;
+    }
+    const href = /^doi:/i.test(raw) ? `https://doi.org/${raw.slice(4)}` : raw;
+    const [start, end] = capturedRange.current ?? [value.length, value.length];
+    const selected = value.slice(start, end) || t('markdown.ph.link', 'link text');
+    const next = `${value.slice(0, start)}[${selected}](${href})${value.slice(end)}`;
+    const selStart = start + 1;
+    commit(next, selStart, selStart + selected.length);
+    setSourceFormOpen(false);
+    setSourceUrl('');
+    setSourceError(null);
+  }
+
   // Standard rich-text keyboard shortcuts (⌘/Ctrl + B / I / K). Only the
   // platform's PRIMARY modifier triggers formatting — ⌘ on Apple, Ctrl elsewhere
   // — so macOS's Ctrl-based Cocoa text bindings survive; Alt-modified combos
@@ -213,7 +279,10 @@ export function MarkdownEditor({
       applyFormat('italic');
     } else if (key === 'k') {
       event.preventDefault();
-      applyFormat('link');
+      // K is "link" — but with inline sourcing on it opens the "Add source"
+      // prompt (the sole link mechanism there), matching the visible affordance.
+      if (enableSourceLink) openSourceForm();
+      else applyFormat('link');
     }
   }
 
@@ -320,6 +389,81 @@ export function MarkdownEditor({
                 <Icon name={button.icon} className="size-4" />
               </button>
             ))}
+            {enableSourceLink ? (
+              <>
+                <span className="mx-1 h-5 w-px bg-line-strong" aria-hidden />
+                <button
+                  type="button"
+                  aria-expanded={sourceFormOpen}
+                  aria-controls={sourceFieldId}
+                  title={t(
+                    'markdown.source.tooltip',
+                    'Turn the selected text into a link to a source',
+                  )}
+                  onClick={openSourceForm}
+                  className="inline-flex h-8 items-center gap-1 rounded px-2 text-sm font-medium text-ink-muted transition-colors hover:bg-canvas hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  <Icon name="link" className="size-4" />
+                  {t('markdown.source.add', 'Add source')}
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Inline-source sub-form (WS-T): wrap the captured selection as a link
+            to the entered source URL. */}
+        {tab === 'write' && sourceFormOpen ? (
+          <div
+            id={sourceFieldId}
+            className="flex flex-col gap-1.5 border border-b-0 border-line-strong bg-surface px-2 py-2"
+          >
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex-1">
+                <span className="text-xs font-medium text-ink-muted">
+                  {t('markdown.source.url', 'Source URL for the selected text')}
+                </span>
+                <input
+                  ref={sourceInputRef}
+                  type="url"
+                  inputMode="url"
+                  value={sourceUrl}
+                  onChange={(event) => {
+                    setSourceUrl(event.currentTarget.value);
+                    if (sourceError) setSourceError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      confirmSource();
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setSourceFormOpen(false);
+                    }
+                  }}
+                  placeholder="https://…"
+                  className="mt-1 w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                />
+              </label>
+              <div className="flex gap-2">
+                <Button type="button" variant="ghost" onClick={() => setSourceFormOpen(false)}>
+                  {t('common.cancel', 'Cancel')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={confirmSource}
+                  disabled={sourceUrl.trim().length === 0}
+                >
+                  {t('markdown.source.link', 'Link source')}
+                </Button>
+              </div>
+            </div>
+            {sourceError ? (
+              <p role="alert" className="text-sm text-error">
+                {sourceError}
+              </p>
+            ) : null}
           </div>
         ) : null}
 

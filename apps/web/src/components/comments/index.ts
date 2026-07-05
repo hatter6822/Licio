@@ -6,6 +6,7 @@ export {
   CommentComposer,
   CommentHeader,
   CommentMedia,
+  CorrectionComposer,
   commentActionClass,
 } from './CommentParts.js';
 export { CommentSection, type CommentSectionProps } from './CommentSection.js';
