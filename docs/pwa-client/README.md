@@ -34,7 +34,7 @@ apps/web/src/
   routes/            File-based route tree (generated) + thin route files      (WS-C.1.1)
     -pages/          Co-located page components (the `-` keeps them off-tree)   (WS-C.1.1)
   routing/           Pure search-param + guard logic; requireAuth + telemetry  (WS-C.1.1)
-  stores/            Zustand: auth, ui, feature-flags, room-vantage + zod persist (WS-C.1.3)
+  stores/            Zustand: auth, ui, feature-flags + zod-validated persist  (WS-C.1.3)
   lib/
     api.ts           Hono RPC client (typed vs AppType) + CSRF + zod-on-read   (WS-C.3.1)
     query-client.ts  TanStack Query config (cache policy, retry/backoff)       (WS-C.1.2)
@@ -454,19 +454,25 @@ server's bars, it does not re-decide them.
   the scan-gated path first; a still-pending scan shows "pending a safety
   check", never a failure. The form uses `noValidate` so the accessible JS
   validation (not native bubbles) drives the UX.
-- **Interpretation lenses** (WS-G.2.2, `components/rooms/LensManager`,
-  `components/comments/{CommentParts,CommentSection}`, `stores/room-vantage`). A
-  room steward creates/lists lenses in the steward-only room settings
-  (`POST /v1/rooms/:id/lenses`; server enforces the role). The top-level comment
-  composer then offers an OPTIONAL "Reading this as" lens picker (only when the
-  room has lenses); the choice is a client-local "declare-once" room vantage
-  (`room-vantage` — a zod-validated persisted UI preference bounded to 50 rooms;
-  the authoritative `lens_id` tag is validated server-side against the room). The
-  story detail carries `room_id` on the wire so the client can load the room's
-  lenses. Once two or more lenses appear among a story's comments, the
-  conversation shows lens FILTER chips scoping the reading, and the "Where
-  interpretations differ" drawer adds a plain-language divergence band. A lens is
-  an interpretation context, never a vote (the `check:no-applause` gate covers it).
+- **Comment view control + interpretation lenses** (WS-G.2.2/WS-T,
+  `components/rooms/LensManager`,
+  `components/comments/{CommentSection,CommentViewSelector,comment-participation}`).
+  A room steward creates/lists lenses in the steward-only room settings
+  (`POST /v1/rooms/:id/lenses`; server enforces the role). The conversation then
+  has ONE "view" control — a button labelled by the active view that opens a modal
+  `Sheet` (scales to any number of lenses, unlike chips). Its mutually-exclusive
+  options unify **sorting** and **lens filtering**: *Newest*/*Oldest*
+  (chronological, the server `order` param across the whole thread), *Highest
+  participation* (the WS-E.2.1c content-participation weight — sourced comments
+  rank above unsourced, debate-losers sink; a content weight, NEVER attention or
+  applause, since per-comment attention is not tracked — `comment-participation.ts`),
+  or a **lens** (scopes the loaded comments to one reading). Selecting a lens is
+  ALSO the lens a comment written here joins — the composer shows a "Posting to the
+  X lens" hint, no separate picker; replies stay untagged. Story detail carries
+  `room_id` so the client can load the room's lenses; the authoritative `lens_id`
+  tag is validated server-side against the room. The "Where interpretations differ"
+  drawer (WS-H) renders right after the composer with a plain-language divergence
+  band. A lens is an interpretation context, never a vote (`check:no-applause`).
 - **Native media rendering** (`components/story/StoryMedia`, wired into
   `StoryCard` and the story page via the shared `feed-card` mapper). Image/video
   load ONLY through the scan-gated upload URL; video is a native

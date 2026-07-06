@@ -515,7 +515,8 @@ licio/
 │   │       │   ├── composer/            -- StoryComposer (author topic picker) + shared affordances (Attachment,
 │   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
 │   │       │   ├── comments/            -- Inline CommentSection + comment composer/media +
-│   │       │   │                           interpretation-lens picker/filter (WS-T, WS-G.2.2)
+│   │       │   │                           the ONE "view" control (sort: new/old/participation +
+│   │       │   │                           lens filter; button→modal Sheet) (WS-T, WS-G.2.2)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
 │   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (+ LensManager,
 │   │       │   │                           WS-G.2.2 steward lens create/list) + RoomMembership
@@ -536,11 +537,10 @@ licio/
 │   │       │   ├── i18n/                -- TranslationDisclosure
 │   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget,
 │   │       │                               QuietHoursSetting
-│   │       ├── stores/                  -- Zustand state (4 stores)
+│   │       ├── stores/                  -- Zustand state (3 stores)
 │   │       │   ├── auth.ts              --   session + cross-tab logout
 │   │       │   ├── ui.ts                --   theme, motion, feed mode, focus
 │   │       │   ├── feature-flags.ts     --   fail-closed feature gates
-│   │       │   ├── room-vantage.ts      --   per-room "declare-once" lens (WS-G.2.2)
 │   │       │   ├── persist.ts           --   zod-validated localStorage
 │   │       │   └── dom-sync.ts          --   DOM synchronization
 │   │       ├── lib/                     -- core utilities

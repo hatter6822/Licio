@@ -162,26 +162,32 @@ thread's room).  `GET /v1/stories/:id/lenses` groups lens-tagged
 contributions per lens — never framed as factions or scoreboards — and the
 SCOI divergence summary is absent gracefully until WS-H.4 produces it.
 
-Lens authoring + reading (client, WS-G.2.2).  Lenses now have an end-to-end
-UI so `metadata.lens_id` is produced by real members, not only the seed:
+Comment "view" control + lens authoring (client, WS-G.2.2/WS-T).  The
+conversation has ONE control — a button labelled by the active view that opens a
+modal `Sheet` (`components/comments/CommentViewSelector`; a modal, not a chip
+row, so it scales to any number of lenses).  Its mutually-exclusive options
+unify sorting with lens filtering, so `metadata.lens_id` is produced by real
+members, not only the seed:
 
 * **Create** — a steward manages a room's lenses inside the steward-only
   `RoomSettingsForm` (`apps/web/src/components/rooms/LensManager/`), which
   calls the existing `POST /v1/rooms/:id/lenses` (server enforces the steward
   role); the read is `GET /v1/rooms/:id/lenses`.
-* **Tag** — the top-level comment composer offers an optional "Reading this
-  as" lens picker (only when the room has lenses).  The choice is remembered
-  as a client-local **"declare-once" room vantage** (`stores/room-vantage.ts`,
-  a zod-validated persisted UI preference — the authoritative tag is still
-  server-validated) and pre-fills every comment box in that room, editable per
-  comment.  Story detail now carries `room_id` on the wire so the client can
-  load the room's lenses.
-* **Read** — once two or more lenses appear among a story's comments, the
-  conversation shows lens **filter chips** ("All · Skeptical (n) · …") that
-  scope the top-level comments to one reading, and the "Where interpretations
-  differ" drawer adds a plain-language divergence band per lens pair.  A lens
-  is an interpretation context, never a vote — the `check:no-applause` gate
-  covers these surfaces.
+* **Sort** — *Newest*/*Oldest* map to the endpoint's `order` param (whole-thread,
+  server-ordered); *Highest participation* client-sorts the loaded page by the
+  WS-E.2.1c content-participation weight (`comment-participation.ts`: a sourced
+  comment outweighs an unsourced one; a debate-loser sinks) — a content weight,
+  NEVER attention or applause (per-comment attention is not tracked — contribution
+  events fold under the thread, not the comment).
+* **Tag** — selecting a **lens** view both scopes the loaded comments to that
+  reading AND is the lens a top-level comment written here joins (the composer
+  shows a "Posting to the X lens" hint, no separate picker; replies stay
+  untagged).  Story detail carries `room_id` on the wire so the client can load
+  the room's lenses; the authoritative tag is server-validated against the room.
+* **Read** — the "Where interpretations differ" drawer (WS-H) renders right after
+  the composer with a plain-language divergence band per lens pair.  A lens is an
+  interpretation context, never a vote — the `check:no-applause` gate covers these
+  surfaces.
 
 ## WS-G/WS-T API surface and comment composer
 

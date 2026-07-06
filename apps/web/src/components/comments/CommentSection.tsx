@@ -16,13 +16,23 @@ import {
   useRoomLensesQuery,
   useStoryCommentsQuery,
   useStoryDebatesQuery,
+  useStoryInterpretationsQuery,
 } from '../../lib/queries.js';
 import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
+import { WhereInterpretationsDiffer } from '../story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../ui/Button/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
 import { Icon } from '../ui/Icon/index.js';
+import { Sheet } from '../ui/Sheet/index.js';
 import { CommentNode } from './CommentNode.js';
 import { CommentComposer } from './CommentParts.js';
+import {
+  type CommentViewMode,
+  CommentViewSelector,
+  lensIdOfView,
+  viewLabel,
+} from './CommentViewSelector.js';
+import { byParticipationDesc } from './comment-participation.js';
 import { DebatePanel } from './DebatePanel.js';
 
 export interface CommentSectionProps {
@@ -41,54 +51,87 @@ export function CommentSection({
   threadId,
   roomId,
 }: CommentSectionProps): React.ReactElement {
-  // No type filter tabs: sources are read per-comment via the "Sources" footnote
-  // modal, and live corrections/debates surface in the active-debates panel — so
-  // a top-level Sources/Corrections filter would be redundant.
-  const comments = useStoryCommentsQuery(storyId, { depth: INLINE_MAX_DEPTH });
+  // ONE comment "view" control (WS-G.2.2 / WS-T): a button → modal Sheet that
+  // both SORTS (newest/oldest/highest-participation) and FILTERS by lens, and — for
+  // a lens view — is the lens a comment written here joins. `newest`/`oldest` are
+  // server-ordered across the whole thread; the participation sort and lens filter
+  // are client-side over the loaded top page (this section is a preview).
+  const [view, setView] = useState<CommentViewMode>('oldest');
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const order: 'newest' | 'oldest' = view === 'newest' ? 'newest' : 'oldest';
+
+  const comments = useStoryCommentsQuery(storyId, { depth: INLINE_MAX_DEPTH, order });
   const stream = useCommentStream(storyId);
   const debates = useStoryDebatesQuery(storyId);
   const lenses = useRoomLensesQuery(roomId ?? '', roomId !== undefined);
-  const [selectedLensId, setSelectedLensId] = useState<string | null>(null);
+  // SCOI "Where interpretations differ" (WS-H): shown right after the composer so
+  // the lens-divergence context sits with the conversation, not at page bottom.
+  const interpretations = useStoryInterpretationsQuery(storyId);
 
   const all = comments.data?.comments ?? [];
-  // WS-G.2.2 conversation lens filter: read each community's interpretation on
-  // its own. Lens ids come from every top-level comment's metadata (already on
-  // the wire); names come from the room's lens list. Chips appear only once TWO
-  // or more lenses are actually present — that is when filtering by reading has
-  // something to distinguish (never a popularity/vote control).
-  const lensName = new Map((lenses.data ?? []).map((lens) => [lens.lens_id, lens.name]));
+  const roomLenses = lenses.data ?? [];
   const lensCounts = new Map<string, number>();
   for (const comment of all) {
     const id = comment.metadata.lens_id;
-    if (id !== undefined && lensName.has(id)) lensCounts.set(id, (lensCounts.get(id) ?? 0) + 1);
+    if (id !== undefined) lensCounts.set(id, (lensCounts.get(id) ?? 0) + 1);
   }
-  const presentLenses = [...lensCounts.keys()];
-  const showLensFilter = presentLenses.length >= 2;
+  // A `lens:<id>` view resolves to a real room lens (self-heals if it vanishes).
+  const activeLensId = lensIdOfView(view);
   const activeLens =
-    selectedLensId !== null && lensCounts.has(selectedLensId) ? selectedLensId : null;
+    activeLensId !== null
+      ? (roomLenses.find((lens) => lens.lens_id === activeLensId) ?? null)
+      : null;
+  // Offer the control when there is something to sort OR a lens to pick/tag. A
+  // lens is a reading context, never a vote.
+  const showViewControl = all.length >= 2 || roomLenses.length >= 2;
   const visible =
-    activeLens !== null ? all.filter((comment) => comment.metadata.lens_id === activeLens) : all;
+    activeLens !== null
+      ? all.filter((comment) => comment.metadata.lens_id === activeLens.lens_id)
+      : view === 'participation'
+        ? byParticipationDesc(all)
+        : all;
 
   return (
     <section id="comments" className="mt-6 flex flex-col gap-4" aria-label="Conversation">
       {debates.data ? <DebatePanel storyId={storyId} debates={debates.data.debates} /> : null}
-      <CommentComposer storyId={storyId} threadId={threadId} {...(roomId ? { roomId } : {})} />
-      {showLensFilter ? (
-        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by lens">
-          <LensChip
-            label={`All (${all.length})`}
-            active={activeLens === null}
-            onClick={() => setSelectedLensId(null)}
-          />
-          {presentLenses.map((id) => (
-            <LensChip
-              key={id}
-              label={`${lensName.get(id) ?? 'Lens'} (${lensCounts.get(id) ?? 0})`}
-              active={activeLens === id}
-              onClick={() => setSelectedLensId(id)}
+      {showViewControl ? (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-ink-muted text-sm">Viewing</span>
+            <Button
+              variant="secondary"
+              onClick={() => setSelectorOpen(true)}
+              aria-haspopup="dialog"
+              aria-label={`Sort and filter comments — ${viewLabel(view, roomLenses)}`}
+            >
+              {viewLabel(view, roomLenses)}
+              <Icon name="chevron-down" className="size-4" />
+            </Button>
+          </div>
+          <Sheet
+            open={selectorOpen}
+            onClose={() => setSelectorOpen(false)}
+            title="Sort & filter comments"
+          >
+            <CommentViewSelector
+              view={view}
+              roomLenses={roomLenses}
+              lensCounts={lensCounts}
+              onSelect={(next) => {
+                setView(next);
+                setSelectorOpen(false);
+              }}
             />
-          ))}
-        </div>
+          </Sheet>
+        </>
+      ) : null}
+      <CommentComposer
+        storyId={storyId}
+        threadId={threadId}
+        {...(activeLens ? { activeLens: { id: activeLens.lens_id, name: activeLens.name } } : {})}
+      />
+      {interpretations.data ? (
+        <WhereInterpretationsDiffer data={interpretations.data} storyId={storyId} />
       ) : null}
       {stream.newComments.length > 0 ? (
         <button
@@ -145,32 +188,5 @@ export function CommentSection({
         </Button>
       ) : null}
     </section>
-  );
-}
-
-/** A single lens filter toggle (WS-G.2.2). Not a vote — it scopes the reading. */
-function LensChip({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}): React.ReactElement {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={cn(
-        'rounded-full border px-3 py-1 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-        active
-          ? 'border-primary bg-primary-soft text-primary-on-soft'
-          : 'border-line text-ink-muted hover:bg-surface',
-      )}
-    >
-      {label}
-    </button>
   );
 }

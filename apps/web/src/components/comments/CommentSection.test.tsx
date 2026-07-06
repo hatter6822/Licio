@@ -4,12 +4,16 @@
 // thread that continues deeper (or a comment with more direct replies than shown)
 // links to the dedicated comment-centric page rather than nesting further, and
 // more TOP-LEVEL comments load in place via "Load more comments".
-import type { CommentItem, DebateArenaSummary, LensPublic } from '@licio/shared';
+import type {
+  CommentItem,
+  DebateArenaSummary,
+  LensPublic,
+  StoryInterpretationsResponse,
+} from '@licio/shared';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useRoomVantageStore } from '../../stores/room-vantage.js';
 import { CommentSection } from './CommentSection.js';
 
 const mutate = vi.fn();
@@ -33,6 +37,7 @@ let queryState: {
 let streamState: { newComments: unknown[] };
 let mutationState: { isPending?: boolean; isError?: boolean };
 let debatesState: { debates: DebateArenaSummary[] };
+let interpretationsState: StoryInterpretationsResponse | null = null;
 let lensesState: LensPublic[] = [];
 
 // Render the router Link as a real anchor whose href reflects `to` with the
@@ -79,6 +84,7 @@ vi.mock('../../lib/queries.js', () => ({
     refetch,
   })),
   useStoryDebatesQuery: vi.fn(() => ({ data: debatesState })),
+  useStoryInterpretationsQuery: vi.fn(() => ({ data: interpretationsState })),
   useRoomLensesQuery: vi.fn(() => ({ data: lensesState })),
   useCreateCommentMutation: vi.fn(() => ({
     isPending: mutationState.isPending ?? false,
@@ -164,8 +170,8 @@ beforeEach(() => {
   streamState = { newComments: [] };
   mutationState = {};
   debatesState = { debates: [] };
+  interpretationsState = null;
   lensesState = [];
-  useRoomVantageStore.setState({ byRoom: {} });
   mutate.mockReset();
   refetch.mockReset();
   loadMore.mockReset();
@@ -495,11 +501,28 @@ describe('CommentSection', () => {
     );
   });
 
-  it('WS-G.2.2 — shows lens filter chips only once two lenses are present, and filters', async () => {
+  const twoLenses = (): void => {
     lensesState = [
       lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' }),
       lens({ lens_id: LENS_INDUSTRY, name: 'Industry', lens_type: 'policy' }),
     ];
+  };
+
+  // The ONE comment "view" control is a BUTTON that opens a modal Sheet — it
+  // unifies sort with lens filter and scales to any number of lenses. Open it and
+  // click an option (scoped inside the dialog so the trigger's own label can't
+  // collide).
+  async function pickView(
+    user: ReturnType<typeof userEvent.setup>,
+    optionName: string,
+  ): Promise<void> {
+    await user.click(screen.getByRole('button', { name: /sort and filter comments/i }));
+    const dialog = await screen.findByRole('dialog', { name: /sort & filter comments/i });
+    await user.click(within(dialog).getByRole('button', { name: optionName }));
+  }
+
+  it('WS-G.2.2 — ONE view control (button + modal) scopes the conversation to a lens', async () => {
+    twoLenses();
     queryState = {
       data: {
         comments: [
@@ -520,99 +543,199 @@ describe('CommentSection', () => {
       },
     };
     renderSection(true);
-    const group = screen.getByRole('group', { name: /filter by lens/i });
-    expect(within(group).getByRole('button', { name: /^All \(2\)$/ })).toBeInTheDocument();
-    // Both readings are visible under "All".
+    // Exactly ONE view control (a button) — no separate composer picker/combobox.
+    expect(screen.getByRole('button', { name: /sort and filter comments/i })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     expect(screen.getByText('The skeptical reading.')).toBeInTheDocument();
     expect(screen.getByText('The industry reading.')).toBeInTheDocument();
 
-    // Filtering to one lens keeps only its comments; the other reading is gone.
+    // Selecting a lens filters the conversation and relabels the button.
     const user = userEvent.setup();
-    await user.click(within(group).getByRole('button', { name: /^Skeptical \(1\)$/ }));
-    expect(within(group).getByRole('button', { name: /^Skeptical \(1\)$/ })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    await pickView(user, 'Skeptical (1)');
+    expect(
+      screen.getByRole('button', { name: /sort and filter comments — lens: skeptical/i }),
+    ).toBeInTheDocument();
     expect(screen.getByText('The skeptical reading.')).toBeInTheDocument();
     expect(screen.queryByText('The industry reading.')).not.toBeInTheDocument();
   });
 
-  it('WS-G.2.2 — the composer sends the chosen lens tag and remembers the vantage', async () => {
-    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
+  it('WS-G.2.2 — the selector offers every room lens even before any comment is tagged', async () => {
+    twoLenses(); // no comments tagged yet, but 2 room lenses ⇒ control shows
+    const user = userEvent.setup();
+    renderSection(true);
+    await user.click(screen.getByRole('button', { name: /sort and filter comments/i }));
+    const dialog = await screen.findByRole('dialog', { name: /sort & filter comments/i });
+    expect(within(dialog).getByRole('button', { name: 'Skeptical (0)' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Industry (0)' })).toBeInTheDocument();
+    // …and the sort options are always present.
+    expect(within(dialog).getByRole('button', { name: 'Newest first' })).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole('button', { name: 'Highest participation' }),
+    ).toBeInTheDocument();
+  });
+
+  it('WS-G.2.2 — a comment written under a selected lens JOINS that lens', async () => {
+    twoLenses();
     mutate.mockImplementation((_payload, options) => options?.onSuccess?.());
     const user = userEvent.setup();
     renderSection(true);
 
-    await user.type(
-      screen.getByRole('textbox', { name: 'Write a comment' }),
-      'A skeptical take with context',
-    );
-    await user.click(screen.getByRole('combobox', { name: /reading this as/i }));
-    await user.click(screen.getByRole('option', { name: 'Skeptical' }));
+    await pickView(user, 'Skeptical (0)');
+    expect(
+      screen.getByText((_content, el) => el?.textContent === 'Posting to the Skeptical lens'),
+    ).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: 'Write a comment' }), 'A skeptical take');
     await user.click(screen.getByRole('button', { name: 'Comment' }));
 
     expect(mutate).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'comment',
         thread_id: threadId,
-        body: 'A skeptical take with context',
+        body: 'A skeptical take',
         lens_id: LENS_SKEPTICAL,
       }),
       expect.any(Object),
     );
-    // "Declare once": the choice is remembered for the room.
-    expect(useRoomVantageStore.getState().getVantage(roomId)).toBe(LENS_SKEPTICAL);
   });
 
-  it('WS-G.2.2 — hides the lens filter when fewer than two lenses appear', () => {
-    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
+  it('WS-G.2.2 — under a SORT view, a comment joins no lens', async () => {
+    twoLenses();
+    mutate.mockImplementation((_payload, options) => options?.onSuccess?.());
+    const user = userEvent.setup();
+    renderSection(true);
+    // Default view is a sort ("Oldest first"), so no lens is joined.
+    expect(screen.queryByText(/posting to the/i)).not.toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: 'Write a comment' }), 'A general point');
+    await user.click(screen.getByRole('button', { name: 'Comment' }));
+    expect(mutate.mock.calls[0]?.[0]).not.toHaveProperty('lens_id');
+  });
+
+  it('WS-T — "Highest participation" sorts sourced up and debate-losers down', async () => {
     queryState = {
       data: {
-        comments: [comment({ metadata: { lens_id: LENS_SKEPTICAL } })],
+        comments: [
+          comment({ contribution_id: 'c0000000-0000-4000-8000-000000000001', body: 'Plain take.' }),
+          comment({
+            contribution_id: 'c0000000-0000-4000-8000-000000000002',
+            body: 'Sourced take.',
+            citations: [{ url: 'https://example.org/x' }],
+          }),
+          comment({
+            contribution_id: 'c0000000-0000-4000-8000-000000000003',
+            body: 'Debate loser.',
+            dispute_status: 'incorrect',
+          }),
+        ],
         next_cursor: null,
         anchor: null,
-        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
-      },
-    };
-    renderSection(true);
-    expect(screen.queryByRole('group', { name: /filter by lens/i })).not.toBeInTheDocument();
-  });
-
-  it('WS-G.2.2 — offers the composer lens picker for a room with lenses', () => {
-    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
-    renderSection(true);
-    expect(screen.getByRole('combobox', { name: /reading this as/i })).toBeInTheDocument();
-  });
-
-  it('WS-G.2.2 — prefills the composer from the remembered room vantage', () => {
-    useRoomVantageStore.getState().setVantage(roomId, LENS_SKEPTICAL);
-    lensesState = [
-      lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' }),
-      lens({ lens_id: LENS_INDUSTRY, name: 'Industry', lens_type: 'policy' }),
-    ];
-    renderSection(true);
-    // The "declare once" vantage is pre-selected on the trigger.
-    expect(screen.getByRole('combobox', { name: /reading this as/i })).toHaveTextContent(
-      'Skeptical',
-    );
-  });
-
-  it('WS-G.2.2 — never offers the lens picker on a reply composer (top-level only)', async () => {
-    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
-    queryState = {
-      data: {
-        comments: [comment({ reply_count: 0, has_more_replies: false })],
-        next_cursor: null,
-        anchor: null,
-        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+        overview: { comment_count: 3, sources_count: 1, corrections_count: 0 },
       },
     };
     const user = userEvent.setup();
+    renderSection();
+    await pickView(user, 'Highest participation');
+    const sourced = screen.getByText('Sourced take.');
+    const plain = screen.getByText('Plain take.');
+    const loser = screen.getByText('Debate loser.');
+    // sourced (1.35) → plain (1.0) → loser (sunk).
+    expect(sourced.compareDocumentPosition(plain) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(plain.compareDocumentPosition(loser) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('WS-T — the control offers chronological sorts and relabels on selection', async () => {
+    queryState = {
+      data: {
+        comments: [
+          comment({ contribution_id: 'd1', body: 'one' }),
+          comment({ contribution_id: 'd2', body: 'two' }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 2, sources_count: 0, corrections_count: 0 },
+      },
+    };
+    const user = userEvent.setup();
+    renderSection();
+    await pickView(user, 'Newest first');
+    expect(
+      screen.getByRole('button', { name: /sort and filter comments — newest first/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('WS-G.2.2 — hides the view control when there is nothing to sort or filter', () => {
+    // One comment, fewer than two lenses ⇒ no control.
+    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
+    queryState = {
+      data: {
+        comments: [comment({ contribution_id: 'e1' })],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+      },
+    };
     renderSection(true);
-    // Open the reply composer on the one comment…
+    expect(
+      screen.queryByRole('button', { name: /sort and filter comments/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('WS-G.2.2 — a reply never joins a lens, even while a lens is selected', async () => {
+    twoLenses();
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            metadata: { lens_id: LENS_SKEPTICAL },
+            reply_count: 0,
+            has_more_replies: false,
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+      },
+    };
+    mutate.mockImplementation((_payload, options) => options?.onSuccess?.());
+    const user = userEvent.setup();
+    renderSection(true);
+    await pickView(user, 'Skeptical (1)');
     await user.click(screen.getByRole('button', { name: 'Reply' }));
-    expect(screen.getByRole('textbox', { name: 'Write a reply' })).toBeInTheDocument();
-    // …and only the TOP-LEVEL composer carries a lens picker (the reply adds none).
-    expect(screen.getAllByRole('combobox', { name: /reading this as/i })).toHaveLength(1);
+    await user.type(screen.getByRole('textbox', { name: 'Write a reply' }), 'A reply');
+    await user.click(screen.getAllByRole('button', { name: 'Reply' }).at(-1) as HTMLElement);
+    const replyPayload = mutate.mock.calls.at(-1)?.[0];
+    expect(replyPayload).not.toHaveProperty('lens_id');
+    expect(replyPayload).toMatchObject({ parent_contribution_id: expect.any(String) });
+  });
+
+  it('WS-H — renders "Where interpretations differ" right after the composer', () => {
+    interpretationsState = {
+      story_id: storyId,
+      context_state: 'split',
+      needs_context: true,
+      interpretations: [
+        {
+          lens_a: 'l1',
+          lens_b: 'l2',
+          summary: 'These lenses read this differently.',
+          disagreement: 0.7,
+        },
+      ],
+    };
+    renderSection(true);
+    const composer = screen.getByRole('textbox', { name: 'Write a comment' });
+    const drawer = screen.getByRole('heading', { name: /where interpretations differ/i });
+    // The drawer sits inside the Conversation section AFTER the composer (DOM
+    // order), not at the page bottom.
+    expect(
+      composer.compareDocumentPosition(drawer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('WS-H — omits the interpretations drawer when there is nothing to show', () => {
+    interpretationsState = null;
+    renderSection(true);
+    expect(
+      screen.queryByRole('heading', { name: /where interpretations differ/i }),
+    ).not.toBeInTheDocument();
   });
 });
