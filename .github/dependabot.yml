@@ -22,5 +22,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      # The codeql-action sub-actions (init/analyze/…) share an on-disk config
+      # stamped with the action version, so they MUST bump in lockstep. Grouping
+      # them into ONE PR prevents the version-skew deadlock where a half-merged
+      # split bump leaves init on release N and analyze on N+1, breaking CodeQL on
+      # every open PR (the base branch's workflow runs on PR checks).
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
     labels:
       - "ci"
