@@ -834,10 +834,12 @@ licio/
 │           │   └── service.ts            --   the process-wide ingestion-server singleton
 │           ├── simulator/                -- DEV-ONLY traffic simulator (NEVER in production):
 │           │   ├── prng.ts               --   deterministic mulberry32 seeded PRNG
-│           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster
+│           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster +
+│           │   │                              per-archetype lens vantage (WS-G.2.2)
 │           │   ├── content.ts            --   deterministic story/comment/evidence generators
 │           │   ├── scenarios.ts          --   the six scenario presets (steady…coordinated_burst)
 │           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
+│           │   │                              (tags root comments with the author's vantage lens)
 │           │   ├── link-fixtures.ts      --   dev fetchDocument for reserved `.example` hosts
 │           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY I/O module — drives the
 │           │   │                              REAL submission/contribution/attention/report paths +

@@ -98,6 +98,7 @@ describe('DevTrafficSimulator runtime', () => {
     }
     // And the real forum store actually holds published comments.
     let published = 0;
+    let lensTagged = 0;
     for (const story of await graph.ingestion.stories.listRecent(20)) {
       const t = await graph.ingestion.stories.getThreadByStoryId(story.storyId);
       if (!t) continue;
@@ -106,8 +107,13 @@ describe('DevTrafficSimulator runtime', () => {
         limit: 50,
       });
       published += rows.length;
+      lensTagged += rows.filter((r) => typeof r.metadata['lens_id'] === 'string').length;
     }
     expect(published).toBeGreaterThan(0);
+    // WS-G.2.2 — synthetic traffic tags root comments with an interpretation
+    // lens through the REAL createContribution path (room-validated), so SCOI
+    // lens divergence is exercised end to end, not only by the S10 seed.
+    expect(lensTagged).toBeGreaterThan(0);
   });
 
   it('ingests bucketed attention and refreshes real reading signals', async () => {

@@ -11,7 +11,7 @@
 // gate, while the adversarial cluster is intentionally FRESH so the
 // coordinated-burst scenario trips the real burst detectors.
 
-import type { DwellBucket, ReplyDepthBucket, ReturnVisitBucket } from '@licio/shared';
+import type { DwellBucket, LensType, ReplyDepthBucket, ReturnVisitBucket } from '@licio/shared';
 
 /** Stable id factory for simulator users (the 5f5ed000 family is reserved for
  *  the simulator; demo-seed uses 5f5e0000–5f5ec000). */
@@ -31,6 +31,62 @@ export type PersonaArchetypeId =
   | 'reporter'
   | 'cluster_member'
   | 'newcomer';
+
+// ---------------------------------------------------------------------------
+// Interpretation lenses (WS-G.2.2). The simulator provisions a focused lens set
+// per room and tags ROOT comments with the author persona's "declare-once"
+// vantage, so lens-grouped SCOI divergence (the "Where interpretations differ"
+// drawer + the conversation filter) is exercised by synthetic traffic — not only
+// by the S10 dev-seed fixture. A lens is a reading CONTEXT, never a vote.
+// ---------------------------------------------------------------------------
+
+/** The lens types the simulator provisions in every room it uses. Kept focused
+ *  so an active story quickly has >= 2 lenses carrying comments (the threshold
+ *  SCOI needs to report divergence). */
+export const SIM_LENS_TYPES: readonly LensType[] = [
+  'skeptical',
+  'expert',
+  'local_resident',
+  'policy',
+];
+
+/** Human display names for every lens type (create-if-missing is idempotent, so
+ *  a room the dev-seed already gave a lens of some type keeps that lens). */
+export const SIM_LENS_NAMES: Readonly<Record<LensType, string>> = {
+  local_resident: 'Local resident',
+  beginner: 'Beginner',
+  expert: 'Expert',
+  affected_community: 'Affected community',
+  skeptical: 'Skeptical',
+  policy: 'Policy',
+  historical: 'Historical',
+};
+
+/**
+ * A persona's reading vantage: the lens its ROOT comments carry. Returns only a
+ * {@link SIM_LENS_TYPES} member (so a tag never references a lens the room lacks)
+ * or null — pure readers, story authors, and lurkers declare no lens. The
+ * mapping spreads the commenting archetypes across the four provisioned lenses so
+ * the SAME story attracts multiple readings.
+ */
+export function lensVantageOf(archetype: PersonaArchetypeId): LensType | null {
+  switch (archetype) {
+    case 'evidence_contributor':
+    case 'cluster_member':
+      return 'skeptical';
+    case 'expert_author':
+    case 'deep_reader':
+      return 'expert';
+    case 'local_correspondent':
+    case 'newcomer':
+      return 'local_resident';
+    case 'reporter':
+    case 'commenter':
+      return 'policy';
+    default:
+      return null;
+  }
+}
 
 /** A weighted option list the engine samples with prng.weighted. */
 export type WeightedList<T> = ReadonlyArray<{ value: T; weight: number }>;

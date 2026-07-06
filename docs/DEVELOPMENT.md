@@ -837,6 +837,16 @@ anti-signal detectors. A per-boot story budget caps how much it creates. The
 whole run is deterministic: the same seed and scenario replay the same traffic,
 which is what makes a tester's session reproducible.
 
+**Interpretation lenses (WS-G.2.2).** The simulator provisions a focused lens
+set (`skeptical`, `expert`, `local_resident`, `policy`) in each room it uses and
+tags ROOT comments with the author persona's "declare-once" vantage through the
+REAL `createContribution` path (the server re-validates the tag against the
+room's lenses). Different archetypes read through different lenses, so an active
+story accumulates two or more lens-tagged readings — which is what makes the
+**"Where interpretations differ"** drawer and the conversation **lens filter**
+appear from live simulated traffic, not only on the S10 seed fixture. Replies
+carry no lens (matching the client, which offers the picker top-level only).
+
 The simulator's engine, personas, scenarios, and content generators live in
 `apps/api/src/simulator/`; the control panel is `apps/web/src/components/dev/`.
 

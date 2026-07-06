@@ -9,7 +9,7 @@
 // same seed and the same inputs produce the same plan (unit-tested), which is
 // what makes a tester's session replayable.
 
-import type { DwellBucket, ReplyDepthBucket, ReturnVisitBucket } from '@licio/shared';
+import type { DwellBucket, LensType, ReplyDepthBucket, ReturnVisitBucket } from '@licio/shared';
 import {
   type CommentFlavor,
   DOMAIN_IDS,
@@ -21,7 +21,13 @@ import {
   generateStory,
   type StoryKind,
 } from './content.js';
-import { archetypeOf, NEWCOMER_CAP, type PersonaArchetype, type PersonaSpec } from './personas.js';
+import {
+  archetypeOf,
+  lensVantageOf,
+  NEWCOMER_CAP,
+  type PersonaArchetype,
+  type PersonaSpec,
+} from './personas.js';
 import type { Prng } from './prng.js';
 import type { ScenarioDefinition } from './scenarios.js';
 
@@ -50,6 +56,9 @@ export interface WorldRoom {
   /** Posting restricted to experts/stewards (only the expert persona posts). */
   readonly expertGated: boolean;
   readonly domains: readonly DomainId[];
+  /** The room's provisioned interpretation lenses, by type (WS-G.2.2). A root
+   *  comment is tagged with its author's vantage lens when the room carries it. */
+  readonly lensesByType: ReadonlyMap<LensType, string>;
 }
 
 export interface WorldCommentRef {
@@ -121,6 +130,10 @@ export type SimAction =
       readonly storyId: string;
       readonly parentContributionId: string | null;
       readonly body: string;
+      /** The interpretation lens this comment declares (WS-G.2.2), or null. Only
+       *  ROOT comments from a persona with a vantage carry one, and only when the
+       *  story's room provisions that lens (the server re-validates the tag). */
+      readonly lensId: string | null;
     }
   | {
       readonly kind: 'evidence';
@@ -277,6 +290,9 @@ function uniqueTitle(story: GeneratedStory, world: SimWorld, serial: number): Ge
  */
 export function planTick(input: PlanTickInput): SimAction[] {
   const { scenario, world, personas, prng, tickMs, speed } = input;
+  // Room lookup for resolving a comment's vantage lens (WS-G.2.2). Built once
+  // per tick; the map is small (the public open rooms the simulator uses).
+  const roomsById = new Map(world.rooms.map((r) => [r.roomId, r]));
   const tickMinutes = tickMs / 60_000;
   const phase = scenario.phase ? scenario.phase(input.scenarioElapsedMs) : 1;
   const provisioning: SimAction[] = [];
@@ -450,12 +466,21 @@ export function planTick(input: PlanTickInput): SimAction[] {
           : parent.isQuestion
             ? 'reply_answer'
             : 'reply_followup';
+      // WS-G.2.2 — a ROOT comment declares its author's reading vantage when the
+      // story's room provisions that lens (deterministic; consumes no PRNG, so
+      // the plan stays reproducible). Replies inherit their parent's context and
+      // carry no lens — matching the client, which offers the picker top-level
+      // only. The server re-validates the tag against the room's lenses.
+      const vantage = parent === null ? lensVantageOf(persona.spec.archetype) : null;
+      const lensId =
+        vantage !== null ? (roomsById.get(story.roomId)?.lensesByType.get(vantage) ?? null) : null;
       contributions.push({
         kind: 'comment',
         personaUserId: persona.spec.userId,
         storyId: story.storyId,
         parentContributionId: parent?.contributionId ?? null,
         body: generateCommentBody(flavor, domain, prng),
+        lensId,
       });
     }
 
@@ -534,12 +559,20 @@ export function planTick(input: PlanTickInput): SimAction[] {
         focusStory.threadId !== null &&
         prng.poisson(archetype.rates.comment * burst.comment * speed * tickMinutes) > 0
       ) {
+        // Root comment ⇒ carries the member's vantage lens when the focus room
+        // provides it (a coordinated same-lens reading also exercises SCOI).
+        const vantage = lensVantageOf(member.spec.archetype);
+        const lensId =
+          vantage !== null
+            ? (roomsById.get(focusStory.roomId)?.lensesByType.get(vantage) ?? null)
+            : null;
         contributions.push({
           kind: 'comment',
           personaUserId: member.spec.userId,
           storyId: focusStory.storyId,
           parentContributionId: null,
           body: prng.pick(CLUSTER_COMMENT_BODIES),
+          lensId,
         });
       }
       if (prng.poisson(archetype.rates.report * burst.report * speed * tickMinutes) > 0) {

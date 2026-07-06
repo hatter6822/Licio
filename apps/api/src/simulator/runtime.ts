@@ -22,6 +22,7 @@ import {
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   emptyReputationSummary,
+  type LensType,
   type SimulatorActivityEntry,
   type SimulatorConfigureRequest,
   type SimulatorCounters,
@@ -80,6 +81,8 @@ import {
   CLUSTER_ROSTER,
   newcomerSpec,
   type PersonaSpec,
+  SIM_LENS_NAMES,
+  SIM_LENS_TYPES,
 } from './personas.js';
 import { createPrng, type Prng } from './prng.js';
 import { SCENARIO_INFOS, SCENARIOS } from './scenarios.js';
@@ -214,6 +217,9 @@ export class DevTrafficSimulator {
   #repostDone = false;
   #focusStoryId: string | null = null;
   #newcomersProvisioned = 0;
+  /** roomId → (lensType → lensId): the WS-G.2.2 lenses provisioned for each room
+   *  the simulator uses, resolved once (create-if-missing) then cached. */
+  #roomLensCache = new Map<string, ReadonlyMap<LensType, string>>();
   #counters = emptyCounters();
   #activity: SimulatorActivityEntry[] = [];
   #feedPulse: { computedAtMs: number | null; fallback: boolean; items: SimulatorFeedPulseItem[] } =
@@ -447,6 +453,34 @@ export class DevTrafficSimulator {
   // World assembly (from the REAL stores).
   // -------------------------------------------------------------------------
 
+  /**
+   * Ensure the room carries the WS-G.2.2 simulator lens set and return the
+   * `lensType → lensId` map. Create-if-missing is idempotent (a duplicate type
+   * is a no-op — a lens the dev-seed already created keeps its identity), and the
+   * resolved map is cached per room so lens provisioning runs at most once each.
+   */
+  async #ensureRoomLenses(roomId: string): Promise<ReadonlyMap<LensType, string>> {
+    const cached = this.#roomLensCache.get(roomId);
+    if (cached) return cached;
+    const { forum } = this.#graph;
+    for (const lensType of SIM_LENS_TYPES) {
+      // A duplicate (ok:false) means the room already has this lens type — fine.
+      await forum.lenses.insert({
+        lensId: randomUUID(),
+        roomId,
+        name: SIM_LENS_NAMES[lensType],
+        lensType,
+        description: null,
+      });
+    }
+    const map = new Map<LensType, string>();
+    for (const lens of await forum.lenses.listByRoom(roomId)) {
+      if (SIM_LENS_TYPES.includes(lens.lensType)) map.set(lens.lensType, lens.lensId);
+    }
+    this.#roomLensCache.set(roomId, map);
+    return map;
+  }
+
   async #buildWorld(): Promise<SimWorld> {
     const { ingestion, forum } = this.#graph;
     const rawStories = await ingestion.stories.listRecent(WORLD_STORY_LIMIT);
@@ -485,14 +519,17 @@ export class DevTrafficSimulator {
       visibilities: ['public'],
       limit: 50,
     });
-    const rooms: WorldRoom[] = rawRooms
-      .filter((room) => room.storageMode === 'server' && room.joinModel === 'open')
-      .map((room) => ({
-        roomId: room.roomId,
-        name: room.name,
-        expertGated: room.postingPolicy === 'experts_and_stewards',
-        domains: inferRoomDomains(room.name),
-      }));
+    const rooms: WorldRoom[] = await Promise.all(
+      rawRooms
+        .filter((room) => room.storageMode === 'server' && room.joinModel === 'open')
+        .map(async (room) => ({
+          roomId: room.roomId,
+          name: room.name,
+          expertGated: room.postingPolicy === 'experts_and_stewards',
+          domains: inferRoomDomains(room.name),
+          lensesByType: await this.#ensureRoomLenses(room.roomId),
+        })),
+    );
 
     const commentsByStory = new Map<string, WorldCommentRef[]>();
     for (const story of stories) {
@@ -763,6 +800,9 @@ export class DevTrafficSimulator {
       ...(action.parentContributionId !== null
         ? { parent_contribution_id: action.parentContributionId }
         : {}),
+      // WS-G.2.2 — a ROOT comment's interpretation-lens tag (the server
+      // re-validates it belongs to the thread's room, exactly as the UI path).
+      ...(action.lensId !== null ? { lens_id: action.lensId } : {}),
     };
     const parsed = contributionCreateSchema.safeParse(candidate);
     if (!parsed.success) {
