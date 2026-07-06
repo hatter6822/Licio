@@ -2,16 +2,29 @@
 import type { LensPublic } from '@licio/shared';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../../../lib/api.js';
 import { checkA11y } from '../../../test/axe.js';
 import { LensManager } from './LensManager.js';
 
 const createLens = vi.hoisted(() => vi.fn());
 const lensesData = vi.hoisted(() => ({ current: [] as LensPublic[] }));
+const createState = vi.hoisted(() => ({ isError: false, error: undefined as unknown }));
 vi.mock('../../../lib/queries.js', () => ({
   useRoomLensesQuery: () => ({ data: lensesData.current }),
-  useCreateLensMutation: () => ({ mutate: createLens, isPending: false, isError: false }),
+  useCreateLensMutation: () => ({
+    mutate: createLens,
+    isPending: false,
+    isError: createState.isError,
+    error: createState.error,
+  }),
 }));
+
+beforeEach(() => {
+  createState.isError = false;
+  createState.error = undefined;
+  createLens.mockClear();
+});
 
 const lens = (over: Partial<LensPublic>): LensPublic => ({
   lens_id: '11111111-1111-4111-8111-111111111111',
@@ -60,6 +73,20 @@ describe('LensManager (WS-G.2.2 steward lens management)', () => {
     expect(screen.getByRole('button', { name: /add lens/i })).toHaveAttribute(
       'aria-disabled',
       'true',
+    );
+  });
+
+  it('surfaces the server reason honestly when a create fails', () => {
+    lensesData.current = [];
+    createState.isError = true;
+    createState.error = new ApiClientError(
+      'duplicate_lens',
+      'This room already has a lens of that type',
+      409,
+    );
+    render(<LensManager roomId="r1" />);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'This room already has a lens of that type',
     );
   });
 

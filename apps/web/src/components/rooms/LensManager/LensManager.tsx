@@ -7,6 +7,7 @@
 // enforces the role; this surface is rendered only inside the steward settings.
 import { LENS_TYPES, type LensType } from '@licio/shared';
 import { useState } from 'react';
+import { ApiClientError } from '../../../lib/api.js';
 import { useCreateLensMutation, useRoomLensesQuery } from '../../../lib/queries.js';
 import { Button } from '../../ui/Button/index.js';
 import { Input } from '../../ui/Input/index.js';
@@ -124,7 +125,9 @@ export function LensManager({ roomId }: LensManagerProps): React.ReactElement {
         </Button>
         {create.isError ? (
           <p role="alert" className="text-error text-sm">
-            The lens could not be added. A room can have only one lens of each type.
+            {create.error instanceof ApiClientError
+              ? create.error.message
+              : 'The lens could not be added. Please try again.'}
           </p>
         ) : null}
       </form>
