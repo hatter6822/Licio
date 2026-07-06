@@ -49,11 +49,11 @@
     "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.1",
+    "@biomejs/biome": "^2.5.2",
     "@vitest/coverage-v8": "^4.1.9",
     "lefthook": "^2.1.9",
-    "node-html-parser": "^8.0.3",
-    "tsx": "^4.19.0",
+    "node-html-parser": "^8.0.4",
+    "tsx": "^4.23.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"
   },
