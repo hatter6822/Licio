@@ -262,6 +262,16 @@ export const LENS_TYPES = [
 export type LensType = (typeof LENS_TYPES)[number];
 export const lensTypeSchema = z.enum(LENS_TYPES);
 
+/**
+ * WS-G.2.2 — the canonical name for the default, no-committed-lens POSTING state
+ * that is present in EVERY room.  A member who has not chosen a specific
+ * interpretation lens (membership `lens_id` is null) posts as "Undecided"; it is
+ * always the default and needs no per-room provisioning (it IS the null state, so
+ * it can never be deleted or absent).  The label is the single source of truth
+ * for the server default-note and the client's lens picker/filter.
+ */
+export const UNDECIDED_LENS_LABEL = 'Undecided';
+
 // ---------------------------------------------------------------------------
 // Lens projections (WS-G.2.2/2.4).
 // ---------------------------------------------------------------------------
@@ -351,6 +361,12 @@ export const roomDetailSchema = roomSummarySchema
     /** WS-Q.5.3c — true when the requesting user is a steward of this room
      *  (gates the steward-only governance/visibility controls). */
     is_steward: z.boolean().optional(),
+    /** WS-G.2.2 — the requesting member's chosen POSTING lens for this room: the
+     *  interpretation a top-level comment they write here joins.  `null` is the
+     *  default "Undecided" state ([[UNDECIDED_LENS_LABEL]]).  Chosen when the
+     *  member joins and changed ONLY through the room's lens control — it is
+     *  never a side effect of the reading/filter lens.  `null` for a non-member. */
+    my_lens_id: uuidSchema.nullable().default(null),
   })
   .strict();
 export type RoomDetail = z.infer<typeof roomDetailSchema>;
@@ -459,6 +475,22 @@ export const roomJoinResponseSchema = z
   })
   .strict();
 export type RoomJoinResponse = z.infer<typeof roomJoinResponseSchema>;
+
+/** WS-G.2.2 — the POSTING lens a member chooses when they join a room.  Omitted
+ *  or `null` = the default "Undecided" ([[UNDECIDED_LENS_LABEL]]); a uuid picks a
+ *  specific interpretation to represent.  The server validates the lens belongs
+ *  to the room. */
+export const roomJoinRequestBodySchema = z
+  .object({ lens_id: uuidSchema.nullable().optional() })
+  .strict();
+export type RoomJoinRequestBody = z.infer<typeof roomJoinRequestBodySchema>;
+
+/** WS-G.2.2 — change the caller's POSTING lens for a room they are a member of.
+ *  `null` returns to "Undecided"; a uuid must be one of the room's lenses.  This
+ *  is the ONLY way to change the lens a member posts through (the reading/filter
+ *  lens never touches it). */
+export const roomLensSelectionSchema = z.object({ lens_id: uuidSchema.nullable() }).strict();
+export type RoomLensSelection = z.infer<typeof roomLensSelectionSchema>;
 
 export const roomNotificationPreferencesSchema = z
   .object({

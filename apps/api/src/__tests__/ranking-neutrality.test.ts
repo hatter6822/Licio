@@ -247,6 +247,7 @@ describe('Test 1 — feed replay with/without wallet links is identical (WS-I.3.
         userId: user.userId,
         status: 'active',
         requestId: randomUUID(),
+        lensId: null,
         notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
         requestedAt: new Date().toISOString(),
         joinedAt: new Date().toISOString(),

@@ -27,6 +27,7 @@ async function joinRoom(
     userId,
     status: 'active',
     requestId: randomUUID(),
+    lensId: null,
     notificationPreferences: {
       threads: 'mentions',
       new_evidence: false,

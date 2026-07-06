@@ -13,12 +13,13 @@ import { useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useCommentStream } from '../../lib/comment-stream.js';
 import {
-  useRoomLensesQuery,
+  useRoomQuery,
   useStoryCommentsQuery,
   useStoryDebatesQuery,
   useStoryInterpretationsQuery,
 } from '../../lib/queries.js';
 import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
+import { lensDisplayName } from '../rooms/RoomLensControl/RoomLensSelector.js';
 import { WhereInterpretationsDiffer } from '../story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../ui/Button/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
@@ -52,8 +53,9 @@ export function CommentSection({
   roomId,
 }: CommentSectionProps): React.ReactElement {
   // ONE comment "view" control (WS-G.2.2 / WS-T): a button → modal Sheet that
-  // both SORTS (newest/oldest/highest-participation) and FILTERS by lens, and — for
-  // a lens view — is the lens a comment written here joins. `newest`/`oldest` are
+  // both SORTS (newest/oldest/highest-participation) and FILTERS by lens. It is a
+  // READING control only — the lens you post as is your membership lens (chosen at
+  // join / via the room's lens button), never this filter. `newest`/`oldest` are
   // server-ordered across the whole thread; the participation sort and lens filter
   // are client-side over the loaded top page (this section is a preview).
   const [view, setView] = useState<CommentViewMode>('oldest');
@@ -63,26 +65,42 @@ export function CommentSection({
   const comments = useStoryCommentsQuery(storyId, { depth: INLINE_MAX_DEPTH, order });
   const stream = useCommentStream(storyId);
   const debates = useStoryDebatesQuery(storyId);
-  const lenses = useRoomLensesQuery(roomId ?? '', roomId !== undefined);
+  // The home room supplies BOTH the interpretation lenses (for the reading FILTER
+  // below) AND the member's chosen POSTING lens (`my_lens_id`) — the two are now
+  // fully decoupled: the filter lens is what you READ, the membership lens is what
+  // you POST as (chosen at join / via the room's lens button, WS-G.2.2).
+  const room = useRoomQuery(roomId ?? '', roomId !== undefined);
   // SCOI "Where interpretations differ" (WS-H): shown right after the composer so
   // the lens-divergence context sits with the conversation, not at page bottom.
   const interpretations = useStoryInterpretationsQuery(storyId);
 
   const all = comments.data?.comments ?? [];
-  const roomLenses = lenses.data ?? [];
+  const roomLenses = room.data?.lenses ?? [];
   const lensCounts = new Map<string, number>();
   for (const comment of all) {
     const id = comment.metadata.lens_id;
     if (id !== undefined) lensCounts.set(id, (lensCounts.get(id) ?? 0) + 1);
   }
   // A `lens:<id>` view resolves to a real room lens (self-heals if it vanishes).
+  // This is the READING FILTER only — it scopes which comments are shown and
+  // never the lens a new comment is posted as.
   const activeLensId = lensIdOfView(view);
   const activeLens =
     activeLensId !== null
       ? (roomLenses.find((lens) => lens.lens_id === activeLensId) ?? null)
       : null;
-  // Offer the control when there is something to sort OR a lens to pick/tag. A
-  // lens is a reading context, never a vote.
+  // The member's POSTING lens for this room (null = Undecided): what a top-level
+  // comment written here joins. Shown to the composer for transparency; changed
+  // ONLY on the room page, never here. Offered only when the room has lenses.
+  const postingLens =
+    roomLenses.length > 0
+      ? {
+          id: room.data?.my_lens_id ?? null,
+          name: lensDisplayName(room.data?.my_lens_id ?? null, roomLenses),
+        }
+      : null;
+  // Offer the view control when there is something to sort OR a lens to filter by.
+  // A lens is a reading context, never a vote.
   const showViewControl = all.length >= 2 || roomLenses.length >= 2;
   const visible =
     activeLens !== null
@@ -114,7 +132,7 @@ export function CommentSection({
         storyId={storyId}
         threadId={threadId}
         leadingAction={viewButton}
-        {...(activeLens ? { activeLens: { id: activeLens.lens_id, name: activeLens.name } } : {})}
+        {...(postingLens ? { postingLens } : {})}
       />
       {showViewControl ? (
         <Sheet

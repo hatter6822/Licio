@@ -542,6 +542,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       userId: authorId,
       status: 'pending',
       requestId,
+      lensId: null,
       notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
       requestedAt,
       joinedAt: null,
@@ -558,6 +559,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       userId: authorId,
       status: 'active',
       requestId: randomUUID(), // ignored on conflict — the original survives
+      lensId: null,
       notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES, new_evidence: true },
       requestedAt,
       joinedAt: new Date().toISOString(),
@@ -574,6 +576,26 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect((await roomsStore.listSubscriptionsByUser(authorId)).map((s) => s.roomId)).toContain(
       room.roomId,
     );
+
+    // WS-G.2.2 — the member's POSTING lens round-trips through the store, and
+    // setSubscriptionLens changes ONLY the lens (null returns to Undecided),
+    // leaving status/preferences untouched; a non-member yields null.
+    const lensCreate = await lenses.insert({
+      lensId: randomUUID(),
+      roomId: room.roomId,
+      name: 'Skeptical',
+      lensType: 'skeptical',
+      description: null,
+    });
+    expect(lensCreate.ok).toBe(true);
+    const lensId = lensCreate.ok ? lensCreate.lens.lensId : '';
+    const withLens = await roomsStore.setSubscriptionLens(room.roomId, authorId, lensId);
+    expect(withLens?.lensId).toBe(lensId);
+    expect(withLens?.status).toBe('active');
+    expect(withLens?.notificationPreferences.new_evidence).toBe(true);
+    expect((await roomsStore.getSubscription(room.roomId, authorId))?.lensId).toBe(lensId);
+    expect((await roomsStore.setSubscriptionLens(room.roomId, authorId, null))?.lensId).toBeNull();
+    expect(await roomsStore.setSubscriptionLens(room.roomId, secondUserId, lensId)).toBeNull();
 
     await roomsStore.anonymizeUser(authorId);
     await roomsStore.anonymizeUser(secondUserId);

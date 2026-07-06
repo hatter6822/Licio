@@ -45,6 +45,7 @@ function activeSubscription(roomId: string, userId: string) {
     userId,
     status: 'active' as const,
     requestId: randomUUID(),
+    lensId: null,
     notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
     requestedAt: nowIso,
     joinedAt: nowIso,

@@ -230,6 +230,14 @@ export const roomSubscriptions = pgTable(
       .references(() => users.userId, { onDelete: 'cascade' }),
     /** `pending` = a restricted-room join request awaiting steward approval. */
     status: roomSubscriptionStatusEnum('status').notNull(),
+    /** WS-G.2.2 — the member's chosen POSTING lens: the interpretation a
+     *  top-level comment they write in this room joins.  NULL is the default
+     *  "Undecided" state present in every room.  Set when the member joins and
+     *  changed only via the room's lens control (never the reading/filter lens).
+     *  ON DELETE SET NULL returns members to Undecided when a lens is removed —
+     *  a forward reference to `lenses` (defined below) resolved via the deferred
+     *  Drizzle callback. */
+    lensId: uuid('lens_id').references(() => lenses.lensId, { onDelete: 'set null' }),
     /** Stable id so stewards can address PATCH /join-requests/:requestId. */
     requestId: uuid('request_id').notNull().defaultRandom(),
     /** WS-G.2.3d per-room notification preferences. */

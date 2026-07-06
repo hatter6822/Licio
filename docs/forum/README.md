@@ -154,41 +154,51 @@ notification preferences (one row).  Visibility is two-tier: a pending
 applicant can see the room EXISTS (listings, their join status) but reads
 none of its content — threads, lenses, and detail all require an ACTIVE
 membership or a steward role (`roomContentVisibleToUser`, the same bar
-`threadVisibleToUser` enforces).
+`threadVisibleToUser` enforces).  A subscription also carries the member's
+chosen **posting lens** (`room_subscriptions.lens_id`, nullable, migration
+`0058`): the interpretation a top-level comment they write in the room joins.
+`NULL` is the default **"Undecided"** state present in every room; it is set
+when the member joins (`POST /join` `{ lens_id }`) and changed ONLY through
+`PUT /v1/rooms/:id/lens` (`setMembershipLens` — validated lens∈room, `null`
+returns to Undecided) — never a side effect of the reading/filter lens.  Room
+detail projects it as `my_lens_id`.
 
 Lenses (WS-G.2.2/2.4): `(room_id, lens_type)` unique over the seven §16.2
-types; contributions may carry `metadata.lens_id` (validated against the
-thread's room).  `GET /v1/stories/:id/lenses` groups lens-tagged
-contributions per lens — never framed as factions or scoreboards — and the
-SCOI divergence summary is absent gracefully until WS-H.4 produces it.
+types; a top-level comment carries `metadata.lens_id` (the author's membership
+posting lens, validated against the thread's room).  `GET /v1/stories/:id/lenses`
+groups lens-tagged contributions per lens — never framed as factions or
+scoreboards — and the SCOI divergence summary is absent gracefully until WS-H.4
+produces it.
 
-Comment "view" control + lens authoring (client, WS-G.2.2/WS-T).  The
-conversation has ONE control — a button labelled by the active view that opens a
-modal `Sheet` (`components/comments/CommentViewSelector`; a modal, not a chip
-row, so it scales to any number of lenses).  Its mutually-exclusive options
-unify sorting with lens filtering, so `metadata.lens_id` is produced by real
-members, not only the seed:
+Lens authoring is DECOUPLED into READING and POSTING (client, WS-G.2.2/WS-T),
+so a member can never accidentally post as a lens they were only viewing:
 
 * **Create** — a steward manages a room's lenses inside the steward-only
   `RoomSettingsForm` (`apps/web/src/components/rooms/LensManager/`), which
   calls the existing `POST /v1/rooms/:id/lenses` (server enforces the steward
   role); the read is `GET /v1/rooms/:id/lenses`.
-* **Sort** — *Newest*/*Oldest* map to the endpoint's `order` param (whole-thread,
-  server-ordered); *Highest participation* client-sorts the loaded page by the
-  WS-E.2.1c content-participation weight (`comment-participation.ts`: a sourced
-  comment outweighs an unsourced one; a debate-loser sinks) — a content weight,
-  NEVER attention or applause (per-comment attention is not tracked — contribution
-  events fold under the thread, not the comment).
-* **Tag** — selecting a **lens** view both scopes the loaded comments to that
-  reading AND is the lens a top-level comment written here joins.  The view button
-  sits on the LEFT of the composer action row (opposing the Comment button) and
-  reads "Lens: X" when a lens is active, so there is no separate picker/hint;
-  replies stay untagged.  Story detail carries `room_id` on the wire so the client
-  can load the room's lenses; the authoritative tag is server-validated.
-* **Read** — the "Where interpretations differ" drawer (WS-H) renders right after
-  the composer with a plain-language divergence band per lens pair.  A lens is an
-  interpretation context, never a vote — the `check:no-applause` gate covers these
-  surfaces.
+* **Read (sort + filter)** — the conversation has ONE "view" control, a button
+  labelled by the active view that opens a modal `Sheet`
+  (`components/comments/CommentViewSelector`; a modal, not a chip row, so it scales
+  to any number of lenses).  *Newest*/*Oldest* map to the endpoint's `order` param
+  (whole-thread, server-ordered); *Highest participation* client-sorts the loaded
+  page by the WS-E.2.1c content-participation weight (`comment-participation.ts`: a
+  sourced comment outweighs an unsourced one; a debate-loser sinks) — a content
+  weight, NEVER attention or applause.  A **lens** view is a reading FILTER ONLY —
+  it scopes which comments are shown and never the lens a comment posts as.
+* **Post (membership lens)** — the lens a top-level comment JOINS is the author's
+  chosen **membership posting lens** (`my_lens_id`, null = Undecided), NOT the view
+  filter.  It is picked when they join a room with lenses (a lens modal defaulting
+  to Undecided) and changed ONLY via the room page's **lens button**
+  (`components/rooms/RoomLensControl/`: `RoomLensButton` → `RoomLensDialog` →
+  `RoomLensSelector`), placed BETWEEN the sign-in/join button and the governance
+  button.  The story-page composer shows a read-only "Posting as: X" note and sends
+  `metadata.lens_id = my_lens_id`; replies stay untagged; the authoritative tag is
+  server-validated (lens∈room).
+* **Read divergence** — the "Where interpretations differ" drawer (WS-H) renders
+  right after the composer with a plain-language divergence band per lens pair.  A
+  lens is an interpretation context, never a vote — the `check:no-applause` gate
+  covers these surfaces.
 
 ## WS-G/WS-T API surface and comment composer
 
@@ -204,7 +214,7 @@ members, not only the seed:
 | `GET/PATCH /v1/feed/preferences` | The §23.2 canonical veneer over the WS-D settings stores (single source of truth; clamped/audited); the five §13 modes |
 | `POST /v1/uploads`, `GET /v1/uploads/:id` | See uploads below |
 | `GET /v1/security/link-blocklist` | Drainer blocklist, steward-tunable, content-hash version for cache busting |
-| `GET/POST… /v1/rooms*` | Listing/creation/detail/threads/join/notifications/join-requests/lenses; the directory walks the store keyset until a full visible page (no fetch-prefix cap), `joined` enumerates the requester's own memberships, and `thread_count` counts VISIBLE threads only (hidden stories excluded — no oracle) |
+| `GET/POST… /v1/rooms*` | Listing/creation/detail/threads/join (`POST /join` carries the joiner's `{ lens_id }`, WS-G.2.2)/notifications/join-requests/lenses + `PUT /v1/rooms/:id/lens` (the SOLE posting-lens change path — validated lens∈room, `null` = Undecided, member-only); the directory walks the store keyset until a full visible page (no fetch-prefix cap), `joined` enumerates the requester's own memberships, and `thread_count` counts VISIBLE threads only (hidden stories excluded — no oracle) |
 | `GET /v1/notifications`, `PATCH /v1/notifications/:id/read` | Bodyless reply-notification inbox; push wakes are user-scoped and honor `reply_notifications`, quiet hours, budgets, and block/mute relationships. |
 | `PATCH /v1/threads/:id/state` | Steward transitions (audited, reasoned) |
 | `/v1/forum/admin/*` | Steward+TOTP: validated config writes (422 on bad values), metrics |

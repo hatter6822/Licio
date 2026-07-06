@@ -5,8 +5,8 @@
 // a sign-in prompt; a steward (a member via role) gets nothing here; a member can
 // leave; an outsider joins (open) or requests (request_approval); a governed room
 // ties the affordance to governance participation.
-import type { RoomDetail } from '@licio/shared';
-import { render, screen } from '@testing-library/react';
+import type { LensPublic, RoomDetail } from '@licio/shared';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -53,6 +53,7 @@ function baseRoom(over: Partial<RoomDetail>): RoomDetail {
     can_post: false,
     created_at: '2026-06-19T00:00:00.000Z',
     lenses: [],
+    my_lens_id: null,
     stewards: [],
     governance: null,
     charter_summary: null,
@@ -169,5 +170,51 @@ describe('RoomMembership (WS-Q.5.3a / WS-U §16.6)', () => {
     expect(screen.getByText(/pending a steward decision/i)).toBeInTheDocument();
     expect(screen.getByText(/private from the public/i)).toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  // WS-G.2.2 — a room whose lenses the reader can already see prompts for the
+  // posting lens as part of joining (defaulting to Undecided).
+  const lens = (id: string, name: string): LensPublic => ({
+    lens_id: id,
+    room_id: 'r1',
+    name,
+    lens_type: 'skeptical',
+    description: null,
+    created_at: '2026-06-19T00:00:00.000Z',
+  });
+
+  it('opens a lens picker on join for a room with lenses, then joins with the chosen lens', async () => {
+    signIn();
+    render(
+      <RoomMembership roomId="r1" room={baseRoom({ lenses: [lens('lens-1', 'Skeptical')] })} />,
+    );
+    // Clicking Join opens the picker instead of joining immediately.
+    await userEvent.click(screen.getByRole('button', { name: /join room/i }));
+    const dialog = await screen.findByRole('dialog', { name: /choose your lens/i });
+    expect(joinMutate).not.toHaveBeenCalled();
+    // The default is Undecided; choose the Skeptical lens, then confirm the join.
+    await userEvent.click(within(dialog).getByRole('radio', { name: /skeptical/i }));
+    await userEvent.click(within(dialog).getByRole('button', { name: /join room/i }));
+    expect(joinMutate).toHaveBeenCalledWith({ lensId: 'lens-1' }, expect.any(Object));
+  });
+
+  it('joins as Undecided when the picker keeps the default', async () => {
+    signIn();
+    render(
+      <RoomMembership roomId="r1" room={baseRoom({ lenses: [lens('lens-1', 'Skeptical')] })} />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: /join room/i }));
+    const dialog = await screen.findByRole('dialog', { name: /choose your lens/i });
+    // Undecided is preselected — confirm without changing.
+    await userEvent.click(within(dialog).getByRole('button', { name: /join room/i }));
+    expect(joinMutate).toHaveBeenCalledWith({ lensId: null }, expect.any(Object));
+  });
+
+  it('joins immediately (no picker) when the room has no lenses', async () => {
+    signIn();
+    render(<RoomMembership roomId="r1" room={baseRoom({ lenses: [] })} />);
+    await userEvent.click(screen.getByRole('button', { name: /join room/i }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(joinMutate).toHaveBeenCalledWith(undefined, expect.any(Object));
   });
 });

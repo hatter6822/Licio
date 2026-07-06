@@ -18,6 +18,7 @@ describe('RoomStore.countEligibleVoters (in-memory)', () => {
         userId,
         status,
         requestId: `req-${userId}`,
+        lensId: null,
         notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
         requestedAt: 't',
         joinedAt: status === 'active' ? 't' : null,

@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
 import { RoomGovernanceDialog } from '../../components/governance/RoomGovernanceDialog.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
+import { RoomLensButton } from '../../components/rooms/RoomLensControl/index.js';
 import { RoomMembership } from '../../components/rooms/RoomMembership/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -216,11 +217,23 @@ export function RoomDetailBody({
           the gate room governance voting enforces. Public rooms join immediately;
           private rooms by request/invite. Handles every state (incl. leave) and
           is independent of content visibility (a public room reads without it). */}
-      {/* WS-Q.5.3a + WS-U §24.6 — the compact room action bar: the membership
-          button (Join/Leave) and the governance-modal button share ONE row (the
-          governance button is passed as `trailing`), placed ABOVE the feed so
-          neither control is buried under a long list of story cards. */}
-      <RoomMembership roomId={roomId} room={room} trailing={governanceButton} />
+      {/* WS-Q.5.3a + WS-U §24.6 + WS-G.2.2 — the compact room action bar: the
+          membership button (Sign in / Join / Leave), then the POSTING-lens button
+          (WS-G.2.2 — a member's sole control for the interpretation they post
+          through), then the governance-modal button all share ONE row (both are
+          passed as `trailing`, lens BEFORE governance), placed ABOVE the feed so
+          no control is buried under a long list of story cards. The lens button
+          renders nothing unless the reader is a member of a room with lenses. */}
+      <RoomMembership
+        roomId={roomId}
+        room={room}
+        trailing={
+          <>
+            <RoomLensButton roomId={roomId} room={room} />
+            {governanceButton}
+          </>
+        }
+      />
 
       {room.governance !== null ? (
         <Link

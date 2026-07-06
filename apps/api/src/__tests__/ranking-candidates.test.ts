@@ -114,6 +114,7 @@ describe('WS-I.1.1a retrievers', () => {
       userId,
       status: 'active',
       requestId: randomUUID(),
+      lensId: null,
       notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
       requestedAt: new Date().toISOString(),
       joinedAt: new Date().toISOString(),

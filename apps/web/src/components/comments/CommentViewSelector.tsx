@@ -7,7 +7,9 @@
 //   • a SORT over all comments: Newest / Oldest (chronological, server-ordered) or
 //     Highest participation (content-participation weight; WS-E.2.1c, never
 //     applause — see comment-participation.ts); or
-//   • a LENS: scope the conversation to one reading AND join it when you comment.
+//   • a LENS: scope the conversation to one reading — a reading FILTER ONLY. It
+//     changes what you READ, never the lens you post as (that is the room's
+//     posting lens, chosen at join / via the room's lens button, WS-G.2.2).
 import type { LensPublic } from '@licio/shared';
 import { cn } from '../../lib/cn.js';
 import { Icon } from '../ui/Icon/index.js';
@@ -69,7 +71,7 @@ export function CommentViewSelector({
       {roomLenses.length >= 2 ? (
         <ViewGroup
           label="By interpretation lens"
-          hint="Reading a lens also posts your comment to it. Not a vote."
+          hint="Filters what you READ — it never changes the lens you post as. Not a vote."
         >
           {roomLenses.map((lens) => {
             const value: CommentViewMode = `lens:${lens.lens_id}`;

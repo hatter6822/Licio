@@ -47,11 +47,13 @@ import {
   type RoomDetail,
   type RoomGovernanceSettingsRequest,
   type RoomJoinResponse,
+  type RoomLensSelection,
   type RoomListResponse,
   type RoomSummary,
   reportCreatedResponseSchema,
   roomDetailSchema,
   roomJoinResponseSchema,
+  roomLensSelectionSchema,
   roomListResponseSchema,
   roomSummarySchema,
   type SignalLedgerResponse,
@@ -290,14 +292,36 @@ export async function fetchRoom(roomId: string): Promise<RoomDetail> {
   return parseResponse(response, roomDetailSchema);
 }
 
-export async function joinRoom(roomId: string): Promise<RoomJoinResponse> {
-  const response = await client.v1.rooms[':roomId'].join.$post({ param: { roomId } });
+/** WS-G.2.2 — join a room, recording the member's chosen POSTING lens.  `null`
+ *  (the default) joins as "Undecided"; a lens id represents that interpretation. */
+export async function joinRoom(
+  roomId: string,
+  lensId: string | null = null,
+): Promise<RoomJoinResponse> {
+  const response = await client.v1.rooms[':roomId'].join.$post({
+    param: { roomId },
+    json: { lens_id: lensId },
+  });
   return parseResponse(response, roomJoinResponseSchema);
 }
 
 export async function leaveRoom(roomId: string): Promise<void> {
   const response = await client.v1.rooms[':roomId'].join.$delete({ param: { roomId } });
   await parseResponse(response, z.object({ left: z.boolean() }));
+}
+
+/** WS-G.2.2 — change the caller's POSTING lens for a room (the SOLE way to change
+ *  it; `null` returns to "Undecided").  The server validates the lens belongs to
+ *  the room and that the caller is a member. */
+export async function setRoomLens(
+  roomId: string,
+  lensId: string | null,
+): Promise<RoomLensSelection> {
+  const response = await client.v1.rooms[':roomId'].lens.$put({
+    param: { roomId },
+    json: { lens_id: lensId },
+  });
+  return parseResponse(response, roomLensSelectionSchema);
 }
 
 /** WS-G.2.2 — the room's interpretation lenses (read; visible to any member). */

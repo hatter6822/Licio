@@ -158,11 +158,12 @@ export function useRoomsQuery() {
   });
 }
 
-export function useRoomQuery(roomId: string) {
+export function useRoomQuery(roomId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.room(roomId),
     queryFn: () => api.fetchRoom(roomId),
     ...cachePolicy.room,
+    enabled,
   });
 }
 
@@ -259,12 +260,28 @@ export function useRoomFeedQuery(roomId: string, enabled = true) {
   });
 }
 
-/** WS-Q.5.3a — join a room from the tier-one shell (open ⇒ active; otherwise a
- *  pending request). Refreshes the room so the membership state updates. */
+/** WS-Q.5.3a / WS-G.2.2 — join a room from the tier-one shell (open ⇒ active;
+ *  otherwise a pending request), recording the member's chosen POSTING lens.
+ *  The variable is optional; omit it (or pass a null `lensId`) to join as the
+ *  default "Undecided". Refreshes the room so the membership + lens state update. */
 export function useJoinRoomMutation(roomId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => api.joinRoom(roomId),
+    mutationFn: (vars?: { lensId?: string | null }) => api.joinRoom(roomId, vars?.lensId ?? null),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-G.2.2 — change the caller's POSTING lens for a room (the SOLE way to change
+ *  it; `null` returns to "Undecided"). Refreshes the room so the composer's
+ *  posting lens + the lens control's label update. */
+export function useSetRoomLensMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (lensId: string | null) => api.setRoomLens(roomId, lensId),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
