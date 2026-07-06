@@ -74,6 +74,7 @@ vi.mock('../../lib/queries.js', () => ({
     loadMore: vi.fn(),
   }),
   useCreateCommentMutation: () => ({ isPending: false, isError: false, mutate: vi.fn() }),
+  useRoomLensesQuery: () => ({ data: [] }),
 }));
 
 const { StoryCommentsPage } = await import('./story-comments.js');

@@ -9,6 +9,7 @@ import type {
   DebateOverrideRequest,
   DebatePositionUpdate,
   FeedMode,
+  LensCreateRequest,
   NotificationPreferences,
   RoomCreateRequest,
   RoomJoinModel,
@@ -270,6 +271,29 @@ export function useLeaveRoomMutation(roomId: string) {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-G.2.2 — the room's interpretation lenses (read; visible to any member).
+ *  Powers the comment composer's lens picker and the conversation filter. */
+export function useRoomLensesQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.roomLenses(roomId),
+    queryFn: () => api.fetchRoomLenses(roomId),
+    enabled,
+    ...cachePolicy.room,
+  });
+}
+
+/** WS-G.2.2 — create a room lens (steward-only; the server enforces the role).
+ *  Refreshes the lens list on success. */
+export function useCreateLensMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: LensCreateRequest) => api.createLens(roomId, request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.roomLenses(roomId) });
     },
   });
 }

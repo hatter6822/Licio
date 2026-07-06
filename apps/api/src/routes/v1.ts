@@ -261,6 +261,9 @@ function realStoryToDetail(
     exposure_label: signals.meriExposure,
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
+    // The home room (WS-G.2.2): powers the client's lens composer + conversation
+    // filter (the interpretation lenses are per-room).
+    room_id: story.roomId,
     // A freshly submitted story carries the UNCLASSIFIED sentinel until the WS-K
     // validator runs; it is NOT a subject topic, so strip it from the wire (parity
     // with the routes/stories.ts detail projection) — never let a client/offline

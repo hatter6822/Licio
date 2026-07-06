@@ -13,10 +13,12 @@ import {
 } from '@licio/shared';
 import { useMemo, useState } from 'react';
 import { cn } from '../../lib/cn.js';
-import { useCreateCommentMutation } from '../../lib/queries.js';
+import { useCreateCommentMutation, useRoomLensesQuery } from '../../lib/queries.js';
 import { relativeTimeShort } from '../../lib/time.js';
+import { useRoomVantageStore } from '../../stores/room-vantage.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
 import { Button } from '../ui/Button/index.js';
+import { Select } from '../ui/Select/index.js';
 
 export function authorName(comment: CommentItemType): string {
   return comment.author_display_name ?? comment.author_handle ?? 'Deleted account';
@@ -114,11 +116,15 @@ export function CommentMedia({ comment }: { comment: CommentItemType }): React.R
 export function CommentComposer({
   storyId,
   threadId,
+  roomId,
   parentContributionId,
   onCancel,
 }: {
   storyId: string;
   threadId: string;
+  /** The home room, present only on the top-level composer — enables the
+   *  interpretation-lens picker (WS-G.2.2). Replies omit it. */
+  roomId?: string;
   parentContributionId?: string;
   onCancel?: () => void;
 }): React.ReactElement {
@@ -127,6 +133,20 @@ export function CommentComposer({
   const trimmed = body.trim();
   // Sources are the INLINE links in the body — derived, not a separate list.
   const derivedSources = useMemo(() => deriveCitationsFromBody(trimmed), [trimmed]);
+  const isReply = parentContributionId !== undefined;
+
+  // WS-G.2.2 lens picker: offered on the TOP-LEVEL composer of a room with
+  // interpretation lenses. The choice pre-fills from (and updates) the "declare
+  // once" room vantage; the server validates the tag against the room's lenses.
+  const lensEnabled = !isReply && roomId !== undefined;
+  const lenses = useRoomLensesQuery(roomId ?? '', lensEnabled);
+  const getVantage = useRoomVantageStore((s) => s.getVantage);
+  const setVantage = useRoomVantageStore((s) => s.setVantage);
+  const [lensId, setLensId] = useState<string>(() => (roomId ? (getVantage(roomId) ?? '') : ''));
+  const lensOptions = lenses.data ?? [];
+  // Guard against a stale vantage pointing at a since-deleted lens.
+  const selectedLens = lensOptions.some((lens) => lens.lens_id === lensId) ? lensId : '';
+  const showLensPicker = lensEnabled && lensOptions.length > 0;
 
   const submit = (): void => {
     if (trimmed.length === 0 || mutation.isPending) return;
@@ -138,6 +158,7 @@ export function CommentComposer({
       body: trimmed,
       ...(citations.length > 0 ? { citations } : {}),
       ...(parentContributionId ? { parent_contribution_id: parentContributionId } : {}),
+      ...(showLensPicker && selectedLens ? { lens_id: selectedLens } : {}),
     };
     mutation.mutate(payload, {
       onSuccess: () => {
@@ -146,7 +167,6 @@ export function CommentComposer({
       },
     });
   };
-  const isReply = parentContributionId !== undefined;
   const fieldId = parentContributionId ? `reply-${parentContributionId}` : 'comment-body';
   return (
     <form
@@ -194,6 +214,21 @@ export function CommentComposer({
             ? '1 source linked in this comment.'
             : `${derivedSources.length} sources linked in this comment.`}
         </p>
+      ) : null}
+      {showLensPicker ? (
+        <Select
+          label="Reading this as"
+          value={selectedLens}
+          onValueChange={(value) => {
+            setLensId(value);
+            if (roomId) setVantage(roomId, value === '' ? null : value);
+          }}
+          helperText="An interpretation lens groups readings so the story can show where communities differ. Optional; not a vote."
+          options={[
+            { value: '', label: 'No particular lens' },
+            ...lensOptions.map((lens) => ({ value: lens.lens_id, label: lens.name })),
+          ]}
+        />
       ) : null}
       <div className={cn('flex items-center gap-3', isReply ? 'justify-between' : 'justify-end')}>
         {isReply ? (

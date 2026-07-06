@@ -31,6 +31,8 @@ vi.mock('../../lib/queries.js', () => ({
   // RoomSettingsForm (Settings tab).
   useUpdateRoomSettingsMutation: () => ({ mutate: () => {}, isPending: false }),
   useChangeRoomVisibilityMutation: () => ({ mutate: () => {}, isPending: false }),
+  useRoomLensesQuery: () => ({ data: [] }),
+  useCreateLensMutation: () => ({ mutate: () => {}, isPending: false, isError: false }),
 }));
 
 import { RoomGovernanceDialog } from './RoomGovernanceDialog.js';

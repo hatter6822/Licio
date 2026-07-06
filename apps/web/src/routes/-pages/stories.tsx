@@ -197,7 +197,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 lightly nested comment section; /threads deep links remain only
                 as backwards-compatible redirects/read shells. */}
             {data.thread_id ? (
-              <CommentSection storyId={data.story_id} threadId={data.thread_id} />
+              <CommentSection
+                storyId={data.story_id}
+                threadId={data.thread_id}
+                {...(data.room_id ? { roomId: data.room_id } : {})}
+              />
             ) : null}
             {/* WS-Q.5.4a — the author's visibility control (owner only). */}
             {data.is_owner ? (

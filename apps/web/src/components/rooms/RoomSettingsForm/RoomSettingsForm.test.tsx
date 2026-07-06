@@ -12,9 +12,12 @@ import { RoomSettingsForm } from './RoomSettingsForm.js';
 
 const updateSettings = vi.hoisted(() => vi.fn());
 const changeVisibility = vi.hoisted(() => vi.fn());
+const createLens = vi.hoisted(() => vi.fn());
 vi.mock('../../../lib/queries.js', () => ({
   useUpdateRoomSettingsMutation: () => ({ mutate: updateSettings, isPending: false }),
   useChangeRoomVisibilityMutation: () => ({ mutate: changeVisibility, isPending: false }),
+  useRoomLensesQuery: () => ({ data: [] }),
+  useCreateLensMutation: () => ({ mutate: createLens, isPending: false, isError: false }),
 }));
 
 function room(over: Partial<RoomDetail>): RoomDetail {

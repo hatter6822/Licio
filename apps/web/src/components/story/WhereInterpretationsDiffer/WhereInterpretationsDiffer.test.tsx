@@ -41,6 +41,30 @@ describe('WhereInterpretationsDiffer', () => {
     expect(text.toLowerCase()).not.toMatch(/incorrect|wrong side|misinformation/);
   });
 
+  it('shows a plain-language divergence band derived from the magnitude', () => {
+    render(<WhereInterpretationsDiffer data={base} storyId="s1" />);
+    // disagreement 0.7 → the strong band.
+    expect(screen.getByText('Strong difference')).toBeInTheDocument();
+  });
+
+  it('scales the band to the divergence magnitude', () => {
+    render(
+      <WhereInterpretationsDiffer
+        data={{
+          ...base,
+          interpretations: [
+            {
+              ...(base.interpretations[0] as (typeof base.interpretations)[number]),
+              disagreement: 0.4,
+            },
+          ],
+        }}
+        storyId="s1"
+      />,
+    );
+    expect(screen.getByText('Moderate difference')).toBeInTheDocument();
+  });
+
   it('renders nothing when there are no interpretations', () => {
     const { container } = render(
       <WhereInterpretationsDiffer

@@ -4,7 +4,7 @@
 // thread that continues deeper (or a comment with more direct replies than shown)
 // links to the dedicated comment-centric page rather than nesting further, and
 // more TOP-LEVEL comments load in place via "Load more comments".
-import type { CommentItem, DebateArenaSummary } from '@licio/shared';
+import type { CommentItem, DebateArenaSummary, LensPublic } from '@licio/shared';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -32,6 +32,7 @@ let queryState: {
 let streamState: { newComments: unknown[] };
 let mutationState: { isPending?: boolean; isError?: boolean };
 let debatesState: { debates: DebateArenaSummary[] };
+let lensesState: LensPublic[] = [];
 
 // Render the router Link as a real anchor whose href reflects `to` with the
 // params interpolated and the search serialized, so destinations are assertable.
@@ -77,6 +78,7 @@ vi.mock('../../lib/queries.js', () => ({
     refetch,
   })),
   useStoryDebatesQuery: vi.fn(() => ({ data: debatesState })),
+  useRoomLensesQuery: vi.fn(() => ({ data: lensesState })),
   useCreateCommentMutation: vi.fn(() => ({
     isPending: mutationState.isPending ?? false,
     isError: mutationState.isError ?? false,
@@ -124,8 +126,29 @@ function comment(overrides: Partial<CommentItem> = {}): CommentItem {
   };
 }
 
-function renderSection() {
-  return render(<CommentSection storyId={storyId} threadId={threadId} />);
+const roomId = '55555555-5555-4555-8555-555555555555';
+const LENS_SKEPTICAL = '66666666-6666-4666-8666-666666666661';
+const LENS_INDUSTRY = '66666666-6666-4666-8666-666666666662';
+
+function lens(
+  over: Partial<LensPublic> & Pick<LensPublic, 'lens_id' | 'name' | 'lens_type'>,
+): LensPublic {
+  return {
+    room_id: roomId,
+    description: null,
+    created_at: '2026-06-18T00:00:00.000Z',
+    ...over,
+  };
+}
+
+function renderSection(withRoom = false) {
+  return render(
+    withRoom ? (
+      <CommentSection storyId={storyId} threadId={threadId} roomId={roomId} />
+    ) : (
+      <CommentSection storyId={storyId} threadId={threadId} />
+    ),
+  );
 }
 
 beforeEach(() => {
@@ -140,6 +163,7 @@ beforeEach(() => {
   streamState = { newComments: [] };
   mutationState = {};
   debatesState = { debates: [] };
+  lensesState = [];
   mutate.mockReset();
   refetch.mockReset();
   loadMore.mockReset();
@@ -467,5 +491,59 @@ describe('CommentSection', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Comment could not be posted. Please try again.',
     );
+  });
+
+  it('WS-G.2.2 — shows lens filter chips only once two lenses are present', async () => {
+    lensesState = [
+      lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' }),
+      lens({ lens_id: LENS_INDUSTRY, name: 'Industry', lens_type: 'policy' }),
+    ];
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            contribution_id: '77777777-7777-4777-8777-777777777771',
+            metadata: { lens_id: LENS_SKEPTICAL },
+          }),
+          comment({
+            contribution_id: '77777777-7777-4777-8777-777777777772',
+            metadata: { lens_id: LENS_INDUSTRY },
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 2, sources_count: 0, corrections_count: 0 },
+      },
+    };
+    renderSection(true);
+    const group = screen.getByRole('group', { name: /filter by lens/i });
+    expect(within(group).getByRole('button', { name: /^All \(2\)$/ })).toBeInTheDocument();
+    // Filtering to one lens keeps only its comment tree.
+    const user = userEvent.setup();
+    await user.click(within(group).getByRole('button', { name: /^Skeptical \(1\)$/ }));
+    expect(within(group).getByRole('button', { name: /^Skeptical \(1\)$/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('WS-G.2.2 — hides the lens filter when fewer than two lenses appear', () => {
+    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
+    queryState = {
+      data: {
+        comments: [comment({ metadata: { lens_id: LENS_SKEPTICAL } })],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+      },
+    };
+    renderSection(true);
+    expect(screen.queryByRole('group', { name: /filter by lens/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-G.2.2 — offers the composer lens picker for a room with lenses', () => {
+    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
+    renderSection(true);
+    expect(screen.getByRole('combobox', { name: /reading this as/i })).toBeInTheDocument();
   });
 });

@@ -10,7 +10,9 @@ import { useAuthStore } from '../stores/auth.js';
 import {
   ApiClientError,
   createContribution,
+  createLens,
   fetchFeed,
+  fetchRoomLenses,
   parseResponse,
   resetApiClientState,
   uploadAttentionAggregates,
@@ -315,5 +317,40 @@ describe('uploadAttentionAggregates rate-limit backoff (WS-C.4.4)', () => {
     // The second saw the armed cooldown inside the serialized turn and never
     // reached the network — only ONE request hit the rate-limited endpoint.
     expect(posts).toBe(1);
+  });
+});
+
+describe('room lens client (WS-G.2.2)', () => {
+  const ROOM_ID = '11111111-1111-4111-8111-111111111111';
+  const LENS = {
+    lens_id: '22222222-2222-4222-8222-222222222222',
+    room_id: ROOM_ID,
+    name: 'Skeptical',
+    lens_type: 'skeptical' as const,
+    description: null,
+    created_at: '2026-06-09T13:00:00.000Z',
+  };
+
+  it('fetchRoomLenses returns the validated lens list', async () => {
+    mockFetch(async (url) => {
+      expect(url).toContain(`/v1/rooms/${ROOM_ID}/lenses`);
+      return jsonResponse({ items: [LENS] });
+    });
+    const result = await fetchRoomLenses(ROOM_ID);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.name).toBe('Skeptical');
+  });
+
+  it('createLens posts the request and returns the created lens', async () => {
+    let posted: unknown;
+    mockFetch(async (url, init) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      expect(url).toContain(`/v1/rooms/${ROOM_ID}/lenses`);
+      posted = JSON.parse(String(init?.body));
+      return jsonResponse(LENS, 201);
+    });
+    const created = await createLens(ROOM_ID, { name: 'Skeptical', lens_type: 'skeptical' });
+    expect(created.lens_id).toBe(LENS.lens_id);
+    expect(posted).toMatchObject({ name: 'Skeptical', lens_type: 'skeptical' });
   });
 });

@@ -18,6 +18,7 @@ import {
 } from '../../../lib/queries.js';
 import { Button } from '../../ui/Button/index.js';
 import { Select } from '../../ui/Select/index.js';
+import { LensManager } from '../LensManager/index.js';
 
 export interface RoomSettingsFormProps {
   roomId: string;
@@ -118,6 +119,9 @@ export function RoomSettingsForm({ roomId, room }: RoomSettingsFormProps): React
           </Button>
         )}
       </div>
+
+      {/* WS-G.2.2 — interpretation lenses (steward-managed; server enforces role). */}
+      <LensManager roomId={roomId} />
     </section>
   );
 }

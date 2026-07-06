@@ -153,6 +153,10 @@ export type FeedQuery = z.infer<typeof feedQuerySchema>;
 export const storyDetailSchema = feedItemSchema.extend({
   body_summary: z.string(),
   thread_id: uuidSchema.nullable(),
+  /** The home room (WS-G.2.2): the client uses it to load the room's
+   *  interpretation lenses for the comment composer + conversation filter.
+   *  Optional so the legacy/demo detail contract stays valid on the wire. */
+  room_id: uuidSchema.optional(),
   /** `topic_ids` is inherited from `feedItemSchema` (shared by the feed card
    *  and the detail read; powers WS-H.6.1a client loop tracking). */
   /** WS-Q.5.4a — true when the requesting user authored this story (gates the

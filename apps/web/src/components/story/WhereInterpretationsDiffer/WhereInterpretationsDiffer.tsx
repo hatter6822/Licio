@@ -18,6 +18,15 @@ export interface WhereInterpretationsDifferProps {
   storyId: string;
 }
 
+/** Plain-language band for the [0,1] divergence magnitude (WS-H.4.3b). Purely
+ *  descriptive of how far two readings differ — never a correctness judgment. */
+function disagreementBand(value: number): string | null {
+  if (value >= 0.67) return 'Strong difference';
+  if (value >= 0.34) return 'Moderate difference';
+  if (value > 0) return 'Slight difference';
+  return null;
+}
+
 export function WhereInterpretationsDiffer({
   data,
   storyId,
@@ -57,14 +66,24 @@ export function WhereInterpretationsDiffer({
             key={`${interpretation.lens_a}~${interpretation.lens_b}`}
             className="border-s-2 border-line ps-3"
           >
-            <p className="text-sm font-medium text-ink">
-              {interpretation.lens_a_name && interpretation.lens_b_name
-                ? t('interpretations.betweenNamed', 'Between {a} and {b}', {
-                    a: interpretation.lens_a_name,
-                    b: interpretation.lens_b_name,
-                  })
-                : t('interpretations.between', 'Between two lenses')}
-            </p>
+            <div className="flex flex-wrap items-baseline gap-2">
+              <p className="text-sm font-medium text-ink">
+                {interpretation.lens_a_name && interpretation.lens_b_name
+                  ? t('interpretations.betweenNamed', 'Between {a} and {b}', {
+                      a: interpretation.lens_a_name,
+                      b: interpretation.lens_b_name,
+                    })
+                  : t('interpretations.between', 'Between two lenses')}
+              </p>
+              {(() => {
+                const band = disagreementBand(interpretation.disagreement);
+                return band ? (
+                  <span className="rounded border border-line px-1.5 py-px text-xs text-ink-muted">
+                    {band}
+                  </span>
+                ) : null;
+              })()}
+            </div>
             <p className="text-sm text-ink-muted">{interpretation.summary}</p>
           </li>
         ))}

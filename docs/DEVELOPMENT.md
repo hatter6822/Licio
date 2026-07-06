@@ -734,7 +734,12 @@ production code, not hand-authored fixtures:
   drawer. Near-duplicate reposts stay grouped as duplicate context rather than
   counting as independent support.
 - SCOI divergence appears in the **Where interpretations differ** drawer for
-  stories where seeded lenses genuinely interpret the context differently.
+  stories where seeded lenses genuinely interpret the context differently
+  (S10). Lenses are now authored end-to-end: a room steward manages them under
+  **Room settings → Interpretation lenses**, the top-level comment composer
+  offers an optional "Reading this as" lens picker (remembered per room), and
+  once two or more lenses appear on a story the conversation shows lens filter
+  chips that scope the comments to one reading.
 - Safety posture such as `caution` or `under review` appears descriptively on
   affected threads.
 - **Profile → Signal Ledger** shows the signed-in user's own bounded attention
