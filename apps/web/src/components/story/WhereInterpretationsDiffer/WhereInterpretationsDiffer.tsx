@@ -61,32 +61,32 @@ export function WhereInterpretationsDiffer({
         </p>
       ) : null}
       <ul className="mt-3 flex flex-col gap-2">
-        {data.interpretations.map((interpretation) => (
-          <li
-            key={`${interpretation.lens_a}~${interpretation.lens_b}`}
-            className="border-s-2 border-line ps-3"
-          >
-            <div className="flex flex-wrap items-baseline gap-2">
-              <p className="text-sm font-medium text-ink">
-                {interpretation.lens_a_name && interpretation.lens_b_name
-                  ? t('interpretations.betweenNamed', 'Between {a} and {b}', {
-                      a: interpretation.lens_a_name,
-                      b: interpretation.lens_b_name,
-                    })
-                  : t('interpretations.between', 'Between two lenses')}
-              </p>
-              {(() => {
-                const band = disagreementBand(interpretation.disagreement);
-                return band ? (
+        {data.interpretations.map((interpretation) => {
+          const band = disagreementBand(interpretation.disagreement);
+          return (
+            <li
+              key={`${interpretation.lens_a}~${interpretation.lens_b}`}
+              className="border-s-2 border-line ps-3"
+            >
+              <div className="flex flex-wrap items-baseline gap-2">
+                <p className="text-sm font-medium text-ink">
+                  {interpretation.lens_a_name && interpretation.lens_b_name
+                    ? t('interpretations.betweenNamed', 'Between {a} and {b}', {
+                        a: interpretation.lens_a_name,
+                        b: interpretation.lens_b_name,
+                      })
+                    : t('interpretations.between', 'Between two lenses')}
+                </p>
+                {band ? (
                   <span className="rounded border border-line px-1.5 py-px text-xs text-ink-muted">
                     {band}
                   </span>
-                ) : null;
-              })()}
-            </div>
-            <p className="text-sm text-ink-muted">{interpretation.summary}</p>
-          </li>
-        ))}
+                ) : null}
+              </div>
+              <p className="text-sm text-ink-muted">{interpretation.summary}</p>
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

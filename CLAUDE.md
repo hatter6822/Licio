@@ -204,9 +204,11 @@ licio/
 │   │       │   │                           import.meta.env.DEV-gated, tree-shaken in production)
 │   │       │   ├── composer/            -- StoryComposer (author topic picker) + shared affordances (Attachment,
 │   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
-│   │       │   ├── comments/            -- Inline CommentSection + comment composer/media (WS-T)
+│   │       │   ├── comments/            -- Inline CommentSection + comment composer/media +
+│   │       │   │                           interpretation-lens picker/filter (WS-T, WS-G.2.2)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
-│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm + RoomMembership
+│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (+ LensManager,
+│   │       │   │                           WS-G.2.2 steward lens create/list) + RoomMembership
 │   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
 │   │       │   │                           ExposureLabel, TopicRepeatsButton,
@@ -224,10 +226,11 @@ licio/
 │   │       │   ├── i18n/                -- TranslationDisclosure
 │   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget,
 │   │       │                               QuietHoursSetting
-│   │       ├── stores/                  -- Zustand state (3 stores)
+│   │       ├── stores/                  -- Zustand state (4 stores)
 │   │       │   ├── auth.ts              --   session + cross-tab logout
 │   │       │   ├── ui.ts                --   theme, motion, feed mode, focus
 │   │       │   ├── feature-flags.ts     --   fail-closed feature gates
+│   │       │   ├── room-vantage.ts      --   per-room "declare-once" lens (WS-G.2.2)
 │   │       │   ├── persist.ts           --   zod-validated localStorage
 │   │       │   └── dom-sync.ts          --   DOM synchronization
 │   │       ├── lib/                     -- core utilities

@@ -9,6 +9,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useRoomVantageStore } from '../../stores/room-vantage.js';
 import { CommentSection } from './CommentSection.js';
 
 const mutate = vi.fn();
@@ -164,6 +165,7 @@ beforeEach(() => {
   mutationState = {};
   debatesState = { debates: [] };
   lensesState = [];
+  useRoomVantageStore.setState({ byRoom: {} });
   mutate.mockReset();
   refetch.mockReset();
   loadMore.mockReset();
@@ -493,7 +495,7 @@ describe('CommentSection', () => {
     );
   });
 
-  it('WS-G.2.2 — shows lens filter chips only once two lenses are present', async () => {
+  it('WS-G.2.2 — shows lens filter chips only once two lenses are present, and filters', async () => {
     lensesState = [
       lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' }),
       lens({ lens_id: LENS_INDUSTRY, name: 'Industry', lens_type: 'policy' }),
@@ -503,10 +505,12 @@ describe('CommentSection', () => {
         comments: [
           comment({
             contribution_id: '77777777-7777-4777-8777-777777777771',
+            body: 'The skeptical reading.',
             metadata: { lens_id: LENS_SKEPTICAL },
           }),
           comment({
             contribution_id: '77777777-7777-4777-8777-777777777772',
+            body: 'The industry reading.',
             metadata: { lens_id: LENS_INDUSTRY },
           }),
         ],
@@ -518,13 +522,46 @@ describe('CommentSection', () => {
     renderSection(true);
     const group = screen.getByRole('group', { name: /filter by lens/i });
     expect(within(group).getByRole('button', { name: /^All \(2\)$/ })).toBeInTheDocument();
-    // Filtering to one lens keeps only its comment tree.
+    // Both readings are visible under "All".
+    expect(screen.getByText('The skeptical reading.')).toBeInTheDocument();
+    expect(screen.getByText('The industry reading.')).toBeInTheDocument();
+
+    // Filtering to one lens keeps only its comments; the other reading is gone.
     const user = userEvent.setup();
     await user.click(within(group).getByRole('button', { name: /^Skeptical \(1\)$/ }));
     expect(within(group).getByRole('button', { name: /^Skeptical \(1\)$/ })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
+    expect(screen.getByText('The skeptical reading.')).toBeInTheDocument();
+    expect(screen.queryByText('The industry reading.')).not.toBeInTheDocument();
+  });
+
+  it('WS-G.2.2 — the composer sends the chosen lens tag and remembers the vantage', async () => {
+    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
+    mutate.mockImplementation((_payload, options) => options?.onSuccess?.());
+    const user = userEvent.setup();
+    renderSection(true);
+
+    await user.type(
+      screen.getByRole('textbox', { name: 'Write a comment' }),
+      'A skeptical take with context',
+    );
+    await user.click(screen.getByRole('combobox', { name: /reading this as/i }));
+    await user.click(screen.getByRole('option', { name: 'Skeptical' }));
+    await user.click(screen.getByRole('button', { name: 'Comment' }));
+
+    expect(mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'comment',
+        thread_id: threadId,
+        body: 'A skeptical take with context',
+        lens_id: LENS_SKEPTICAL,
+      }),
+      expect.any(Object),
+    );
+    // "Declare once": the choice is remembered for the room.
+    expect(useRoomVantageStore.getState().getVantage(roomId)).toBe(LENS_SKEPTICAL);
   });
 
   it('WS-G.2.2 — hides the lens filter when fewer than two lenses appear', () => {
