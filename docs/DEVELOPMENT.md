@@ -737,10 +737,11 @@ production code, not hand-authored fixtures:
   (rendered right after the composer) for stories where seeded lenses genuinely
   interpret the context differently (S10). Lenses are authored end-to-end: a room
   steward manages them under **Room settings → Interpretation lenses**, and the
-  conversation's single **view** control (a button that opens a modal selector)
-  lets you sort comments by **Newest / Oldest / Highest participation** or filter
-  by a **lens** — and writing a comment while a lens is selected joins that
-  reading (a "Posting to the X lens" hint on the composer).
+  conversation's single **view** control (a button on the LEFT of the composer
+  action row, opposing the Comment button, that opens a modal selector) lets you
+  sort comments by **Newest / Oldest / Highest participation** or filter by a
+  **lens** — and writing a comment while a lens is selected joins that reading (the
+  button reads "Lens: X" while it is active).
 - Safety posture such as `caution` or `under review` appears descriptively on
   affected threads.
 - **Profile → Signal Ledger** shows the signed-in user's own bounded attention

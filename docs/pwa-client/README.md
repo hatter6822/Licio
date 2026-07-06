@@ -467,8 +467,11 @@ server's bars, it does not re-decide them.
   rank above unsourced, debate-losers sink; a content weight, NEVER attention or
   applause, since per-comment attention is not tracked — `comment-participation.ts`),
   or a **lens** (scopes the loaded comments to one reading). Selecting a lens is
-  ALSO the lens a comment written here joins — the composer shows a "Posting to the
-  X lens" hint, no separate picker; replies stay untagged. Story detail carries
+  ALSO the lens a comment written here joins — the view button sits on the LEFT of
+  the composer action row (opposing the Comment button) and reads "Lens: X" when a
+  lens is active, so no separate picker/hint is needed; replies stay untagged. The
+  modal itself explains the dual purpose ("Reading a lens also posts your comment
+  to it. Not a vote."). Story detail carries
   `room_id` so the client can load the room's lenses; the authoritative `lens_id`
   tag is validated server-side against the room. The "Where interpretations differ"
   drawer (WS-H) renders right after the composer with a plain-language divergence

@@ -180,10 +180,11 @@ members, not only the seed:
   NEVER attention or applause (per-comment attention is not tracked — contribution
   events fold under the thread, not the comment).
 * **Tag** — selecting a **lens** view both scopes the loaded comments to that
-  reading AND is the lens a top-level comment written here joins (the composer
-  shows a "Posting to the X lens" hint, no separate picker; replies stay
-  untagged).  Story detail carries `room_id` on the wire so the client can load
-  the room's lenses; the authoritative tag is server-validated against the room.
+  reading AND is the lens a top-level comment written here joins.  The view button
+  sits on the LEFT of the composer action row (opposing the Comment button) and
+  reads "Lens: X" when a lens is active, so there is no separate picker/hint;
+  replies stay untagged.  Story detail carries `room_id` on the wire so the client
+  can load the room's lenses; the authoritative tag is server-validated.
 * **Read** — the "Where interpretations differ" drawer (WS-H) renders right after
   the composer with a plain-language divergence band per lens pair.  A lens is an
   interpretation context, never a vote — the `check:no-applause` gate covers these

@@ -91,45 +91,48 @@ export function CommentSection({
         ? byParticipationDesc(all)
         : all;
 
+  // The view selector's trigger sits on the LEFT of the composer's action row,
+  // opposing the Comment button on the right (visual symmetry); its label is the
+  // active view (e.g. "Oldest first" / "Lens: Skeptical"), so no separate word or
+  // lens hint is needed. The modal Sheet it opens is rendered below.
+  const viewButton = showViewControl ? (
+    <Button
+      variant="secondary"
+      onClick={() => setSelectorOpen(true)}
+      aria-haspopup="dialog"
+      aria-label={`Sort and filter comments — ${viewLabel(view, roomLenses)}`}
+    >
+      {viewLabel(view, roomLenses)}
+      <Icon name="chevron-down" className="size-4" />
+    </Button>
+  ) : null;
+
   return (
     <section id="comments" className="mt-6 flex flex-col gap-4" aria-label="Conversation">
       {debates.data ? <DebatePanel storyId={storyId} debates={debates.data.debates} /> : null}
-      {showViewControl ? (
-        <>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-ink-muted text-sm">Viewing</span>
-            <Button
-              variant="secondary"
-              onClick={() => setSelectorOpen(true)}
-              aria-haspopup="dialog"
-              aria-label={`Sort and filter comments — ${viewLabel(view, roomLenses)}`}
-            >
-              {viewLabel(view, roomLenses)}
-              <Icon name="chevron-down" className="size-4" />
-            </Button>
-          </div>
-          <Sheet
-            open={selectorOpen}
-            onClose={() => setSelectorOpen(false)}
-            title="Sort & filter comments"
-          >
-            <CommentViewSelector
-              view={view}
-              roomLenses={roomLenses}
-              lensCounts={lensCounts}
-              onSelect={(next) => {
-                setView(next);
-                setSelectorOpen(false);
-              }}
-            />
-          </Sheet>
-        </>
-      ) : null}
       <CommentComposer
         storyId={storyId}
         threadId={threadId}
+        leadingAction={viewButton}
         {...(activeLens ? { activeLens: { id: activeLens.lens_id, name: activeLens.name } } : {})}
       />
+      {showViewControl ? (
+        <Sheet
+          open={selectorOpen}
+          onClose={() => setSelectorOpen(false)}
+          title="Sort & filter comments"
+        >
+          <CommentViewSelector
+            view={view}
+            roomLenses={roomLenses}
+            lensCounts={lensCounts}
+            onSelect={(next) => {
+              setView(next);
+              setSelectorOpen(false);
+            }}
+          />
+        </Sheet>
+      ) : null}
       {interpretations.data ? (
         <WhereInterpretationsDiffer data={interpretations.data} storyId={storyId} />
       ) : null}

@@ -591,8 +591,10 @@ describe('CommentSection', () => {
     renderSection(true);
 
     await pickView(user, 'Skeptical (0)');
+    // The view button (on the LEFT of the composer action row) now reads the
+    // active lens, so a comment written here joins it — no separate hint needed.
     expect(
-      screen.getByText((_content, el) => el?.textContent === 'Posting to the Skeptical lens'),
+      screen.getByRole('button', { name: /sort and filter comments — lens: skeptical/i }),
     ).toBeInTheDocument();
     await user.type(screen.getByRole('textbox', { name: 'Write a comment' }), 'A skeptical take');
     await user.click(screen.getByRole('button', { name: 'Comment' }));
@@ -613,8 +615,10 @@ describe('CommentSection', () => {
     mutate.mockImplementation((_payload, options) => options?.onSuccess?.());
     const user = userEvent.setup();
     renderSection(true);
-    // Default view is a sort ("Oldest first"), so no lens is joined.
-    expect(screen.queryByText(/posting to the/i)).not.toBeInTheDocument();
+    // Default view is a sort ("Oldest first"), not a lens, so no lens is joined.
+    expect(
+      screen.getByRole('button', { name: /sort and filter comments — oldest first/i }),
+    ).toBeInTheDocument();
     await user.type(screen.getByRole('textbox', { name: 'Write a comment' }), 'A general point');
     await user.click(screen.getByRole('button', { name: 'Comment' }));
     expect(mutate.mock.calls[0]?.[0]).not.toHaveProperty('lens_id');
