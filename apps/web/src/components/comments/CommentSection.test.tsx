@@ -74,15 +74,25 @@ vi.mock('@tanstack/react-router', () => ({
 }));
 
 vi.mock('../../lib/queries.js', () => ({
-  useStoryCommentsQuery: vi.fn(() => ({
-    data: queryState.data,
-    isError: queryState.isError ?? false,
-    isLoading: queryState.isLoading ?? false,
-    hasMore: queryState.hasMore ?? false,
-    isFetchingMore: queryState.isFetchingMore ?? false,
-    loadMore,
-    refetch,
-  })),
+  // Honor the `order` arg exactly as the server does: `newest` returns the same
+  // roots reversed (the store's chronological order), so a sort toggle is
+  // behaviorally testable, not just a label change.
+  useStoryCommentsQuery: vi.fn((_storyId: string, options?: { order?: 'newest' | 'oldest' }) => {
+    const base = queryState.data;
+    const data =
+      base && options?.order === 'newest'
+        ? { ...base, comments: [...base.comments].reverse() }
+        : base;
+    return {
+      data,
+      isError: queryState.isError ?? false,
+      isLoading: queryState.isLoading ?? false,
+      hasMore: queryState.hasMore ?? false,
+      isFetchingMore: queryState.isFetchingMore ?? false,
+      loadMore,
+      refetch,
+    };
+  }),
   useStoryDebatesQuery: vi.fn(() => ({ data: debatesState })),
   useStoryInterpretationsQuery: vi.fn(() => ({ data: interpretationsState })),
   useRoomLensesQuery: vi.fn(() => ({ data: lensesState })),
@@ -642,12 +652,19 @@ describe('CommentSection', () => {
     expect(plain.compareDocumentPosition(loser) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('WS-T — the control offers chronological sorts and relabels on selection', async () => {
+  it('WS-T — "Newest first" reorders the conversation (server order) and relabels', async () => {
     queryState = {
       data: {
+        // Default (oldest) order: the older comment first.
         comments: [
-          comment({ contribution_id: 'd1', body: 'one' }),
-          comment({ contribution_id: 'd2', body: 'two' }),
+          comment({
+            contribution_id: 'd0000000-0000-4000-8000-000000000001',
+            body: 'The older one.',
+          }),
+          comment({
+            contribution_id: 'd0000000-0000-4000-8000-000000000002',
+            body: 'The newer one.',
+          }),
         ],
         next_cursor: null,
         anchor: null,
@@ -656,10 +673,25 @@ describe('CommentSection', () => {
     };
     const user = userEvent.setup();
     renderSection();
+    // Oldest first: older precedes newer.
+    expect(
+      screen
+        .getByText('The older one.')
+        .compareDocumentPosition(screen.getByText('The newer one.')) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
     await pickView(user, 'Newest first');
+    // The button relabels AND the list flips (newer precedes older).
     expect(
       screen.getByRole('button', { name: /sort and filter comments — newest first/i }),
     ).toBeInTheDocument();
+    expect(
+      screen
+        .getByText('The newer one.')
+        .compareDocumentPosition(screen.getByText('The older one.')) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it('WS-G.2.2 — hides the view control when there is nothing to sort or filter', () => {
@@ -705,6 +737,26 @@ describe('CommentSection', () => {
     const replyPayload = mutate.mock.calls.at(-1)?.[0];
     expect(replyPayload).not.toHaveProperty('lens_id');
     expect(replyPayload).toMatchObject({ parent_contribution_id: expect.any(String) });
+  });
+
+  it('WS-G.2.2 — the empty state is lens-aware when a lens filters everything out', async () => {
+    twoLenses();
+    queryState = {
+      data: {
+        comments: [
+          comment({ metadata: { lens_id: LENS_INDUSTRY }, body: 'An industry-only reading.' }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+      },
+    };
+    const user = userEvent.setup();
+    renderSection(true);
+    // Filter to Skeptical — no comments carry it, but there ARE comments.
+    await pickView(user, 'Skeptical (0)');
+    expect(screen.getByText(/no comments in the skeptical lens yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no comments yet\./i)).not.toBeInTheDocument();
   });
 
   it('WS-H — renders "Where interpretations differ" right after the composer', () => {

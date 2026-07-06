@@ -18,7 +18,13 @@ import type {
   StoryDetail,
   UserSettings,
 } from '@licio/shared';
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { readNotificationsUsedToday } from '../offline/notification-meter.js';
 import {
   cacheSignalLedger,
@@ -118,6 +124,11 @@ export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOpt
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
     enabled: storyId.length > 0,
+    // Changing the sort `order` mints a new query key; keep the previous page
+    // rendered during the refetch so a Newest⇄Oldest toggle reorders in place
+    // instead of blanking the conversation (which would also collapse the view
+    // control and drop focus). Applies to the dedicated comment page too.
+    placeholderData: keepPreviousData,
     ...cachePolicy.thread,
   });
   const pages = query.data?.pages ?? [];

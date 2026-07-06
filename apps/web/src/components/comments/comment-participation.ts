@@ -34,10 +34,13 @@ export function commentParticipationWeight(comment: CommentItem): number {
 
 /**
  * Order comments by descending participation weight, preserving the incoming
- * (server) order within ties — Array.prototype.sort is stable (ES2019+).
+ * (server) order within ties. Weights are computed ONCE per comment (the body is
+ * parsed once, not on every comparison), and the original index is the explicit
+ * tie-break so the result is stable regardless of the engine's sort stability.
  */
 export function byParticipationDesc(comments: readonly CommentItem[]): CommentItem[] {
-  return [...comments].sort(
-    (a, b) => commentParticipationWeight(b) - commentParticipationWeight(a),
-  );
+  return comments
+    .map((comment, index) => ({ comment, index, weight: commentParticipationWeight(comment) }))
+    .sort((a, b) => b.weight - a.weight || a.index - b.index)
+    .map((entry) => entry.comment);
 }

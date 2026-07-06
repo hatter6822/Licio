@@ -31,9 +31,14 @@ export function viewLabel(view: CommentViewMode, roomLenses: readonly LensPublic
   const lensId = lensIdOfView(view);
   if (lensId !== null) {
     const lens = roomLenses.find((l) => l.lens_id === lensId);
+    // A stale lens id (deleted mid-session) degrades to the default sort label.
     return lens ? `Lens: ${lens.name}` : SORT_LABELS.oldest;
   }
-  return SORT_LABELS[view as 'newest' | 'oldest' | 'participation'] ?? SORT_LABELS.oldest;
+  // `view` is one of the three sort keys here (lensIdOfView returned null).
+  if (view === 'newest' || view === 'oldest' || view === 'participation') {
+    return SORT_LABELS[view];
+  }
+  return SORT_LABELS.oldest;
 }
 
 export interface CommentViewSelectorProps {

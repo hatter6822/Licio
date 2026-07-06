@@ -159,7 +159,9 @@ export function CommentSection({
         <p className="text-sm text-ink-muted">Loading comments…</p>
       ) : visible.length === 0 ? (
         <p className="rounded-md border border-line p-4 text-sm text-ink-muted">
-          No comments yet. Start the conversation with context or a source.
+          {activeLens !== null
+            ? `No comments in the ${activeLens.name} lens yet. Post one to start this reading.`
+            : 'No comments yet. Start the conversation with context or a source.'}
         </p>
       ) : (
         <div className="flex flex-col gap-3">
