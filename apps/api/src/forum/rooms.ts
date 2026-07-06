@@ -306,7 +306,24 @@ export async function storyReadableByUser(
 export type JoinOutcome =
   | { ok: true; status: 'active' | 'pending'; subscription: RoomSubscriptionRecord }
   | { ok: false; code: 'not_found'; message: string }
-  | { ok: false; code: 'invite_only'; message: string };
+  | { ok: false; code: 'invite_only'; message: string }
+  | { ok: false; code: 'invalid_lens'; message: string };
+
+/**
+ * WS-G.2.2 — validate a chosen POSTING lens for a room.  `null` is always valid
+ * (the default "Undecided" state present in every room); a non-null id must be
+ * one of the room's own lenses.  Shared by the join path and the lens-change
+ * path so the "lens belongs to this room" rule has ONE enforcement point.
+ */
+async function lensBelongsToRoom(
+  forum: ForumServices,
+  roomId: string,
+  lensId: string | null,
+): Promise<boolean> {
+  if (lensId === null) return true;
+  const lens = await forum.lenses.getById(lensId);
+  return lens !== null && lens.roomId === roomId;
+}
 
 /**
  * WS-Q.3.1c — join branches on the room's `join_model` (not visibility):
@@ -314,13 +331,23 @@ export type JoinOutcome =
  *   • `request_approval` ⇒ a `pending` request (steward approves);
  *   • `invite`           ⇒ self-join rejected (invitations are a separate
  *                          steward action — the WS-J seam).
- * Idempotent: re-joining returns the existing subscription unchanged.
+ * Idempotent: re-joining returns the existing subscription unchanged (the lens
+ * is changed later ONLY through setMembershipLens, never a repeat join).  A
+ * fresh IMMEDIATE (open) join records the member's chosen POSTING lens (WS-G.2.2)
+ * — `null` (the default) means "Undecided"; a non-null lens must belong to the
+ * room.  A `pending` request (a private room the applicant cannot yet read)
+ * always joins as Undecided and IGNORES any supplied lens: it picks a lens later
+ * via the content-gated setMembershipLens once active.  This keeps the join path
+ * from validating a supplied lens against a room the applicant cannot see —
+ * closing the lens-existence oracle the PUT /lens path deliberately avoids (§8.3;
+ * a private room's lens ids never leak to an outsider).
  */
 export async function joinRoom(
   forum: ForumServices,
   room: RoomRecord,
   userId: string,
   nowIso: string,
+  lensId: string | null = null,
 ): Promise<JoinOutcome> {
   const existing = await forum.rooms.getSubscription(room.roomId, userId);
   if (existing) return { ok: true, status: existing.status, subscription: existing };
@@ -333,10 +360,18 @@ export async function joinRoom(
     };
   }
   const status: RoomSubscriptionRecord['status'] = room.joinModel === 'open' ? 'active' : 'pending';
+  // Only an immediate ACTIVE join (a public/open room, whose lenses the joiner
+  // can already see) records the chosen lens; a pending private-room request
+  // joins Undecided and validates nothing about the lens (no outsider oracle).
+  const effectiveLensId = status === 'active' ? lensId : null;
+  if (!(await lensBelongsToRoom(forum, room.roomId, effectiveLensId))) {
+    return { ok: false, code: 'invalid_lens', message: 'The lens must belong to this room.' };
+  }
   const subscription = await forum.rooms.upsertSubscription({
     roomId: room.roomId,
     userId,
     status,
+    lensId: effectiveLensId,
     requestId: randomUUID(),
     notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES },
     requestedAt: nowIso,
@@ -344,6 +379,36 @@ export async function joinRoom(
   });
   forum.metrics.increment(status === 'active' ? 'rooms.joined' : 'rooms.join_requested');
   return { ok: true, status, subscription };
+}
+
+export type SetMembershipLensOutcome =
+  | { ok: true; subscription: RoomSubscriptionRecord }
+  | { ok: false; code: 'not_member'; message: string }
+  | { ok: false; code: 'invalid_lens'; message: string };
+
+/**
+ * WS-G.2.2 — set the caller's POSTING lens for a room they belong to.  This is
+ * the SOLE mutation of a member's posting lens (the reading/filter lens never
+ * touches it), so a member never accidentally posts as a lens they were only
+ * viewing.  `null` returns them to the default "Undecided"; a non-null lens must
+ * belong to the room.  Requires an existing subscription (a non-member has no
+ * membership to carry a lens).
+ */
+export async function setMembershipLens(
+  forum: ForumServices,
+  room: RoomRecord,
+  userId: string,
+  lensId: string | null,
+): Promise<SetMembershipLensOutcome> {
+  if (!(await lensBelongsToRoom(forum, room.roomId, lensId))) {
+    return { ok: false, code: 'invalid_lens', message: 'The lens must belong to this room.' };
+  }
+  const updated = await forum.rooms.setSubscriptionLens(room.roomId, userId, lensId);
+  if (!updated) {
+    return { ok: false, code: 'not_member', message: 'Join this room to choose a posting lens.' };
+  }
+  forum.metrics.increment('rooms.lens_set');
+  return { ok: true, subscription: updated };
 }
 
 /** Steward gate for room-scoped actions: any of the five WS-A.2.2 roles in

@@ -13,8 +13,10 @@ import {
   createLens,
   fetchFeed,
   fetchRoomLenses,
+  joinRoom,
   parseResponse,
   resetApiClientState,
+  setRoomLens,
   uploadAttentionAggregates,
 } from './api.js';
 
@@ -352,5 +354,53 @@ describe('room lens client (WS-G.2.2)', () => {
     const created = await createLens(ROOM_ID, { name: 'Skeptical', lens_type: 'skeptical' });
     expect(created.lens_id).toBe(LENS.lens_id);
     expect(posted).toMatchObject({ name: 'Skeptical', lens_type: 'skeptical' });
+  });
+
+  const ROOM_SUMMARY = {
+    room_id: ROOM_ID,
+    name: 'Hydrology',
+    slug: 'hydrology',
+    room_type: 'global_topic' as const,
+    visibility: 'public' as const,
+    join_model: 'open' as const,
+    posting_policy: 'all_members' as const,
+    description: null,
+    thread_count: 0,
+    member_count: 1,
+    latest_activity_at: null,
+    governance_mode: 'ordinary' as const,
+    joined: true,
+    can_post: true,
+    created_at: '2026-06-09T13:00:00.000Z',
+  };
+
+  it('joinRoom posts the chosen lens (null = Undecided by default)', async () => {
+    const posted: unknown[] = [];
+    mockFetch(async (url, init) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      expect(url).toContain(`/v1/rooms/${ROOM_ID}/join`);
+      posted.push(JSON.parse(String(init?.body)));
+      return jsonResponse({ status: 'active', room: ROOM_SUMMARY });
+    });
+    const joined = await joinRoom(ROOM_ID, LENS.lens_id);
+    expect(joined.status).toBe('active');
+    expect(posted[0]).toEqual({ lens_id: LENS.lens_id });
+    // The default (no arg) joins as Undecided (null).
+    await joinRoom(ROOM_ID);
+    expect(posted[1]).toEqual({ lens_id: null });
+  });
+
+  it('setRoomLens puts the chosen lens and returns the echoed selection', async () => {
+    let posted: unknown;
+    mockFetch(async (url, init) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      expect(url).toContain(`/v1/rooms/${ROOM_ID}/lens`);
+      expect(init?.method).toBe('PUT');
+      posted = JSON.parse(String(init?.body));
+      return jsonResponse({ lens_id: LENS.lens_id });
+    });
+    const result = await setRoomLens(ROOM_ID, LENS.lens_id);
+    expect(result.lens_id).toBe(LENS.lens_id);
+    expect(posted).toEqual({ lens_id: LENS.lens_id });
   });
 });

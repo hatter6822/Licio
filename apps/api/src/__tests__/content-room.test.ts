@@ -40,6 +40,7 @@ async function joinAsMember(roomId: string, userId: string): Promise<void> {
     userId,
     status: 'active',
     requestId: randomUUID(),
+    lensId: null,
     notificationPreferences: {
       threads: 'mentions',
       new_evidence: false,
@@ -101,6 +102,7 @@ describe('WS-Q.2.1 submission guards', () => {
       userId: member.userId,
       status: 'active',
       requestId: randomUUID(),
+      lensId: null,
       notificationPreferences: {
         threads: 'mentions',
         new_evidence: false,
@@ -247,6 +249,7 @@ describe('WS-Q.3.2 item read bar', () => {
       userId: author.userId,
       status: 'active',
       requestId: randomUUID(),
+      lensId: null,
       notificationPreferences: {
         threads: 'mentions',
         new_evidence: false,
@@ -933,6 +936,7 @@ describe('WS-Q.3.3b/3.4 room governance + visibility cascade (steward)', () => {
       userId: member.userId,
       status: 'active',
       requestId: randomUUID(),
+      lensId: null,
       notificationPreferences: {
         threads: 'mentions',
         new_evidence: false,

@@ -45,6 +45,7 @@ async function joinMember(roomId: string, userId: string): Promise<void> {
     userId,
     status: 'active',
     requestId: randomUUID(),
+    lensId: null,
     notificationPreferences: {
       threads: 'mentions',
       new_evidence: false,

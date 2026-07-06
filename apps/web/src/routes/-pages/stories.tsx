@@ -196,9 +196,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 lightly nested comment section; /threads deep links remain only
                 as backwards-compatible redirects/read shells. */}
             {data.thread_id ? (
-              // Key by story id so all per-story comment state — the lens filter
-              // selection and the composer's once-only vantage/body — resets when
+              // Key by story id so all per-story comment state — the view control's
+              // sort + reading-filter selection and the composer body — resets when
               // the reader navigates story→story (the route reuses this instance).
+              // The POSTING lens is NOT per-story state: it is the reader's room
+              // membership lens (WS-G.2.2), set on the room page.
               <CommentSection
                 key={data.story_id}
                 storyId={data.story_id}

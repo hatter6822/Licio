@@ -41,6 +41,10 @@ vi.mock('../../lib/queries.js', () => ({
   useRoomFeedQuery: (_roomId: string, enabled: boolean) => roomFeed(enabled),
   useJoinRoomMutation: () => ({ mutate: joinRoom, isPending: false }),
   useLeaveRoomMutation: () => ({ mutate: leaveRoom, isPending: false }),
+  // WS-G.2.2: the room action row now renders the posting-lens button (its own
+  // set-lens mutation). It renders null for these fixtures (lenses: []), but the
+  // hook still runs, so the mock must define it.
+  useSetRoomLensMutation: () => ({ mutate: () => {}, isPending: false }),
   // WS-U: the room page now renders the "governed by" panel (its own query).
   useGovernedByQuery: () => ({
     isLoading: false,
@@ -78,6 +82,7 @@ function baseRoom(over: Partial<RoomDetail>): RoomDetail {
     joined: false,
     created_at: '2026-01-01T00:00:00.000Z',
     lenses: [],
+    my_lens_id: null,
     stewards: [],
     governance: null,
     charter_summary: null,

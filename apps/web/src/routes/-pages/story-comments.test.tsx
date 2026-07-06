@@ -3,7 +3,7 @@
 // WS-T.7.2 dedicated comment-centric page: up to two nested reply layers, a
 // focused (rooted) anchor whose replies nest INSIDE its article, drill-down
 // breadcrumbs, and the page-header upper-left back button to the story.
-import type { CommentItem } from '@licio/shared';
+import type { CommentItem, LensPublic } from '@licio/shared';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,13 +13,15 @@ const recordReplyDepth = vi.fn();
 const setActiveStory = vi.fn();
 let canGoBack: boolean;
 let search: { root?: string };
-let storyState: { data?: { title: string; thread_id: string | null } };
+let storyState: { data?: { title: string; thread_id: string | null; room_id?: string | null } };
 let commentsState: {
   data?: { comments: CommentItem[]; anchor: CommentItem | null; next_cursor: string | null };
   isError?: boolean;
   isLoading?: boolean;
   hasMore?: boolean;
 };
+// WS-G.2.2 — the story's home room supplies the member's POSTING lens.
+let roomState: { data?: { lenses: LensPublic[]; my_lens_id: string | null } };
 
 const historyBack = vi.fn();
 vi.mock('@tanstack/react-router', () => ({
@@ -74,13 +76,17 @@ vi.mock('../../lib/queries.js', () => ({
     loadMore: vi.fn(),
   }),
   useCreateCommentMutation: () => ({ isPending: false, isError: false, mutate: vi.fn() }),
-  useRoomLensesQuery: () => ({ data: [] }),
+  // WS-G.2.2 — the top-level composer reads the room's posting lens; no lenses ⇒
+  // no posting-lens note and an untagged comment (the default here).
+  useRoomQuery: () => roomState,
 }));
 
 const { StoryCommentsPage } = await import('./story-comments.js');
 
 const STORY_ID = '11111111-1111-4111-8111-111111111111';
 const THREAD_ID = '22222222-2222-4222-8222-222222222222';
+const ROOM_ID = '55555555-5555-4555-8555-555555555555';
+const LENS_ID = '66666666-6666-4666-8666-666666666666';
 
 function node(id: string, overrides: Partial<CommentItem> = {}): CommentItem {
   return {
@@ -118,12 +124,38 @@ beforeEach(() => {
   historyBack.mockReset();
   canGoBack = true;
   search = {};
-  storyState = { data: { title: 'Regional water board dataset', thread_id: THREAD_ID } };
+  storyState = {
+    data: { title: 'Regional water board dataset', thread_id: THREAD_ID, room_id: ROOM_ID },
+  };
   commentsState = { data: { comments: [], anchor: null, next_cursor: null } };
+  roomState = { data: { lenses: [], my_lens_id: null } };
   vi.stubGlobal('crypto', { randomUUID: () => '44444444-4444-4444-8444-444444444444' });
 });
 
 describe('StoryCommentsPage (dedicated comment page)', () => {
+  it('WS-G.2.2 — the unrooted top-level composer posts through the member’s room lens', () => {
+    // A member of a lensed room whose posting lens is "Skeptical": this dedicated
+    // page's top-level composer must honor it just like the inline story page (the
+    // "Posting as" note appears ONLY when the membership lens reaches the composer).
+    roomState = {
+      data: {
+        lenses: [
+          {
+            lens_id: LENS_ID,
+            room_id: ROOM_ID,
+            name: 'Skeptical',
+            lens_type: 'skeptical',
+            description: null,
+            created_at: '2026-06-18T00:00:00.000Z',
+          },
+        ],
+        my_lens_id: LENS_ID,
+      },
+    };
+    render(<StoryCommentsPage />);
+    expect(screen.getByText(/posting as/i)).toHaveTextContent('Skeptical');
+  });
+
   it('renders two nested layers unrooted; the deepest visible comment links onward', () => {
     const deep = node('33333333-3333-4333-8333-333333333333', {
       depth: 2,

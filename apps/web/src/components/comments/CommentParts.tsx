@@ -114,22 +114,24 @@ export function CommentMedia({ comment }: { comment: CommentItemType }): React.R
 export function CommentComposer({
   storyId,
   threadId,
-  activeLens,
+  postingLens,
   leadingAction,
   parentContributionId,
   onCancel,
 }: {
   storyId: string;
   threadId: string;
-  /** The interpretation lens the conversation is currently scoped to (WS-G.2.2),
-   *  passed only to the TOP-LEVEL composer. A comment written here JOINS that
-   *  reading — the server re-validates the tag against the room's lenses. There
-   *  is ONE lens control (the "view" button on the LEFT of the action row, which
-   *  shows the active lens); the composer has no separate picker. Replies stay
-   *  untagged. */
-  activeLens?: { id: string; name: string };
+  /** The member's chosen POSTING lens for the home room (WS-G.2.2), passed only
+   *  to the TOP-LEVEL composer. A top-level comment written here JOINS this lens
+   *  (`id: null` = "Undecided" — no tag); the server re-validates it against the
+   *  room's lenses. This is the member's DELIBERATE membership lens — chosen at
+   *  join and changed ONLY via the room page's lens button — NOT the "view"
+   *  selector's reading/filter lens, so a member never accidentally posts as a
+   *  lens they were only viewing. Shown here purely for transparency. Replies
+   *  stay untagged. */
+  postingLens?: { id: string | null; name: string };
   /** Node rendered on the LEFT of the action row, opposing the Comment button —
-   *  the conversation "view" selector (top-level composer only). */
+   *  the conversation "view" (sort + reading-filter) selector (top-level only). */
   leadingAction?: ReactNode;
   parentContributionId?: string;
   onCancel?: () => void;
@@ -140,8 +142,9 @@ export function CommentComposer({
   // Sources are the INLINE links in the body — derived, not a separate list.
   const derivedSources = useMemo(() => deriveCitationsFromBody(trimmed), [trimmed]);
   const isReply = parentContributionId !== undefined;
-  // A top-level comment joins the currently-selected lens; replies stay untagged.
-  const lensTag = isReply ? undefined : activeLens;
+  // A top-level comment joins the member's POSTING lens (null = Undecided ⇒ no
+  // tag); replies stay untagged.
+  const postingLensId = isReply ? null : (postingLens?.id ?? null);
 
   const submit = (): void => {
     if (trimmed.length === 0 || mutation.isPending) return;
@@ -153,7 +156,7 @@ export function CommentComposer({
       body: trimmed,
       ...(citations.length > 0 ? { citations } : {}),
       ...(parentContributionId ? { parent_contribution_id: parentContributionId } : {}),
-      ...(lensTag ? { lens_id: lensTag.id } : {}),
+      ...(postingLensId ? { lens_id: postingLensId } : {}),
     };
     mutation.mutate(payload, {
       onSuccess: () => {
@@ -210,6 +213,14 @@ export function CommentComposer({
             : `${derivedSources.length} sources linked in this comment.`}
         </p>
       ) : null}
+      {!isReply && postingLens ? (
+        // WS-G.2.2 — transparency only: the lens this comment will post as is the
+        // member's chosen membership lens, changed on the room page (never here).
+        <p className="text-ink-muted text-xs">
+          Posting as <strong className="font-medium text-ink">{postingLens.name}</strong>. Change
+          your lens on the room page.
+        </p>
+      ) : null}
       <div
         className={cn(
           'flex flex-wrap items-center gap-3',
@@ -219,10 +230,10 @@ export function CommentComposer({
         {isReply ? (
           <p className="text-sm text-ink-muted">{trimmed.length}/5000 characters</p>
         ) : (
-          // The conversation "view" selector sits on the LEFT, opposing the Comment
-          // button on the right (WS-G.2.2/WS-T). When a lens view is active it reads
-          // "Lens: X", so a comment written here joins that reading — no separate
-          // picker or hint needed.
+          // The conversation "view" (sort + reading-filter) selector sits on the
+          // LEFT, opposing the Comment button on the right (WS-G.2.2/WS-T). It only
+          // affects what you READ; the lens this comment posts as is shown in the
+          // "Posting as …" note above and is set on the room page.
           (leadingAction ?? null)
         )}
         <div className="flex gap-2">

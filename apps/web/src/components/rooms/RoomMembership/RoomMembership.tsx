@@ -30,6 +30,7 @@ import { ApiClientError } from '../../../lib/api.js';
 import { useJoinRoomMutation, useLeaveRoomMutation } from '../../../lib/queries.js';
 import { useAuthStore } from '../../../stores/auth.js';
 import { Button } from '../../ui/Button/index.js';
+import { RoomLensDialog } from '../RoomLensControl/index.js';
 
 export interface RoomMembershipProps {
   roomId: string;
@@ -76,6 +77,13 @@ export function RoomMembership({
   const join = useJoinRoomMutation(roomId);
   const leave = useLeaveRoomMutation(roomId);
   const [error, setError] = useState<string | null>(null);
+  // WS-G.2.2 — when a room the reader can already see has interpretation lenses,
+  // joining opens a picker so they choose the lens they'll post through up front
+  // (defaulting to "Undecided"). A private-room outsider cannot see lenses yet
+  // (`room.lenses` is empty), so they join first and pick later via the lens
+  // button — hence the picker is gated on the lens list being visible + non-empty.
+  const [lensPickerOpen, setLensPickerOpen] = useState(false);
+  const [lensError, setLensError] = useState<string | null>(null);
   const governed = room.governance !== null;
   // The honest-limits disclosure (SPEC §6.9) shown for EVERY private-room
   // non-member state — anonymous, pending, invite, and joinable — so a reader
@@ -204,35 +212,73 @@ export function RoomMembership({
 
   // Joinable: open (immediate active membership) or request_approval (pending).
   const isOpen = room.join_model === 'open';
+  // A room whose lenses the reader can already see (a public/open room) prompts
+  // for the posting lens as part of joining; otherwise the join is immediate.
+  const pickLensOnJoin = room.lenses.length > 0;
+  const startJoin = (): void => {
+    setError(null);
+    if (pickLensOnJoin) {
+      setLensError(null);
+      setLensPickerOpen(true);
+      return;
+    }
+    join.mutate(undefined, { onError: fail });
+  };
   return (
-    <ActionBar
-      button={
-        <Button
-          variant="primary"
-          disabled={join.isPending}
-          onClick={() => {
-            setError(null);
-            join.mutate(undefined, { onError: fail });
+    <>
+      <ActionBar
+        button={
+          <Button variant="primary" disabled={join.isPending} onClick={startJoin}>
+            {isOpen ? t('room.join.open', 'Join room') : t('room.join.request', 'Request to join')}
+          </Button>
+        }
+        trailing={trailing}
+        notes={
+          <>
+            <p className="text-ink-muted text-xs">
+              {governed
+                ? t(
+                    'room.membership.joinGovernance',
+                    'Join to take part in this room’s governance — electing a steward and ratifying its community AI model.',
+                  )
+                : t('room.membership.join', 'Join to take part in this room.')}
+            </p>
+            {privateNotice}
+            {errorNote}
+          </>
+        }
+      />
+      {pickLensOnJoin ? (
+        <RoomLensDialog
+          open={lensPickerOpen}
+          onClose={() => setLensPickerOpen(false)}
+          lenses={room.lenses}
+          currentLensId={null}
+          title={t('room.join.lensTitle', 'Choose your lens')}
+          intro={t(
+            'room.join.lensIntro',
+            'Pick the interpretation you’ll represent when you post in this room. “Undecided” is the default — you can change it anytime from the room’s lens button.',
+          )}
+          confirmLabel={t('room.join.open', 'Join room')}
+          busy={join.isPending}
+          error={lensError}
+          onConfirm={(lensId) => {
+            setLensError(null);
+            join.mutate(
+              { lensId },
+              {
+                onSuccess: () => setLensPickerOpen(false),
+                onError: (e) =>
+                  setLensError(
+                    e instanceof ApiClientError
+                      ? e.message
+                      : t('room.membership.error', 'Something went wrong. Please try again.'),
+                  ),
+              },
+            );
           }}
-        >
-          {isOpen ? t('room.join.open', 'Join room') : t('room.join.request', 'Request to join')}
-        </Button>
-      }
-      trailing={trailing}
-      notes={
-        <>
-          <p className="text-ink-muted text-xs">
-            {governed
-              ? t(
-                  'room.membership.joinGovernance',
-                  'Join to take part in this room’s governance — electing a steward and ratifying its community AI model.',
-                )
-              : t('room.membership.join', 'Join to take part in this room.')}
-          </p>
-          {privateNotice}
-          {errorNote}
-        </>
-      }
-    />
+        />
+      ) : null}
+    </>
   );
 }

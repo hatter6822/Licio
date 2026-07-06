@@ -111,6 +111,11 @@ export interface RoomSubscriptionRecord {
   userId: string;
   status: 'active' | 'pending';
   requestId: string;
+  /** WS-G.2.2 — the member's chosen POSTING lens: the interpretation a top-level
+   *  comment they write in this room joins.  `null` is the default "Undecided"
+   *  state.  Set when the member joins and changed only via the room's lens
+   *  control (never the reading/filter lens). */
+  lensId: string | null;
   notificationPreferences: RoomNotificationPreferences;
   requestedAt: string;
   joinedAt: string | null;
@@ -366,6 +371,14 @@ export interface RoomStore {
   listStewardRoomsByUser(userId: string): Promise<string[]>;
   upsertSubscription(record: RoomSubscriptionRecord): Promise<RoomSubscriptionRecord>;
   getSubscription(roomId: string, userId: string): Promise<RoomSubscriptionRecord | null>;
+  /** WS-G.2.2 — change ONLY the member's POSTING lens (null = Undecided) on an
+   *  existing subscription, leaving status/preferences untouched.  Returns the
+   *  updated record, or null when the user has no subscription in the room. */
+  setSubscriptionLens(
+    roomId: string,
+    userId: string,
+    lensId: string | null,
+  ): Promise<RoomSubscriptionRecord | null>;
   deleteSubscription(roomId: string, userId: string): Promise<boolean>;
   listSubscriptionsByUser(userId: string): Promise<RoomSubscriptionRecord[]>;
   countMembers(roomId: string): Promise<number>;
@@ -1036,6 +1049,18 @@ export class InMemoryRoomStore implements RoomStore {
 
   async getSubscription(roomId: string, userId: string): Promise<RoomSubscriptionRecord | null> {
     return this.#subscriptions.get(this.#subKey(roomId, userId)) ?? null;
+  }
+
+  async setSubscriptionLens(
+    roomId: string,
+    userId: string,
+    lensId: string | null,
+  ): Promise<RoomSubscriptionRecord | null> {
+    const existing = this.#subscriptions.get(this.#subKey(roomId, userId));
+    if (!existing) return null;
+    const updated = { ...existing, lensId };
+    this.#subscriptions.set(this.#subKey(roomId, userId), updated);
+    return updated;
   }
 
   async deleteSubscription(roomId: string, userId: string): Promise<boolean> {

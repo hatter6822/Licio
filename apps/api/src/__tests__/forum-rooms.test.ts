@@ -424,3 +424,153 @@ describe('WS-G.2.2 / WS-G.2.4 — lenses', () => {
     expect(lenses.divergence).toBeNull(); // SCOI not yet run (WS-H.4)
   });
 });
+
+describe('WS-G.2.2 — the room POSTING lens (membership)', () => {
+  // A public room whose creator (the default `cookie`, an auto-steward) provisions
+  // one lens; returns the room + that lens id.
+  async function roomWithLens(name = 'Public Health'): Promise<{ roomId: string; lensId: string }> {
+    const created = (await (await createRoom({ ...PUBLIC_ROOM, name })).json()) as {
+      room_id: string;
+    };
+    const lens = (await (
+      await app().request(
+        jsonRequest(
+          `/v1/rooms/${created.room_id}/lenses`,
+          'POST',
+          { name: 'Skeptical', lens_type: 'skeptical' },
+          cookie,
+        ),
+      )
+    ).json()) as { lens_id: string };
+    return { roomId: created.room_id, lensId: lens.lens_id };
+  }
+
+  async function detailFor(roomId: string, asCookie: string): Promise<Response> {
+    return app().request(
+      new Request(`http://local/v1/rooms/${roomId}`, { headers: { cookie: asCookie } }),
+    );
+  }
+
+  it('records the chosen lens on join and projects it as my_lens_id', async () => {
+    const { roomId, lensId } = await roomWithLens();
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'lensjoiner' });
+    const join = roomJoinResponseSchema.parse(
+      await (
+        await app().request(
+          jsonRequest(`/v1/rooms/${roomId}/join`, 'POST', { lens_id: lensId }, reader.cookie),
+        )
+      ).json(),
+    );
+    expect(join.status).toBe('active');
+    expect((await fixture.forum.rooms.getSubscription(roomId, reader.userId))?.lensId).toBe(lensId);
+    const detail = roomDetailSchema.parse(await (await detailFor(roomId, reader.cookie)).json());
+    expect(detail.my_lens_id).toBe(lensId);
+  });
+
+  it('a plain join defaults to Undecided (my_lens_id null)', async () => {
+    const { roomId } = await roomWithLens();
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'undecided' });
+    await app().request(jsonRequest(`/v1/rooms/${roomId}/join`, 'POST', {}, reader.cookie));
+    const detail = roomDetailSchema.parse(await (await detailFor(roomId, reader.cookie)).json());
+    expect(detail.my_lens_id).toBeNull();
+  });
+
+  it('PUT /lens is the sole change path: sets a lens and returns to Undecided', async () => {
+    const { roomId, lensId } = await roomWithLens();
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'changer' });
+    await app().request(jsonRequest(`/v1/rooms/${roomId}/join`, 'POST', {}, reader.cookie));
+    const set = await app().request(
+      jsonRequest(`/v1/rooms/${roomId}/lens`, 'PUT', { lens_id: lensId }, reader.cookie),
+    );
+    expect(set.status).toBe(200);
+    expect(((await set.json()) as { lens_id: string | null }).lens_id).toBe(lensId);
+    expect((await fixture.forum.rooms.getSubscription(roomId, reader.userId))?.lensId).toBe(lensId);
+    const clear = await app().request(
+      jsonRequest(`/v1/rooms/${roomId}/lens`, 'PUT', { lens_id: null }, reader.cookie),
+    );
+    expect(clear.status).toBe(200);
+    expect((await fixture.forum.rooms.getSubscription(roomId, reader.userId))?.lensId).toBeNull();
+  });
+
+  it('rejects a foreign lens (400) and a non-member (409)', async () => {
+    const { roomId } = await roomWithLens('Room A');
+    const other = await roomWithLens('Room B'); // a lens belonging to a DIFFERENT room
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'rejecter' });
+    await app().request(jsonRequest(`/v1/rooms/${roomId}/join`, 'POST', {}, reader.cookie));
+    const foreign = await app().request(
+      jsonRequest(`/v1/rooms/${roomId}/lens`, 'PUT', { lens_id: other.lensId }, reader.cookie),
+    );
+    expect(foreign.status).toBe(400);
+    const stranger = await seedUserWithSession(fixture.identity, { handle: 'stranger' });
+    const notMember = await app().request(
+      jsonRequest(`/v1/rooms/${roomId}/lens`, 'PUT', { lens_id: null }, stranger.cookie),
+    );
+    expect(notMember.status).toBe(409);
+  });
+
+  it('rejects joining with a foreign lens on an OPEN (public) room (400)', async () => {
+    const { roomId } = await roomWithLens('Room C');
+    const other = await roomWithLens('Room D');
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'badjoin' });
+    const res = await app().request(
+      jsonRequest(`/v1/rooms/${roomId}/join`, 'POST', { lens_id: other.lensId }, reader.cookie),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('a pending (private) join ignores the supplied lens — no lens-existence oracle', async () => {
+    // A private request_approval room whose lens the applicant CANNOT see: a join
+    // carrying a valid vs a bogus lens id must be INDISTINGUISHABLE (both 200
+    // pending, lens ignored ⇒ Undecided), so the join path never confirms whether
+    // a lens id belongs to a room the outsider has no content access to.
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const created = (await (
+      await createRoom(
+        { ...PUBLIC_ROOM, name: 'Closed lens room', visibility: 'private' },
+        steward.cookie,
+      )
+    ).json()) as { room_id: string };
+    const lens = (await (
+      await app().request(
+        jsonRequest(
+          `/v1/rooms/${created.room_id}/lenses`,
+          'POST',
+          { name: 'Skeptical', lens_type: 'skeptical' },
+          steward.cookie,
+        ),
+      )
+    ).json()) as { lens_id: string };
+
+    const applicantValid = await seedUserWithSession(fixture.identity, {
+      handle: 'applicantvalid',
+    });
+    const withValid = await app().request(
+      jsonRequest(
+        `/v1/rooms/${created.room_id}/join`,
+        'POST',
+        { lens_id: lens.lens_id },
+        applicantValid.cookie,
+      ),
+    );
+    expect(withValid.status).toBe(200);
+    expect(((await withValid.json()) as { status: string }).status).toBe('pending');
+    const sub = await fixture.forum.rooms.getSubscription(created.room_id, applicantValid.userId);
+    expect(sub?.status).toBe('pending');
+    expect(sub?.lensId).toBeNull(); // ignored — Undecided until approved + active
+
+    // A bogus (nonexistent) lens id gets the SAME 200 pending, not a 400.
+    const applicantBogus = await seedUserWithSession(fixture.identity, {
+      handle: 'applicantbogus',
+    });
+    const withBogus = await app().request(
+      jsonRequest(
+        `/v1/rooms/${created.room_id}/join`,
+        'POST',
+        { lens_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+        applicantBogus.cookie,
+      ),
+    );
+    expect(withBogus.status).toBe(200);
+    expect(((await withBogus.json()) as { status: string }).status).toBe('pending');
+  });
+});

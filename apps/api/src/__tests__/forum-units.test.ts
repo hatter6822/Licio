@@ -786,6 +786,7 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       userId: session.userId,
       status: 'active',
       requestId: '88888888-8888-4888-8888-888888888883',
+      lensId: null,
       notificationPreferences: {
         threads: 'all',
         new_evidence: true,

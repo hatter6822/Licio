@@ -87,6 +87,7 @@ async function subscribe(
     userId,
     status,
     requestId: randomUUID(),
+    lensId: null,
     notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
     requestedAt: new Date().toISOString(),
     joinedAt: status === 'active' ? new Date().toISOString() : null,

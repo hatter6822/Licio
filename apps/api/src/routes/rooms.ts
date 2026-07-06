@@ -23,9 +23,11 @@ import {
   roomCreateRequestSchema,
   roomDetailSchema,
   roomGovernanceSettingsRequestSchema,
+  roomJoinRequestBodySchema,
   roomJoinRequestDecisionSchema,
   roomJoinRequestPublicSchema,
   roomJoinResponseSchema,
+  roomLensSelectionSchema,
   roomListResponseSchema,
   roomNotificationPreferencesSchema,
   roomSummarySchema,
@@ -54,6 +56,7 @@ import {
   roomMatchesQuery,
   roomTypeMetadata,
   roomVisibleToUser,
+  setMembershipLens,
   slugify,
   storyReadableByUser,
   toRoomSummary,
@@ -334,6 +337,9 @@ export function createRoomsRoutes() {
             roomId: created.room.roomId,
             userId: auth.userId,
             status: 'active',
+            // WS-G.2.2 — a new room's creator starts Undecided (they can pick a
+            // posting lens later via the room's lens control).
+            lensId: null,
             requestId: randomUUID(),
             notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES },
             requestedAt: new Date(forum.now()).toISOString(),
@@ -399,6 +405,9 @@ export function createRoomsRoutes() {
             join_pending: subscription?.status === 'pending',
             // WS-Q.5.3c — gates the steward-only room-settings UI.
             is_steward: userId !== null && stewards.some((s) => s.userId === userId),
+            // WS-G.2.2 — the member's chosen POSTING lens (null = Undecided, the
+            // default). Drives the composer's posting lens + the lens control.
+            my_lens_id: subscription?.lensId ?? null,
           }),
         );
       })
@@ -459,10 +468,15 @@ export function createRoomsRoutes() {
         authMiddleware(),
         requireVerifiedAccount(),
         zValidator('param', z.object({ roomId: uuidSchema })),
+        // WS-G.2.2 — the join body carries the member's chosen POSTING lens
+        // (`lens_id` omitted/null = the default "Undecided").  The web client
+        // (the sole caller) always sends a body; an empty `{}` joins as Undecided.
+        zValidator('json', roomJoinRequestBodySchema),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const { roomId } = c.req.valid('param');
+          const { lens_id } = c.req.valid('json');
           const forum = getForumServices();
           const ingestion = getIngestionServices();
           const room = await forum.rooms.getById(roomId);
@@ -472,14 +486,56 @@ export function createRoomsRoutes() {
             room,
             auth.userId,
             new Date(forum.now()).toISOString(),
+            lens_id ?? null,
           );
-          if (!outcome.ok) return c.json(notFound, 404);
+          if (!outcome.ok) {
+            if (outcome.code === 'invalid_lens') {
+              return c.json(deny('invalid_lens', outcome.message), 400);
+            }
+            return c.json(notFound, 404);
+          }
           const threadCount = await ingestion.stories.countThreadsByRoom(roomId);
           return c.json(
             roomJoinResponseSchema.parse({
               status: outcome.status,
               room: await toRoomSummary(forum, room, threadCount, auth.userId, auth.roles),
             }),
+            200,
+          );
+        },
+      )
+
+      // --- Posting lens (WS-G.2.2): the SOLE way to change the lens a member
+      // posts through — decoupled from the reading/filter lens so a member never
+      // accidentally posts as a lens they were only viewing.  `null` = Undecided.
+      .put(
+        '/rooms/:roomId/lens',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('json', roomLensSelectionSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const { lens_id } = c.req.valid('json');
+          const forum = getForumServices();
+          const room = await forum.rooms.getById(roomId);
+          if (!room) return c.json(notFound, 404);
+          // Lenses are tier-two CONTENT: a private-room outsider gets 404 (no
+          // membership oracle), matching the lens read + detail bars.
+          if (!(await roomContentVisibleToUser(forum, room, auth.userId))) {
+            return c.json(notFound, 404);
+          }
+          const outcome = await setMembershipLens(forum, room, auth.userId, lens_id);
+          if (!outcome.ok) {
+            if (outcome.code === 'not_member') {
+              return c.json(deny('not_member', outcome.message), 409);
+            }
+            return c.json(deny('invalid_lens', outcome.message), 400);
+          }
+          return c.json(
+            roomLensSelectionSchema.parse({ lens_id: outcome.subscription.lensId }),
             200,
           );
         },

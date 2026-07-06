@@ -23,6 +23,7 @@ import {
   CommentNode,
   commentActionClass,
 } from '../../components/comments/index.js';
+import { lensDisplayName } from '../../components/rooms/RoomLensControl/RoomLensSelector.js';
 import { UgcBody } from '../../components/ugc/UgcBody.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -33,7 +34,7 @@ import { useGoBack } from '../../hooks/useGoBack.js';
 import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
-import { useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
+import { useRoomQuery, useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
@@ -193,6 +194,22 @@ function StoryCommentsContent({
   const threadId = story.data?.thread_id ?? anchor?.thread_id ?? list[0]?.thread_id ?? null;
   const storyTitle = story.data?.title ?? null;
 
+  // WS-G.2.2 — the top-level composer here posts through the SAME membership
+  // posting lens as the inline story-page composer (never the reading/filter
+  // lens), so a member's chosen lens is honored on BOTH comment surfaces. The
+  // lens is a property of the story's home room membership (`my_lens_id`, null =
+  // Undecided); shown read-only and changed only on the room page.
+  const roomId = story.data?.room_id;
+  const room = useRoomQuery(roomId ?? '', roomId !== undefined && roomId !== null);
+  const roomLenses = room.data?.lenses ?? [];
+  const postingLens =
+    roomLenses.length > 0
+      ? {
+          id: room.data?.my_lens_id ?? null,
+          name: lensDisplayName(room.data?.my_lens_id ?? null, roomLenses),
+        }
+      : null;
+
   // This level's comments + the load-more control, rendered EITHER nested inside
   // the focused anchor's article (rooted view) or as the page's top-level list
   // (unrooted view).
@@ -278,8 +295,16 @@ function StoryCommentsContent({
         ) : (
           <>
             {/* A top-level composer for the unrooted view; the focused view's
-                composer lives on the anchor (a reply to it). */}
-            {threadId ? <CommentComposer storyId={storyId} threadId={threadId} /> : null}
+                composer lives on the anchor (a reply to it). It posts through the
+                member's room posting lens (WS-G.2.2), identical to the inline
+                story-page composer. */}
+            {threadId ? (
+              <CommentComposer
+                storyId={storyId}
+                threadId={threadId}
+                {...(postingLens ? { postingLens } : {})}
+              />
+            ) : null}
             {listAndMore}
           </>
         )}

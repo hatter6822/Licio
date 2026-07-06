@@ -39,6 +39,9 @@ let mutationState: { isPending?: boolean; isError?: boolean };
 let debatesState: { debates: DebateArenaSummary[] };
 let interpretationsState: StoryInterpretationsResponse | null = null;
 let lensesState: LensPublic[] = [];
+// WS-G.2.2 — the member's chosen POSTING lens for the room (null = Undecided),
+// now fully separate from the reading/filter lens the view control selects.
+let myLensIdState: string | null = null;
 
 // Render the router Link as a real anchor whose href reflects `to` with the
 // params interpolated and the search serialized, so destinations are assertable.
@@ -95,7 +98,8 @@ vi.mock('../../lib/queries.js', () => ({
   }),
   useStoryDebatesQuery: vi.fn(() => ({ data: debatesState })),
   useStoryInterpretationsQuery: vi.fn(() => ({ data: interpretationsState })),
-  useRoomLensesQuery: vi.fn(() => ({ data: lensesState })),
+  // The room detail supplies the reading lenses AND the member's posting lens.
+  useRoomQuery: vi.fn(() => ({ data: { lenses: lensesState, my_lens_id: myLensIdState } })),
   useCreateCommentMutation: vi.fn(() => ({
     isPending: mutationState.isPending ?? false,
     isError: mutationState.isError ?? false,
@@ -182,6 +186,7 @@ beforeEach(() => {
   debatesState = { debates: [] };
   interpretationsState = null;
   lensesState = [];
+  myLensIdState = null;
   mutate.mockReset();
   refetch.mockReset();
   loadMore.mockReset();
@@ -584,41 +589,48 @@ describe('CommentSection', () => {
     ).toBeInTheDocument();
   });
 
-  it('WS-G.2.2 — a comment written under a selected lens JOINS that lens', async () => {
+  it('WS-G.2.2 — a top-level comment posts through the MEMBERSHIP lens, never the filter lens', async () => {
     twoLenses();
+    // The member's posting lens is Industry; the reading filter is set to a
+    // DIFFERENT lens (Skeptical) — the comment must still join Industry, proving
+    // the reading lens can never accidentally become the posting lens.
+    myLensIdState = LENS_INDUSTRY;
     mutate.mockImplementation((_payload, options) => options?.onSuccess?.());
     const user = userEvent.setup();
     renderSection(true);
 
+    // The composer states the posting lens for transparency (the membership one).
+    expect(screen.getByText(/posting as/i)).toHaveTextContent(/Industry/);
+
     await pickView(user, 'Skeptical (0)');
-    // The view button (on the LEFT of the composer action row) now reads the
-    // active lens, so a comment written here joins it — no separate hint needed.
     expect(
       screen.getByRole('button', { name: /sort and filter comments — lens: skeptical/i }),
     ).toBeInTheDocument();
-    await user.type(screen.getByRole('textbox', { name: 'Write a comment' }), 'A skeptical take');
+    await user.type(screen.getByRole('textbox', { name: 'Write a comment' }), 'A take');
     await user.click(screen.getByRole('button', { name: 'Comment' }));
 
+    // Posted lens = the MEMBERSHIP lens (Industry), NOT the Skeptical filter.
     expect(mutate).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'comment',
         thread_id: threadId,
-        body: 'A skeptical take',
-        lens_id: LENS_SKEPTICAL,
+        body: 'A take',
+        lens_id: LENS_INDUSTRY,
       }),
       expect.any(Object),
     );
   });
 
-  it('WS-G.2.2 — under a SORT view, a comment joins no lens', async () => {
+  it('WS-G.2.2 — an Undecided member (no membership lens) posts no lens, even under a lens filter', async () => {
     twoLenses();
+    myLensIdState = null; // Undecided (the default)
     mutate.mockImplementation((_payload, options) => options?.onSuccess?.());
     const user = userEvent.setup();
     renderSection(true);
-    // Default view is a sort ("Oldest first"), not a lens, so no lens is joined.
-    expect(
-      screen.getByRole('button', { name: /sort and filter comments — oldest first/i }),
-    ).toBeInTheDocument();
+    // The composer says "Posting as Undecided".
+    expect(screen.getByText(/posting as/i)).toHaveTextContent(/Undecided/);
+    // Select a lens FILTER — this must NOT tag the comment.
+    await pickView(user, 'Skeptical (0)');
     await user.type(screen.getByRole('textbox', { name: 'Write a comment' }), 'A general point');
     await user.click(screen.getByRole('button', { name: 'Comment' }));
     expect(mutate.mock.calls[0]?.[0]).not.toHaveProperty('lens_id');
@@ -715,8 +727,11 @@ describe('CommentSection', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('WS-G.2.2 — a reply never joins a lens, even while a lens is selected', async () => {
+  it('WS-G.2.2 — a reply never carries the posting lens, even for a lensed member', async () => {
     twoLenses();
+    // Even with a real MEMBERSHIP posting lens AND a lens filter active, a REPLY
+    // stays untagged — only top-level comments join the member's lens.
+    myLensIdState = LENS_SKEPTICAL;
     queryState = {
       data: {
         comments: [

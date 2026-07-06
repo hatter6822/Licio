@@ -206,11 +206,15 @@ licio/
 │   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
 │   │       │   ├── comments/            -- Inline CommentSection + comment composer/media +
 │   │       │   │                           the ONE "view" control (sort: new/old/participation +
-│   │       │   │                           lens filter; button→modal Sheet) (WS-T, WS-G.2.2)
+│   │       │   │                           lens READING filter only; button→modal Sheet) (WS-T,
+│   │       │   │                           WS-G.2.2); composer posts the member's lens, not the view
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
 │   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (+ LensManager,
-│   │       │   │                           WS-G.2.2 steward lens create/list) + RoomMembership
-│   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership)
+│   │       │   │                           WS-G.2.2 steward lens create/list) + RoomLensControl
+│   │       │   │                           (WS-G.2.2 member POSTING-lens button + modal, between
+│   │       │   │                           join + governance; default "Undecided") + RoomMembership
+│   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership; picks
+│   │       │   │                           the posting lens on join)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
 │   │       │   │                           ExposureLabel, TopicRepeatsButton,
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +

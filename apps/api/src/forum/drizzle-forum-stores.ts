@@ -642,6 +642,7 @@ export class DrizzleRoomStore implements RoomStore {
       userId: row.userId,
       status: row.status,
       requestId: row.requestId,
+      lensId: row.lensId ?? null,
       notificationPreferences:
         row.notificationPreferences as RoomSubscriptionRecord['notificationPreferences'],
       requestedAt: iso(row.requestedAt),
@@ -869,14 +870,20 @@ export class DrizzleRoomStore implements RoomStore {
         userId: record.userId,
         status: record.status,
         requestId: record.requestId,
+        lensId: record.lensId,
         notificationPreferences: record.notificationPreferences,
         requestedAt: new Date(record.requestedAt),
         joinedAt: record.joinedAt !== null ? new Date(record.joinedAt) : null,
       })
+      // Full replace on conflict (mirrors the in-memory store): every caller
+      // passes the intended lensId (the join sets it, notifications/approval
+      // preserve the read-back value), so overwriting is correct.  Dedicated
+      // lens CHANGES flow through setSubscriptionLens.
       .onConflictDoUpdate({
         target: [roomSubscriptionsTable.roomId, roomSubscriptionsTable.userId],
         set: {
           status: record.status,
+          lensId: record.lensId,
           notificationPreferences: record.notificationPreferences,
           joinedAt: record.joinedAt !== null ? new Date(record.joinedAt) : null,
         },
@@ -885,6 +892,21 @@ export class DrizzleRoomStore implements RoomStore {
     const row = rows[0];
     if (!row) throw new Error('subscription upsert returned no row');
     return this.#toSubscription(row);
+  }
+
+  async setSubscriptionLens(
+    roomId: string,
+    userId: string,
+    lensId: string | null,
+  ): Promise<RoomSubscriptionRecord | null> {
+    const rows = await this.#db
+      .update(roomSubscriptionsTable)
+      .set({ lensId })
+      .where(
+        and(eq(roomSubscriptionsTable.roomId, roomId), eq(roomSubscriptionsTable.userId, userId)),
+      )
+      .returning();
+    return rows[0] ? this.#toSubscription(rows[0]) : null;
   }
 
   async getSubscription(roomId: string, userId: string): Promise<RoomSubscriptionRecord | null> {
