@@ -583,4 +583,36 @@ describe('CommentSection', () => {
     renderSection(true);
     expect(screen.getByRole('combobox', { name: /reading this as/i })).toBeInTheDocument();
   });
+
+  it('WS-G.2.2 — prefills the composer from the remembered room vantage', () => {
+    useRoomVantageStore.getState().setVantage(roomId, LENS_SKEPTICAL);
+    lensesState = [
+      lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' }),
+      lens({ lens_id: LENS_INDUSTRY, name: 'Industry', lens_type: 'policy' }),
+    ];
+    renderSection(true);
+    // The "declare once" vantage is pre-selected on the trigger.
+    expect(screen.getByRole('combobox', { name: /reading this as/i })).toHaveTextContent(
+      'Skeptical',
+    );
+  });
+
+  it('WS-G.2.2 — never offers the lens picker on a reply composer (top-level only)', async () => {
+    lensesState = [lens({ lens_id: LENS_SKEPTICAL, name: 'Skeptical', lens_type: 'skeptical' })];
+    queryState = {
+      data: {
+        comments: [comment({ reply_count: 0, has_more_replies: false })],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+      },
+    };
+    const user = userEvent.setup();
+    renderSection(true);
+    // Open the reply composer on the one comment…
+    await user.click(screen.getByRole('button', { name: 'Reply' }));
+    expect(screen.getByRole('textbox', { name: 'Write a reply' })).toBeInTheDocument();
+    // …and only the TOP-LEVEL composer carries a lens picker (the reply adds none).
+    expect(screen.getAllByRole('combobox', { name: /reading this as/i })).toHaveLength(1);
+  });
 });

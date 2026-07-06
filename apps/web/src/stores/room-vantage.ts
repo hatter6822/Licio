@@ -55,11 +55,12 @@ export const useRoomVantageStore = create<RoomVantageState>((set, get) => ({
   getVantage: (roomId) => get().byRoom[roomId] ?? null,
   setVantage: (roomId, lensId) => {
     const next = { ...get().byRoom };
-    if (lensId === null) {
-      delete next[roomId];
-    } else {
-      next[roomId] = lensId;
-    }
+    // Always remove first so a re-declared room RE-INSERTS at the tail: JS keeps
+    // a string key's position on value update, so without this a daily-used room
+    // could be evicted as "oldest" despite being just re-declared. Delete-then-
+    // append makes {@link bounded}'s keep-last-N a true LRU (recency of set).
+    delete next[roomId];
+    if (lensId !== null) next[roomId] = lensId;
     const byRoom = bounded(next);
     set({ byRoom });
     savePersisted(PERSIST, { byRoom });

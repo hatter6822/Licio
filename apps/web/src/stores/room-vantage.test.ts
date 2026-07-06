@@ -52,4 +52,16 @@ describe('room vantage store (WS-G.2.2 declare-once lens)', () => {
     for (let i = 0; i < 60; i += 1) setVantage(uuid(i), LENS_A);
     expect(Object.keys(useRoomVantageStore.getState().byRoom).length).toBeLessThanOrEqual(50);
   });
+
+  it('evicts the least-recently-SET room, sparing one that was just re-declared (LRU)', () => {
+    const { setVantage, getVantage } = useRoomVantageStore.getState();
+    for (let i = 0; i < 50; i += 1) setVantage(uuid(i), LENS_A); // rooms 0..49 fill the cap
+    setVantage(uuid(0), LENS_B); // re-declare room 0 → it becomes the most recent
+    setVantage(uuid(50), LENS_A); // a 51st room forces one eviction
+    // Room 0 survives (recently re-declared); the now-oldest (room 1) is evicted.
+    expect(getVantage(uuid(0))).toBe(LENS_B);
+    expect(getVantage(uuid(1))).toBeNull();
+    expect(getVantage(uuid(50))).toBe(LENS_A);
+    expect(Object.keys(useRoomVantageStore.getState().byRoom).length).toBe(50);
+  });
 });

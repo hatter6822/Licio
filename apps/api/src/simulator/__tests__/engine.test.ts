@@ -358,4 +358,15 @@ describe('simulator engine — interpretation lens tagging (WS-G.2.2)', () => {
     expect(comments.length).toBeGreaterThan(0);
     expect(comments.every((c) => c.lensId === null)).toBe(true);
   });
+
+  it('lens resolution consumes NO prng — the plan is identical modulo lensId', () => {
+    // If a future change read the prng while resolving a lens, the two plans
+    // would diverge in bodies/order/count under the same seed. Stripping lensId
+    // must leave byte-identical plans (proving lens tagging is prng-neutral).
+    const stripLens = (plan: SimAction[]): SimAction[] =>
+      plan.map((a) => (a.kind === 'comment' ? { ...a, lensId: null } : a));
+    const withLenses = stripLens(planTick(lensInput(LENSED)));
+    const withoutLenses = stripLens(planTick(lensInput(new Map())));
+    expect(withLenses).toEqual(withoutLenses);
+  });
 });
