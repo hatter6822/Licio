@@ -733,8 +733,15 @@ production code, not hand-authored fixtures:
 - MERI exposure labels appear on feed cards and in the independent-sources
   drawer. Near-duplicate reposts stay grouped as duplicate context rather than
   counting as independent support.
-- SCOI divergence appears in the **Where interpretations differ** drawer for
-  stories where seeded lenses genuinely interpret the context differently.
+- SCOI divergence appears in the **Where interpretations differ** drawer
+  (rendered right after the composer) for stories where seeded lenses genuinely
+  interpret the context differently (S10). Lenses are authored end-to-end: a room
+  steward manages them under **Room settings → Interpretation lenses**, and the
+  conversation's single **view** control (a button on the LEFT of the composer
+  action row, opposing the Comment button, that opens a modal selector) lets you
+  sort comments by **Newest / Oldest / Highest participation** or filter by a
+  **lens** — and writing a comment while a lens is selected joins that reading (the
+  button reads "Lens: X" while it is active).
 - Safety posture such as `caution` or `under review` appears descriptively on
   affected threads.
 - **Profile → Signal Ledger** shows the signed-in user's own bounded attention
@@ -831,6 +838,17 @@ the coordinated-burst cluster is intentionally fresh so it genuinely trips the
 anti-signal detectors. A per-boot story budget caps how much it creates. The
 whole run is deterministic: the same seed and scenario replay the same traffic,
 which is what makes a tester's session reproducible.
+
+**Interpretation lenses (WS-G.2.2).** The simulator provisions a focused lens
+set (`skeptical`, `expert`, `local_resident`, `policy`) in each room it uses and
+tags ROOT comments with the author persona's reading lens (each archetype maps to
+one lens) through the REAL `createContribution` path (the server re-validates the
+tag against the room's lenses). Different archetypes read through different
+lenses, so an active story accumulates two or more lens-tagged readings — which is
+what makes the **"Where interpretations differ"** drawer and the conversation
+**lens filter** (in the view control) appear from live simulated traffic, not
+only on the S10 seed fixture. Replies carry no lens (matching the client, which
+tags top-level comments only).
 
 The simulator's engine, personas, scenarios, and content generators live in
 `apps/api/src/simulator/`; the control panel is `apps/web/src/components/dev/`.

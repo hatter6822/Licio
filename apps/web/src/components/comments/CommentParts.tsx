@@ -11,7 +11,7 @@ import {
   type ContributionWriteCreate,
   deriveCitationsFromBody,
 } from '@licio/shared';
-import { useMemo, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useCreateCommentMutation } from '../../lib/queries.js';
 import { relativeTimeShort } from '../../lib/time.js';
@@ -114,11 +114,23 @@ export function CommentMedia({ comment }: { comment: CommentItemType }): React.R
 export function CommentComposer({
   storyId,
   threadId,
+  activeLens,
+  leadingAction,
   parentContributionId,
   onCancel,
 }: {
   storyId: string;
   threadId: string;
+  /** The interpretation lens the conversation is currently scoped to (WS-G.2.2),
+   *  passed only to the TOP-LEVEL composer. A comment written here JOINS that
+   *  reading — the server re-validates the tag against the room's lenses. There
+   *  is ONE lens control (the "view" button on the LEFT of the action row, which
+   *  shows the active lens); the composer has no separate picker. Replies stay
+   *  untagged. */
+  activeLens?: { id: string; name: string };
+  /** Node rendered on the LEFT of the action row, opposing the Comment button —
+   *  the conversation "view" selector (top-level composer only). */
+  leadingAction?: ReactNode;
   parentContributionId?: string;
   onCancel?: () => void;
 }): React.ReactElement {
@@ -127,6 +139,9 @@ export function CommentComposer({
   const trimmed = body.trim();
   // Sources are the INLINE links in the body — derived, not a separate list.
   const derivedSources = useMemo(() => deriveCitationsFromBody(trimmed), [trimmed]);
+  const isReply = parentContributionId !== undefined;
+  // A top-level comment joins the currently-selected lens; replies stay untagged.
+  const lensTag = isReply ? undefined : activeLens;
 
   const submit = (): void => {
     if (trimmed.length === 0 || mutation.isPending) return;
@@ -138,6 +153,7 @@ export function CommentComposer({
       body: trimmed,
       ...(citations.length > 0 ? { citations } : {}),
       ...(parentContributionId ? { parent_contribution_id: parentContributionId } : {}),
+      ...(lensTag ? { lens_id: lensTag.id } : {}),
     };
     mutation.mutate(payload, {
       onSuccess: () => {
@@ -146,7 +162,6 @@ export function CommentComposer({
       },
     });
   };
-  const isReply = parentContributionId !== undefined;
   const fieldId = parentContributionId ? `reply-${parentContributionId}` : 'comment-body';
   return (
     <form
@@ -195,10 +210,21 @@ export function CommentComposer({
             : `${derivedSources.length} sources linked in this comment.`}
         </p>
       ) : null}
-      <div className={cn('flex items-center gap-3', isReply ? 'justify-between' : 'justify-end')}>
+      <div
+        className={cn(
+          'flex flex-wrap items-center gap-3',
+          isReply || leadingAction ? 'justify-between' : 'justify-end',
+        )}
+      >
         {isReply ? (
           <p className="text-sm text-ink-muted">{trimmed.length}/5000 characters</p>
-        ) : null}
+        ) : (
+          // The conversation "view" selector sits on the LEFT, opposing the Comment
+          // button on the right (WS-G.2.2/WS-T). When a lens view is active it reads
+          // "Lens: X", so a comment written here joins that reading — no separate
+          // picker or hint needed.
+          (leadingAction ?? null)
+        )}
         <div className="flex gap-2">
           {onCancel ? (
             <Button type="button" variant="ghost" onClick={onCancel}>

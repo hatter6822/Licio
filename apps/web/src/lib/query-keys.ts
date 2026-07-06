@@ -26,6 +26,8 @@ export const queryKeys = {
   rooms: () => ['rooms'] as const,
   room: (roomId: string) => ['room', roomId] as const,
   roomFeed: (roomId: string) => ['room', roomId, 'feed'] as const,
+  /** WS-G.2.2 — the room's interpretation lenses. */
+  roomLenses: (roomId: string) => ['room', roomId, 'lenses'] as const,
   // WS-U AI-governed rooms.
   governedBy: (roomId: string) => ['room', roomId, 'governed-by'] as const,
   stewardSeat: (roomId: string) => ['room', roomId, 'steward'] as const,

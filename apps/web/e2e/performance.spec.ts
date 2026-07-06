@@ -56,7 +56,15 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
       });
     });
     await page.route(`**/v1/stories/${STORY}/interpretations`, async (route) => {
-      await route.fulfill({ json: { interpretations: [] } });
+      // A SCHEMA-VALID payload: `{ interpretations: [] }` alone fails
+      // storyInterpretationsResponseSchema (missing story_id/context_state/
+      // needs_context), so the query would retry with backoff — and since the
+      // comment section now subscribes to it (for the "Where interpretations
+      // differ" drawer), that retry churn re-renders the section during the
+      // measured interaction and blows the budget on webkit.
+      await route.fulfill({
+        json: { story_id: STORY, context_state: null, interpretations: [], needs_context: false },
+      });
     });
     await page.route(`**/v1/stories/${STORY}/independent-sources`, async (route) => {
       await route.fulfill({ json: { sources: [] } });

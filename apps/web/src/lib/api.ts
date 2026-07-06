@@ -34,6 +34,9 @@ import {
   featureFlagsResponseSchema,
   feedPreferencesSchema,
   feedResponseSchema,
+  type LensCreateRequest,
+  type LensPublic,
+  lensPublicSchema,
   type NotificationPreferences,
   notificationPreferencesSchema,
   okAckSchema,
@@ -295,6 +298,22 @@ export async function joinRoom(roomId: string): Promise<RoomJoinResponse> {
 export async function leaveRoom(roomId: string): Promise<void> {
   const response = await client.v1.rooms[':roomId'].join.$delete({ param: { roomId } });
   await parseResponse(response, z.object({ left: z.boolean() }));
+}
+
+/** WS-G.2.2 — the room's interpretation lenses (read; visible to any member). */
+export async function fetchRoomLenses(roomId: string): Promise<LensPublic[]> {
+  const response = await client.v1.rooms[':roomId'].lenses.$get({ param: { roomId } });
+  const { items } = await parseResponse(response, z.object({ items: z.array(lensPublicSchema) }));
+  return items;
+}
+
+/** WS-G.2.2 — create a room lens (steward-only; the server enforces the role). */
+export async function createLens(roomId: string, request: LensCreateRequest): Promise<LensPublic> {
+  const response = await client.v1.rooms[':roomId'].lenses.$post({
+    param: { roomId },
+    json: request,
+  });
+  return parseResponse(response, lensPublicSchema);
 }
 
 export async function fetchFeedPreferences(): Promise<FeedPreferences> {

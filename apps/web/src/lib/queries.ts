@@ -9,6 +9,7 @@ import type {
   DebateOverrideRequest,
   DebatePositionUpdate,
   FeedMode,
+  LensCreateRequest,
   NotificationPreferences,
   RoomCreateRequest,
   RoomJoinModel,
@@ -17,7 +18,13 @@ import type {
   StoryDetail,
   UserSettings,
 } from '@licio/shared';
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { readNotificationsUsedToday } from '../offline/notification-meter.js';
 import {
   cacheSignalLedger,
@@ -117,6 +124,11 @@ export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOpt
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
     enabled: storyId.length > 0,
+    // Changing the sort `order` mints a new query key; keep the previous page
+    // rendered during the refetch so a Newest⇄Oldest toggle reorders in place
+    // instead of blanking the conversation (which would also collapse the view
+    // control and drop focus). Applies to the dedicated comment page too.
+    placeholderData: keepPreviousData,
     ...cachePolicy.thread,
   });
   const pages = query.data?.pages ?? [];
@@ -270,6 +282,29 @@ export function useLeaveRoomMutation(roomId: string) {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-G.2.2 — the room's interpretation lenses (read; visible to any member).
+ *  Powers the comment composer's lens picker and the conversation filter. */
+export function useRoomLensesQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.roomLenses(roomId),
+    queryFn: () => api.fetchRoomLenses(roomId),
+    enabled,
+    ...cachePolicy.room,
+  });
+}
+
+/** WS-G.2.2 — create a room lens (steward-only; the server enforces the role).
+ *  Refreshes the lens list on success. */
+export function useCreateLensMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: LensCreateRequest) => api.createLens(roomId, request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.roomLenses(roomId) });
     },
   });
 }

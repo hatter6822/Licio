@@ -13,7 +13,6 @@ import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
 import { StoryMedia } from '../../components/story/StoryMedia/index.js';
-import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { Dialog } from '../../components/ui/Dialog/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -197,7 +196,15 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 lightly nested comment section; /threads deep links remain only
                 as backwards-compatible redirects/read shells. */}
             {data.thread_id ? (
-              <CommentSection storyId={data.story_id} threadId={data.thread_id} />
+              // Key by story id so all per-story comment state — the lens filter
+              // selection and the composer's once-only vantage/body — resets when
+              // the reader navigates story→story (the route reuses this instance).
+              <CommentSection
+                key={data.story_id}
+                storyId={data.story_id}
+                threadId={data.thread_id}
+                {...(data.room_id ? { roomId: data.room_id } : {})}
+              />
             ) : null}
             {/* WS-Q.5.4a — the author's visibility control (owner only). */}
             {data.is_owner ? (
@@ -207,9 +214,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 {...(data.room_visibility ? { roomVisibility: data.room_visibility } : {})}
               />
             ) : null}
-            {interpretations.data ? (
-              <WhereInterpretationsDiffer data={interpretations.data} storyId={storyId} />
-            ) : null}
+            {/* WS-H "Where interpretations differ" renders inside CommentSection,
+                right after the composer (not here at the page bottom). */}
           </article>
         )
       }

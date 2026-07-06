@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import type { LensType } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import {
   type EnginePersona,
@@ -14,8 +15,18 @@ import { createPrng } from '../prng.js';
 import { SCENARIOS } from '../scenarios.js';
 import { req } from './sim-test-util.js';
 
-function room(id: string, expertGated = false): WorldRoom {
-  return { roomId: id, name: `Room ${id}`, expertGated, domains: ['health', 'climate', 'local'] };
+function room(
+  id: string,
+  expertGated = false,
+  lensesByType: ReadonlyMap<LensType, string> = new Map(),
+): WorldRoom {
+  return {
+    roomId: id,
+    name: `Room ${id}`,
+    expertGated,
+    domains: ['health', 'climate', 'local'],
+    lensesByType,
+  };
 }
 
 function story(id: string, roomId: string, opts: Partial<WorldStory> = {}): WorldStory {
@@ -278,5 +289,84 @@ describe('simulator engine planTick', () => {
     }
     // The non-expert can never place a story when the only room is expert-gated.
     expect(submitters.has(nonExpert.userId)).toBe(false);
+  });
+});
+
+describe('simulator engine — interpretation lens tagging (WS-G.2.2)', () => {
+  const LENSED = new Map<LensType, string>([
+    ['skeptical', 'lens-skeptical'],
+    ['expert', 'lens-expert'],
+    ['local_resident', 'lens-local'],
+    ['policy', 'lens-policy'],
+  ]);
+
+  // A world whose one room carries `lenses`, with empty comment branches so every
+  // NEW comment is a ROOT comment (the only kind the simulator lens-tags).
+  function lensedWorld(lenses: ReadonlyMap<LensType, string>): SimWorld {
+    return baseWorld({
+      rooms: [room('r1', false, lenses)],
+      commentsByStory: new Map([
+        ['s1', []],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+  }
+
+  function commentsOf(plan: SimAction[]): Extract<SimAction, { kind: 'comment' }>[] {
+    return plan.filter((a): a is Extract<SimAction, { kind: 'comment' }> => a.kind === 'comment');
+  }
+
+  const lensInput = (lenses: ReadonlyMap<LensType, string>) => ({
+    scenario: SCENARIOS.viral_thread,
+    world: lensedWorld(lenses),
+    personas: personas([...BASE_ROSTER, ...CLUSTER_ROSTER]),
+    newcomersProvisioned: 0,
+    prng: createPrng('lens-seed'),
+    scenarioElapsedMs: 60_000,
+    tickMs: 5_000,
+    speed: 20,
+    storySerial: 1,
+    kickoffDone: true,
+    repostDone: true,
+  });
+
+  it('tags root comments with a vantage lens the room actually provides', () => {
+    const comments = commentsOf(planTick(lensInput(LENSED)));
+    const validIds = new Set(LENSED.values());
+    const tagged = comments.filter((c) => c.lensId !== null);
+    // Synthetic traffic produces lens-grouped comments (feeds SCOI divergence)…
+    expect(tagged.length).toBeGreaterThan(0);
+    // …every tag is a real room lens, and only ROOT comments ever carry one.
+    for (const c of comments) {
+      if (c.lensId !== null) {
+        expect(validIds.has(c.lensId)).toBe(true);
+        expect(c.parentContributionId).toBeNull();
+      }
+    }
+  });
+
+  it('spreads tags across multiple lenses so SCOI has divergence to measure', () => {
+    const comments = commentsOf(planTick(lensInput(LENSED)));
+    const usedLenses = new Set(comments.map((c) => c.lensId).filter((id) => id !== null));
+    expect(usedLenses.size).toBeGreaterThanOrEqual(2);
+  });
+
+  it('never tags a comment when the room provisions no lenses (guard)', () => {
+    const comments = commentsOf(planTick(lensInput(new Map())));
+    // Same seed ⇒ the same comments are produced; only the lens tag differs.
+    expect(comments.length).toBeGreaterThan(0);
+    expect(comments.every((c) => c.lensId === null)).toBe(true);
+  });
+
+  it('lens resolution consumes NO prng — the plan is identical modulo lensId', () => {
+    // If a future change read the prng while resolving a lens, the two plans
+    // would diverge in bodies/order/count under the same seed. Stripping lensId
+    // must leave byte-identical plans (proving lens tagging is prng-neutral).
+    const stripLens = (plan: SimAction[]): SimAction[] =>
+      plan.map((a) => (a.kind === 'comment' ? { ...a, lensId: null } : a));
+    const withLenses = stripLens(planTick(lensInput(LENSED)));
+    const withoutLenses = stripLens(planTick(lensInput(new Map())));
+    expect(withLenses).toEqual(withoutLenses);
   });
 });

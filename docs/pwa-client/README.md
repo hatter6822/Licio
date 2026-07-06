@@ -454,6 +454,28 @@ server's bars, it does not re-decide them.
   the scan-gated path first; a still-pending scan shows "pending a safety
   check", never a failure. The form uses `noValidate` so the accessible JS
   validation (not native bubbles) drives the UX.
+- **Comment view control + interpretation lenses** (WS-G.2.2/WS-T,
+  `components/rooms/LensManager`,
+  `components/comments/{CommentSection,CommentViewSelector,comment-participation}`).
+  A room steward creates/lists lenses in the steward-only room settings
+  (`POST /v1/rooms/:id/lenses`; server enforces the role). The conversation then
+  has ONE "view" control — a button labelled by the active view that opens a modal
+  `Sheet` (scales to any number of lenses, unlike chips). Its mutually-exclusive
+  options unify **sorting** and **lens filtering**: *Newest*/*Oldest*
+  (chronological, the server `order` param across the whole thread), *Highest
+  participation* (the WS-E.2.1c content-participation weight — sourced comments
+  rank above unsourced, debate-losers sink; a content weight, NEVER attention or
+  applause, since per-comment attention is not tracked — `comment-participation.ts`),
+  or a **lens** (scopes the loaded comments to one reading). Selecting a lens is
+  ALSO the lens a comment written here joins — the view button sits on the LEFT of
+  the composer action row (opposing the Comment button) and reads "Lens: X" when a
+  lens is active, so no separate picker/hint is needed; replies stay untagged. The
+  modal itself explains the dual purpose ("Reading a lens also posts your comment
+  to it. Not a vote."). Story detail carries
+  `room_id` so the client can load the room's lenses; the authoritative `lens_id`
+  tag is validated server-side against the room. The "Where interpretations differ"
+  drawer (WS-H) renders right after the composer with a plain-language divergence
+  band. A lens is an interpretation context, never a vote (`check:no-applause`).
 - **Native media rendering** (`components/story/StoryMedia`, wired into
   `StoryCard` and the story page via the shared `feed-card` mapper). Image/video
   load ONLY through the scan-gated upload URL; video is a native

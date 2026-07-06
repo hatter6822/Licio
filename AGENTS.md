@@ -514,9 +514,12 @@ licio/
 │   │       │   │                           import.meta.env.DEV-gated, tree-shaken in production)
 │   │       │   ├── composer/            -- StoryComposer (author topic picker) + shared affordances (Attachment,
 │   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
-│   │       │   ├── comments/            -- Inline CommentSection + comment composer/media (WS-T)
+│   │       │   ├── comments/            -- Inline CommentSection + comment composer/media +
+│   │       │   │                           the ONE "view" control (sort: new/old/participation +
+│   │       │   │                           lens filter; button→modal Sheet) (WS-T, WS-G.2.2)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
-│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm + RoomMembership
+│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (+ LensManager,
+│   │       │   │                           WS-G.2.2 steward lens create/list) + RoomMembership
 │   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
 │   │       │   │                           ExposureLabel, TopicRepeatsButton,
@@ -831,10 +834,12 @@ licio/
 │           │   └── service.ts            --   the process-wide ingestion-server singleton
 │           ├── simulator/                -- DEV-ONLY traffic simulator (NEVER in production):
 │           │   ├── prng.ts               --   deterministic mulberry32 seeded PRNG
-│           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster
+│           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster +
+│           │   │                              per-archetype lens vantage (WS-G.2.2)
 │           │   ├── content.ts            --   deterministic story/comment/evidence generators
 │           │   ├── scenarios.ts          --   the six scenario presets (steady…coordinated_burst)
 │           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
+│           │   │                              (tags root comments with the author's vantage lens)
 │           │   ├── link-fixtures.ts      --   dev fetchDocument for reserved `.example` hosts
 │           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY I/O module — drives the
 │           │   │                              REAL submission/contribution/attention/report paths +

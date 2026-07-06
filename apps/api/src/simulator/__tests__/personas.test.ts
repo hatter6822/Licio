@@ -5,9 +5,12 @@ import {
   archetypeOf,
   BASE_ROSTER,
   CLUSTER_ROSTER,
+  lensVantageOf,
   NEWCOMER_CAP,
   newcomerSpec,
   PERSONA_ARCHETYPES,
+  SIM_LENS_NAMES,
+  SIM_LENS_TYPES,
   SIM_USER_ID,
 } from '../personas.js';
 import { req } from './sim-test-util.js';
@@ -73,6 +76,50 @@ describe('simulator personas', () => {
       const [min, max] = archetype.itemsPerBatch;
       expect(min).toBeGreaterThanOrEqual(1);
       expect(max).toBeGreaterThanOrEqual(min);
+    }
+  });
+});
+
+describe('interpretation lens vantage (WS-G.2.2)', () => {
+  it('maps every returned vantage to a provisioned lens type', () => {
+    for (const id of Object.keys(PERSONA_ARCHETYPES) as (keyof typeof PERSONA_ARCHETYPES)[]) {
+      const vantage = lensVantageOf(id);
+      if (vantage !== null) expect(SIM_LENS_TYPES).toContain(vantage);
+    }
+  });
+
+  it('gives the main commenting archetypes a vantage and readers/authors none', () => {
+    // Commenting archetypes declare a reading…
+    for (const id of [
+      'commenter',
+      'evidence_contributor',
+      'expert_author',
+      'local_correspondent',
+      'deep_reader',
+      'reporter',
+      'newcomer',
+      'cluster_member',
+    ] as const) {
+      expect(lensVantageOf(id)).not.toBeNull();
+    }
+    // …pure readers and story authors declare none.
+    for (const id of ['author', 'lurker', 'skimmer', 'burst_returner'] as const) {
+      expect(lensVantageOf(id)).toBeNull();
+    }
+  });
+
+  it('spreads the commenting archetypes across at least three distinct lenses', () => {
+    const vantages = new Set(
+      (Object.keys(PERSONA_ARCHETYPES) as (keyof typeof PERSONA_ARCHETYPES)[])
+        .map((id) => lensVantageOf(id))
+        .filter((v) => v !== null),
+    );
+    expect(vantages.size).toBeGreaterThanOrEqual(3);
+  });
+
+  it('names every lens type (so create-if-missing always has a name)', () => {
+    for (const type of SIM_LENS_TYPES) {
+      expect(SIM_LENS_NAMES[type]).toBeTruthy();
     }
   });
 });
