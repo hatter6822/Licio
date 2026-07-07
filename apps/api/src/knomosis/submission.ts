@@ -307,6 +307,10 @@ export async function applyTransition(
 export async function resubmitPendingActions(
   deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log'> & {
     gateway: () => KnomosisGateway | null;
+    /** WS-L.3.5c: skip forwarding a record whose submission is paused — the
+     *  crypto flag is off, or the `action_submission` (or a narrower) kill switch
+     *  is engaged for its room.  Absent ⇒ never paused (the retry default). */
+    submissionPaused?: (roomId: string) => Promise<boolean>;
   },
   deploymentId: string,
   limit = 50,
@@ -316,10 +320,15 @@ export async function resubmitPendingActions(
   const pending = (await deps.actions.listUnreconciled(deploymentId, limit)).filter(
     (r) => r.submissionState === 'submitted',
   );
+  let forwarded = 0;
   for (const record of pending) {
+    // An incident pause must stop the SCHEDULER's retries too, not just the HTTP
+    // submit route — otherwise a paused deployment keeps forwarding to the gateway.
+    if (deps.submissionPaused && (await deps.submissionPaused(record.roomId))) continue;
     await forwardToGateway(deps, gateway, record);
+    forwarded += 1;
   }
-  return pending.length;
+  return forwarded;
 }
 
 export type { KnomosisSignedActionType };

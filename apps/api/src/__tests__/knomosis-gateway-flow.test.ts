@@ -860,6 +860,9 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     expect(rebuilt.remarked).toBeGreaterThanOrEqual(0);
     const afterRebuild = await reconcileDeployment(fixture.knomosis, DEPLOYMENT);
     expect(afterRebuild.halted).toBe(false);
+    // The rebuild RE-ANCHORS the cursor to the retained-window start (1000 − 1),
+    // so the next tick no longer re-fetches the same gap (WS-L review fix).
+    expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBe('999');
   });
 
   it('does NOT advance the cursor past an incomplete seq group (WS-L review fix)', async () => {

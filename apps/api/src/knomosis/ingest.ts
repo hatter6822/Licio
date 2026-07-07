@@ -270,6 +270,15 @@ export async function rebuildFromSnapshot(
       lowWatermarkSeq: result.lowWatermarkSeq,
       createdAt: nowIso,
     });
+    // RE-ANCHOR the resume cursor to the retained-window start.  The dropped
+    // events were never stored, so the derived max-stored seq is still PRE-gap;
+    // without this the next tick re-fetches the same gap and re-halts forever.
+    // getEvents returns seq > cursor, so anchor at `oldestRetained - 1` to include
+    // the whole retained window on the next pull.
+    const oldestRetained = result.details['oldest_retained_seq'];
+    if (typeof oldestRetained === 'string' && /^\d+$/.test(oldestRetained)) {
+      await deps.events.recordGatewayCursor(deploymentId, (BigInt(oldestRetained) - 1n).toString());
+    }
     clearedGaps += 1;
   }
   await deps.audit.append({

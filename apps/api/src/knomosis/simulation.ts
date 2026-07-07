@@ -210,7 +210,40 @@ export async function ensureSimTreasury(
     balances: { [config.simStartingAsset]: config.simStartingBalanceMinorUnits },
     updatedAt: new Date(deps.now()).toISOString(),
   };
-  return deps.simTreasury.put(record);
+  // Insert-if-absent: a concurrent create/deposit returns the authoritative row.
+  return (await deps.simTreasury.put(record)) ?? record;
+}
+
+/**
+ * Read-modify-write the sim treasury balances with optimistic-concurrency retry
+ * (WS-L.4.1c): two racing deposits/executions can no longer read the same
+ * snapshot and overwrite each other's delta.  `compute` runs against the LATEST
+ * balances each attempt (so an execution's sufficiency check stays atomic with
+ * the debit); it returns the next balances + a result, or a typed error.
+ */
+async function mutateSimTreasury<T>(
+  deps: SimulationDeps,
+  roomId: string,
+  compute: (
+    balances: Record<string, string>,
+  ) => { balances: Record<string, string>; result: T } | { error: SimulationError },
+): Promise<{ ok: true; result: T } | SimulationError> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const current = await ensureSimTreasury(deps, roomId);
+    const computed = compute(current.balances);
+    if ('error' in computed) return computed.error;
+    // The version MUST advance even under a static test clock, or a same-ms
+    // second writer would see an unchanged version and lose its update.
+    const nextUpdatedAt = new Date(
+      Math.max(deps.now(), Date.parse(current.updatedAt) + 1),
+    ).toISOString();
+    const written = await deps.simTreasury.put(
+      { roomId, balances: computed.balances, updatedAt: nextUpdatedAt },
+      current.updatedAt,
+    );
+    if (written !== null) return { ok: true, result: computed.result };
+  }
+  return err(409, 'treasury_contended', 'The simulated treasury is busy; please retry.');
 }
 
 export async function simTreasuryView(
@@ -243,28 +276,27 @@ export async function simDeposit(
     return err(503, 'kill_switch_active', 'Payment creation is temporarily paused.');
   }
 
-  const treasury = await ensureSimTreasury(deps, args.roomId);
-  // Reject a deposit that would introduce a distinct asset beyond the schema cap:
-  // otherwise the write succeeds and every later treasury/governance read parses a
-  // balances array that violates simTreasuryResponseSchema → a 500 (WS-L.4.1c).
-  const isNewAsset = !Object.hasOwn(treasury.balances, args.asset);
-  if (isNewAsset && Object.keys(treasury.balances).length >= SIM_TREASURY_MAX_ASSETS) {
-    return err(
-      409,
-      'too_many_sim_assets',
-      `A simulated treasury holds at most ${SIM_TREASURY_MAX_ASSETS} distinct assets.`,
-    );
-  }
+  // Atomic read-modify-write: the asset-cap check + the balance add re-run against
+  // the LATEST balances each attempt, so concurrent deposits cannot lose an update
+  // or slip a distinct asset past the schema cap (WS-L.4.1c).
+  const applied = await mutateSimTreasury(deps, args.roomId, (balances) => {
+    const isNewAsset = !Object.hasOwn(balances, args.asset);
+    if (isNewAsset && Object.keys(balances).length >= SIM_TREASURY_MAX_ASSETS) {
+      return {
+        error: err(
+          409,
+          'too_many_sim_assets',
+          `A simulated treasury holds at most ${SIM_TREASURY_MAX_ASSETS} distinct assets.`,
+        ),
+      };
+    }
+    return {
+      balances: { ...balances, [args.asset]: decSum([balances[args.asset] ?? '0', args.amount]) },
+      result: null,
+    };
+  });
+  if (!applied.ok) return applied;
   const nowIso = new Date(deps.now()).toISOString();
-  const next = {
-    ...treasury,
-    balances: {
-      ...treasury.balances,
-      [args.asset]: decSum([treasury.balances[args.asset] ?? '0', args.amount]),
-    },
-    updatedAt: nowIso,
-  };
-  await deps.simTreasury.put(next);
   await deps.simTreasury.appendEntry({
     entryId: deps.uuid(),
     roomId: args.roomId,
@@ -531,28 +563,33 @@ export async function executeSimProposal(
 
   const nowIso = new Date(nowMs).toISOString();
   if (proposal.requestedAmount !== null && proposal.asset !== null) {
-    const treasury = await ensureSimTreasury(deps, args.roomId);
-    const available = treasury.balances[proposal.asset] ?? '0';
-    if (decCompare(proposal.requestedAmount, available) > 0) {
-      // Balance can never go negative (WS-L.4.1c): execution blocks instead.
-      const blocked: GovernanceProposalRecord = { ...proposal, executionState: 'blocked' };
-      await deps.proposals.update(blocked);
-      return err(409, 'insufficient_sim_funds', 'The simulated treasury cannot cover this.');
-    }
-    await deps.simTreasury.put({
-      ...treasury,
-      balances: {
-        ...treasury.balances,
-        [proposal.asset]: subtractMinor(available, proposal.requestedAmount),
-      },
-      updatedAt: nowIso,
+    const asset = proposal.asset;
+    const amount = proposal.requestedAmount;
+    // Atomic sufficiency-check + debit: a lost-update race can never drive the
+    // balance negative or double-spend the same grant (WS-L.4.1c).
+    const applied = await mutateSimTreasury(deps, args.roomId, (balances) => {
+      const available = balances[asset] ?? '0';
+      if (decCompare(amount, available) > 0) {
+        return {
+          error: err(409, 'insufficient_sim_funds', 'The simulated treasury cannot cover this.'),
+        };
+      }
+      return { balances: { ...balances, [asset]: subtractMinor(available, amount) }, result: null };
     });
+    if (!applied.ok) {
+      // Insufficient funds blocks execution (never a negative balance); a
+      // contention error just surfaces for retry.
+      if (applied.code === 'insufficient_sim_funds') {
+        await deps.proposals.update({ ...proposal, executionState: 'blocked' });
+      }
+      return applied;
+    }
     await deps.simTreasury.appendEntry({
       entryId: deps.uuid(),
       roomId: args.roomId,
       kind: 'grant_execution',
-      asset: proposal.asset,
-      amount: proposal.requestedAmount,
+      asset,
+      amount,
       actorUserId: args.actorUserId,
       proposalId: proposal.proposalId,
       createdAt: nowIso,

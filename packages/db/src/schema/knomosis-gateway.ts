@@ -444,9 +444,11 @@ export const knomosisReceipts = knomosisSchema.table(
   'knomosis_receipt',
   {
     receiptId: uuid('receipt_id').primaryKey().defaultRandom(),
-    actionRecordId: uuid('action_record_id')
-      .notNull()
-      .references(() => knomosisActionRecords.actionRecordId, { onDelete: 'cascade' }),
+    // SOFT reference (no FK): a PUBLIC receipt is the public transparency ledger
+    // and must SURVIVE the owner's account deletion, so it cannot cascade with the
+    // signed action row.  Data-rights purges the owner's PRIVATE receipts + actions
+    // directly; the ownerless public receipt keeps its own payload/hash (WS-L.3.4c).
+    actionRecordId: uuid('action_record_id').notNull(),
     kind: receiptKindEnum('kind').notNull(),
     /** Public receipts carry ONLY the allowlisted fields (WS-L.3.4c). */
     payload: jsonb('payload').notNull(),
@@ -481,3 +483,13 @@ export const comprehensionResults = knomosisSchema.table(
   (t) => [primaryKey({ columns: [t.userId, t.quizVersion] })],
 );
 export type ComprehensionResultRow = typeof comprehensionResults.$inferSelect;
+
+/** The gateway ingestion RESUME cursor per deployment (WS-L.3.3b).  Distinct from
+ *  the derived max-stored seq: a retention-gap rebuild re-anchors it FORWARD past
+ *  events that were dropped and never stored, so ingestion resumes without
+ *  re-gapping.  `latestGatewaySeq()` returns the max of this and the stored seq. */
+export const knomosisGatewayCursor = knomosisSchema.table('knomosis_gateway_cursor', {
+  deploymentId: uuid('deployment_id').primaryKey(),
+  seq: numeric('seq').notNull(),
+});
+export type KnomosisGatewayCursorRow = typeof knomosisGatewayCursor.$inferSelect;

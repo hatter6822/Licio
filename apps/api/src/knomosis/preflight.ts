@@ -479,34 +479,39 @@ export async function runPreflight(
       );
     }
     /* c8 ignore stop */
-    const region = await deps.regionForUser(input.userId);
-    const jurisdiction = await deps.compliance.jurisdiction({ userId: input.userId, region });
-    if (jurisdiction === 'blocked') {
-      return audited(
-        fail(
-          'sanctions',
-          'JURISDICTION_BLOCKED',
-          'This feature is not available in your region.',
-          input,
-          nowIso,
-        ),
-      );
-    }
-    /* c8 ignore start -- real-funds path (see the sanctions block above): dead
-       on testnet/local; live once a capped/mature deployment is pinned. */
-    if (jurisdiction === 'unknown' && realFunds) {
-      return audited(
-        fail(
-          'sanctions',
-          'JURISDICTION_UNKNOWN',
-          'Your region could not be verified; real-fund actions are unavailable.',
-          input,
-          nowIso,
-        ),
-      );
-    }
-    /* c8 ignore stop */
   }
+
+  // 7b. jurisdiction (WS-L.3.1b) — applies to EVERY real signed action, not just
+  //     fund transfers: an unknown/blocked jurisdiction means "no crypto features"
+  //     per the WS-N port contract, so a binding proposal_sign / charter_update /
+  //     steward_rotation signature must be gated on region eligibility too.
+  const region = await deps.regionForUser(input.userId);
+  const jurisdiction = await deps.compliance.jurisdiction({ userId: input.userId, region });
+  if (jurisdiction === 'blocked') {
+    return audited(
+      fail(
+        'sanctions',
+        'JURISDICTION_BLOCKED',
+        'This feature is not available in your region.',
+        input,
+        nowIso,
+      ),
+    );
+  }
+  /* c8 ignore start -- real-funds path (see the sanctions block above): dead
+     on testnet/local; live once a capped/mature deployment is pinned. */
+  if (jurisdiction === 'unknown' && realFunds) {
+    return audited(
+      fail(
+        'sanctions',
+        'JURISDICTION_UNKNOWN',
+        'Your region could not be verified; real-fund actions are unavailable.',
+        input,
+        nowIso,
+      ),
+    );
+  }
+  /* c8 ignore stop */
 
   // 8. fraud_risk (WS-L.3.1b) — velocity/pattern signals via the WS-N seam.
   const fraud = await deps.compliance.fraudRisk({

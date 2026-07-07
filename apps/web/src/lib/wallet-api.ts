@@ -28,6 +28,8 @@ import {
   walletListResponseSchema,
   walletNonceResponseSchema,
   walletRiskStateResponseSchema,
+  walletUnlinkAcceptedSchema,
+  walletUnlinkBlockedSchema,
 } from '@licio/shared';
 import { z } from 'zod';
 import { client, parseResponse } from './api.js';
@@ -65,23 +67,9 @@ export async function fetchWalletRiskState(walletId: string): Promise<WalletRisk
   return parseResponse(response, walletRiskStateResponseSchema);
 }
 
-const unlinkResultSchema = z.union([
-  z
-    .object({
-      wallet_account_id: z.string(),
-      unlink_state: z.literal('pending_unlink'),
-      finalize_after: z.string(),
-    })
-    .strict(),
-  z
-    .object({
-      error: z.object({ code: z.string(), message: z.string() }),
-      blocking_obligations: z.array(
-        z.object({ type: z.string(), ref: z.string(), description: z.string() }),
-      ),
-    })
-    .strict(),
-]);
+// Reuse the SHARED accepted/blocked contracts so the client can never drift
+// from the server shape (e.g. the blocked response's `total_obligations`).
+const unlinkResultSchema = z.union([walletUnlinkAcceptedSchema, walletUnlinkBlockedSchema]);
 export type WalletUnlinkResult = z.infer<typeof unlinkResultSchema>;
 
 export async function requestWalletUnlink(walletId: string): Promise<WalletUnlinkResult> {

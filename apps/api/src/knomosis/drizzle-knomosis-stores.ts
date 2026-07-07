@@ -16,6 +16,7 @@ import {
   knomosisActionNonces,
   knomosisActionRecords,
   knomosisDeployments,
+  knomosisGatewayCursor,
   knomosisReceipts,
   onChainEvents,
   reconciliationResults,
@@ -24,7 +25,7 @@ import {
   walletAccounts,
   walletActorMappings,
 } from '@licio/db';
-import { and, asc, desc, eq, inArray, lte, max, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lt, lte, max, ne, sql } from 'drizzle-orm';
 import type { ActionNonceStore } from './services.js';
 import type {
   ComprehensionResultRecord,
@@ -539,8 +540,31 @@ export class DrizzleOnChainEventStore implements OnChainEventStore {
       .select({ latest: max(onChainEvents.gatewaySeq) })
       .from(onChainEvents)
       .where(eq(onChainEvents.deploymentId, deploymentId));
-    const latest = rows[0]?.latest ?? null;
-    return latest === null ? null : latest.toString();
+    const derived = rows[0]?.latest ?? null;
+    const cursorRows = await this.db
+      .select({ seq: knomosisGatewayCursor.seq })
+      .from(knomosisGatewayCursor)
+      .where(eq(knomosisGatewayCursor.deploymentId, deploymentId));
+    const cursor = cursorRows[0]?.seq ?? null;
+    // The resume cursor is the greater of the stored max seq and any rebuild
+    // re-anchor (which can jump forward past dropped, never-stored events).
+    const derivedBig = derived === null ? null : BigInt(derived);
+    const cursorBig = cursor === null ? null : BigInt(cursor);
+    if (derivedBig === null) return cursorBig?.toString() ?? null;
+    if (cursorBig === null) return derivedBig.toString();
+    return (derivedBig > cursorBig ? derivedBig : cursorBig).toString();
+  }
+
+  async recordGatewayCursor(deploymentId: string, seq: string): Promise<void> {
+    // Monotonic upsert: advance the cursor forward, never backward.
+    await this.db
+      .insert(knomosisGatewayCursor)
+      .values({ deploymentId, seq })
+      .onConflictDoUpdate({
+        target: knomosisGatewayCursor.deploymentId,
+        set: { seq },
+        setWhere: lt(knomosisGatewayCursor.seq, seq),
+      });
   }
 
   async markReorged(eventIds: readonly string[], detectedAtIso: string): Promise<void> {
@@ -595,6 +619,14 @@ export class DrizzleActionNonceStore implements ActionNonceStore {
       )
       .limit(1);
     return rows.length > 0;
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(knomosisActionNonces)
+      .where(eq(knomosisActionNonces.userId, userId))
+      .returning({ userId: knomosisActionNonces.userId });
+    return rows.length;
   }
 
   async clear(): Promise<void> {
@@ -779,6 +811,22 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows.map(mapProposal);
   }
 
+  async listByProposer(userId: string): Promise<GovernanceProposalRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(governanceProposals)
+      .where(eq(governanceProposals.proposerUserId, userId));
+    return rows.map(mapProposal);
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(governanceProposals)
+      .where(eq(governanceProposals.proposerUserId, userId))
+      .returning({ proposalId: governanceProposals.proposalId });
+    return rows.length;
+  }
+
   async clear(): Promise<void> {
     await this.db.delete(governanceProposals);
   }
@@ -817,6 +865,27 @@ export class DrizzleProposalVoteStore implements ProposalVoteStore {
       }
     }
     return tally;
+  }
+
+  async listByVoter(userId: string): Promise<ProposalVoteRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(governanceProposalVotes)
+      .where(eq(governanceProposalVotes.voterUserId, userId));
+    return rows.map((r) => ({
+      proposalId: r.proposalId,
+      voterUserId: r.voterUserId,
+      choice: r.choice as ProposalVoteRecord['choice'],
+      castAt: iso(r.castAt),
+    }));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(governanceProposalVotes)
+      .where(eq(governanceProposalVotes.voterUserId, userId))
+      .returning({ voterUserId: governanceProposalVotes.voterUserId });
+    return rows.length;
   }
 
   async clear(): Promise<void> {
@@ -924,19 +993,38 @@ export class DrizzleSimTreasuryStore implements SimTreasuryStore {
       : null;
   }
 
-  async put(record: SimTreasuryRecord): Promise<SimTreasuryRecord> {
-    await this.db
+  async put(
+    record: SimTreasuryRecord,
+    expectedUpdatedAt?: string,
+  ): Promise<SimTreasuryRecord | null> {
+    const values = {
+      roomId: record.roomId,
+      balances: record.balances,
+      updatedAt: new Date(record.updatedAt),
+    };
+    if (expectedUpdatedAt === undefined) {
+      // Bootstrap: INSERT-IF-ABSENT — never clobber an existing treasury.
+      const inserted = await this.db
+        .insert(simTreasuries)
+        .values(values)
+        .onConflictDoNothing()
+        .returning({ roomId: simTreasuries.roomId });
+      if (inserted.length > 0) return record;
+      return this.get(record.roomId);
+    }
+    // Conditional (optimistic-concurrency) overwrite: the DO UPDATE applies only
+    // when the stored `updated_at` still matches the caller's snapshot, so two
+    // racing deposits/executions cannot each overwrite the balance map (lost update).
+    const rows = await this.db
       .insert(simTreasuries)
-      .values({
-        roomId: record.roomId,
-        balances: record.balances,
-        updatedAt: new Date(record.updatedAt),
-      })
+      .values(values)
       .onConflictDoUpdate({
         target: simTreasuries.roomId,
         set: { balances: record.balances, updatedAt: new Date(record.updatedAt) },
-      });
-    return record;
+        setWhere: eq(simTreasuries.updatedAt, new Date(expectedUpdatedAt)),
+      })
+      .returning({ roomId: simTreasuries.roomId });
+    return rows.length > 0 ? record : null;
   }
 
   async appendEntry(entry: SimTreasuryEntryRecord): Promise<SimTreasuryEntryRecord> {
@@ -970,6 +1058,15 @@ export class DrizzleSimTreasuryStore implements SimTreasuryStore {
       proposalId: row.proposalId,
       createdAt: iso(row.createdAt),
     }));
+  }
+
+  async anonymizeActor(userId: string): Promise<number> {
+    const rows = await this.db
+      .update(simTreasuryEntries)
+      .set({ actorUserId: null })
+      .where(eq(simTreasuryEntries.actorUserId, userId))
+      .returning({ entryId: simTreasuryEntries.entryId });
+    return rows.length;
   }
 
   async clear(): Promise<void> {
@@ -1043,6 +1140,24 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
         ),
       );
     return rows[0]?.count ?? 0;
+  }
+
+  async anonymizeActor(userId: string): Promise<number> {
+    // The audit log is append-only (a trigger blocks UPDATE/DELETE).  Toggle it
+    // off to SCRUB the actor id — a right-to-erasure-safe anonymization that keeps
+    // the ledger's integrity while removing the personal identifier — then on.
+    await this.db.execute(
+      sql`ALTER TABLE "knomosis"."governance_audit_log" DISABLE TRIGGER "governance_audit_no_mutate_trg"`,
+    );
+    const rows = await this.db
+      .update(governanceAuditLogs)
+      .set({ actorUserId: null })
+      .where(eq(governanceAuditLogs.actorUserId, userId))
+      .returning({ entryId: governanceAuditLogs.entryId });
+    await this.db.execute(
+      sql`ALTER TABLE "knomosis"."governance_audit_log" ENABLE TRIGGER "governance_audit_no_mutate_trg"`,
+    );
+    return rows.length;
   }
 
   /** Test-only; production DELETEs are blocked by the append-only trigger. */
@@ -1299,6 +1414,29 @@ export class DrizzleComprehensionStore implements ComprehensionStore {
         },
       });
     return next;
+  }
+
+  async listByUser(userId: string): Promise<ComprehensionResultRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(comprehensionResults)
+      .where(eq(comprehensionResults.userId, userId));
+    return rows.map((r) => ({
+      userId: r.userId,
+      quizVersion: r.quizVersion,
+      passed: r.passed,
+      attempts: r.attempts,
+      passedAt: isoOrNull(r.passedAt),
+      updatedAt: iso(r.updatedAt),
+    }));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(comprehensionResults)
+      .where(eq(comprehensionResults.userId, userId))
+      .returning({ userId: comprehensionResults.userId });
+    return rows.length;
   }
 
   async clear(): Promise<void> {

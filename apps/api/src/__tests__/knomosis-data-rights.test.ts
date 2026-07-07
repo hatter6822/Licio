@@ -151,4 +151,80 @@ describe('WS-L financial wallet data-rights', () => {
     await expect(purgeFinancialWalletData(knomosis, USER)).resolves.toBeUndefined();
     expect(await knomosis.wallets.listByUser(USER, true)).toHaveLength(0);
   });
+
+  it('exports + erases the SIMULATED-GOVERNANCE personal rows (WS-L review fix)', async () => {
+    const { knomosis } = await freshKnomosisServices();
+    const now = '2026-07-01T00:00:00.000Z';
+    // The user's own simulated proposal, vote, comprehension, audit + treasury
+    // entry, and an anti-replay nonce.
+    await knomosis.proposals.insert({
+      proposalId: 'p-user',
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'bounty',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'open',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: true,
+      executableAfter: null,
+      createdAt: now,
+      executedAt: null,
+    });
+    await knomosis.votes.cast({
+      proposalId: 'p-x',
+      voterUserId: USER,
+      choice: 'approve',
+      castAt: now,
+    });
+    await knomosis.comprehension.record(USER, 'v1', true, now);
+    await knomosis.governanceAudit.append({
+      entryId: 'aud-user',
+      roomId: ROOM,
+      actionType: 'proposal_created',
+      actorUserId: USER,
+      actionDetails: {},
+      simulationMode: true,
+      createdAt: now,
+    });
+    await knomosis.simTreasury.appendEntry({
+      entryId: 'ent-user',
+      roomId: ROOM,
+      kind: 'deposit',
+      asset: 'SIM-USDC',
+      amount: '1',
+      actorUserId: USER,
+      proposalId: null,
+      createdAt: now,
+    });
+    await knomosis.nonces.tryConsume(USER, 'local', 'n1');
+
+    // Export carries the user's simulated-governance activity.
+    const out = await exportFinancialWalletData(knomosis, USER);
+    expect(out.simulated_proposals).toHaveLength(1);
+    expect(out.simulated_votes).toHaveLength(1);
+    expect(out.comprehension).toHaveLength(1);
+
+    await purgeFinancialWalletData(knomosis, USER);
+
+    // DELETED: the user's proposals / votes / comprehension / nonces.
+    expect(await knomosis.proposals.listByProposer(USER)).toHaveLength(0);
+    expect(await knomosis.votes.listByVoter(USER)).toHaveLength(0);
+    expect(await knomosis.comprehension.listByUser(USER)).toHaveLength(0);
+    expect(await knomosis.nonces.isUsed(USER, 'local', 'n1')).toBe(false);
+    // ANONYMIZED (append-only ledgers keep the row, scrub the actor).
+    const audit = await knomosis.governanceAudit.listByRoom(ROOM, 10);
+    expect(audit.find((a) => a.entryId === 'aud-user')?.actorUserId).toBeNull();
+    const entries = await knomosis.simTreasury.listEntries(ROOM, 10);
+    expect(entries.find((e) => e.entryId === 'ent-user')?.actorUserId).toBeNull();
+  });
 });

@@ -9,11 +9,17 @@
 // only — NEVER the financial-domain address hash — mirroring the owner-facing
 // wallet projection.  Reporter/counterparty identities are never included.
 
+import type { ActionNonceStore } from './services.js';
 import type {
+  ComprehensionStore,
   FinancialWalletStore,
+  GovernanceAuditStore,
+  GovernanceProposalStore,
   GovernanceSignatureStore,
   KnomosisActionStore,
   KnomosisReceiptStore,
+  ProposalVoteStore,
+  SimTreasuryStore,
 } from './stores.js';
 
 export interface WalletDataRightsDeps {
@@ -21,16 +27,33 @@ export interface WalletDataRightsDeps {
   actions: KnomosisActionStore;
   proposalSignatures: GovernanceSignatureStore;
   receipts: KnomosisReceiptStore;
+  // WS-L.4 simulated-governance personal rows (WS-D tombstones users, so the DB
+  // ON DELETE clauses never fire — these are purged/anonymized explicitly).
+  proposals: GovernanceProposalStore;
+  votes: ProposalVoteStore;
+  simTreasury: SimTreasuryStore;
+  governanceAudit: GovernanceAuditStore;
+  comprehension: ComprehensionStore;
+  nonces: ActionNonceStore;
 }
 
-/** Cap the private receipts pulled into a single DSAR export archive. */
-const MAX_EXPORT_RECEIPTS = 1000;
+/** A high ceiling that covers realistic per-user receipt volume, so a DSAR
+ *  export is COMPLETE rather than silently truncated (the store returns all
+ *  rows up to this bound). */
+const MAX_EXPORT_ROWS = 1_000_000;
 
-/** WS-L DSAR export: the user's own wallet links (truncated) + private receipts. */
+/** WS-L DSAR export: the user's own wallet links (truncated) + private receipts
+ *  + simulated-governance activity (proposals, votes, comprehension). */
 export async function exportFinancialWalletData(
   deps: WalletDataRightsDeps,
   userId: string,
-): Promise<{ wallets: unknown[]; receipts: unknown[] }> {
+): Promise<{
+  wallets: unknown[];
+  receipts: unknown[];
+  simulated_proposals: unknown[];
+  simulated_votes: unknown[];
+  comprehension: unknown[];
+}> {
   const wallets = (await deps.wallets.listByUser(userId, true)).map((w) => ({
     wallet_account_id: w.walletAccountId,
     label: w.label,
@@ -43,17 +66,40 @@ export async function exportFinancialWalletData(
     linked_at: w.linkedAt,
     last_used_at: w.lastUsedAt,
   }));
-  const receipts = (await deps.receipts.listPrivateForUser(userId, MAX_EXPORT_RECEIPTS)).map(
-    (r) => ({
-      receipt_id: r.receiptId,
-      action_record_id: r.actionRecordId,
-      kind: r.kind,
-      final_state: r.finalState,
-      created_at: r.createdAt,
-      updated_at: r.updatedAt,
-    }),
-  );
-  return { wallets, receipts };
+  const receipts = (await deps.receipts.listPrivateForUser(userId, MAX_EXPORT_ROWS)).map((r) => ({
+    receipt_id: r.receiptId,
+    action_record_id: r.actionRecordId,
+    kind: r.kind,
+    final_state: r.finalState,
+    // The FULL private receipt data the owner endpoint returns — the DSAR copy
+    // must be complete, not metadata-only (WS-L.3.4c).
+    payload: r.payload,
+    summary_payload_hash: r.summaryPayloadHash,
+    created_at: r.createdAt,
+    updated_at: r.updatedAt,
+  }));
+  const simulated_proposals = (await deps.proposals.listByProposer(userId)).map((p) => ({
+    proposal_id: p.proposalId,
+    room_id: p.roomId,
+    proposal_type: p.proposalType,
+    title: p.title,
+    voting_state: p.votingState,
+    execution_state: p.executionState,
+    simulation_mode: p.simulationMode,
+    created_at: p.createdAt,
+  }));
+  const simulated_votes = (await deps.votes.listByVoter(userId)).map((v) => ({
+    proposal_id: v.proposalId,
+    choice: v.choice,
+    cast_at: v.castAt,
+  }));
+  const comprehension = (await deps.comprehension.listByUser(userId)).map((c) => ({
+    quiz_version: c.quizVersion,
+    passed: c.passed,
+    attempts: c.attempts,
+    passed_at: c.passedAt,
+  }));
+  return { wallets, receipts, simulated_proposals, simulated_votes, comprehension };
 }
 
 /**
@@ -70,4 +116,13 @@ export async function purgeFinancialWalletData(
   await deps.actions.purgeByUser(userId);
   await deps.proposalSignatures.purgeByUser(userId);
   await deps.wallets.purgeByUser(userId);
+  // WS-L.4 simulated-governance personal rows: DELETE the user's own proposals /
+  // votes / comprehension / anti-replay nonces, and ANONYMIZE the append-only
+  // ledgers (audit log + sim-treasury entries) — scrub the actor, keep the row.
+  await deps.votes.purgeByUser(userId);
+  await deps.proposals.purgeByUser(userId);
+  await deps.comprehension.purgeByUser(userId);
+  await deps.nonces.purgeByUser(userId);
+  await deps.simTreasury.anonymizeActor(userId);
+  await deps.governanceAudit.anonymizeActor(userId);
 }

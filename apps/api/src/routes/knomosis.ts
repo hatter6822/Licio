@@ -14,6 +14,8 @@
 import { zValidator } from '@hono/zod-validator';
 import {
   KILL_SWITCH_IDS,
+  type KillSwitchId,
+  type KnomosisSignedActionType,
   killSwitchAdminRequestSchema,
   killSwitchRegistryResponseSchema,
   knomosisActionStatusResponseSchema,
@@ -51,6 +53,18 @@ import {
 } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
+
+/** The NARROWER emergency switch that governs each signed action type, checked
+ *  in addition to the broad `action_submission` switch (WS-L.3.5c): a
+ *  treasury-execution pause must stop grant/deposit/bounty submissions, and a
+ *  governance-voting pause must stop proposal-signature submissions, without
+ *  operators having to engage the whole submission plane. */
+const ACTION_KILL_SWITCH: Partial<Record<KnomosisSignedActionType, KillSwitchId>> = {
+  treasury_deposit: 'treasury_execution',
+  grant_payout: 'treasury_execution',
+  bounty_contribution: 'treasury_execution',
+  proposal_sign: 'governance_voting',
+};
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
 
 function preflightDeps(services: KnomosisServices): PreflightDeps | null {
@@ -217,6 +231,21 @@ export function createKnomosisRoutes() {
               503,
             );
           }
+          // Also honour the NARROWER switch for this action type (treasury /
+          // governance-voting) so a targeted pause stops the mapped submissions.
+          const specificSwitch = ACTION_KILL_SWITCH[body.action_type as KnomosisSignedActionType];
+          if (specificSwitch) {
+            const specific = await killSwitchDecision(services.configStore, specificSwitch, {
+              roomId: body.room_id,
+              region,
+            });
+            if (specific.engaged) {
+              return c.json(
+                deny('kill_switch_active', 'This action type is temporarily paused.'),
+                503,
+              );
+            }
+          }
           const outcome = await submitAction(submissionDeps(services), {
             userId: auth.userId,
             preflightToken: body.preflight_token,
@@ -348,7 +377,9 @@ export function createKnomosisRoutes() {
       )
 
       // --- GET /receipts (private, owner-scoped; WS-L.3.4c) ----------------
-      .get('/receipts', authMiddleware(), requireVerifiedAccount(), async (c) => {
+      // ADULT gate like every other financial surface (WS-D.1.7c: fail closed on
+      // unknown/teen age) — these payloads carry the full signed financial fields.
+      .get('/receipts', authMiddleware(), requireVerifiedAccount(), requireAdult(), async (c) => {
         const auth = requireAuth(c);
         const services = getKnomosisServices();
         if (!services.config().cryptoEnabled) {

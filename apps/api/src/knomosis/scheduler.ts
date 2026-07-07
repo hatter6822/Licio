@@ -11,6 +11,7 @@
 import { hostname } from 'node:os';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { ingestGatewayEvents } from './ingest.js';
+import { killSwitchDecision } from './killswitch.js';
 import { reconcileDeployment } from './reconciliation.js';
 import { type KnomosisServices, simulationDeps } from './services.js';
 import { executeElapsedSimProposals } from './simulation.js';
@@ -59,7 +60,24 @@ export async function runKnomosisTick(
       onError(error, 'event_ingest');
     }
     try {
-      await resubmitPendingActions(services, deployment.deploymentId);
+      // Gate scheduler retries by the SAME live crypto flag + kill switch the
+      // HTTP submit route honours, per record's room (WS-L.3.5c): an incident
+      // pause must stop the scheduler forwarding submitted actions too.
+      const submissionPaused = async (roomId: string): Promise<boolean> => {
+        if (!services.config().cryptoEnabled) return true;
+        return (await killSwitchDecision(services.configStore, 'action_submission', { roomId }))
+          .engaged;
+      };
+      await resubmitPendingActions(
+        {
+          actions: services.actions,
+          now: services.now,
+          log: services.log,
+          gateway: services.gateway,
+          submissionPaused,
+        },
+        deployment.deploymentId,
+      );
     } catch (error) {
       onError(error, 'resubmit');
     }

@@ -271,8 +271,14 @@ export interface OnChainEventStore {
   ingest(record: OnChainEventRecord): Promise<{ record: OnChainEventRecord; inserted: boolean }>;
   getById(eventId: string): Promise<OnChainEventRecord | null>;
   listByDeployment(deploymentId: string, limit: number): Promise<OnChainEventRecord[]>;
-  /** The highest ingested gateway seq for a deployment (cursor resume). */
+  /** The resume cursor for `getEvents`: the greater of the highest ingested
+   *  gateway seq and any explicit re-anchor recorded by a gap rebuild (so the
+   *  cursor can jump FORWARD past events that were dropped and never stored). */
   latestGatewaySeq(deploymentId: string): Promise<string | null>;
+  /** Re-anchor the resume cursor to `seq` after a retention-gap rebuild — the
+   *  dropped events were never stored, so the derived max-stored-seq is stale and
+   *  would re-gap forever without this (WS-L.3.3b). */
+  recordGatewayCursor(deploymentId: string, seq: string): Promise<void>;
   markReorged(eventIds: readonly string[], detectedAtIso: string): Promise<void>;
   markConfirmed(eventIds: readonly string[]): Promise<void>;
   clear(): Promise<void>;
@@ -296,6 +302,10 @@ export interface GovernanceProposalStore {
     roomId: string,
     proposalType: GovernanceProposalRecord['proposalType'],
   ): Promise<GovernanceProposalRecord[]>;
+  /** The user's own (simulated) proposals — DSAR export. */
+  listByProposer(userId: string): Promise<GovernanceProposalRecord[]>;
+  /** WS-L data-rights: delete the user's proposals on account deletion. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -303,6 +313,10 @@ export interface ProposalVoteStore {
   /** Insert-once per (proposal, voter); returns null when already voted. */
   cast(record: ProposalVoteRecord): Promise<ProposalVoteRecord | null>;
   tally(proposalId: string): Promise<{ approve: number; reject: number; abstain: number }>;
+  /** The user's own votes — DSAR export. */
+  listByVoter(userId: string): Promise<ProposalVoteRecord[]>;
+  /** WS-L data-rights: delete the user's votes on account deletion. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -320,9 +334,17 @@ export interface GovernanceSignatureStore {
 
 export interface SimTreasuryStore {
   get(roomId: string): Promise<SimTreasuryRecord | null>;
-  put(record: SimTreasuryRecord): Promise<SimTreasuryRecord>;
+  /** Persist the balance map.  When `expectedUpdatedAt` is given, the write is
+   *  CONDITIONAL (optimistic concurrency): it applies only if the stored row's
+   *  `updatedAt` still equals it, returning null on a lost-update race so the
+   *  caller can retry.  Omit it for the unconditional bootstrap create. */
+  put(record: SimTreasuryRecord, expectedUpdatedAt?: string): Promise<SimTreasuryRecord | null>;
   appendEntry(entry: SimTreasuryEntryRecord): Promise<SimTreasuryEntryRecord>;
   listEntries(roomId: string, limit: number): Promise<SimTreasuryEntryRecord[]>;
+  /** WS-L data-rights: ANONYMIZE (null the actor) on account deletion — the
+   *  simulated ledger entries are append-only, so the actor id is scrubbed
+   *  rather than the row deleted.  Returns the rows anonymized. */
+  anonymizeActor(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -347,6 +369,10 @@ export interface GovernanceAuditStore {
   /** Count only qualifying simulated-practice actions for the readiness gate
    *  (WS-L.4.1f) — never the meta mode-transition/comprehension rows. */
   countQualifyingByRoom(roomId: string): Promise<number>;
+  /** WS-L data-rights: ANONYMIZE the actor on account deletion — the audit log
+   *  is append-only, so the actor id is scrubbed, not the row.  Returns the rows
+   *  anonymized. */
+  anonymizeActor(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -385,6 +411,10 @@ export interface ComprehensionStore {
     passed: boolean,
     nowIso: string,
   ): Promise<ComprehensionResultRecord>;
+  /** The user's own comprehension results — DSAR export. */
+  listByUser(userId: string): Promise<ComprehensionResultRecord[]>;
+  /** WS-L data-rights: delete the user's comprehension rows on account deletion. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -598,6 +628,7 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
 
 export class InMemoryOnChainEventStore implements OnChainEventStore {
   readonly #rows = new Map<string, OnChainEventRecord>();
+  readonly #cursors = new Map<string, bigint>();
 
   #sourceKey(record: OnChainEventRecord): string {
     return record.eventSource === 'chain'
@@ -635,13 +666,20 @@ export class InMemoryOnChainEventStore implements OnChainEventStore {
   }
 
   async latestGatewaySeq(deploymentId: string): Promise<string | null> {
-    let latest: bigint | null = null;
+    let latest: bigint | null = this.#cursors.get(deploymentId) ?? null;
     for (const row of this.#rows.values()) {
       if (row.deploymentId !== deploymentId || row.gatewaySeq === null) continue;
       const seq = BigInt(row.gatewaySeq);
       if (latest === null || seq > latest) latest = seq;
     }
     return latest === null ? null : latest.toString();
+  }
+
+  async recordGatewayCursor(deploymentId: string, seq: string): Promise<void> {
+    const next = BigInt(seq);
+    const current = this.#cursors.get(deploymentId);
+    // Monotonic: the cursor only ever advances forward.
+    if (current === undefined || next > current) this.#cursors.set(deploymentId, next);
   }
 
   async markReorged(eventIds: readonly string[], detectedAtIso: string): Promise<void> {
@@ -736,6 +774,23 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
       .map((r) => structuredClone(r));
   }
 
+  async listByProposer(userId: string): Promise<GovernanceProposalRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.proposerUserId === userId)
+      .map((r) => structuredClone(r));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.proposerUserId === userId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   async clear(): Promise<void> {
     this.#rows.clear();
   }
@@ -757,6 +812,21 @@ export class InMemoryProposalVoteStore implements ProposalVoteStore {
       if (row.proposalId === proposalId) tally[row.choice] += 1;
     }
     return tally;
+  }
+
+  async listByVoter(userId: string): Promise<ProposalVoteRecord[]> {
+    return [...this.#rows.values()].filter((r) => r.voterUserId === userId).map((r) => ({ ...r }));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.voterUserId === userId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async clear(): Promise<void> {
@@ -822,7 +892,20 @@ export class InMemorySimTreasuryStore implements SimTreasuryStore {
     return row ? structuredClone(row) : null;
   }
 
-  async put(record: SimTreasuryRecord): Promise<SimTreasuryRecord> {
+  async put(
+    record: SimTreasuryRecord,
+    expectedUpdatedAt?: string,
+  ): Promise<SimTreasuryRecord | null> {
+    const current = this.#treasuries.get(record.roomId);
+    if (expectedUpdatedAt === undefined) {
+      // Bootstrap: INSERT-IF-ABSENT — never clobber an existing (possibly already
+      // deposited-into) treasury with the starting balance.
+      if (current) return structuredClone(current);
+      this.#treasuries.set(record.roomId, structuredClone(record));
+      return structuredClone(record);
+    }
+    // Conditional overwrite: a lost-update race (the row moved on) returns null.
+    if ((current?.updatedAt ?? null) !== expectedUpdatedAt) return null;
     this.#treasuries.set(record.roomId, structuredClone(record));
     return structuredClone(record);
   }
@@ -838,6 +921,18 @@ export class InMemorySimTreasuryStore implements SimTreasuryStore {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
       .map((e) => ({ ...e }));
+  }
+
+  async anonymizeActor(userId: string): Promise<number> {
+    let anonymized = 0;
+    for (let i = 0; i < this.#entries.length; i += 1) {
+      const entry = this.#entries[i];
+      if (entry !== undefined && entry.actorUserId === userId) {
+        this.#entries[i] = { ...entry, actorUserId: null };
+        anonymized += 1;
+      }
+    }
+    return anonymized;
   }
 
   async clear(): Promise<void> {
@@ -878,6 +973,18 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
         r.simulationMode &&
         READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
     ).length;
+  }
+
+  async anonymizeActor(userId: string): Promise<number> {
+    let anonymized = 0;
+    for (let i = 0; i < this.#rows.length; i += 1) {
+      const row = this.#rows[i];
+      if (row !== undefined && row.actorUserId === userId) {
+        this.#rows[i] = { ...row, actorUserId: null };
+        anonymized += 1;
+      }
+    }
+    return anonymized;
   }
 
   async clear(): Promise<void> {
@@ -1011,6 +1118,21 @@ export class InMemoryComprehensionStore implements ComprehensionStore {
     };
     this.#rows.set(key, next);
     return { ...next };
+  }
+
+  async listByUser(userId: string): Promise<ComprehensionResultRecord[]> {
+    return [...this.#rows.values()].filter((r) => r.userId === userId).map((r) => ({ ...r }));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.userId === userId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async clear(): Promise<void> {

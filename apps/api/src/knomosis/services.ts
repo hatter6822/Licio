@@ -88,6 +88,8 @@ export class KnomosisMetrics {
 export interface ActionNonceStore {
   tryConsume(userId: string, deploymentId: string, nonce: string): Promise<boolean>;
   isUsed(userId: string, deploymentId: string, nonce: string): Promise<boolean>;
+  /** WS-L data-rights: delete the user's anti-replay nonces on account deletion. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -103,6 +105,17 @@ export class InMemoryActionNonceStore implements ActionNonceStore {
 
   async isUsed(userId: string, deploymentId: string, nonce: string): Promise<boolean> {
     return this.#used.has(`${userId}:${deploymentId}:${nonce}`);
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const key of this.#used) {
+      if (key.startsWith(`${userId}:`)) {
+        this.#used.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async clear(): Promise<void> {

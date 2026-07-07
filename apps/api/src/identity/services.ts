@@ -177,7 +177,7 @@ export interface IdentityServices {
   exportModerationNotices?: (userId: string) => Promise<unknown[]>;
   /** WS-L: the user's own financial wallet links + receipts for the export —
    *  truncated display address only, never the address hash (default none). */
-  exportFinancialWallets?: (userId: string) => Promise<{ wallets: unknown[]; receipts: unknown[] }>;
+  exportFinancialWallets?: (userId: string) => Promise<Record<string, unknown[]>>;
   /** WS-G: anonymize the user's contributions on hard deletion (default no-op). */
   anonymizeContributions?: (userId: string) => Promise<void>;
   /** WS-L: purge the user's financial wallet rows + receipts on hard deletion

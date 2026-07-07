@@ -292,7 +292,6 @@ CREATE TABLE "knomosis"."knomosis_receipt" (
 	CONSTRAINT "knomosis_receipt_owner_chk" CHECK (("kind" = 'private' AND "owner_user_id" IS NOT NULL) OR ("kind" = 'public' AND "owner_user_id" IS NULL))
 );
 --> statement-breakpoint
-ALTER TABLE "knomosis"."knomosis_receipt" ADD CONSTRAINT "knomosis_receipt_action_fk" FOREIGN KEY ("action_record_id") REFERENCES "knomosis"."knomosis_action_record"("action_record_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "knomosis"."knomosis_receipt" ADD CONSTRAINT "knomosis_receipt_owner_fk" FOREIGN KEY ("owner_user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "knomosis_receipt_action_kind_idx" ON "knomosis"."knomosis_receipt" USING btree ("action_record_id", "kind");--> statement-breakpoint
 CREATE TABLE "knomosis"."comprehension_result" (
@@ -303,6 +302,11 @@ CREATE TABLE "knomosis"."comprehension_result" (
 	"passed_at" timestamp with time zone,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "comprehension_result_pk" PRIMARY KEY ("user_id", "quiz_version")
+);
+--> statement-breakpoint
+CREATE TABLE "knomosis"."knomosis_gateway_cursor" (
+	"deployment_id" uuid PRIMARY KEY NOT NULL,
+	"seq" numeric NOT NULL
 );
 --> statement-breakpoint
 ALTER TABLE "knomosis"."comprehension_result" ADD CONSTRAINT "comprehension_result_user_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;

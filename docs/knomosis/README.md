@@ -37,13 +37,17 @@ social product is unaffected and every WS-L endpoint withholds (`503`).
   or private key; the address is stored only as a financial-domain HMAC +
   truncation (§19.5).  A unit sweep asserts no wallet/knomosis schema carries
   key material.
-- **Data-rights coverage.**  The financial wallet footprint is wired into the
-  WS-D DSAR lifecycle (`apps/api/src/knomosis/data-rights.ts`): export carries
-  the truncated address + private receipts (never the hash), and hard deletion
-  purges wallets + actions + proposal signatures + private receipts (the
-  ownerless public-ledger receipts survive).  The private-key custody invariant
-  therefore extends to the erasure path — a linked wallet never outlives the
-  account.
+- **Data-rights coverage.**  The financial wallet footprint AND the simulated-
+  governance personal rows are wired into the WS-D DSAR lifecycle
+  (`apps/api/src/knomosis/data-rights.ts`): export carries the truncated address
+  + full private receipts + the user's simulated proposals/votes/comprehension
+  (never the hash), and hard deletion purges wallets + actions + proposal
+  signatures + private receipts + proposals + votes + comprehension + anti-replay
+  nonces, and ANONYMIZES the append-only ledgers (governance audit log + sim
+  treasury entries — scrub the actor, keep the row).  The ownerless public-ledger
+  receipts survive (their action FK is a soft reference, not a cascade).  Because
+  WS-D tombstones `users` rather than deleting the row, these are purged
+  EXPLICITLY (the DB `ON DELETE` clauses never fire).
 - **Private-room governance reads.**  The `/rooms/:id/governance/*` read
   surfaces (tab bundle, proposals, treasury) enforce the WS-Q §16.1 content bar
   through `RoomGovernancePort.contentVisibleToUser` (delegating to the forum's
