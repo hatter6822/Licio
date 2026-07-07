@@ -119,6 +119,55 @@ describe('WS-L financial wallet data-rights', () => {
     expect(json).not.toContain(OTHER_HASH);
   });
 
+  it('exports IN-FLIGHT / failed signed actions that never produced a receipt (R8-2)', async () => {
+    const { knomosis } = await freshKnomosisServices();
+    const nowIso = new Date().toISOString();
+    // A `submitted` action the user holds — no receipt is written for it yet.
+    await knomosis.actions.insert({
+      actionRecordId: 'act-user',
+      deploymentId: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: crypto.randomUUID(),
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: '0x',
+      typedDataHash: '0xabc',
+      signedAction: { message: { amount: '5', asset: 'USDC' }, signature: '0xsig' },
+      submissionState: 'submitted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    // Another user's action must NOT be exported.
+    await knomosis.actions.insert({
+      actionRecordId: 'act-other',
+      deploymentId: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: crypto.randomUUID(),
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: OTHER,
+      payloadHash: '0x',
+      typedDataHash: '0xdef',
+      signedAction: { message: {}, signature: '0xother' },
+      submissionState: 'submitted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    const out = await exportFinancialWalletData(knomosis, USER);
+    expect(out.signed_actions).toHaveLength(1);
+    const json = JSON.stringify(out.signed_actions);
+    expect(json).toContain('act-user');
+    expect(json).toContain('0xsig');
+    expect(json).not.toContain('act-other');
+  });
+
   it('purges wallets + actions + signatures + private receipts; keeps public receipts + other users', async () => {
     const { knomosis } = await freshKnomosisServices();
     await knomosis.wallets.insert(wallet(USER, 'w-user', USER_HASH));

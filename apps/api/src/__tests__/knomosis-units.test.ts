@@ -584,6 +584,26 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
     expect(logged).toContain('knomosis.action.invalid_transition');
   });
 
+  it('applyTransition CAS does NOT clobber a row a concurrent writer already moved (R8-3)', async () => {
+    const actions = new InMemoryKnomosisActionStore();
+    // The action is `submitted` when forwardToGateway computes its transition…
+    const record = baseAction({ submissionState: 'submitted' });
+    await actions.insert(record);
+    // …but ingestion RACES it to `finalized` before the stale transition writes.
+    await actions.update({ ...record, submissionState: 'finalized' });
+    const logged: string[] = [];
+    const result = await applyTransition(
+      { actions, now: () => Date.now(), log: (e) => logged.push(e) },
+      record, // still carries the stale `submitted` from-state
+      'accepted',
+      null,
+    );
+    // The CAS matches nothing → null, and the terminal `finalized` state stands.
+    expect(result).toBeNull();
+    expect(logged).toContain('knomosis.action.stale_transition');
+    expect((await actions.getById(record.actionRecordId))?.submissionState).toBe('finalized');
+  });
+
   it('resubmitPendingActions re-forwards only submitted records', async () => {
     const fixture = await freshKnomosisServices();
     const record = baseAction({ submissionState: 'submitted', reconciliationState: 'pending' });
@@ -849,6 +869,7 @@ describe('ingest unsupported-event halt (WS-L.3.3a)', () => {
   function ingestDeps(fixture: Awaited<ReturnType<typeof freshKnomosisServices>>) {
     return {
       actions: fixture.knomosis.actions,
+      proposalSignatures: fixture.knomosis.proposalSignatures,
       events: fixture.knomosis.events,
       reconciliation: fixture.knomosis.reconciliation,
       receipts: fixture.knomosis.receipts,
@@ -1403,6 +1424,7 @@ describe('in-memory store adapters + services getter', () => {
     const result = await ingestGatewayEvents(
       {
         actions: fixture.knomosis.actions,
+        proposalSignatures: fixture.knomosis.proposalSignatures,
         events: fixture.knomosis.events,
         reconciliation: fixture.knomosis.reconciliation,
         receipts: fixture.knomosis.receipts,

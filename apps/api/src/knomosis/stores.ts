@@ -248,6 +248,21 @@ export interface KnomosisActionStore {
     idempotencyKey: string,
   ): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
+  /** COMPARE-AND-SET the submission state: apply the patch ONLY if the stored row
+   *  is still in `expectedState`, returning null when a concurrent writer (e.g.
+   *  event ingestion racing the gateway verdict) already moved it — so a stale
+   *  transition can never clobber a newer terminal state or its indexedEventRef
+   *  (WS-L.3.2b). */
+  updateIfState(
+    actionRecordId: string,
+    expectedState: SubmissionState,
+    patch: {
+      submissionState: SubmissionState;
+      failureReason: string | null;
+      indexedEventRef: string | null;
+      updatedAt: string;
+    },
+  ): Promise<KnomosisActionRecordEntity | null>;
   listByRoom(roomId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
   /** Event-stream lookup: the action a gateway event refers to (WS-L.3.3a). */
   getByTypedDataHash(
@@ -265,6 +280,11 @@ export interface KnomosisActionStore {
   /** Pending obligations for the unlink check (WS-L.2.5b): non-terminal actions
    *  signed by this wallet. */
   listOpenByWallet(walletAccountId: string): Promise<KnomosisActionRecordEntity[]>;
+  /** EVERY action a user signed — the DSAR export set.  In-flight/failed actions
+   *  hold the user's `signedAction` with no receipt yet, so a receipts-only
+   *  export would omit personal financial data the account still holds (WS-L
+   *  data-rights). */
+  listByActor(userId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
   /** Finalized deposit-type actions for the deployment — the product-side deposit
    *  ledger the WS-L.3.4a treasury reconciliation compares against gateway standing. */
   listFinalizedDeposits(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
@@ -324,6 +344,12 @@ export interface GovernanceProposalStore {
   getById(proposalId: string): Promise<GovernanceProposalRecord | null>;
   listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]>;
   update(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
+  /** ATOMICALLY claim a passed, timelocked proposal for execution: CAS the
+   *  executionState `timelocked` → `executed`, returning the claimed row, or null
+   *  when it is not claimable (already claimed by a racing execute).  This is the
+   *  single-execution gate so two concurrent executes cannot both debit the
+   *  simulated treasury (WS-L.4.1c). */
+  claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null>;
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
   /** Open proposals in a room of a given type (policy-conflict check). */
@@ -358,6 +384,11 @@ export interface GovernanceSignatureStore {
   listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]>;
   /** Signatures by this wallet on proposals that are still open (obligations). */
   listOpenByWallet(walletAccountId: string): Promise<GovernanceSignatureRecord[]>;
+  /** Remove the signature recorded for a specific action (its `signatureRef`).
+   *  Called when a `proposal_sign` action REVERTS after acceptance so the vote no
+   *  longer counts in the tally or blocks unlink, and a re-signed retry can insert
+   *  again (WS-L.3.4c).  Returns the rows removed. */
+  removeByAction(actionRecordId: string): Promise<number>;
   /** WS-L data-rights: hard-delete every proposal signature by a user on account
    *  deletion; returns the rows removed. */
   purgeByUser(userId: string): Promise<number>;
@@ -599,6 +630,23 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
     return structuredClone(record);
   }
 
+  async updateIfState(
+    actionRecordId: string,
+    expectedState: SubmissionState,
+    patch: {
+      submissionState: SubmissionState;
+      failureReason: string | null;
+      indexedEventRef: string | null;
+      updatedAt: string;
+    },
+  ): Promise<KnomosisActionRecordEntity | null> {
+    const row = this.#rows.get(actionRecordId);
+    if (row === undefined || row.submissionState !== expectedState) return null;
+    const updated = { ...row, ...patch };
+    this.#rows.set(actionRecordId, structuredClone(updated));
+    return structuredClone(updated);
+  }
+
   async listByRoom(roomId: string, limit: number): Promise<KnomosisActionRecordEntity[]> {
     return [...this.#rows.values()]
       .filter((r) => r.roomId === roomId)
@@ -648,6 +696,14 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
           r.actorWalletAccountId === walletAccountId &&
           !TERMINAL_SUBMISSION_STATES.has(r.submissionState),
       )
+      .map((r) => structuredClone(r));
+  }
+
+  async listByActor(userId: string, limit: number): Promise<KnomosisActionRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.actorUserId === userId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit)
       .map((r) => structuredClone(r));
   }
 
@@ -865,6 +921,16 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     return structuredClone(record);
   }
 
+  async claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || row.executionState !== 'timelocked' || row.votingState !== 'passed') {
+      return null;
+    }
+    const claimed = { ...row, executionState: 'executed' as const };
+    this.#rows.set(proposalId, structuredClone(claimed));
+    return structuredClone(claimed);
+  }
+
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
     return [...this.#rows.values()]
       .filter(
@@ -978,6 +1044,17 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
       if (proposal && proposal.votingState === 'open') open.push({ ...row });
     }
     return open;
+  }
+
+  async removeByAction(actionRecordId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.signatureRef === actionRecordId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async purgeByUser(userId: string): Promise<number> {

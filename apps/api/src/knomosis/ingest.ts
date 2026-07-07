@@ -24,6 +24,7 @@ import type { AuditStore } from '../identity/audit.js';
 import type { GatewayEvent, KnomosisGateway } from './gateway.js';
 import { type ReceiptDeps, writeReceipts } from './receipts.js';
 import type {
+  GovernanceSignatureStore,
   KnomosisActionRecordEntity,
   KnomosisActionStore,
   OnChainEventStore,
@@ -55,6 +56,9 @@ const EVENT_STATE: Readonly<
 
 export interface IngestDeps extends ReceiptDeps {
   actions: KnomosisActionStore;
+  /** Governance-signature ledger — a reverted proposal_sign's signature is
+   *  removed here so it stops counting/blocking (WS-L.3.4c). */
+  proposalSignatures: GovernanceSignatureStore;
   events: OnChainEventStore;
   reconciliation: ReconciliationStore;
   audit: AuditStore;
@@ -228,6 +232,13 @@ export async function ingestGatewayEvents(
       targetState === 'reverted' ? 'reverted by the post-reorg event stream' : null,
     );
     if (updated === null) continue;
+
+    // A `proposal_sign` that REVERTS after acceptance must not keep a live
+    // governance signature — remove it so the vote no longer counts in the tally
+    // or blocks unlink, and a re-signed retry can insert again (WS-L.3.4c).
+    if (updated.submissionState === 'reverted' && updated.actionType === 'proposal_sign') {
+      await deps.proposalSignatures.removeByAction(updated.actionRecordId);
+    }
 
     // Stable states produce/refresh receipts and a user-visible status.
     if (

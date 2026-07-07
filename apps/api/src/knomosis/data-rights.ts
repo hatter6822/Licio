@@ -49,6 +49,7 @@ export async function exportFinancialWalletData(
   userId: string,
 ): Promise<{
   wallets: unknown[];
+  signed_actions: unknown[];
   receipts: unknown[];
   simulated_proposals: unknown[];
   simulated_votes: unknown[];
@@ -65,6 +66,23 @@ export async function exportFinancialWalletData(
     risk_state: w.riskState,
     linked_at: w.linkedAt,
     last_used_at: w.lastUsedAt,
+  }));
+  // EVERY signed action the user holds — including in-flight (`submitted`/
+  // `accepted`) and `failed` records that never produced a receipt, so the export
+  // is not silently receipts-only (WS-L data-rights).  Owner-scoped, so the full
+  // signed payload (the user's OWN address/fields) is included.
+  const signed_actions = (await deps.actions.listByActor(userId, MAX_EXPORT_ROWS)).map((a) => ({
+    action_record_id: a.actionRecordId,
+    deployment_id: a.deploymentId,
+    action_type: a.actionType,
+    room_id: a.roomId,
+    typed_data_hash: a.typedDataHash,
+    submission_state: a.submissionState,
+    failure_reason: a.failureReason,
+    // The exact payload the owner signed (message + signature).
+    signed_action: a.signedAction,
+    created_at: a.createdAt,
+    updated_at: a.updatedAt,
   }));
   const receipts = (await deps.receipts.listPrivateForUser(userId, MAX_EXPORT_ROWS)).map((r) => ({
     receipt_id: r.receiptId,
@@ -99,7 +117,7 @@ export async function exportFinancialWalletData(
     attempts: c.attempts,
     passed_at: c.passedAt,
   }));
-  return { wallets, receipts, simulated_proposals, simulated_votes, comprehension };
+  return { wallets, signed_actions, receipts, simulated_proposals, simulated_votes, comprehension };
 }
 
 /**

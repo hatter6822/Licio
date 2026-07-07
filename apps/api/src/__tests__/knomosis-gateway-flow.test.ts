@@ -70,6 +70,7 @@ function ingestDeps(fixture: KnomosisFixture) {
   const s = fixture.knomosis;
   return {
     actions: s.actions,
+    proposalSignatures: s.proposalSignatures,
     events: s.events,
     reconciliation: s.reconciliation,
     receipts: s.receipts,
@@ -866,6 +867,39 @@ describe('WS-L.3.2 submission + state machine', () => {
     expect(first.ok && dup.ok).toBe(true);
     if (first.ok && dup.ok) expect(dup.actionRecordId).toBe(first.actionRecordId);
   });
+
+  it('CONCURRENT same-key submits stay idempotent — one action, one replay (R8-6)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const idem = crypto.randomUUID();
+    // Two independently-preflighted deposits (DIFFERENT nonces, so neither loses
+    // the nonce race) that share the SAME idempotency key.
+    const a = await preflightPass(fixture, userId, walletAccountId, '1');
+    const b = await preflightPass(fixture, userId, walletAccountId, '2');
+    const submit = (x: Awaited<ReturnType<typeof preflightPass>>) =>
+      submitAction(submissionDeps(fixture), {
+        userId,
+        preflightToken: x.pre.preflight_token,
+        idempotencyKey: idem,
+        actionType: 'treasury_deposit',
+        roomId: ROOM,
+        deploymentId: DEPLOYMENT,
+        walletAccountId,
+        typedDataMessage: x.req.typedDataMessage,
+        signature: x.req.signature,
+      });
+    const [r1, r2] = await Promise.all([submit(a), submit(b)]);
+    expect(r1.ok && r2.ok).toBe(true);
+    if (r1.ok && r2.ok) {
+      // Both resolve to the SAME action; exactly one is the replay (never a raw
+      // unique-key error to the loser).
+      expect(r1.actionRecordId).toBe(r2.actionRecordId);
+      expect(r1.replayed).not.toBe(r2.replayed);
+    }
+    // Exactly ONE action row was created.
+    expect(await fixture.knomosis.actions.listByRoom(ROOM, 100)).toHaveLength(1);
+  });
 });
 
 describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
@@ -1062,6 +1096,77 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     // whole group is re-fetched once the schema learns the new type.
     expect(await fixture.knomosis.events.listByDeployment(DEPLOYMENT, 100)).toHaveLength(0);
     expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBeNull();
+  });
+
+  it('a REVERTED proposal_sign removes its live governance signature (R8-1)', async () => {
+    const fixture = await freshKnomosisServices();
+    const proposalId = crypto.randomUUID();
+    const walletAccountId = crypto.randomUUID();
+    const actionRecordId = crypto.randomUUID();
+    const typedDataHash = `0x${'ef'.repeat(32)}`;
+    const nowIso = new Date().toISOString();
+    // An ACCEPTED proposal_sign action with a live recorded signature.
+    await fixture.knomosis.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      actorWalletAccountId: walletAccountId,
+      actorUserId: crypto.randomUUID(),
+      payloadHash: '0x',
+      typedDataHash,
+      signedAction: { message: { proposalId }, signature: '0x' },
+      submissionState: 'accepted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await fixture.knomosis.proposalSignatures.insert({
+      signatureId: crypto.randomUUID(),
+      proposalId,
+      userId: crypto.randomUUID(),
+      walletAccountId,
+      signatureType: 'eip712_ecdsa',
+      typedDataHash,
+      signatureRef: actionRecordId,
+      weightSnapshot: null,
+      eligibilityReason: 'x',
+      createdAt: nowIso,
+    });
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(1);
+    // The post-reorg stream REVERTS the action.
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.reverted',
+            payload: { typed_data_hash: typedDataHash },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    expect((await fixture.knomosis.actions.getById(actionRecordId))?.submissionState).toBe(
+      'reverted',
+    );
+    // The signature is gone — it no longer counts or blocks unlink.
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(0);
   });
 
   it('reconciliation matches a finalized action against the indexed stream', async () => {

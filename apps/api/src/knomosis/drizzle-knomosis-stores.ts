@@ -360,6 +360,36 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     return record;
   }
 
+  async updateIfState(
+    actionRecordId: string,
+    expectedState: KnomosisActionRecordEntity['submissionState'],
+    patch: {
+      submissionState: KnomosisActionRecordEntity['submissionState'];
+      failureReason: string | null;
+      indexedEventRef: string | null;
+      updatedAt: string;
+    },
+  ): Promise<KnomosisActionRecordEntity | null> {
+    // Atomic CAS: the WHERE binds the expected state, so a concurrent ingestion
+    // that already advanced the row matches 0 rows and we return null.
+    const rows = await this.db
+      .update(knomosisActionRecords)
+      .set({
+        submissionState: patch.submissionState,
+        failureReason: patch.failureReason,
+        indexedEventRef: patch.indexedEventRef,
+        updatedAt: new Date(patch.updatedAt),
+      })
+      .where(
+        and(
+          eq(knomosisActionRecords.actionRecordId, actionRecordId),
+          eq(knomosisActionRecords.submissionState, expectedState),
+        ),
+      )
+      .returning();
+    return rows[0] ? mapAction(rows[0]) : null;
+  }
+
   async listByRoom(roomId: string, limit: number): Promise<KnomosisActionRecordEntity[]> {
     const rows = await this.db
       .select()
@@ -435,6 +465,16 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
           sql`${knomosisActionRecords.submissionState} NOT IN ('finalized', 'reverted', 'failed')`,
         ),
       );
+    return rows.map(mapAction);
+  }
+
+  async listByActor(userId: string, limit: number): Promise<KnomosisActionRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(eq(knomosisActionRecords.actorUserId, userId))
+      .orderBy(asc(knomosisActionRecords.createdAt))
+      .limit(limit);
     return rows.map(mapAction);
   }
 
@@ -870,6 +910,23 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return record;
   }
 
+  async claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null> {
+    // Atomic CAS timelocked→executed: only ONE racing execute wins the claim, so
+    // the treasury cannot be debited twice for the same proposal (WS-L.4.1c).
+    const rows = await this.db
+      .update(governanceProposals)
+      .set({ executionState: 'executed' })
+      .where(
+        and(
+          eq(governanceProposals.proposalId, proposalId),
+          eq(governanceProposals.executionState, 'timelocked'),
+          eq(governanceProposals.votingState, 'passed'),
+        ),
+      )
+      .returning();
+    return rows[0] ? mapProposal(rows[0]) : null;
+  }
+
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
     const rows = await this.db
       .select()
@@ -1046,6 +1103,14 @@ export class DrizzleGovernanceSignatureStore implements GovernanceSignatureStore
         ),
       );
     return rows.map((r) => mapSignature(r.signature));
+  }
+
+  async removeByAction(actionRecordId: string): Promise<number> {
+    const rows = await this.db
+      .delete(governanceSignatures)
+      .where(eq(governanceSignatures.signatureRef, actionRecordId))
+      .returning({ signatureId: governanceSignatures.signatureId });
+    return rows.length;
   }
 
   async purgeByUser(userId: string): Promise<number> {

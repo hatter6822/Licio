@@ -259,7 +259,26 @@ export async function submitAction(
     createdAt: nowIso,
     updatedAt: nowIso,
   };
-  await deps.actions.insert(record);
+  // Race-safe idempotency: the early getByIdempotencyKey check and this insert
+  // are not atomic, so a CONCURRENT same-key submit can win the insert.  Catch the
+  // unique-key conflict and REPLAY the stored record instead of surfacing the raw
+  // DB error to the loser (WS-L.3.2a).
+  try {
+    await deps.actions.insert(record);
+  } catch (error) {
+    const winner = await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey);
+    if (winner !== null) {
+      return {
+        ok: true,
+        actionRecordId: winner.actionRecordId,
+        submissionState: winner.submissionState,
+        reasonCode: null,
+        humanMessage: null,
+        replayed: true,
+      };
+    }
+    throw error; // a different failure — propagate
+  }
   await deps.audit.append({
     actorUserId: input.userId,
     eventType: 'knomosis_action_submit',
@@ -388,13 +407,23 @@ export async function applyTransition(
     });
     return null;
   }
-  const updated: KnomosisActionRecordEntity = {
-    ...record,
+  // COMPARE-AND-SET on the stored `from` state: if a concurrent writer (event
+  // ingestion racing the gateway verdict) already advanced the row past
+  // `record.submissionState`, the CAS matches nothing and we DO NOT clobber the
+  // newer state (WS-L.3.2b).
+  const updated = await deps.actions.updateIfState(record.actionRecordId, record.submissionState, {
     submissionState: to,
     failureReason: failureReason ?? record.failureReason,
+    indexedEventRef: record.indexedEventRef,
     updatedAt: new Date(deps.now()).toISOString(),
-  };
-  await deps.actions.update(updated);
+  });
+  if (updated === null) {
+    deps.log('knomosis.action.stale_transition', {
+      action_record_id: record.actionRecordId,
+      from: record.submissionState,
+      to,
+    });
+  }
   return updated;
 }
 

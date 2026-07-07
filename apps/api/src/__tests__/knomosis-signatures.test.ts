@@ -183,6 +183,28 @@ describe('verifyActionSignature — EOA path (WS-L.2.4a)', () => {
     expect(result).toEqual({ ok: false, reason: 'signature_malleable' });
   });
 
+  it('a HIGH-S 65-byte signature still REACHES the EIP-1271 verifier (R8-5)', async () => {
+    // A contract wallet can legitimately return arbitrary 65 bytes that parse as
+    // high-s; the low-s rejection must NOT gate the contract path.
+    const message = depositMessage(testAccount2.address); // the "contract" actor
+    const highS = malleate((await signedTypedData('treasury_deposit', message)) as `0x${string}`);
+    expect(classifyEcdsaSignature(highS)).toBe('malleable');
+    const calls: string[] = [];
+    const result = await verifyActionSignature({
+      actionType: 'treasury_deposit',
+      domain: LOCAL_DOMAIN,
+      message,
+      signature: highS,
+      contractVerifier: async (a) => {
+        calls.push(a.address);
+        return true;
+      },
+    });
+    // Accepted as a contract signature — NOT rejected outright as malleable.
+    expect(result).toMatchObject({ ok: true, walletType: 'contract' });
+    expect(calls).toEqual([testAccount2.address]);
+  });
+
   it('handles malformed signatures without crashing (truncated, garbage)', async () => {
     const message = depositMessage(testAccount.address);
     for (const bad of ['0x1234', 'nonsense', `0x${'zz'.repeat(65)}`]) {

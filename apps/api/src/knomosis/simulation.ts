@@ -610,10 +610,19 @@ export async function executeSimProposal(
     return err(409, 'timelocked', 'The simulated timelock has not elapsed yet.');
   }
 
+  // ATOMICALLY CLAIM the proposal (CAS timelocked→executed) BEFORE any debit:
+  // two concurrent executes (a double-click racing the scheduler, or two
+  // scheduler processes) can both pass the stale `timelocked` check above, so the
+  // claim is the single-execution gate that prevents a double debit (WS-L.4.1c).
+  const claimed = await deps.proposals.claimForExecution(args.proposalId);
+  if (claimed === null) {
+    return err(409, 'not_executable', 'This proposal is already being executed.');
+  }
+
   const nowIso = new Date(nowMs).toISOString();
-  if (proposal.requestedAmount !== null && proposal.asset !== null) {
-    const asset = proposal.asset;
-    const amount = proposal.requestedAmount;
+  if (claimed.requestedAmount !== null && claimed.asset !== null) {
+    const asset = claimed.asset;
+    const amount = claimed.requestedAmount;
     // Atomic sufficiency-check + debit: a lost-update race can never drive the
     // balance negative or double-spend the same grant (WS-L.4.1c).
     const applied = await mutateSimTreasury(deps, args.roomId, (balances) => {
@@ -626,11 +635,14 @@ export async function executeSimProposal(
       return { balances: { ...balances, [asset]: subtractMinor(available, amount) }, result: null };
     });
     if (!applied.ok) {
-      // Insufficient funds blocks execution (never a negative balance); a
-      // contention error just surfaces for retry.
-      if (applied.code === 'insufficient_sim_funds') {
-        await deps.proposals.update({ ...proposal, executionState: 'blocked' });
-      }
+      // Insufficient funds BLOCKS the (already-claimed) proposal; a transient
+      // treasury contention RELEASES the claim back to `timelocked` so a retry
+      // can execute — never leaving it stranded as `executed` without a debit.
+      await deps.proposals.update({
+        ...claimed,
+        executionState: applied.code === 'insufficient_sim_funds' ? 'blocked' : 'timelocked',
+        executedAt: null,
+      });
       return applied;
     }
     await deps.simTreasury.appendEntry({
@@ -640,13 +652,13 @@ export async function executeSimProposal(
       asset,
       amount,
       actorUserId: args.actorUserId,
-      proposalId: proposal.proposalId,
+      proposalId: claimed.proposalId,
       createdAt: nowIso,
     });
   }
 
   const executed: GovernanceProposalRecord = {
-    ...proposal,
+    ...claimed,
     executionState: 'executed',
     executedAt: nowIso,
   };

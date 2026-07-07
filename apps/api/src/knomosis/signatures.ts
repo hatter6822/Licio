@@ -165,8 +165,14 @@ export async function verifyActionSignature(
   const signature = input.signature as `0x${string}`;
   const actorLower = actor.toLowerCase();
 
+  // LOW-s is enforced for the EOA recovery path ONLY: a high-s ("malleable")
+  // 65-byte blob is not accepted as an EOA signature, but an EIP-1271 contract
+  // wallet can legitimately return arbitrary 65 bytes that happen to parse as
+  // high-s — so it FALLS THROUGH to the contract verifier instead of being
+  // rejected outright (WS-L.2.4a).  Replay of a malleable EOA twin is separately
+  // prevented by the single-use nonce, so the malleability check is defence in
+  // depth for the EOA path, not a gate on the contract path.
   const ecdsaClass = classifyEcdsaSignature(signature);
-  if (ecdsaClass === 'malleable') return { ok: false, reason: 'signature_malleable' };
 
   if (ecdsaClass === 'ok') {
     try {
@@ -189,5 +195,10 @@ export async function verifyActionSignature(
     if (valid) return { ok: true, walletType: 'contract', typedDataHash, actorLower };
   }
 
-  return { ok: false, reason: 'signature_invalid' };
+  // Neither an EOA nor a contract accepted it: surface malleability distinctly
+  // for a bare high-s EOA blob (no contract fallback), else a generic invalid.
+  return {
+    ok: false,
+    reason: ecdsaClass === 'malleable' ? 'signature_malleable' : 'signature_invalid',
+  };
 }

@@ -328,6 +328,48 @@ describe('WS-L.4.1d simulated voting + execution', () => {
     expect(audit.some((e) => e.actionType === 'execution_simulated')).toBe(false);
   });
 
+  it('two concurrent executes debit the simulated treasury EXACTLY once (R8-4 claim gate)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const deps = simulationDeps(fixture.knomosis);
+    await ensureSimTreasury(deps, ROOM); // 10,000.000000 SIM-USDC
+    const proposalId = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      challengeState: 'none',
+      executionState: 'timelocked',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+    });
+    // Both pass the stale `timelocked` check; only the claim winner may debit.
+    const [a, b] = await Promise.all([
+      executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null }),
+      executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null }),
+    ]);
+    expect([a, b].filter((r) => r.ok)).toHaveLength(1); // EXACTLY one succeeds
+    // The treasury was debited once (10,000 − 1); NOT twice.
+    const treasury = await ensureSimTreasury(deps, ROOM);
+    expect(treasury.balances['SIM-USDC']).toBe('9999000000');
+    const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
+    expect(entries.filter((e) => e.kind === 'grant_execution')).toHaveLength(1);
+  });
+
   it('leaves a quorum-reaching TIE open (crosses neither threshold, WS-L review fix)', async () => {
     const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' } });
     const proposer = await seedUserWithSession(fixture.identity, { handle: 'tieProp' });
