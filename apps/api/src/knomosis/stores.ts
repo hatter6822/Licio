@@ -124,7 +124,12 @@ export interface GovernanceProposalRecord {
   preflightState: 'pending' | 'passed' | 'failed';
   votingState: 'open' | 'passed' | 'rejected' | 'quorum_not_met';
   challengeState: 'none' | 'open' | 'upheld' | 'dismissed';
-  executionState: 'not_executed' | 'timelocked' | 'executed' | 'blocked';
+  // `executing` is a RECOVERABLE in-progress state (WS-L.4.1c): a proposal is
+  // claimed `timelocked`→`executing` BEFORE the simulated debit, and advanced to
+  // `executed` ONLY after the debit + ledger are durable.  A crash mid-execution
+  // leaves it `executing` — honest (never falsely `executed`) and never re-run by
+  // the timelocked-only sweep, so the treasury is never double-debited.
+  executionState: 'not_executed' | 'timelocked' | 'executing' | 'executed' | 'blocked';
   simulationMode: boolean;
   executableAfter: string | null;
   createdAt: string;
@@ -290,7 +295,12 @@ export interface KnomosisActionStore {
     },
   ): Promise<KnomosisActionRecordEntity | null>;
   listByRoom(roomId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
-  /** Event-stream lookup: the action a gateway event refers to (WS-L.3.3a). */
+  /** Event-stream lookup: the action a gateway event refers to (WS-L.3.3a).
+   *  When SEVERAL rows share the `(deployment, typedDataHash)` (a duplicate
+   *  preflight+submit whose loser is `failed`), returns the DETERMINISTIC
+   *  gateway-bound row (forwarded/live > terminal-on-chain > failed > reserving),
+   *  never an arbitrary one, so a gateway event advances the row that actually
+   *  reached the gateway.  Returns null ONLY when no row matches. */
   getByTypedDataHash(
     deploymentId: string,
     typedDataHash: string,
@@ -316,6 +326,16 @@ export interface KnomosisActionStore {
    *  submit.  Oldest first. */
   listReservingOlderThan(
     deploymentId: string,
+    createdBefore: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]>;
+  /** Deployment-AGNOSTIC `listReservingOlderThan`: EVERY `reserving` row older
+   *  than `createdBefore` across ALL deployments (active/frozen/retired).  The
+   *  scheduler sweep must NOT be gated by the active-deployment filter — a
+   *  frozen/retired deployment's abandoned reservation still pins the wallet's
+   *  unlink (`listOpenByWallet` treats `reserving` as open), so it must still be
+   *  failed (WS-L.3.2a).  Oldest first. */
+  listAllReservingOlderThan(
     createdBefore: string,
     limit: number,
   ): Promise<KnomosisActionRecordEntity[]>;
@@ -358,13 +378,16 @@ export interface OnChainEventStore {
     deploymentId: string,
     typedDataHashes: readonly string[],
   ): Promise<OnChainEventRecord[]>;
-  /** The resume cursor for `getEvents`: the greater of the highest ingested
-   *  gateway seq and any explicit re-anchor recorded by a gap rebuild (so the
-   *  cursor can jump FORWARD past events that were dropped and never stored). */
+  /** The resume cursor for `getEvents`: the group-atomic PROCESSED watermark,
+   *  advanced ONLY after a whole `gateway_seq` group is persisted AND processed
+   *  (or re-anchored FORWARD by a gap rebuild), NOT the raw max-stored seq — a
+   *  partially-stored multi-index group must never move the resume point past its
+   *  unprocessed indexes and permanently skip them (WS-L.3.3a). */
   latestGatewaySeq(deploymentId: string): Promise<string | null>;
-  /** Re-anchor the resume cursor to `seq` after a retention-gap rebuild — the
-   *  dropped events were never stored, so the derived max-stored-seq is stale and
-   *  would re-gap forever without this (WS-L.3.3b). */
+  /** Advance the resume watermark to `seq` — called per COMPLETE seq group after
+   *  ingestion, and to re-anchor FORWARD after a retention-gap rebuild.  Monotonic
+   *  (only ever moves forward), so a re-fetched-and-reprocessed group is a no-op
+   *  (WS-L.3.3a/3.3b). */
   recordGatewayCursor(deploymentId: string, seq: string): Promise<void>;
   markReorged(eventIds: readonly string[], detectedAtIso: string): Promise<void>;
   markConfirmed(eventIds: readonly string[]): Promise<void>;
@@ -387,11 +410,32 @@ export interface GovernanceProposalStore {
   listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]>;
   update(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   /** ATOMICALLY claim a passed, timelocked proposal for execution: CAS the
-   *  executionState `timelocked` → `executed`, returning the claimed row, or null
+   *  executionState `timelocked` → `executing`, returning the claimed row, or null
    *  when it is not claimable (already claimed by a racing execute).  This is the
    *  single-execution gate so two concurrent executes cannot both debit the
-   *  simulated treasury (WS-L.4.1c). */
+   *  simulated treasury.  The claim leaves the proposal in the RECOVERABLE
+   *  `executing` state — it advances to `executed` only via `finalizeExecution`
+   *  AFTER the debit + ledger are durable (WS-L.4.1c). */
   claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null>;
+  /** ATOMICALLY finalize a claimed proposal: CAS `executing` → `executed` with
+   *  the given `executedAt`, returning the finalized row or null if it is no longer
+   *  `executing`.  Called ONLY after the debit + ledger entry are durable, so a
+   *  proposal is `executed` iff its treasury effect actually happened (WS-L.4.1c). */
+  finalizeExecution(
+    proposalId: string,
+    executedAt: string,
+  ): Promise<GovernanceProposalRecord | null>;
+  /** ATOMICALLY resolve voting: CAS `votingState` `open` → a terminal outcome
+   *  (`passed`+timelock, or `rejected`), returning the row or null when it is no
+   *  longer open.  The single-resolution gate so two concurrent votes that each
+   *  reach quorum cannot both close the proposal (double timelock / outcome flip /
+   *  duplicate audit) — WS-L.4.1d. */
+  resolveVotingIfOpen(
+    proposalId: string,
+    resolution:
+      | { votingState: 'passed'; executionState: 'timelocked'; executableAfter: string }
+      | { votingState: 'rejected' },
+  ): Promise<GovernanceProposalRecord | null>;
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
   /** Open proposals in a room of a given type (policy-conflict check). */
@@ -410,7 +454,9 @@ export interface GovernanceProposalStore {
 }
 
 export interface ProposalVoteStore {
-  /** Insert-once per (proposal, voter); returns null when already voted. */
+  /** Insert-once per (proposal, voter) ONLY while the proposal is still open;
+   *  returns null when already voted OR the proposal is no longer open (WS-L.4.1d).
+   */
   cast(record: ProposalVoteRecord): Promise<ProposalVoteRecord | null>;
   tally(proposalId: string): Promise<{ approve: number; reject: number; abstain: number }>;
   /** The user's own votes — DSAR export. */
@@ -680,6 +726,53 @@ const TERMINAL_SUBMISSION_STATES: ReadonlySet<SubmissionState> = new Set([
   'failed',
 ]);
 
+// When several action rows share a `(deployment, typedDataHash)` — a user can
+// preflight the SAME payload twice (preflight never burns the nonce) and submit
+// under two idempotency keys; both reserve, one wins the single-use nonce and
+// forwards while the loser is marked `failed`(NONCE_REUSED) — the row that
+// ACTUALLY reached the gateway must win when a gateway event is bound back to an
+// action.  Only ONE row per hash can forward (the nonce burns for the rest), so
+// the top tier holds at most one row.  Deterministic ⇒ the same event resolves to
+// the same row across the in-memory + Drizzle adapters + reconciliation (WS-L.3.3a).
+const GATEWAY_BINDING_RANK: Readonly<Record<SubmissionState, number>> = {
+  submitted: 0,
+  accepted: 0,
+  settled: 0,
+  challenged: 0,
+  frozen: 0, // forwarded, still live
+  finalized: 1,
+  reverted: 1, // reached the gateway, terminal on-chain
+  failed: 2, // pre-submit loser / gateway decline
+  reserving: 3, // never forwarded
+};
+
+/**
+ * Deterministically select the row that is (or was) bound to the gateway among
+ * rows sharing a `(deployment, typedDataHash)`: lowest rank wins, ties broken by
+ * oldest `createdAt` then `actionRecordId`.  Returns null ONLY for an empty set.
+ */
+export function selectGatewayBoundAction(
+  rows: readonly KnomosisActionRecordEntity[],
+): KnomosisActionRecordEntity | null {
+  let best: KnomosisActionRecordEntity | null = null;
+  for (const row of rows) {
+    if (best === null) {
+      best = row;
+      continue;
+    }
+    const r = GATEWAY_BINDING_RANK[row.submissionState];
+    const b = GATEWAY_BINDING_RANK[best.submissionState];
+    if (
+      r < b ||
+      (r === b && row.createdAt < best.createdAt) ||
+      (r === b && row.createdAt === best.createdAt && row.actionRecordId < best.actionRecordId)
+    ) {
+      best = row;
+    }
+  }
+  return best;
+}
+
 export class InMemoryKnomosisActionStore implements KnomosisActionStore {
   readonly #rows = new Map<string, KnomosisActionRecordEntity>();
 
@@ -748,12 +841,14 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
     deploymentId: string,
     typedDataHash: string,
   ): Promise<KnomosisActionRecordEntity | null> {
+    const matches: KnomosisActionRecordEntity[] = [];
     for (const row of this.#rows.values()) {
       if (row.deploymentId === deploymentId && row.typedDataHash === typedDataHash) {
-        return structuredClone(row);
+        matches.push(row);
       }
     }
-    return null;
+    const chosen = selectGatewayBoundAction(matches);
+    return chosen ? structuredClone(chosen) : null;
   }
 
   async listUnreconciled(
@@ -797,6 +892,17 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
           r.submissionState === 'reserving' &&
           r.createdAt < createdBefore,
       )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit)
+      .map((r) => structuredClone(r));
+  }
+
+  async listAllReservingOlderThan(
+    createdBefore: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.submissionState === 'reserving' && r.createdAt < createdBefore)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(0, limit)
       .map((r) => structuredClone(r));
@@ -940,13 +1046,12 @@ export class InMemoryOnChainEventStore implements OnChainEventStore {
   }
 
   async latestGatewaySeq(deploymentId: string): Promise<string | null> {
-    let latest: bigint | null = this.#cursors.get(deploymentId) ?? null;
-    for (const row of this.#rows.values()) {
-      if (row.deploymentId !== deploymentId || row.gatewaySeq === null) continue;
-      const seq = BigInt(row.gatewaySeq);
-      if (latest === null || seq > latest) latest = seq;
-    }
-    return latest === null ? null : latest.toString();
+    // The resume cursor is the group-atomic PROCESSED watermark (recorded ONLY
+    // after a whole seq group is persisted + processed), NOT the raw max-stored
+    // seq — a partially-stored multi-index group must never advance the resume
+    // point past its unprocessed indexes (WS-L.3.3a).
+    const cursor = this.#cursors.get(deploymentId);
+    return cursor === undefined ? null : cursor.toString();
   }
 
   async recordGatewayCursor(deploymentId: string, seq: string): Promise<void> {
@@ -1039,9 +1144,33 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     if (row === undefined || row.executionState !== 'timelocked' || row.votingState !== 'passed') {
       return null;
     }
-    const claimed = { ...row, executionState: 'executed' as const };
+    const claimed = { ...row, executionState: 'executing' as const };
     this.#rows.set(proposalId, structuredClone(claimed));
     return structuredClone(claimed);
+  }
+
+  async finalizeExecution(
+    proposalId: string,
+    executedAt: string,
+  ): Promise<GovernanceProposalRecord | null> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || row.executionState !== 'executing') return null;
+    const finalized = { ...row, executionState: 'executed' as const, executedAt };
+    this.#rows.set(proposalId, structuredClone(finalized));
+    return structuredClone(finalized);
+  }
+
+  async resolveVotingIfOpen(
+    proposalId: string,
+    resolution:
+      | { votingState: 'passed'; executionState: 'timelocked'; executableAfter: string }
+      | { votingState: 'rejected' },
+  ): Promise<GovernanceProposalRecord | null> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || row.votingState !== 'open') return null;
+    const resolved = { ...row, ...resolution };
+    this.#rows.set(proposalId, structuredClone(resolved));
+    return structuredClone(resolved);
   }
 
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
@@ -1090,8 +1219,19 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
 
 export class InMemoryProposalVoteStore implements ProposalVoteStore {
   readonly #rows = new Map<string, ProposalVoteRecord>();
+  readonly #proposals: GovernanceProposalStore;
+
+  constructor(proposals: GovernanceProposalStore) {
+    this.#proposals = proposals;
+  }
 
   async cast(record: ProposalVoteRecord): Promise<ProposalVoteRecord | null> {
+    // Gate the insert on the LIVE proposal state: a vote loaded while the proposal
+    // was open must not be counted after a concurrent vote closed/timelocked it
+    // (WS-L.4.1d).  Returns null when the proposal is no longer open OR already
+    // voted (the caller disambiguates the 409 message).
+    const proposal = await this.#proposals.getById(record.proposalId);
+    if (proposal === null || proposal.votingState !== 'open') return null;
     const key = `${record.proposalId}:${record.voterUserId}`;
     if (this.#rows.has(key)) return null;
     this.#rows.set(key, { ...record });

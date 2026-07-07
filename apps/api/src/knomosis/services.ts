@@ -199,7 +199,7 @@ export function createInMemoryKnomosisServices(options: InMemoryKnomosisOptions)
     nonces: new InMemoryActionNonceStore(),
     actorMappings: new InMemoryWalletActorMappingStore(),
     proposals,
-    votes: new InMemoryProposalVoteStore(),
+    votes: new InMemoryProposalVoteStore(proposals),
     proposalSignatures: new InMemoryGovernanceSignatureStore(proposals),
     simTreasury: new InMemorySimTreasuryStore(),
     governanceAudit: new InMemoryGovernanceAuditStore(),

@@ -229,6 +229,30 @@ describe('WS-L financial wallet data-rights', () => {
       createdAt: now,
       executedAt: null,
     });
+    // A separate OPEN proposal the user voted on (cast now requires it to be open).
+    await knomosis.proposals.insert({
+      proposalId: 'p-x',
+      roomId: ROOM,
+      proposerUserId: OTHER,
+      proposalType: 'bounty',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'open',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: true,
+      executableAfter: null,
+      createdAt: now,
+      executedAt: null,
+    });
     await knomosis.votes.cast({
       proposalId: 'p-x',
       voterUserId: USER,

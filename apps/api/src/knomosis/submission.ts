@@ -34,6 +34,7 @@ import {
 } from './signatures.js';
 import type {
   FinancialWalletStore,
+  GovernanceProposalStore,
   GovernanceSignatureStore,
   KnomosisActionRecordEntity,
   KnomosisActionStore,
@@ -79,6 +80,11 @@ export interface SubmissionDeps {
    *  are RE-RUN at submit (a room can freeze / a role be revoked during the token
    *  TTL) so a high-impact action never forwards on stale authorization. */
   rooms: RoomGovernancePort;
+  /** Governance proposals — the §23.5 step-6 proposal-policy gate is RE-RUN at
+   *  submit for `proposal_sign`/`charter_update` because the voting window can
+   *  close during the token TTL, so a late token must not forward or record a
+   *  signature for a proposal that is no longer open (WS-L.3.2a). */
+  proposals: GovernanceProposalStore;
   /** Durable governance-signature ledger — a `proposal_sign` submit is
    *  recorded here (insert-once per (proposal, wallet)) so the vote powers the
    *  tally + the unlink-obligation check, not just the on-chain action row. */
@@ -233,6 +239,18 @@ export async function submitAction(
       message: 'This wallet is currently restricted from this financial action.',
     };
   }
+  // BIND the wallet to the deployment's chain (mirrors the WS-L.3.1b preflight
+  // gate): a wallet linked on chain A must never submit an action for a deployment
+  // on chain B, since an EOA key signs a valid payload for any chainId and an
+  // EIP-1271 address may be a different contract on chain B (WS-L.3.2a).
+  if (wallet.chainId !== deployment.chain_id) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'WALLET_CHAIN_MISMATCH',
+      message: 'The selected wallet is linked on a different chain than this deployment.',
+    };
+  }
 
   // RE-RUN the MUTABLE governance gates (room mode + role) BEFORE reserving: a
   // room can be FROZEN or a mode changed, and a steward/member role revoked,
@@ -272,6 +290,46 @@ export async function submitAction(
         ? 'This action requires a room steward.'
         : 'This action requires room membership.',
     };
+  }
+
+  // RE-RUN the §23.5 step-6 PROPOSAL-POLICY gate at submit (mirrors preflight):
+  // the voting window can CLOSE during the preflight-token TTL, so a token minted
+  // while a proposal was open must not forward — and record a governance signature
+  // — for a proposal that has since closed (WS-L.3.2a re-runs WS-L.3.1a step 6).
+  if (actionType === 'proposal_sign') {
+    const proposalId = input.typedDataMessage['proposalId'] ?? '';
+    const proposal = await deps.proposals.getById(proposalId);
+    if (proposal?.simulationMode) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'POLICY_CONFLICT',
+        message: 'A simulated proposal cannot be signed for real submission.',
+      };
+    }
+    if (proposal === null || proposal.roomId !== input.roomId || proposal.votingState !== 'open') {
+      return {
+        ok: false,
+        status: 409,
+        code: 'POLICY_CONFLICT',
+        message: 'The referenced proposal is not open for signatures.',
+      };
+    }
+  }
+  if (actionType === 'charter_update') {
+    // Only a REAL open charter proposal conflicts (a leftover simulated one can no
+    // longer be voted/executed) — mirrors the preflight charter conflict gate.
+    const openCharter = (
+      await deps.proposals.listOpenByRoomAndType(input.roomId, 'charter_update')
+    ).filter((p) => !p.simulationMode);
+    if (openCharter.length > 0) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'POLICY_CONFLICT',
+        message: 'A conflicting charter-update proposal is already open.',
+      };
+    }
   }
 
   // ---- RESERVE (state `reserving`) ------------------------------------------
@@ -627,16 +685,22 @@ export async function resubmitPendingActions(
  * transition makes the sweep race-safe against a slow-but-live submit: whichever
  * of the sweep (→ failed) or the submit (→ submitted) wins, the loser's CAS
  * matches nothing.  `staleAfterMs` is set well beyond any submit's wall-clock so
- * a live submission is never swept.
+ * a live submission is never swept.  `deploymentId === null` sweeps EVERY
+ * deployment (active AND frozen/retired): a reservation on a since-retired
+ * deployment is dropped from the scheduler's active loop yet still pins the
+ * wallet's unlink, so it must still be failed (WS-L.3.2a).
  */
 export async function failStaleReservations(
   deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log'>,
-  deploymentId: string,
+  deploymentId: string | null,
   staleAfterMs: number,
   limit = 50,
 ): Promise<number> {
   const cutoff = new Date(deps.now() - staleAfterMs).toISOString();
-  const stale = await deps.actions.listReservingOlderThan(deploymentId, cutoff, limit);
+  const stale =
+    deploymentId === null
+      ? await deps.actions.listAllReservingOlderThan(cutoff, limit)
+      : await deps.actions.listReservingOlderThan(deploymentId, cutoff, limit);
   let failed = 0;
   for (const record of stale) {
     const updated = await applyTransition(

@@ -536,6 +536,59 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     expect(standing.status).toBe(200);
   });
 
+  it('a REPLAY of a FAILED (unvalidated) reservation does NOT rebuild the mapping (F8)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkAndMapWallet(fixture, userId);
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const message = depositMessage(deploymentId);
+    const idem = crypto.randomUUID();
+    // A stored action that FAILED a submit gate before forwarding — its `actor` is
+    // the caller's UNVERIFIED payload value (the reviewer's attack shape).
+    await fixture.knomosis.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      actorWalletAccountId: walletAccountId,
+      actorUserId: userId,
+      payloadHash: '0x',
+      typedDataHash: `0x${'cd'.repeat(32)}`,
+      signedAction: { message, signature: '0x' },
+      submissionState: 'failed',
+      failureReason: 'preflight token missing/expired/used',
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: idem,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // Clear the mapping so we can detect whether the replay wrongly recreates it.
+    await fixture.knomosis.actorMappings.clear();
+    const signature = await signedTypedData('treasury_deposit', message);
+    const submit = await post('/knomosis/actions/submit', cookie, {
+      preflight_token: 'replayed-token-stand-in',
+      idempotency_key: idem,
+      action_type: 'treasury_deposit',
+      room_id: ROOM,
+      deployment_id: deploymentId,
+      wallet_account_id: walletAccountId,
+      typed_data_message: message,
+      signature,
+    });
+    // The replay returns the stored (failed) state, but the route must NOT rebuild
+    // an actor mapping from an unvalidated `failed` row — so standing stays unmapped.
+    expect(submit.status).toBe(202);
+    const standing = await get(`/knomosis/standing/${walletAccountId}/${deploymentId}`, cookie);
+    expect(standing.status).not.toBe(200);
+  });
+
   it('a preflight failure returns a typed reason (unknown action type)', async () => {
     const fixture = await freshKnomosisServices();
     fixture.knomosis.rooms = {

@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import type { GovernanceProposalCreate } from '@licio/shared';
 import { afterEach, describe, expect, it } from 'vitest';
+import { switchConfigKey } from '../knomosis/killswitch.js';
 import { evaluateReadiness, requestModeTransition } from '../knomosis/readiness.js';
 import { simulationDeps } from '../knomosis/services.js';
 import {
@@ -368,6 +369,145 @@ describe('WS-L.4.1d simulated voting + execution', () => {
     expect(treasury.balances['SIM-USDC']).toBe('9999000000');
     const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
     expect(entries.filter((e) => e.kind === 'grant_execution')).toHaveLength(1);
+    // F10: the winner ended `executed` (finalized AFTER the debit), not `executing`.
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe('executed');
+  });
+
+  it('a crash-left `executing` proposal is NEVER re-executed — no double debit (F10)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const deps = simulationDeps(fixture.knomosis);
+    await ensureSimTreasury(deps, ROOM);
+    const proposalId = crypto.randomUUID();
+    // A crash between claim and finalize left the proposal honestly `executing`.
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      executionState: 'executing',
+      challengeState: 'none',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+    });
+    // The sweep lists ONLY `timelocked` proposals, so an `executing` one is never
+    // re-run — the treasury can never be double-debited on recovery.
+    expect(await executeElapsedSimProposals(deps)).toBe(0);
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe(
+      'executing',
+    );
+    expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('10000000000');
+    // The manual route also refuses (not `timelocked`).
+    const manual = await executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null });
+    expect(manual.ok).toBe(false);
+  });
+
+  it('an engaged treasury_execution kill switch pauses simulated execution (F7)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const deps = simulationDeps(fixture.knomosis);
+    await ensureSimTreasury(deps, ROOM);
+    const proposalId = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      executionState: 'timelocked',
+      challengeState: 'none',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+    });
+    // Engage the treasury-execution switch GLOBALLY.
+    await fixture.knomosis.configStore.set(switchConfigKey('treasury_execution'), {
+      scopes: { global: true, regions: [], room_ids: [] },
+      release_card: null,
+      engaged_at: new Date(clock).toISOString(),
+      deactivation_requested_by: null,
+    });
+    // The manual route (scheduler actor = null) is paused with a 503.
+    const manual = await executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null });
+    expect(manual.ok).toBe(false);
+    if (!manual.ok) {
+      expect(manual.status).toBe(503);
+      expect(manual.code).toBe('kill_switch_active');
+    }
+    // The scheduler sweep executes NONE, the treasury is untouched, no audit row.
+    expect(await executeElapsedSimProposals(deps)).toBe(0);
+    expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('10000000000');
+    const audit = await fixture.knomosis.governanceAudit.listByRoom(ROOM, 50);
+    expect(audit.some((e) => e.actionType === 'execution_simulated')).toBe(false);
+  });
+
+  it('two concurrent quorum-reaching votes close the proposal EXACTLY once (F6)', async () => {
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' } });
+    const proposer = await seedUserWithSession(fixture.identity, { handle: 'f6Prop' });
+    const v0 = await seedUserWithSession(fixture.identity, { handle: 'f6v0' });
+    const v1 = await seedUserWithSession(fixture.identity, { handle: 'f6v1' });
+    const v2 = await seedUserWithSession(fixture.identity, { handle: 'f6v2' });
+    const v3 = await seedUserWithSession(fixture.identity, { handle: 'f6v3' });
+    for (const u of [proposer, v0, v1, v2, v3]) await passComprehension(fixture, u.userId);
+    const deps = simulationDeps(fixture.knomosis);
+    const created = await createSimProposal(deps, {
+      roomId: ROOM,
+      userId: proposer.userId,
+      create: bountyTemplate({ requested_amount: '1000000' }),
+    });
+    if (!created.ok) throw new Error('proposal failed');
+    const proposalId = created.proposal.proposalId;
+    // Two approvals below quorum keep it open…
+    await castSimVote(deps, {
+      roomId: ROOM,
+      proposalId,
+      userId: v0.userId,
+      choice: 'approve',
+    });
+    await castSimVote(deps, {
+      roomId: ROOM,
+      proposalId,
+      userId: v1.userId,
+      choice: 'approve',
+    });
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.votingState).toBe('open');
+    // …then two CONCURRENT approvals each reach quorum and try to close it.
+    const results = await Promise.all([
+      castSimVote(deps, { roomId: ROOM, proposalId, userId: v2.userId, choice: 'approve' }),
+      castSimVote(deps, { roomId: ROOM, proposalId, userId: v3.userId, choice: 'approve' }),
+    ]);
+    expect(results.every((r) => r.ok)).toBe(true);
+    // The proposal is closed EXACTLY once — a single `proposal_passed` audit row,
+    // not a double-close / timelock reset (F6 CAS gate).
+    const audit = await fixture.knomosis.governanceAudit.listByRoom(ROOM, 100);
+    expect(audit.filter((e) => e.actionType === 'proposal_passed')).toHaveLength(1);
+    const final = await fixture.knomosis.proposals.getById(proposalId);
+    expect(final?.votingState).toBe('passed');
+    expect(final?.executionState).toBe('timelocked');
   });
 
   it('leaves a quorum-reaching TIE open (crosses neither threshold, WS-L review fix)', async () => {

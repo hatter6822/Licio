@@ -106,28 +106,32 @@ export async function runKnomosisTick(
       onError(error, 'resubmit');
     }
     try {
-      // Fail reservations abandoned mid-validation (a crash between the reservation
-      // insert and the `reserving → submitted` promotion, WS-L.3.2a).  The stale
-      // threshold is the preflight-token TTL — vastly longer than any submit's
-      // wall-clock — so a live submission is never swept, and the CAS in
-      // `applyTransition` makes a rare collision safe either way.
-      await failStaleReservations(
-        {
-          actions: services.actions,
-          now: services.now,
-          log: services.log,
-        },
-        deployment.deploymentId,
-        services.config().preflightTokenTtlMs,
-      );
-    } catch (error) {
-      onError(error, 'fail_stale_reservations');
-    }
-    try {
       await reconcileDeployment(services, deployment.deploymentId);
     } catch (error) {
       onError(error, 'reconcile');
     }
+  }
+
+  try {
+    // Fail reservations abandoned mid-validation (a crash between the reservation
+    // insert and the `reserving → submitted` promotion, WS-L.3.2a) — ONE global
+    // sweep across ALL deployments, NOT gated by the active-deployment loop above:
+    // a `reserving` row on a since-frozen/retired deployment is dropped from that
+    // loop yet still pins the wallet's unlink (`listOpenByWallet` treats it as
+    // open), so it must still be swept.  The stale threshold is the preflight-token
+    // TTL — vastly longer than any submit's wall-clock — so a live submission is
+    // never swept, and the CAS in `applyTransition` makes a rare collision safe.
+    await failStaleReservations(
+      {
+        actions: services.actions,
+        now: services.now,
+        log: services.log,
+      },
+      null,
+      services.config().preflightTokenTtlMs,
+    );
+  } catch (error) {
+    onError(error, 'fail_stale_reservations');
   }
 
   // Honour the LIVE governance flag: disabling the plane during an incident must

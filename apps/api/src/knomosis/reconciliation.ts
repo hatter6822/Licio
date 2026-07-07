@@ -185,10 +185,29 @@ export async function reconcileDeployment(
   }
   const lowWatermark = await deps.events.latestGatewaySeq(deploymentId);
 
+  // The DETERMINISTIC gateway-bound owner per hash: when a duplicate preflight+
+  // submit leaves a `failed` loser sharing the winner's `(deployment, hash)`, only
+  // the winner owns the indexed event.  A non-owner loser never reached the gateway,
+  // so it must reconcile as a clean match — NOT a spurious critical divergence
+  // against its sibling's finalized event (WS-L.3.4a).
+  const ownerByHash = new Map<string, string>();
+  for (const hash of batchHashes) {
+    const owner = await deps.actions.getByTypedDataHash(deploymentId, hash);
+    if (owner !== null) ownerByHash.set(hash, owner.actionRecordId);
+  }
+
   let matched = 0;
   let mismatched = 0;
   let inFlight = 0;
   for (const record of records) {
+    // A duplicate LOSER (a different row owns the hash) reconciles as matched: the
+    // indexed event belongs to its gateway-bound sibling, not to this failed row.
+    const owner = ownerByHash.get(record.typedDataHash);
+    if (owner !== undefined && owner !== record.actionRecordId) {
+      await deps.actions.update({ ...record, reconciliationState: 'matched', updatedAt: nowIso });
+      matched += 1;
+      continue;
+    }
     // Source 2 = the ACTUAL persisted public receipt (its finalState), read
     // per-record — never the product state echoed back at itself.
     const receipt = await deps.receipts.getByAction(record.actionRecordId, 'public');

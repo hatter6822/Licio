@@ -765,6 +765,7 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
       isSteward: async () => false,
       contentVisibleToUser: async () => false,
     },
+    proposals: fixture.knomosis.proposals,
     signatures: fixture.knomosis.proposalSignatures,
     nonces: fixture.knomosis.nonces,
     gateway: fixture.knomosis.gateway,
@@ -793,7 +794,7 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
       userId: 'u1',
       addressHashHex: 'deadbeef',
       addressTruncated: '0x00…00',
-      chainId: 1,
+      chainId: LOCAL_DEPLOYMENT.chain_id,
       walletType: 'eoa',
       unlinkState: 'active',
       riskState: 'normal',
@@ -842,7 +843,7 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     userId,
     addressHashHex: 'deadbeef',
     addressTruncated: '0x00…00',
-    chainId: 1,
+    chainId: LOCAL_DEPLOYMENT.chain_id,
     walletType: 'eoa' as const,
     unlinkState: 'active' as const,
     riskState: 'normal' as const,
@@ -868,6 +869,33 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     nonce: '1',
     expiration: String(Math.floor(Date.now() / 1000) + 600),
     deploymentId,
+  });
+
+  it('rejects a submit for a wallet linked on a DIFFERENT chain than the deployment (F1)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = testnetRooms;
+    // An active, owned wallet — but linked on a DIFFERENT chain than the deployment.
+    await fixture.knomosis.wallets.insert({
+      ...activeWallet('w1', 'u1'),
+      chainId: LOCAL_DEPLOYMENT.chain_id + 1,
+    });
+    const room = crypto.randomUUID();
+    const { submitAction } = await import('../knomosis/submission.js');
+    const result = await submitAction(s(fixture), {
+      userId: 'u1',
+      preflightToken: 'irrelevant-token-here',
+      idempotencyKey: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: room,
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      walletAccountId: 'w1',
+      typedDataMessage: validDeposit(LOCAL_DEPLOYMENT.deployment_id, room),
+      signature: '0x',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('WALLET_CHAIN_MISMATCH');
+    // The chain gate runs BEFORE the reservation — no row persisted.
+    expect(await fixture.knomosis.actions.listByActor('u1', 10)).toHaveLength(0);
   });
 
   it('rejects a submit for a wallet owned by ANOTHER user WITHOUT reserving a row (R11-1)', async () => {
@@ -1258,6 +1286,14 @@ describe('in-memory store adapters + services getter', () => {
       reorgDetectedAt: null,
       indexedAt: new Date().toISOString(),
     });
+    // F3: latestGatewaySeq is the RECORDED, group-atomic watermark — NOT the raw
+    // max-stored seq — so an ingested-but-not-yet-cursor-advanced event does not
+    // move the resume point (a partial multi-index group must never advance it).
+    expect(await store.latestGatewaySeq('d')).toBeNull();
+    await store.recordGatewayCursor('d', '5');
+    expect(await store.latestGatewaySeq('d')).toBe('5');
+    // Monotonic: a lower seq never rewinds the watermark.
+    await store.recordGatewayCursor('d', '3');
     expect(await store.latestGatewaySeq('d')).toBe('5');
     await store.markConfirmed([record.eventId]);
     await store.markReorged([record.eventId], new Date().toISOString());

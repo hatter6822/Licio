@@ -269,6 +269,23 @@ export async function runPreflight(
       fail('signature', 'WALLET_NOT_ACTIVE', 'The selected wallet is not active.', input, nowIso),
     );
   }
+  // BIND the selected wallet to the deployment's chain.  Wallets are chain-scoped
+  // (the SIWE link records `chainId`), but an EOA key signs a valid EIP-712 payload
+  // for ANY chainId, so without this gate a wallet linked on chain A could preflight
+  // a deployment on chain B (and for an EIP-1271 contract wallet the same address
+  // may be a DIFFERENT contract on chain B).  Enforce it unconditionally — with a
+  // single active chain every legitimate wallet already satisfies it (WS-L.3.1b).
+  if (wallet.chainId !== deployment.chain_id) {
+    return audited(
+      fail(
+        'signature',
+        'WALLET_CHAIN_MISMATCH',
+        'The selected wallet is linked on a different chain than this deployment.',
+        input,
+        nowIso,
+      ),
+    );
+  }
   if (wallet.riskState === 'high') {
     return audited(
       fail(

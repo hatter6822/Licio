@@ -117,6 +117,26 @@ export function TransactionPreviewCard({
         <Field label={t('wallet.preview.nonce', 'Nonce')} value={preview.nonce} />
       </dl>
 
+      {/* WS-L.2.6a/b — AUTHORITATIVE anti-bait-and-switch disclosure: EVERY signed
+          field, verbatim, with its plain-language label, derived directly from the
+          typed-data message.  The friendly summary above is a curated subset; this
+          guarantees the critical target of actions whose signed payload is NOT a
+          recipient/amount pair (proposal_sign.proposalId, charter_update.contentHash/
+          charterVersionId, steward_rotation.incoming/outgoingUserId) is shown before
+          the signature is enabled.  Iterate ONLY signed_fields so display ⊆ signed. */}
+      {preview.signed_fields.length > 0 ? (
+        <div className="flex flex-col gap-1 rounded-md border border-line bg-surface-sunken p-3">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-muted">
+            {t('wallet.preview.signedFields', 'Exactly what you will sign')}
+          </h3>
+          <dl className="grid grid-cols-1 gap-x-4 sm:grid-cols-2">
+            {preview.signed_fields.map((field) => (
+              <Field key={field.name} label={field.label} value={field.value} />
+            ))}
+          </dl>
+        </div>
+      ) : null}
+
       {/* §19.5 durability disclosure — always shown for on-chain actions. */}
       <p className="rounded-md border border-line bg-surface-sunken p-3 text-xs text-ink-muted">
         {preview.public_visibility_disclosure}

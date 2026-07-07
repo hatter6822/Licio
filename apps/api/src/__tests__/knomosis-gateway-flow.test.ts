@@ -14,6 +14,7 @@ import { ingestGatewayEvents, rebuildFromSnapshot } from '../knomosis/ingest.js'
 import type { PreflightDeps, PreflightRequestInput } from '../knomosis/preflight.js';
 import { runPreflight } from '../knomosis/preflight.js';
 import { canExpandTreasury, reconcileDeployment } from '../knomosis/reconciliation.js';
+import type { KnomosisActionRecordEntity } from '../knomosis/stores.js';
 import { type SubmissionDeps, submitAction } from '../knomosis/submission.js';
 import { seedUserWithSession } from './event-test-helpers.js';
 import type { KnomosisFixture } from './knomosis-test-helpers.js';
@@ -57,6 +58,7 @@ function submissionDeps(fixture: KnomosisFixture): SubmissionDeps {
     actions: s.actions,
     wallets: s.wallets,
     rooms: s.rooms,
+    proposals: s.proposals,
     signatures: s.proposalSignatures,
     nonces: s.nonces,
     gateway: s.gateway,
@@ -866,6 +868,81 @@ describe('WS-L.3.2 submission + state machine', () => {
     expect(open).toHaveLength(1);
   });
 
+  it('rejects a proposal_sign whose proposal CLOSED between preflight and submit (F9)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const proposalId = crypto.randomUUID();
+    const openProposal = {
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: userId,
+      proposalType: 'charter_update' as const,
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed' as const,
+      votingState: 'open' as const,
+      challengeState: 'none' as const,
+      executionState: 'not_executed' as const,
+      simulationMode: false,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+    };
+    await fixture.knomosis.proposals.insert(openProposal);
+    const message = {
+      roomId: ROOM,
+      proposalId,
+      actor: testAccount.address,
+      nonce: '1',
+      expiration: String(Math.floor(Date.now() / 1000) + 600),
+      deploymentId: DEPLOYMENT,
+    };
+    const signature = await signedTypedData('proposal_sign', message);
+    const pre = await runPreflight(preflightDeps(fixture), {
+      userId,
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    if (pre.result !== 'pass') throw new Error(`preflight failed: ${JSON.stringify(pre)}`);
+    // The voting window CLOSES during the preflight-token TTL.
+    await fixture.knomosis.proposals.update({ ...openProposal, votingState: 'passed' });
+    const idem = crypto.randomUUID();
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: idem,
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('POLICY_CONFLICT');
+    // No signature recorded for the CLOSED proposal, and no reserved row.
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(0);
+    expect(await fixture.knomosis.actions.getByIdempotencyKey(userId, idem)).toBeNull();
+  });
+
   it('rejects a reused preflight token (single-use)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
@@ -1421,5 +1498,126 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     // Zero unexplained divergence ⇒ treasury may expand (§28.3).
     const gate = await canExpandTreasury(fixture.knomosis, DEPLOYMENT);
     expect(gate.allowed).toBe(true);
+  });
+
+  const dupAction = (
+    id: string,
+    hash: string,
+    state: KnomosisActionRecordEntity['submissionState'],
+    createdAt: string,
+    actorUserId = crypto.randomUUID(),
+  ): KnomosisActionRecordEntity => ({
+    actionRecordId: id,
+    deploymentId: DEPLOYMENT,
+    actionType: 'treasury_deposit',
+    roomId: ROOM,
+    actorWalletAccountId: crypto.randomUUID(),
+    actorUserId,
+    payloadHash: '0x',
+    typedDataHash: hash,
+    signedAction: { message: {}, signature: '0x' },
+    submissionState: state,
+    failureReason: null,
+    indexedEventRef: null,
+    reconciliationState: 'pending',
+    idempotencyKey: crypto.randomUUID(),
+    createdAt,
+    updatedAt: createdAt,
+  });
+
+  it('a gateway event binds to the gateway-bound row, not a duplicate FAILED loser (F4)', async () => {
+    const fixture = await freshKnomosisServices();
+    const hash = `0x${'ab'.repeat(32)}`;
+    const winnerId = crypto.randomUUID();
+    const loserId = crypto.randomUUID();
+    // The loser FAILED (NONCE_REUSED), the winner forwarded + settled — both share
+    // the hash.  Insert the loser FIRST so a naive first-match would pick it.
+    await fixture.knomosis.actions.insert(
+      dupAction(loserId, hash, 'failed', '2026-07-01T00:00:00Z'),
+    );
+    await fixture.knomosis.actions.insert(
+      dupAction(winnerId, hash, 'settled', '2026-07-01T00:00:01Z'),
+    );
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.finalized',
+            payload: { typed_data_hash: hash },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    // The event advanced the WINNER; the failed loser is untouched (no invalid
+    // transition, no stranding the row that reached the gateway) (F4).
+    expect((await fixture.knomosis.actions.getById(winnerId))?.submissionState).toBe('finalized');
+    expect((await fixture.knomosis.actions.getById(loserId))?.submissionState).toBe('failed');
+  });
+
+  it('does NOT advance the resume cursor when a side effect throws mid seq-group (F3)', async () => {
+    const fixture = await freshKnomosisServices();
+    const hashA = `0x${'a1'.repeat(32)}`;
+    const hashB = `0x${'b2'.repeat(32)}`;
+    const actorB = crypto.randomUUID();
+    await fixture.knomosis.actions.insert(
+      dupAction(crypto.randomUUID(), hashA, 'settled', '2026-07-01T00:00:00Z'),
+    );
+    await fixture.knomosis.actions.insert(
+      dupAction(crypto.randomUUID(), hashB, 'settled', '2026-07-01T00:00:01Z', actorB),
+    );
+    // ONE seq (1) with TWO indexes — both finalized events, second binds to actor B.
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.finalized',
+            payload: { typed_data_hash: hashA },
+          },
+          {
+            seq: '1',
+            index: 1,
+            type: 'knomosis.action.finalized',
+            payload: { typed_data_hash: hashB },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    // A crash while processing the SECOND index of the group.
+    const deps = {
+      ...ingestDeps(fixture),
+      gateway: () => stub,
+      notifyActor: async (userId: string) => {
+        if (userId === actorB) throw new Error('crash mid-group');
+      },
+    };
+    await expect(
+      ingestGatewayEvents(deps, DEPLOYMENT, LOCAL_DEPLOYMENT.chain_id),
+    ).rejects.toThrow();
+    // The resume cursor did NOT advance past the incomplete group — the whole seq-1
+    // group (both indexes) is re-fetched intact next tick, so no index is skipped (F3).
+    expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBeNull();
   });
 });

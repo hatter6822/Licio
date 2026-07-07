@@ -21,6 +21,7 @@ import {
   InMemorySimTreasuryStore,
   InMemoryWalletActorMappingStore,
   type KnomosisActionRecordEntity,
+  selectGatewayBoundAction,
 } from '../knomosis/stores.js';
 
 const now = () => new Date().toISOString();
@@ -138,6 +139,70 @@ describe('InMemoryKnomosisActionStore', () => {
     expect((await store.listUnreconciled('d1', 10)).length).toBeGreaterThan(0);
     await expect(store.update(action({ actionRecordId: 'nope' }))).rejects.toThrow();
   });
+
+  it('getByTypedDataHash resolves duplicates to the gateway-bound row, not the failed loser (F4)', async () => {
+    const store = new InMemoryKnomosisActionStore();
+    const hash = `0x${'ab'.repeat(32)}`;
+    // Duplicate preflight+submit: the loser FAILED (NONCE_REUSED), the winner
+    // forwarded (`submitted`).  They share (deployment, typedDataHash).
+    const loser = action({
+      deploymentId: 'd1',
+      typedDataHash: hash,
+      submissionState: 'failed',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    const winner = action({
+      deploymentId: 'd1',
+      typedDataHash: hash,
+      submissionState: 'submitted',
+      createdAt: '2026-07-01T00:00:01.000Z',
+    });
+    // Insert loser FIRST so a naive "first match" would return it.
+    await store.insert(loser);
+    await store.insert(winner);
+    expect((await store.getByTypedDataHash('d1', hash))?.actionRecordId).toBe(
+      winner.actionRecordId,
+    );
+    // Deterministic regardless of input order.
+    expect(selectGatewayBoundAction([loser, winner])?.actionRecordId).toBe(winner.actionRecordId);
+    expect(selectGatewayBoundAction([winner, loser])?.actionRecordId).toBe(winner.actionRecordId);
+    // A `reserving` sibling ranks below `failed`, never chosen over a forwarded row.
+    const reserving = action({
+      deploymentId: 'd1',
+      typedDataHash: hash,
+      submissionState: 'reserving',
+    });
+    expect(selectGatewayBoundAction([reserving, winner])?.actionRecordId).toBe(
+      winner.actionRecordId,
+    );
+    expect(selectGatewayBoundAction([])).toBeNull();
+  });
+
+  it('listAllReservingOlderThan spans deployments and excludes fresh rows (F5)', async () => {
+    const store = new InMemoryKnomosisActionStore();
+    const old = '2026-07-01T00:00:00.000Z';
+    const fresh = '2026-07-01T12:00:00.000Z';
+    await store.insert(
+      action({ deploymentId: 'dA', submissionState: 'reserving', createdAt: old }),
+    );
+    await store.insert(
+      action({ deploymentId: 'dB', submissionState: 'reserving', createdAt: old }),
+    );
+    await store.insert(
+      action({ deploymentId: 'dA', submissionState: 'reserving', createdAt: fresh }),
+    );
+    await store.insert(
+      action({ deploymentId: 'dA', submissionState: 'submitted', createdAt: old }),
+    );
+    const cutoff = '2026-07-01T06:00:00.000Z';
+    const stale = await store.listAllReservingOlderThan(cutoff, 50);
+    // Both OLD reserving rows across dA + dB; NOT the fresh one, NOT the submitted one.
+    expect(stale).toHaveLength(2);
+    expect(new Set(stale.map((r) => r.deploymentId))).toEqual(new Set(['dA', 'dB']));
+    expect(stale.every((r) => r.submissionState === 'reserving' && r.createdAt < cutoff)).toBe(
+      true,
+    );
+  });
 });
 
 describe('InMemoryGovernanceProposalStore + votes + signatures', () => {
@@ -154,8 +219,38 @@ describe('InMemoryGovernanceProposalStore + votes + signatures', () => {
     await expect(store.update(proposal({ proposalId: 'nope' }))).rejects.toThrow();
   });
 
-  it('votes are insert-once and tally correctly', async () => {
-    const store = new InMemoryProposalVoteStore();
+  it('claimForExecution→executing then finalizeExecution→executed, each once (F10)', async () => {
+    const store = new InMemoryGovernanceProposalStore();
+    await store.insert(
+      proposal({ proposalId: 'p', votingState: 'passed', executionState: 'timelocked' }),
+    );
+    const claimed = await store.claimForExecution('p');
+    expect(claimed?.executionState).toBe('executing'); // NOT executed (recoverable)
+    expect(await store.claimForExecution('p')).toBeNull(); // no double execution
+    const finalized = await store.finalizeExecution('p', '2026-07-01T00:00:00.000Z');
+    expect(finalized?.executionState).toBe('executed');
+    expect(finalized?.executedAt).toBe('2026-07-01T00:00:00.000Z');
+    expect(await store.finalizeExecution('p', '2026-07-02T00:00:00.000Z')).toBeNull(); // no-op
+  });
+
+  it('resolveVotingIfOpen CAS open→terminal exactly once (F6)', async () => {
+    const store = new InMemoryGovernanceProposalStore();
+    await store.insert(proposal({ proposalId: 'p', votingState: 'open' }));
+    const passed = await store.resolveVotingIfOpen('p', {
+      votingState: 'passed',
+      executionState: 'timelocked',
+      executableAfter: '2026-07-01T00:00:00.000Z',
+    });
+    expect(passed?.votingState).toBe('passed');
+    expect(passed?.executionState).toBe('timelocked');
+    // A racer that tries to resolve again (or flip the outcome) loses the CAS.
+    expect(await store.resolveVotingIfOpen('p', { votingState: 'rejected' })).toBeNull();
+  });
+
+  it('votes are insert-once and tally correctly (only while open)', async () => {
+    const proposals = new InMemoryGovernanceProposalStore();
+    await proposals.insert(proposal({ proposalId: 'p', votingState: 'open' }));
+    const store = new InMemoryProposalVoteStore(proposals);
     expect(
       await store.cast({ proposalId: 'p', voterUserId: 'a', choice: 'approve', castAt: now() }),
     ).not.toBeNull();
@@ -164,6 +259,24 @@ describe('InMemoryGovernanceProposalStore + votes + signatures', () => {
     ).toBeNull();
     await store.cast({ proposalId: 'p', voterUserId: 'b', choice: 'reject', castAt: now() });
     expect(await store.tally('p')).toEqual({ approve: 1, reject: 1, abstain: 0 });
+  });
+
+  it('cast REFUSES once the proposal is no longer open (F6)', async () => {
+    const proposals = new InMemoryGovernanceProposalStore();
+    await proposals.insert(proposal({ proposalId: 'closed', votingState: 'passed' }));
+    const store = new InMemoryProposalVoteStore(proposals);
+    expect(
+      await store.cast({
+        proposalId: 'closed',
+        voterUserId: 'a',
+        choice: 'approve',
+        castAt: now(),
+      }),
+    ).toBeNull();
+    // An absent proposal is likewise refused (fail-closed).
+    expect(
+      await store.cast({ proposalId: 'ghost', voterUserId: 'a', choice: 'approve', castAt: now() }),
+    ).toBeNull();
   });
 
   it('signatures are insert-once per (proposal, wallet) and filter open', async () => {

@@ -123,6 +123,7 @@ export const KNOMOSIS_REASON_CODES = [
   'PREFLIGHT_USED',
   'PAYLOAD_MISMATCH',
   'WALLET_NOT_ACTIVE',
+  'WALLET_CHAIN_MISMATCH',
   'RISK_BLOCKED',
   'DEPLOYMENT_UNKNOWN',
   'CRYPTO_DISABLED',
@@ -411,6 +412,9 @@ export const PROPOSAL_CHALLENGE_STATES = ['none', 'open', 'upheld', 'dismissed']
 export const PROPOSAL_EXECUTION_STATES = [
   'not_executed',
   'timelocked',
+  // `executing` — the recoverable in-progress state: claimed before the simulated
+  // debit, advanced to `executed` only once the debit + ledger are durable (WS-L.4.1c).
+  'executing',
   'executed',
   'blocked',
 ] as const;

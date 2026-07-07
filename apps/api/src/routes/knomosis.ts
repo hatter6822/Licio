@@ -87,6 +87,7 @@ function submissionDeps(services: KnomosisServices): SubmissionDeps | null {
     actions: services.actions,
     wallets: services.wallets,
     rooms: services.rooms,
+    proposals: services.proposals,
     signatures: services.proposalSignatures,
     nonces: services.nonces,
     gateway: services.gateway,
@@ -279,9 +280,21 @@ export function createKnomosisRoutes() {
               });
             }
           } else {
+            // Rebuild the mapping ONLY from a record that COMPLETED submit
+            // validation.  A `reserving` row (never validated) or a `failed` row
+            // (a pre-forward gate failure via failReserved carries the caller's
+            // UNVERIFIED `actor`, or a gateway decline that produced no standing)
+            // must NOT map a wallet to an arbitrary actor — `ensureActorMapping`
+            // is first-write-wins, so /standing would then read balances for that
+            // unverified actor.  Only a forwarded state (submitted/accepted/…)
+            // proves the actor↔wallet binding passed every gate (WS-L.3.2a).
             const stored = await services.actions.getById(outcome.actionRecordId);
             const storedActor = stored?.signedAction.message['actor'];
-            if (stored != null && typeof storedActor === 'string') {
+            const validated =
+              stored != null &&
+              stored.submissionState !== 'reserving' &&
+              stored.submissionState !== 'failed';
+            if (validated && typeof storedActor === 'string') {
               await ensureActorMapping(services, {
                 walletAccountId: stored.actorWalletAccountId,
                 deploymentId: stored.deploymentId,

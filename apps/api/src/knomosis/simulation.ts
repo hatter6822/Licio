@@ -484,7 +484,16 @@ export async function castSimVote(
     choice: args.choice,
     castAt: new Date(deps.now()).toISOString(),
   });
-  if (cast === null) return err(409, 'already_voted', 'You have already voted on this proposal.');
+  if (cast === null) {
+    // cast() atomically refuses BOTH a duplicate vote AND a proposal that closed
+    // between the open-check above and the insert (a concurrent vote resolved it) —
+    // disambiguate the 409 for a correct message (WS-L.4.1d).
+    const fresh = await deps.proposals.getById(args.proposalId);
+    if (fresh !== null && fresh.votingState !== 'open') {
+      return err(409, 'voting_closed', 'Voting on this proposal has closed.');
+    }
+    return err(409, 'already_voted', 'You have already voted on this proposal.');
+  }
 
   await deps.governanceAudit.append({
     entryId: deps.uuid(),
@@ -521,13 +530,16 @@ export async function evaluateSimVote(
   const nowMs = deps.now();
   const approvePct = (tally.approve / decided) * 100;
   if (approvePct > config.simApprovalThresholdPercent) {
-    const updated: GovernanceProposalRecord = {
-      ...proposal,
+    // ATOMIC CAS open→passed: if a concurrent vote already resolved the proposal,
+    // this matches 0 rows — DO NOT double-close it (a second timelock reset /
+    // duplicate `proposal_passed` audit / outcome flip); return the resolved row
+    // as-is (WS-L.4.1d).
+    const resolved = await deps.proposals.resolveVotingIfOpen(proposal.proposalId, {
       votingState: 'passed',
       executionState: 'timelocked',
       executableAfter: new Date(nowMs + config.simTimelockSeconds * 1000).toISOString(),
-    };
-    await deps.proposals.update(updated);
+    });
+    if (resolved === null) return (await deps.proposals.getById(proposal.proposalId)) ?? proposal;
     await deps.governanceAudit.append({
       entryId: deps.uuid(),
       roomId: proposal.roomId,
@@ -537,14 +549,16 @@ export async function evaluateSimVote(
       simulationMode: true,
       createdAt: new Date(nowMs).toISOString(),
     });
-    return updated;
+    return resolved;
   }
   // STRICT rejecting majority (mirrors the strict approval bar): a tie — e.g. a
   // quorum-reaching 1 approve / 1 reject / 1 abstain — crosses NEITHER threshold
   // and stays OPEN rather than being prematurely rejected.
   if ((tally.reject / decided) * 100 > 100 - config.simApprovalThresholdPercent) {
-    const updated: GovernanceProposalRecord = { ...proposal, votingState: 'rejected' };
-    await deps.proposals.update(updated);
+    const resolved = await deps.proposals.resolveVotingIfOpen(proposal.proposalId, {
+      votingState: 'rejected',
+    });
+    if (resolved === null) return (await deps.proposals.getById(proposal.proposalId)) ?? proposal;
     await deps.governanceAudit.append({
       entryId: deps.uuid(),
       roomId: proposal.roomId,
@@ -554,7 +568,7 @@ export async function evaluateSimVote(
       simulationMode: true,
       createdAt: new Date(nowMs).toISOString(),
     });
-    return updated;
+    return resolved;
   }
   return withTally(proposal, tally);
 }
@@ -585,6 +599,21 @@ export async function executeSimProposal(
     const comprehension = await requireComprehension(deps, args.actorUserId);
     if (comprehension !== null) return comprehension;
   }
+  // An engaged treasury-execution kill switch pauses simulated execution on BOTH
+  // the manual route AND the scheduler sweep — mirroring the real grant/deposit/
+  // bounty submit path (ACTION_KILL_SWITCH → treasury_execution) and castSimVote's
+  // governance_voting gate.  A manual actor is scoped by their self-declared
+  // region; the scheduler passes a null actor (region null), so any region- or
+  // global-scoped pause blocks the sweep.  Placed BEFORE the claim, so a paused
+  // proposal never mutates state and stays cleanly re-executable (WS-L.3.5c/f).
+  const region = args.actorUserId !== null ? await deps.regionForUser(args.actorUserId) : null;
+  const killSwitch = await killSwitchDecision(deps.configStore, 'treasury_execution', {
+    roomId: args.roomId,
+    region,
+  });
+  if (killSwitch.engaged) {
+    return err(503, 'kill_switch_active', 'Simulated treasury execution is temporarily paused.');
+  }
   const proposal = await deps.proposals.getById(args.proposalId);
   if (proposal === null || proposal.roomId !== args.roomId) {
     return err(404, 'not_found', 'Resource not found');
@@ -610,10 +639,15 @@ export async function executeSimProposal(
     return err(409, 'timelocked', 'The simulated timelock has not elapsed yet.');
   }
 
-  // ATOMICALLY CLAIM the proposal (CAS timelocked→executed) BEFORE any debit:
+  // ATOMICALLY CLAIM the proposal (CAS timelocked→EXECUTING) BEFORE any debit:
   // two concurrent executes (a double-click racing the scheduler, or two
   // scheduler processes) can both pass the stale `timelocked` check above, so the
-  // claim is the single-execution gate that prevents a double debit (WS-L.4.1c).
+  // claim is the single-execution gate that prevents a double debit.  The claim
+  // leaves the proposal in the RECOVERABLE `executing` state — it becomes
+  // `executed` ONLY via finalizeExecution AFTER the debit + ledger are durable, so
+  // a crash between the claim and the debit leaves it honestly `executing` (never
+  // falsely `executed` without a debit) and the timelocked-only sweep never
+  // re-runs it, so the treasury is never double-debited (WS-L.4.1c).
   const claimed = await deps.proposals.claimForExecution(args.proposalId);
   if (claimed === null) {
     return err(409, 'not_executable', 'This proposal is already being executed.');
@@ -657,12 +691,13 @@ export async function executeSimProposal(
     });
   }
 
-  const executed: GovernanceProposalRecord = {
-    ...claimed,
-    executionState: 'executed',
-    executedAt: nowIso,
-  };
-  await deps.proposals.update(executed);
+  // FINALIZE: CAS executing→executed ONLY now that the debit + ledger are durable.
+  // We exclusively own the `executing` claim, so this succeeds; a null return would
+  // mean a concurrent writer advanced it (treat as already executed, idempotent).
+  const finalized: GovernanceProposalRecord = (await deps.proposals.finalizeExecution(
+    claimed.proposalId,
+    nowIso,
+  )) ?? { ...claimed, executionState: 'executed', executedAt: nowIso };
   await deps.governanceAudit.append({
     entryId: deps.uuid(),
     roomId: args.roomId,
@@ -672,7 +707,7 @@ export async function executeSimProposal(
     simulationMode: true,
     createdAt: nowIso,
   });
-  return { ok: true, proposal: executed };
+  return { ok: true, proposal: finalized };
 }
 
 /** Scheduler sweep: execute every timelock-elapsed simulated proposal. */

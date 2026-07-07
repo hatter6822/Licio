@@ -25,7 +25,7 @@ import {
   walletAccounts,
   walletActorMappings,
 } from '@licio/db';
-import { and, asc, desc, eq, inArray, lt, lte, max, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lt, lte, ne, sql } from 'drizzle-orm';
 import type { ActionNonceStore } from './services.js';
 import type {
   AuditLogCursor,
@@ -57,7 +57,7 @@ import type {
   WalletActorMappingRecord,
   WalletActorMappingStore,
 } from './stores.js';
-import { READINESS_QUALIFYING_AUDIT_ACTIONS } from './stores.js';
+import { READINESS_QUALIFYING_AUDIT_ACTIONS, selectGatewayBoundAction } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -417,6 +417,11 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     deploymentId: string,
     typedDataHash: string,
   ): Promise<KnomosisActionRecordEntity | null> {
+    // Fetch ALL rows sharing the hash (bounded: the single-use nonce caps forwarded
+    // rows at one, and identical hash ⇒ identical nonce, so at most a handful of
+    // `failed`/`reserving` losers) and resolve to the deterministic gateway-bound
+    // row via the SAME pure selector the in-memory adapter uses — a `.limit(1)`
+    // with no ORDER BY could pick a `failed` loser and strand the real row (WS-L.3.3a).
     const rows = await this.db
       .select()
       .from(knomosisActionRecords)
@@ -425,9 +430,8 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
           eq(knomosisActionRecords.deploymentId, deploymentId),
           eq(knomosisActionRecords.typedDataHash, typedDataHash),
         ),
-      )
-      .limit(1);
-    return rows[0] ? mapAction(rows[0]) : null;
+      );
+    return selectGatewayBoundAction(rows.map(mapAction));
   }
 
   async update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity> {
@@ -536,6 +540,24 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       .where(
         and(
           eq(knomosisActionRecords.deploymentId, deploymentId),
+          eq(knomosisActionRecords.submissionState, 'reserving'),
+          lt(knomosisActionRecords.createdAt, new Date(createdBefore)),
+        ),
+      )
+      .orderBy(asc(knomosisActionRecords.createdAt))
+      .limit(limit);
+    return rows.map(mapAction);
+  }
+
+  async listAllReservingOlderThan(
+    createdBefore: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(
+        and(
           eq(knomosisActionRecords.submissionState, 'reserving'),
           lt(knomosisActionRecords.createdAt, new Date(createdBefore)),
         ),
@@ -761,23 +783,15 @@ export class DrizzleOnChainEventStore implements OnChainEventStore {
   }
 
   async latestGatewaySeq(deploymentId: string): Promise<string | null> {
-    const rows = await this.db
-      .select({ latest: max(onChainEvents.gatewaySeq) })
-      .from(onChainEvents)
-      .where(eq(onChainEvents.deploymentId, deploymentId));
-    const derived = rows[0]?.latest ?? null;
+    // The resume cursor is the group-atomic PROCESSED watermark (the cursor row),
+    // recorded ONLY after a whole seq group is persisted + processed — NOT the raw
+    // max-stored seq, which could sit on a partially-stored multi-index group and
+    // permanently skip its unprocessed indexes on resume (WS-L.3.3a).
     const cursorRows = await this.db
       .select({ seq: knomosisGatewayCursor.seq })
       .from(knomosisGatewayCursor)
       .where(eq(knomosisGatewayCursor.deploymentId, deploymentId));
-    const cursor = cursorRows[0]?.seq ?? null;
-    // The resume cursor is the greater of the stored max seq and any rebuild
-    // re-anchor (which can jump forward past dropped, never-stored events).
-    const derivedBig = derived === null ? null : BigInt(derived);
-    const cursorBig = cursor === null ? null : BigInt(cursor);
-    if (derivedBig === null) return cursorBig?.toString() ?? null;
-    if (cursorBig === null) return derivedBig.toString();
-    return (derivedBig > cursorBig ? derivedBig : cursorBig).toString();
+    return cursorRows[0]?.seq ?? null;
   }
 
   async recordGatewayCursor(deploymentId: string, seq: string): Promise<void> {
@@ -1020,16 +1034,65 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
   }
 
   async claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null> {
-    // Atomic CAS timelocked→executed: only ONE racing execute wins the claim, so
-    // the treasury cannot be debited twice for the same proposal (WS-L.4.1c).
+    // Atomic CAS timelocked→EXECUTING: only ONE racing execute wins the claim, so
+    // the treasury cannot be debited twice.  The proposal advances to `executed`
+    // only via finalizeExecution AFTER the debit + ledger are durable (WS-L.4.1c).
     const rows = await this.db
       .update(governanceProposals)
-      .set({ executionState: 'executed' })
+      .set({ executionState: 'executing' })
       .where(
         and(
           eq(governanceProposals.proposalId, proposalId),
           eq(governanceProposals.executionState, 'timelocked'),
           eq(governanceProposals.votingState, 'passed'),
+        ),
+      )
+      .returning();
+    return rows[0] ? mapProposal(rows[0]) : null;
+  }
+
+  async finalizeExecution(
+    proposalId: string,
+    executedAt: string,
+  ): Promise<GovernanceProposalRecord | null> {
+    // Atomic CAS executing→executed: called ONLY after the debit + ledger are
+    // durable, so `executed` implies the treasury effect happened (WS-L.4.1c).
+    const rows = await this.db
+      .update(governanceProposals)
+      .set({ executionState: 'executed', executedAt: new Date(executedAt) })
+      .where(
+        and(
+          eq(governanceProposals.proposalId, proposalId),
+          eq(governanceProposals.executionState, 'executing'),
+        ),
+      )
+      .returning();
+    return rows[0] ? mapProposal(rows[0]) : null;
+  }
+
+  async resolveVotingIfOpen(
+    proposalId: string,
+    resolution:
+      | { votingState: 'passed'; executionState: 'timelocked'; executableAfter: string }
+      | { votingState: 'rejected' },
+  ): Promise<GovernanceProposalRecord | null> {
+    // Atomic CAS votingState open→terminal: the single-resolution gate so two
+    // concurrent quorum-reaching votes cannot both close the proposal (WS-L.4.1d).
+    const set =
+      resolution.votingState === 'passed'
+        ? {
+            votingState: 'passed' as const,
+            executionState: 'timelocked' as const,
+            executableAfter: new Date(resolution.executableAfter),
+          }
+        : { votingState: 'rejected' as const };
+    const rows = await this.db
+      .update(governanceProposals)
+      .set(set)
+      .where(
+        and(
+          eq(governanceProposals.proposalId, proposalId),
+          eq(governanceProposals.votingState, 'open'),
         ),
       )
       .returning();
@@ -1094,17 +1157,30 @@ export class DrizzleProposalVoteStore implements ProposalVoteStore {
   constructor(private readonly db: Db) {}
 
   async cast(record: ProposalVoteRecord): Promise<ProposalVoteRecord | null> {
-    const rows = await this.db
-      .insert(governanceProposalVotes)
-      .values({
-        proposalId: record.proposalId,
-        voterUserId: record.voterUserId,
-        choice: record.choice,
-        castAt: new Date(record.castAt),
-      })
-      .onConflictDoNothing()
-      .returning({ proposalId: governanceProposalVotes.proposalId });
-    return rows.length > 0 ? record : null;
+    // Gate the insert on the LIVE proposal state, atomically: lock the proposal row
+    // FOR UPDATE so a concurrent resolveVotingIfOpen cannot close it between the
+    // open-check and the vote insert — a vote loaded while open must not be counted
+    // after the proposal has closed/timelocked (WS-L.4.1d).  Returns null when the
+    // proposal is no longer open OR the voter already voted.
+    return this.db.transaction(async (tx) => {
+      const proposal = await tx
+        .select({ votingState: governanceProposals.votingState })
+        .from(governanceProposals)
+        .where(eq(governanceProposals.proposalId, record.proposalId))
+        .for('update');
+      if (proposal[0]?.votingState !== 'open') return null;
+      const rows = await tx
+        .insert(governanceProposalVotes)
+        .values({
+          proposalId: record.proposalId,
+          voterUserId: record.voterUserId,
+          choice: record.choice,
+          castAt: new Date(record.castAt),
+        })
+        .onConflictDoNothing()
+        .returning({ proposalId: governanceProposalVotes.proposalId });
+      return rows.length > 0 ? record : null;
+    });
   }
 
   async tally(proposalId: string): Promise<{ approve: number; reject: number; abstain: number }> {

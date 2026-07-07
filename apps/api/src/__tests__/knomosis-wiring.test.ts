@@ -204,4 +204,38 @@ describe('WS-L wiring ports over real in-memory services', () => {
     await runKnomosisTick(fixture.knomosis, (_e, task) => errors.push(task));
     expect(errors).toEqual([]);
   });
+
+  it('the tick globally sweeps a stale `reserving` row on a NON-active deployment (F5)', async () => {
+    const fixture = await freshKnomosisServices();
+    const walletAccountId = randomUUID();
+    const staleId = randomUUID();
+    const old = new Date(fixture.knomosis.now() - 24 * 60 * 60_000).toISOString();
+    // A reservation abandoned mid-validation on a deployment that is NOT in the
+    // scheduler's active loop (e.g. since frozen/retired / never registered).
+    await fixture.knomosis.actions.insert({
+      actionRecordId: staleId,
+      deploymentId: randomUUID(), // not an active pinned deployment
+      actionType: 'treasury_deposit',
+      roomId: randomUUID(),
+      actorWalletAccountId: walletAccountId,
+      actorUserId: randomUUID(),
+      payloadHash: '0x',
+      typedDataHash: `0x${'ab'.repeat(32)}`,
+      signedAction: { message: {}, signature: '0x' },
+      submissionState: 'reserving',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: randomUUID(),
+      createdAt: old,
+      updatedAt: old,
+    });
+    // Before the sweep the `reserving` row pins the wallet's unlink (open obligation).
+    expect(await fixture.knomosis.actions.listOpenByWallet(walletAccountId)).toHaveLength(1);
+    await runKnomosisTick(fixture.knomosis);
+    // The global sweep failed it even though its deployment is not active — the
+    // unlink is no longer blocked (F5).
+    expect((await fixture.knomosis.actions.getById(staleId))?.submissionState).toBe('failed');
+    expect(await fixture.knomosis.actions.listOpenByWallet(walletAccountId)).toHaveLength(0);
+  });
 });

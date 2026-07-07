@@ -198,111 +198,135 @@ export async function ingestGatewayEvents(
   const toIngest =
     firstBad === undefined ? sorted : sorted.filter((e) => BigInt(e.seq) < BigInt(firstBad.seq));
 
-  let ingested = 0;
+  // Group the (seq,index)-sorted events by `gateway_seq` so the resume cursor is
+  // advanced ONLY after a WHOLE seq group is persisted AND processed.  If the
+  // process crashes / a side effect throws part-way through a multi-index group,
+  // the throw propagates BEFORE `recordGatewayCursor` and the watermark stays at
+  // the last COMPLETE group — the whole group is re-fetched next tick (idempotent
+  // re-ingest + no-op CAS transitions), so no `gateway_index` is ever skipped
+  // (WS-L.3.3a — the resume cursor is a group-atomic PROCESSED watermark).
+  const groups: { seq: string; events: GatewayEvent[] }[] = [];
   for (const event of toIngest) {
-    // Idempotent ingestion (per-source unique key): a replayed event is a
-    // no-op, so SSE resume / cursor overlap can never double-apply.
-    const { record: stored, inserted } = await deps.events.ingest({
-      eventId: deps.uuid(),
-      deploymentId,
-      chainId,
-      blockNumber: null,
-      txHash: null,
-      logIndex: null,
-      eventType: event.type,
-      decodedPayload: event.payload,
-      eventSource: 'gateway',
-      gatewaySeq: event.seq,
-      gatewayIndex: event.index,
-      // Gateway events are ALREADY post-reorg (upstream l1-ingest + kernel).
-      reorgState: 'confirmed',
-      reorgDetectedAt: null,
-      indexedAt: new Date(deps.now()).toISOString(),
-    });
-    // Apply the side effects for EVERY event — new OR already-stored — because
-    // storing the event and applying its transition are NOT atomic: a crash after
-    // `events.ingest()` but before the transition would otherwise leave the action
-    // stuck (a later settled/finalized becoming an invalid transition).  Every
-    // step here is idempotent (a no-op transition returns null; receipts upsert),
-    // so re-running for an existing event is safe (WS-L.3.3a).
-    if (inserted) ingested += 1;
+    const last = groups.at(-1);
+    if (last !== undefined && last.seq === event.seq) last.events.push(event);
+    else groups.push({ seq: event.seq, events: [event] });
+  }
 
-    const action = await actionForEvent(deps, deploymentId, event);
-    if (action === null) {
-      // A KNOWN, well-formed action event whose `typed_data_hash` matches NO action
-      // row: an unexpected governance event, or an action row lost before it
-      // persisted.  The event itself IS stored (above), so a late-arriving action
-      // row still reconciles against it — but we MUST NOT silently drop it and let
-      // it vanish without a mismatch or receipt.  Record a CRITICAL divergence
-      // (reconciliation is driven from action rows, so nothing else would surface
-      // it) and alert for operator review (WS-L.3.3b).
-      await deps.reconciliation.append({
-        resultId: deps.uuid(),
+  let ingested = 0;
+  for (const group of groups) {
+    for (const event of group.events) {
+      // Idempotent ingestion (per-source unique key): a replayed event is a
+      // no-op, so SSE resume / cursor overlap can never double-apply.
+      const { record: stored, inserted } = await deps.events.ingest({
+        eventId: deps.uuid(),
         deploymentId,
-        entityType: 'action',
-        entityRef: `event:${event.seq}.${event.index}`,
-        outcome: 'mismatch',
-        severity: 'critical',
-        details: {
-          kind: 'event_without_action',
-          event_type: event.type,
-          typed_data_hash: event.payload['typed_data_hash'],
-          seq: event.seq,
-          index: event.index,
-        },
-        lowWatermarkSeq: event.seq,
-        createdAt: new Date(deps.now()).toISOString(),
+        chainId,
+        blockNumber: null,
+        txHash: null,
+        logIndex: null,
+        eventType: event.type,
+        decodedPayload: event.payload,
+        eventSource: 'gateway',
+        gatewaySeq: event.seq,
+        gatewayIndex: event.index,
+        // Gateway events are ALREADY post-reorg (upstream l1-ingest + kernel).
+        reorgState: 'confirmed',
+        reorgDetectedAt: null,
+        indexedAt: new Date(deps.now()).toISOString(),
       });
-      deps.alert('knomosis.ingest.event_without_action', {
-        deployment_id: deploymentId,
-        event_type: event.type,
-        seq: event.seq,
-      });
-      continue;
-    }
-    const targetState = EVENT_STATE[event.type as KnownGatewayEventType];
-    const updated = await applyTransition(
-      deps,
-      { ...action, indexedEventRef: stored.eventId },
-      targetState,
-      targetState === 'reverted' ? 'reverted by the post-reorg event stream' : null,
-    );
-    if (updated === null) continue;
+      // Apply the side effects for EVERY event — new OR already-stored — because
+      // storing the event and applying its transition are NOT atomic: a crash after
+      // `events.ingest()` but before the transition would otherwise leave the action
+      // stuck (a later settled/finalized becoming an invalid transition).  Every
+      // step here is idempotent (a no-op transition returns null; receipts upsert),
+      // so re-running for an existing event is safe (WS-L.3.3a).
+      if (inserted) ingested += 1;
 
-    if (updated.actionType === 'proposal_sign') {
-      if (updated.submissionState === 'reverted') {
-        // A `proposal_sign` that REVERTS after acceptance must not keep a live
-        // governance signature — remove it so the vote no longer counts in the
-        // tally or blocks unlink, and a re-signed retry can insert again (WS-L.3.4c).
-        await deps.proposalSignatures.removeByAction(updated.actionRecordId);
-      } else if (
-        updated.submissionState === 'accepted' ||
+      const action = await actionForEvent(deps, deploymentId, event);
+      if (action === null) {
+        // A KNOWN, well-formed action event whose `typed_data_hash` matches NO action
+        // row: an unexpected governance event, or an action row lost before it
+        // persisted.  The event itself IS stored (above), so a late-arriving action
+        // row still reconciles against it — but we MUST NOT silently drop it and let
+        // it vanish without a mismatch or receipt.  Record a CRITICAL divergence
+        // (reconciliation is driven from action rows, so nothing else would surface
+        // it) and alert for operator review (WS-L.3.3b).
+        await deps.reconciliation.append({
+          resultId: deps.uuid(),
+          deploymentId,
+          entityType: 'action',
+          entityRef: `event:${event.seq}.${event.index}`,
+          outcome: 'mismatch',
+          severity: 'critical',
+          details: {
+            kind: 'event_without_action',
+            event_type: event.type,
+            typed_data_hash: event.payload['typed_data_hash'],
+            seq: event.seq,
+            index: event.index,
+          },
+          lowWatermarkSeq: event.seq,
+          createdAt: new Date(deps.now()).toISOString(),
+        });
+        deps.alert('knomosis.ingest.event_without_action', {
+          deployment_id: deploymentId,
+          event_type: event.type,
+          seq: event.seq,
+        });
+        continue;
+      }
+      const targetState = EVENT_STATE[event.type as KnownGatewayEventType];
+      const updated = await applyTransition(
+        deps,
+        { ...action, indexedEventRef: stored.eventId },
+        targetState,
+        targetState === 'reverted' ? 'reverted by the post-reorg event stream' : null,
+      );
+      if (updated === null) continue;
+
+      if (updated.actionType === 'proposal_sign') {
+        if (updated.submissionState === 'reverted') {
+          // A `proposal_sign` that REVERTS after acceptance must not keep a live
+          // governance signature — remove it so the vote no longer counts in the
+          // tally or blocks unlink, and a re-signed retry can insert again (WS-L.3.4c).
+          await deps.proposalSignatures.removeByAction(updated.actionRecordId);
+        } else if (
+          updated.submissionState === 'accepted' ||
+          updated.submissionState === 'settled' ||
+          updated.submissionState === 'finalized'
+        ) {
+          // Ingestion can WIN the accept-CAS race with `forwardToGateway`
+          // (submitted → accepted): the submit path then SKIPS its signature insert
+          // (its own CAS returned null).  Record the accepted governance signature
+          // HERE too so a proposal signature the kernel accepted always powers the
+          // tally + blocks unlink, whichever path advanced the row.  The insert is
+          // insert-once per (proposal, wallet), so the submit path and ingestion
+          // recording the same acceptance is a no-op (WS-L.3.2a/3.4c).
+          await recordAcceptedProposalSignature(
+            { signatures: deps.proposalSignatures, uuid: deps.uuid, now: deps.now },
+            updated,
+          );
+        }
+      }
+
+      // Stable states produce/refresh receipts and a user-visible status.
+      if (
         updated.submissionState === 'settled' ||
-        updated.submissionState === 'finalized'
+        updated.submissionState === 'finalized' ||
+        updated.submissionState === 'reverted'
       ) {
-        // Ingestion can WIN the accept-CAS race with `forwardToGateway`
-        // (submitted → accepted): the submit path then SKIPS its signature insert
-        // (its own CAS returned null).  Record the accepted governance signature
-        // HERE too so a proposal signature the kernel accepted always powers the
-        // tally + blocks unlink, whichever path advanced the row.  The insert is
-        // insert-once per (proposal, wallet), so the submit path and ingestion
-        // recording the same acceptance is a no-op (WS-L.3.2a/3.4c).
-        await recordAcceptedProposalSignature(
-          { signatures: deps.proposalSignatures, uuid: deps.uuid, now: deps.now },
-          updated,
+        await writeReceipts(deps, updated);
+        await deps.notifyActor(
+          updated.actorUserId,
+          updated.actionRecordId,
+          updated.submissionState,
         );
       }
     }
-
-    // Stable states produce/refresh receipts and a user-visible status.
-    if (
-      updated.submissionState === 'settled' ||
-      updated.submissionState === 'finalized' ||
-      updated.submissionState === 'reverted'
-    ) {
-      await writeReceipts(deps, updated);
-      await deps.notifyActor(updated.actorUserId, updated.actionRecordId, updated.submissionState);
-    }
+    // The WHOLE seq group is now persisted + processed — advance the resume
+    // watermark atomically to this seq.  A crash before this line leaves the
+    // watermark at the previous complete group, so the group is re-fetched intact.
+    await deps.events.recordGatewayCursor(deploymentId, group.seq);
   }
 
   // After ingesting the complete supported groups below it, HALT on the first

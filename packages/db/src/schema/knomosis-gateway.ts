@@ -284,6 +284,11 @@ export const proposalChallengeStateEnum = knomosisSchema.enum('proposal_challeng
 export const proposalExecutionStateEnum = knomosisSchema.enum('proposal_execution_state', [
   'not_executed',
   'timelocked',
+  // `executing` is the RECOVERABLE in-progress state (WS-L.4.1c): a proposal is
+  // claimed `timelocked`→`executing` before the simulated debit and advanced to
+  // `executed` only after the debit + ledger are durable, so a crash mid-execution
+  // never leaves a falsely-`executed` proposal with no debit.
+  'executing',
   'executed',
   'blocked',
 ]);
