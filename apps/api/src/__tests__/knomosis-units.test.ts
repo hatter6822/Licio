@@ -25,6 +25,7 @@ import {
 import { getKnomosisServices, resetKnomosisServicesForTests } from '../knomosis/services.js';
 import { createContractTypedDataVerifier } from '../knomosis/signatures.js';
 import {
+  InMemoryFinancialWalletStore,
   InMemoryGovernanceAuditStore,
   InMemoryKnomosisActionStore,
   InMemoryOnChainEventStore,
@@ -293,6 +294,51 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     expect(withReceipt.mismatched).toBe(0);
   });
 
+  it('a MISMATCHED action AUTO-resolves on a later tick, no manual reset (R9-3)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const typedDataHash = `0x${'cc'.repeat(32)}`;
+    const record = baseAction({
+      deploymentId,
+      typedDataHash,
+      submissionState: 'finalized',
+      reconciliationState: 'pending',
+      signedAction: { message: { amount: '0', asset: 'USDC' }, signature: '0x' },
+    });
+    await fixture.knomosis.actions.insert(record);
+    await fixture.knomosis.events.ingest({
+      eventId: crypto.randomUUID(),
+      deploymentId,
+      chainId: LOCAL_DEPLOYMENT.chain_id,
+      blockNumber: null,
+      txHash: null,
+      logIndex: null,
+      eventType: 'knomosis.action.finalized',
+      decodedPayload: { typed_data_hash: typedDataHash },
+      eventSource: 'gateway',
+      gatewaySeq: '1',
+      gatewayIndex: 0,
+      reorgState: 'confirmed',
+      reorgDetectedAt: null,
+      indexedAt: new Date().toISOString(),
+    });
+    // Tick 1: the receipt is delayed ⇒ mismatch, which blocks treasury expansion.
+    await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(
+      (await fixture.knomosis.actions.getById(record.actionRecordId))?.reconciliationState,
+    ).toBe('mismatch');
+    expect((await canExpandTreasury(fixture.knomosis, deploymentId)).allowed).toBe(false);
+    // The delayed receipt finally arrives — NO manual reset of the row.
+    await writeReceipts(fixture.knomosis, record);
+    // Tick 2: the still-mismatched action is re-checked and resolves to matched.
+    const resolved = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(resolved.matched).toBe(1);
+    expect(
+      (await fixture.knomosis.actions.getById(record.actionRecordId))?.reconciliationState,
+    ).toBe('matched');
+    expect((await canExpandTreasury(fixture.knomosis, deploymentId)).allowed).toBe(true);
+  });
+
   it('reconcileDeployment flags a mapped actor with a gateway balance but NO deposit (R6-5)', async () => {
     const fixture = await freshKnomosisServices();
     const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
@@ -348,6 +394,36 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     const sigs = await fixture.knomosis.proposalSignatures.listByProposal(proposalId);
     expect(sigs).toHaveLength(1);
     expect(sigs[0]).toMatchObject({ proposalId, walletAccountId });
+  });
+
+  it('forwardToGateway records NO signature when the CAS transition is stale (R9-2)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { forwardToGateway } = await import('../knomosis/submission.js');
+    const deps = {
+      actions: fixture.knomosis.actions,
+      signatures: fixture.knomosis.proposalSignatures,
+      uuid: fixture.knomosis.uuid,
+      now: fixture.knomosis.now,
+      log: fixture.knomosis.log,
+    };
+    const proposalId = crypto.randomUUID();
+    const record = baseAction({
+      actionType: 'proposal_sign',
+      submissionState: 'submitted',
+      typedDataHash: '0xacc',
+      signedAction: { message: { proposalId }, signature: `0x${'ab'.repeat(65)}` },
+    });
+    await fixture.knomosis.actions.insert(record);
+    // Ingestion RACES the action to a terminal `reverted` state (and would have
+    // removed any signature) before forwardToGateway applies its stale accept.
+    await fixture.knomosis.actions.update({ ...record, submissionState: 'reverted' });
+    // The gateway accepts, but the CAS from the stale `submitted` fails ⇒ NO
+    // signature is resurrected for the reverted action.
+    expect((await forwardToGateway(deps, fixture.gateway, record)).state).toBe('accepted');
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(0);
+    expect((await fixture.knomosis.actions.getById(record.actionRecordId))?.submissionState).toBe(
+      'reverted',
+    );
   });
 
   it('sumFinalizedDeposits aggregates EVERY finalized deposit per (wallet,asset) (R7-2)', async () => {
@@ -661,6 +737,7 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
 describe('submission fail-closed paths (WS-L.3.2)', () => {
   const s = (fixture: Awaited<ReturnType<typeof freshKnomosisServices>>) => ({
     actions: fixture.knomosis.actions,
+    wallets: fixture.knomosis.wallets,
     signatures: fixture.knomosis.proposalSignatures,
     nonces: fixture.knomosis.nonces,
     gateway: fixture.knomosis.gateway,
@@ -998,14 +1075,40 @@ describe('in-memory store adapters + services getter', () => {
     expect(await store.listByRoom('r1', 10)).toHaveLength(1);
   });
 
-  it('the abuse limiter enforces a sliding window', () => {
+  it('insertIfUnderCap atomically rejects at the wallet cap (R9-5)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const userId = crypto.randomUUID();
+    const mk = (i: number) => ({
+      walletAccountId: crypto.randomUUID(),
+      userId,
+      addressHashHex: `cc${i.toString().padStart(62, '0')}`,
+      addressTruncated: `0x0${i}…ff`,
+      chainId: 31337,
+      walletType: 'eoa' as const,
+      unlinkState: 'active' as const,
+      riskState: 'pending' as const,
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    expect(await store.insertIfUnderCap(mk(0), 2)).not.toBe('cap_exceeded');
+    expect(await store.insertIfUnderCap(mk(1), 2)).not.toBe('cap_exceeded');
+    // At the cap ⇒ rejected (the count + insert are one atomic step).
+    expect(await store.insertIfUnderCap(mk(2), 2)).toBe('cap_exceeded');
+    expect(await store.listByUser(userId, false)).toHaveLength(2);
+  });
+
+  it('the abuse limiter enforces a sliding window', async () => {
     let clock = 0;
     const limiter = new WalletAbuseLimiter(() => clock);
-    expect(limiter.hit('k', 2, 1000)).toBe(true);
-    expect(limiter.hit('k', 2, 1000)).toBe(true);
-    expect(limiter.hit('k', 2, 1000)).toBe(false); // over
+    expect(await limiter.hit('k', 2, 1000)).toBe(true);
+    expect(await limiter.hit('k', 2, 1000)).toBe(true);
+    expect(await limiter.hit('k', 2, 1000)).toBe(false); // over
     clock += 2000; // window elapsed
-    expect(limiter.hit('k', 2, 1000)).toBe(true);
+    expect(await limiter.hit('k', 2, 1000)).toBe(true);
   });
 
   it('getKnomosisServices throws when unconfigured; configured flag reflects state', async () => {

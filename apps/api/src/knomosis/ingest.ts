@@ -73,7 +73,7 @@ export interface IngestDeps extends ReceiptDeps {
 
 export type IngestOutcome =
   | { kind: 'ok'; ingested: number; latestSeq: string | null }
-  | { kind: 'halted'; reason: 'gap' | 'unsupported_event'; detail: string }
+  | { kind: 'halted'; reason: 'gap' | 'unsupported_event' | 'malformed_event'; detail: string }
   | { kind: 'unavailable' };
 
 /** Look up the action a gateway event refers to (by typed-data hash). */
@@ -185,13 +185,18 @@ export async function ingestGatewayEvents(
   const sorted = [...batch].sort((a, b) =>
     a.seq === b.seq ? a.index - b.index : BigInt(a.seq) < BigInt(b.seq) ? -1 : 1,
   );
-  const firstUnknown = sorted.find(
-    (e) => !(KNOWN_GATEWAY_EVENT_TYPES as readonly string[]).includes(e.type),
+  // A "bad" event is either an UNKNOWN type OR a known action event with a
+  // MALFORMED payload (no string `typed_data_hash` to bind it to its action).
+  // Both must HALT rather than be silently stored+skipped, because a seq-only
+  // cursor would otherwise advance past them and leave the action stuck in-flight
+  // and never re-delivered (WS-L.3.3a).
+  const isKnown = (e: GatewayEvent) =>
+    (KNOWN_GATEWAY_EVENT_TYPES as readonly string[]).includes(e.type);
+  const firstBad = sorted.find(
+    (e) => !isKnown(e) || typeof e.payload['typed_data_hash'] !== 'string',
   );
   const toIngest =
-    firstUnknown === undefined
-      ? sorted
-      : sorted.filter((e) => BigInt(e.seq) < BigInt(firstUnknown.seq));
+    firstBad === undefined ? sorted : sorted.filter((e) => BigInt(e.seq) < BigInt(firstBad.seq));
 
   let ingested = 0;
   for (const event of toIngest) {
@@ -252,34 +257,44 @@ export async function ingestGatewayEvents(
   }
 
   // After ingesting the complete supported groups below it, HALT on the first
-  // unsupported event: fail closed into an unsupported-version state so an
-  // operator updates the schema and clears the halt.  The cursor sits just
-  // below `firstUnknown.seq`, so the whole group is re-fetched intact.
-  if (firstUnknown !== undefined) {
+  // bad event: fail closed so an operator fixes the schema (unknown type) or the
+  // upstream payload (malformed) and clears the halt.  The cursor sits just below
+  // `firstBad.seq`, so the whole group is re-fetched intact.
+  if (firstBad !== undefined) {
+    const unknownType = !isKnown(firstBad);
     await deps.reconciliation.append({
       resultId: deps.uuid(),
       deploymentId,
       entityType: 'action',
-      entityRef: `event:${firstUnknown.seq}.${firstUnknown.index}`,
+      entityRef: `event:${firstBad.seq}.${firstBad.index}`,
       outcome: 'halted_unsupported_version',
       severity: 'critical',
       details: {
-        kind: 'unknown_event_type',
-        event_type: firstUnknown.type,
-        seq: firstUnknown.seq,
+        kind: unknownType ? 'unknown_event_type' : 'malformed_event_payload',
+        event_type: firstBad.type,
+        seq: firstBad.seq,
       },
-      lowWatermarkSeq: firstUnknown.seq,
+      lowWatermarkSeq: firstBad.seq,
       createdAt: new Date(deps.now()).toISOString(),
     });
-    deps.alert('knomosis.ingest.unsupported_event', {
-      deployment_id: deploymentId,
-      event_type: firstUnknown.type,
-    });
-    return {
-      kind: 'halted',
-      reason: 'unsupported_event',
-      detail: `unknown event type "${firstUnknown.type}" at seq ${firstUnknown.seq}`,
-    };
+    deps.alert(
+      unknownType ? 'knomosis.ingest.unsupported_event' : 'knomosis.ingest.malformed_event',
+      {
+        deployment_id: deploymentId,
+        event_type: firstBad.type,
+      },
+    );
+    return unknownType
+      ? {
+          kind: 'halted',
+          reason: 'unsupported_event',
+          detail: `unknown event type "${firstBad.type}" at seq ${firstBad.seq}`,
+        }
+      : {
+          kind: 'halted',
+          reason: 'malformed_event',
+          detail: `event "${firstBad.type}" at seq ${firstBad.seq} has no typed_data_hash`,
+        };
   }
   return { kind: 'ok', ingested, latestSeq: result.latestSeq };
 }

@@ -7,10 +7,11 @@
 // display data — trust is established ONLY by server-side SIWE verification
 // (WS-L.2.1a security note); nothing here implies a provider is verified.
 
-import type { WalletSummary } from '@licio/shared';
+import type { UnlinkObligation, WalletSummary } from '@licio/shared';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useT } from '../../i18n/index.js';
+import { StepUpRequiredError } from '../../lib/auth-api.js';
 import {
   useLinkWalletMutation,
   useUnlinkWalletMutation,
@@ -20,8 +21,18 @@ import { requestWalletNonce } from '../../lib/wallet-api.js';
 import { startProviderDiscovery } from '../../wallet/discovery.js';
 import type { Eip6963ProviderDetail } from '../../wallet/eip1193.js';
 import { buildSiweMessage, normalizeAddress } from '../../wallet/siwe.js';
+import { StepUpDialog, useStepUpGate } from '../security/StepUpDialog/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Icon } from '../ui/Icon/index.js';
+
+/** The provider `icon` is attacker-controllable announcement data.  Only a
+ *  `data:image/...` URI is safe to put in `<img src>`; an `https://…` icon would
+ *  make the browser request a third-party URL (leaking a visit to the wallet
+ *  surface) whenever this page opens.  Anything else falls back to a local icon
+ *  (WS-L.2.1a). */
+function safeIconSrc(icon: string): string | null {
+  return /^data:image\//i.test(icon.trim()) ? icon : null;
+}
 
 /** Ask the connected provider for its accounts + chain id (EIP-1193). */
 async function connectProvider(
@@ -49,9 +60,15 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
   const [providers, setProviders] = useState<readonly Eip6963ProviderDetail[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [busyRdns, setBusyRdns] = useState<string | null>(null);
+  const [blockedObligations, setBlockedObligations] = useState<readonly UnlinkObligation[] | null>(
+    null,
+  );
   const walletsQuery = useWalletsQuery(enabled);
   const linkMutation = useLinkWalletMutation();
   const unlinkMutation = useUnlinkWalletMutation();
+  // Link + unlink both require a FRESH step-up; the gate transparently opens the
+  // challenge dialog and retries the SAME action once satisfied (WS-L.2.5a/b).
+  const gate = useStepUpGate();
 
   useEffect(() => {
     if (!enabled) return;
@@ -84,19 +101,70 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
           setStatus(t('wallet.sign.failed', 'The wallet did not return a signature.'));
           return;
         }
-        await linkMutation.mutateAsync({ message, signature });
+        // Run through the step-up gate so an expired step-up opens the retry
+        // dialog instead of surfacing a bare 401 (WS-L.2.5a).
+        await gate.guard(() => linkMutation.mutateAsync({ message, signature }));
         setStatus(t('wallet.link.success', 'Wallet linked.'));
       } catch (error) {
-        setStatus(
-          error instanceof Error && error.message
-            ? error.message
-            : t('wallet.link.error', 'Could not link the wallet.'),
-        );
+        if (error instanceof StepUpRequiredError) {
+          // The user dismissed the step-up challenge — a quiet cancellation.
+          setStatus(t('wallet.stepup.cancelled', 'Verification is required to link a wallet.'));
+        } else {
+          setStatus(
+            error instanceof Error && error.message
+              ? error.message
+              : t('wallet.link.error', 'Could not link the wallet.'),
+          );
+        }
       } finally {
         setBusyRdns(null);
       }
     },
-    [linkMutation, t],
+    [gate, linkMutation, t],
+  );
+
+  const unlinkFlow = useCallback(
+    async (walletId: string) => {
+      setStatus(null);
+      setBlockedObligations(null);
+      try {
+        const result = await gate.guard(() => unlinkMutation.mutateAsync(walletId));
+        if ('error' in result) {
+          // 409 blocked: SURFACE the specific obligations so the user knows what
+          // to resolve first (WS-L.2.5b) — never a silent no-op.
+          setBlockedObligations(result.blocking_obligations);
+          const extra =
+            (result.total_obligations ?? result.blocking_obligations.length) -
+            result.blocking_obligations.length;
+          setStatus(
+            extra > 0
+              ? t(
+                  'wallet.unlink.blocked.more',
+                  'Unlink is blocked by pending obligations (+{count} more).',
+                  {
+                    count: extra,
+                  },
+                )
+              : t('wallet.unlink.blocked', 'Unlink is blocked by pending obligations.'),
+          );
+        } else {
+          setStatus(t('wallet.unlink.scheduled', 'Unlink scheduled after the cooling-off period.'));
+        }
+      } catch (error) {
+        if (error instanceof StepUpRequiredError) {
+          setStatus(
+            t('wallet.stepup.cancelled.unlink', 'Verification is required to unlink a wallet.'),
+          );
+        } else {
+          setStatus(
+            error instanceof Error && error.message
+              ? error.message
+              : t('wallet.unlink.error', 'Could not unlink the wallet.'),
+          );
+        }
+      }
+    },
+    [gate, unlinkMutation, t],
   );
 
   const wallets = useMemo(() => walletsQuery.data?.items ?? [], [walletsQuery.data]);
@@ -131,13 +199,24 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
                   disabled={busyRdns !== null}
                   aria-busy={busyRdns === detail.info.rdns}
                 >
-                  {/* Icon is extension-injected data — rendered via <img>, never innerHTML. */}
-                  <img
-                    src={detail.info.icon}
-                    alt=""
-                    aria-hidden="true"
-                    className="h-8 w-8 rounded"
-                  />
+                  {/* Icon is extension-injected data — rendered via <img>, never
+                      innerHTML, and ONLY when it is a data: URI (else a local
+                      fallback, so no third-party request is made). */}
+                  {safeIconSrc(detail.info.icon) !== null ? (
+                    <img
+                      src={safeIconSrc(detail.info.icon) ?? undefined}
+                      alt=""
+                      aria-hidden="true"
+                      className="h-8 w-8 rounded"
+                    />
+                  ) : (
+                    <span
+                      className="flex h-8 w-8 items-center justify-center rounded"
+                      aria-hidden="true"
+                    >
+                      <Icon name="layers" />
+                    </span>
+                  )}
                   <span className="flex-1 text-sm text-ink">{detail.info.name}</span>
                   <Icon name="chevron-right" />
                 </button>
@@ -177,7 +256,7 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
                 {w.unlink_state === 'active' ? (
                   <Button
                     variant="ghost"
-                    onClick={() => void unlinkMutation.mutateAsync(w.wallet_account_id)}
+                    onClick={() => void unlinkFlow(w.wallet_account_id)}
                     loading={unlinkMutation.isPending}
                   >
                     {t('wallet.unlink', 'Unlink')}
@@ -191,7 +270,27 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
             ))}
           </ul>
         )}
+        {blockedObligations !== null ? (
+          <div
+            className="mt-3 rounded-md border border-line bg-surface-sunken p-3"
+            role="alert"
+            aria-label={t('wallet.unlink.blocked.title', 'Unlink is blocked')}
+          >
+            <p className="mb-2 text-sm font-medium text-ink">
+              {t('wallet.unlink.blocked.title', 'Resolve these before unlinking:')}
+            </p>
+            <ul className="flex flex-col gap-1">
+              {blockedObligations.map((o) => (
+                <li key={`${o.type}:${o.ref}`} className="text-xs text-ink-muted">
+                  {o.description}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </section>
+
+      <StepUpDialog {...gate.dialog} />
     </div>
   );
 }

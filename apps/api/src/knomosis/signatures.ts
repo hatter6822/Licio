@@ -78,10 +78,18 @@ export type ContractTypedDataVerifier = (args: {
 
 /**
  * Build the production contract verifier from per-chain RPC endpoints, using
- * viem's `publicClient.verifyHash` (ERC-6492-aware: handles deployed contract
- * wallets via EIP-1271 `isValidSignature` over read-only `eth_call`, and
- * counterfactual smart accounts via the deployless wrapper).  A chain with no
- * endpoint, or any RPC error, verifies as FALSE (fail closed) — never a throw.
+ * viem's `publicClient.verifyHash` (EIP-1271 `isValidSignature` over a read-only
+ * `eth_call`).  A chain with no endpoint, or any RPC error, verifies as FALSE
+ * (fail closed) — never a throw.
+ *
+ * CONTRACT-ONLY (WS-L.2.4a): the verifier requires DEPLOYED CODE at the address
+ * before calling `verifyHash`.  Without this guard, a high-s EOA signature —
+ * which `verifyActionSignature` deliberately skips on the EOA path as a
+ * malleable twin — would reach `verifyHash`, whose ECDSA-recovery fallback for
+ * code-less addresses would accept it as a contract signature, defeating the
+ * malleability defense.  (Counterfactual, not-yet-deployed smart accounts are
+ * therefore not verifiable here; that is an accepted trade-off for the
+ * anti-malleability guarantee on this financial surface.)
  */
 export function createContractTypedDataVerifier(
   chainRpcUrls: Readonly<Record<number, string>> = {},
@@ -92,6 +100,8 @@ export function createContractTypedDataVerifier(
     if (!rpc) return false;
     try {
       const client = createPublicClient({ transport: http(rpc) });
+      const code = await client.getCode({ address: address as `0x${string}` });
+      if (code === undefined || code === '0x') return false; // EOA / undeployed ⇒ not a contract
       return await client.verifyHash({
         address: address as `0x${string}`,
         hash: typedDataHash,

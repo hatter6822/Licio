@@ -143,6 +143,7 @@ import {
 import { exportFinancialWalletData, purgeFinancialWalletData } from './knomosis/data-rights.js';
 import { createDrizzleKnomosisStores } from './knomosis/drizzle-knomosis-stores.js';
 import { FakeKnomosisGateway, HttpKnomosisGateway } from './knomosis/gateway.js';
+import { RedisWalletAbuseLimiter } from './knomosis/redis-stores.js';
 import { KNOMOSIS_SCHEDULER_INTERVAL_MS, startKnomosisScheduler } from './knomosis/scheduler.js';
 import {
   createInMemoryKnomosisServices,
@@ -866,6 +867,18 @@ if (db) {
   knomosisServices.reconciliation = knomosisStores.reconciliation;
   knomosisServices.receipts = knomosisStores.receipts;
   knomosisServices.comprehension = knomosisStores.comprehension;
+}
+// WS-L.2.5d: back the wallet abuse limiter with a SHARED Redis counter when
+// REDIS_URL is set, so the per-endpoint link/unlink limits hold across pods (the
+// default in-memory limiter is per-process and multipliable on a multi-instance
+// deployment).
+if (env.REDIS_URL !== undefined) {
+  const IORedis = (await import('ioredis')).default;
+  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redis.on('error', (err) =>
+    logger.warn({ err }, 'Redis connection error (knomosis abuse limiter)'),
+  );
+  knomosisServices.abuse = new RedisWalletAbuseLimiter(redis, knomosisServices.now);
 }
 // WS-L data-rights: fold the financial wallet footprint into the WS-D DSAR
 // export + hard-deletion lifecycle (truncated address only on export; wallets +

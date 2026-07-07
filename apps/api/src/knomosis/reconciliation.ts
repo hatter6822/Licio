@@ -227,16 +227,31 @@ export async function reconcileDeployment(
       lowWatermarkSeq: lowWatermark,
       createdAt: nowIso,
     };
-    await deps.reconciliation.append(result);
-    await deps.actions.update({
-      ...record,
-      reconciliationState: decision.outcome === 'match' ? 'matched' : 'mismatch',
-      updatedAt: nowIso,
-    });
-    if (decision.outcome === 'match') matched += 1;
-    else {
+    if (decision.outcome === 'match') {
+      // A resolving `match` SUPERSEDES any prior mismatch for this action (a
+      // finalized action whose delayed receipt/event finally arrived), so it stops
+      // blocking canExpandTreasury.  This resolution pass only runs because
+      // mismatched actions stay in the re-check set (listUnreconciled, WS-L.3.4b).
+      await deps.reconciliation.append(result);
+      await deps.actions.update({ ...record, reconciliationState: 'matched', updatedAt: nowIso });
+      matched += 1;
+    } else {
       mismatched += 1;
-      await raiseDivergence(deps, result);
+      // Dedup: an UNCHANGED persistent mismatch is already recorded — don't
+      // re-append or re-alert every tick (mirrors the treasury-ledger path).
+      const latest = await deps.reconciliation.latestForEntity('action', record.actionRecordId);
+      const unchanged =
+        latest?.outcome === 'mismatch' &&
+        (latest.details as { detail?: string }).detail === decision.detail;
+      if (!unchanged) {
+        await deps.reconciliation.append(result);
+        await deps.actions.update({
+          ...record,
+          reconciliationState: 'mismatch',
+          updatedAt: nowIso,
+        });
+        await raiseDivergence(deps, result);
+      }
     }
   }
 

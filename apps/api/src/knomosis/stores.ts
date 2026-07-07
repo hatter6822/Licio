@@ -220,6 +220,15 @@ export interface ComprehensionResultRecord {
 
 export interface FinancialWalletStore {
   insert(record: FinancialWalletRecord): Promise<FinancialWalletRecord>;
+  /** Insert a NEW wallet ONLY if the user is still below `maxActive` non-finalized
+   *  wallets — the count and the insert are ATOMIC (a per-user lock).  A plain
+   *  count-then-insert lets two concurrent links slip past the cap since the DB
+   *  enforces only address uniqueness, not a per-user active-count (WS-L.2.5a).
+   *  Returns 'cap_exceeded' when already at the cap. */
+  insertIfUnderCap(
+    record: FinancialWalletRecord,
+    maxActive: number,
+  ): Promise<FinancialWalletRecord | 'cap_exceeded'>;
   getById(walletAccountId: string): Promise<FinancialWalletRecord | null>;
   getByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null>;
   listByUser(userId: string, includeUnlinked: boolean): Promise<FinancialWalletRecord[]>;
@@ -269,7 +278,9 @@ export interface KnomosisActionStore {
     deploymentId: string,
     typedDataHash: string,
   ): Promise<KnomosisActionRecordEntity | null>;
-  /** Actions not yet in a terminal reconciliation outcome, oldest first. */
+  /** Actions still eligible for reconciliation — `pending` (never reconciled) OR
+   *  `mismatch` (re-checked each tick so a transient divergence can resolve to a
+   *  superseding match), oldest first.  `matched` is terminal (WS-L.3.4b). */
   listUnreconciled(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
   /** Actions STUCK in `submitted` (the scheduler's idempotent retry set), oldest
    *  first — queried directly so retries cannot starve behind older in-flight rows. */
@@ -511,6 +522,18 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
     return { ...record };
   }
 
+  async insertIfUnderCap(
+    record: FinancialWalletRecord,
+    maxActive: number,
+  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
+    // Single-threaded in memory ⇒ count + insert is already atomic.
+    const active = [...this.#rows.values()].filter(
+      (r) => r.userId === record.userId && r.unlinkState !== 'finalized',
+    ).length;
+    if (active >= maxActive) return 'cap_exceeded';
+    return this.insert(record);
+  }
+
   async getById(walletAccountId: string): Promise<FinancialWalletRecord | null> {
     const row = this.#rows.get(walletAccountId);
     return row ? { ...row } : null;
@@ -672,7 +695,11 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
     limit: number,
   ): Promise<KnomosisActionRecordEntity[]> {
     return [...this.#rows.values()]
-      .filter((r) => r.deploymentId === deploymentId && r.reconciliationState === 'pending')
+      .filter(
+        (r) =>
+          r.deploymentId === deploymentId &&
+          (r.reconciliationState === 'pending' || r.reconciliationState === 'mismatch'),
+      )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(0, limit)
       .map((r) => structuredClone(r));
@@ -1355,7 +1382,16 @@ export class InMemoryComprehensionStore implements ComprehensionStore {
 // design — the durable backstops are the DB-visible cooldown timestamps.
 // ---------------------------------------------------------------------------
 
-export class WalletAbuseLimiter {
+/** Sliding-window abuse limiter for the wallet endpoints (WS-L.2.5d).  ASYNC so
+ *  the production boot can swap in a SHARED (Redis-backed) counter — the default
+ *  in-memory limiter is per-process and would let a user multiply the limits by
+ *  spreading requests across pods on a multi-instance deployment. */
+export interface WalletAbuseLimiterPort {
+  /** Record + check one attempt; false ⇒ over the limit (reject). */
+  hit(key: string, limit: number, windowMs: number): Promise<boolean>;
+}
+
+export class WalletAbuseLimiter implements WalletAbuseLimiterPort {
   readonly #hits = new Map<string, number[]>();
   readonly #now: Clock;
 
@@ -1363,8 +1399,7 @@ export class WalletAbuseLimiter {
     this.#now = now;
   }
 
-  /** Record + check one attempt; false ⇒ over the limit (reject). */
-  hit(key: string, limit: number, windowMs: number): boolean {
+  async hit(key: string, limit: number, windowMs: number): Promise<boolean> {
     const now = this.#now();
     const kept = (this.#hits.get(key) ?? []).filter((t) => now - t < windowMs);
     if (kept.length >= limit) {

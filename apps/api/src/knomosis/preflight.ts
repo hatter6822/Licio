@@ -116,7 +116,7 @@ const MODE_ENVIRONMENTS: Readonly<Partial<Record<GovernanceMode, readonly Knomos
   };
 
 /** Action types that move funds (sanctions screening applies, WS-L.3.1b). */
-const FUND_TRANSFER_ACTIONS: ReadonlySet<KnomosisSignedActionType> = new Set([
+export const FUND_TRANSFER_ACTIONS: ReadonlySet<KnomosisSignedActionType> = new Set([
   'treasury_deposit',
   'grant_payout',
   'bounty_contribution',

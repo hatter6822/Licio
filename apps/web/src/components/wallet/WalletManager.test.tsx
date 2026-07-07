@@ -107,11 +107,67 @@ describe('WalletManager', () => {
         ],
       },
     });
+    mockUnlinkMutate.mockResolvedValue({
+      wallet_account_id: 'w1',
+      unlink_state: 'pending_unlink',
+      finalize_after: '2026-07-07T12:00:00.000Z',
+    });
     render(<WalletManager enabled />);
     expect(screen.getByText('Treasury key')).toBeInTheDocument();
     expect(screen.getByText(/0x1234…5678/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /unlink/i }));
     expect(mockUnlinkMutate).toHaveBeenCalledWith('w1');
+  });
+
+  it('surfaces the blocking obligations when unlink is blocked (R9-6)', async () => {
+    mockUseWallets.mockReturnValue({
+      data: {
+        items: [
+          {
+            wallet_account_id: 'w1',
+            label: 'Treasury key',
+            address_truncated: '0x1234…5678',
+            chain_id: 31337,
+            wallet_type: 'eoa',
+            unlink_state: 'active',
+            risk_state: 'normal',
+            linked_at: '2026-07-06T12:00:00.000Z',
+            last_used_at: null,
+          },
+        ],
+      },
+    });
+    // The server's typed 409 blocked response (not an error the mutation rejects).
+    mockUnlinkMutate.mockResolvedValue({
+      error: { code: 'unlink_blocked', message: 'blocked' },
+      blocking_obligations: [
+        { type: 'open_proposal', ref: 'p1', description: 'Open proposal awaiting your vote' },
+      ],
+    });
+    render(<WalletManager enabled />);
+    fireEvent.click(screen.getByRole('button', { name: /unlink/i }));
+    // The specific obligation is shown, not a silent no-op.
+    expect(await screen.findByText(/open proposal awaiting your vote/i)).toBeInTheDocument();
+  });
+
+  it('does NOT render an <img> for a non-data: wallet icon (R9-11)', async () => {
+    render(<WalletManager enabled />);
+    // A provider that announces an https icon (would leak a third-party request).
+    discoveryCallback?.([
+      {
+        info: {
+          uuid: 'u',
+          name: 'PhishWallet',
+          icon: 'https://evil.example/icon.png',
+          rdns: 'com.evil',
+        },
+        provider: { request: vi.fn() },
+      },
+    ]);
+    await screen.findByRole('button', { name: /phishwallet/i });
+    // No image element sources the announced https URL.
+    const imgs = document.querySelectorAll('img');
+    for (const img of imgs) expect(img.getAttribute('src')).not.toContain('evil.example');
   });
 
   it('has no accessibility violations', async () => {

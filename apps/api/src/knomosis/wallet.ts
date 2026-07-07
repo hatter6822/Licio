@@ -29,7 +29,7 @@ import type {
   FinancialWalletStore,
   GovernanceSignatureStore,
   KnomosisActionStore,
-  WalletAbuseLimiter,
+  WalletAbuseLimiterPort,
 } from './stores.js';
 
 const NONCE_PREFIX = 'finwallet';
@@ -43,7 +43,7 @@ export interface WalletServiceDeps {
   /** Identity TTL'd single-use store (SIWE nonces). */
   ephemeral: EphemeralStore;
   audit: AuditStore;
-  abuse: WalletAbuseLimiter;
+  abuse: WalletAbuseLimiterPort;
   masterSecret: string;
   /** Canonical origin binding shared with the auth SIWE config (§25.5). */
   siweBase: Pick<SiweConfig, 'domain' | 'uri'>;
@@ -93,7 +93,7 @@ export async function issueWalletLinkNonce(
   args: { userId: string; sessionTokenHash: string },
 ): Promise<{ ok: true; nonce: string; issuedAt: string; expiresAt: string } | WalletServiceError> {
   const config = deps.config();
-  if (!deps.abuse.hit(`nonce:${args.userId}`, config.linkAttemptsPerHour, 3_600_000)) {
+  if (!(await deps.abuse.hit(`nonce:${args.userId}`, config.linkAttemptsPerHour, 3_600_000))) {
     return err(429, 'rate_limited', 'Too many wallet link attempts; try again later.');
   }
   const issued = await issueSiweNonce(
@@ -131,7 +131,7 @@ export async function linkWallet(
   const nowMs = deps.now();
 
   // Abuse limit counts ATTEMPTS (including failures), per account (WS-L.2.5d).
-  if (!deps.abuse.hit(`link:${args.userId}`, config.linkAttemptsPerHour, 3_600_000)) {
+  if (!(await deps.abuse.hit(`link:${args.userId}`, config.linkAttemptsPerHour, 3_600_000))) {
     deps.alert('knomosis.wallet.link_rate_exceeded', { user_id: args.userId });
     return err(429, 'rate_limited', 'Too many wallet link attempts; try again later.');
   }
@@ -222,11 +222,6 @@ export async function linkWallet(
     return { ok: true, wallet: record, alreadyLinked: true };
   }
 
-  const activeCount = (await deps.wallets.listByUser(args.userId, false)).length;
-  if (activeCount >= config.maxWalletsPerUser) {
-    return err(429, 'wallet_limit', `You can link at most ${config.maxWalletsPerUser} wallets.`);
-  }
-
   const record: FinancialWalletRecord = {
     walletAccountId: deps.uuid(),
     userId: args.userId,
@@ -243,7 +238,12 @@ export async function linkWallet(
     unlinkFinalizeAfter: null,
     unlinkedAt: null,
   };
-  const inserted = await deps.wallets.insert(record);
+  // ATOMIC cap check + insert (per-user lock): a bare count-then-insert races two
+  // concurrent links past `maxWalletsPerUser` (WS-L.2.5a).
+  const inserted = await deps.wallets.insertIfUnderCap(record, config.maxWalletsPerUser);
+  if (inserted === 'cap_exceeded') {
+    return err(429, 'wallet_limit', `You can link at most ${config.maxWalletsPerUser} wallets.`);
+  }
   await deps.audit.append({
     actorUserId: args.userId,
     eventType: 'wallet_link',
@@ -335,7 +335,7 @@ export async function requestUnlink(
   args: { userId: string; walletAccountId: string },
 ): Promise<UnlinkRequestOutcome> {
   const config = deps.config();
-  if (!deps.abuse.hit(`unlink:${args.userId}`, config.unlinkRequestsPerDay, 86_400_000)) {
+  if (!(await deps.abuse.hit(`unlink:${args.userId}`, config.unlinkRequestsPerDay, 86_400_000))) {
     deps.alert('knomosis.wallet.unlink_rate_exceeded', { user_id: args.userId });
     return err(429, 'rate_limited', 'Too many unlink requests; try again later.');
   }

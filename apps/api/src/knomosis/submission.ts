@@ -19,7 +19,7 @@ import type { EphemeralStore } from '../identity/ephemeral-store.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
-import { buildEip712Domain, consumePreflightToken } from './preflight.js';
+import { buildEip712Domain, consumePreflightToken, FUND_TRANSFER_ACTIONS } from './preflight.js';
 import {
   type ContractTypedDataVerifier,
   classifyEcdsaSignature,
@@ -27,6 +27,7 @@ import {
   verifyActionSignature,
 } from './signatures.js';
 import type {
+  FinancialWalletStore,
   GovernanceSignatureStore,
   KnomosisActionRecordEntity,
   KnomosisActionStore,
@@ -61,6 +62,9 @@ export interface NonceConsumerPort {
 
 export interface SubmissionDeps {
   actions: KnomosisActionStore;
+  /** Wallet store — RE-CHECKED at submit (ownership/active/risk) because the
+   *  preflight gates can go stale in the minutes before submit (WS-L.3.2a). */
+  wallets: FinancialWalletStore;
   /** Durable governance-signature ledger — a `proposal_sign` submit is
    *  recorded here (insert-once per (proposal, wallet)) so the vote powers the
    *  tally + the unlink-obligation check, not just the on-chain action row. */
@@ -229,6 +233,31 @@ export async function submitAction(
     };
   }
 
+  // RE-CHECK the WALLET at submit: preflight's ownership/active/risk gates can go
+  // stale in the minutes between preflight and submit — the wallet may have moved
+  // to pending_unlink/finalized or had its risk raised.  Never forward on a wallet
+  // that would now FAIL preflight (WS-L.3.2a mirrors the WS-L.3.1b gates).
+  const wallet = await deps.wallets.getById(input.walletAccountId);
+  if (wallet === null || wallet.userId !== input.userId || wallet.unlinkState !== 'active') {
+    return {
+      ok: false,
+      status: 409,
+      code: 'WALLET_NOT_ACTIVE',
+      message: 'The selected wallet is not active.',
+    };
+  }
+  if (
+    wallet.riskState === 'high' ||
+    (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(binding.actionType))
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'RISK_BLOCKED',
+      message: 'This wallet is currently restricted from this financial action.',
+    };
+  }
+
   // Anti-replay nonce: consumed atomically per (user, deployment) BEFORE the
   // gateway call (WS-L.3.2c).  Gaps are allowed; reuse is not.
   const nonce = input.typedDataMessage['nonce'] ?? '';
@@ -360,9 +389,16 @@ export async function forwardToGateway(
   const nowIso = new Date(deps.now()).toISOString();
   if (result.kind === 'verdict') {
     if (result.verdict.accepted) {
-      await applyTransition(deps, record, 'accepted', null);
-      // Record the governance signature ONLY now — on acceptance (WS-L.3.2a).
-      await recordAcceptedProposalSignature(deps, record);
+      // Record the governance signature ONLY when the CAS transition to
+      // `accepted` ACTUALLY succeeds.  If ingestion has already advanced the row
+      // to a terminal state (e.g. `reverted`), the CAS returns null and we must
+      // NOT insert a signature — the revert-side removal may already have run, so
+      // recording here would resurrect a live signature for a non-accepted action
+      // (WS-L.3.2a/3.4c).
+      const updated = await applyTransition(deps, record, 'accepted', null);
+      if (updated !== null) {
+        await recordAcceptedProposalSignature(deps, record);
+      }
       return { state: 'accepted', reasonCode: null, humanMessage: null };
     }
     const reason = result.verdict.reason ?? result.verdict.verdict;
@@ -438,7 +474,11 @@ export async function resubmitPendingActions(
      *  crypto flag is off, or the `action_submission` OR the action-type-specific
      *  (treasury_execution / governance_voting) kill switch is engaged for its
      *  room.  Absent ⇒ never paused (the retry default). */
-    submissionPaused?: (roomId: string, actionType: KnomosisSignedActionType) => Promise<boolean>;
+    submissionPaused?: (
+      roomId: string,
+      actionType: KnomosisSignedActionType,
+      actorUserId: string,
+    ) => Promise<boolean>;
   },
   deploymentId: string,
   limit = 50,
@@ -451,7 +491,10 @@ export async function resubmitPendingActions(
     // An incident pause must stop the SCHEDULER's retries too, not just the HTTP
     // submit route — including the ACTION-TYPE-specific switch (a treasury_execution
     // pause must stop a grant_payout resubmit even if action_submission is off).
-    if (deps.submissionPaused && (await deps.submissionPaused(record.roomId, record.actionType)))
+    if (
+      deps.submissionPaused &&
+      (await deps.submissionPaused(record.roomId, record.actionType, record.actorUserId))
+    )
       continue;
     // The signed payload can EXPIRE while the action sits in `submitted` during a
     // gateway outage — never forward a signature past the time the user authorized

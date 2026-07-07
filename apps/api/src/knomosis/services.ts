@@ -64,6 +64,7 @@ import {
   type ReconciliationStore,
   type SimTreasuryStore,
   WalletAbuseLimiter,
+  type WalletAbuseLimiterPort,
   type WalletActorMappingStore,
 } from './stores.js';
 
@@ -138,7 +139,7 @@ export interface KnomosisServices {
   reconciliation: ReconciliationStore;
   receipts: KnomosisReceiptStore;
   comprehension: ComprehensionStore;
-  abuse: WalletAbuseLimiter;
+  abuse: WalletAbuseLimiterPort;
 
   // Ports (fail-closed defaults; production boot swaps the real ones in).
   compliance: CompliancePort;

@@ -67,10 +67,18 @@ export async function runKnomosisTick(
       const submissionPaused = async (
         roomId: string,
         actionType: KnomosisSignedActionType,
+        actorUserId: string,
       ): Promise<boolean> => {
         if (!services.config().cryptoEnabled) return true;
+        // Resolve the actor's region — the SAME thing the HTTP submit path does —
+        // so a REGION-scoped switch pauses only that region's retries.  Omitting
+        // it makes killSwitchDecision treat the region as unknown (= inside every
+        // engaged region), pausing all users globally during a regional incident
+        // (WS-L.3.5c / §19.1).
+        const region = await services.regionResolver.regionForUser(actorUserId);
         if (
-          (await killSwitchDecision(services.configStore, 'action_submission', { roomId })).engaged
+          (await killSwitchDecision(services.configStore, 'action_submission', { roomId, region }))
+            .engaged
         )
           return true;
         // The action-type-specific switch (treasury_execution / governance_voting)
@@ -78,7 +86,7 @@ export async function runKnomosisTick(
         const specific = ACTION_KILL_SWITCH[actionType];
         return (
           specific !== undefined &&
-          (await killSwitchDecision(services.configStore, specific, { roomId })).engaged
+          (await killSwitchDecision(services.configStore, specific, { roomId, region })).engaged
         );
       };
       await resubmitPendingActions(

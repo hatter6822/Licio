@@ -91,8 +91,8 @@ function mapWallet(row: typeof walletAccounts.$inferSelect): FinancialWalletReco
 export class DrizzleFinancialWalletStore implements FinancialWalletStore {
   constructor(private readonly db: Db) {}
 
-  async insert(record: FinancialWalletRecord): Promise<FinancialWalletRecord> {
-    await this.db.insert(walletAccounts).values({
+  #insertValues(record: FinancialWalletRecord) {
+    return {
       walletAccountId: record.walletAccountId,
       userId: record.userId,
       addressHash: Buffer.from(record.addressHashHex, 'hex'),
@@ -107,8 +107,38 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
       unlinkRequestedAt: dateOrNull(record.unlinkRequestedAt),
       unlinkFinalizeAfter: dateOrNull(record.unlinkFinalizeAfter),
       unlinkedAt: dateOrNull(record.unlinkedAt),
-    });
+    };
+  }
+
+  async insert(record: FinancialWalletRecord): Promise<FinancialWalletRecord> {
+    await this.db.insert(walletAccounts).values(this.#insertValues(record));
     return record;
+  }
+
+  async insertIfUnderCap(
+    record: FinancialWalletRecord,
+    maxActive: number,
+  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
+    return this.db.transaction(async (tx) => {
+      // A per-user transaction-scoped advisory lock SERIALIZES concurrent links
+      // for this user, so the active-count check and the insert are atomic across
+      // pods — the DB otherwise enforces only address uniqueness, not the cap
+      // (WS-L.2.5a).  Namespaced by a constant second key so it cannot collide
+      // with other advisory locks.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${record.userId}), 2079)`);
+      const counted = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(walletAccounts)
+        .where(
+          and(
+            eq(walletAccounts.userId, record.userId),
+            ne(walletAccounts.unlinkState, 'finalized'),
+          ),
+        );
+      if ((counted[0]?.n ?? 0) >= maxActive) return 'cap_exceeded' as const;
+      await tx.insert(walletAccounts).values(this.#insertValues(record));
+      return record;
+    });
   }
 
   async getById(walletAccountId: string): Promise<FinancialWalletRecord | null> {
@@ -410,7 +440,9 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       .where(
         and(
           eq(knomosisActionRecords.deploymentId, deploymentId),
-          eq(knomosisActionRecords.reconciliationState, 'pending'),
+          // `pending` OR `mismatch` — a mismatch stays eligible so a later tick can
+          // resolve it to a superseding match (WS-L.3.4b).
+          inArray(knomosisActionRecords.reconciliationState, ['pending', 'mismatch']),
         ),
       )
       .orderBy(asc(knomosisActionRecords.createdAt))

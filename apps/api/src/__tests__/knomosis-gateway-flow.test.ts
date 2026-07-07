@@ -54,6 +54,7 @@ function submissionDeps(fixture: KnomosisFixture): SubmissionDeps {
   const s = fixture.knomosis;
   return {
     actions: s.actions,
+    wallets: s.wallets,
     signatures: s.proposalSignatures,
     nonces: s.nonces,
     gateway: s.gateway,
@@ -699,6 +700,30 @@ describe('WS-L.3.2 submission + state machine', () => {
     if (result.ok) expect(result.submissionState).toBe('accepted');
   });
 
+  it('REJECTS submit when the wallet went inactive after preflight (R9-4)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const { pre, req } = await preflightPass(fixture, userId, walletAccountId);
+    // Between preflight and submit, the wallet moves to pending_unlink.
+    const w = await fixture.knomosis.wallets.getById(walletAccountId);
+    if (w === null) throw new Error('wallet missing');
+    await fixture.knomosis.wallets.update({ ...w, unlinkState: 'pending_unlink' });
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: req.typedDataMessage,
+      signature: req.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('WALLET_NOT_ACTIVE');
+  });
+
   it('a proposal_sign submit DURABLY records a governance signature (WS-L.3.2a)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
@@ -1044,9 +1069,19 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     // A limit-full batch (3) that ENDS mid seq-6 group (index 1; index 2 exists
     // beyond the limit).  The cursor advances by seq, so seq-6 must NOT be stored.
     const batch = [
-      { seq: '5', index: 0, type: 'knomosis.action.accepted', payload: {} },
-      { seq: '6', index: 0, type: 'knomosis.action.accepted', payload: {} },
-      { seq: '6', index: 1, type: 'knomosis.action.accepted', payload: {} },
+      { seq: '5', index: 0, type: 'knomosis.action.accepted', payload: { typed_data_hash: '0x5' } },
+      {
+        seq: '6',
+        index: 0,
+        type: 'knomosis.action.accepted',
+        payload: { typed_data_hash: '0x6a' },
+      },
+      {
+        seq: '6',
+        index: 1,
+        type: 'knomosis.action.accepted',
+        payload: { typed_data_hash: '0x6b' },
+      },
     ];
     const stub: KnomosisGateway = {
       submitAction: async () => {
@@ -1094,6 +1129,35 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     if (outcome.kind === 'halted') expect(outcome.reason).toBe('unsupported_event');
     // NEITHER event from seq 1 was stored, so the cursor never advanced — the
     // whole group is re-fetched once the schema learns the new type.
+    expect(await fixture.knomosis.events.listByDeployment(DEPLOYMENT, 100)).toHaveLength(0);
+    expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBeNull();
+  });
+
+  it('HALTS on a known action event with a malformed payload (no typed_data_hash) (R9-1)', async () => {
+    const fixture = await freshKnomosisServices();
+    // A KNOWN event type but a malformed payload — no string typed_data_hash to
+    // bind it to its action.  Storing+skipping it would advance the cursor and
+    // strand the action in-flight forever.
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [{ seq: '1', index: 0, type: 'knomosis.action.finalized', payload: {} }],
+        latestSeq: '1',
+      }),
+    };
+    const outcome = await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    expect(outcome.kind).toBe('halted');
+    if (outcome.kind === 'halted') expect(outcome.reason).toBe('malformed_event');
+    // Nothing stored, cursor not advanced → the event is re-delivered after a fix.
     expect(await fixture.knomosis.events.listByDeployment(DEPLOYMENT, 100)).toHaveLength(0);
     expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBeNull();
   });

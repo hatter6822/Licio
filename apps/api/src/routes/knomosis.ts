@@ -84,6 +84,7 @@ function preflightDeps(services: KnomosisServices): PreflightDeps | null {
 function submissionDeps(services: KnomosisServices): SubmissionDeps {
   return {
     actions: services.actions,
+    wallets: services.wallets,
     signatures: services.proposalSignatures,
     nonces: services.nonces,
     gateway: services.gateway,
