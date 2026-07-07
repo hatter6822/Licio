@@ -15,7 +15,9 @@ import {
   type KillSwitchAdminDeps,
   killSwitchDecision,
   readKillSwitchRegistry,
+  readSwitchEntry,
   requestKillSwitchDeactivation,
+  switchConfigKey,
 } from '../knomosis/killswitch.js';
 import { freshEventServices } from './event-test-helpers.js';
 
@@ -99,14 +101,17 @@ describe('kill-switch scope precedence + immediate effect', () => {
     ).toBe(true);
   });
 
-  it('an UNREADABLE registry fails closed (every switch engaged)', async () => {
+  it('an UNREADABLE switch entry fails closed (that switch engaged)', async () => {
     const configStore = new InMemoryPwattConfigStore();
-    // Write garbage under the registry key.
-    await configStore.set('knomosis.killswitch', { not: 'a registry' });
-    const state = await readKillSwitchRegistry(configStore);
-    expect(state).toBe('invalid');
+    // Write garbage under ONE switch's per-switch key.
+    await configStore.set(switchConfigKey('treasury_execution'), { not: 'an entry' });
+    // The corrupt entry fails the switch closed…
     const decision = await killSwitchDecision(configStore, 'treasury_execution');
     expect(decision).toEqual({ engaged: true, scope: 'unreadable_state' });
+    // …and a full-registry read reports the whole surface unreadable (fail closed).
+    expect(await readKillSwitchRegistry(configStore)).toBe('invalid');
+    // A DIFFERENT, uncorrupted switch is still independently readable (inactive).
+    expect((await killSwitchDecision(configStore, 'action_submission')).engaged).toBe(false);
   });
 
   it('an absent key is the normal all-inactive state', async () => {
@@ -114,6 +119,64 @@ describe('kill-switch scope precedence + immediate effect', () => {
     for (const id of ['wallet_connection', 'action_submission', 'treasury_execution'] as const) {
       expect((await killSwitchDecision(configStore, id)).engaged).toBe(false);
     }
+  });
+
+  it('REJECTS an empty-scope activation instead of a silent no-op (R12-1)', async () => {
+    const { identity } = freshEventServices();
+    const configStore = new InMemoryPwattConfigStore();
+    const deps = adminDeps(configStore, identity.audit);
+    const result = await activateKillSwitch(deps, {
+      switchId: 'action_submission',
+      // No scope selected — this would appear engaged but block nothing.
+      scopes: { global: false, regions: [], room_ids: [] },
+      releaseCard: RELEASE_CARD,
+      actorUserId: 'a1111111-1111-4111-8111-111111111111',
+      reason: 'ui bug',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('empty_scopes');
+    // NOTHING was persisted, so the switch is not falsely "engaged".
+    expect(await readSwitchEntry(configStore, 'action_submission')).toBeNull();
+    expect((await killSwitchDecision(configStore, 'action_submission')).engaged).toBe(false);
+  });
+
+  it('CONCURRENT activations of DIFFERENT switches never drop one another (R12-3)', async () => {
+    const { identity } = freshEventServices();
+    const configStore = new InMemoryPwattConfigStore();
+    const deps = adminDeps(configStore, identity.audit);
+    // Two operators engage two different switches at the same instant.  With a
+    // shared-registry read-modify-write the loser's snapshot would clobber the
+    // winner; per-switch keys keep them independent.
+    await Promise.all([
+      activateKillSwitch(deps, {
+        switchId: 'action_submission',
+        scopes: { global: true, regions: [], room_ids: [] },
+        releaseCard: RELEASE_CARD,
+        actorUserId: 'a1111111-1111-4111-8111-111111111111',
+        reason: 'incident A',
+      }),
+      activateKillSwitch(deps, {
+        switchId: 'treasury_execution',
+        scopes: { global: true, regions: [], room_ids: [] },
+        releaseCard: RELEASE_CARD,
+        actorUserId: 'a2222222-2222-4222-8222-222222222222',
+        reason: 'incident B',
+      }),
+    ]);
+    // BOTH remain engaged, and each lives under its own key.
+    expect((await killSwitchDecision(configStore, 'action_submission')).engaged).toBe(true);
+    expect((await killSwitchDecision(configStore, 'treasury_execution')).engaged).toBe(true);
+    expect(switchConfigKey('action_submission')).not.toBe(switchConfigKey('treasury_execution'));
+    // Engaging a THIRD switch leaves the first's stored entry byte-for-byte intact.
+    const before = await configStore.get(switchConfigKey('action_submission'));
+    await activateKillSwitch(deps, {
+      switchId: 'governance_voting',
+      scopes: { global: true, regions: [], room_ids: [] },
+      releaseCard: RELEASE_CARD,
+      actorUserId: 'a3333333-3333-4333-8333-333333333333',
+      reason: 'incident C',
+    });
+    expect(await configStore.get(switchConfigKey('action_submission'))).toEqual(before);
   });
 });
 

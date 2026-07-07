@@ -902,15 +902,30 @@ knomosisServices.contractTypedDataVerifier = createContractTypedDataVerifier(kno
 // null — every gateway consumer degrades closed.  Non-production gets the
 // deterministic in-memory fake bound to the local pinned deployment.
 if (env.KNOMOSIS_GATEWAY_URL !== undefined && env.KNOMOSIS_GATEWAY_TOKEN_FILE !== undefined) {
+  // The gateway is CONFIGURED (both env values set) — an unreadable/empty token
+  // file is a fatal MISCONFIGURATION of a financial surface, not a soft
+  // degradation.  Failing here (rather than logging and leaving the gateway
+  // null) prevents the server from starting up and silently serving a broken
+  // gateway surface where every submission / standing read / retry / ingest
+  // degrades to unavailable (WS-L.3 fail-closed boot).
+  let bearerToken: string;
   try {
-    const bearerToken = readFileSync(env.KNOMOSIS_GATEWAY_TOKEN_FILE, 'utf8').trim();
-    setServicesGateway(
-      knomosisServices,
-      new HttpKnomosisGateway({ baseUrl: env.KNOMOSIS_GATEWAY_URL, bearerToken }),
-    );
+    bearerToken = readFileSync(env.KNOMOSIS_GATEWAY_TOKEN_FILE, 'utf8').trim();
   } catch (error) {
-    logger.error({ err: error }, 'knomosis gateway token file unreadable — gateway disabled');
+    throw new Error(
+      `KNOMOSIS_GATEWAY_TOKEN_FILE (${env.KNOMOSIS_GATEWAY_TOKEN_FILE}) is set but unreadable — refusing to start with a broken gateway surface`,
+      { cause: error },
+    );
   }
+  if (bearerToken.length === 0) {
+    throw new Error(
+      `KNOMOSIS_GATEWAY_TOKEN_FILE (${env.KNOMOSIS_GATEWAY_TOKEN_FILE}) is empty — refusing to start with a broken gateway surface`,
+    );
+  }
+  setServicesGateway(
+    knomosisServices,
+    new HttpKnomosisGateway({ baseUrl: env.KNOMOSIS_GATEWAY_URL, bearerToken }),
+  );
 } else if (env.NODE_ENV !== 'production') {
   setServicesGateway(knomosisServices, new FakeKnomosisGateway());
 }

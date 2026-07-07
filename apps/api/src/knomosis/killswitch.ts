@@ -32,6 +32,19 @@ import type { AuditStore } from '../identity/audit.js';
 
 export const KNOMOSIS_KILLSWITCH_CONFIG_KEY = 'knomosis.killswitch';
 
+/**
+ * Per-switch config key.  Each of the five switches is stored under its OWN
+ * key so two operators activating/deactivating DIFFERENT switches during an
+ * incident never read-modify-write a shared registry blob and drop each other's
+ * change (WS-L.3.5f).  A read-modify-write on ONE switch is still last-write-wins
+ * (two operators fighting over the same switch is a human-coordination case), but
+ * an emergency engagement of switch A can never be silently cleared by a
+ * concurrent edit to switch B.
+ */
+export function switchConfigKey(id: KillSwitchId): string {
+  return `${KNOMOSIS_KILLSWITCH_CONFIG_KEY}.${id}`;
+}
+
 /** The NARROWER emergency switch that governs each signed action type (checked
  *  in addition to the broad `action_submission` switch): a treasury-execution
  *  pause stops grant/deposit/bounty submissions, and a governance-voting pause
@@ -76,24 +89,50 @@ export function emptyRegistry(nowIso: string): KillSwitchRegistry {
   return { switches, updated_at: nowIso };
 }
 
-/** Read the registry; null ⇒ all inactive, 'invalid' ⇒ fail closed (all on). */
-export async function readKillSwitchRegistry(
+/**
+ * Read ONE switch entry; null ⇒ absent (inactive), 'invalid' ⇒ fail closed for
+ * that switch (a store error OR a present-but-malformed value — a corrupt
+ * emergency-control surface must degrade to "engaged", never to "assume fine").
+ */
+export async function readSwitchEntry(
   configStore: PwattConfigStore,
-): Promise<KillSwitchRegistry | null | 'invalid'> {
+  switchId: KillSwitchId,
+): Promise<KillSwitchEntry | null | 'invalid'> {
   let raw: Record<string, unknown> | null;
   try {
-    raw = await configStore.get(KNOMOSIS_KILLSWITCH_CONFIG_KEY);
+    raw = await configStore.get(switchConfigKey(switchId));
   } catch {
     return 'invalid';
   }
   if (raw === null) return null;
-  const parsed = registrySchema.safeParse(raw);
-  if (!parsed.success) return 'invalid';
-  // Every switch id must be present — a partial registry is malformed.
+  const parsed = switchEntrySchema.safeParse(raw);
+  return parsed.success ? parsed.data : 'invalid';
+}
+
+/**
+ * Assemble the full registry from the per-switch keys (the status/list read):
+ * an absent switch is INACTIVE, and if ANY switch read fails closed the whole
+ * list is reported 'invalid'.  `null` ⇒ every switch is pristine/absent.
+ */
+export async function readKillSwitchRegistry(
+  configStore: PwattConfigStore,
+): Promise<KillSwitchRegistry | null | 'invalid'> {
+  const switches = {} as Record<KillSwitchId, KillSwitchEntry>;
+  let anyPresent = false;
+  let latest = '';
   for (const id of KILL_SWITCH_IDS) {
-    if (parsed.data.switches[id] === undefined) return 'invalid';
+    const entry = await readSwitchEntry(configStore, id);
+    if (entry === 'invalid') return 'invalid';
+    if (entry === null) {
+      switches[id] = structuredClone(INACTIVE_ENTRY);
+    } else {
+      switches[id] = entry;
+      anyPresent = true;
+      if (entry.engaged_at !== null && entry.engaged_at > latest) latest = entry.engaged_at;
+    }
   }
-  return parsed.data;
+  if (!anyPresent) return null;
+  return { switches, updated_at: latest || new Date(0).toISOString() };
 }
 
 export interface KillSwitchRequestContext {
@@ -117,11 +156,10 @@ export async function killSwitchDecision(
   switchId: KillSwitchId,
   context: KillSwitchRequestContext = {},
 ): Promise<KillSwitchDecision> {
-  const registry = await readKillSwitchRegistry(configStore);
-  if (registry === null) return { engaged: false };
-  if (registry === 'invalid') return { engaged: true, scope: 'unreadable_state' };
+  const entry = await readSwitchEntry(configStore, switchId);
+  if (entry === null) return { engaged: false };
+  if (entry === 'invalid') return { engaged: true, scope: 'unreadable_state' };
 
-  const entry = registry.switches[switchId];
   if (entry.scopes.global) return { engaged: true, scope: 'global' };
   if (entry.scopes.regions.length > 0) {
     // Case-INSENSITIVE match: the resolver normalizes locale regions to
@@ -151,19 +189,37 @@ export type KillSwitchAdminResult =
   | { ok: true; entry: KillSwitchEntry }
   | {
       ok: false;
-      code: 'registry_unreadable' | 'not_engaged' | 'no_pending_request' | 'same_operator';
+      code:
+        | 'registry_unreadable'
+        | 'empty_scopes'
+        | 'not_engaged'
+        | 'no_pending_request'
+        | 'same_operator';
       message: string;
     };
 
-async function loadOrInit(deps: KillSwitchAdminDeps): Promise<KillSwitchRegistry | 'invalid'> {
-  const registry = await readKillSwitchRegistry(deps.configStore);
-  if (registry === 'invalid') return 'invalid';
-  return registry ?? emptyRegistry(new Date(deps.now()).toISOString());
+/** Read ONE switch for an admin edit; INACTIVE when absent, 'invalid' fails closed. */
+async function loadSwitch(
+  deps: KillSwitchAdminDeps,
+  switchId: KillSwitchId,
+): Promise<KillSwitchEntry | 'invalid'> {
+  const entry = await readSwitchEntry(deps.configStore, switchId);
+  if (entry === 'invalid') return 'invalid';
+  return entry ?? structuredClone(INACTIVE_ENTRY);
 }
 
-async function persist(deps: KillSwitchAdminDeps, registry: KillSwitchRegistry): Promise<void> {
-  registry.updated_at = new Date(deps.now()).toISOString();
-  await deps.configStore.set(KNOMOSIS_KILLSWITCH_CONFIG_KEY, registry);
+/** Persist ONE switch entry under its own key — no shared-registry rewrite. */
+async function persistSwitch(
+  deps: KillSwitchAdminDeps,
+  switchId: KillSwitchId,
+  entry: KillSwitchEntry,
+): Promise<void> {
+  await deps.configStore.set(switchConfigKey(switchId), entry);
+}
+
+/** True when the entry's scopes actually block SOME traffic (global/region/room). */
+function hasActiveScope(scopes: KillSwitchScopes): boolean {
+  return scopes.global || scopes.regions.length > 0 || scopes.room_ids.length > 0;
 }
 
 /** Activate a switch (immediate; audited).  Overwrites the prior scopes. */
@@ -177,9 +233,22 @@ export async function activateKillSwitch(
     reason: string;
   },
 ): Promise<KillSwitchAdminResult> {
-  const registry = await loadOrInit(deps);
-  if (registry === 'invalid') {
-    // A corrupt registry is already failing closed; refuse to overwrite it
+  // REJECT an empty-scope activation: `killSwitchDecision` treats
+  // `{global:false, regions:[], room_ids:[]}` as INACTIVE, so persisting it would
+  // record an `engaged_at` and return success while blocking NOTHING — an
+  // incident operator would believe the surface is frozen when it is not.  A
+  // malformed admin request / UI bug must fail loudly, not silently no-op
+  // (WS-L.3.5f).
+  if (!hasActiveScope(input.scopes)) {
+    return {
+      ok: false,
+      code: 'empty_scopes',
+      message: 'An activation must select at least one scope (global, a region, or a room).',
+    };
+  }
+  const existing = await loadSwitch(deps, input.switchId);
+  if (existing === 'invalid') {
+    // A corrupt switch entry is already failing closed; refuse to overwrite it
     // silently — operators must inspect before re-arming.
     return {
       ok: false,
@@ -193,8 +262,7 @@ export async function activateKillSwitch(
     engaged_at: new Date(deps.now()).toISOString(),
     deactivation_requested_by: null,
   };
-  registry.switches[input.switchId] = entry;
-  await persist(deps, registry);
+  await persistSwitch(deps, input.switchId, entry);
   await deps.audit.append({
     actorUserId: input.actorUserId,
     eventType: 'knomosis_killswitch_change',
@@ -220,22 +288,19 @@ export async function requestKillSwitchDeactivation(
   deps: KillSwitchAdminDeps,
   input: { switchId: KillSwitchId; actorUserId: string; reason: string },
 ): Promise<KillSwitchAdminResult> {
-  const registry = await loadOrInit(deps);
-  if (registry === 'invalid') {
+  const entry = await loadSwitch(deps, input.switchId);
+  if (entry === 'invalid') {
     return {
       ok: false,
       code: 'registry_unreadable',
       message: 'The stored kill-switch registry is unreadable (all switches fail closed).',
     };
   }
-  const entry = registry.switches[input.switchId];
-  const engaged =
-    entry.scopes.global || entry.scopes.regions.length > 0 || entry.scopes.room_ids.length > 0;
-  if (!engaged) {
+  if (!hasActiveScope(entry.scopes)) {
     return { ok: false, code: 'not_engaged', message: 'The switch is not engaged.' };
   }
-  entry.deactivation_requested_by = input.actorUserId;
-  await persist(deps, registry);
+  const updated: KillSwitchEntry = { ...entry, deactivation_requested_by: input.actorUserId };
+  await persistSwitch(deps, input.switchId, updated);
   await deps.audit.append({
     actorUserId: input.actorUserId,
     eventType: 'knomosis_killswitch_change',
@@ -246,7 +311,7 @@ export async function requestKillSwitchDeactivation(
     state: 'deactivation_requested',
     switch_id: input.switchId,
   });
-  return { ok: true, entry: structuredClone(entry) };
+  return { ok: true, entry: structuredClone(updated) };
 }
 
 /**
@@ -257,15 +322,14 @@ export async function confirmKillSwitchDeactivation(
   deps: KillSwitchAdminDeps,
   input: { switchId: KillSwitchId; actorUserId: string; reason: string },
 ): Promise<KillSwitchAdminResult> {
-  const registry = await loadOrInit(deps);
-  if (registry === 'invalid') {
+  const entry = await loadSwitch(deps, input.switchId);
+  if (entry === 'invalid') {
     return {
       ok: false,
       code: 'registry_unreadable',
       message: 'The stored kill-switch registry is unreadable (all switches fail closed).',
     };
   }
-  const entry = registry.switches[input.switchId];
   if (entry.deactivation_requested_by === null) {
     return {
       ok: false,
@@ -280,8 +344,7 @@ export async function confirmKillSwitchDeactivation(
       message: 'Deactivation must be confirmed by a different operator (two-person rule).',
     };
   }
-  registry.switches[input.switchId] = structuredClone(INACTIVE_ENTRY);
-  await persist(deps, registry);
+  await persistSwitch(deps, input.switchId, structuredClone(INACTIVE_ENTRY));
   await deps.audit.append({
     actorUserId: input.actorUserId,
     eventType: 'knomosis_killswitch_change',

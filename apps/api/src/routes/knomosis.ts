@@ -482,7 +482,8 @@ export function createKnomosisRoutes() {
                     reason: body.reason,
                   });
           if (!result.ok) {
-            const status = result.code === 'same_operator' ? 403 : 409;
+            const status =
+              result.code === 'same_operator' ? 403 : result.code === 'empty_scopes' ? 400 : 409;
             return c.json(deny(result.code, result.message), status);
           }
           return c.json({ ok: true, entry: result.entry });
