@@ -135,6 +135,10 @@ export const walletUnlinkAcceptedSchema = z
   .strict();
 export type WalletUnlinkAccepted = z.infer<typeof walletUnlinkAcceptedSchema>;
 
+/** Max obligations carried inline in a blocked-unlink response; a longer list is
+ *  truncated to this and summarized by `total_obligations` (WS-L.2.5b). */
+export const WALLET_UNLINK_OBLIGATIONS_MAX = 100;
+
 /** 409 — blocked with the specific obligations (WS-L.2.5b). */
 export const walletUnlinkBlockedSchema = z
   .object({
@@ -144,7 +148,10 @@ export const walletUnlinkBlockedSchema = z
         message: z.string().min(1),
       })
       .strict(),
-    blocking_obligations: z.array(unlinkObligationSchema).min(1).max(100),
+    blocking_obligations: z.array(unlinkObligationSchema).min(1).max(WALLET_UNLINK_OBLIGATIONS_MAX),
+    /** The TRUE count of blocking obligations — equals the inline list length
+     *  unless it was truncated, so the client can say "and N more". */
+    total_obligations: z.number().int().min(1).optional(),
   })
   .strict();
 export type WalletUnlinkBlocked = z.infer<typeof walletUnlinkBlockedSchema>;

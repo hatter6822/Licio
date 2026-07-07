@@ -405,6 +405,9 @@ export const reconciliationOutcomeEnum = knomosisSchema.enum('knomosis_reconcili
   'match',
   'mismatch',
   'halted_unsupported_version',
+  // A gateway event-retention gap: an unknown range was lost, so reconciliation
+  // HALTS (like an unsupported version) until `rebuildFromSnapshot` re-anchors.
+  'halted_event_gap',
 ]);
 
 export const divergenceSeverityEnum = knomosisSchema.enum('knomosis_divergence_severity', [

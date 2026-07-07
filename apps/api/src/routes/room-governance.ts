@@ -137,6 +137,20 @@ async function simGate(
   if (room.mode === 'ordinary') {
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   }
+  // WS-Q §16.1 content bar — closes the private-room governance READ: a private
+  // room's governance content (active proposals, simulated treasury) is visible
+  // only to active members/stewards.  For a public room this is always true, so
+  // public reads stay open; for a private room a non-member is blocked here,
+  // BEFORE any proposal/treasury data is assembled.  Applies to reads and writes
+  // (writes additionally require membership below).
+  if (!(await services.rooms.contentVisibleToUser(roomId, userId))) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'membership_required',
+      message: 'This room’s governance is visible to members only.',
+    };
+  }
   if (needsMembership && !(await services.rooms.isMember(roomId, userId))) {
     return {
       ok: false,

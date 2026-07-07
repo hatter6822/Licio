@@ -15,6 +15,7 @@
 import { zValidator } from '@hono/zod-validator';
 import {
   uuidSchema,
+  WALLET_UNLINK_OBLIGATIONS_MAX,
   walletLabelRequestSchema,
   walletLinkRequestSchema,
   walletLinkResponseSchema,
@@ -182,13 +183,17 @@ export function createWalletRoutes() {
             walletAccountId: body.wallet_account_id,
           });
           if ('blocked' in result) {
+            // Cap the inline list at the schema max; a wallet with a very large
+            // number of open obligations must still yield a usable 409, not a
+            // schema exception → 500.  `total_obligations` keeps the count honest.
             return c.json(
               walletUnlinkBlockedSchema.parse({
                 error: {
                   code: 'unlink_blocked',
                   message: 'This wallet has unresolved obligations.',
                 },
-                blocking_obligations: result.obligations,
+                blocking_obligations: result.obligations.slice(0, WALLET_UNLINK_OBLIGATIONS_MAX),
+                total_obligations: result.obligations.length,
               }),
               409,
             );

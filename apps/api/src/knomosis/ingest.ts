@@ -102,15 +102,18 @@ export async function ingestGatewayEvents(
   if (result.kind === 'unavailable') return { kind: 'unavailable' };
 
   if (result.kind === 'gap') {
-    // FAIL CLOSED: an unknown range was lost.  Record a critical divergence
-    // and halt — the cursor never advances past a gap until the rebuild
-    // (rebuildFromSnapshot) has re-anchored every consumer.
+    // FAIL CLOSED: an unknown range was lost.  Persist a HALT (not a mere
+    // mismatch): reconcileDeployment blocks on an unresolved `halted_event_gap`
+    // exactly as it does on an unsupported version, so no tick can reconcile
+    // actions against a stream already known to have dropped an unknown range.
+    // The halt (and the cursor) clears only after `rebuildFromSnapshot`
+    // re-anchors every consumer.
     await deps.reconciliation.append({
       resultId: deps.uuid(),
       deploymentId,
       entityType: 'action',
       entityRef: `gap:${result.oldestSeq}`,
-      outcome: 'mismatch',
+      outcome: 'halted_event_gap',
       severity: 'critical',
       details: {
         kind: 'event_window_gap',
@@ -209,15 +212,37 @@ export async function rebuildFromSnapshot(
   deps: IngestDeps,
   deploymentId: string,
 ): Promise<{ remarked: number }> {
+  const nowIso = new Date(deps.now()).toISOString();
   const open = await deps.actions.listUnreconciled(deploymentId, 10_000);
   let remarked = 0;
   for (const record of open) {
     await deps.actions.update({
       ...record,
       reconciliationState: 'pending',
-      updatedAt: new Date(deps.now()).toISOString(),
+      updatedAt: nowIso,
     });
     remarked += 1;
+  }
+  // Clear the gap halt(s) this rebuild re-anchors: append a resolving `match`
+  // for each unresolved `halted_event_gap` so reconcileDeployment resumes (the
+  // gap is the recovery path's explicit close; unsupported-version halts clear
+  // via the separate schema-update path, not here).
+  const unresolved = await deps.reconciliation.listUnresolvedMismatches(deploymentId);
+  let clearedGaps = 0;
+  for (const result of unresolved) {
+    if (result.outcome !== 'halted_event_gap') continue;
+    await deps.reconciliation.append({
+      resultId: deps.uuid(),
+      deploymentId,
+      entityType: result.entityType,
+      entityRef: result.entityRef,
+      outcome: 'match',
+      severity: null,
+      details: { kind: 'event_window_gap_rebuilt', remarked },
+      lowWatermarkSeq: result.lowWatermarkSeq,
+      createdAt: nowIso,
+    });
+    clearedGaps += 1;
   }
   await deps.audit.append({
     actorUserId: null,
@@ -225,6 +250,6 @@ export async function rebuildFromSnapshot(
     targetRef: deploymentId,
     context: { setting: 'rebuild_from_snapshot', new_value: String(remarked) },
   });
-  deps.log('knomosis.ingest.rebuilt', { deployment_id: deploymentId, remarked });
+  deps.log('knomosis.ingest.rebuilt', { deployment_id: deploymentId, remarked, clearedGaps });
   return { remarked };
 }

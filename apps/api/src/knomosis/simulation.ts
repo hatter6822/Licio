@@ -493,6 +493,15 @@ export async function executeSimProposal(
   deps: SimulationDeps,
   args: { roomId: string; proposalId: string; actorUserId: string | null },
 ): Promise<{ ok: true; proposal: GovernanceProposalRecord } | SimulationError> {
+  // A manual execution IS a first-class governance action: enforce the
+  // comprehension gate for a member actor exactly as proposal creation/voting/
+  // deposit do, so executing a timelock-elapsed proposal cannot become an
+  // unquizzed member's first action.  The automated scheduler path passes a
+  // null actor and is never user-gated.
+  if (args.actorUserId !== null) {
+    const comprehension = await requireComprehension(deps, args.actorUserId);
+    if (comprehension !== null) return comprehension;
+  }
   const proposal = await deps.proposals.getById(args.proposalId);
   if (proposal === null || proposal.roomId !== args.roomId) {
     return err(404, 'not_found', 'Resource not found');

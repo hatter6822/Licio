@@ -60,6 +60,11 @@ export async function assembleExport(
     contributions: (await services.exportContributions?.(userId)) ?? [],
     // Reasons only — reporter identities are NEVER exported (§19.5).
     moderation_notices: (await services.exportModerationNotices?.(userId)) ?? [],
+    // WS-L: financial wallet links + receipts (truncated address only, §19.5).
+    financial_wallets: (await services.exportFinancialWallets?.(userId)) ?? {
+      wallets: [],
+      receipts: [],
+    },
   };
 }
 
@@ -161,6 +166,9 @@ export async function runDeletionPurge(
   for (const req of due) {
     await services.anonymizeContributions?.(req.userId);
     await services.purgeAttention?.(req.userId, 'delete');
+    // WS-L: a linked financial wallet + its receipts must never outlive the
+    // account — purge them alongside the other domains' personal data.
+    await services.purgeFinancialWallets?.(req.userId);
     // ALL export archives for the user (completed ones included) are removed
     // from object storage before the job rows are dropped by the tombstone.
     for (const job of await services.store.listExportJobs(req.userId)) {

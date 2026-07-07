@@ -37,6 +37,22 @@ social product is unaffected and every WS-L endpoint withholds (`503`).
   or private key; the address is stored only as a financial-domain HMAC +
   truncation (§19.5).  A unit sweep asserts no wallet/knomosis schema carries
   key material.
+- **Data-rights coverage.**  The financial wallet footprint is wired into the
+  WS-D DSAR lifecycle (`apps/api/src/knomosis/data-rights.ts`): export carries
+  the truncated address + private receipts (never the hash), and hard deletion
+  purges wallets + actions + proposal signatures + private receipts (the
+  ownerless public-ledger receipts survive).  The private-key custody invariant
+  therefore extends to the erasure path — a linked wallet never outlives the
+  account.
+- **Private-room governance reads.**  The `/rooms/:id/governance/*` read
+  surfaces (tab bundle, proposals, treasury) enforce the WS-Q §16.1 content bar
+  through `RoomGovernancePort.contentVisibleToUser` (delegating to the forum's
+  single `roomContentVisibleToUser`), so a private room's proposals/treasury are
+  visible only to active members/stewards.
+- **Fail-closed wallet risk.**  Preflight rejects a fund-transfer action from a
+  wallet whose risk is `high` OR `pending` (the pre-assessment state), so an
+  unassessed wallet can never move funds before its first compliance
+  assessment.
 - **Idempotent + replay-resistant.**  Every write binds a per-(user,
   deployment) anti-replay nonce, a chain id, an expiration, and a
   `deploymentId` into the EIP-712 domain/message; submissions require a
@@ -67,6 +83,7 @@ Server (`apps/api/src/knomosis/`):
 | `reconciliation.ts` | WS-L.3.4a/b three-source reconciliation + divergence severity + expansion gate |
 | `receipts.ts` | WS-L.3.4c public/private receipts + hash pairing |
 | `standing.ts` | WS-L.3.6a ranking-firewalled balances/budget reads |
+| `data-rights.ts` | WS-D DSAR export + hard-deletion purge of the wallet footprint (wallets/actions/signatures/private receipts) |
 | `simulation.ts` | WS-L.4 proposals/treasury/voting/execution/comprehension (structurally separate from real execution) |
 | `readiness.ts` | WS-L.4.1g room-readiness gate + mode transitions |
 | `services.ts` / `scheduler.ts` / `wiring.ts` | container + lease-guarded tick + boot wiring |

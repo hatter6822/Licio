@@ -59,7 +59,7 @@ CREATE TYPE "knomosis"."proposal_preflight_state" AS ENUM('pending', 'passed', '
 CREATE TYPE "knomosis"."proposal_voting_state" AS ENUM('open', 'passed', 'rejected', 'quorum_not_met');--> statement-breakpoint
 CREATE TYPE "knomosis"."proposal_challenge_state" AS ENUM('none', 'open', 'upheld', 'dismissed');--> statement-breakpoint
 CREATE TYPE "knomosis"."proposal_execution_state" AS ENUM('not_executed', 'timelocked', 'executed', 'blocked');--> statement-breakpoint
-CREATE TYPE "knomosis"."knomosis_reconciliation_outcome" AS ENUM('match', 'mismatch', 'halted_unsupported_version');--> statement-breakpoint
+CREATE TYPE "knomosis"."knomosis_reconciliation_outcome" AS ENUM('match', 'mismatch', 'halted_unsupported_version', 'halted_event_gap');--> statement-breakpoint
 CREATE TYPE "knomosis"."knomosis_divergence_severity" AS ENUM('informational', 'warning', 'critical');--> statement-breakpoint
 CREATE TYPE "knomosis"."knomosis_receipt_kind" AS ENUM('public', 'private');--> statement-breakpoint
 CREATE TABLE "knomosis"."knomosis_deployment" (

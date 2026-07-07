@@ -689,6 +689,7 @@ describe('in-memory store adapters + services getter', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     // A wallet in pending_unlink is NOT active.
     const walletAccountId = fixture.knomosis.uuid();

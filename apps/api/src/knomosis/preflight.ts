@@ -44,6 +44,11 @@ export interface RoomGovernancePort {
   roomGovernance(roomId: string): Promise<{ mode: GovernanceMode; name: string } | null>;
   isMember(roomId: string, userId: string): Promise<boolean>;
   isSteward(roomId: string, userId: string): Promise<boolean>;
+  /** WS-Q §16.1 content bar: may this user VIEW the room's content?  Public
+   *  rooms → everyone; private rooms → active members/stewards only.  Delegates
+   *  to the forum's `roomContentVisibleToUser` so the governance read surfaces
+   *  cannot drift from the single canonical visibility rule. */
+  contentVisibleToUser(roomId: string, userId: string): Promise<boolean>;
 }
 
 /** WS-U law-pack seam: the room's treasury bounds (null ⇒ no caps configured). */
@@ -269,6 +274,21 @@ export async function runPreflight(
         'signature',
         'RISK_BLOCKED',
         'This wallet is currently restricted from financial actions.',
+        input,
+        nowIso,
+      ),
+    );
+  }
+  // A newly linked wallet is `pending` until its FIRST compliance assessment —
+  // the fail-closed risk state.  Never let an unassessed wallet move funds:
+  // fund-transfer actions REJECT until an assessment resolves the risk to a
+  // concrete state (the non-fund governance signatures are unaffected).
+  if (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType)) {
+    return audited(
+      fail(
+        'signature',
+        'RISK_BLOCKED',
+        'This wallet must complete a risk assessment before it can move funds.',
         input,
         nowIso,
       ),

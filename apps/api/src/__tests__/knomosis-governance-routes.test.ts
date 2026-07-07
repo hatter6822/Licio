@@ -38,6 +38,7 @@ async function simRoomFixture(): Promise<KnomosisFixture> {
     roomGovernance: async () => ({ mode: 'simulated', name: 'Sim Room' }),
     isMember: async () => true,
     isSteward: async () => false,
+    contentVisibleToUser: async () => true,
   };
   return fixture;
 }
@@ -73,6 +74,7 @@ describe('WS-L.4.1a governance tab', () => {
       roomGovernance: async () => ({ mode: 'ordinary', name: 'Plain Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const { cookie } = await seedUserWithSession(fixture.identity);
     expect((await req('GET', `/rooms/${ROOM}/governance`, cookie)).status).toBe(404);
@@ -84,9 +86,28 @@ describe('WS-L.4.1a governance tab', () => {
       roomGovernance: async () => ({ mode: 'simulated', name: 'Sim Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const { cookie } = await seedUserWithSession(fixture.identity);
     expect((await req('GET', `/rooms/${ROOM}/governance`, cookie)).status).toBe(503);
+  });
+
+  it('403s the READ for a private room the user cannot view (WS-L review fix)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'simulated', name: 'Private Room' }),
+      isMember: async () => false,
+      isSteward: async () => false,
+      // A private room's governance content is not visible to this non-member.
+      contentVisibleToUser: async () => false,
+    };
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    const res = await req('GET', `/rooms/${ROOM}/governance`, cookie);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('membership_required');
+    // The proposals + treasury read surfaces are gated by the same bar.
+    expect((await req('GET', `/rooms/${ROOM}/governance/proposals`, cookie)).status).toBe(403);
   });
 });
 
@@ -156,6 +177,7 @@ describe('WS-L.4.1d proposal → vote → execute + treasury over HTTP', () => {
       roomGovernance: async () => ({ mode: 'simulated', name: 'Sim Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const proposer = await seedUserWithSession(fixture.identity, { handle: 'gprop' });
     await passQuiz(proposer.cookie);
@@ -223,6 +245,7 @@ describe('WS-L.4.1d proposal → vote → execute + treasury over HTTP', () => {
       roomGovernance: async () => ({ mode: 'simulated', name: 'Sim Room' }),
       isMember: async () => false,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const { cookie } = await seedUserWithSession(fixture.identity);
     const res = await req('POST', `/rooms/${ROOM}/governance/proposals`, cookie, bounty);
@@ -238,6 +261,7 @@ describe('WS-L.4.1g readiness + mode transition over HTTP', () => {
       roomGovernance: async () => ({ mode: mode as never, name: 'Sim Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     fixture.knomosis.roomMode = {
       currentMode: async () => mode as never,
@@ -268,6 +292,7 @@ describe('WS-L.4.1g readiness + mode transition over HTTP', () => {
       roomGovernance: async () => ({ mode: mode as never, name: 'Room' }),
       isMember: async () => true,
       isSteward: async () => true,
+      contentVisibleToUser: async () => true,
     };
     fixture.knomosis.roomMode = {
       currentMode: async () => mode as never,
@@ -296,6 +321,7 @@ describe('governance surface fail-closed gates', () => {
       roomGovernance: async () => ({ mode: 'simulated', name: 'Sim Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const { cookie } = await seedUserWithSession(fixture.identity);
     expect((await req('GET', `/rooms/${ROOM}/governance/proposals`, cookie)).status).toBe(503);
@@ -307,6 +333,7 @@ describe('governance surface fail-closed gates', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Testnet Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const { cookie } = await seedUserWithSession(fixture.identity);
     await passQuiz(cookie);
@@ -323,6 +350,7 @@ describe('governance surface fail-closed gates', () => {
       roomGovernance: async () => ({ mode: 'simulated', name: 'Sim Room' }),
       isMember: async () => true,
       isSteward: async () => true,
+      contentVisibleToUser: async () => true,
     };
     fixture.knomosis.roomMode = {
       currentMode: async () => 'simulated',

@@ -211,6 +211,54 @@ describe('WS-L.4.1d simulated voting + execution', () => {
     expect(await fixture.knomosis.events.listByDeployment('any', 100)).toHaveLength(0);
   });
 
+  it('gates a MANUAL execution on the actor’s comprehension (never a first action)', async () => {
+    let clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const proposer = await seedUserWithSession(fixture.identity, { handle: 'propX' });
+    const voters = await Promise.all(
+      Array.from({ length: 3 }, (_v, i) =>
+        seedUserWithSession(fixture.identity, { handle: `xvoter${i}` }),
+      ),
+    );
+    for (const u of [proposer, ...voters]) await passComprehension(fixture, u.userId);
+    const deps = simulationDeps(fixture.knomosis);
+    const created = await createSimProposal(deps, {
+      roomId: ROOM,
+      userId: proposer.userId,
+      create: bountyTemplate({ requested_amount: '1000000' }),
+    });
+    if (!created.ok) throw new Error('proposal failed');
+    const proposalId = created.proposal.proposalId;
+    for (const voter of voters) {
+      await castSimVote(deps, {
+        roomId: ROOM,
+        proposalId,
+        userId: voter.userId,
+        choice: 'approve',
+      });
+    }
+    clock += (fixture.knomosis.config().simTimelockSeconds + 1) * 1000;
+
+    // A newcomer who never passed the quiz cannot make execution their FIRST action.
+    const newcomer = await seedUserWithSession(fixture.identity, { handle: 'newcomerX' });
+    const blocked = await executeSimProposal(deps, {
+      roomId: ROOM,
+      proposalId,
+      actorUserId: newcomer.userId,
+    });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.code).toBe('comprehension_required');
+
+    // After passing comprehension the same member may execute.
+    await passComprehension(fixture, newcomer.userId);
+    const executed = await executeSimProposal(deps, {
+      roomId: ROOM,
+      proposalId,
+      actorUserId: newcomer.userId,
+    });
+    expect(executed.ok).toBe(true);
+  });
+
   it('does not pass below quorum', async () => {
     const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' } });
     const proposer = await seedUserWithSession(fixture.identity, { handle: 'prop2' });

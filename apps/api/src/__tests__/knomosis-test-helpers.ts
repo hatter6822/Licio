@@ -93,6 +93,9 @@ export async function freshKnomosisServices(
       }),
       isMember: async (_roomId, userId) => members.has(userId) || stewards.has(userId),
       isSteward: async (_roomId, userId) => stewards.has(userId),
+      // Test rooms model a content-visible (public/testnet) room; a private-room
+      // read gate is exercised explicitly in knomosis-governance-routes.test.ts.
+      contentVisibleToUser: async () => true,
     };
   }
   await storeKnomosisConfigValue(

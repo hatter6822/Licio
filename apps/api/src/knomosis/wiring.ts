@@ -8,7 +8,7 @@
 
 import { lawPackSchema, type TreasuryBounds } from '@licio/governance';
 import type { GovernanceMode } from '@licio/shared';
-import { isRoomSteward } from '../forum/rooms.js';
+import { isRoomSteward, roomContentVisibleToUser } from '../forum/rooms.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceStores } from '../governance/stores.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -36,6 +36,11 @@ export function buildRoomGovernancePort(
     isSteward: async (roomId, userId) => {
       const user = await identity.store.getUser(userId);
       return isRoomSteward(forum, roomId, userId, user?.roles ?? []);
+    },
+    contentVisibleToUser: async (roomId, userId) => {
+      const room = await forum.rooms.getById(roomId);
+      // Unknown room ⇒ not visible (the caller maps to 404 on its own null check).
+      return room === null ? false : roomContentVisibleToUser(forum, room, userId);
     },
   };
 }

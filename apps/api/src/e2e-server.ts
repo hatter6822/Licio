@@ -44,6 +44,7 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { storeKnomosisConfigValue } from './knomosis/config.js';
+import { exportFinancialWalletData, purgeFinancialWalletData } from './knomosis/data-rights.js';
 import { FakeKnomosisGateway } from './knomosis/gateway.js';
 import { createInMemoryKnomosisServices, setKnomosisServices } from './knomosis/services.js';
 import {
@@ -213,6 +214,10 @@ const knomosisServices = createInMemoryKnomosisServices({
 knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
 knomosisServices.roomMode = buildRoomModePort(forumServices);
 knomosisServices.regionResolver = buildRegionResolver(identityServices);
+identityServices.exportFinancialWallets = (userId) =>
+  exportFinancialWalletData(knomosisServices, userId);
+identityServices.purgeFinancialWallets = (userId) =>
+  purgeFinancialWalletData(knomosisServices, userId);
 await storeKnomosisConfigValue(eventServices.configStore, 'cryptoEnabled', true);
 await storeKnomosisConfigValue(eventServices.configStore, 'governanceEnabled', true);
 await knomosisServices.reloadConfig();

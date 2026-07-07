@@ -335,6 +335,49 @@ describe('additional fail-closed route branches', () => {
     const body = (await unlink.json()) as { blocking_obligations: unknown[] };
     expect(body.blocking_obligations.length).toBeGreaterThan(0);
   });
+
+  it('caps the blocked-unlink obligation list at the schema max (409, never 500)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId, cookie } = await seedUserWithSession(fixture.identity, { handle: 'obl2' });
+    const nonceRes = await post('/wallet/nonce', cookie, {});
+    const { nonce } = (await nonceRes.json()) as { nonce: string };
+    const signed = await signedSiweLink(nonce, testAccount);
+    await post('/wallet/link', cookie, { message: signed.message, signature: signed.signature });
+    const list = (await (await get('/wallets', cookie)).json()) as {
+      items: Array<{ wallet_account_id: string }>;
+    };
+    const walletId = list.items[0]?.wallet_account_id as string;
+    // Seed 150 non-terminal obligations — MORE than the 100 the response caps at.
+    for (let i = 0; i < 150; i++) {
+      await fixture.knomosis.actions.insert({
+        actionRecordId: crypto.randomUUID(),
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+        actionType: 'treasury_deposit',
+        roomId: crypto.randomUUID(),
+        actorWalletAccountId: walletId,
+        actorUserId: userId,
+        payloadHash: `0x${'11'.repeat(32)}`,
+        typedDataHash: `0x${i.toString(16).padStart(64, '0')}`,
+        signedAction: { message: {}, signature: '0x' },
+        submissionState: 'accepted',
+        failureReason: null,
+        indexedEventRef: null,
+        reconciliationState: 'pending',
+        idempotencyKey: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    const unlink = await post('/wallet/unlink/request', cookie, { wallet_account_id: walletId });
+    // A usable 409 blocked response — NOT a 500 from the schema `.max(100)`.
+    expect(unlink.status).toBe(409);
+    const body = (await unlink.json()) as {
+      blocking_obligations: unknown[];
+      total_obligations: number;
+    };
+    expect(body.blocking_obligations.length).toBe(100);
+    expect(body.total_obligations).toBe(150);
+  });
 });
 
 describe('preflight → submit → status → standing → receipts over HTTP', () => {
@@ -383,6 +426,7 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     const walletAccountId = await linkAndMapWallet(fixture, userId);
@@ -444,6 +488,7 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     const walletAccountId = await linkAndMapWallet(fixture, userId);

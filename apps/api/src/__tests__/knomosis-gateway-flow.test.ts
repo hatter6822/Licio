@@ -81,7 +81,11 @@ function ingestDeps(fixture: KnomosisFixture) {
   };
 }
 
-async function linkWalletDirectly(fixture: KnomosisFixture, userId: string): Promise<string> {
+async function linkWalletDirectly(
+  fixture: KnomosisFixture,
+  userId: string,
+  riskState: 'pending' | 'normal' | 'elevated' | 'high' = 'normal',
+): Promise<string> {
   const walletAccountId = fixture.knomosis.uuid();
   await fixture.knomosis.wallets.insert({
     walletAccountId,
@@ -94,7 +98,7 @@ async function linkWalletDirectly(fixture: KnomosisFixture, userId: string): Pro
     chainId: LOCAL_DEPLOYMENT.chain_id,
     walletType: 'eoa',
     unlinkState: 'active',
-    riskState: 'normal',
+    riskState,
     label: null,
     linkedAt: new Date().toISOString(),
     lastUsedAt: null,
@@ -147,6 +151,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const req = await buildDeposit(userId, walletAccountId);
@@ -157,6 +162,20 @@ describe('WS-L.3.1 preflight pipeline', () => {
       expect(result.typed_data_hash).toMatch(/^0x[0-9a-f]{64}$/);
       // The human summary and machine payload are paired by hash (§23.5).
       expect(result.summary_payload_hash).toMatch(/^0x[0-9a-f]{64}$/);
+    }
+  });
+
+  it('blocks a fund transfer from a pending-risk (unassessed) wallet (RISK_BLOCKED)', async () => {
+    const fixture = await freshKnomosisServices({ rooms: {} });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // A freshly linked wallet is `pending` until its first compliance assessment.
+    const walletAccountId = await linkWalletDirectly(fixture, userId, 'pending');
+    const req = await buildDeposit(userId, walletAccountId);
+    const result = await runPreflight(preflightDeps(fixture), req);
+    expect(result.result).toBe('fail');
+    if (result.result === 'fail') {
+      expect(result.reason_code).toBe('RISK_BLOCKED');
+      expect(result.failed_step).toBe('signature');
     }
   });
 
@@ -184,6 +203,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'frozen', name: 'Frozen Room' }),
       isMember: async () => true,
       isSteward: async () => true,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const req = await buildDeposit(userId, walletAccountId);
@@ -202,6 +222,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => false,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const message = {
@@ -236,6 +257,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const message = { ...depositMessage('1'), expiration: '1' }; // long past
@@ -260,6 +282,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     await fixture.knomosis.nonces.tryConsume(userId, DEPLOYMENT, '9');
@@ -280,6 +303,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const req = await buildDeposit(userId, walletAccountId);
@@ -295,6 +319,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     fixture.knomosis.compliance = {
       ...fixture.knomosis.compliance,
@@ -314,6 +339,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     fixture.knomosis.compliance = {
       ...fixture.knomosis.compliance,
@@ -335,6 +361,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     fixture.knomosis.compliance = {
       ...fixture.knomosis.compliance,
@@ -355,6 +382,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const message = {
@@ -386,6 +414,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => true,
+      contentVisibleToUser: async () => true,
     };
     // Wire a law-pack port with a small grant cap.
     fixture.knomosis.lawPacks = {
@@ -436,6 +465,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => true,
+      contentVisibleToUser: async () => true,
     };
     // Seed an already-open charter proposal in the room.
     await fixture.knomosis.proposals.insert({
@@ -492,6 +522,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     // Sign with a DIFFERENT key than the linked wallet's hash.
@@ -523,6 +554,7 @@ describe('WS-L.3.2 submission + state machine', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const req = await buildDeposit(userId, walletAccountId, nonce);
     const pre = await runPreflight(preflightDeps(fixture), req);
@@ -649,6 +681,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
       isMember: async () => true,
       isSteward: async () => false,
+      contentVisibleToUser: async () => true,
     };
     const req = await buildDeposit(userId, walletAccountId, nonce);
     const pre = await runPreflight(preflightDeps(fixture), req);
@@ -758,9 +791,17 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     // A critical divergence was recorded, blocking treasury expansion.
     const gate = await canExpandTreasury(fixture.knomosis, DEPLOYMENT);
     expect(gate.allowed).toBe(false);
-    // Rebuild re-marks open actions pending (the only path that clears a gap).
+    // The gap HALTS reconciliation (WS-L review fix): no tick reconciles actions
+    // against a stream known to have dropped an unknown range.
+    const duringHalt = await reconcileDeployment(fixture.knomosis, DEPLOYMENT);
+    expect(duringHalt.halted).toBe(true);
+    expect(duringHalt.matched).toBe(0);
+    // Rebuild re-marks open actions pending AND clears the gap halt, so the next
+    // reconciliation tick resumes (the recovery path).
     const rebuilt = await rebuildFromSnapshot(ingestDeps(fixture), DEPLOYMENT);
     expect(rebuilt.remarked).toBeGreaterThanOrEqual(0);
+    const afterRebuild = await reconcileDeployment(fixture.knomosis, DEPLOYMENT);
+    expect(afterRebuild.halted).toBe(false);
   });
 
   it('reconciliation matches a finalized action against the indexed stream', async () => {

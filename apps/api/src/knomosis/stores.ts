@@ -183,7 +183,7 @@ export interface ReconciliationResultRecord {
   deploymentId: string;
   entityType: 'treasury' | 'proposal' | 'grant' | 'action';
   entityRef: string;
-  outcome: 'match' | 'mismatch' | 'halted_unsupported_version';
+  outcome: 'match' | 'mismatch' | 'halted_unsupported_version' | 'halted_event_gap';
   severity: 'informational' | 'warning' | 'critical' | null;
   details: Record<string, unknown>;
   lowWatermarkSeq: string | null;
@@ -223,6 +223,9 @@ export interface FinancialWalletStore {
   update(record: FinancialWalletRecord): Promise<FinancialWalletRecord>;
   /** Wallets whose cooling-off elapsed (unlink finalization sweep, WS-L.2.5b). */
   listPendingFinalization(nowIso: string): Promise<FinancialWalletRecord[]>;
+  /** WS-L data-rights: hard-delete every wallet row for a user on account
+   *  deletion; returns the rows removed. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -253,6 +256,9 @@ export interface KnomosisActionStore {
   /** Pending obligations for the unlink check (WS-L.2.5b): non-terminal actions
    *  signed by this wallet. */
   listOpenByWallet(walletAccountId: string): Promise<KnomosisActionRecordEntity[]>;
+  /** WS-L data-rights: hard-delete every action a user signed on account
+   *  deletion; returns the rows removed. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -303,6 +309,9 @@ export interface GovernanceSignatureStore {
   listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]>;
   /** Signatures by this wallet on proposals that are still open (obligations). */
   listOpenByWallet(walletAccountId: string): Promise<GovernanceSignatureRecord[]>;
+  /** WS-L data-rights: hard-delete every proposal signature by a user on account
+   *  deletion; returns the rows removed. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -343,6 +352,9 @@ export interface KnomosisReceiptStore {
   ): Promise<KnomosisReceiptRecord | null>;
   listPublicByRoomActions(actionRecordIds: readonly string[]): Promise<KnomosisReceiptRecord[]>;
   listPrivateForUser(userId: string, limit: number): Promise<KnomosisReceiptRecord[]>;
+  /** WS-L data-rights: hard-delete every receipt OWNED by a user (the private
+   *  ones; public receipts carry no owner) on account deletion; returns removed. */
+  purgeByUser(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -408,6 +420,17 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
           r.unlinkFinalizeAfter <= nowIso,
       )
       .map((r) => ({ ...r }));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.userId === userId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async clear(): Promise<void> {
@@ -521,6 +544,17 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
           !TERMINAL_SUBMISSION_STATES.has(r.submissionState),
       )
       .map((r) => structuredClone(r));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.actorUserId === userId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async clear(): Promise<void> {
@@ -729,6 +763,17 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
     return open;
   }
 
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.userId === userId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   async clear(): Promise<void> {
     this.#rows.clear();
   }
@@ -878,6 +923,17 @@ export class InMemoryKnomosisReceiptStore implements KnomosisReceiptStore {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
       .map((r) => structuredClone(r));
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#rows) {
+      if (row.ownerUserId === userId) {
+        this.#rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async clear(): Promise<void> {

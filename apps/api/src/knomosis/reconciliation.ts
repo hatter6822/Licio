@@ -118,7 +118,9 @@ export async function reconcileDeployment(
   // A halted deployment (unsupported event / gap) stays halted until the
   // schema/rebuild path clears it — reconciliation never silently resumes.
   const unresolved = await deps.reconciliation.listUnresolvedMismatches(deploymentId);
-  const halted = unresolved.some((r) => r.outcome === 'halted_unsupported_version');
+  const halted = unresolved.some(
+    (r) => r.outcome === 'halted_unsupported_version' || r.outcome === 'halted_event_gap',
+  );
   if (halted) {
     deps.log('knomosis.reconcile.halted', { deployment_id: deploymentId });
     return { matched: 0, mismatched: 0, inFlight: 0, halted: true };

@@ -169,6 +169,14 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
     return rows.map(mapWallet);
   }
 
+  async purgeByUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(walletAccounts)
+      .where(eq(walletAccounts.userId, userId))
+      .returning({ userId: walletAccounts.userId });
+    return rows.length;
+  }
+
   async clear(): Promise<void> {
     await this.db.delete(walletAccounts);
   }
@@ -388,6 +396,14 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
         ),
       );
     return rows.map(mapAction);
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(knomosisActionRecords)
+      .where(eq(knomosisActionRecords.actorUserId, userId))
+      .returning({ userId: knomosisActionRecords.actorUserId });
+    return rows.length;
   }
 
   async clear(): Promise<void> {
@@ -851,6 +867,14 @@ export class DrizzleGovernanceSignatureStore implements GovernanceSignatureStore
     return rows.map((r) => mapSignature(r.signature));
   }
 
+  async purgeByUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(governanceSignatures)
+      .where(eq(governanceSignatures.userId, userId))
+      .returning({ userId: governanceSignatures.userId });
+    return rows.length;
+  }
+
   async clear(): Promise<void> {
     await this.db.delete(governanceSignatures);
   }
@@ -1149,6 +1173,15 @@ export class DrizzleKnomosisReceiptStore implements KnomosisReceiptStore {
       .orderBy(desc(knomosisReceipts.createdAt))
       .limit(limit);
     return rows.map(mapReceipt);
+  }
+
+  async purgeByUser(userId: string): Promise<number> {
+    // Private receipts only — public receipts carry no owner (ownerUserId null).
+    const rows = await this.db
+      .delete(knomosisReceipts)
+      .where(and(eq(knomosisReceipts.kind, 'private'), eq(knomosisReceipts.ownerUserId, userId)))
+      .returning({ id: knomosisReceipts.receiptId });
+    return rows.length;
   }
 
   async clear(): Promise<void> {

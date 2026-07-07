@@ -140,6 +140,7 @@ import {
   registerInvariantConsumers,
   setInvariantServices,
 } from './invariants/services.js';
+import { exportFinancialWalletData, purgeFinancialWalletData } from './knomosis/data-rights.js';
 import { createDrizzleKnomosisStores } from './knomosis/drizzle-knomosis-stores.js';
 import { FakeKnomosisGateway, HttpKnomosisGateway } from './knomosis/gateway.js';
 import { KNOMOSIS_SCHEDULER_INTERVAL_MS, startKnomosisScheduler } from './knomosis/scheduler.js';
@@ -866,6 +867,13 @@ if (db) {
   knomosisServices.receipts = knomosisStores.receipts;
   knomosisServices.comprehension = knomosisStores.comprehension;
 }
+// WS-L data-rights: fold the financial wallet footprint into the WS-D DSAR
+// export + hard-deletion lifecycle (truncated address only on export; wallets +
+// actions + signatures + private receipts purged on account deletion).
+identityServices.exportFinancialWallets = (userId) =>
+  exportFinancialWalletData(knomosisServices, userId);
+identityServices.purgeFinancialWallets = (userId) =>
+  purgeFinancialWalletData(knomosisServices, userId);
 // The WS-U governance stores are SHARED with the law-pack port below.
 const governanceStores = db ? createDrizzleGovernanceStores(db) : createInMemoryGovernanceStores();
 knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
