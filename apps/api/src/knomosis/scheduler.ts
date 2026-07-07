@@ -88,10 +88,16 @@ export async function runKnomosisTick(
     }
   }
 
-  try {
-    await executeElapsedSimProposals(simulationDeps(services));
-  } catch (error) {
-    onError(error, 'sim_execute');
+  // Honour the LIVE governance flag: disabling the plane during an incident must
+  // also stop the background sweep from executing timelock-elapsed simulated
+  // proposals (which mutate the simulated treasury/audit), matching the HTTP
+  // surfaces that fail closed on `governanceEnabled === false`.
+  if (services.config().governanceEnabled) {
+    try {
+      await executeElapsedSimProposals(simulationDeps(services));
+    } catch (error) {
+      onError(error, 'sim_execute');
+    }
   }
 }
 

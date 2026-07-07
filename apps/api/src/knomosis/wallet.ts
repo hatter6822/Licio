@@ -290,6 +290,32 @@ export type UnlinkRequestOutcome =
   | { ok: false; blocked: true; obligations: UnlinkObligation[] }
   | WalletServiceError;
 
+/** WS-L.2.5b — collect every OPEN unlink obligation for a wallet (fail closed). */
+async function collectUnlinkObligations(
+  deps: Pick<WalletServiceDeps, 'actions' | 'proposalSignatures' | 'treasuryObligations'>,
+  walletAccountId: string,
+): Promise<UnlinkObligation[]> {
+  const obligations: UnlinkObligation[] = [];
+  for (const action of await deps.actions.listOpenByWallet(walletAccountId)) {
+    obligations.push(actionObligation(action.actionType, action.actionRecordId));
+  }
+  for (const signature of await deps.proposalSignatures.listOpenByWallet(walletAccountId)) {
+    obligations.push({
+      type: 'active_proposal',
+      ref: signature.proposalId,
+      description: 'This wallet signed a governance proposal whose vote is still open.',
+    });
+  }
+  for (const external of await deps.treasuryObligations.obligationsForWallet(walletAccountId)) {
+    obligations.push({
+      type: external.type === 'pending_grant' ? 'pending_grant' : 'pending_payment',
+      ref: external.ref,
+      description: external.description,
+    });
+  }
+  return obligations;
+}
+
 /** WS-L.2.5b — obligation-checked unlink request with cooling-off. */
 export async function requestUnlink(
   deps: WalletServiceDeps,
@@ -312,28 +338,8 @@ export async function requestUnlink(
     return { ok: true, wallet, finalizeAfter: wallet.unlinkFinalizeAfter };
   }
 
-  // WS-L.2.5b obligation check: every obligation type, each with a specific
-  // description.  Fail closed: any open item blocks.
-  const obligations: UnlinkObligation[] = [];
-  for (const action of await deps.actions.listOpenByWallet(wallet.walletAccountId)) {
-    obligations.push(actionObligation(action.actionType, action.actionRecordId));
-  }
-  for (const signature of await deps.proposalSignatures.listOpenByWallet(wallet.walletAccountId)) {
-    obligations.push({
-      type: 'active_proposal',
-      ref: signature.proposalId,
-      description: 'This wallet signed a governance proposal whose vote is still open.',
-    });
-  }
-  for (const external of await deps.treasuryObligations.obligationsForWallet(
-    wallet.walletAccountId,
-  )) {
-    obligations.push({
-      type: external.type === 'pending_grant' ? 'pending_grant' : 'pending_payment',
-      ref: external.ref,
-      description: external.description,
-    });
-  }
+  // WS-L.2.5b obligation check: fail closed on any open item.
+  const obligations = await collectUnlinkObligations(deps, wallet.walletAccountId);
   if (obligations.length > 0) {
     return { ok: false, blocked: true, obligations };
   }
@@ -357,11 +363,25 @@ export async function requestUnlink(
 
 /** Scheduler sweep: finalize unlinks whose cooling-off elapsed (WS-L.2.5b). */
 export async function finalizeElapsedUnlinks(
-  deps: Pick<WalletServiceDeps, 'wallets' | 'audit' | 'now' | 'log'>,
+  deps: Pick<
+    WalletServiceDeps,
+    'wallets' | 'audit' | 'now' | 'log' | 'actions' | 'proposalSignatures' | 'treasuryObligations'
+  >,
 ): Promise<number> {
   const nowIso = new Date(deps.now()).toISOString();
   const pending = await deps.wallets.listPendingFinalization(nowIso);
+  let finalized = 0;
   for (const wallet of pending) {
+    // RE-CHECK obligations at finalization: a wallet may have gained a blocking
+    // obligation DURING the cooling-off window (e.g. an action record that only
+    // materialized after the unlink request), so it must not be finalized while
+    // an obligation is open — it stays `pending_unlink` for the next sweep.
+    if ((await collectUnlinkObligations(deps, wallet.walletAccountId)).length > 0) {
+      deps.log('knomosis.wallet.finalize_deferred_obligation', {
+        wallet: wallet.addressTruncated,
+      });
+      continue;
+    }
     await deps.wallets.update({
       ...wallet,
       unlinkState: 'finalized',
@@ -373,9 +393,10 @@ export async function finalizeElapsedUnlinks(
       targetRef: wallet.addressTruncated,
       context: { setting: 'finalize' },
     });
+    finalized += 1;
   }
-  if (pending.length > 0) deps.log('knomosis.wallet.unlinks_finalized', { count: pending.length });
-  return pending.length;
+  if (finalized > 0) deps.log('knomosis.wallet.unlinks_finalized', { count: finalized });
+  return finalized;
 }
 
 const RISK_EXPLANATIONS: Record<WalletRiskState, { explanation: string; nextStep: string | null }> =

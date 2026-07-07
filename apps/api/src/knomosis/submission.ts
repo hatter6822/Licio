@@ -20,7 +20,11 @@ import type { KnomosisRuntimeConfig } from './config.js';
 import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
 import { buildEip712Domain, consumePreflightToken } from './preflight.js';
-import { computeTypedDataDigest } from './signatures.js';
+import {
+  type ContractTypedDataVerifier,
+  computeTypedDataDigest,
+  verifyActionSignature,
+} from './signatures.js';
 import type { KnomosisActionRecordEntity, KnomosisActionStore } from './stores.js';
 
 // ---------------------------------------------------------------------------
@@ -60,6 +64,9 @@ export interface SubmissionDeps {
   now: () => number;
   uuid: () => string;
   log: (event: string, meta: Record<string, unknown>) => void;
+  /** EIP-1271 contract-wallet verifier (shared with preflight) — needed to
+   *  RE-verify the signature at submit (the token binds the hash, not the sig). */
+  contractVerifier?: ContractTypedDataVerifier;
 }
 
 export interface SubmitActionInput {
@@ -81,6 +88,10 @@ export type SubmitActionOutcome =
       submissionState: SubmissionState;
       reasonCode: KnomosisReasonCode | null;
       humanMessage: string | null;
+      /** True when this was an idempotency-key REPLAY (the request body was NOT
+       *  re-validated) — the caller must not derive new side effects (e.g. a
+       *  wallet→actor mapping) from an unvalidated replay body. */
+      replayed: boolean;
     }
   | { ok: false; status: 400 | 401 | 409 | 503; code: KnomosisReasonCode; message: string };
 
@@ -100,6 +111,7 @@ export async function submitAction(
       submissionState: existing.submissionState,
       reasonCode: null,
       humanMessage: null,
+      replayed: true,
     };
   }
 
@@ -175,6 +187,26 @@ export async function submitAction(
     };
   }
 
+  // RE-VERIFY the signature (the token binds only the typed-data HASH): a valid
+  // low-s signature could pass preflight and then be swapped for its high-s
+  // malleable twin over the same payload, so re-run the low-s/EIP-1271 check
+  // that minted the token before forwarding to the gateway (WS-L.3.2a).
+  const verified = await verifyActionSignature({
+    actionType: binding.actionType,
+    domain: buildEip712Domain(deployment),
+    message: input.typedDataMessage,
+    signature: input.signature,
+    ...(deps.contractVerifier ? { contractVerifier: deps.contractVerifier } : {}),
+  });
+  if (!verified.ok) {
+    return {
+      ok: false,
+      status: 400,
+      code: verified.reason === 'message_invalid' ? 'PAYLOAD_MISMATCH' : 'SIGNATURE_INVALID',
+      message: 'The submitted signature failed verification.',
+    };
+  }
+
   // Anti-replay nonce: consumed atomically per (user, deployment) BEFORE the
   // gateway call (WS-L.3.2c).  Gaps are allowed; reuse is not.
   const nonce = input.typedDataMessage['nonce'] ?? '';
@@ -220,6 +252,7 @@ export async function submitAction(
     submissionState: outcome.state,
     reasonCode: outcome.reasonCode,
     humanMessage: outcome.humanMessage,
+    replayed: false,
   };
 }
 

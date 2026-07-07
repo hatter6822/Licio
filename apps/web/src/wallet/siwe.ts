@@ -1,16 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-L.2.3b — client-side EIP-4361 (SIWE) message construction.  The domain is
-// a HARDCODED constant (never derived from `window.location` — a look-alike
-// origin cannot mint a message that validates, WS-L.2.3b security note), the
-// expiration is short-lived, and the EXACT string built here is the string
+// a BUILD-PINNED constant (never derived from `window.location` — a look-alike
+// runtime origin cannot mint a message that validates, WS-L.2.3b security note),
+// the expiration is short-lived, and the EXACT string built here is the string
 // passed to `personal_sign` and shown to the user (no display/sign divergence).
+//
+// The default derives from `VITE_APP_URL` so it stays in LOCKSTEP with the server
+// (which derives its SIWE domain/URI from CORS_ORIGIN's host) — otherwise a
+// zero-config `localhost` client would sign a message the `localhost:5173` server
+// rejects with `siwe_domain_mismatch`.
+
+const APP_URL = (import.meta.env['VITE_APP_URL'] as string | undefined) ?? 'http://localhost:5173';
+/** The host (host:port) of the app origin; falls back if VITE_APP_URL is malformed. */
+function appHost(): string {
+  try {
+    return new URL(APP_URL).host;
+  } catch {
+    return 'localhost:5173';
+  }
+}
 
 /** Licio's canonical origin for SIWE domain binding (WS-L.2.3b). */
 export const LICIO_SIWE_DOMAIN =
-  (import.meta.env['VITE_SIWE_DOMAIN'] as string | undefined) ?? 'localhost';
-export const LICIO_SIWE_URI =
-  (import.meta.env['VITE_SIWE_URI'] as string | undefined) ?? 'http://localhost';
+  (import.meta.env['VITE_SIWE_DOMAIN'] as string | undefined) ?? appHost();
+export const LICIO_SIWE_URI = (import.meta.env['VITE_SIWE_URI'] as string | undefined) ?? APP_URL;
 
 /** EIP-55 checksum an address (pure keccak-free: uppercase per the algorithm
  *  needs keccak, so we defer checksumming to the wallet — here we only lowercase

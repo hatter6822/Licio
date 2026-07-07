@@ -345,6 +345,19 @@ export function validateProposalTemplate(
         problem: 'a conflict-of-interest disclosure is required for grants and bounties',
       });
     }
+  } else {
+    // A NON-budgeted proposal (charter_update) must NOT carry budget fields —
+    // otherwise it would deduct the simulated treasury on execution while
+    // skipping the recipient/conflict-disclosure checks a spend requires.
+    if (create.requested_amount !== null) {
+      problems.push({
+        field: 'requested_amount',
+        problem: 'a budget amount is not allowed for this proposal type',
+      });
+    }
+    if (create.asset !== null) {
+      problems.push({ field: 'asset', problem: 'an asset is not allowed for this proposal type' });
+    }
   }
   return problems;
 }

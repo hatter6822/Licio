@@ -159,7 +159,10 @@ export function assembleTransactionPreview(
     room_id: fieldValue(parsed, 'roomId'),
     recipient_or_contract: truncateForDisplay(recipient),
     asset,
-    amount,
+    // The user-facing amount is the HUMAN-READABLE display value (e.g. `1.05`),
+    // not the raw minor-unit integer (`1050000`) — the raw value stays only in
+    // `signed_fields` (the anti-confusion purpose of the preview, WS-L.2.6a/b).
+    amount: amount === null ? null : (context.displayAmount ?? amount),
     estimated_fee: context.estimatedFee,
     reversibility_statement: context.reversibilityStatement,
     timelock: context.timelock,

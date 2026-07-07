@@ -236,8 +236,13 @@ async function reconcileActorLedgers(
     const read = await gateway.getBalances(mapping.actorId, null);
     if (read.kind !== 'ok') continue; // unavailable / not-modified: retry next tick
     const hasInFlight = (await deps.actions.listOpenByWallet(walletAccountId)).length > 0;
-    for (const divergence of compareActorLedger(ledger, read.value, threshold, hasInFlight)) {
-      const entityRef = `${walletAccountId}:${divergence.asset}`;
+    const divergences = compareActorLedger(ledger, read.value, threshold, hasInFlight);
+    const divergentAssets = new Set(divergences.map((d) => d.asset));
+    // The entityRef includes the DEPLOYMENT — `latestForEntity` keys on
+    // (entityType, entityRef) with no deployment filter, so a shared wallet/asset
+    // across deployments must not collide (a divergence on B is not masked by A).
+    for (const divergence of divergences) {
+      const entityRef = `${deploymentId}:${walletAccountId}:${divergence.asset}`;
       const latest = await deps.reconciliation.latestForEntity('treasury', entityRef);
       if (
         latest?.outcome === 'mismatch' &&
@@ -264,6 +269,27 @@ async function reconcileActorLedgers(
       await deps.reconciliation.append(result);
       await raiseDivergence(deps, result);
       recorded += 1;
+    }
+    // RESOLVE: an asset that USED to diverge but now compares clean gets a
+    // superseding `match`, or `canExpandTreasury` stays blocked forever on a
+    // long-since-corrected balance.
+    const allAssets = new Set([...ledger.map((l) => l.asset), ...Object.keys(read.value)]);
+    for (const asset of allAssets) {
+      if (divergentAssets.has(asset)) continue;
+      const entityRef = `${deploymentId}:${walletAccountId}:${asset}`;
+      const latest = await deps.reconciliation.latestForEntity('treasury', entityRef);
+      if (latest?.outcome !== 'mismatch') continue; // nothing to clear
+      await deps.reconciliation.append({
+        resultId: deps.uuid(),
+        deploymentId,
+        entityType: 'treasury',
+        entityRef,
+        outcome: 'match',
+        severity: null,
+        details: { asset, detail: `treasury ledger resolved (${asset})` },
+        lowWatermarkSeq,
+        createdAt: nowIso,
+      });
     }
   }
   return recorded;

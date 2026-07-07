@@ -1013,11 +1013,14 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
 
   async listUnresolvedMismatches(deploymentId: string): Promise<ReconciliationResultRecord[]> {
     const latestByEntity = new Map<string, ReconciliationResultRecord>();
+    // Insertion order is chronological; `>=` breaks a same-millisecond tie in
+    // favour of the LATER-appended row, so a resolving `match` recorded in the
+    // same instant as its mismatch (e.g. a fast rebuild) correctly supersedes it.
     for (const row of this.#rows) {
       if (row.deploymentId !== deploymentId) continue;
       const key = `${row.entityType}:${row.entityRef}`;
       const existing = latestByEntity.get(key);
-      if (!existing || row.createdAt > existing.createdAt) latestByEntity.set(key, row);
+      if (!existing || row.createdAt >= existing.createdAt) latestByEntity.set(key, row);
     }
     return [...latestByEntity.values()]
       .filter((r) => r.outcome !== 'match')

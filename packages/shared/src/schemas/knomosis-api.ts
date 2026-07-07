@@ -361,10 +361,28 @@ export const killSwitchDeactivateRequestSchema = z
   })
   .strict();
 
-export const killSwitchAdminRequestSchema = z.discriminatedUnion('action', [
-  killSwitchActivateRequestSchema,
-  killSwitchDeactivateRequestSchema,
-]);
+export const killSwitchAdminRequestSchema = z
+  .discriminatedUnion('action', [
+    killSwitchActivateRequestSchema,
+    killSwitchDeactivateRequestSchema,
+  ])
+  .superRefine((req, ctx) => {
+    // An ACTIVATION must engage at least one scope; the all-empty shape means
+    // "inactive", so accepting it would record a release card while blocking no
+    // request — an operator typo that looks like an emergency pause (WS-L.3.5f).
+    if (
+      req.action === 'activate' &&
+      !req.scopes.global &&
+      req.scopes.regions.length === 0 &&
+      req.scopes.room_ids.length === 0
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'An activation must engage at least one scope (global, a region, or a room).',
+        path: ['scopes'],
+      });
+    }
+  });
 export type KillSwitchAdminRequest = z.infer<typeof killSwitchAdminRequestSchema>;
 
 // ---------------------------------------------------------------------------

@@ -99,6 +99,9 @@ function submissionDeps(services: KnomosisServices): SubmissionDeps {
     now: services.now,
     uuid: services.uuid,
     log: services.log,
+    ...(services.contractTypedDataVerifier
+      ? { contractVerifier: services.contractTypedDataVerifier }
+      : {}),
   };
 }
 
@@ -258,10 +261,12 @@ export function createKnomosisRoutes() {
             signature: body.signature,
           });
           if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
-          // Record the wallet→actor mapping for the standing reads (G1 seam);
-          // the verified actor address is the gateway actor id.
+          // Record the wallet→actor mapping for the standing reads (G1 seam) ONLY
+          // from a validated NEW submission — never an idempotency-key REPLAY,
+          // whose body was not re-validated (a replay with a different owned wallet
+          // + arbitrary actor must not remap the standing lookup).
           const actor = body.typed_data_message['actor'];
-          if (actor !== undefined) {
+          if (!outcome.replayed && actor !== undefined) {
             await ensureActorMapping(services, {
               walletAccountId: body.wallet_account_id,
               deploymentId: body.deployment_id,

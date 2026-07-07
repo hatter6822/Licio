@@ -172,7 +172,9 @@ describe('transaction preview derivation (WS-L.2.6a/b/c)', () => {
     const preview = assembleTransactionPreview('treasury_deposit', DOMAIN, message, context);
     expect(preview.nonce).toBe(message['nonce']);
     expect(preview.expiration).toBe(message['expiration']);
-    expect(preview.amount).toBe(message['amount']);
+    // The user-facing `amount` is the HUMAN-READABLE display value; the RAW
+    // minor-unit value is verified in `signed_fields` below (WS-L review fix).
+    expect(preview.amount).toBe(context.displayAmount);
     expect(preview.room_id).toBe(message['roomId']);
     expect(preview.wallet_address_truncated).toBe(truncateForDisplay(message['actor'] ?? ''));
     expect(preview.chain_id).toBe(DOMAIN.chainId);
