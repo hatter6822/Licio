@@ -165,7 +165,7 @@ ALTER TABLE "knomosis"."wallet_actor_mapping" ADD CONSTRAINT "wallet_actor_deplo
 CREATE TABLE "knomosis"."governance_proposal" (
 	"proposal_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"room_id" uuid NOT NULL,
-	"proposer_user_id" uuid NOT NULL,
+	"proposer_user_id" uuid,
 	"proposal_type" "knomosis"."governance_proposal_type" NOT NULL,
 	"title" text NOT NULL,
 	"plain_language_summary" text NOT NULL,
@@ -284,11 +284,12 @@ CREATE TABLE "knomosis"."knomosis_reconciliation_result" (
 	"severity" "knomosis"."knomosis_divergence_severity",
 	"details" jsonb NOT NULL,
 	"low_watermark_seq" bigint,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"seq" bigserial NOT NULL
 );
 --> statement-breakpoint
 ALTER TABLE "knomosis"."knomosis_reconciliation_result" ADD CONSTRAINT "knomosis_reconciliation_deployment_fk" FOREIGN KEY ("deployment_id") REFERENCES "knomosis"."knomosis_deployment"("deployment_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "knomosis_reconciliation_entity_idx" ON "knomosis"."knomosis_reconciliation_result" USING btree ("entity_type", "entity_ref", "created_at");--> statement-breakpoint
+CREATE INDEX "knomosis_reconciliation_entity_idx" ON "knomosis"."knomosis_reconciliation_result" USING btree ("entity_type", "entity_ref", "created_at", "seq");--> statement-breakpoint
 CREATE TABLE "knomosis"."knomosis_receipt" (
 	"receipt_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"action_record_id" uuid NOT NULL,

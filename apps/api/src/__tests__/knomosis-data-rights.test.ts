@@ -186,6 +186,14 @@ describe('WS-L financial wallet data-rights', () => {
       choice: 'approve',
       castAt: now,
     });
+    // ANOTHER member voted on the DELETING user's proposal — their vote must NOT
+    // be cascade-deleted when the proposer is erased (R7-1).
+    await knomosis.votes.cast({
+      proposalId: 'p-user',
+      voterUserId: OTHER,
+      choice: 'reject',
+      castAt: now,
+    });
     await knomosis.comprehension.record(USER, 'v1', true, now);
     await knomosis.governanceAudit.append({
       entryId: 'aud-user',
@@ -216,12 +224,18 @@ describe('WS-L financial wallet data-rights', () => {
 
     await purgeFinancialWalletData(knomosis, USER);
 
-    // DELETED: the user's proposals / votes / comprehension / nonces.
-    expect(await knomosis.proposals.listByProposer(USER)).toHaveLength(0);
+    // DELETED: the user's OWN votes / comprehension / nonces.
     expect(await knomosis.votes.listByVoter(USER)).toHaveLength(0);
     expect(await knomosis.comprehension.listByUser(USER)).toHaveLength(0);
     expect(await knomosis.nonces.isUsed(USER, 'local', 'n1')).toBe(false);
-    // ANONYMIZED (append-only ledgers keep the row, scrub the actor).
+    // ANONYMIZED (row kept, actor scrubbed): the append-only ledgers AND the
+    // authored proposal — the proposal is NOT deleted, so it no longer surfaces
+    // by proposer but the row + OTHER members' votes survive (R7-1).
+    expect(await knomosis.proposals.listByProposer(USER)).toHaveLength(0);
+    const proposal = await knomosis.proposals.getById('p-user');
+    expect(proposal).not.toBeNull();
+    expect(proposal?.proposerUserId).toBeNull();
+    expect(await knomosis.votes.listByVoter(OTHER)).toHaveLength(1); // co-participant preserved
     const audit = await knomosis.governanceAudit.listByRoom(ROOM, 10);
     expect(audit.find((a) => a.entryId === 'aud-user')?.actorUserId).toBeNull();
     const entries = await knomosis.simTreasury.listEntries(ROOM, 10);

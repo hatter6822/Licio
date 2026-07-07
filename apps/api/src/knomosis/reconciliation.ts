@@ -130,6 +130,14 @@ export function classifyDivergence(
   return 'warning';
 }
 
+/** Action types that MOVE funds (carry an `asset`) — the only in-flight actions
+ *  that can explain a per-asset balance timing shortfall (WS-L.3.4b). */
+const FUND_MOVEMENT_ACTION_TYPES: ReadonlySet<string> = new Set([
+  'treasury_deposit',
+  'grant_payout',
+  'bounty_contribution',
+]);
+
 const EVENT_STATE_OF_TYPE: Record<string, string> = {
   'knomosis.action.accepted': 'accepted',
   'knomosis.action.settled': 'settled',
@@ -257,15 +265,14 @@ async function reconcileActorLedgers(
 ): Promise<number> {
   const gateway = deps.gateway();
   if (gateway === null) return 0;
-  const deposits = await deps.actions.listFinalizedDeposits(deploymentId, 10_000);
+  // Aggregate EVERY finalized deposit per (wallet, asset) in the store — a fixed
+  // page of raw deposits would omit later ones on a high-volume deployment and
+  // manufacture false treasury mismatches (WS-L.3.4a).
   const ledgerByWallet = new Map<string, { asset: string; amount: string }[]>();
-  for (const deposit of deposits) {
-    const asset = deposit.signedAction.message['asset'];
-    const amount = deposit.signedAction.message['amount'];
-    if (typeof asset !== 'string' || typeof amount !== 'string') continue;
-    const ledger = ledgerByWallet.get(deposit.actorWalletAccountId) ?? [];
-    ledger.push({ asset, amount });
-    ledgerByWallet.set(deposit.actorWalletAccountId, ledger);
+  for (const row of await deps.actions.sumFinalizedDeposits(deploymentId)) {
+    const ledger = ledgerByWallet.get(row.walletAccountId) ?? [];
+    ledger.push({ asset: row.asset, amount: row.total });
+    ledgerByWallet.set(row.walletAccountId, ledger);
   }
   const threshold = deps.config().divergenceCriticalThresholdMinorUnits;
   let recorded = 0;
@@ -280,8 +287,16 @@ async function reconcileActorLedgers(
     const ledger = ledgerByWallet.get(walletAccountId) ?? [];
     const read = await gateway.getBalances(mapping.actorId, null);
     if (read.kind !== 'ok') continue; // unavailable / not-modified: retry next tick
-    const hasInFlight = (await deps.actions.listOpenByWallet(walletAccountId)).length > 0;
-    const divergences = compareActorLedger(ledger, read.value, threshold, hasInFlight);
+    // Downgrade a timing shortfall ONLY for assets with an in-flight fund
+    // movement — an open proposal_sign/charter_update must not mask an unrelated
+    // asset's real divergence.
+    const inFlightAssets = new Set<string>();
+    for (const open of await deps.actions.listOpenByWallet(walletAccountId)) {
+      if (!FUND_MOVEMENT_ACTION_TYPES.has(open.actionType)) continue;
+      const asset = open.signedAction.message['asset'];
+      if (typeof asset === 'string') inFlightAssets.add(asset);
+    }
+    const divergences = compareActorLedger(ledger, read.value, threshold, inFlightAssets);
     const divergentAssets = new Set(divergences.map((d) => d.asset));
     // The entityRef includes the DEPLOYMENT — `latestForEntity` keys on
     // (entityType, entityRef) with no deployment filter, so a shared wallet/asset
@@ -384,7 +399,10 @@ export function compareActorLedger(
   finalizedDeposits: readonly { asset: string; amount: string }[],
   gatewayBalances: Readonly<Record<string, string>>,
   criticalThreshold: string,
-  hasInFlight: boolean,
+  // The assets with an in-flight FUND MOVEMENT — a timing shortfall is only
+  // explained for THOSE assets.  An open non-balance action (proposal_sign,
+  // charter_update) must NOT downgrade an unrelated asset's divergence (WS-L.3.4b).
+  inFlightAssets: ReadonlySet<string>,
 ): {
   asset: string;
   expected: string;
@@ -415,7 +433,7 @@ export function compareActorLedger(
       asset,
       expected,
       actual,
-      severity: classifyDivergence(magnitude, criticalThreshold, hasInFlight),
+      severity: classifyDivergence(magnitude, criticalThreshold, inFlightAssets.has(asset)),
     });
   }
   return divergences;

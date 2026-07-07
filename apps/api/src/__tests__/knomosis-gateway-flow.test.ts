@@ -574,6 +574,63 @@ describe('WS-L.3.1 preflight pipeline', () => {
     if (result.result === 'fail') expect(result.reason_code).toBe('POLICY_CONFLICT');
   });
 
+  it('a leftover SIMULATED charter proposal does NOT block a real charter_update (R7-5)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => true,
+      contentVisibleToUser: async () => true,
+    };
+    // An open charter proposal from the room's SIMULATED practice phase.
+    await fixture.knomosis.proposals.insert({
+      proposalId: crypto.randomUUID(),
+      roomId: ROOM,
+      proposerUserId: userId,
+      proposalType: 'charter_update',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'open',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: true, // practice — must NOT conflict with a real submission
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+    });
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const message = {
+      roomId: ROOM,
+      charterVersionId: crypto.randomUUID(),
+      contentHash: `0x${'cd'.repeat(32)}`,
+      actor: testAccount.address,
+      nonce: '1',
+      expiration: String(Math.floor(Date.now() / 1000) + 600),
+      deploymentId: DEPLOYMENT,
+    };
+    const signature = await signedTypedData('charter_update', message);
+    const result = await runPreflight(preflightDeps(fixture), {
+      userId,
+      actionType: 'charter_update',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    // The simulated proposal is filtered out, so no charter conflict is raised.
+    if (result.result === 'fail') expect(result.reason_code).not.toBe('POLICY_CONFLICT');
+  });
+
   it('a wallet whose signer differs from the selected wallet is rejected', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);

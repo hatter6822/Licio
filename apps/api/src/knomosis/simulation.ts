@@ -202,6 +202,10 @@ async function requireComprehension(
 // Simulated treasury (WS-L.4.1c)
 // ---------------------------------------------------------------------------
 
+/** The stored balance is numeric(78,0) — a summed balance may hold at most 78
+ *  digits, matching `minorUnitAmountSchema` on the response boundary. */
+const SIM_TREASURY_MAX_BALANCE_DIGITS = 78;
+
 /** Idempotent bootstrap with the configured starting balance. */
 export async function ensureSimTreasury(
   deps: SimulationDeps,
@@ -295,8 +299,22 @@ export async function simDeposit(
         ),
       };
     }
+    // Each deposit fits `minorUnitAmountSchema` (≤ 78 digits), but the SUM can
+    // overflow the numeric(78,0) balance.  Reject BEFORE persisting — else the
+    // oversized row saves and then fails `simTreasuryResponseSchema` on every
+    // future read, wedging the treasury behind 500s (WS-L.4.1c).
+    const next = decSum([balances[args.asset] ?? '0', args.amount]);
+    if (next.replace('-', '').length > SIM_TREASURY_MAX_BALANCE_DIGITS) {
+      return {
+        error: err(
+          409,
+          'sim_balance_overflow',
+          'This deposit would overflow the simulated treasury balance.',
+        ),
+      };
+    }
     return {
-      balances: { ...balances, [args.asset]: decSum([balances[args.asset] ?? '0', args.amount]) },
+      balances: { ...balances, [args.asset]: next },
       result: null,
     };
   });

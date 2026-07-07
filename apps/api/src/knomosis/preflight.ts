@@ -435,7 +435,13 @@ export async function runPreflight(
     }
   }
   if (actionType === 'charter_update') {
-    const open = await deps.proposals.listOpenByRoomAndType(input.roomId, 'charter_update');
+    // Only a REAL open charter proposal conflicts.  A leftover SIMULATED
+    // (practice) charter proposal — which can no longer be voted or executed once
+    // the room left `simulated` — must never block a real charter_update, mirroring
+    // the proposal_sign simulated-isolation above (WS-L.4.1a).
+    const open = (
+      await deps.proposals.listOpenByRoomAndType(input.roomId, 'charter_update')
+    ).filter((p) => !p.simulationMode);
     if (open.length > 0) {
       return audited(
         fail(

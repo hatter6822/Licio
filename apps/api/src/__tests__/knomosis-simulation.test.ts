@@ -125,6 +125,24 @@ describe('WS-L.4.1b/c proposal templates + simulated treasury', () => {
     }
   });
 
+  it('rejects a deposit whose SUMMED balance would overflow 78 digits (R7-6)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await passComprehension(fixture, userId);
+    const deps = simulationDeps(fixture.knomosis);
+    const big = '9'.repeat(78); // the max single deposit (78 digits)
+    const first = await simDeposit(deps, { roomId: ROOM, userId, asset: 'SIM-BIG', amount: big });
+    expect(first.ok).toBe(true);
+    // A second 78-digit deposit would push the balance to 79 digits — rejected
+    // BEFORE persisting (else the row saves and every future read 500s).
+    const second = await simDeposit(deps, { roomId: ROOM, userId, asset: 'SIM-BIG', amount: big });
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.code).toBe('sim_balance_overflow');
+    // The stored balance is still the (valid) first deposit — not corrupted.
+    const treasury = await ensureSimTreasury(deps, ROOM);
+    expect(treasury.balances['SIM-BIG']).toBe(big);
+  });
+
   it('rejects a bounty missing the conflict disclosure (template completeness)', async () => {
     const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' } });
     const { userId } = await seedUserWithSession(fixture.identity);

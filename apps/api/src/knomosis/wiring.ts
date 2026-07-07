@@ -136,6 +136,7 @@ export function buildGovernanceKillSwitchGuards(services: KnomosisServices): {
  * there is no user-facing mutation path.  Idempotent (upsert by id).
  */
 export async function syncPinnedDeployments(services: KnomosisServices): Promise<number> {
+  const pinnedIds = new Set(KNOMOSIS_PIN.deployments.map((p) => p.deployment_id));
   let synced = 0;
   for (const pin of KNOMOSIS_PIN.deployments) {
     await services.deployments.upsert({
@@ -151,6 +152,18 @@ export async function syncPinnedDeployments(services: KnomosisServices): Promise
     });
     synced += 1;
   }
-  services.log('knomosis.config_sync.deployments', { synced });
+  // RETIRE any deployment row no longer in the pin set.  The deployment list +
+  // scheduler trust the DB's active rows while manifest/preflight trust the pin
+  // file, so an active row for an unpinned environment is a split brain — the
+  // scheduler would keep ingesting/reconciling it and users would see it live
+  // (WS-L.1.1a-1).
+  let retired = 0;
+  for (const existing of await services.deployments.list()) {
+    if (!pinnedIds.has(existing.deploymentId) && existing.status !== 'retired') {
+      await services.deployments.upsert({ ...existing, status: 'retired' });
+      retired += 1;
+    }
+  }
+  services.log('knomosis.config_sync.deployments', { synced, retired });
   return synced;
 }

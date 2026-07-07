@@ -146,6 +146,34 @@ describe('WS-L wiring ports over real in-memory services', () => {
     expect(list.some((d) => d.environment === 'local')).toBe(true);
   });
 
+  it('syncPinnedDeployments RETIRES a deployment removed from the pin set (R7-7)', async () => {
+    const fixture = await freshKnomosisServices();
+    // A stale ACTIVE deployment that is NOT in the pin file.
+    const staleId = randomUUID();
+    await fixture.knomosis.deployments.upsert({
+      deploymentId: staleId,
+      environment: 'testnet',
+      chainId: 999,
+      l1BridgeAddress: '0x0000000000000000000000000000000000000000',
+      runtimeEndpointRef: 'stale',
+      contractManifestHash: '0x',
+      pinnedKnomosisCommit: 'deadbeef',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+    });
+    await syncPinnedDeployments(fixture.knomosis);
+    const stale = (await fixture.knomosis.deployments.list()).find(
+      (d) => d.deploymentId === staleId,
+    );
+    expect(stale?.status).toBe('retired'); // no longer trusted by the list/scheduler
+    // The genuinely pinned deployments stay active.
+    expect(
+      (await fixture.knomosis.deployments.list()).some(
+        (d) => d.environment === 'local' && d.status !== 'retired',
+      ),
+    ).toBe(true);
+  });
+
   it('a scheduler tick runs every task without throwing', async () => {
     const fixture = await freshKnomosisServices();
     const errors: string[] = [];

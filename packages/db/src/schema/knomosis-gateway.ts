@@ -18,6 +18,7 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  bigserial,
   boolean,
   index,
   integer,
@@ -279,9 +280,11 @@ export const governanceProposals = knomosisSchema.table(
   {
     proposalId: uuid('proposal_id').primaryKey().defaultRandom(),
     roomId: uuid('room_id').notNull(), // soft ref (isolation)
-    proposerUserId: uuid('proposer_user_id')
-      .notNull()
-      .references(() => users.userId, { onDelete: 'restrict' }),
+    // Nullable: set NULL when the proposer's account is erased (the proposal +
+    // other members' votes/signatures survive; WS-L data-rights).
+    proposerUserId: uuid('proposer_user_id').references(() => users.userId, {
+      onDelete: 'restrict',
+    }),
     proposalType: proposalTypeEnum('proposal_type').notNull(),
     title: text('title').notNull(),
     plainLanguageSummary: text('plain_language_summary').notNull(),
@@ -437,8 +440,16 @@ export const reconciliationResults = knomosisSchema.table(
     /** The common low-watermark X-Knomosis-Seq the comparison was made at. */
     lowWatermarkSeq: bigint('low_watermark_seq', { mode: 'bigint' }),
     createdAt: tz('created_at').notNull().defaultNow(),
+    /** Monotonic INSERTION order — the strict tiebreaker for "latest per entity":
+     *  a resolving `match` and its mismatch can share a `created_at`, and only an
+     *  insertion sequence deterministically keeps the later row (WS-L.3.4b). */
+    seq: bigserial('seq', { mode: 'bigint' }).notNull(),
   },
-  (t) => [index('knomosis_reconciliation_entity_idx').on(t.entityType, t.entityRef, t.createdAt)],
+  // (entity_type, entity_ref, created_at DESC, seq DESC) backs the latest-per-
+  // entity DISTINCT ON / ORDER BY with the tiebreaker in the index.
+  (t) => [
+    index('knomosis_reconciliation_entity_idx').on(t.entityType, t.entityRef, t.createdAt, t.seq),
+  ],
 );
 export type ReconciliationResultRow = typeof reconciliationResults.$inferSelect;
 

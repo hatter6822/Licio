@@ -437,7 +437,8 @@ export const governanceProposalSchema = z
   .object({
     proposal_id: uuidSchema,
     room_id: uuidSchema,
-    proposer_user_id: uuidSchema,
+    // Null once the proposer's account is erased (WS-L data-rights).
+    proposer_user_id: uuidSchema.nullable(),
     proposal_type: proposalTypeSchema,
     title: z.string().min(1).max(200),
     plain_language_summary: z.string().min(1).max(2_000),

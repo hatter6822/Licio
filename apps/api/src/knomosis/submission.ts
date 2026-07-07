@@ -424,6 +424,20 @@ export async function resubmitPendingActions(
     // pause must stop a grant_payout resubmit even if action_submission is off).
     if (deps.submissionPaused && (await deps.submissionPaused(record.roomId, record.actionType)))
       continue;
+    // The signed payload can EXPIRE while the action sits in `submitted` during a
+    // gateway outage — never forward a signature past the time the user authorized
+    // (the submit path checks this, so the retry must too, WS-L.3.2a).  An expired
+    // record fails terminally rather than being retried forever.
+    const expirationSeconds = Number(record.signedAction.message['expiration'] ?? '');
+    if (!Number.isFinite(expirationSeconds) || expirationSeconds * 1000 <= deps.now()) {
+      await applyTransition(
+        deps,
+        record,
+        'failed',
+        'the signed action expired before it was accepted',
+      );
+      continue;
+    }
     await forwardToGateway(deps, gateway, record);
     forwarded += 1;
   }

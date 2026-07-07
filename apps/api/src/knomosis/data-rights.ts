@@ -116,11 +116,13 @@ export async function purgeFinancialWalletData(
   await deps.actions.purgeByUser(userId);
   await deps.proposalSignatures.purgeByUser(userId);
   await deps.wallets.purgeByUser(userId);
-  // WS-L.4 simulated-governance personal rows: DELETE the user's own proposals /
-  // votes / comprehension / anti-replay nonces, and ANONYMIZE the append-only
-  // ledgers (audit log + sim-treasury entries) — scrub the actor, keep the row.
+  // WS-L.4 simulated-governance personal rows: DELETE the user's OWN votes /
+  // comprehension / anti-replay nonces, ANONYMIZE the proposer link on proposals
+  // they authored (deleting the proposal would cascade-remove OTHER members'
+  // votes/signatures via the §0059 FKs), and ANONYMIZE the append-only ledgers
+  // (audit log + sim-treasury entries) — scrub the actor, keep the row.
   await deps.votes.purgeByUser(userId);
-  await deps.proposals.purgeByUser(userId);
+  await deps.proposals.anonymizeProposer(userId);
   await deps.comprehension.purgeByUser(userId);
   await deps.nonces.purgeByUser(userId);
   await deps.simTreasury.anonymizeActor(userId);

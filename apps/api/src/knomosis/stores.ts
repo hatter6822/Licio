@@ -107,7 +107,10 @@ export interface WalletActorMappingRecord {
 export interface GovernanceProposalRecord {
   proposalId: string;
   roomId: string;
-  proposerUserId: string;
+  /** Null once the proposer's account is erased — the proposal + OTHER members'
+   *  votes/signatures are preserved; only the deleting user's authorship link is
+   *  scrubbed (WS-L data-rights; never cascade-delete co-participants). */
+  proposerUserId: string | null;
   proposalType: 'charter_update' | 'bounty' | 'capped_grant';
   title: string;
   plainLanguageSummary: string;
@@ -265,6 +268,13 @@ export interface KnomosisActionStore {
   /** Finalized deposit-type actions for the deployment — the product-side deposit
    *  ledger the WS-L.3.4a treasury reconciliation compares against gateway standing. */
   listFinalizedDeposits(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
+  /** SUM of finalized deposit amounts per (wallet, asset), computed in the store
+   *  so the reconciliation ledger is COMPLETE — a fixed-limit page of raw deposits
+   *  would omit later deposits on a high-volume deployment and manufacture false
+   *  treasury mismatches (WS-L.3.4a). */
+  sumFinalizedDeposits(
+    deploymentId: string,
+  ): Promise<{ walletAccountId: string; asset: string; total: string }[]>;
   /** WS-L data-rights: hard-delete every action a user signed on account
    *  deletion; returns the rows removed. */
   purgeByUser(userId: string): Promise<number>;
@@ -323,8 +333,11 @@ export interface GovernanceProposalStore {
   ): Promise<GovernanceProposalRecord[]>;
   /** The user's own (simulated) proposals — DSAR export. */
   listByProposer(userId: string): Promise<GovernanceProposalRecord[]>;
-  /** WS-L data-rights: delete the user's proposals on account deletion. */
-  purgeByUser(userId: string): Promise<number>;
+  /** WS-L data-rights: ANONYMIZE the proposer (null `proposerUserId`) on account
+   *  deletion — the proposal row and OTHER members' votes/signatures on it are
+   *  preserved (a hard delete would cascade-remove co-participants' data via the
+   *  §0059 `proposal_id` FKs).  Returns the rows anonymized. */
+  anonymizeProposer(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -653,6 +666,37 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       .map((r) => structuredClone(r));
   }
 
+  async sumFinalizedDeposits(
+    deploymentId: string,
+  ): Promise<{ walletAccountId: string; asset: string; total: string }[]> {
+    // Exact bigint aggregation over EVERY finalized deposit (no page limit).
+    const totals = new Map<string, bigint>();
+    const meta = new Map<string, { walletAccountId: string; asset: string }>();
+    for (const r of this.#rows.values()) {
+      if (
+        r.deploymentId !== deploymentId ||
+        r.submissionState !== 'finalized' ||
+        r.actionType !== 'treasury_deposit'
+      )
+        continue;
+      const asset = r.signedAction.message['asset'];
+      const amount = r.signedAction.message['amount'];
+      if (typeof asset !== 'string' || typeof amount !== 'string' || !/^\d+$/.test(amount))
+        continue;
+      const key = `${r.actorWalletAccountId} ${asset}`;
+      totals.set(key, (totals.get(key) ?? 0n) + BigInt(amount));
+      if (!meta.has(key)) meta.set(key, { walletAccountId: r.actorWalletAccountId, asset });
+    }
+    return [...totals.entries()].map(([key, total]) => {
+      const m = meta.get(key);
+      return {
+        walletAccountId: m?.walletAccountId ?? '',
+        asset: m?.asset ?? '',
+        total: total.toString(),
+      };
+    });
+  }
+
   async purgeByUser(userId: string): Promise<number> {
     let removed = 0;
     for (const [key, row] of this.#rows) {
@@ -849,15 +893,15 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
       .map((r) => structuredClone(r));
   }
 
-  async purgeByUser(userId: string): Promise<number> {
-    let removed = 0;
+  async anonymizeProposer(userId: string): Promise<number> {
+    let anonymized = 0;
     for (const [key, row] of this.#rows) {
       if (row.proposerUserId === userId) {
-        this.#rows.delete(key);
-        removed += 1;
+        this.#rows.set(key, { ...row, proposerUserId: null });
+        anonymized += 1;
       }
     }
-    return removed;
+    return anonymized;
   }
 
   async clear(): Promise<void> {
@@ -1085,10 +1129,14 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
     entityType: ReconciliationResultRecord['entityType'],
     entityRef: string,
   ): Promise<ReconciliationResultRecord | null> {
-    const matches = this.#rows
-      .filter((r) => r.entityType === entityType && r.entityRef === entityRef)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const latest = matches[0];
+    // Insertion order is chronological; iterate in-order and let `>=` on
+    // createdAt keep the LATER-appended row on a same-millisecond tie, so a
+    // resolving `match` supersedes its equally-stamped mismatch (WS-L.3.4b).
+    let latest: ReconciliationResultRecord | null = null;
+    for (const row of this.#rows) {
+      if (row.entityType !== entityType || row.entityRef !== entityRef) continue;
+      if (latest === null || row.createdAt >= latest.createdAt) latest = row;
+    }
     return latest ? structuredClone(latest) : null;
   }
 

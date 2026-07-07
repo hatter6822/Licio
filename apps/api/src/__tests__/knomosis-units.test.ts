@@ -28,6 +28,7 @@ import {
   InMemoryGovernanceAuditStore,
   InMemoryKnomosisActionStore,
   InMemoryOnChainEventStore,
+  InMemoryReconciliationStore,
   type KnomosisActionRecordEntity,
   WalletAbuseLimiter,
 } from '../knomosis/stores.js';
@@ -57,7 +58,16 @@ const baseAction = (
   actorUserId: crypto.randomUUID(),
   payloadHash: `0x${'11'.repeat(32)}`,
   typedDataHash: `0x${'11'.repeat(32)}`,
-  signedAction: { message: { amount: '10', asset: 'USDC' }, signature: '0x' },
+  signedAction: {
+    // A far-future expiration so the retry sweep's expiry gate (WS-L.3.2a) does
+    // not treat the fixture action as expired.
+    message: {
+      amount: '10',
+      asset: 'USDC',
+      expiration: String(Math.floor(Date.now() / 1000) + 3600),
+    },
+    signature: '0x',
+  },
   submissionState: 'finalized',
   failureReason: null,
   indexedEventRef: null,
@@ -158,15 +168,32 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
       ],
       { USDC: '120' }, // gateway shows 120; product expects 150
       '10',
-      false,
+      new Set(),
     );
     expect(divergences).toHaveLength(1);
     expect(divergences[0]).toMatchObject({ asset: 'USDC', expected: '150', actual: '120' });
     expect(divergences[0]?.severity).toBe('critical'); // |30| ≥ 10
     // Agreement ⇒ no divergence.
-    expect(compareActorLedger([{ asset: 'USDC', amount: '5' }], { USDC: '5' }, '1', false)).toEqual(
-      [],
+    expect(
+      compareActorLedger([{ asset: 'USDC', amount: '5' }], { USDC: '5' }, '1', new Set()),
+    ).toEqual([]);
+  });
+
+  it('compareActorLedger downgrades ONLY the in-flight asset, per-asset (R7-4)', () => {
+    // USDC has an in-flight fund movement (informational); DAI does NOT — its
+    // large delta must stay critical even though the wallet has an open action.
+    const divergences = compareActorLedger(
+      [
+        { asset: 'USDC', amount: '100' },
+        { asset: 'DAI', amount: '100' },
+      ],
+      { USDC: '90', DAI: '40' }, // both short by 10 / 60
+      '10',
+      new Set(['USDC']),
     );
+    const bySeverity = Object.fromEntries(divergences.map((d) => [d.asset, d.severity]));
+    expect(bySeverity['USDC']).toBe('informational'); // in-flight ⇒ downgraded
+    expect(bySeverity['DAI']).toBe('critical'); // unrelated ⇒ NOT downgraded
   });
 
   it('reconcileDeployment halts when an unresolved unsupported-version result exists', async () => {
@@ -321,6 +348,63 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     const sigs = await fixture.knomosis.proposalSignatures.listByProposal(proposalId);
     expect(sigs).toHaveLength(1);
     expect(sigs[0]).toMatchObject({ proposalId, walletAccountId });
+  });
+
+  it('sumFinalizedDeposits aggregates EVERY finalized deposit per (wallet,asset) (R7-2)', async () => {
+    const store = new InMemoryKnomosisActionStore();
+    const wallet = crypto.randomUUID();
+    for (let i = 0; i < 3; i += 1) {
+      await store.insert(
+        baseAction({
+          actorWalletAccountId: wallet,
+          actionType: 'treasury_deposit',
+          submissionState: 'finalized',
+          signedAction: { message: { asset: 'USDC', amount: '100' }, signature: '0x' },
+        }),
+      );
+    }
+    // A non-finalized deposit must NOT count.
+    await store.insert(
+      baseAction({
+        actorWalletAccountId: wallet,
+        actionType: 'treasury_deposit',
+        submissionState: 'submitted',
+        signedAction: { message: { asset: 'USDC', amount: '999' }, signature: '0x' },
+      }),
+    );
+    const sums = await store.sumFinalizedDeposits(LOCAL_DEPLOYMENT.deployment_id);
+    expect(sums).toHaveLength(1);
+    expect(sums[0]).toMatchObject({ walletAccountId: wallet, asset: 'USDC', total: '300' });
+  });
+
+  it('reconciliation latest-per-entity picks the resolving match on a same-createdAt tie (R7-8)', async () => {
+    const store = new InMemoryReconciliationStore();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const at = new Date().toISOString();
+    const base = {
+      deploymentId,
+      entityType: 'treasury' as const,
+      entityRef: `${deploymentId}:w1:USDC`,
+      details: {},
+      lowWatermarkSeq: null,
+      createdAt: at, // identical timestamp for BOTH rows
+    };
+    await store.append({
+      ...base,
+      resultId: crypto.randomUUID(),
+      outcome: 'mismatch',
+      severity: 'critical',
+    });
+    // The resolving match is appended LATER with the SAME createdAt — it must win.
+    await store.append({
+      ...base,
+      resultId: crypto.randomUUID(),
+      outcome: 'match',
+      severity: null,
+    });
+    const latest = await store.latestForEntity('treasury', base.entityRef);
+    expect(latest?.outcome).toBe('match');
+    expect(await store.listUnresolvedMismatches(deploymentId)).toHaveLength(0);
   });
 
   it('countQualifyingByRoom counts only simulated PRACTICE, not meta rows (WS-L review fix)', async () => {
@@ -519,6 +603,38 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
     // The fake gateway accepted it → now `accepted`.
     const after = await fixture.knomosis.actions.getById(record.actionRecordId);
     expect(after?.submissionState).toBe('accepted');
+  });
+
+  it('resubmitPendingActions FAILS an expired submitted action instead of forwarding (R7-3)', async () => {
+    const fixture = await freshKnomosisServices();
+    // A submitted action whose signed expiration has already passed.
+    const expired = baseAction({
+      submissionState: 'submitted',
+      reconciliationState: 'pending',
+      signedAction: {
+        message: {
+          amount: '10',
+          asset: 'USDC',
+          expiration: String(Math.floor(Date.now() / 1000) - 60),
+        },
+        signature: '0x',
+      },
+    });
+    await fixture.knomosis.actions.insert(expired);
+    const count = await resubmitPendingActions(
+      {
+        actions: fixture.knomosis.actions,
+        signatures: fixture.knomosis.proposalSignatures,
+        uuid: fixture.knomosis.uuid,
+        gateway: fixture.knomosis.gateway,
+        now: fixture.knomosis.now,
+        log: fixture.knomosis.log,
+      },
+      LOCAL_DEPLOYMENT.deployment_id,
+    );
+    expect(count).toBe(0); // NOT forwarded past the authorized expiration
+    const after = await fixture.knomosis.actions.getById(expired.actionRecordId);
+    expect(after?.submissionState).toBe('failed');
   });
 });
 

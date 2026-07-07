@@ -438,6 +438,38 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     return rows.map(mapAction);
   }
 
+  async sumFinalizedDeposits(
+    deploymentId: string,
+  ): Promise<{ walletAccountId: string; asset: string; total: string }[]> {
+    // SUM the JSONB amount per (wallet, asset) across ALL finalized deposits —
+    // aggregated in SQL so a high-volume deployment never omits later deposits
+    // from the reconciliation ledger (WS-L.3.4a).
+    const assetExpr = sql<string>`${knomosisActionRecords.signedAction} -> 'message' ->> 'asset'`;
+    const rows = await this.db
+      .select({
+        walletAccountId: knomosisActionRecords.actorWalletAccountId,
+        asset: assetExpr,
+        total: sql<
+          string | null
+        >`sum((${knomosisActionRecords.signedAction} -> 'message' ->> 'amount')::numeric)::text`,
+      })
+      .from(knomosisActionRecords)
+      .where(
+        and(
+          eq(knomosisActionRecords.deploymentId, deploymentId),
+          eq(knomosisActionRecords.submissionState, 'finalized'),
+          eq(knomosisActionRecords.actionType, 'treasury_deposit'),
+        ),
+      )
+      .groupBy(knomosisActionRecords.actorWalletAccountId, assetExpr);
+    return rows
+      .filter(
+        (r): r is { walletAccountId: string; asset: string; total: string | null } =>
+          typeof r.asset === 'string',
+      )
+      .map((r) => ({ walletAccountId: r.walletAccountId, asset: r.asset, total: r.total ?? '0' }));
+  }
+
   async purgeByUser(userId: string): Promise<number> {
     const rows = await this.db
       .delete(knomosisActionRecords)
@@ -876,9 +908,12 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows.map(mapProposal);
   }
 
-  async purgeByUser(userId: string): Promise<number> {
+  async anonymizeProposer(userId: string): Promise<number> {
+    // Scrub the authorship link ONLY — never DELETE the proposal, or the §0059
+    // `proposal_id` FKs would cascade-remove other members' votes/signatures.
     const rows = await this.db
-      .delete(governanceProposals)
+      .update(governanceProposals)
+      .set({ proposerUserId: null })
       .where(eq(governanceProposals.proposerUserId, userId))
       .returning({ proposalId: governanceProposals.proposalId });
     return rows.length;
@@ -1257,19 +1292,23 @@ export class DrizzleReconciliationStore implements ReconciliationStore {
           eq(reconciliationResults.entityRef, entityRef),
         ),
       )
-      .orderBy(desc(reconciliationResults.createdAt))
+      // seq DESC is the strict tiebreaker: on an equal created_at the LATER
+      // insert (a resolving match) wins over its mismatch (WS-L.3.4b).
+      .orderBy(desc(reconciliationResults.createdAt), desc(reconciliationResults.seq))
       .limit(1);
     const row = rows[0];
     return row ? mapReconciliation(row) : null;
   }
 
   async listUnresolvedMismatches(deploymentId: string): Promise<ReconciliationResultRecord[]> {
-    // Latest result per entity via a window function; keep non-matches.
+    // Latest result per entity; the seq tiebreaker ensures a same-`created_at`
+    // resolving match supersedes its mismatch (else DISTINCT ON could keep the
+    // older mismatch and block canExpandTreasury forever, WS-L.3.4b).
     const rows = await this.db.execute(sql`
       SELECT DISTINCT ON (entity_type, entity_ref) *
       FROM "knomosis"."knomosis_reconciliation_result"
       WHERE deployment_id = ${deploymentId}
-      ORDER BY entity_type, entity_ref, created_at DESC
+      ORDER BY entity_type, entity_ref, created_at DESC, seq DESC
     `);
     const records = (rows as unknown as Array<Record<string, unknown>>)
       .map((raw) => ({
