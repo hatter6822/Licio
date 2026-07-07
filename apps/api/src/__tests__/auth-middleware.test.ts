@@ -16,10 +16,12 @@ import {
 } from '../identity/services.js';
 import { buildSessionCookie, createSession, type SessionStore } from '../identity/sessions.js';
 import {
+  type AuthContext,
   type AuthEnv,
   assuranceStale,
   authMiddleware,
   requireAdult,
+  requireAuth,
   requireStepUp,
   requireSteward,
   requireUnrestricted,
@@ -107,6 +109,19 @@ function guardedApp() {
       c.json({ ok: true }),
     );
 }
+
+describe('requireAuth', () => {
+  it('returns the attached AuthContext when authMiddleware ran', () => {
+    const auth = { userId: 'u1' } as unknown as AuthContext;
+    const c = { get: (_k: 'auth') => auth };
+    expect(requireAuth(c)).toBe(auth);
+  });
+
+  it('throws when no auth context is present (a routing misconfiguration)', () => {
+    const c = { get: (_k: 'auth') => undefined };
+    expect(() => requireAuth(c)).toThrow(/without authMiddleware/);
+  });
+});
 
 describe('assuranceStale', () => {
   it('is false within the window and true beyond it', async () => {

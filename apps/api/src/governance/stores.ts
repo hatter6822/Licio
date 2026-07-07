@@ -147,7 +147,9 @@ export interface TreasuryActionRecord {
   actionId: string;
   roomId: string;
   category: string;
-  amount: number;
+  /** `number` (simulation units) or an exact decimal string (minor units) —
+   *  the kernel compares either with exact decimal math (no double rounding). */
+  amount: number | string;
   asset: string | null;
   /** The per-asset target allocation for an `investment_rebalance` (null for other
    *  categories) — persisted so an accepted rebalance can be AUDITED / replayed to

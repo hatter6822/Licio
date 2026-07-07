@@ -58,4 +58,11 @@ export const queryKeys = {
   modAppeal: (appealId: string) => ['mod-appeal', appealId] as const,
   modAudit: (filterKey: string) => ['mod-audit', filterKey] as const,
   modIncidents: () => ['mod-incidents'] as const,
+  // WS-L wallets + knomosis.
+  wallets: () => ['wallets'] as const,
+  walletRiskState: (walletId: string) => ['wallet-risk-state', walletId] as const,
+  governanceTab: (roomId: string) => ['room', roomId, 'governance-tab'] as const,
+  governanceProposals: (roomId: string) => ['room', roomId, 'governance-proposals'] as const,
+  comprehensionQuiz: (roomId: string) => ['room', roomId, 'comprehension-quiz'] as const,
+  roomReadiness: (roomId: string) => ['room', roomId, 'readiness'] as const,
 } as const;

@@ -407,6 +407,13 @@
       "when": 1782199100000,
       "tag": "0058_ws_g_room_subscription_lens",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1782199101000,
+      "tag": "0059_ws_l_knomosis_gateway_wallets",
+      "breakpoints": true
     }
   ]
 }

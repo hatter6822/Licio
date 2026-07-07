@@ -51,6 +51,7 @@ export default defineConfig({
         'apps/api/src/ranking/drizzle-ranking-stores.ts',
         'apps/api/src/moderation/drizzle-moderation-stores.ts',
         'apps/api/src/governance/drizzle-governance-stores.ts',
+        'apps/api/src/knomosis/drizzle-knomosis-stores.ts',
         'packages/db/src/similarity.ts',
         // Dev/test-only entrypoint + fixtures (never production): the in-memory
         // E2E server is run by Playwright, not vitest, and the demo seed/data are
@@ -60,6 +61,16 @@ export default defineConfig({
         'apps/api/src/e2e-server.ts',
         'apps/api/src/lib/demo-seed.ts',
         'apps/api/src/lib/demo-data.ts',
+        // The production server boot entrypoint: pure DI wiring (createInMemory*
+        // → `if (db)` Drizzle swaps → `set*Services` → scheduler starts →
+        // `serve()`).  Never imported by a unit test (it opens a socket); its
+        // wiring is exercised structurally by the in-memory service fixtures and
+        // the BFF E2E harness — same rationale as the e2e-server entrypoint
+        // above.  The composed logic (createApp / every service) IS covered.
+        'apps/api/src/index.ts',
+        // WS-L test-only fixture signer (mounted ONLY by the e2e-server; driven
+        // by Playwright, never a unit test) — same precedent as test-auth.ts.
+        'apps/api/src/routes/test-wallet.ts',
       ],
       thresholds: {
         lines: 80,

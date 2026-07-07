@@ -23,6 +23,7 @@ import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { Switch } from '../../components/ui/Switch/index.js';
 import { ThemeToggle } from '../../components/ui/ThemeToggle/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
+import { WalletManager } from '../../components/wallet/index.js';
 import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useT } from '../../i18n/index.js';
@@ -664,20 +665,22 @@ export function WalletPage(): React.ReactElement {
   // Reaching a flag-gated page is a fail-closed restriction worth observing
   // (route PATTERN only, no PII) so accidental enablement/lockout is visible.
   useEffect(() => {
-    track({ name: 'route_guard', metric: 'restricted', bucket: '/profile/wallet' });
-  }, []);
+    if (!cryptoEnabled) {
+      track({ name: 'route_guard', metric: 'restricted', bucket: '/profile/wallet' });
+    }
+  }, [cryptoEnabled]);
   return (
     <>
       <PageHeader title={t('profile.wallet', 'Wallet')} />
       <div className="mx-auto w-full max-w-2xl p-4">
-        <RestrictedState
-          title={t('wallet.unavailable', 'Wallet unavailable')}
-          reason={
-            cryptoEnabled
-              ? t('wallet.soon', 'Wallet features are not yet available here.')
-              : t('wallet.disabled', 'Wallet and crypto features are not enabled.')
-          }
-        />
+        {cryptoEnabled ? (
+          <WalletManager enabled={cryptoEnabled} />
+        ) : (
+          <RestrictedState
+            title={t('wallet.unavailable', 'Wallet unavailable')}
+            reason={t('wallet.disabled', 'Wallet and crypto features are not enabled.')}
+          />
+        )}
       </div>
     </>
   );

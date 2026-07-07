@@ -6,7 +6,7 @@
 // satisfies the law-pack preconditions, or rejecting it with a typed code.
 
 import { z } from 'zod';
-import { treasuryCategorySchema } from './law-pack.js';
+import { moneyAmountSchema, treasuryCategorySchema } from './law-pack.js';
 
 /** A proposed target allocation for an investment rebalance (fractions in [0,1]). */
 export const targetAllocationSchema = z.object({
@@ -19,9 +19,10 @@ export const treasuryActionSchema = z.object({
   actionId: z.string().min(1).max(128),
   roomId: z.string().min(1).max(128),
   category: treasuryCategorySchema,
-  // `.finite()` rejects NaN/±Infinity; the kernel additionally re-guards this so
-  // the proof-carrying contract holds for any direct (non-schema-fronted) caller.
-  amount: z.number().finite().min(0),
+  // Number branch rejects NaN/±Infinity; string branch is an exact decimal for
+  // minor-unit (uint256-scale) amounts.  The kernel re-guards validity with exact
+  // decimal math so the proof-carrying contract holds for any direct caller.
+  amount: moneyAmountSchema,
   asset: z.string().min(1).max(32).nullable(),
   /** When the action would execute (ISO-8601). */
   timestamp: z.string().datetime(),

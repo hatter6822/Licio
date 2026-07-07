@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.7.17",
+  "version": "0.7.18",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",
@@ -19,6 +19,7 @@
     "lint:security": "tsx scripts/lint-security.ts",
     "check:no-applause": "tsx scripts/check-no-applause.ts",
     "check:no-raw-egress": "tsx scripts/check-no-raw-egress.ts",
+    "check:knomosis-pins": "tsx scripts/check-knomosis-pins.ts",
     "check:lcap-p2p-split": "tsx scripts/check-lcap-p2p-split.ts",
     "check:private-p2p-split": "tsx scripts/check-private-p2p-split.ts",
     "check:lcap-schema-egress": "tsx scripts/check-lcap-schema-egress.ts",

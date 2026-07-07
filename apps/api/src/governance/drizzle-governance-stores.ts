@@ -202,7 +202,9 @@ function toTreasury(row: typeof agentTreasuryActions.$inferSelect): TreasuryActi
     actionId: row.actionId,
     roomId: row.roomId,
     category: row.category,
-    amount: Number(row.amount),
+    // Preserve the numeric string EXACTLY (a minor-unit amount can exceed 2^53;
+    // Number() would silently round it — the kernel does exact decimal math).
+    amount: row.amount,
     asset: row.asset,
     targetAllocation:
       (row.targetAllocation as TreasuryActionRecord['targetAllocation'] | null) ?? null,

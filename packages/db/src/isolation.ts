@@ -72,6 +72,22 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
   'knomosis.room_agent_binding',
   'knomosis.agent_action_log',
   'knomosis.agent_treasury_action',
+  // WS-L Knomosis gateway, wallets, and receipts (migration 0059).  Every new
+  // financial table is a BFS seed of the pay-to-rank isolation proof.
+  'knomosis.knomosis_deployment',
+  'knomosis.on_chain_event',
+  'knomosis.knomosis_action_record',
+  'knomosis.knomosis_action_nonce',
+  'knomosis.wallet_actor_mapping',
+  'knomosis.governance_proposal',
+  'knomosis.governance_proposal_vote',
+  'knomosis.governance_signature',
+  'knomosis.sim_treasury',
+  'knomosis.sim_treasury_entry',
+  'knomosis.governance_audit_log',
+  'knomosis.knomosis_reconciliation_result',
+  'knomosis.knomosis_receipt',
+  'knomosis.comprehension_result',
 ]);
 
 /**

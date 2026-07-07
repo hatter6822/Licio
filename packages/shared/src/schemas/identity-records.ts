@@ -163,11 +163,17 @@ export const WALLET_ACCOUNT_TYPES = ['eoa', 'contract'] as const;
 export type WalletAccountType = (typeof WALLET_ACCOUNT_TYPES)[number];
 export const walletAccountTypeSchema = z.enum(WALLET_ACCOUNT_TYPES);
 
-export const UNLINK_STATES = ['linked', 'unlink_requested', 'unlinked'] as const;
+export const UNLINK_STATES = ['active', 'pending_unlink', 'finalized'] as const;
 export type UnlinkState = (typeof UNLINK_STATES)[number];
 export const unlinkStateSchema = z.enum(UNLINK_STATES);
 
-export const WALLET_RISK_STATES = ['none', 'flagged', 'blocked'] as const;
+/**
+ * WS-L.2.5c-1 risk ladder.  `pending` is the FAIL-CLOSED default for a newly
+ * linked wallet: high-value actions stay gated until the first WS-N assessment
+ * completes; `normal`/`elevated`/`high` are the assessed levels that feed the
+ * transaction-preview risk label (WS-L.2.6b).
+ */
+export const WALLET_RISK_STATES = ['pending', 'normal', 'elevated', 'high'] as const;
 export type WalletRiskState = (typeof WALLET_RISK_STATES)[number];
 export const walletRiskStateSchema = z.enum(WALLET_RISK_STATES);
 
@@ -181,6 +187,8 @@ export const walletAccountSchema = z
     wallet_type: walletAccountTypeSchema,
     unlink_state: unlinkStateSchema,
     risk_state: walletRiskStateSchema,
+    /** User-defined display label (WS-L.2.5c); null falls back to "Wallet N". */
+    label: z.string().min(1).max(64).nullable(),
     linked_at: isoTimestampSchema,
     last_used_at: isoTimestampSchema.nullable(),
   })
@@ -188,14 +196,15 @@ export const walletAccountSchema = z
 export type WalletAccountRecord = z.infer<typeof walletAccountSchema>;
 
 /**
- * Valid unlink-state transitions (WS-D.3.1a state machine).  `linked` may request
- * unlink; an unlink request may complete or be cancelled back to `linked`;
- * `unlinked` is terminal.  Used by the link/unlink lifecycle and asserted in tests.
+ * Valid unlink-state transitions (WS-D.3.1a / WS-L.2.5b state machine).
+ * `active` may request unlink; a pending unlink may finalize after the
+ * cooling-off period or be cancelled back to `active`; `finalized` is terminal
+ * (the record is retained for audit, WS-L.2.5b).
  */
 export const UNLINK_TRANSITIONS: Readonly<Record<UnlinkState, readonly UnlinkState[]>> = {
-  linked: ['unlink_requested'],
-  unlink_requested: ['unlinked', 'linked'],
-  unlinked: [],
+  active: ['pending_unlink'],
+  pending_unlink: ['finalized', 'active'],
+  finalized: [],
 };
 
 /** Whether moving from `from` to `to` is a permitted unlink-state transition. */

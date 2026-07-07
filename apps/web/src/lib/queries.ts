@@ -48,6 +48,7 @@ import {
 } from './privacy-api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
+import * as wallet from './wallet-api.js';
 
 // --- Reads ----------------------------------------------------------------
 
@@ -669,6 +670,82 @@ export function useUpdateDurablePrivacyMutation() {
     mutationFn: patchPrivacySettings,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.durablePrivacySettings() });
+    },
+  });
+}
+
+// --- WS-L wallets + governance simulation ----------------------------------
+
+/** WS-L.2.5c — the authenticated user's linked wallets (gated by cryptoEnabled). */
+export function useWalletsQuery(enabled: boolean, includeUnlinked = false) {
+  return useQuery({
+    queryKey: [...queryKeys.wallets(), includeUnlinked] as const,
+    queryFn: () => wallet.fetchWallets(includeUnlinked),
+    ...cachePolicy.profile,
+    enabled,
+  });
+}
+
+/** WS-L.2.5c-1 — a wallet's coarse risk state (label + safe explanation only). */
+export function useWalletRiskStateQuery(walletId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.walletRiskState(walletId ?? 'none'),
+    queryFn: () => wallet.fetchWalletRiskState(walletId as string),
+    ...cachePolicy.profile,
+    enabled: walletId !== null,
+  });
+}
+
+/** WS-L.2.5a — the SIWE link flow: caller builds+signs; this posts the result. */
+export function useLinkWalletMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: wallet.linkWallet,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.wallets() });
+    },
+  });
+}
+
+/** WS-L.2.5b — request unlink (may return a blocked-with-obligations outcome). */
+export function useUnlinkWalletMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: wallet.requestWalletUnlink,
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.wallets() });
+    },
+  });
+}
+
+/** WS-L.4.1a — the room governance tab bundle (simulation-aware). */
+export function useGovernanceTabQuery(roomId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.governanceTab(roomId),
+    queryFn: () => wallet.fetchGovernanceTab(roomId),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+/** WS-L.4.1e — the comprehension quiz for a governance room. */
+export function useComprehensionQuizQuery(roomId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.comprehensionQuiz(roomId),
+    queryFn: () => wallet.fetchComprehensionQuiz(roomId),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+export function useSubmitComprehensionMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { quiz_version: string; answers: Record<string, number> }) =>
+      wallet.submitComprehensionQuiz(roomId, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.comprehensionQuiz(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceTab(roomId) });
     },
   });
 }

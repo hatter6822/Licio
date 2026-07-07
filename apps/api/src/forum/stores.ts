@@ -353,6 +353,10 @@ export interface RoomStore {
         | 'visibility'
         | 'joinModel'
         | 'postingPolicy'
+        // WS-L.4.1g: governance-mode transitions are written ONLY by the
+        // knomosis readiness gate (audited, fail-closed), never by room
+        // settings surfaces.
+        | 'governanceMode'
       >
     >,
   ): Promise<RoomRecord | null>;
@@ -984,6 +988,10 @@ export class InMemoryRoomStore implements RoomStore {
         | 'visibility'
         | 'joinModel'
         | 'postingPolicy'
+        // WS-L.4.1g: governance-mode transitions are written ONLY by the
+        // knomosis readiness gate (audited, fail-closed), never by room
+        // settings surfaces.
+        | 'governanceMode'
       >
     >,
   ): Promise<RoomRecord | null> {

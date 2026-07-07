@@ -1,0 +1,408 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-L.2.3a + WS-L.2.5a-d — the wallet-link lifecycle over REAL SIWE crypto:
+// nonce issue → EIP-4361 sign → link, idempotent re-link, cross-user address
+// denial, the wallet cap, the re-link cooldown, obligation-blocked unlink,
+// cooling-off + finalization sweep, labels, the fail-closed risk state, and
+// the abuse limits (attempt-counted, alert on excess).
+
+import { afterEach, describe, expect, it } from 'vitest';
+import { KNOMOSIS_PIN } from '../knomosis/pin.js';
+import {
+  finalizeElapsedUnlinks,
+  issueWalletLinkNonce,
+  linkWallet,
+  listWallets,
+  requestUnlink,
+  setWalletLabel,
+  type WalletServiceDeps,
+  walletRiskState,
+} from '../knomosis/wallet.js';
+import { seedUserWithSession } from './event-test-helpers.js';
+import type { KnomosisFixture } from './knomosis-test-helpers.js';
+import {
+  freshKnomosisServices,
+  resetKnomosisFixture,
+  signedSiweLink,
+  testAccount,
+} from './knomosis-test-helpers.js';
+
+function walletDeps(fixture: KnomosisFixture, now?: () => number): WalletServiceDeps {
+  const services = fixture.knomosis;
+  return {
+    wallets: services.wallets,
+    actions: services.actions,
+    proposalSignatures: services.proposalSignatures,
+    compliance: services.compliance,
+    treasuryObligations: services.treasuryObligations,
+    ephemeral: services.ephemeral,
+    audit: services.audit,
+    abuse: services.abuse,
+    masterSecret: services.masterSecret,
+    siweBase: services.siweBase,
+    chainAllowlist: () => KNOMOSIS_PIN.deployments.map((d) => d.chain_id),
+    config: services.config,
+    now: now ?? services.now,
+    uuid: services.uuid,
+    log: services.log,
+    alert: services.alert,
+  };
+}
+
+async function linkTestWallet(
+  fixture: KnomosisFixture,
+  userId: string,
+  session: string,
+  account = testAccount,
+  now?: () => number,
+) {
+  const deps = walletDeps(fixture, now);
+  const nonce = await issueWalletLinkNonce(deps, { userId, sessionTokenHash: session });
+  if (!nonce.ok) throw new Error(`nonce failed: ${nonce.code}`);
+  const signed = await signedSiweLink(nonce.nonce, account, now ? { nowMs: now() } : {});
+  return linkWallet(deps, {
+    userId,
+    sessionTokenHash: session,
+    message: signed.message,
+    signature: signed.signature,
+  });
+}
+
+afterEach(() => resetKnomosisFixture());
+
+describe('WS-L.2.3a nonce + WS-L.2.5a link (REAL SIWE)', () => {
+  it('links a wallet end-to-end: nonce → sign → verify → record', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const result = await linkTestWallet(fixture, userId, 's1');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.alreadyLinked).toBe(false);
+    expect(result.wallet.walletType).toBe('eoa');
+    expect(result.wallet.unlinkState).toBe('active');
+    // Fail-closed default until the first WS-N assessment (WS-L.2.5c-1).
+    expect(result.wallet.riskState).toBe('pending');
+    // Data minimization: no full address anywhere on the record (§19.5).
+    const serialized = JSON.stringify(result.wallet);
+    expect(serialized.toLowerCase()).not.toContain(testAccount.address.toLowerCase());
+    expect(result.wallet.addressTruncated).toMatch(/^0x.{4}…?.*$/i);
+    // Audit entry carries the truncation only.
+    const audit = await fixture.identity.audit.securityActivityForUser(userId);
+    const link = audit.find((entry) => entry.event_type === 'wallet_link');
+    expect(link).toBeDefined();
+    expect(JSON.stringify(link).toLowerCase()).not.toContain(
+      testAccount.address.toLowerCase().slice(2),
+    );
+  });
+
+  it('a nonce is single-use: replaying the same signed message fails', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const deps = walletDeps(fixture);
+    const nonce = await issueWalletLinkNonce(deps, { userId, sessionTokenHash: 's1' });
+    if (!nonce.ok) throw new Error('nonce failed');
+    const signed = await signedSiweLink(nonce.nonce);
+    const first = await linkWallet(deps, {
+      userId,
+      sessionTokenHash: 's1',
+      message: signed.message,
+      signature: signed.signature,
+    });
+    expect(first.ok).toBe(true);
+    const replay = await linkWallet(deps, {
+      userId,
+      sessionTokenHash: 's1',
+      message: signed.message,
+      signature: signed.signature,
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.code).toBe('siwe_nonce_invalid');
+  });
+
+  it('cross-session nonce usage is rejected (session binding)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const deps = walletDeps(fixture);
+    const nonce = await issueWalletLinkNonce(deps, { userId, sessionTokenHash: 'session-A' });
+    if (!nonce.ok) throw new Error('nonce failed');
+    const signed = await signedSiweLink(nonce.nonce);
+    const result = await linkWallet(deps, {
+      userId,
+      sessionTokenHash: 'session-B', // different session
+      message: signed.message,
+      signature: signed.signature,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a message signed for the WRONG domain (anti-phishing)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const deps = walletDeps(fixture);
+    const nonce = await issueWalletLinkNonce(deps, { userId, sessionTokenHash: 's1' });
+    if (!nonce.ok) throw new Error('nonce failed');
+    const signed = await signedSiweLink(nonce.nonce, testAccount, { domain: 'evil.example' });
+    const result = await linkWallet(deps, {
+      userId,
+      sessionTokenHash: 's1',
+      message: signed.message,
+      signature: signed.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('siwe_domain_mismatch');
+  });
+
+  it('rejects a chain outside the pinned allowlist (fail closed)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const deps = walletDeps(fixture);
+    const nonce = await issueWalletLinkNonce(deps, { userId, sessionTokenHash: 's1' });
+    if (!nonce.ok) throw new Error('nonce failed');
+    const signed = await signedSiweLink(nonce.nonce, testAccount, { chainId: 999999 });
+    const result = await linkWallet(deps, {
+      userId,
+      sessionTokenHash: 's1',
+      message: signed.message,
+      signature: signed.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('siwe_chain_not_allowed');
+  });
+
+  it('re-linking the same wallet is idempotent (same record, already_linked)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const first = await linkTestWallet(fixture, userId, 's1');
+    const second = await linkTestWallet(fixture, userId, 's1');
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.alreadyLinked).toBe(true);
+    expect(second.wallet.walletAccountId).toBe(first.wallet.walletAccountId);
+  });
+
+  it('an address linked by ANOTHER account cannot be linked (no oracle)', async () => {
+    const fixture = await freshKnomosisServices();
+    const alice = await seedUserWithSession(fixture.identity, { handle: 'alice1' });
+    const bob = await seedUserWithSession(fixture.identity, { handle: 'bob1' });
+    const first = await linkTestWallet(fixture, alice.userId, 'sA');
+    expect(first.ok).toBe(true);
+    const second = await linkTestWallet(fixture, bob.userId, 'sB');
+    expect(second.ok).toBe(false);
+    if (!second.ok) {
+      expect(second.status).toBe(409);
+      expect(second.code).toBe('address_unavailable');
+    }
+  });
+
+  it('enforces the max-wallets cap (WS-L.2.5d)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // Simulate an at-cap user by inserting cap-1 synthetic wallets directly.
+    const cap = fixture.knomosis.config().maxWalletsPerUser;
+    for (let i = 0; i < cap; i += 1) {
+      await fixture.knomosis.wallets.insert({
+        walletAccountId: crypto.randomUUID(),
+        userId,
+        addressHashHex: `aa${i.toString().padStart(62, '0')}`,
+        addressTruncated: `0x0${i}…ff`,
+        chainId: 31337,
+        walletType: 'eoa',
+        unlinkState: 'active',
+        riskState: 'pending',
+        label: null,
+        linkedAt: new Date().toISOString(),
+        lastUsedAt: null,
+        unlinkRequestedAt: null,
+        unlinkFinalizeAfter: null,
+        unlinkedAt: null,
+      });
+    }
+    const result = await linkTestWallet(fixture, userId, 's1');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('wallet_limit');
+  });
+});
+
+describe('WS-L.2.5b unlink lifecycle + WS-L.2.5c list/label', () => {
+  it('unlink with no obligations → pending_unlink with cooling-off, then finalizes', async () => {
+    let clock = Date.now();
+    const fixture = await freshKnomosisServices({ now: () => clock });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1', testAccount, () => clock);
+    if (!linked.ok) throw new Error('link failed');
+    const deps = walletDeps(fixture, () => clock);
+
+    const unlink = await requestUnlink(deps, {
+      userId,
+      walletAccountId: linked.wallet.walletAccountId,
+    });
+    expect('blocked' in unlink).toBe(false);
+    if (!('ok' in unlink) || unlink.ok !== true) throw new Error('unlink not accepted');
+    expect(unlink.wallet.unlinkState).toBe('pending_unlink');
+
+    // Cooling-off prevents immediate finalization…
+    expect(await finalizeElapsedUnlinks(deps)).toBe(0);
+    // …until the window elapses (default 24h).
+    clock += 25 * 3_600_000;
+    expect(await finalizeElapsedUnlinks(deps)).toBe(1);
+    const after = await fixture.knomosis.wallets.getById(linked.wallet.walletAccountId);
+    expect(after?.unlinkState).toBe('finalized');
+    // Removed from the default list; retained for audit with include_unlinked.
+    expect(await listWallets(deps, { userId, includeUnlinked: false })).toHaveLength(0);
+    expect(await listWallets(deps, { userId, includeUnlinked: true })).toHaveLength(1);
+  });
+
+  it('re-linking during cooling-off CANCELS the unlink', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1');
+    if (!linked.ok) throw new Error('link failed');
+    const deps = walletDeps(fixture);
+    await requestUnlink(deps, { userId, walletAccountId: linked.wallet.walletAccountId });
+    const relink = await linkTestWallet(fixture, userId, 's1');
+    expect(relink.ok).toBe(true);
+    if (relink.ok) expect(relink.wallet.unlinkState).toBe('active');
+  });
+
+  it('re-linking a FINALIZED wallet inside the cooldown is blocked (WS-L.2.5d)', async () => {
+    let clock = Date.now();
+    const fixture = await freshKnomosisServices({ now: () => clock });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1', testAccount, () => clock);
+    if (!linked.ok) throw new Error('link failed');
+    const deps = walletDeps(fixture, () => clock);
+    await requestUnlink(deps, { userId, walletAccountId: linked.wallet.walletAccountId });
+    clock += 25 * 3_600_000;
+    await finalizeElapsedUnlinks(deps);
+
+    // Inside the 7-day cooldown: blocked.
+    clock += 3_600_000;
+    const early = await linkTestWallet(fixture, userId, 's1', testAccount, () => clock);
+    expect(early.ok).toBe(false);
+    if (!early.ok) expect(early.code).toBe('relink_cooldown');
+
+    // After the cooldown: reactivates with fail-closed risk.
+    clock += 8 * 24 * 3_600_000;
+    const late = await linkTestWallet(fixture, userId, 's1', testAccount, () => clock);
+    expect(late.ok).toBe(true);
+    if (late.ok) expect(late.wallet.riskState).toBe('pending');
+  });
+
+  it('an open signed action BLOCKS the unlink with the specific obligation', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1');
+    if (!linked.ok) throw new Error('link failed');
+    await fixture.knomosis.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: crypto.randomUUID(),
+      actorWalletAccountId: linked.wallet.walletAccountId,
+      actorUserId: userId,
+      payloadHash: `0x${'11'.repeat(32)}`,
+      typedDataHash: `0x${'11'.repeat(32)}`,
+      signedAction: { message: {}, signature: '0x' },
+      submissionState: 'accepted', // non-terminal ⇒ an obligation
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const deps = walletDeps(fixture);
+    const unlink = await requestUnlink(deps, {
+      userId,
+      walletAccountId: linked.wallet.walletAccountId,
+    });
+    expect('blocked' in unlink && unlink.blocked).toBe(true);
+    if ('blocked' in unlink) {
+      expect(unlink.obligations[0]?.type).toBe('pending_payment');
+    }
+  });
+
+  it('labels default to "Wallet N" and PATCH updates them (WS-L.2.5c)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1');
+    if (!linked.ok) throw new Error('link failed');
+    const deps = walletDeps(fixture);
+    const before = await listWallets(deps, { userId, includeUnlinked: false });
+    expect(before[0]?.label).toBe('Wallet 1');
+    const set = await setWalletLabel(deps, {
+      userId,
+      walletAccountId: linked.wallet.walletAccountId,
+      label: 'Treasury key',
+    });
+    expect(set.ok).toBe(true);
+    const after = await listWallets(deps, { userId, includeUnlinked: false });
+    expect(after[0]?.label).toBe('Treasury key');
+    // 404-over-403 for someone else's wallet.
+    const bob = await seedUserWithSession(fixture.identity, { handle: 'bob2' });
+    const foreign = await setWalletLabel(deps, {
+      userId: bob.userId,
+      walletAccountId: linked.wallet.walletAccountId,
+      label: 'mine now',
+    });
+    expect(foreign.ok).toBe(false);
+    if (!foreign.ok) expect(foreign.status).toBe(404);
+  });
+
+  it('risk state stays fail-closed pending, then reads through the WS-N seam', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1');
+    if (!linked.ok) throw new Error('link failed');
+    const deps = walletDeps(fixture);
+    const pending = await walletRiskState(deps, {
+      userId,
+      walletAccountId: linked.wallet.walletAccountId,
+    });
+    expect(pending.ok && pending.riskState).toBe('pending');
+
+    // Wire an assessment: the label updates and persists; no internals leak.
+    deps.compliance = {
+      ...deps.compliance,
+      walletRisk: async () => ({
+        state: 'elevated',
+        explanation: 'Additional review required.',
+        nextStep: 'Additional verification required before high-value transfers.',
+      }),
+    };
+    const assessed = await walletRiskState(deps, {
+      userId,
+      walletAccountId: linked.wallet.walletAccountId,
+    });
+    expect(assessed.ok && assessed.riskState).toBe('elevated');
+    const stored = await fixture.knomosis.wallets.getById(linked.wallet.walletAccountId);
+    expect(stored?.riskState).toBe('elevated');
+  });
+
+  it('link attempts are rate-limited and fire an integrity alert (WS-L.2.5d)', async () => {
+    const fixture = await freshKnomosisServices();
+    const alerts: string[] = [];
+    fixture.knomosis.alert = (event) => alerts.push(event);
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const deps = walletDeps(fixture);
+    const limit = fixture.knomosis.config().linkAttemptsPerHour;
+    // Burn the budget with garbage attempts (failures still count).
+    for (let i = 0; i < limit; i += 1) {
+      await linkWallet(deps, {
+        userId,
+        sessionTokenHash: `s${i}`,
+        message: 'garbage',
+        signature: `0x${'ab'.repeat(65)}`,
+      });
+    }
+    const over = await linkWallet(deps, {
+      userId,
+      sessionTokenHash: 'sx',
+      message: 'garbage',
+      signature: `0x${'ab'.repeat(65)}`,
+    });
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.status).toBe(429);
+    expect(alerts).toContain('knomosis.wallet.link_rate_exceeded');
+  });
+});

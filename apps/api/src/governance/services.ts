@@ -19,6 +19,11 @@ export interface GovernanceServiceOptions {
   config?: GovernanceConfig;
   now?: () => Date;
   uuid?: () => string;
+  /** WS-L.3.5d/e kill-switch guards (boot wires the knomosis registry in). */
+  killSwitches?: {
+    treasuryExecutionBlocked(roomId: string): Promise<boolean>;
+    votingBlocked(roomId: string, voterUserId: string | null): Promise<boolean>;
+  };
 }
 
 export function createGovernanceService(opts: GovernanceServiceOptions = {}): GovernanceService {
@@ -28,6 +33,7 @@ export function createGovernanceService(opts: GovernanceServiceOptions = {}): Go
     now: opts.now ?? (() => new Date()),
     uuid: opts.uuid ?? randomUUID,
     digest: sha256Hex,
+    ...(opts.killSwitches ? { killSwitches: opts.killSwitches } : {}),
   });
 }
 

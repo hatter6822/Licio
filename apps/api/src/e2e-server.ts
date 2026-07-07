@@ -43,6 +43,15 @@ import {
   registerInvariantConsumers,
   setInvariantServices,
 } from './invariants/services.js';
+import { storeKnomosisConfigValue } from './knomosis/config.js';
+import { FakeKnomosisGateway } from './knomosis/gateway.js';
+import { createInMemoryKnomosisServices, setKnomosisServices } from './knomosis/services.js';
+import {
+  buildRegionResolver,
+  buildRoomGovernancePort,
+  buildRoomModePort,
+  syncPinnedDeployments,
+} from './knomosis/wiring.js';
 import { LcapIngestServer } from './lcap/server-ingest.js';
 import { setLcapIngestServer } from './lcap/service.js';
 import { InMemoryLcapServerStore } from './lcap/store.js';
@@ -58,6 +67,7 @@ import {
   setRankingServices,
 } from './ranking/services.js';
 import { createTestAuthRoute } from './routes/test-auth.js';
+import { createTestWalletRoute } from './routes/test-wallet.js';
 
 const env = validateServerEnv(process.env);
 
@@ -184,6 +194,32 @@ setLcapIngestServer(
   ),
 );
 
+// WS-L knomosis: the in-memory container with the deterministic FAKE gateway,
+// the forum-backed room ports, and the pinned local deployment.  The harness
+// EXPLICITLY enables the crypto/governance flags (they default off everywhere
+// else) so the wallet + governance-simulation BFF specs exercise real flows.
+const knomosisServices = createInMemoryKnomosisServices({
+  configStore: eventServices.configStore,
+  ephemeral: identityServices.challenges,
+  audit: identityServices.audit,
+  masterSecret: identityServices.config.masterSecret,
+  siweBase: {
+    domain: identityServices.config.siwe.domain,
+    uri: identityServices.config.siwe.uri,
+  },
+  gateway: new FakeKnomosisGateway(),
+  log: (event, meta) => logger.info(meta, event),
+});
+knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
+knomosisServices.roomMode = buildRoomModePort(forumServices);
+knomosisServices.regionResolver = buildRegionResolver(identityServices);
+await storeKnomosisConfigValue(eventServices.configStore, 'cryptoEnabled', true);
+await storeKnomosisConfigValue(eventServices.configStore, 'governanceEnabled', true);
+await knomosisServices.reloadConfig();
+await syncPinnedDeployments(knomosisServices);
+setKnomosisServices(knomosisServices);
+eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
+
 await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
 await seedAiGovernance(aiGovernanceServices);
 
@@ -191,6 +227,10 @@ await seedAiGovernance(aiGovernanceServices);
 // then the full production app for everything else. --------------------------
 const app = new Hono()
   .route('/v1/test-auth', createTestAuthRoute(identityServices))
+  // Test-only fixture signer (never in the production AppType): the Playwright
+  // fake EIP-6963 provider proxies its sign requests here so the browser
+  // drives REAL secp256k1 signatures through the REAL verification path.
+  .route('/v1/test-wallet', createTestWalletRoute())
   .route('/', createApp());
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
