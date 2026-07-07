@@ -977,6 +977,36 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBe('5');
   });
 
+  it('halts WITHOUT storing an earlier supported event sharing a seq with an unsupported one (R6-4)', async () => {
+    const fixture = await freshKnomosisServices();
+    // Same gateway_seq 1, two indices: a SUPPORTED event (index 0) BEFORE an
+    // UNSUPPORTED one (index 1).  A seq-only cursor cannot page within seq 1, so
+    // storing index 0 would advance the cursor past index 1 and drop it forever.
+    const batch = [
+      { seq: '1', index: 0, type: 'knomosis.action.accepted', payload: { typed_data_hash: '0xh' } },
+      { seq: '1', index: 1, type: 'knomosis.action.some_future_type', payload: {} },
+    ];
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({ kind: 'events', events: batch, latestSeq: '1' }),
+    };
+    const outcome = await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    expect(outcome.kind).toBe('halted');
+    if (outcome.kind === 'halted') expect(outcome.reason).toBe('unsupported_event');
+    // NEITHER event from seq 1 was stored, so the cursor never advanced — the
+    // whole group is re-fetched once the schema learns the new type.
+    expect(await fixture.knomosis.events.listByDeployment(DEPLOYMENT, 100)).toHaveLength(0);
+    expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBeNull();
+  });
+
   it('reconciliation matches a finalized action against the indexed stream', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);

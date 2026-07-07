@@ -269,9 +269,15 @@ async function reconcileActorLedgers(
   }
   const threshold = deps.config().divergenceCriticalThresholdMinorUnits;
   let recorded = 0;
-  for (const [walletAccountId, ledger] of ledgerByWallet) {
-    const mapping = await deps.actorMappings.get(walletAccountId, deploymentId);
-    if (mapping === null) continue;
+  // Iterate EVERY mapped actor for the deployment — NOT just wallets with a
+  // finalized deposit.  A gateway actor reporting a nonzero balance while Licio
+  // holds no deposit for it (indexer bug / out-of-band credit) must be compared
+  // against its expected-ZERO ledger and surface as a blocker; keying off
+  // `ledgerByWallet` alone would never call `compareActorLedger` for it (WS-L.3.4a).
+  const mappings = await deps.actorMappings.listByDeployment(deploymentId);
+  for (const mapping of mappings) {
+    const walletAccountId = mapping.walletAccountId;
+    const ledger = ledgerByWallet.get(walletAccountId) ?? [];
     const read = await gateway.getBalances(mapping.actorId, null);
     if (read.kind !== 'ok') continue; // unavailable / not-modified: retry next tick
     const hasInFlight = (await deps.actions.listOpenByWallet(walletAccountId)).length > 0;

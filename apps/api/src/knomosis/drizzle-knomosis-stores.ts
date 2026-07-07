@@ -726,6 +726,19 @@ export class DrizzleWalletActorMappingStore implements WalletActorMappingStore {
     return record;
   }
 
+  async listByDeployment(deploymentId: string): Promise<WalletActorMappingRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(walletActorMappings)
+      .where(eq(walletActorMappings.deploymentId, deploymentId));
+    return rows.map((row) => ({
+      walletAccountId: row.walletAccountId,
+      deploymentId: row.deploymentId,
+      actorId: row.actorId,
+      createdAt: iso(row.createdAt),
+    }));
+  }
+
   async clear(): Promise<void> {
     await this.db.delete(walletActorMappings);
   }

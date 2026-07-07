@@ -271,6 +271,12 @@ export function simulationDeps(services: KnomosisServices): SimulationDeps {
     log: services.log,
     metric: (name, value) => services.metrics.increment(name, value),
     regionForUser: (userId) => services.regionResolver.regionForUser(userId),
+    // The room's live governance mode (fail-closed to null when the port is
+    // unwired) — gates simulated execution to `simulated` rooms only (WS-L.4.1d).
+    roomMode: async (roomId) =>
+      services.rooms === null
+        ? null
+        : ((await services.rooms.roomGovernance(roomId))?.mode ?? null),
   };
 }
 

@@ -302,6 +302,10 @@ export interface OnChainEventStore {
 export interface WalletActorMappingStore {
   get(walletAccountId: string, deploymentId: string): Promise<WalletActorMappingRecord | null>;
   put(record: WalletActorMappingRecord): Promise<WalletActorMappingRecord>;
+  /** Every wallet→actor mapping for a deployment — the treasury reconciliation
+   *  compares ALL mapped actors, including those with no finalized deposit yet
+   *  (a gateway-reported balance with no product ledger is a divergence). */
+  listByDeployment(deploymentId: string): Promise<WalletActorMappingRecord[]>;
   clear(): Promise<void>;
 }
 
@@ -775,6 +779,14 @@ export class InMemoryWalletActorMappingStore implements WalletActorMappingStore 
   async put(record: WalletActorMappingRecord): Promise<WalletActorMappingRecord> {
     this.#rows.set(`${record.walletAccountId}:${record.deploymentId}`, { ...record });
     return { ...record };
+  }
+
+  async listByDeployment(deploymentId: string): Promise<WalletActorMappingRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.deploymentId === deploymentId)
+      .map((r) => ({
+        ...r,
+      }));
   }
 
   async clear(): Promise<void> {

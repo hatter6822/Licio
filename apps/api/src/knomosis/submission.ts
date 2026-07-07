@@ -22,6 +22,7 @@ import { pinnedDeployment } from './pin.js';
 import { buildEip712Domain, consumePreflightToken } from './preflight.js';
 import {
   type ContractTypedDataVerifier,
+  classifyEcdsaSignature,
   computeTypedDataDigest,
   verifyActionSignature,
 } from './signatures.js';
@@ -266,30 +267,13 @@ export async function submitAction(
     context: { setting: binding.actionType },
   });
 
-  // A governance vote (`proposal_sign`) is DURABLY recorded in the signature
-  // ledger too — the on-chain action row alone is invisible to the tally and to
-  // the WS-L.2.5b unlink-obligation check.  Insert-once per (proposal, wallet):
-  // a duplicate signature returns null and is a no-op.  Recorded BEFORE the
-  // gateway forward so a transient outage (record left `submitted`) still
-  // captures the member's signed vote (WS-L.3.2a).
-  if (binding.actionType === 'proposal_sign') {
-    const proposalId = input.typedDataMessage['proposalId'];
-    if (proposalId !== undefined && proposalId.length > 0) {
-      await deps.signatures.insert({
-        signatureId: deps.uuid(),
-        proposalId,
-        userId: input.userId,
-        walletAccountId: input.walletAccountId,
-        signatureType: verified.walletType === 'contract' ? 'eip712_eip1271' : 'eip712_ecdsa',
-        typedDataHash,
-        signatureRef: record.actionRecordId,
-        weightSnapshot: null,
-        eligibilityReason: 'proposal_sign action submission (WS-L.3.2a)',
-        createdAt: nowIso,
-      });
-    }
-  }
-
+  // The governance-signature ledger row for a `proposal_sign` is recorded by
+  // `forwardToGateway` ONLY when the gateway ACCEPTS — not here — so a declined
+  // action never leaves a live signature that would wrongly block unlink / count
+  // in the tally and would block a re-signed retry via the unique (proposal,
+  // wallet) key.  This also covers the outage path: a `submitted` record's
+  // scheduler retry runs the same `forwardToGateway` and records on acceptance
+  // (WS-L.3.2a).
   const outcome = await forwardToGateway(deps, gateway, record);
   return {
     ok: true,
@@ -301,9 +285,40 @@ export async function submitAction(
   };
 }
 
+/**
+ * Record the governance-signature ledger row for an ACCEPTED `proposal_sign`.
+ * Called from `forwardToGateway` (the sole acceptance point, shared by the
+ * submit path AND the scheduler retry) so a declined/never-accepted action
+ * leaves NO signature — the unique (proposal, wallet) key then lets a re-signed
+ * retry insert cleanly (WS-L.3.2a).  Insert-once: a duplicate is a no-op.
+ */
+async function recordAcceptedProposalSignature(
+  deps: Pick<SubmissionDeps, 'signatures' | 'uuid' | 'now'>,
+  record: KnomosisActionRecordEntity,
+): Promise<void> {
+  if (record.actionType !== 'proposal_sign') return;
+  const proposalId = record.signedAction.message['proposalId'];
+  if (proposalId === undefined || proposalId.length === 0) return;
+  // The signature already passed low-s verification before submit, so a 65-byte
+  // ECDSA blob is `ok`; anything else is an EIP-1271 contract signature.
+  const isEcdsa = classifyEcdsaSignature(record.signedAction.signature) === 'ok';
+  await deps.signatures.insert({
+    signatureId: deps.uuid(),
+    proposalId,
+    userId: record.actorUserId,
+    walletAccountId: record.actorWalletAccountId,
+    signatureType: isEcdsa ? 'eip712_ecdsa' : 'eip712_eip1271',
+    typedDataHash: record.typedDataHash,
+    signatureRef: record.actionRecordId,
+    weightSnapshot: null,
+    eligibilityReason: 'proposal_sign accepted by the gateway (WS-L.3.2a)',
+    createdAt: new Date(deps.now()).toISOString(),
+  });
+}
+
 /** Forward one record to the gateway and apply the verdict (idempotent). */
 export async function forwardToGateway(
-  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log'>,
+  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log' | 'signatures' | 'uuid'>,
   gateway: KnomosisGateway,
   record: KnomosisActionRecordEntity,
 ): Promise<{
@@ -327,6 +342,8 @@ export async function forwardToGateway(
   if (result.kind === 'verdict') {
     if (result.verdict.accepted) {
       await applyTransition(deps, record, 'accepted', null);
+      // Record the governance signature ONLY now — on acceptance (WS-L.3.2a).
+      await recordAcceptedProposalSignature(deps, record);
       return { state: 'accepted', reasonCode: null, humanMessage: null };
     }
     const reason = result.verdict.reason ?? result.verdict.verdict;
@@ -383,7 +400,10 @@ export async function applyTransition(
 
 /** Scheduler sweep: re-forward `submitted` records after a gateway outage. */
 export async function resubmitPendingActions(
-  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log'> & {
+  // `signatures` + `uuid` flow through to `forwardToGateway` so an outage-stuck
+  // `proposal_sign` that the retry finally gets ACCEPTED records its signature
+  // then — the submit path records nothing until acceptance (WS-L.3.2a).
+  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log' | 'signatures' | 'uuid'> & {
     gateway: () => KnomosisGateway | null;
     /** WS-L.3.5c: skip forwarding a record whose submission is paused — the
      *  crypto flag is off, or the `action_submission` OR the action-type-specific

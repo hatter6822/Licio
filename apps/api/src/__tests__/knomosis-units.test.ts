@@ -266,6 +266,63 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     expect(withReceipt.mismatched).toBe(0);
   });
 
+  it('reconcileDeployment flags a mapped actor with a gateway balance but NO deposit (R6-5)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const walletAccountId = crypto.randomUUID();
+    // A wallet→actor mapping with NO finalized deposit at all…
+    await fixture.knomosis.actorMappings.put({
+      walletAccountId,
+      deploymentId,
+      actorId: 'ghost-actor',
+      createdAt: new Date().toISOString(),
+    });
+    // …but the gateway reports a nonzero balance for that actor (indexer bug /
+    // out-of-band credit).  The expected-ZERO product ledger must still be
+    // compared, so this surfaces as a divergence + blocks treasury expansion.
+    fixture.gateway.setBalance('ghost-actor', 'USDC', '500');
+    const summary = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(summary.mismatched).toBeGreaterThanOrEqual(1);
+    const gate = await canExpandTreasury(fixture.knomosis, deploymentId);
+    expect(gate.allowed).toBe(false);
+  });
+
+  it('forwardToGateway records a proposal_sign signature ONLY on gateway acceptance (R6-3)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { forwardToGateway } = await import('../knomosis/submission.js');
+    const deps = {
+      actions: fixture.knomosis.actions,
+      signatures: fixture.knomosis.proposalSignatures,
+      uuid: fixture.knomosis.uuid,
+      now: fixture.knomosis.now,
+      log: fixture.knomosis.log,
+    };
+    const proposalId = crypto.randomUUID();
+    const walletAccountId = crypto.randomUUID();
+    const mk = (typedDataHash: string) =>
+      baseAction({
+        actionType: 'proposal_sign',
+        submissionState: 'submitted',
+        actorWalletAccountId: walletAccountId,
+        typedDataHash,
+        signedAction: { message: { proposalId }, signature: `0x${'ab'.repeat(65)}` },
+      });
+    // Gateway DECLINES ⇒ no signature is left behind…
+    const declined = mk('0xno');
+    await fixture.knomosis.actions.insert(declined);
+    fixture.gateway.decline('0xno');
+    expect((await forwardToGateway(deps, fixture.gateway, declined)).state).toBe('failed');
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(0);
+    // …so a re-signed retry (same proposal/wallet) is not blocked by the unique
+    // key and records once it is ACCEPTED.
+    const accepted = mk('0xyes');
+    await fixture.knomosis.actions.insert(accepted);
+    expect((await forwardToGateway(deps, fixture.gateway, accepted)).state).toBe('accepted');
+    const sigs = await fixture.knomosis.proposalSignatures.listByProposal(proposalId);
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0]).toMatchObject({ proposalId, walletAccountId });
+  });
+
   it('countQualifyingByRoom counts only simulated PRACTICE, not meta rows (WS-L review fix)', async () => {
     const store = new InMemoryGovernanceAuditStore();
     const roomId = crypto.randomUUID();
@@ -450,6 +507,8 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
     const count = await resubmitPendingActions(
       {
         actions: fixture.knomosis.actions,
+        signatures: fixture.knomosis.proposalSignatures,
+        uuid: fixture.knomosis.uuid,
         gateway: fixture.knomosis.gateway,
         now: fixture.knomosis.now,
         log: fixture.knomosis.log,
@@ -519,6 +578,8 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     const { forwardToGateway } = await import('../knomosis/submission.js');
     const deps = {
       actions: fixture.knomosis.actions,
+      signatures: fixture.knomosis.proposalSignatures,
+      uuid: fixture.knomosis.uuid,
       now: fixture.knomosis.now,
       log: fixture.knomosis.log,
     };

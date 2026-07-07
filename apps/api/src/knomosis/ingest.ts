@@ -172,34 +172,25 @@ export async function ingestGatewayEvents(
     }
   }
 
-  let ingested = 0;
-  for (const event of batch) {
-    const known = (KNOWN_GATEWAY_EVENT_TYPES as readonly string[]).includes(event.type);
-    if (!known) {
-      // FAIL CLOSED on an unknown event affecting a tracked deployment: halt
-      // this deployment's reconciliation into an unsupported-version state.
-      await deps.reconciliation.append({
-        resultId: deps.uuid(),
-        deploymentId,
-        entityType: 'action',
-        entityRef: `event:${event.seq}.${event.index}`,
-        outcome: 'halted_unsupported_version',
-        severity: 'critical',
-        details: { kind: 'unknown_event_type', event_type: event.type, seq: event.seq },
-        lowWatermarkSeq: event.seq,
-        createdAt: new Date(deps.now()).toISOString(),
-      });
-      deps.alert('knomosis.ingest.unsupported_event', {
-        deployment_id: deploymentId,
-        event_type: event.type,
-      });
-      return {
-        kind: 'halted',
-        reason: 'unsupported_event',
-        detail: `unknown event type "${event.type}" at seq ${event.seq}`,
-      };
-    }
+  // Sort into (seq, index) order so a seq group is contiguous, then find the
+  // FIRST unsupported event.  We must store NOTHING from its seq group or beyond
+  // — a seq-only cursor cannot page within a seq, so storing an EARLIER
+  // supported index of the same seq would advance the cursor past the later
+  // unsupported index and PERMANENTLY drop it after the schema is updated.  Only
+  // COMPLETE supported groups strictly BELOW the halt seq are ingested (WS-L.3.3a).
+  const sorted = [...batch].sort((a, b) =>
+    a.seq === b.seq ? a.index - b.index : BigInt(a.seq) < BigInt(b.seq) ? -1 : 1,
+  );
+  const firstUnknown = sorted.find(
+    (e) => !(KNOWN_GATEWAY_EVENT_TYPES as readonly string[]).includes(e.type),
+  );
+  const toIngest =
+    firstUnknown === undefined
+      ? sorted
+      : sorted.filter((e) => BigInt(e.seq) < BigInt(firstUnknown.seq));
 
+  let ingested = 0;
+  for (const event of toIngest) {
     // Idempotent ingestion (per-source unique key): a replayed event is a
     // no-op, so SSE resume / cursor overlap can never double-apply.
     const { record: stored, inserted } = await deps.events.ingest({
@@ -247,6 +238,37 @@ export async function ingestGatewayEvents(
       await writeReceipts(deps, updated);
       await deps.notifyActor(updated.actorUserId, updated.actionRecordId, updated.submissionState);
     }
+  }
+
+  // After ingesting the complete supported groups below it, HALT on the first
+  // unsupported event: fail closed into an unsupported-version state so an
+  // operator updates the schema and clears the halt.  The cursor sits just
+  // below `firstUnknown.seq`, so the whole group is re-fetched intact.
+  if (firstUnknown !== undefined) {
+    await deps.reconciliation.append({
+      resultId: deps.uuid(),
+      deploymentId,
+      entityType: 'action',
+      entityRef: `event:${firstUnknown.seq}.${firstUnknown.index}`,
+      outcome: 'halted_unsupported_version',
+      severity: 'critical',
+      details: {
+        kind: 'unknown_event_type',
+        event_type: firstUnknown.type,
+        seq: firstUnknown.seq,
+      },
+      lowWatermarkSeq: firstUnknown.seq,
+      createdAt: new Date(deps.now()).toISOString(),
+    });
+    deps.alert('knomosis.ingest.unsupported_event', {
+      deployment_id: deploymentId,
+      event_type: firstUnknown.type,
+    });
+    return {
+      kind: 'halted',
+      reason: 'unsupported_event',
+      detail: `unknown event type "${firstUnknown.type}" at seq ${firstUnknown.seq}`,
+    };
   }
   return { kind: 'ok', ingested, latestSeq: result.latestSeq };
 }

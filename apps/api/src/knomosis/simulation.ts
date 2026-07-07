@@ -17,6 +17,7 @@
 import { decCompare, decSum } from '@licio/governance';
 import {
   type ComprehensionQuestion,
+  type GovernanceMode,
   type GovernanceProposalCreate,
   SIM_TREASURY_MAX_ASSETS,
   SIMULATION_LABEL,
@@ -49,6 +50,10 @@ export interface SimulationDeps {
   /** Comprehension metric sink (§28.3 "transaction comprehension"). */
   metric: (name: string, value: number) => void;
   regionForUser: (userId: string) => Promise<string | null>;
+  /** The room's CURRENT governance mode (null when unknown/unavailable) — both
+   *  the manual execute route AND the background sweep must refuse to debit a
+   *  retired simulated treasury once the room leaves `simulated` (WS-L.4.1d). */
+  roomMode: (roomId: string) => Promise<GovernanceMode | null>;
 }
 
 export type SimulationError = {
@@ -565,6 +570,19 @@ export async function executeSimProposal(
   const proposal = await deps.proposals.getById(args.proposalId);
   if (proposal === null || proposal.roomId !== args.roomId) {
     return err(404, 'not_found', 'Resource not found');
+  }
+  // The room must STILL be in simulated mode: a room that transitioned out of
+  // `simulated` must never have its retired simulated treasury debited or an
+  // `execution_simulated` audit row appended — enforced HERE so BOTH the manual
+  // route and the background sweep are covered; fail-closed on an unknown mode
+  // (WS-L.4.1d).
+  const mode = await deps.roomMode(args.roomId);
+  if (mode !== 'simulated') {
+    return err(
+      409,
+      'mode_invalid',
+      'This room has left simulated mode; simulated execution is disabled.',
+    );
   }
   if (proposal.executionState !== 'timelocked' || proposal.votingState !== 'passed') {
     return err(409, 'not_executable', 'This proposal is not ready to execute.');

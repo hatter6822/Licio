@@ -18,6 +18,7 @@ import {
   castSimVote,
   createSimProposal,
   ensureSimTreasury,
+  executeElapsedSimProposals,
   executeSimProposal,
   simDeposit,
   submitComprehension,
@@ -257,6 +258,56 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       actorUserId: newcomer.userId,
     });
     expect(executed.ok).toBe(true);
+  });
+
+  it('the sweep + manual execute REFUSE a proposal whose room left simulated mode (R6-2)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const deps = simulationDeps(fixture.knomosis);
+    await ensureSimTreasury(deps, ROOM);
+    // A passed, timelock-ELAPSED simulated proposal ready to execute.
+    const proposalId = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'bounty',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      challengeState: 'none',
+      executionState: 'timelocked',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+    });
+    // The room transitions OUT of `simulated` before the timelock sweep runs.
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    // Manual execute is refused…
+    const manual = await executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null });
+    expect(manual.ok).toBe(false);
+    if (!manual.ok) expect(manual.code).toBe('mode_invalid');
+    // …and the background sweep executes NONE and never debits the retired treasury.
+    expect(await executeElapsedSimProposals(deps)).toBe(0);
+    const treasury = await ensureSimTreasury(deps, ROOM);
+    expect(treasury.balances['SIM-USDC']).toBe('10000000000'); // untouched
+    // No `execution_simulated` audit row was appended for the retired room.
+    const audit = await fixture.knomosis.governanceAudit.listByRoom(ROOM, 50);
+    expect(audit.some((e) => e.actionType === 'execution_simulated')).toBe(false);
   });
 
   it('leaves a quorum-reaching TIE open (crosses neither threshold, WS-L review fix)', async () => {

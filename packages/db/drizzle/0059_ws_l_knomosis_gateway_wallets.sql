@@ -36,6 +36,16 @@ ALTER TABLE "wallet"."wallet_accounts" ADD COLUMN "label" text;--> statement-bre
 ALTER TABLE "wallet"."wallet_accounts" ADD COLUMN "unlink_requested_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "wallet"."wallet_accounts" ADD COLUMN "unlink_finalize_after" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "wallet"."wallet_accounts" ADD COLUMN "unlinked_at" timestamp with time zone;--> statement-breakpoint
+-- Backfill the new lifecycle timestamps for wallets caught mid-unlink by this
+-- migration (WS-L.2.5b/d).  A `pending_unlink` row (legacy `unlink_requested`)
+-- with a NULL `unlink_finalize_after` is invisible to the finalization sweep
+-- (which selects `unlink_finalize_after <= now`) and would be STUCK forever, and
+-- a `finalized` row (legacy `unlinked`) with a NULL `unlinked_at` reads as
+-- "unlinked at epoch 0" and BYPASSES the relink cooldown.  Anchor both to the
+-- migration instant (conservative: pending rows finalize on the next sweep; the
+-- cooldown runs from migration time).
+UPDATE "wallet"."wallet_accounts" SET "unlink_requested_at" = now(), "unlink_finalize_after" = now() WHERE "unlink_state" = 'pending_unlink' AND "unlink_finalize_after" IS NULL;--> statement-breakpoint
+UPDATE "wallet"."wallet_accounts" SET "unlinked_at" = now() WHERE "unlink_state" = 'finalized' AND "unlinked_at" IS NULL;--> statement-breakpoint
 -- Part 2 — WS-L audit taxonomy additions (shared/schemas/audit.ts mirror).
 ALTER TYPE "public"."audit_event_type" ADD VALUE IF NOT EXISTS 'wallet_label_change';--> statement-breakpoint
 ALTER TYPE "public"."audit_event_type" ADD VALUE IF NOT EXISTS 'knomosis_killswitch_change';--> statement-breakpoint

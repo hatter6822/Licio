@@ -84,6 +84,8 @@ export async function runKnomosisTick(
       await resubmitPendingActions(
         {
           actions: services.actions,
+          signatures: services.proposalSignatures,
+          uuid: services.uuid,
           now: services.now,
           log: services.log,
           gateway: services.gateway,
