@@ -70,7 +70,14 @@ export const knomosisDeployments = knomosisSchema.table(
     status: knomosisDeploymentStatusEnum('status').notNull().default('provisioning'),
     createdAt: tz('created_at').notNull().defaultNow(),
   },
-  (t) => [uniqueIndex('knomosis_deployment_env_chain_idx').on(t.environment, t.chainId)],
+  // (environment, chain_id) is unique among ACTIVE-lifecycle rows only: a
+  // RETIRED row (a pin the file rotated away) must not block the replacement pin
+  // for the same environment/chain from syncing in (WS-L.1.1a-1).
+  (t) => [
+    uniqueIndex('knomosis_deployment_env_chain_idx')
+      .on(t.environment, t.chainId)
+      .where(sql`status <> 'retired'`),
+  ],
 );
 export type KnomosisDeploymentRow = typeof knomosisDeployments.$inferSelect;
 

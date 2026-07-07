@@ -178,28 +178,29 @@ export async function linkWallet(
         );
       }
       // Reactivating a finalized wallet counts toward the cap exactly like a
-      // fresh link — the finalized wallet is NOT in the active set, so without
-      // this a user could unlink one, link a replacement, then re-link the old
-      // one to exceed maxWalletsPerUser (WS-L.2.5a).  Same query the new-link
-      // path uses, so the cap semantics stay symmetric.
-      const activeForRelink = (await deps.wallets.listByUser(args.userId, false)).length;
-      if (activeForRelink >= config.maxWalletsPerUser) {
+      // fresh link.  The count + state change run ATOMICALLY under the SAME
+      // per-user lock as the new-link path, so two concurrent relinks can't both
+      // observe "under cap" and exceed maxWalletsPerUser (WS-L.2.5a).
+      const reactivated = await deps.wallets.reactivateIfUnderCap(
+        {
+          ...existing,
+          unlinkState: 'active',
+          riskState: 'pending', // fail-closed: reassess on re-link
+          linkedAt: nowIso,
+          unlinkRequestedAt: null,
+          unlinkFinalizeAfter: null,
+          unlinkedAt: null,
+          ...(args.label !== undefined ? { label: args.label } : {}),
+        },
+        config.maxWalletsPerUser,
+      );
+      if (reactivated === 'cap_exceeded') {
         return err(
           429,
           'wallet_limit',
           `You can link at most ${config.maxWalletsPerUser} wallets.`,
         );
       }
-      const reactivated = await deps.wallets.update({
-        ...existing,
-        unlinkState: 'active',
-        riskState: 'pending', // fail-closed: reassess on re-link
-        linkedAt: nowIso,
-        unlinkRequestedAt: null,
-        unlinkFinalizeAfter: null,
-        unlinkedAt: null,
-        ...(args.label !== undefined ? { label: args.label } : {}),
-      });
       await deps.audit.append({
         actorUserId: args.userId,
         eventType: 'wallet_link',
@@ -395,11 +396,18 @@ export async function finalizeElapsedUnlinks(
       });
       continue;
     }
-    await deps.wallets.update({
-      ...wallet,
-      unlinkState: 'finalized',
-      unlinkedAt: nowIso,
-    });
+    // CONDITIONAL finalize: if a re-link cancelled the unlink between the list and
+    // now, the CAS matches nothing and we skip — never clobbering the reactivated
+    // wallet back to `finalized` (WS-L.2.5b).
+    const applied = await deps.wallets.finalizeIfStillPending(
+      wallet.walletAccountId,
+      wallet.unlinkFinalizeAfter,
+      nowIso,
+    );
+    if (!applied) {
+      deps.log('knomosis.wallet.finalize_skipped_relinked', { wallet: wallet.addressTruncated });
+      continue;
+    }
     await deps.audit.append({
       actorUserId: null,
       eventType: 'wallet_unlink',

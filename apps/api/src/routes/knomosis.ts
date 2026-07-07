@@ -81,10 +81,12 @@ function preflightDeps(services: KnomosisServices): PreflightDeps | null {
   };
 }
 
-function submissionDeps(services: KnomosisServices): SubmissionDeps {
+function submissionDeps(services: KnomosisServices): SubmissionDeps | null {
+  if (services.rooms === null) return null; // governance port unwired ⇒ fail closed
   return {
     actions: services.actions,
     wallets: services.wallets,
+    rooms: services.rooms,
     signatures: services.proposalSignatures,
     nonces: services.nonces,
     gateway: services.gateway,
@@ -244,7 +246,11 @@ export function createKnomosisRoutes() {
               );
             }
           }
-          const outcome = await submitAction(submissionDeps(services), {
+          const subDeps = submissionDeps(services);
+          if (subDeps === null) {
+            return c.json(deny('unavailable', 'Governance data is unavailable.'), 503);
+          }
+          const outcome = await submitAction(subDeps, {
             userId: auth.userId,
             preflightToken: body.preflight_token,
             idempotencyKey: body.idempotency_key,
@@ -256,17 +262,32 @@ export function createKnomosisRoutes() {
             signature: body.signature,
           });
           if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
-          // Record the wallet→actor mapping for the standing reads (G1 seam) ONLY
-          // from a validated NEW submission — never an idempotency-key REPLAY,
-          // whose body was not re-validated (a replay with a different owned wallet
-          // + arbitrary actor must not remap the standing lookup).
-          const actor = body.typed_data_message['actor'];
-          if (!outcome.replayed && actor !== undefined) {
-            await ensureActorMapping(services, {
-              walletAccountId: body.wallet_account_id,
-              deploymentId: body.deployment_id,
-              actorLower: actor.toLowerCase(),
-            });
+          // Record the wallet→actor mapping for the standing reads (G1 seam).  On a
+          // validated NEW submission, use the request body.  On an idempotency-key
+          // REPLAY, NEVER trust the unvalidated replay body (a different owned
+          // wallet + arbitrary actor must not remap standing) — instead rebuild the
+          // mapping from the STORED (validated) signed action, so a mapping lost to
+          // an error/crash on the original submit is restored (ensureActorMapping is
+          // idempotent, so this never double-writes).
+          if (!outcome.replayed) {
+            const actor = body.typed_data_message['actor'];
+            if (actor !== undefined) {
+              await ensureActorMapping(services, {
+                walletAccountId: body.wallet_account_id,
+                deploymentId: body.deployment_id,
+                actorLower: actor.toLowerCase(),
+              });
+            }
+          } else {
+            const stored = await services.actions.getById(outcome.actionRecordId);
+            const storedActor = stored?.signedAction.message['actor'];
+            if (stored != null && typeof storedActor === 'string') {
+              await ensureActorMapping(services, {
+                walletAccountId: stored.actorWalletAccountId,
+                deploymentId: stored.deploymentId,
+                actorLower: storedActor.toLowerCase(),
+              });
+            }
           }
           return c.json(
             knomosisSubmitResponseSchema.parse({

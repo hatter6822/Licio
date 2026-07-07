@@ -174,6 +174,30 @@ describe('WS-L wiring ports over real in-memory services', () => {
     ).toBe(true);
   });
 
+  it('RETIRES a DISPLACED deployment (rotated id, same env/chain) then upserts the pin (R10-7)', async () => {
+    const fixture = await freshKnomosisServices();
+    const pinnedLocal = (await fixture.knomosis.deployments.list()).find(
+      (d) => d.environment === 'local',
+    );
+    if (pinnedLocal === undefined) throw new Error('no pinned local deployment');
+    // A DISPLACED row: SAME environment/chain as the pinned local, but a ROTATED id.
+    const displacedId = randomUUID();
+    await fixture.knomosis.deployments.upsert({
+      ...pinnedLocal,
+      deploymentId: displacedId,
+      runtimeEndpointRef: 'old-rotated-away',
+      status: 'active',
+    });
+    await syncPinnedDeployments(fixture.knomosis);
+    const list = await fixture.knomosis.deployments.list();
+    // The rotated-away row is retired FIRST (freeing the active-only env/chain
+    // uniqueness), and the current pin re-syncs active.
+    expect(list.find((d) => d.deploymentId === displacedId)?.status).toBe('retired');
+    expect(list.find((d) => d.deploymentId === pinnedLocal.deploymentId)?.status).not.toBe(
+      'retired',
+    );
+  });
+
   it('a scheduler tick runs every task without throwing', async () => {
     const fixture = await freshKnomosisServices();
     const errors: string[] = [];

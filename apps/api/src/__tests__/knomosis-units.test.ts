@@ -169,14 +169,14 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
       ],
       { USDC: '120' }, // gateway shows 120; product expects 150
       '10',
-      new Set(),
+      new Map(),
     );
     expect(divergences).toHaveLength(1);
     expect(divergences[0]).toMatchObject({ asset: 'USDC', expected: '150', actual: '120' });
     expect(divergences[0]?.severity).toBe('critical'); // |30| ≥ 10
     // Agreement ⇒ no divergence.
     expect(
-      compareActorLedger([{ asset: 'USDC', amount: '5' }], { USDC: '5' }, '1', new Set()),
+      compareActorLedger([{ asset: 'USDC', amount: '5' }], { USDC: '5' }, '1', new Map()),
     ).toEqual([]);
   });
 
@@ -190,11 +190,30 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
       ],
       { USDC: '90', DAI: '40' }, // both short by 10 / 60
       '10',
-      new Set(['USDC']),
+      new Map([['USDC', '100']]), // a 100-unit pending deposit covers USDC's 10 shortfall
     );
     const bySeverity = Object.fromEntries(divergences.map((d) => [d.asset, d.severity]));
     expect(bySeverity['USDC']).toBe('informational'); // in-flight ⇒ downgraded
     expect(bySeverity['DAI']).toBe('critical'); // unrelated ⇒ NOT downgraded
+  });
+
+  it('compareActorLedger downgrade is BOUNDED by the in-flight amount (R10-4)', () => {
+    // A tiny 1-unit pending movement must NOT explain a huge unrelated gap.
+    const divergences = compareActorLedger(
+      [{ asset: 'USDC', amount: '1000' }],
+      { USDC: '0' }, // short by 1000
+      '10',
+      new Map([['USDC', '1']]), // only 1 unit is in flight
+    );
+    expect(divergences[0]?.severity).toBe('critical'); // 1000 > 1 ⇒ still critical
+    // A shortfall WITHIN the in-flight amount IS explained.
+    const explained = compareActorLedger(
+      [{ asset: 'USDC', amount: '1000' }],
+      { USDC: '995' }, // short by 5
+      '1',
+      new Map([['USDC', '10']]), // 10 in flight covers the 5 shortfall
+    );
+    expect(explained[0]?.severity).toBe('informational');
   });
 
   it('reconcileDeployment halts when an unresolved unsupported-version result exists', async () => {
@@ -738,6 +757,14 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
   const s = (fixture: Awaited<ReturnType<typeof freshKnomosisServices>>) => ({
     actions: fixture.knomosis.actions,
     wallets: fixture.knomosis.wallets,
+    // These fail-closed tests reject BEFORE the room revalidation; a fail-closed
+    // stub suffices when the fixture has no rooms port wired.
+    rooms: fixture.knomosis.rooms ?? {
+      roomGovernance: async () => null,
+      isMember: async () => false,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => false,
+    },
     signatures: fixture.knomosis.proposalSignatures,
     nonces: fixture.knomosis.nonces,
     gateway: fixture.knomosis.gateway,
@@ -757,10 +784,21 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
       preflightToken: 'nonexistent',
       idempotencyKey: crypto.randomUUID(),
       actionType: 'treasury_deposit',
-      roomId: 'r1',
+      roomId: '33333333-3333-4333-8333-333333333333',
       deploymentId: LOCAL_DEPLOYMENT.deployment_id,
       walletAccountId: 'w1',
-      typedDataMessage: {},
+      // A VALID message so the hash computes and the flow reaches the (missing)
+      // preflight-token check rather than failing message validation first.
+      typedDataMessage: {
+        roomId: '33333333-3333-4333-8333-333333333333',
+        treasuryId: '44444444-4444-4444-8444-444444444444',
+        asset: 'USDC',
+        amount: '1000000',
+        actor: '0x0000000000000000000000000000000000000001',
+        nonce: '1',
+        expiration: String(Math.floor(Date.now() / 1000) + 600),
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      },
       signature: '0x',
     });
     expect(result.ok).toBe(false);
@@ -1099,6 +1137,85 @@ describe('in-memory store adapters + services getter', () => {
     // At the cap ⇒ rejected (the count + insert are one atomic step).
     expect(await store.insertIfUnderCap(mk(2), 2)).toBe('cap_exceeded');
     expect(await store.listByUser(userId, false)).toHaveLength(2);
+  });
+
+  it('reactivateIfUnderCap shares the cap with the new-link path (R10-3)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const userId = crypto.randomUUID();
+    const base = (over: Record<string, unknown>) => ({
+      walletAccountId: crypto.randomUUID(),
+      userId,
+      addressHashHex: `dd${crypto.randomUUID().replace(/-/g, '')}`.slice(0, 64),
+      addressTruncated: '0x00…00',
+      chainId: 31337,
+      walletType: 'eoa' as const,
+      unlinkState: 'active' as const,
+      riskState: 'pending' as const,
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+      ...over,
+    });
+    await store.insert(base({}));
+    await store.insert(base({})); // 2 active — at the cap of 2
+    const finalized = base({ unlinkState: 'finalized' as const });
+    await store.insert(finalized);
+    // Reactivating the finalized wallet would make 3 active ⇒ blocked by the SAME cap.
+    expect(await store.reactivateIfUnderCap({ ...finalized, unlinkState: 'active' }, 2)).toBe(
+      'cap_exceeded',
+    );
+    expect((await store.getById(finalized.walletAccountId))?.unlinkState).toBe('finalized');
+  });
+
+  it('finalizeIfStillPending CAS never clobbers a re-linked wallet (R10-6)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const finalizeAfter = '2026-01-01T00:00:00.000Z';
+    const wallet = {
+      walletAccountId: crypto.randomUUID(),
+      userId: crypto.randomUUID(),
+      addressHashHex: 'e'.repeat(64),
+      addressTruncated: '0x0…0',
+      chainId: 31337,
+      walletType: 'eoa' as const,
+      unlinkState: 'pending_unlink' as const,
+      riskState: 'normal' as const,
+      label: null,
+      linkedAt: '2026-01-01T00:00:00.000Z',
+      lastUsedAt: null,
+      unlinkRequestedAt: '2026-01-01T00:00:00.000Z',
+      unlinkFinalizeAfter: finalizeAfter,
+      unlinkedAt: null,
+    };
+    await store.insert(wallet);
+    // A relink CANCELS the unlink (active, finalize timestamp cleared) between the
+    // sweep's list and this write.
+    await store.update({ ...wallet, unlinkState: 'active', unlinkFinalizeAfter: null });
+    // The CAS (still-pending + same timestamp) matches nothing ⇒ not clobbered.
+    expect(
+      await store.finalizeIfStillPending(
+        wallet.walletAccountId,
+        finalizeAfter,
+        '2026-01-02T00:00:00.000Z',
+      ),
+    ).toBe(false);
+    expect((await store.getById(wallet.walletAccountId))?.unlinkState).toBe('active');
+    // A genuinely still-pending wallet DOES finalize.
+    await store.update({
+      ...wallet,
+      unlinkState: 'pending_unlink',
+      unlinkFinalizeAfter: finalizeAfter,
+    });
+    expect(
+      await store.finalizeIfStillPending(
+        wallet.walletAccountId,
+        finalizeAfter,
+        '2026-01-02T00:00:00.000Z',
+      ),
+    ).toBe(true);
+    expect((await store.getById(wallet.walletAccountId))?.unlinkState).toBe('finalized');
   });
 
   it('the abuse limiter enforces a sliding window', async () => {

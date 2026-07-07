@@ -172,21 +172,51 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
     return rows.map(mapWallet);
   }
 
+  #updateSet(record: FinancialWalletRecord) {
+    return {
+      unlinkState: record.unlinkState,
+      riskState: record.riskState,
+      label: record.label,
+      linkedAt: new Date(record.linkedAt),
+      lastUsedAt: dateOrNull(record.lastUsedAt),
+      unlinkRequestedAt: dateOrNull(record.unlinkRequestedAt),
+      unlinkFinalizeAfter: dateOrNull(record.unlinkFinalizeAfter),
+      unlinkedAt: dateOrNull(record.unlinkedAt),
+    };
+  }
+
   async update(record: FinancialWalletRecord): Promise<FinancialWalletRecord> {
     await this.db
       .update(walletAccounts)
-      .set({
-        unlinkState: record.unlinkState,
-        riskState: record.riskState,
-        label: record.label,
-        linkedAt: new Date(record.linkedAt),
-        lastUsedAt: dateOrNull(record.lastUsedAt),
-        unlinkRequestedAt: dateOrNull(record.unlinkRequestedAt),
-        unlinkFinalizeAfter: dateOrNull(record.unlinkFinalizeAfter),
-        unlinkedAt: dateOrNull(record.unlinkedAt),
-      })
+      .set(this.#updateSet(record))
       .where(eq(walletAccounts.walletAccountId, record.walletAccountId));
     return record;
+  }
+
+  async reactivateIfUnderCap(
+    record: FinancialWalletRecord,
+    maxActive: number,
+  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
+    return this.db.transaction(async (tx) => {
+      // SAME per-user advisory lock as insertIfUnderCap (namespace 2079), so a
+      // relink and a new-link for one user serialize against the shared cap.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${record.userId}), 2079)`);
+      const counted = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(walletAccounts)
+        .where(
+          and(
+            eq(walletAccounts.userId, record.userId),
+            ne(walletAccounts.unlinkState, 'finalized'),
+          ),
+        );
+      if ((counted[0]?.n ?? 0) >= maxActive) return 'cap_exceeded' as const;
+      await tx
+        .update(walletAccounts)
+        .set(this.#updateSet(record))
+        .where(eq(walletAccounts.walletAccountId, record.walletAccountId));
+      return record;
+    });
   }
 
   async listPendingFinalization(nowIso: string): Promise<FinancialWalletRecord[]> {
@@ -200,6 +230,30 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
         ),
       );
     return rows.map(mapWallet);
+  }
+
+  async finalizeIfStillPending(
+    walletAccountId: string,
+    expectedFinalizeAfter: string | null,
+    unlinkedAtIso: string,
+  ): Promise<boolean> {
+    // CAS: finalize ONLY if the row is still pending with the SAME finalize
+    // timestamp — a re-link that cancelled the unlink flips the state and clears
+    // the timestamp, so it matches 0 rows and is never clobbered (WS-L.2.5b).
+    const rows = await this.db
+      .update(walletAccounts)
+      .set({ unlinkState: 'finalized', unlinkedAt: new Date(unlinkedAtIso) })
+      .where(
+        and(
+          eq(walletAccounts.walletAccountId, walletAccountId),
+          eq(walletAccounts.unlinkState, 'pending_unlink'),
+          expectedFinalizeAfter === null
+            ? sql`${walletAccounts.unlinkFinalizeAfter} IS NULL`
+            : eq(walletAccounts.unlinkFinalizeAfter, new Date(expectedFinalizeAfter)),
+        ),
+      )
+      .returning({ walletAccountId: walletAccounts.walletAccountId });
+    return rows.length > 0;
   }
 
   async purgeByUser(userId: string): Promise<number> {

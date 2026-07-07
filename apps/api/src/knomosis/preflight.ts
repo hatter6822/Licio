@@ -108,12 +108,13 @@ const REAL_FUNDS_ENVIRONMENTS: ReadonlySet<KnomosisEnvironment> = new Set([
 
 /** Governance modes permitted to submit REAL signed actions, per deployment
  *  environment (simulated/ordinary rooms never reach the gateway). */
-const MODE_ENVIRONMENTS: Readonly<Partial<Record<GovernanceMode, readonly KnomosisEnvironment[]>>> =
-  {
-    testnet: ['local', 'testnet'],
-    capped_production: ['capped_production'],
-    mature_production: ['mature_production'],
-  };
+export const MODE_ENVIRONMENTS: Readonly<
+  Partial<Record<GovernanceMode, readonly KnomosisEnvironment[]>>
+> = {
+  testnet: ['local', 'testnet'],
+  capped_production: ['capped_production'],
+  mature_production: ['mature_production'],
+};
 
 /** Action types that move funds (sanctions screening applies, WS-L.3.1b). */
 export const FUND_TRANSFER_ACTIONS: ReadonlySet<KnomosisSignedActionType> = new Set([

@@ -229,12 +229,29 @@ export interface FinancialWalletStore {
     record: FinancialWalletRecord,
     maxActive: number,
   ): Promise<FinancialWalletRecord | 'cap_exceeded'>;
+  /** REACTIVATE a finalized wallet only if the user is still below `maxActive` —
+   *  count + update under the SAME per-user lock as `insertIfUnderCap`, so a
+   *  concurrent relink can't exceed the cap either (WS-L.2.5a).  Returns
+   *  'cap_exceeded' at the cap. */
+  reactivateIfUnderCap(
+    record: FinancialWalletRecord,
+    maxActive: number,
+  ): Promise<FinancialWalletRecord | 'cap_exceeded'>;
   getById(walletAccountId: string): Promise<FinancialWalletRecord | null>;
   getByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null>;
   listByUser(userId: string, includeUnlinked: boolean): Promise<FinancialWalletRecord[]>;
   update(record: FinancialWalletRecord): Promise<FinancialWalletRecord>;
   /** Wallets whose cooling-off elapsed (unlink finalization sweep, WS-L.2.5b). */
   listPendingFinalization(nowIso: string): Promise<FinancialWalletRecord[]>;
+  /** CONDITIONALLY finalize an elapsed unlink: set `finalized` ONLY if the row is
+   *  STILL `pending_unlink` with the SAME `unlinkFinalizeAfter` — so a re-link that
+   *  cancelled the unlink between the sweep's list and this write is not clobbered
+   *  (WS-L.2.5b).  Returns false when the row changed. */
+  finalizeIfStillPending(
+    walletAccountId: string,
+    expectedFinalizeAfter: string | null,
+    unlinkedAtIso: string,
+  ): Promise<boolean>;
   /** WS-L data-rights: hard-delete every wallet row for a user on account
    *  deletion; returns the rows removed. */
   purgeByUser(userId: string): Promise<number>;
@@ -534,6 +551,20 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
     return this.insert(record);
   }
 
+  async reactivateIfUnderCap(
+    record: FinancialWalletRecord,
+    maxActive: number,
+  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
+    // The wallet being reactivated is currently `finalized`, so it is not in the
+    // active count; single-threaded in memory ⇒ atomic.
+    const active = [...this.#rows.values()].filter(
+      (r) => r.userId === record.userId && r.unlinkState !== 'finalized',
+    ).length;
+    if (active >= maxActive) return 'cap_exceeded';
+    this.#rows.set(record.walletAccountId, { ...record });
+    return { ...record };
+  }
+
   async getById(walletAccountId: string): Promise<FinancialWalletRecord | null> {
     const row = this.#rows.get(walletAccountId);
     return row ? { ...row } : null;
@@ -568,6 +599,27 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
           r.unlinkFinalizeAfter <= nowIso,
       )
       .map((r) => ({ ...r }));
+  }
+
+  async finalizeIfStillPending(
+    walletAccountId: string,
+    expectedFinalizeAfter: string | null,
+    unlinkedAtIso: string,
+  ): Promise<boolean> {
+    const row = this.#rows.get(walletAccountId);
+    if (
+      row === undefined ||
+      row.unlinkState !== 'pending_unlink' ||
+      row.unlinkFinalizeAfter !== expectedFinalizeAfter
+    ) {
+      return false;
+    }
+    this.#rows.set(walletAccountId, {
+      ...row,
+      unlinkState: 'finalized',
+      unlinkedAt: unlinkedAtIso,
+    });
+    return true;
   }
 
   async purgeByUser(userId: string): Promise<number> {

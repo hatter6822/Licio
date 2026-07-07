@@ -302,16 +302,18 @@ async function reconcileActorLedgers(
     const ledger = ledgerByWallet.get(walletAccountId) ?? [];
     const read = await gateway.getBalances(mapping.actorId, null);
     if (read.kind !== 'ok') continue; // unavailable / not-modified: retry next tick
-    // Downgrade a timing shortfall ONLY for assets with an in-flight fund
-    // movement — an open proposal_sign/charter_update must not mask an unrelated
-    // asset's real divergence.
-    const inFlightAssets = new Set<string>();
+    // Sum the pending in-flight fund-movement AMOUNT per asset — a timing
+    // shortfall is only explained up to that amount; a larger gap stays critical,
+    // and an open proposal_sign/charter_update (no asset/amount) contributes 0.
+    const inFlightByAsset = new Map<string, string>();
     for (const open of await deps.actions.listOpenByWallet(walletAccountId)) {
       if (!FUND_MOVEMENT_ACTION_TYPES.has(open.actionType)) continue;
       const asset = open.signedAction.message['asset'];
-      if (typeof asset === 'string') inFlightAssets.add(asset);
+      const amount = open.signedAction.message['amount'];
+      if (typeof asset !== 'string' || typeof amount !== 'string') continue;
+      inFlightByAsset.set(asset, decSum([inFlightByAsset.get(asset) ?? '0', amount]));
     }
-    const divergences = compareActorLedger(ledger, read.value, threshold, inFlightAssets);
+    const divergences = compareActorLedger(ledger, read.value, threshold, inFlightByAsset);
     const divergentAssets = new Set(divergences.map((d) => d.asset));
     // The entityRef includes the DEPLOYMENT — `latestForEntity` keys on
     // (entityType, entityRef) with no deployment filter, so a shared wallet/asset
@@ -414,10 +416,11 @@ export function compareActorLedger(
   finalizedDeposits: readonly { asset: string; amount: string }[],
   gatewayBalances: Readonly<Record<string, string>>,
   criticalThreshold: string,
-  // The assets with an in-flight FUND MOVEMENT — a timing shortfall is only
-  // explained for THOSE assets.  An open non-balance action (proposal_sign,
-  // charter_update) must NOT downgrade an unrelated asset's divergence (WS-L.3.4b).
-  inFlightAssets: ReadonlySet<string>,
+  // The TOTAL in-flight fund-movement AMOUNT per asset.  A timing shortfall is
+  // only "explained" (downgraded to informational) up to that amount — a delta
+  // LARGER than the pending movement stays a real divergence, and an open
+  // non-balance action (proposal_sign/charter_update) contributes 0 (WS-L.3.4b).
+  inFlightByAsset: ReadonlyMap<string, string>,
 ): {
   asset: string;
   expected: string;
@@ -444,11 +447,17 @@ export function compareActorLedger(
     if (decCompare(expected, actual) === 0) continue;
     const magnitude =
       decCompare(expected, actual) > 0 ? subtract(expected, actual) : subtract(actual, expected);
+    // Downgrade to informational ONLY when the divergence magnitude is within the
+    // pending in-flight amount for this asset — a bigger unexplained gap is still
+    // a real divergence even if a smaller movement is in flight.
+    const inFlight = inFlightByAsset.get(asset) ?? '0';
+    const explainedByInFlight =
+      decCompare(magnitude, inFlight) <= 0 && decCompare(inFlight, '0') > 0;
     divergences.push({
       asset,
       expected,
       actual,
-      severity: classifyDivergence(magnitude, criticalThreshold, inFlightAssets.has(asset)),
+      severity: classifyDivergence(magnitude, criticalThreshold, explainedByInFlight),
     });
   }
   return divergences;

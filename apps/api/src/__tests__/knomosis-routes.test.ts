@@ -482,6 +482,60 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     expect(receipts.status).toBe(200);
   });
 
+  it('a REPLAYED submit rebuilds a lost actor mapping (R10-5)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkAndMapWallet(fixture, userId);
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const message = depositMessage(deploymentId);
+    const signature = await signedTypedData('treasury_deposit', message);
+    const idem = crypto.randomUUID();
+    const preflight = await post('/knomosis/actions/preflight', cookie, {
+      action_type: 'treasury_deposit',
+      room_id: ROOM,
+      deployment_id: deploymentId,
+      wallet_account_id: walletAccountId,
+      typed_data_message: message,
+      signature,
+    });
+    const pf = (await preflight.json()) as { preflight_token?: string };
+    const submitBody = {
+      idempotency_key: idem,
+      action_type: 'treasury_deposit',
+      room_id: ROOM,
+      deployment_id: deploymentId,
+      wallet_account_id: walletAccountId,
+      typed_data_message: message,
+      signature,
+    };
+    const submit1 = await post('/knomosis/actions/submit', cookie, {
+      ...submitBody,
+      preflight_token: pf.preflight_token,
+    });
+    expect(submit1.status).toBe(202);
+    // The mapping is LOST (e.g. the original ensureActorMapping side effect failed
+    // or the process died before it ran).
+    await fixture.knomosis.actorMappings.clear();
+    const gone = await get(`/knomosis/standing/${walletAccountId}/${deploymentId}`, cookie);
+    expect(gone.status).not.toBe(200); // no_actor_mapping
+    // A retry with the SAME idempotency key REPLAYS and rebuilds the mapping from
+    // the stored (validated) signed action.  The idempotency replay short-circuits
+    // BEFORE the preflight token is consumed, so any schema-valid token stands in.
+    const submit2 = await post('/knomosis/actions/submit', cookie, {
+      ...submitBody,
+      preflight_token: 'replayed-token-stand-in',
+    });
+    expect(submit2.status).toBe(202);
+    const standing = await get(`/knomosis/standing/${walletAccountId}/${deploymentId}`, cookie);
+    expect(standing.status).toBe(200);
+  });
+
   it('a preflight failure returns a typed reason (unknown action type)', async () => {
     const fixture = await freshKnomosisServices();
     fixture.knomosis.rooms = {

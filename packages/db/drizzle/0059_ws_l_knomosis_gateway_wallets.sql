@@ -87,7 +87,7 @@ CREATE TABLE "knomosis"."knomosis_deployment" (
 	CONSTRAINT "knomosis_deployment_commit_chk" CHECK ("pinned_knomosis_commit" ~ '^[0-9a-f]{40}$')
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "knomosis_deployment_env_chain_idx" ON "knomosis"."knomosis_deployment" USING btree ("environment", "chain_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "knomosis_deployment_env_chain_idx" ON "knomosis"."knomosis_deployment" USING btree ("environment", "chain_id") WHERE "status" <> 'retired';--> statement-breakpoint
 CREATE TABLE "knomosis"."on_chain_event" (
 	"event_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"deployment_id" uuid NOT NULL,

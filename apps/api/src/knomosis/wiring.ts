@@ -137,6 +137,19 @@ export function buildGovernanceKillSwitchGuards(services: KnomosisServices): {
  */
 export async function syncPinnedDeployments(services: KnomosisServices): Promise<number> {
   const pinnedIds = new Set(KNOMOSIS_PIN.deployments.map((p) => p.deployment_id));
+  // RETIRE first, THEN upsert.  A row no longer in the pin set is a split brain
+  // (the list/scheduler trust the DB's active rows while manifest/preflight trust
+  // the pin file).  Retiring BEFORE the pinned upserts also frees the active-only
+  // `(environment, chain_id)` uniqueness, so a pin that ROTATED a deployment id
+  // for the same environment/chain can insert its replacement without colliding
+  // with the still-present displaced row (WS-L.1.1a-1).
+  let retired = 0;
+  for (const existing of await services.deployments.list()) {
+    if (!pinnedIds.has(existing.deploymentId) && existing.status !== 'retired') {
+      await services.deployments.upsert({ ...existing, status: 'retired' });
+      retired += 1;
+    }
+  }
   let synced = 0;
   for (const pin of KNOMOSIS_PIN.deployments) {
     await services.deployments.upsert({
@@ -151,18 +164,6 @@ export async function syncPinnedDeployments(services: KnomosisServices): Promise
       createdAt: new Date(services.now()).toISOString(),
     });
     synced += 1;
-  }
-  // RETIRE any deployment row no longer in the pin set.  The deployment list +
-  // scheduler trust the DB's active rows while manifest/preflight trust the pin
-  // file, so an active row for an unpinned environment is a split brain — the
-  // scheduler would keep ingesting/reconciling it and users would see it live
-  // (WS-L.1.1a-1).
-  let retired = 0;
-  for (const existing of await services.deployments.list()) {
-    if (!pinnedIds.has(existing.deploymentId) && existing.status !== 'retired') {
-      await services.deployments.upsert({ ...existing, status: 'retired' });
-      retired += 1;
-    }
   }
   services.log('knomosis.config_sync.deployments', { synced, retired });
   return synced;

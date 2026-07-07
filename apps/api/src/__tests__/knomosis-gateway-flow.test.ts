@@ -52,9 +52,11 @@ function preflightDeps(fixture: KnomosisFixture): PreflightDeps {
 
 function submissionDeps(fixture: KnomosisFixture): SubmissionDeps {
   const s = fixture.knomosis;
+  if (s.rooms === null) throw new Error('rooms port required');
   return {
     actions: s.actions,
     wallets: s.wallets,
+    rooms: s.rooms,
     signatures: s.proposalSignatures,
     nonces: s.nonces,
     gateway: s.gateway,
@@ -722,6 +724,64 @@ describe('WS-L.3.2 submission + state machine', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('WALLET_NOT_ACTIVE');
+  });
+
+  it('REJECTS submit when the room FROZE after preflight (R10-2)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const { pre, req } = await preflightPass(fixture, userId, walletAccountId);
+    // The room FREEZES between preflight and submit.
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'frozen', name: 'Frozen Room' }),
+      isMember: async () => true,
+      isSteward: async () => true,
+      contentVisibleToUser: async () => true,
+    };
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: req.typedDataMessage,
+      signature: req.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('GOVERNANCE_FROZEN');
+  });
+
+  it('a same-token/same-key duplicate REPLAYS, never PREFLIGHT_EXPIRED (R10-1)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const { pre, req } = await preflightPass(fixture, userId, walletAccountId);
+    const idem = crypto.randomUUID();
+    // Two concurrent submits sharing the SAME preflight token, nonce, AND
+    // idempotency key (a true double-click).  The idempotency key is reserved
+    // before the single-use token is consumed, so the loser REPLAYS.
+    const submit = () =>
+      submitAction(submissionDeps(fixture), {
+        userId,
+        preflightToken: pre.preflight_token,
+        idempotencyKey: idem,
+        actionType: 'treasury_deposit',
+        roomId: ROOM,
+        deploymentId: DEPLOYMENT,
+        walletAccountId,
+        typedDataMessage: req.typedDataMessage,
+        signature: req.signature,
+      });
+    const [r1, r2] = await Promise.all([submit(), submit()]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    if (r1.ok && r2.ok) {
+      expect(r1.actionRecordId).toBe(r2.actionRecordId); // same reserved action
+      expect(r1.replayed).not.toBe(r2.replayed); // exactly one replay
+    }
+    expect(await fixture.knomosis.actions.listByRoom(ROOM, 100)).toHaveLength(1);
   });
 
   it('a proposal_sign submit DURABLY records a governance signature (WS-L.3.2a)', async () => {

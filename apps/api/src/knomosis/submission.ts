@@ -19,7 +19,13 @@ import type { EphemeralStore } from '../identity/ephemeral-store.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
-import { buildEip712Domain, consumePreflightToken, FUND_TRANSFER_ACTIONS } from './preflight.js';
+import {
+  buildEip712Domain,
+  consumePreflightToken,
+  FUND_TRANSFER_ACTIONS,
+  MODE_ENVIRONMENTS,
+  type RoomGovernancePort,
+} from './preflight.js';
 import {
   type ContractTypedDataVerifier,
   classifyEcdsaSignature,
@@ -65,6 +71,10 @@ export interface SubmissionDeps {
   /** Wallet store — RE-CHECKED at submit (ownership/active/risk) because the
    *  preflight gates can go stale in the minutes before submit (WS-L.3.2a). */
   wallets: FinancialWalletStore;
+  /** Room governance port — the MUTABLE governance_mode + role_permission gates
+   *  are RE-RUN at submit (a room can freeze / a role be revoked during the token
+   *  TTL) so a high-impact action never forwards on stale authorization. */
+  rooms: RoomGovernancePort;
   /** Durable governance-signature ledger — a `proposal_sign` submit is
    *  recorded here (insert-once per (proposal, wallet)) so the vote powers the
    *  tally + the unlink-obligation check, not just the on-chain action row. */
@@ -140,33 +150,8 @@ export async function submitAction(
     };
   }
 
-  // Single-use preflight token; its binding must match this submission exactly.
-  const binding = await consumePreflightToken(deps.ephemeral, input.preflightToken);
-  if (binding === null) {
-    return {
-      ok: false,
-      status: 401,
-      code: 'PREFLIGHT_EXPIRED',
-      message: 'The preflight token is missing, expired, or already used.',
-    };
-  }
-  if (
-    binding.userId !== input.userId ||
-    binding.roomId !== input.roomId ||
-    binding.deploymentId !== input.deploymentId ||
-    binding.walletAccountId !== input.walletAccountId ||
-    binding.actionType !== input.actionType
-  ) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'PAYLOAD_MISMATCH',
-      message: 'The submission does not match the preflighted action.',
-    };
-  }
-
-  // Recompute the typed-data hash from the SUBMITTED payload; it must equal
-  // the preflighted hash (anti-substitution, WS-L.3.2a).
+  // Validate the deployment + compute the typed-data hash — PURE, nothing consumed
+  // yet — so the idempotency key can be RESERVED before any destructive op.
   const deployment = pinnedDeployment(input.deploymentId);
   if (!deployment) {
     return {
@@ -176,10 +161,11 @@ export async function submitAction(
       message: 'Unknown deployment.',
     };
   }
+  const actionType = input.actionType as KnomosisSignedActionType;
   let typedDataHash: `0x${string}`;
   try {
     typedDataHash = computeTypedDataDigest(
-      binding.actionType,
+      actionType,
       buildEip712Domain(deployment),
       input.typedDataMessage,
     );
@@ -191,89 +177,17 @@ export async function submitAction(
       message: 'The submitted payload is malformed.',
     };
   }
-  if (typedDataHash !== binding.typedDataHash) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'PAYLOAD_MISMATCH',
-      message: 'The submitted payload differs from the preflighted action.',
-    };
-  }
 
-  // RE-VERIFY the signature (the token binds only the typed-data HASH): a valid
-  // low-s signature could pass preflight and then be swapped for its high-s
-  // malleable twin over the same payload, so re-run the low-s/EIP-1271 check
-  // that minted the token before forwarding to the gateway (WS-L.3.2a).
-  const verified = await verifyActionSignature({
-    actionType: binding.actionType,
-    domain: buildEip712Domain(deployment),
-    message: input.typedDataMessage,
-    signature: input.signature,
-    ...(deps.contractVerifier ? { contractVerifier: deps.contractVerifier } : {}),
-  });
-  if (!verified.ok) {
-    return {
-      ok: false,
-      status: 400,
-      code: verified.reason === 'message_invalid' ? 'PAYLOAD_MISMATCH' : 'SIGNATURE_INVALID',
-      message: 'The submitted signature failed verification.',
-    };
-  }
-
-  // RE-CHECK the signed EXPIRATION: the preflight token can outlive the signed
-  // payload (it lives minutes), so a payload valid at preflight may have expired
-  // before submit — never forward an expired action (WS-L.3.2a).
-  const expirationSeconds = Number(input.typedDataMessage['expiration'] ?? '');
-  if (!Number.isFinite(expirationSeconds) || expirationSeconds * 1000 <= deps.now()) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'EXPIRED',
-      message: 'The signed action has expired; re-sign and resubmit.',
-    };
-  }
-
-  // RE-CHECK the WALLET at submit: preflight's ownership/active/risk gates can go
-  // stale in the minutes between preflight and submit — the wallet may have moved
-  // to pending_unlink/finalized or had its risk raised.  Never forward on a wallet
-  // that would now FAIL preflight (WS-L.3.2a mirrors the WS-L.3.1b gates).
-  const wallet = await deps.wallets.getById(input.walletAccountId);
-  if (wallet === null || wallet.userId !== input.userId || wallet.unlinkState !== 'active') {
-    return {
-      ok: false,
-      status: 409,
-      code: 'WALLET_NOT_ACTIVE',
-      message: 'The selected wallet is not active.',
-    };
-  }
-  if (
-    wallet.riskState === 'high' ||
-    (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(binding.actionType))
-  ) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'RISK_BLOCKED',
-      message: 'This wallet is currently restricted from this financial action.',
-    };
-  }
-
-  // Anti-replay nonce: consumed atomically per (user, deployment) BEFORE the
-  // gateway call (WS-L.3.2c).  Gaps are allowed; reuse is not.
-  const nonce = input.typedDataMessage['nonce'] ?? '';
-  if (!(await deps.nonces.tryConsume(input.userId, input.deploymentId, nonce))) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'NONCE_REUSED',
-      message: 'This nonce has already been used.',
-    };
-  }
-
+  // RESERVE the idempotency key by inserting the action record BEFORE consuming
+  // the single-use preflight token / nonce.  A concurrent duplicate loses the
+  // `(user, idempotency_key)` unique insert and REPLAYS the winner instead of
+  // burning a token and returning PREFLIGHT_EXPIRED/NONCE_REUSED to the loser
+  // (WS-L.3.2a).  The record starts `submitted`; a validation failure below marks
+  // it `failed` (so a retry replays the failure, never re-processes).
   const record: KnomosisActionRecordEntity = {
     actionRecordId: deps.uuid(),
     deploymentId: input.deploymentId,
-    actionType: binding.actionType,
+    actionType,
     roomId: input.roomId,
     actorWalletAccountId: input.walletAccountId,
     actorUserId: input.userId,
@@ -288,10 +202,6 @@ export async function submitAction(
     createdAt: nowIso,
     updatedAt: nowIso,
   };
-  // Race-safe idempotency: the early getByIdempotencyKey check and this insert
-  // are not atomic, so a CONCURRENT same-key submit can win the insert.  Catch the
-  // unique-key conflict and REPLAY the stored record instead of surfacing the raw
-  // DB error to the loser (WS-L.3.2a).
   try {
     await deps.actions.insert(record);
   } catch (error) {
@@ -308,6 +218,155 @@ export async function submitAction(
     }
     throw error; // a different failure — propagate
   }
+
+  /** Mark the RESERVED record `failed` and return the typed error. */
+  const failReserved = async (
+    status: 400 | 401 | 409 | 503,
+    code: KnomosisReasonCode,
+    message: string,
+    reason: string,
+  ): Promise<SubmitActionOutcome> => {
+    await applyTransition(deps, record, 'failed', reason);
+    return { ok: false, status, code, message };
+  };
+
+  // Single-use preflight token; its binding must match this submission exactly.
+  const binding = await consumePreflightToken(deps.ephemeral, input.preflightToken);
+  if (binding === null) {
+    return failReserved(
+      401,
+      'PREFLIGHT_EXPIRED',
+      'The preflight token is missing, expired, or already used.',
+      'preflight token missing/expired/used',
+    );
+  }
+  if (
+    binding.userId !== input.userId ||
+    binding.roomId !== input.roomId ||
+    binding.deploymentId !== input.deploymentId ||
+    binding.walletAccountId !== input.walletAccountId ||
+    binding.actionType !== input.actionType
+  ) {
+    return failReserved(
+      409,
+      'PAYLOAD_MISMATCH',
+      'The submission does not match the preflighted action.',
+      'preflight binding mismatch',
+    );
+  }
+  if (typedDataHash !== binding.typedDataHash) {
+    return failReserved(
+      409,
+      'PAYLOAD_MISMATCH',
+      'The submitted payload differs from the preflighted action.',
+      'typed-data hash mismatch',
+    );
+  }
+
+  // RE-VERIFY the signature (the token binds only the typed-data HASH): a valid
+  // low-s signature could pass preflight and then be swapped for its high-s
+  // malleable twin over the same payload, so re-run the low-s/EIP-1271 check
+  // that minted the token before forwarding to the gateway (WS-L.3.2a).
+  const verified = await verifyActionSignature({
+    actionType: binding.actionType,
+    domain: buildEip712Domain(deployment),
+    message: input.typedDataMessage,
+    signature: input.signature,
+    ...(deps.contractVerifier ? { contractVerifier: deps.contractVerifier } : {}),
+  });
+  if (!verified.ok) {
+    return failReserved(
+      400,
+      verified.reason === 'message_invalid' ? 'PAYLOAD_MISMATCH' : 'SIGNATURE_INVALID',
+      'The submitted signature failed verification.',
+      `signature ${verified.reason}`,
+    );
+  }
+
+  // RE-CHECK the signed EXPIRATION: the preflight token can outlive the signed
+  // payload (it lives minutes), so a payload valid at preflight may have expired
+  // before submit — never forward an expired action (WS-L.3.2a).
+  const expirationSeconds = Number(input.typedDataMessage['expiration'] ?? '');
+  if (!Number.isFinite(expirationSeconds) || expirationSeconds * 1000 <= deps.now()) {
+    return failReserved(
+      409,
+      'EXPIRED',
+      'The signed action has expired; re-sign and resubmit.',
+      'signed action expired',
+    );
+  }
+
+  // RE-CHECK the WALLET at submit: preflight's ownership/active/risk gates can go
+  // stale in the minutes between preflight and submit — the wallet may have moved
+  // to pending_unlink/finalized or had its risk raised.  Never forward on a wallet
+  // that would now FAIL preflight (WS-L.3.2a mirrors the WS-L.3.1b gates).
+  const wallet = await deps.wallets.getById(input.walletAccountId);
+  if (wallet === null || wallet.userId !== input.userId || wallet.unlinkState !== 'active') {
+    return failReserved(
+      409,
+      'WALLET_NOT_ACTIVE',
+      'The selected wallet is not active.',
+      'wallet not active at submit',
+    );
+  }
+  if (
+    wallet.riskState === 'high' ||
+    (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(binding.actionType))
+  ) {
+    return failReserved(
+      409,
+      'RISK_BLOCKED',
+      'This wallet is currently restricted from this financial action.',
+      'wallet risk blocked at submit',
+    );
+  }
+
+  // RE-RUN the MUTABLE governance gates (room mode + role): a room can be FROZEN
+  // or a mode changed, and a steward/member role revoked, during the token TTL —
+  // a high-impact grant_payout/steward_rotation must not forward on the stale
+  // preflight authorization (WS-L.3.2a re-runs WS-L.3.1a steps 2 + 4).
+  const room = await deps.rooms.roomGovernance(input.roomId);
+  if (room === null || room.mode === 'frozen') {
+    return failReserved(
+      409,
+      'GOVERNANCE_FROZEN',
+      'This room’s governance is frozen or unavailable.',
+      'room frozen/unavailable at submit',
+    );
+  }
+  if (!MODE_ENVIRONMENTS[room.mode]?.includes(deployment.environment)) {
+    return failReserved(
+      409,
+      'GOVERNANCE_MODE_INVALID',
+      'This room’s governance mode no longer permits real actions on this deployment.',
+      'governance mode no longer permits',
+    );
+  }
+  const stewardOnly =
+    binding.actionType === 'grant_payout' ||
+    binding.actionType === 'charter_update' ||
+    binding.actionType === 'steward_rotation';
+  const permitted = stewardOnly
+    ? await deps.rooms.isSteward(input.roomId, input.userId)
+    : await deps.rooms.isMember(input.roomId, input.userId);
+  if (!permitted) {
+    return failReserved(
+      409,
+      'ROLE_INSUFFICIENT',
+      stewardOnly
+        ? 'This action requires a room steward.'
+        : 'This action requires room membership.',
+      'role revoked at submit',
+    );
+  }
+
+  // Anti-replay nonce: consumed atomically per (user, deployment) BEFORE the
+  // gateway call (WS-L.3.2c).  Gaps are allowed; reuse is not.
+  const nonce = input.typedDataMessage['nonce'] ?? '';
+  if (!(await deps.nonces.tryConsume(input.userId, input.deploymentId, nonce))) {
+    return failReserved(409, 'NONCE_REUSED', 'This nonce has already been used.', 'nonce reused');
+  }
+
   await deps.audit.append({
     actorUserId: input.userId,
     eventType: 'knomosis_action_submit',
