@@ -25,7 +25,11 @@ import {
   computeTypedDataDigest,
   verifyActionSignature,
 } from './signatures.js';
-import type { KnomosisActionRecordEntity, KnomosisActionStore } from './stores.js';
+import type {
+  GovernanceSignatureStore,
+  KnomosisActionRecordEntity,
+  KnomosisActionStore,
+} from './stores.js';
 
 // ---------------------------------------------------------------------------
 // The §23.5 state machine (WS-L.3.2b).  Invalid transitions are rejected and
@@ -56,6 +60,10 @@ export interface NonceConsumerPort {
 
 export interface SubmissionDeps {
   actions: KnomosisActionStore;
+  /** Durable governance-signature ledger — a `proposal_sign` submit is
+   *  recorded here (insert-once per (proposal, wallet)) so the vote powers the
+   *  tally + the unlink-obligation check, not just the on-chain action row. */
+  signatures: GovernanceSignatureStore;
   nonces: NonceConsumerPort;
   gateway: () => KnomosisGateway | null;
   ephemeral: EphemeralStore;
@@ -207,6 +215,19 @@ export async function submitAction(
     };
   }
 
+  // RE-CHECK the signed EXPIRATION: the preflight token can outlive the signed
+  // payload (it lives minutes), so a payload valid at preflight may have expired
+  // before submit — never forward an expired action (WS-L.3.2a).
+  const expirationSeconds = Number(input.typedDataMessage['expiration'] ?? '');
+  if (!Number.isFinite(expirationSeconds) || expirationSeconds * 1000 <= deps.now()) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'EXPIRED',
+      message: 'The signed action has expired; re-sign and resubmit.',
+    };
+  }
+
   // Anti-replay nonce: consumed atomically per (user, deployment) BEFORE the
   // gateway call (WS-L.3.2c).  Gaps are allowed; reuse is not.
   const nonce = input.typedDataMessage['nonce'] ?? '';
@@ -244,6 +265,30 @@ export async function submitAction(
     targetRef: record.actionRecordId,
     context: { setting: binding.actionType },
   });
+
+  // A governance vote (`proposal_sign`) is DURABLY recorded in the signature
+  // ledger too — the on-chain action row alone is invisible to the tally and to
+  // the WS-L.2.5b unlink-obligation check.  Insert-once per (proposal, wallet):
+  // a duplicate signature returns null and is a no-op.  Recorded BEFORE the
+  // gateway forward so a transient outage (record left `submitted`) still
+  // captures the member's signed vote (WS-L.3.2a).
+  if (binding.actionType === 'proposal_sign') {
+    const proposalId = input.typedDataMessage['proposalId'];
+    if (proposalId !== undefined && proposalId.length > 0) {
+      await deps.signatures.insert({
+        signatureId: deps.uuid(),
+        proposalId,
+        userId: input.userId,
+        walletAccountId: input.walletAccountId,
+        signatureType: verified.walletType === 'contract' ? 'eip712_eip1271' : 'eip712_ecdsa',
+        typedDataHash,
+        signatureRef: record.actionRecordId,
+        weightSnapshot: null,
+        eligibilityReason: 'proposal_sign action submission (WS-L.3.2a)',
+        createdAt: nowIso,
+      });
+    }
+  }
 
   const outcome = await forwardToGateway(deps, gateway, record);
   return {
@@ -341,23 +386,24 @@ export async function resubmitPendingActions(
   deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log'> & {
     gateway: () => KnomosisGateway | null;
     /** WS-L.3.5c: skip forwarding a record whose submission is paused — the
-     *  crypto flag is off, or the `action_submission` (or a narrower) kill switch
-     *  is engaged for its room.  Absent ⇒ never paused (the retry default). */
-    submissionPaused?: (roomId: string) => Promise<boolean>;
+     *  crypto flag is off, or the `action_submission` OR the action-type-specific
+     *  (treasury_execution / governance_voting) kill switch is engaged for its
+     *  room.  Absent ⇒ never paused (the retry default). */
+    submissionPaused?: (roomId: string, actionType: KnomosisSignedActionType) => Promise<boolean>;
   },
   deploymentId: string,
   limit = 50,
 ): Promise<number> {
   const gateway = deps.gateway();
   if (gateway === null) return 0;
-  const pending = (await deps.actions.listUnreconciled(deploymentId, limit)).filter(
-    (r) => r.submissionState === 'submitted',
-  );
+  const pending = await deps.actions.listSubmittedRetryable(deploymentId, limit);
   let forwarded = 0;
   for (const record of pending) {
     // An incident pause must stop the SCHEDULER's retries too, not just the HTTP
-    // submit route — otherwise a paused deployment keeps forwarding to the gateway.
-    if (deps.submissionPaused && (await deps.submissionPaused(record.roomId))) continue;
+    // submit route — including the ACTION-TYPE-specific switch (a treasury_execution
+    // pause must stop a grant_payout resubmit even if action_submission is off).
+    if (deps.submissionPaused && (await deps.submissionPaused(record.roomId, record.actionType)))
+      continue;
     await forwardToGateway(deps, gateway, record);
     forwarded += 1;
   }

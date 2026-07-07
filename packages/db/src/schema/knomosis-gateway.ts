@@ -393,7 +393,11 @@ export const governanceAuditLogs = knomosisSchema.table(
     simulationMode: boolean('simulation_mode').notNull(),
     createdAt: tz('created_at').notNull().defaultNow(),
   },
-  (t) => [index('governance_audit_log_room_idx').on(t.roomId, t.createdAt)],
+  // (room_id, created_at, entry_id): the entry_id tail makes the keyset page
+  // cursor a STRICT total order, so `ORDER BY created_at DESC, entry_id DESC`
+  // over a room is served by a backward index scan with no same-ms ambiguity
+  // (WS-L.4.1f).
+  (t) => [index('governance_audit_log_room_idx').on(t.roomId, t.createdAt, t.entryId)],
 );
 export type GovernanceAuditLogRow = typeof governanceAuditLogs.$inferSelect;
 

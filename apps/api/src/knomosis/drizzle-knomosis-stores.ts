@@ -28,6 +28,7 @@ import {
 import { and, asc, desc, eq, inArray, lt, lte, max, ne, sql } from 'drizzle-orm';
 import type { ActionNonceStore } from './services.js';
 import type {
+  AuditLogCursor,
   ComprehensionResultRecord,
   ComprehensionStore,
   FinancialWalletRecord,
@@ -387,6 +388,24 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     return rows.map(mapAction);
   }
 
+  async listSubmittedRetryable(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(
+        and(
+          eq(knomosisActionRecords.deploymentId, deploymentId),
+          eq(knomosisActionRecords.submissionState, 'submitted'),
+        ),
+      )
+      .orderBy(asc(knomosisActionRecords.createdAt))
+      .limit(limit);
+    return rows.map(mapAction);
+  }
+
   async listFinalizedDeposits(
     deploymentId: string,
     limit: number,
@@ -532,6 +551,31 @@ export class DrizzleOnChainEventStore implements OnChainEventStore {
         asc(onChainEvents.logIndex),
       )
       .limit(limit);
+    return rows.map(mapEvent);
+  }
+
+  async listByTypedDataHashes(
+    deploymentId: string,
+    typedDataHashes: readonly string[],
+  ): Promise<OnChainEventRecord[]> {
+    if (typedDataHashes.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(onChainEvents)
+      .where(
+        and(
+          eq(onChainEvents.deploymentId, deploymentId),
+          // Match the JSONB `typed_data_hash` cell against the batch's hashes —
+          // parameterized IN-list (no string interpolation), index-eligible.
+          inArray(sql`${onChainEvents.decodedPayload} ->> 'typed_data_hash'`, [...typedDataHashes]),
+        ),
+      )
+      .orderBy(
+        asc(onChainEvents.gatewaySeq),
+        asc(onChainEvents.gatewayIndex),
+        asc(onChainEvents.blockNumber),
+        asc(onChainEvents.logIndex),
+      );
     return rows.map(mapEvent);
   }
 
@@ -1094,20 +1138,23 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
   async listByRoom(
     roomId: string,
     limit: number,
-    beforeIso?: string,
+    before?: AuditLogCursor,
   ): Promise<GovernanceAuditRecord[]> {
     const rows = await this.db
       .select()
       .from(governanceAuditLogs)
       .where(
-        beforeIso === undefined
+        before === undefined
           ? eq(governanceAuditLogs.roomId, roomId)
           : and(
               eq(governanceAuditLogs.roomId, roomId),
-              sql`${governanceAuditLogs.createdAt} < ${new Date(beforeIso)}`,
+              // Row-value keyset comparison over the STRICT (createdAt, entryId)
+              // total order — the entryId tiebreaker makes same-millisecond rows
+              // page without skips/duplicates (WS-L.4.1f).
+              sql`(${governanceAuditLogs.createdAt}, ${governanceAuditLogs.entryId}) < (${new Date(before.createdAt)}, ${before.entryId}::uuid)`,
             ),
       )
-      .orderBy(desc(governanceAuditLogs.createdAt))
+      .orderBy(desc(governanceAuditLogs.createdAt), desc(governanceAuditLogs.entryId))
       .limit(limit);
     return rows.map((row) => ({
       entryId: row.entryId,
@@ -1143,20 +1190,14 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
   }
 
   async anonymizeActor(userId: string): Promise<number> {
-    // The audit log is append-only (a trigger blocks UPDATE/DELETE).  Toggle it
-    // off to SCRUB the actor id — a right-to-erasure-safe anonymization that keeps
-    // the ledger's integrity while removing the personal identifier — then on.
-    await this.db.execute(
-      sql`ALTER TABLE "knomosis"."governance_audit_log" DISABLE TRIGGER "governance_audit_no_mutate_trg"`,
-    );
+    // The append-only trigger EXPLICITLY permits the right-to-erasure NULLing of
+    // `actor_user_id` (migration 0059), so scrub the actor WITHOUT disabling it —
+    // never leaving the audit log mutable if the update errors mid-way.
     const rows = await this.db
       .update(governanceAuditLogs)
       .set({ actorUserId: null })
       .where(eq(governanceAuditLogs.actorUserId, userId))
       .returning({ entryId: governanceAuditLogs.entryId });
-    await this.db.execute(
-      sql`ALTER TABLE "knomosis"."governance_audit_log" ENABLE TRIGGER "governance_audit_no_mutate_trg"`,
-    );
     return rows.length;
   }
 

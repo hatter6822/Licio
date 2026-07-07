@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { storeKnomosisConfigValue } from '../knomosis/config.js';
 import { activateKillSwitch } from '../knomosis/killswitch.js';
 import {
+  composeStandingEtag,
   ensureActorMapping,
   readBalances,
   readBudget,
@@ -264,6 +265,63 @@ describe('WS-L.3.6a standing firewall — behavioural', () => {
       expect(conditional.ok).toBe(false);
       if (!conditional.ok) expect(conditional.code).toBe('not_modified');
     }
+  });
+
+  it('composeStandingEtag busts the cache when EITHER balances OR budget moves (R5-1)', () => {
+    const base = composeStandingEtag(
+      { etag: 'W/"bal-1"', knomosisSeq: '5' },
+      {
+        ok: true,
+        value: { amount: '10', isLowerBound: true },
+        knomosisSeq: '5',
+        etag: 'W/"bud-1"',
+      },
+    );
+    // Deterministic: identical inputs → identical validator.
+    expect(
+      composeStandingEtag(
+        { etag: 'W/"bal-1"', knomosisSeq: '5' },
+        {
+          ok: true,
+          value: { amount: '10', isLowerBound: true },
+          knomosisSeq: '5',
+          etag: 'W/"bud-1"',
+        },
+      ),
+    ).toBe(base);
+    // BUDGET moved but balances IDENTICAL ⇒ a DIFFERENT validator, so a client
+    // holding `base` is NOT served a stale 304 (the coherence bug this fixes).
+    expect(
+      composeStandingEtag(
+        { etag: 'W/"bal-1"', knomosisSeq: '5' },
+        {
+          ok: true,
+          value: { amount: '20', isLowerBound: true },
+          knomosisSeq: '6',
+          etag: 'W/"bud-2"',
+        },
+      ),
+    ).not.toBe(base);
+    // Balances moved but budget identical ⇒ also different.
+    expect(
+      composeStandingEtag(
+        { etag: 'W/"bal-2"', knomosisSeq: '6' },
+        {
+          ok: true,
+          value: { amount: '10', isLowerBound: true },
+          knomosisSeq: '5',
+          etag: 'W/"bud-1"',
+        },
+      ),
+    ).not.toBe(base);
+    // Unavailable budget is distinct from a present one; result is a weak validator.
+    expect(
+      composeStandingEtag(
+        { etag: 'W/"bal-1"', knomosisSeq: '5' },
+        { ok: false, code: 'standing_unavailable' },
+      ),
+    ).not.toBe(base);
+    expect(base).toMatch(/^W\/"[A-Za-z0-9_-]+"$/);
   });
 
   it('a wallet with no actor mapping cannot resolve standing', async () => {

@@ -143,15 +143,32 @@ export async function ingestGatewayEvents(
     if (complete.length > 0) {
       batch = complete;
     } else {
-      // Pathological: a SINGLE gateway_seq holds more than `limit` events, so no
-      // trailing group can be dropped without stalling.  A seq-only cursor cannot
-      // page within one seq — store the batch whole and SURFACE it (never silent).
+      // Pathological: a SINGLE gateway_seq holds more than `limit` events.  A
+      // seq-only cursor cannot page WITHIN a seq, so storing a partial group would
+      // advance the cursor and PERMANENTLY drop the rest.  FAIL CLOSED: HALT (store
+      // nothing, leave the cursor untouched) and surface it, so an operator can
+      // re-ingest with a larger fetch limit that covers the whole group.
+      await deps.reconciliation.append({
+        resultId: deps.uuid(),
+        deploymentId,
+        entityType: 'action',
+        entityRef: `oversized:${lastSeq}`,
+        outcome: 'halted_event_gap',
+        severity: 'critical',
+        details: { kind: 'oversized_seq_group', seq: lastSeq ?? null, limit },
+        lowWatermarkSeq: await deps.events.latestGatewaySeq(deploymentId),
+        createdAt: new Date(deps.now()).toISOString(),
+      });
       deps.alert('knomosis.ingest.oversized_seq_group', {
         deployment_id: deploymentId,
         seq: lastSeq ?? null,
         limit,
       });
-      batch = ordered;
+      return {
+        kind: 'halted',
+        reason: 'gap',
+        detail: `gateway_seq ${lastSeq} exceeds the fetch limit ${limit}`,
+      };
     }
   }
 
@@ -202,8 +219,13 @@ export async function ingestGatewayEvents(
       reorgDetectedAt: null,
       indexedAt: new Date(deps.now()).toISOString(),
     });
-    if (!inserted) continue;
-    ingested += 1;
+    // Apply the side effects for EVERY event — new OR already-stored — because
+    // storing the event and applying its transition are NOT atomic: a crash after
+    // `events.ingest()` but before the transition would otherwise leave the action
+    // stuck (a later settled/finalized becoming an invalid transition).  Every
+    // step here is idempotent (a no-op transition returns null; receipts upsert),
+    // so re-running for an existing event is safe (WS-L.3.3a).
+    if (inserted) ingested += 1;
 
     const action = await actionForEvent(deps, deploymentId, event);
     if (action === null) continue;

@@ -177,6 +177,19 @@ export async function linkWallet(
           'This wallet was recently unlinked; it can be re-linked after the cooldown.',
         );
       }
+      // Reactivating a finalized wallet counts toward the cap exactly like a
+      // fresh link — the finalized wallet is NOT in the active set, so without
+      // this a user could unlink one, link a replacement, then re-link the old
+      // one to exceed maxWalletsPerUser (WS-L.2.5a).  Same query the new-link
+      // path uses, so the cap semantics stay symmetric.
+      const activeForRelink = (await deps.wallets.listByUser(args.userId, false)).length;
+      if (activeForRelink >= config.maxWalletsPerUser) {
+        return err(
+          429,
+          'wallet_limit',
+          `You can link at most ${config.maxWalletsPerUser} wallets.`,
+        );
+      }
       const reactivated = await deps.wallets.update({
         ...existing,
         unlinkState: 'active',

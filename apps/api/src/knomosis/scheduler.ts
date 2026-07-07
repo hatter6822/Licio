@@ -9,9 +9,10 @@
 // every task is idempotent.
 
 import { hostname } from 'node:os';
+import type { KnomosisSignedActionType } from '@licio/shared';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { ingestGatewayEvents } from './ingest.js';
-import { killSwitchDecision } from './killswitch.js';
+import { ACTION_KILL_SWITCH, killSwitchDecision } from './killswitch.js';
 import { reconcileDeployment } from './reconciliation.js';
 import { type KnomosisServices, simulationDeps } from './services.js';
 import { executeElapsedSimProposals } from './simulation.js';
@@ -63,10 +64,22 @@ export async function runKnomosisTick(
       // Gate scheduler retries by the SAME live crypto flag + kill switch the
       // HTTP submit route honours, per record's room (WS-L.3.5c): an incident
       // pause must stop the scheduler forwarding submitted actions too.
-      const submissionPaused = async (roomId: string): Promise<boolean> => {
+      const submissionPaused = async (
+        roomId: string,
+        actionType: KnomosisSignedActionType,
+      ): Promise<boolean> => {
         if (!services.config().cryptoEnabled) return true;
-        return (await killSwitchDecision(services.configStore, 'action_submission', { roomId }))
-          .engaged;
+        if (
+          (await killSwitchDecision(services.configStore, 'action_submission', { roomId })).engaged
+        )
+          return true;
+        // The action-type-specific switch (treasury_execution / governance_voting)
+        // must also pause the matching resubmissions (WS-L.3.5c).
+        const specific = ACTION_KILL_SWITCH[actionType];
+        return (
+          specific !== undefined &&
+          (await killSwitchDecision(services.configStore, specific, { roomId })).engaged
+        );
       };
       await resubmitPendingActions(
         {

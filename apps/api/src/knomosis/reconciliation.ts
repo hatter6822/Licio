@@ -21,6 +21,7 @@ import type { KnomosisGateway } from './gateway.js';
 import type {
   KnomosisActionRecordEntity,
   KnomosisActionStore,
+  KnomosisReceiptStore,
   OnChainEventStore,
   ReconciliationResultRecord,
   ReconciliationStore,
@@ -30,6 +31,7 @@ import type {
 export interface ReconciliationDeps {
   actions: KnomosisActionStore;
   events: OnChainEventStore;
+  receipts: KnomosisReceiptStore;
   reconciliation: ReconciliationStore;
   actorMappings: WalletActorMappingStore;
   gateway: () => KnomosisGateway | null;
@@ -52,13 +54,18 @@ export interface ActionReconcileOutcome {
 }
 
 /**
- * Reconcile ONE action record against the indexed event stream (source 3)
- * and its own receipt state (source 2).  Pure decision logic, exported for
- * exhaustive unit testing.
+ * Reconcile ONE action record against BOTH independent sources: the indexed
+ * event stream (source 3, `latestEventState`) AND the Knomosis receipt that was
+ * written for it (source 2, `receiptState` = the public receipt's `finalState`,
+ * or null when NO receipt exists).  The receipt is verified as a genuine third
+ * observation — never echoed from the product-DB state — so a missing or
+ * disagreeing receipt is itself a divergence (WS-L.3.4a).  Pure decision logic,
+ * exported for exhaustive unit testing.
  */
 export function decideActionReconciliation(
   record: KnomosisActionRecordEntity,
   latestEventState: string | null,
+  receiptState: string | null,
 ): ActionReconcileOutcome {
   if (IN_FLIGHT_STATES.has(record.submissionState)) {
     // A pending record is noted but not a mismatch by itself (WS-L.3.4a).
@@ -68,26 +75,48 @@ export function decideActionReconciliation(
     // Failed pre-execution: NO gateway event should exist.  ANY event — a
     // `reverted` included — means the action actually reached execution, which
     // contradicts the product state and must surface as a divergence.
-    return latestEventState === null
-      ? { outcome: 'match', detail: 'failed pre-execution; no indexed event' }
-      : { outcome: 'mismatch', detail: `failed record but event ${latestEventState}` };
+    if (latestEventState !== null) {
+      return { outcome: 'mismatch', detail: `failed record but event ${latestEventState}` };
+    }
+    // A settlement receipt is written ONLY for a stable on-chain state, so a
+    // failed record that nonetheless carries one is a source-2 divergence.
+    if (receiptState !== null) {
+      return { outcome: 'mismatch', detail: `failed record but receipt ${receiptState}` };
+    }
+    return { outcome: 'match', detail: 'failed pre-execution; no indexed event or receipt' };
   }
-  // finalized / reverted must agree with the event stream.
+  // finalized / reverted must agree with the event stream AND the receipt.
   if (latestEventState === null) {
     return {
       outcome: 'mismatch',
       detail: `record ${record.submissionState} but no indexed event`,
     };
   }
-  const agrees =
+  if (receiptState === null) {
+    // The stable state was reached but no receipt was persisted — the audit
+    // trail is incomplete, which is a divergence, not a silent pass.
+    return {
+      outcome: 'mismatch',
+      detail: `record ${record.submissionState} but no receipt`,
+    };
+  }
+  const eventAgrees =
     (record.submissionState === 'finalized' && latestEventState === 'finalized') ||
     (record.submissionState === 'reverted' && latestEventState === 'reverted');
-  return agrees
-    ? { outcome: 'match', detail: 'record state agrees with the indexed stream' }
-    : {
-        outcome: 'mismatch',
-        detail: `record ${record.submissionState} vs event ${latestEventState}`,
-      };
+  const receiptAgrees = receiptState === record.submissionState;
+  if (eventAgrees && receiptAgrees) {
+    return { outcome: 'match', detail: 'record agrees with the indexed stream and the receipt' };
+  }
+  if (!receiptAgrees) {
+    return {
+      outcome: 'mismatch',
+      detail: `record ${record.submissionState} vs receipt ${receiptState}`,
+    };
+  }
+  return {
+    outcome: 'mismatch',
+    detail: `record ${record.submissionState} vs event ${latestEventState}`,
+  };
 }
 
 /** Classify a divergence (WS-L.3.4b). */
@@ -131,7 +160,13 @@ export async function reconcileDeployment(
     return { matched: 0, mismatched: 0, inFlight: 0, halted: true };
   }
 
-  const indexed = await deps.events.listByDeployment(deploymentId, 10_000);
+  const records = await deps.actions.listUnreconciled(deploymentId, limit);
+  // Query the indexed stream by the EXACT hashes of this batch, not a fixed
+  // listByDeployment page — a deployment with >10k events must not let the
+  // newest state fall outside the window (WS-L.3.4a).  `listByTypedDataHashes`
+  // returns ascending (seq,index), so the last write per hash wins = latest.
+  const batchHashes = [...new Set(records.map((r) => r.typedDataHash))];
+  const indexed = await deps.events.listByTypedDataHashes(deploymentId, batchHashes);
   const latestStateByHash = new Map<string, string>();
   for (const event of indexed) {
     const hash = event.decodedPayload['typed_data_hash'];
@@ -145,11 +180,15 @@ export async function reconcileDeployment(
   let matched = 0;
   let mismatched = 0;
   let inFlight = 0;
-  const records = await deps.actions.listUnreconciled(deploymentId, limit);
   for (const record of records) {
+    // Source 2 = the ACTUAL persisted public receipt (its finalState), read
+    // per-record — never the product state echoed back at itself.
+    const receipt = await deps.receipts.getByAction(record.actionRecordId, 'public');
+    const receiptState = receipt?.finalState ?? null;
     const decision = decideActionReconciliation(
       record,
       latestStateByHash.get(record.typedDataHash) ?? null,
+      receiptState,
     );
     if (decision.outcome === 'in_flight') {
       inFlight += 1;
@@ -172,7 +211,7 @@ export async function reconcileDeployment(
       details: {
         sources: {
           product_db: record.submissionState,
-          knomosis_receipt: record.submissionState,
+          knomosis_receipt: receiptState,
           gateway_stream: latestStateByHash.get(record.typedDataHash) ?? null,
         },
         detail: decision.detail,

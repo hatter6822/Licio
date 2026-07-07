@@ -54,6 +54,7 @@ function submissionDeps(fixture: KnomosisFixture): SubmissionDeps {
   const s = fixture.knomosis;
   return {
     actions: s.actions,
+    signatures: s.proposalSignatures,
     nonces: s.nonces,
     gateway: s.gateway,
     ephemeral: s.ephemeral,
@@ -638,6 +639,88 @@ describe('WS-L.3.2 submission + state machine', () => {
     });
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.submissionState).toBe('accepted');
+  });
+
+  it('a proposal_sign submit DURABLY records a governance signature (WS-L.3.2a)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const proposalId = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: userId,
+      proposalType: 'charter_update',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'open',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      // A REAL (non-simulated) open proposal — preflight rejects signing a
+      // simulated proposal for real submission (WS-L.4.1d).
+      simulationMode: false,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+    });
+    const message = {
+      roomId: ROOM,
+      proposalId,
+      actor: testAccount.address,
+      nonce: '1',
+      expiration: String(Math.floor(Date.now() / 1000) + 600),
+      deploymentId: DEPLOYMENT,
+    };
+    const signature = await signedTypedData('proposal_sign', message);
+    const pre = await runPreflight(preflightDeps(fixture), {
+      userId,
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    if (pre.result !== 'pass') throw new Error(`preflight failed: ${JSON.stringify(pre)}`);
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: crypto.randomUUID(),
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    expect(result.ok).toBe(true);
+    // The signature is now in the governance ledger — powering the tally + the
+    // WS-L.2.5b unlink-obligation check, not just the on-chain action row.
+    const sigs = await fixture.knomosis.proposalSignatures.listByProposal(proposalId);
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0]).toMatchObject({
+      proposalId,
+      userId,
+      walletAccountId,
+      signatureType: 'eip712_ecdsa',
+    });
+    // The open proposal makes this an unlink obligation on the wallet.
+    const open = await fixture.knomosis.proposalSignatures.listOpenByWallet(walletAccountId);
+    expect(open).toHaveLength(1);
   });
 
   it('rejects a reused preflight token (single-use)', async () => {

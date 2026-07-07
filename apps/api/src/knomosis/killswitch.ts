@@ -22,6 +22,7 @@ import {
   type KillSwitchId,
   type KillSwitchReleaseCard,
   type KillSwitchScopes,
+  type KnomosisSignedActionType,
   killSwitchReleaseCardSchema,
   killSwitchScopesSchema,
 } from '@licio/shared';
@@ -30,6 +31,19 @@ import type { PwattConfigStore } from '../events/stores.js';
 import type { AuditStore } from '../identity/audit.js';
 
 export const KNOMOSIS_KILLSWITCH_CONFIG_KEY = 'knomosis.killswitch';
+
+/** The NARROWER emergency switch that governs each signed action type (checked
+ *  in addition to the broad `action_submission` switch): a treasury-execution
+ *  pause stops grant/deposit/bounty submissions, and a governance-voting pause
+ *  stops proposal-signature submissions — on both the HTTP submit path AND the
+ *  scheduler's resubmit sweep (WS-L.3.5c). */
+export const ACTION_KILL_SWITCH: Readonly<Partial<Record<KnomosisSignedActionType, KillSwitchId>>> =
+  {
+    treasury_deposit: 'treasury_execution',
+    grant_payout: 'treasury_execution',
+    bounty_contribution: 'treasury_execution',
+    proposal_sign: 'governance_voting',
+  };
 
 const switchEntrySchema = z
   .object({
@@ -110,9 +124,13 @@ export async function killSwitchDecision(
   const entry = registry.switches[switchId];
   if (entry.scopes.global) return { engaged: true, scope: 'global' };
   if (entry.scopes.regions.length > 0) {
-    const region = context.region ?? null;
+    // Case-INSENSITIVE match: the resolver normalizes locale regions to
+    // uppercase, but an operator may activate with a lowercase BCP-47 subtag
+    // (`us`) — a case mismatch must not leave `US` users unblocked.
+    const region = context.region?.toUpperCase() ?? null;
+    const engaged = entry.scopes.regions.map((r) => r.toUpperCase());
     // Unknown region ⇒ treated as inside every engaged region scope.
-    if (region === null || entry.scopes.regions.includes(region)) {
+    if (region === null || engaged.includes(region)) {
       return { engaged: true, scope: 'region' };
     }
   }

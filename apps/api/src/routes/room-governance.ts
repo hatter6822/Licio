@@ -51,7 +51,11 @@ import {
   simTreasuryView,
   submitComprehension,
 } from '../knomosis/simulation.js';
-import type { GovernanceProposalRecord, ProposalVoteStore } from '../knomosis/stores.js';
+import type {
+  AuditLogCursor,
+  GovernanceProposalRecord,
+  ProposalVoteStore,
+} from '../knomosis/stores.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -61,6 +65,22 @@ import {
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
+
+/** Decode the composite `${created_at}|${entry_id}` audit-log keyset cursor;
+ *  null ⇒ malformed (the handler answers 400 rather than silently paging from
+ *  the top, which would loop a client) (WS-L.4.1f). */
+function parseAuditCursor(raw: string): AuditLogCursor | null {
+  const sep = raw.indexOf('|');
+  if (sep <= 0) return null;
+  const createdAt = raw.slice(0, sep);
+  const entryId = raw.slice(sep + 1);
+  const shape = z.object({
+    createdAt: z.string().datetime(),
+    entryId: z.string().uuid(),
+  });
+  const parsed = shape.safeParse({ createdAt, entryId });
+  return parsed.success ? parsed.data : null;
+}
 
 function readinessDeps(services: KnomosisServices): ReadinessDeps | null {
   if (services.roomMode === null) return null;
@@ -359,14 +379,25 @@ export function createRoomGovernanceSimRoutes() {
         '/rooms/:roomId/governance/audit-log',
         authMiddleware(),
         roomParam,
-        zValidator('query', z.object({ before: z.string().datetime().optional() }).strict()),
+        // The keyset cursor is the COMPOSITE `${created_at}|${entry_id}` emitted
+        // as `next_cursor` — createdAt alone is not unique, so paging by it skips
+        // or duplicates same-millisecond rows (WS-L.4.1f).
+        zValidator('query', z.object({ before: z.string().min(1).max(512).optional() }).strict()),
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
           const roomId = c.req.valid('param').roomId;
           const gate = await simGate(services, roomId, auth.userId, true);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
-          const before = c.req.valid('query').before;
+          const rawCursor = c.req.valid('query').before;
+          let before: AuditLogCursor | undefined;
+          if (rawCursor !== undefined) {
+            const parsed = parseAuditCursor(rawCursor);
+            if (parsed === null) {
+              return c.json(deny('invalid_cursor', 'The pagination cursor is malformed.'), 400);
+            }
+            before = parsed;
+          }
           const entries = await services.governanceAudit.listByRoom(roomId, 50, before);
           const oldest = entries[entries.length - 1];
           return c.json(
@@ -380,7 +411,8 @@ export function createRoomGovernanceSimRoutes() {
                 simulation_mode: e.simulationMode,
                 created_at: e.createdAt,
               })),
-              next_cursor: entries.length === 50 && oldest ? oldest.createdAt : null,
+              next_cursor:
+                entries.length === 50 && oldest ? `${oldest.createdAt}|${oldest.entryId}` : null,
             }),
           );
         },

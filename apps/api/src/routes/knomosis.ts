@@ -14,7 +14,6 @@
 import { zValidator } from '@hono/zod-validator';
 import {
   KILL_SWITCH_IDS,
-  type KillSwitchId,
   type KnomosisSignedActionType,
   killSwitchAdminRequestSchema,
   killSwitchRegistryResponseSchema,
@@ -30,6 +29,7 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
+  ACTION_KILL_SWITCH,
   activateKillSwitch,
   confirmKillSwitchDeactivation,
   emptyRegistry,
@@ -40,7 +40,12 @@ import {
 import { KNOMOSIS_PIN, pinnedDeployment } from '../knomosis/pin.js';
 import { type PreflightDeps, runPreflight } from '../knomosis/preflight.js';
 import { getKnomosisServices, type KnomosisServices } from '../knomosis/services.js';
-import { ensureActorMapping, readBalances, readBudget } from '../knomosis/standing.js';
+import {
+  composeStandingEtag,
+  ensureActorMapping,
+  readBalances,
+  readBudget,
+} from '../knomosis/standing.js';
 import { type SubmissionDeps, submitAction } from '../knomosis/submission.js';
 import {
   type AuthEnv,
@@ -53,18 +58,6 @@ import {
 } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
-
-/** The NARROWER emergency switch that governs each signed action type, checked
- *  in addition to the broad `action_submission` switch (WS-L.3.5c): a
- *  treasury-execution pause must stop grant/deposit/bounty submissions, and a
- *  governance-voting pause must stop proposal-signature submissions, without
- *  operators having to engage the whole submission plane. */
-const ACTION_KILL_SWITCH: Partial<Record<KnomosisSignedActionType, KillSwitchId>> = {
-  treasury_deposit: 'treasury_execution',
-  grant_payout: 'treasury_execution',
-  bounty_contribution: 'treasury_execution',
-  proposal_sign: 'governance_voting',
-};
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
 
 function preflightDeps(services: KnomosisServices): PreflightDeps | null {
@@ -91,6 +84,7 @@ function preflightDeps(services: KnomosisServices): PreflightDeps | null {
 function submissionDeps(services: KnomosisServices): SubmissionDeps {
   return {
     actions: services.actions,
+    signatures: services.proposalSignatures,
     nonces: services.nonces,
     gateway: services.gateway,
     ephemeral: services.ephemeral,
@@ -352,15 +346,19 @@ export function createKnomosisRoutes() {
             now: services.now,
             log: services.log,
           };
-          const etag = c.req.header('if-none-match') ?? null;
+          // The response carries BOTH balances AND budget, so the conditional
+          // validator must cover both — a balances-only ETag would 304 a moved
+          // budget (WS-L.3.6a).  Read both views fully (do NOT forward the
+          // client's COMPOSITE ETag to the gateway's per-view conditional read;
+          // it would never match a single view's tag), then compose ONE weak
+          // validator and decide the 304 here.
+          const clientEtag = c.req.header('if-none-match') ?? null;
           const balances = await readBalances(standingDeps, {
             userId: auth.userId,
             walletAccountId: params.walletId,
             deploymentId: params.deploymentId,
-            etag,
           });
           if (!balances.ok) {
-            if (balances.code === 'not_modified') return c.body(null, 304);
             const status = balances.code === 'wallet_not_active' ? 404 : 503;
             return c.json(deny(balances.code, 'Standing is unavailable.'), status);
           }
@@ -369,8 +367,10 @@ export function createKnomosisRoutes() {
             walletAccountId: params.walletId,
             deploymentId: params.deploymentId,
           });
+          const compositeEtag = composeStandingEtag(balances, budget);
+          if (clientEtag !== null && clientEtag === compositeEtag) return c.body(null, 304);
           c.header('x-knomosis-seq', balances.knomosisSeq);
-          if (balances.etag !== null) c.header('etag', balances.etag);
+          c.header('etag', compositeEtag);
           return c.json({
             balances: balances.value,
             budget: budget.ok

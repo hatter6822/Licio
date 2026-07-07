@@ -253,6 +253,12 @@ export interface KnomosisActionStore {
   ): Promise<KnomosisActionRecordEntity | null>;
   /** Actions not yet in a terminal reconciliation outcome, oldest first. */
   listUnreconciled(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
+  /** Actions STUCK in `submitted` (the scheduler's idempotent retry set), oldest
+   *  first — queried directly so retries cannot starve behind older in-flight rows. */
+  listSubmittedRetryable(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]>;
   /** Pending obligations for the unlink check (WS-L.2.5b): non-terminal actions
    *  signed by this wallet. */
   listOpenByWallet(walletAccountId: string): Promise<KnomosisActionRecordEntity[]>;
@@ -271,6 +277,15 @@ export interface OnChainEventStore {
   ingest(record: OnChainEventRecord): Promise<{ record: OnChainEventRecord; inserted: boolean }>;
   getById(eventId: string): Promise<OnChainEventRecord | null>;
   listByDeployment(deploymentId: string, limit: number): Promise<OnChainEventRecord[]>;
+  /** Non-reorged events carrying one of the given typed-data hashes, ascending
+   *  (seq,index).  Reconciliation queries the EXACT hashes of the batch it is
+   *  reconciling instead of paging the whole (unbounded) event history — a
+   *  deployment with >10k events must not let the newest state fall outside a
+   *  fixed listByDeployment window (WS-L.3.4a). */
+  listByTypedDataHashes(
+    deploymentId: string,
+    typedDataHashes: readonly string[],
+  ): Promise<OnChainEventRecord[]>;
   /** The resume cursor for `getEvents`: the greater of the highest ingested
    *  gateway seq and any explicit re-anchor recorded by a gap rebuild (so the
    *  cursor can jump FORWARD past events that were dropped and never stored). */
@@ -362,9 +377,22 @@ export const READINESS_QUALIFYING_AUDIT_ACTIONS: ReadonlySet<GovernanceAuditActi
   'execution_simulated',
 ]);
 
+/** A TOTAL-ORDER keyset cursor for the append-only audit log: `createdAt` alone
+ *  is NOT unique (many rows can share a millisecond), so paging by it skips or
+ *  duplicates rows at a same-timestamp page boundary — the `entryId` tiebreaker
+ *  makes the (createdAt desc, entryId desc) order strict (WS-L.4.1f). */
+export interface AuditLogCursor {
+  createdAt: string;
+  entryId: string;
+}
+
 export interface GovernanceAuditStore {
   append(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord>;
-  listByRoom(roomId: string, limit: number, beforeIso?: string): Promise<GovernanceAuditRecord[]>;
+  listByRoom(
+    roomId: string,
+    limit: number,
+    before?: AuditLogCursor,
+  ): Promise<GovernanceAuditRecord[]>;
   countByRoom(roomId: string): Promise<number>;
   /** Count only qualifying simulated-practice actions for the readiness gate
    *  (WS-L.4.1f) — never the meta mode-transition/comprehension rows. */
@@ -585,6 +613,17 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       .map((r) => structuredClone(r));
   }
 
+  async listSubmittedRetryable(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.deploymentId === deploymentId && r.submissionState === 'submitted')
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit)
+      .map((r) => structuredClone(r));
+  }
+
   async listOpenByWallet(walletAccountId: string): Promise<KnomosisActionRecordEntity[]> {
     return [...this.#rows.values()]
       .filter(
@@ -652,16 +691,34 @@ export class InMemoryOnChainEventStore implements OnChainEventStore {
     return row ? structuredClone(row) : null;
   }
 
+  #compareOrder(a: OnChainEventRecord, b: OnChainEventRecord): number {
+    const seqA = BigInt(a.gatewaySeq ?? a.blockNumber ?? '0');
+    const seqB = BigInt(b.gatewaySeq ?? b.blockNumber ?? '0');
+    if (seqA !== seqB) return seqA < seqB ? -1 : 1;
+    return (a.gatewayIndex ?? a.logIndex ?? 0) - (b.gatewayIndex ?? b.logIndex ?? 0);
+  }
+
   async listByDeployment(deploymentId: string, limit: number): Promise<OnChainEventRecord[]> {
     return [...this.#rows.values()]
       .filter((r) => r.deploymentId === deploymentId)
-      .sort((a, b) => {
-        const seqA = BigInt(a.gatewaySeq ?? a.blockNumber ?? '0');
-        const seqB = BigInt(b.gatewaySeq ?? b.blockNumber ?? '0');
-        if (seqA !== seqB) return seqA < seqB ? -1 : 1;
-        return (a.gatewayIndex ?? a.logIndex ?? 0) - (b.gatewayIndex ?? b.logIndex ?? 0);
-      })
+      .sort((a, b) => this.#compareOrder(a, b))
       .slice(0, limit)
+      .map((r) => structuredClone(r));
+  }
+
+  async listByTypedDataHashes(
+    deploymentId: string,
+    typedDataHashes: readonly string[],
+  ): Promise<OnChainEventRecord[]> {
+    const wanted = new Set(typedDataHashes);
+    if (wanted.size === 0) return [];
+    return [...this.#rows.values()]
+      .filter((r) => {
+        if (r.deploymentId !== deploymentId) return false;
+        const hash = r.decodedPayload['typed_data_hash'];
+        return typeof hash === 'string' && wanted.has(hash);
+      })
+      .sort((a, b) => this.#compareOrder(a, b))
       .map((r) => structuredClone(r));
   }
 
@@ -953,13 +1010,25 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
   async listByRoom(
     roomId: string,
     limit: number,
-    beforeIso?: string,
+    before?: AuditLogCursor,
   ): Promise<GovernanceAuditRecord[]> {
-    return this.#rows
-      .filter((r) => r.roomId === roomId && (beforeIso === undefined || r.createdAt < beforeIso))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, limit)
-      .map((r) => structuredClone(r));
+    return (
+      this.#rows
+        .filter(
+          (r) =>
+            r.roomId === roomId &&
+            (before === undefined ||
+              r.createdAt < before.createdAt ||
+              (r.createdAt === before.createdAt && r.entryId < before.entryId)),
+        )
+        // Strict total order — createdAt DESC, then entryId DESC as the tiebreaker
+        // so same-millisecond rows page deterministically (WS-L.4.1f).
+        .sort(
+          (a, b) => b.createdAt.localeCompare(a.createdAt) || b.entryId.localeCompare(a.entryId),
+        )
+        .slice(0, limit)
+        .map((r) => structuredClone(r))
+    );
   }
 
   async countByRoom(roomId: string): Promise<number> {

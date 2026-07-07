@@ -242,7 +242,7 @@ CREATE TABLE "knomosis"."governance_audit_log" (
 );
 --> statement-breakpoint
 ALTER TABLE "knomosis"."governance_audit_log" ADD CONSTRAINT "governance_audit_actor_fk" FOREIGN KEY ("actor_user_id") REFERENCES "public"."users"("user_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "governance_audit_log_room_idx" ON "knomosis"."governance_audit_log" USING btree ("room_id", "created_at");--> statement-breakpoint
+CREATE INDEX "governance_audit_log_room_idx" ON "knomosis"."governance_audit_log" USING btree ("room_id", "created_at", "entry_id");--> statement-breakpoint
 -- WS-L.4.1f append-only enforcement: no DELETE ever; the ONLY permitted UPDATE
 -- is the right-to-erasure NULLing of `actor_user_id` (the ON DELETE SET NULL
 -- cascade above), mirroring the WS-J moderation_audit trigger.

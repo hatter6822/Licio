@@ -288,6 +288,48 @@ describe('WS-L.2.5b unlink lifecycle + WS-L.2.5c list/label', () => {
     if (late.ok) expect(late.wallet.riskState).toBe('pending');
   });
 
+  it('re-linking a FINALIZED wallet while AT the cap is blocked (WS-L.2.5a review fix)', async () => {
+    let clock = Date.now();
+    const fixture = await freshKnomosisServices({ now: () => clock });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // Link then finalize W1.
+    const linked = await linkTestWallet(fixture, userId, 's1', testAccount, () => clock);
+    if (!linked.ok) throw new Error('link failed');
+    const deps = walletDeps(fixture, () => clock);
+    await requestUnlink(deps, { userId, walletAccountId: linked.wallet.walletAccountId });
+    clock += 25 * 3_600_000;
+    await finalizeElapsedUnlinks(deps);
+    // Advance PAST the re-link cooldown so ONLY the cap can block reactivation.
+    clock += 8 * 24 * 3_600_000;
+    // Meanwhile the user filled the cap with OTHER active wallets.
+    const cap = fixture.knomosis.config().maxWalletsPerUser;
+    for (let i = 0; i < cap; i += 1) {
+      await fixture.knomosis.wallets.insert({
+        walletAccountId: crypto.randomUUID(),
+        userId,
+        addressHashHex: `bb${i.toString().padStart(62, '0')}`,
+        addressTruncated: `0x1${i}…ee`,
+        chainId: 31337,
+        walletType: 'eoa',
+        unlinkState: 'active',
+        riskState: 'pending',
+        label: null,
+        linkedAt: new Date(clock).toISOString(),
+        lastUsedAt: null,
+        unlinkRequestedAt: null,
+        unlinkFinalizeAfter: null,
+        unlinkedAt: null,
+      });
+    }
+    // Reactivating W1 would make cap+1 active wallets — blocked like a fresh link.
+    const over = await linkTestWallet(fixture, userId, 's1', testAccount, () => clock);
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.code).toBe('wallet_limit');
+    // The finalized wallet is untouched (still finalized), not silently reactivated.
+    const w1 = await fixture.knomosis.wallets.getById(linked.wallet.walletAccountId);
+    expect(w1?.unlinkState).toBe('finalized');
+  });
+
   it('an open signed action BLOCKS the unlink with the specific obligation', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);

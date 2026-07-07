@@ -71,39 +71,76 @@ const baseAction = (
 describe('reconciliation decision math (WS-L.3.4a/b)', () => {
   it('decideActionReconciliation covers in-flight, match, and mismatch', () => {
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'accepted' }), null).outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'accepted' }), null, null).outcome,
     ).toBe('in_flight');
+    // finalized: agrees ONLY when BOTH the event stream AND the receipt agree.
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'finalized' }), 'finalized').outcome,
+      decideActionReconciliation(
+        baseAction({ submissionState: 'finalized' }),
+        'finalized',
+        'finalized',
+      ).outcome,
     ).toBe('match');
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'finalized' }), null).outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'finalized' }), null, 'finalized')
+        .outcome,
     ).toBe('mismatch');
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'finalized' }), 'reverted').outcome,
+      decideActionReconciliation(
+        baseAction({ submissionState: 'finalized' }),
+        'reverted',
+        'finalized',
+      ).outcome,
+    ).toBe('mismatch');
+    // Source-2 (receipt) is a GENUINE third observation: a matching event with a
+    // MISSING or DISAGREEING receipt is itself a divergence (WS-L.3.4a).
+    expect(
+      decideActionReconciliation(baseAction({ submissionState: 'finalized' }), 'finalized', null)
+        .outcome,
+    ).toBe('mismatch');
+    expect(
+      decideActionReconciliation(
+        baseAction({ submissionState: 'finalized' }),
+        'finalized',
+        'reverted',
+      ).outcome,
     ).toBe('mismatch');
     // failed pre-execution: NO event ⇒ match; ANY event (a reverted one
     // included) ⇒ mismatch — a reverted event means it actually reached
     // execution, contradicting the failed product state (WS-L review fix).
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'failed' }), null).outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'failed' }), null, null).outcome,
     ).toBe('match');
+    // A failed record that nonetheless carries a settlement receipt is a
+    // source-2 divergence even with no event.
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'failed' }), 'settled').outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'failed' }), null, 'finalized')
+        .outcome,
     ).toBe('mismatch');
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'failed' }), 'reverted').outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'failed' }), 'settled', null)
+        .outcome,
     ).toBe('mismatch');
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'reverted' }), 'reverted').outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'failed' }), 'reverted', null)
+        .outcome,
+    ).toBe('mismatch');
+    expect(
+      decideActionReconciliation(
+        baseAction({ submissionState: 'reverted' }),
+        'reverted',
+        'reverted',
+      ).outcome,
     ).toBe('match');
     // `settled` is PRE-FINALITY: in-flight until it finalizes/reverts, never a
     // mismatch against the finalized/reverted pair (WS-L review fix).
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'settled' }), 'settled').outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'settled' }), 'settled', null)
+        .outcome,
     ).toBe('in_flight');
     expect(
-      decideActionReconciliation(baseAction({ submissionState: 'settled' }), 'finalized').outcome,
+      decideActionReconciliation(baseAction({ submissionState: 'settled' }), 'finalized', null)
+        .outcome,
     ).toBe('in_flight');
   });
 
@@ -187,6 +224,48 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     expect(gate.allowed).toBe(false);
   });
 
+  it('reconcileDeployment flags a finalized action whose RECEIPT is missing/mismatched (WS-L.3.4a receipt source)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const typedDataHash = `0x${'bb'.repeat(32)}`;
+    const record = baseAction({
+      deploymentId,
+      typedDataHash,
+      submissionState: 'finalized',
+      reconciliationState: 'pending',
+      signedAction: { message: { amount: '0', asset: 'USDC' }, signature: '0x' },
+    });
+    await fixture.knomosis.actions.insert(record);
+    // The gateway stream AGREES (a finalized event for the hash) — but NO receipt
+    // was persisted, so source-2 is missing and the action must NOT match.
+    await fixture.knomosis.events.ingest({
+      eventId: crypto.randomUUID(),
+      deploymentId,
+      chainId: LOCAL_DEPLOYMENT.chain_id,
+      blockNumber: null,
+      txHash: null,
+      logIndex: null,
+      eventType: 'knomosis.action.finalized',
+      decodedPayload: { typed_data_hash: typedDataHash },
+      eventSource: 'gateway',
+      gatewaySeq: '1',
+      gatewayIndex: 0,
+      reorgState: 'confirmed',
+      reorgDetectedAt: null,
+      indexedAt: new Date().toISOString(),
+    });
+    const missing = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(missing.mismatched).toBe(1);
+    expect(missing.matched).toBe(0);
+
+    // Now WRITE a matching receipt and re-mark the action unreconciled: it matches.
+    await writeReceipts(fixture.knomosis, record);
+    await fixture.knomosis.actions.update({ ...record, reconciliationState: 'pending' });
+    const withReceipt = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(withReceipt.matched).toBe(1);
+    expect(withReceipt.mismatched).toBe(0);
+  });
+
   it('countQualifyingByRoom counts only simulated PRACTICE, not meta rows (WS-L review fix)', async () => {
     const store = new InMemoryGovernanceAuditStore();
     const roomId = crypto.randomUUID();
@@ -217,6 +296,43 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     });
     expect(await store.countByRoom(roomId)).toBe(5);
     expect(await store.countQualifyingByRoom(roomId)).toBe(3);
+  });
+
+  it('audit-log keyset paging is stable across SAME-millisecond rows (R5-13)', async () => {
+    const store = new InMemoryGovernanceAuditStore();
+    const roomId = crypto.randomUUID();
+    // 5 entries that ALL share one millisecond — the exact case a createdAt-only
+    // cursor skips or duplicates at a page boundary.
+    const createdAt = new Date().toISOString();
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const entryId = crypto.randomUUID();
+      ids.push(entryId);
+      await store.append({
+        entryId,
+        roomId,
+        actionType: 'vote_cast',
+        actorUserId: null,
+        actionDetails: { i },
+        simulationMode: true,
+        createdAt,
+      });
+    }
+    // Page through 2 at a time using the composite (createdAt, entryId) cursor.
+    const seen: string[] = [];
+    let before: { createdAt: string; entryId: string } | undefined;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const page = await store.listByRoom(roomId, 2, before);
+      if (page.length === 0) break;
+      for (const e of page) seen.push(e.entryId);
+      const oldest = page[page.length - 1];
+      if (page.length < 2 || oldest === undefined) break;
+      before = { createdAt: oldest.createdAt, entryId: oldest.entryId };
+    }
+    // Every row is seen EXACTLY once — no skip, no duplicate.
+    expect(seen).toHaveLength(5);
+    expect(new Set(seen).size).toBe(5);
+    expect([...seen].sort()).toEqual([...ids].sort());
   });
 });
 
@@ -350,6 +466,7 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
 describe('submission fail-closed paths (WS-L.3.2)', () => {
   const s = (fixture: Awaited<ReturnType<typeof freshKnomosisServices>>) => ({
     actions: fixture.knomosis.actions,
+    signatures: fixture.knomosis.proposalSignatures,
     nonces: fixture.knomosis.nonces,
     gateway: fixture.knomosis.gateway,
     ephemeral: fixture.knomosis.ephemeral,
