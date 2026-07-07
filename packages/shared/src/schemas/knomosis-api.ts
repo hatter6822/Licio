@@ -459,6 +459,10 @@ export type ProposalVoteRequest = z.infer<typeof proposalVoteRequestSchema>;
 
 // --- Simulated treasury (WS-L.4.1c) ----------------------------------------
 
+/** Max DISTINCT assets a simulated treasury may hold; a deposit introducing an
+ *  asset beyond this is rejected so the response can never violate the schema. */
+export const SIM_TREASURY_MAX_ASSETS = 16;
+
 export const simTreasuryBalanceSchema = z
   .object({
     asset: simAssetSchema,
@@ -471,7 +475,7 @@ export const simTreasuryResponseSchema = z
     room_id: uuidSchema,
     /** Always the WS-L.4.1c banner — the client must render it undismissably. */
     simulation_label: z.literal(SIMULATION_LABEL),
-    balances: z.array(simTreasuryBalanceSchema).max(16),
+    balances: z.array(simTreasuryBalanceSchema).max(SIM_TREASURY_MAX_ASSETS),
     updated_at: isoTimestampSchema,
   })
   .strict();

@@ -256,6 +256,9 @@ export interface KnomosisActionStore {
   /** Pending obligations for the unlink check (WS-L.2.5b): non-terminal actions
    *  signed by this wallet. */
   listOpenByWallet(walletAccountId: string): Promise<KnomosisActionRecordEntity[]>;
+  /** Finalized deposit-type actions for the deployment — the product-side deposit
+   *  ledger the WS-L.3.4a treasury reconciliation compares against gateway standing. */
+  listFinalizedDeposits(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
   /** WS-L data-rights: hard-delete every action a user signed on account
    *  deletion; returns the rows removed. */
   purgeByUser(userId: string): Promise<number>;
@@ -324,10 +327,26 @@ export interface SimTreasuryStore {
 }
 
 /** Append-only (WS-L.4.1f): no update/delete surface exists on the interface. */
+/** Governance-audit action types that count toward the WS-L.4.1f readiness
+ *  track record: genuine SIMULATED governance PRACTICE.  Excludes the meta rows
+ *  (`mode_transition_*`, which a failed transition attempt appends itself, and
+ *  `comprehension_passed`, a prerequisite) so those can never satisfy the bar. */
+export const READINESS_QUALIFYING_AUDIT_ACTIONS: ReadonlySet<GovernanceAuditActionType> = new Set([
+  'proposal_created',
+  'vote_cast',
+  'proposal_passed',
+  'proposal_rejected',
+  'treasury_deposit_simulated',
+  'execution_simulated',
+]);
+
 export interface GovernanceAuditStore {
   append(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord>;
   listByRoom(roomId: string, limit: number, beforeIso?: string): Promise<GovernanceAuditRecord[]>;
   countByRoom(roomId: string): Promise<number>;
+  /** Count only qualifying simulated-practice actions for the readiness gate
+   *  (WS-L.4.1f) — never the meta mode-transition/comprehension rows. */
+  countQualifyingByRoom(roomId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -543,6 +562,21 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
           r.actorWalletAccountId === walletAccountId &&
           !TERMINAL_SUBMISSION_STATES.has(r.submissionState),
       )
+      .map((r) => structuredClone(r));
+  }
+
+  async listFinalizedDeposits(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.deploymentId === deploymentId &&
+          r.submissionState === 'finalized' &&
+          r.actionType === 'treasury_deposit',
+      )
+      .slice(0, limit)
       .map((r) => structuredClone(r));
   }
 
@@ -835,6 +869,15 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
 
   async countByRoom(roomId: string): Promise<number> {
     return this.#rows.filter((r) => r.roomId === roomId).length;
+  }
+
+  async countQualifyingByRoom(roomId: string): Promise<number> {
+    return this.#rows.filter(
+      (r) =>
+        r.roomId === roomId &&
+        r.simulationMode &&
+        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
+    ).length;
   }
 
   async clear(): Promise<void> {

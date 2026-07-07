@@ -158,3 +158,12 @@ production-deployment prerequisite.
    unconfigured deployment degrades closed (submission rejected, standing
    unavailable).  **Closure:** the gateway phase-rollout (G1-G6) as the
    external service ships.
+
+6. **Oversized `gateway_seq` group.**  The ingestion cursor never advances past
+   an incomplete `gateway_seq` group (it drops the trailing partial group and
+   re-fetches it next tick), so a batch boundary can never silently skip events.
+   The one case a seq-only cursor cannot page within is a SINGLE `gateway_seq`
+   carrying more than the fetch limit (default 200) of events; that pathological
+   case is stored best-effort and surfaced by the `knomosis.ingest.oversized_
+   seq_group` alert (never silent).  **Closure:** a composite `(seq, index)`
+   cursor if the external gateway's `?since=` API gains an index parameter.

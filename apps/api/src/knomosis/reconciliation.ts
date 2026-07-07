@@ -40,8 +40,11 @@ export interface ReconciliationDeps {
   alert: (event: string, meta: Record<string, unknown>) => void;
 }
 
-/** States that are legitimately in flight (never a mismatch on their own). */
-const IN_FLIGHT_STATES = new Set(['submitted', 'accepted', 'challenged', 'frozen']);
+/** States that are legitimately in flight (never a mismatch on their own).
+ *  `settled` is on-chain but PRE-FINALITY (a reorg can still revert it), so it
+ *  stays in-flight until it finalizes/reverts rather than being compared against
+ *  the finalized/reverted event pair (which would mis-flag it as a mismatch). */
+const IN_FLIGHT_STATES = new Set(['submitted', 'accepted', 'settled', 'challenged', 'frozen']);
 
 export interface ActionReconcileOutcome {
   outcome: 'match' | 'mismatch' | 'in_flight';
@@ -62,9 +65,11 @@ export function decideActionReconciliation(
     return { outcome: 'in_flight', detail: `in flight (${record.submissionState})` };
   }
   if (record.submissionState === 'failed') {
-    // Failed pre-execution: no event should exist; one appearing is a mismatch.
-    return latestEventState === null || latestEventState === 'reverted'
-      ? { outcome: 'match', detail: 'failed pre-execution; no settled event' }
+    // Failed pre-execution: NO gateway event should exist.  ANY event — a
+    // `reverted` included — means the action actually reached execution, which
+    // contradicts the product state and must surface as a divergence.
+    return latestEventState === null
+      ? { outcome: 'match', detail: 'failed pre-execution; no indexed event' }
       : { outcome: 'mismatch', detail: `failed record but event ${latestEventState}` };
   }
   // finalized / reverted must agree with the event stream.
@@ -188,7 +193,80 @@ export async function reconcileDeployment(
     }
   }
 
+  // Treasury LEDGER reconciliation (source-1 vs source-3): even when every action
+  // STATE agrees, a per-actor balance divergence — finalized deposits vs the
+  // gateway's standing snapshot — must surface, or canExpandTreasury would see
+  // zero blockers on a real imbalance.
+  mismatched += await reconcileActorLedgers(deps, deploymentId, lowWatermark, nowIso);
+
   return { matched, mismatched, inFlight, halted: false };
+}
+
+/**
+ * Per-actor treasury-ledger reconciliation: compare each actor's product-side
+ * finalized-deposit ledger against the gateway standing snapshot (via the pure
+ * `compareActorLedger`), appending a mismatch — deduped per `(wallet, asset)`
+ * against the latest recorded value so a persistent imbalance is not re-alerted
+ * every tick — for every unexplained divergence.  Returns the newly recorded
+ * divergence count.  A null/unavailable gateway skips (never a false "clean").
+ */
+async function reconcileActorLedgers(
+  deps: ReconciliationDeps,
+  deploymentId: string,
+  lowWatermarkSeq: string | null,
+  nowIso: string,
+): Promise<number> {
+  const gateway = deps.gateway();
+  if (gateway === null) return 0;
+  const deposits = await deps.actions.listFinalizedDeposits(deploymentId, 10_000);
+  const ledgerByWallet = new Map<string, { asset: string; amount: string }[]>();
+  for (const deposit of deposits) {
+    const asset = deposit.signedAction.message['asset'];
+    const amount = deposit.signedAction.message['amount'];
+    if (typeof asset !== 'string' || typeof amount !== 'string') continue;
+    const ledger = ledgerByWallet.get(deposit.actorWalletAccountId) ?? [];
+    ledger.push({ asset, amount });
+    ledgerByWallet.set(deposit.actorWalletAccountId, ledger);
+  }
+  const threshold = deps.config().divergenceCriticalThresholdMinorUnits;
+  let recorded = 0;
+  for (const [walletAccountId, ledger] of ledgerByWallet) {
+    const mapping = await deps.actorMappings.get(walletAccountId, deploymentId);
+    if (mapping === null) continue;
+    const read = await gateway.getBalances(mapping.actorId, null);
+    if (read.kind !== 'ok') continue; // unavailable / not-modified: retry next tick
+    const hasInFlight = (await deps.actions.listOpenByWallet(walletAccountId)).length > 0;
+    for (const divergence of compareActorLedger(ledger, read.value, threshold, hasInFlight)) {
+      const entityRef = `${walletAccountId}:${divergence.asset}`;
+      const latest = await deps.reconciliation.latestForEntity('treasury', entityRef);
+      if (
+        latest?.outcome === 'mismatch' &&
+        (latest.details as { actual?: string }).actual === divergence.actual
+      ) {
+        continue; // an unchanged divergence is already recorded (still a blocker)
+      }
+      const result: ReconciliationResultRecord = {
+        resultId: deps.uuid(),
+        deploymentId,
+        entityType: 'treasury',
+        entityRef,
+        outcome: 'mismatch',
+        severity: divergence.severity,
+        details: {
+          asset: divergence.asset,
+          expected: divergence.expected,
+          actual: divergence.actual,
+          detail: `treasury ledger divergence (${divergence.asset})`,
+        },
+        lowWatermarkSeq,
+        createdAt: nowIso,
+      };
+      await deps.reconciliation.append(result);
+      await raiseDivergence(deps, result);
+      recorded += 1;
+    }
+  }
+  return recorded;
 }
 
 /** WS-L.3.4b — alert + freeze-review escalation for a mismatch. */

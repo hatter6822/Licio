@@ -43,7 +43,15 @@ const gatewayVerdictSchema = z
     /** Present but null today (gateway OQ-GW-6); never treated as a failure. */
     seq: z.string().regex(/^\d+$/).nullable(),
   })
-  .strict();
+  .strict()
+  // FAIL CLOSED on an inconsistent verdict: `accepted` MUST agree with
+  // `verdict === 'Ok'`.  An `accepted: true` paired with `NotAdmissible` /
+  // `InsufficientBudget` (or an `accepted: false` with `Ok`) is a protocol
+  // violation — the parse fails and the caller maps it to `protocol_error`,
+  // never advancing the action off a contradictory `accepted` flag.
+  .refine((v) => v.accepted === (v.verdict === 'Ok'), {
+    message: 'inconsistent gateway verdict: `accepted` must match `verdict === "Ok"`',
+  });
 export type GatewayVerdict = z.infer<typeof gatewayVerdictSchema>;
 
 export type GatewaySubmitResult =

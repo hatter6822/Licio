@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
+import type { KnomosisGateway } from '../knomosis/gateway.js';
 import { ingestGatewayEvents, rebuildFromSnapshot } from '../knomosis/ingest.js';
 import type { PreflightDeps, PreflightRequestInput } from '../knomosis/preflight.js';
 import { runPreflight } from '../knomosis/preflight.js';
@@ -388,6 +389,63 @@ describe('WS-L.3.1 preflight pipeline', () => {
     const message = {
       roomId: ROOM,
       proposalId: '88888888-8888-4888-8888-888888888888', // no such open proposal
+      actor: testAccount.address,
+      nonce: '1',
+      expiration: String(Math.floor(Date.now() / 1000) + 600),
+      deploymentId: DEPLOYMENT,
+    };
+    const signature = await signedTypedData('proposal_sign', message);
+    const result = await runPreflight(preflightDeps(fixture), {
+      userId,
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    expect(result.result).toBe('fail');
+    if (result.result === 'fail') expect(result.reason_code).toBe('POLICY_CONFLICT');
+  });
+
+  it('rejects signing a SIMULATED proposal for real submission (WS-L review fix)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // The room has moved to a real mode but still holds an OPEN simulated proposal.
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const proposalId = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: userId,
+      proposalType: 'charter_update',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'open',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: true, // an educational simulated proposal
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+    });
+    const message = {
+      roomId: ROOM,
+      proposalId,
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),
@@ -802,6 +860,35 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     expect(rebuilt.remarked).toBeGreaterThanOrEqual(0);
     const afterRebuild = await reconcileDeployment(fixture.knomosis, DEPLOYMENT);
     expect(afterRebuild.halted).toBe(false);
+  });
+
+  it('does NOT advance the cursor past an incomplete seq group (WS-L review fix)', async () => {
+    const fixture = await freshKnomosisServices();
+    // A limit-full batch (3) that ENDS mid seq-6 group (index 1; index 2 exists
+    // beyond the limit).  The cursor advances by seq, so seq-6 must NOT be stored.
+    const batch = [
+      { seq: '5', index: 0, type: 'knomosis.action.accepted', payload: {} },
+      { seq: '6', index: 0, type: 'knomosis.action.accepted', payload: {} },
+      { seq: '6', index: 1, type: 'knomosis.action.accepted', payload: {} },
+    ];
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({ kind: 'events', events: batch, latestSeq: '6' }),
+    };
+    const outcome = await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+      3,
+    );
+    expect(outcome.kind).toBe('ok');
+    // Only the COMPLETE seq-5 group is stored; the derived cursor stays at 5, so
+    // the full seq-6 group (indexes 0..2) is re-fetched (idempotently) next tick.
+    expect(await fixture.knomosis.events.latestGatewaySeq(DEPLOYMENT)).toBe('5');
   });
 
   it('reconciliation matches a finalized action against the indexed stream', async () => {

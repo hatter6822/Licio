@@ -16,6 +16,7 @@ import {
 } from '../knomosis/ports.js';
 import { verifyReceiptPairing, writeReceipts } from '../knomosis/receipts.js';
 import {
+  canExpandTreasury,
   classifyDivergence,
   compareActorLedger,
   decideActionReconciliation,
@@ -81,7 +82,9 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     expect(
       decideActionReconciliation(baseAction({ submissionState: 'finalized' }), 'reverted').outcome,
     ).toBe('mismatch');
-    // failed pre-execution: no event ⇒ match; an event ⇒ mismatch.
+    // failed pre-execution: NO event ⇒ match; ANY event (a reverted one
+    // included) ⇒ mismatch — a reverted event means it actually reached
+    // execution, contradicting the failed product state (WS-L review fix).
     expect(
       decideActionReconciliation(baseAction({ submissionState: 'failed' }), null).outcome,
     ).toBe('match');
@@ -89,8 +92,19 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
       decideActionReconciliation(baseAction({ submissionState: 'failed' }), 'settled').outcome,
     ).toBe('mismatch');
     expect(
+      decideActionReconciliation(baseAction({ submissionState: 'failed' }), 'reverted').outcome,
+    ).toBe('mismatch');
+    expect(
       decideActionReconciliation(baseAction({ submissionState: 'reverted' }), 'reverted').outcome,
     ).toBe('match');
+    // `settled` is PRE-FINALITY: in-flight until it finalizes/reverts, never a
+    // mismatch against the finalized/reverted pair (WS-L review fix).
+    expect(
+      decideActionReconciliation(baseAction({ submissionState: 'settled' }), 'settled').outcome,
+    ).toBe('in_flight');
+    expect(
+      decideActionReconciliation(baseAction({ submissionState: 'settled' }), 'finalized').outcome,
+    ).toBe('in_flight');
   });
 
   it('classifyDivergence spans informational/warning/critical', () => {
@@ -133,6 +147,76 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     });
     const summary = await reconcileDeployment(fixture.knomosis, LOCAL_DEPLOYMENT.deployment_id);
     expect(summary.halted).toBe(true);
+  });
+
+  it('reconcileDeployment surfaces a treasury LEDGER divergence (WS-L review fix)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const walletAccountId = crypto.randomUUID();
+    // A finalized deposit of 150 USDC; the actor maps to a gateway actor id.
+    await fixture.knomosis.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId,
+      actionType: 'treasury_deposit',
+      roomId: crypto.randomUUID(),
+      actorWalletAccountId: walletAccountId,
+      actorUserId: crypto.randomUUID(),
+      payloadHash: '0x',
+      typedDataHash: `0x${'aa'.repeat(32)}`,
+      signedAction: { message: { asset: 'USDC', amount: '150' }, signature: '0x' },
+      submissionState: 'finalized',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'matched',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await fixture.knomosis.actorMappings.put({
+      walletAccountId,
+      deploymentId,
+      actorId: 'actor-ledger',
+      createdAt: new Date().toISOString(),
+    });
+    // The fake gateway shows 120 for that actor — a 30-unit divergence.
+    fixture.gateway.setBalance('actor-ledger', 'USDC', '120');
+    const summary = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(summary.mismatched).toBeGreaterThanOrEqual(1);
+    // The divergence blocks treasury expansion (§28.3) even though action states agree.
+    const gate = await canExpandTreasury(fixture.knomosis, deploymentId);
+    expect(gate.allowed).toBe(false);
+  });
+
+  it('countQualifyingByRoom counts only simulated PRACTICE, not meta rows (WS-L review fix)', async () => {
+    const store = new InMemoryGovernanceAuditStore();
+    const roomId = crypto.randomUUID();
+    const base = {
+      roomId,
+      actorUserId: null,
+      actionDetails: {},
+      simulationMode: true,
+      createdAt: new Date().toISOString(),
+    };
+    await store.append({ entryId: crypto.randomUUID(), actionType: 'proposal_created', ...base });
+    await store.append({ entryId: crypto.randomUUID(), actionType: 'vote_cast', ...base });
+    await store.append({
+      entryId: crypto.randomUUID(),
+      actionType: 'treasury_deposit_simulated',
+      ...base,
+    });
+    // Meta rows a failed transition attempt / the quiz append — NOT practice.
+    await store.append({
+      entryId: crypto.randomUUID(),
+      actionType: 'mode_transition_requested',
+      ...base,
+    });
+    await store.append({
+      entryId: crypto.randomUUID(),
+      actionType: 'comprehension_passed',
+      ...base,
+    });
+    expect(await store.countByRoom(roomId)).toBe(5);
+    expect(await store.countQualifyingByRoom(roomId)).toBe(3);
   });
 });
 

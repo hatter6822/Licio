@@ -103,7 +103,7 @@ export async function evaluateReadiness(
       description: 'The requesting steward must pass the simulation-comprehension check.',
     });
   }
-  const trackRecord = await deps.governanceAudit.countByRoom(roomId);
+  const trackRecord = await deps.governanceAudit.countQualifyingByRoom(roomId);
   if (trackRecord < deps.config().readinessMinSimActions) {
     unmet.push({
       requirement: 'simulation_track_record',

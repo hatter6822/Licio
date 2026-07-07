@@ -408,6 +408,20 @@ export async function runPreflight(
   if (actionType === 'proposal_sign') {
     const proposalId = message['proposalId'] ?? '';
     const proposal = await deps.proposals.getById(proposalId);
+    // A SIMULATED proposal (from the room's practice phase) must never be signed
+    // for a real gateway submission, even if the room has since moved to a real
+    // mode and the proposal is still 'open' (WS-L.4.1a educational isolation).
+    if (proposal?.simulationMode) {
+      return audited(
+        fail(
+          'policy_conflict',
+          'POLICY_CONFLICT',
+          'A simulated proposal cannot be signed for real submission.',
+          input,
+          nowIso,
+        ),
+      );
+    }
     if (proposal === null || proposal.roomId !== input.roomId || proposal.votingState !== 'open') {
       return audited(
         fail(

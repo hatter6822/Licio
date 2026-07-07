@@ -55,6 +55,12 @@ import type {
 export interface GovernanceServiceDeps {
   stores: GovernanceStores;
   config: GovernanceConfig;
+  /** LIVE crypto-flag reader (wired at boot to the shared knomosis runtime
+   *  config).  When present it OVERRIDES the boot-time `config.cryptoEnabled`
+   *  snapshot, so disabling the flag at runtime immediately stops treasury
+   *  execution rather than only affecting freshly-booted processes.  Absent ⇒
+   *  the static snapshot (the test/default behaviour). */
+  cryptoFlag?: () => boolean;
   now: () => Date;
   uuid: () => string;
   /** sha-256 hex over a canonical string (node:crypto in prod). */
@@ -136,6 +142,12 @@ export class GovernanceService {
 
   private iso(): string {
     return this.deps.now().toISOString();
+  }
+
+  /** The LIVE crypto flag: the wired runtime reader if present, else the
+   *  boot-time config snapshot (WS-L review fix — no stale treasury powers). */
+  private cryptoEnabled(): boolean {
+    return this.deps.cryptoFlag ? this.deps.cryptoFlag() : this.deps.config.cryptoEnabled;
   }
 
   // --- Stage 1: seat + elections -------------------------------------------
@@ -949,8 +961,7 @@ export class GovernanceService {
       targetAllocation?: readonly { asset: string; fraction: number }[] | null;
     },
   ): Promise<GovernanceResult<Verdict>> {
-    if (!this.deps.config.cryptoEnabled)
-      return err('crypto_disabled', 'Crypto features are disabled.');
+    if (!this.cryptoEnabled()) return err('crypto_disabled', 'Crypto features are disabled.');
     // WS-L.3.5d: the treasury-execution kill switch blocks NEW executions for
     // every caller (routes + agent runtime); in-flight on-chain executions are
     // upstream and unaffected.
@@ -991,7 +1002,7 @@ export class GovernanceService {
       timestamp: a.executedAt,
     }));
     const verdict = evaluateTreasuryAction(action.data, lawPack.treasury, history, {
-      cryptoEnabled: this.deps.config.cryptoEnabled,
+      cryptoEnabled: this.cryptoEnabled(),
       now: this.iso(),
     });
     const record: TreasuryActionRecord = {

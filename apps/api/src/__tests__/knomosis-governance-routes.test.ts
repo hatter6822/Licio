@@ -367,3 +367,46 @@ describe('governance surface fail-closed gates', () => {
     expect(body.unmet.length).toBeGreaterThan(0);
   });
 });
+
+describe('WS-L review fix — simulated voting/execution require simulated mode', () => {
+  it('409s a vote in a non-simulated (testnet) room (mode_invalid)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Testnet Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    const proposalId = '99999999-9999-4999-8999-999999999999';
+    const res = await req(
+      'POST',
+      `/rooms/${ROOM}/governance/proposals/${proposalId}/vote`,
+      cookie,
+      {
+        choice: 'approve',
+      },
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('mode_invalid');
+  });
+
+  it('409s an execute in a non-simulated (testnet) room (mode_invalid)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Testnet Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    const proposalId = '99999999-9999-4999-8999-999999999999';
+    const res = await req(
+      'POST',
+      `/rooms/${ROOM}/governance/proposals/${proposalId}/execute`,
+      cookie,
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('mode_invalid');
+  });
+});

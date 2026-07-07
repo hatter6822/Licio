@@ -150,6 +150,34 @@ describe('HttpKnomosisGateway (fail-closed parsing)', () => {
     expect(result.kind).toBe('protocol_error');
   });
 
+  it('FAILS CLOSED on an inconsistent verdict (accepted:true + NotAdmissible)', async () => {
+    // A well-typed but CONTRADICTORY verdict must never advance the action off
+    // the `accepted` flag — the schema refine rejects it as a protocol error.
+    for (const verdict of ['NotAdmissible', 'InsufficientBudget'] as const) {
+      const gw = new HttpKnomosisGateway({
+        baseUrl: 'http://gw',
+        bearerToken: 't',
+        fetchImpl: stubFetch({ status: 200, body: { accepted: true, verdict, seq: null } }),
+      });
+      const result = await gw.submitAction({
+        signedAction: signedAction('0x1'),
+        idempotencyKey: 'k',
+      });
+      expect(result.kind).toBe('protocol_error');
+    }
+    // The mirror inconsistency (accepted:false but verdict Ok) also fails closed.
+    const gw = new HttpKnomosisGateway({
+      baseUrl: 'http://gw',
+      bearerToken: 't',
+      fetchImpl: stubFetch({ status: 200, body: { accepted: false, verdict: 'Ok', seq: null } }),
+    });
+    const result = await gw.submitAction({
+      signedAction: signedAction('0x1'),
+      idempotencyKey: 'k',
+    });
+    expect(result.kind).toBe('protocol_error');
+  });
+
   it('maps a 409 events response to a gap with oldestSeq', async () => {
     const gw = new HttpKnomosisGateway({
       baseUrl: 'http://gw',

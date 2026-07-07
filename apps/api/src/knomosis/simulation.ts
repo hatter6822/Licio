@@ -18,6 +18,7 @@ import { decCompare, decSum } from '@licio/governance';
 import {
   type ComprehensionQuestion,
   type GovernanceProposalCreate,
+  SIM_TREASURY_MAX_ASSETS,
   SIMULATION_LABEL,
   type SimTreasuryResponse,
 } from '@licio/shared';
@@ -243,6 +244,17 @@ export async function simDeposit(
   }
 
   const treasury = await ensureSimTreasury(deps, args.roomId);
+  // Reject a deposit that would introduce a distinct asset beyond the schema cap:
+  // otherwise the write succeeds and every later treasury/governance read parses a
+  // balances array that violates simTreasuryResponseSchema → a 500 (WS-L.4.1c).
+  const isNewAsset = !Object.hasOwn(treasury.balances, args.asset);
+  if (isNewAsset && Object.keys(treasury.balances).length >= SIM_TREASURY_MAX_ASSETS) {
+    return err(
+      409,
+      'too_many_sim_assets',
+      `A simulated treasury holds at most ${SIM_TREASURY_MAX_ASSETS} distinct assets.`,
+    );
+  }
   const nowIso = new Date(deps.now()).toISOString();
   const next = {
     ...treasury,
@@ -459,7 +471,10 @@ export async function evaluateSimVote(
     });
     return updated;
   }
-  if ((tally.reject / decided) * 100 >= 100 - config.simApprovalThresholdPercent) {
+  // STRICT rejecting majority (mirrors the strict approval bar): a tie — e.g. a
+  // quorum-reaching 1 approve / 1 reject / 1 abstain — crosses NEITHER threshold
+  // and stays OPEN rather than being prematurely rejected.
+  if ((tally.reject / decided) * 100 > 100 - config.simApprovalThresholdPercent) {
     const updated: GovernanceProposalRecord = { ...proposal, votingState: 'rejected' };
     await deps.proposals.update(updated);
     await deps.governanceAudit.append({

@@ -127,8 +127,36 @@ export async function ingestGatewayEvents(
     return { kind: 'halted', reason: 'gap', detail: `events before ${result.oldestSeq} lost` };
   }
 
+  // A limit-full batch may end PART-WAY through a `gateway_seq` group.  Because
+  // the cursor advances by seq (`getEvents` returns events with seq > cursor),
+  // storing a partial trailing group would advance the derived cursor past that
+  // seq and PERMANENTLY skip its remaining `gateway_index` entries.  Keep only
+  // COMPLETE seq groups; the idempotent re-fetch next tick returns the whole
+  // trailing group (events are keyed by `(seq, index)`, so re-ingest is a no-op).
+  let batch = result.events;
+  if (batch.length === limit && batch.length > 0) {
+    const ordered = [...batch].sort((a, b) =>
+      a.seq === b.seq ? a.index - b.index : BigInt(a.seq) < BigInt(b.seq) ? -1 : 1,
+    );
+    const lastSeq = ordered.at(-1)?.seq;
+    const complete = ordered.filter((e) => e.seq !== lastSeq);
+    if (complete.length > 0) {
+      batch = complete;
+    } else {
+      // Pathological: a SINGLE gateway_seq holds more than `limit` events, so no
+      // trailing group can be dropped without stalling.  A seq-only cursor cannot
+      // page within one seq — store the batch whole and SURFACE it (never silent).
+      deps.alert('knomosis.ingest.oversized_seq_group', {
+        deployment_id: deploymentId,
+        seq: lastSeq ?? null,
+        limit,
+      });
+      batch = ordered;
+    }
+  }
+
   let ingested = 0;
-  for (const event of result.events) {
+  for (const event of batch) {
     const known = (KNOWN_GATEWAY_EVENT_TYPES as readonly string[]).includes(event.type);
     if (!known) {
       // FAIL CLOSED on an unknown event affecting a tracked deployment: halt

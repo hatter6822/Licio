@@ -909,12 +909,13 @@ eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
 
 setGovernanceService(
   createGovernanceService({
-    // Boot-resolved from the SAME knomosis.* source; the WS-L kill switches
-    // provide the instant OFF path (flag enablement is a reviewed boot-time
-    // action, disablement is immediate via the registry).
+    // Boot-resolved from the SAME knomosis.* source for the static election/agent
+    // config, but the crypto gate reads a LIVE getter so disabling the runtime
+    // flag immediately stops treasury execution (not just after a reboot).
     config: resolveGovernanceConfig({
       cryptoEnabled: knomosisServices.config().cryptoEnabled,
     }),
+    cryptoFlag: () => knomosisServices.config().cryptoEnabled,
     stores: governanceStores,
     killSwitches: buildGovernanceKillSwitchGuards(knomosisServices),
   }),

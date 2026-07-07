@@ -259,6 +259,75 @@ describe('WS-L.4.1d simulated voting + execution', () => {
     expect(executed.ok).toBe(true);
   });
 
+  it('leaves a quorum-reaching TIE open (crosses neither threshold, WS-L review fix)', async () => {
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' } });
+    const proposer = await seedUserWithSession(fixture.identity, { handle: 'tieProp' });
+    const approver = await seedUserWithSession(fixture.identity, { handle: 'tieApprove' });
+    const rejecter = await seedUserWithSession(fixture.identity, { handle: 'tieReject' });
+    const abstainer = await seedUserWithSession(fixture.identity, { handle: 'tieAbstain' });
+    for (const u of [proposer, approver, rejecter, abstainer]) {
+      await passComprehension(fixture, u.userId);
+    }
+    const deps = simulationDeps(fixture.knomosis);
+    const created = await createSimProposal(deps, {
+      roomId: ROOM,
+      userId: proposer.userId,
+      create: bountyTemplate({ requested_amount: '1000000' }),
+    });
+    if (!created.ok) throw new Error('proposal failed');
+    const proposalId = created.proposal.proposalId;
+    // 1 approve / 1 reject / 1 abstain: quorum (3) met but the decided vote is 50/50.
+    await castSimVote(deps, {
+      roomId: ROOM,
+      proposalId,
+      userId: approver.userId,
+      choice: 'approve',
+    });
+    await castSimVote(deps, {
+      roomId: ROOM,
+      proposalId,
+      userId: rejecter.userId,
+      choice: 'reject',
+    });
+    await castSimVote(deps, {
+      roomId: ROOM,
+      proposalId,
+      userId: abstainer.userId,
+      choice: 'abstain',
+    });
+    const final = await fixture.knomosis.proposals.getById(proposalId);
+    expect(final?.votingState).toBe('open'); // neither passed NOR prematurely rejected
+  });
+
+  it('rejects a deposit introducing a DISTINCT asset beyond the treasury cap', async () => {
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' } });
+    const { userId } = await seedUserWithSession(fixture.identity, { handle: 'assetCap' });
+    await passComprehension(fixture, userId);
+    const deps = simulationDeps(fixture.knomosis);
+    // Bootstrap holds 1 asset (SIM-USDC); add 15 more to reach the 16-asset cap.
+    for (let i = 0; i < 15; i++) {
+      const r = await simDeposit(deps, { roomId: ROOM, userId, asset: `SIM-A${i}`, amount: '1' });
+      expect(r.ok).toBe(true);
+    }
+    // The 17th DISTINCT asset would violate simTreasuryResponseSchema → reject it.
+    const overflow = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-OVER',
+      amount: '1',
+    });
+    expect(overflow.ok).toBe(false);
+    if (!overflow.ok) expect(overflow.code).toBe('too_many_sim_assets');
+    // A top-up into an EXISTING asset still succeeds (not a new distinct asset).
+    const existing = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1',
+    });
+    expect(existing.ok).toBe(true);
+  });
+
   it('does not pass below quorum', async () => {
     const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' } });
     const proposer = await seedUserWithSession(fixture.identity, { handle: 'prop2' });

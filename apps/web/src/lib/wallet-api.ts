@@ -31,6 +31,7 @@ import {
 } from '@licio/shared';
 import { z } from 'zod';
 import { client, parseResponse } from './api.js';
+import { parseWithStepUp } from './auth-api.js';
 
 // --- Wallet link lifecycle (WS-L.2) ----------------------------------------
 
@@ -45,7 +46,9 @@ export async function linkWallet(input: {
   label?: string;
 }): Promise<WalletLinkResponse> {
   const response = await client.v1.wallet.link.$post({ json: input });
-  return parseResponse(response, walletLinkResponseSchema);
+  // Link requires fresh step-up: surface a step-up 401 as the typed error so the
+  // retry dialog opens instead of a generic API failure (WS-L.2.5a).
+  return parseWithStepUp(response, walletLinkResponseSchema);
 }
 
 export async function fetchWallets(includeUnlinked = false): Promise<WalletListResponse> {
@@ -90,7 +93,9 @@ export async function requestWalletUnlink(walletId: string): Promise<WalletUnlin
     const data: unknown = await response.json();
     return unlinkResultSchema.parse(data);
   }
-  return parseResponse(response, unlinkResultSchema);
+  // Unlink requires fresh step-up: a step-up 401 becomes the typed error that
+  // opens the retry dialog rather than a generic failure (WS-L.2.5b).
+  return parseWithStepUp(response, unlinkResultSchema);
 }
 
 // --- Knomosis deployment manifest (WS-L.1.1a-1) ----------------------------

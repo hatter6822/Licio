@@ -236,6 +236,9 @@ export function createWalletRoutes() {
         authMiddleware(),
         requireVerifiedAccount(),
         requireAdult(),
+        // A label mutation persists financial-wallet metadata + an audit entry, so
+        // it requires the SAME fresh step-up assurance as link/unlink (WS-L.2.5c).
+        requireStepUp(),
         zValidator('param', z.object({ walletId: uuidSchema })),
         zValidator('json', walletLabelRequestSchema),
         async (c) => {

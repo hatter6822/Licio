@@ -389,6 +389,30 @@ describe('GovernanceService — Stage 5 kernel-backed treasury', () => {
     expect(tr.ok).toBe(false);
   });
 
+  it('reads the crypto flag LIVE — a runtime disable stops execution (WS-L review fix)', async () => {
+    let live = true;
+    const svc = createGovernanceService({
+      stores: createInMemoryGovernanceStores(),
+      // Boot config says ENABLED, but the live getter is the source of truth.
+      config: resolveGovernanceConfig({ cryptoEnabled: true }),
+      cryptoFlag: () => live,
+      now: () => new Date(START),
+      uuid: () => crypto.randomUUID(),
+    });
+    await svc.bootstrapSeat('r', 's');
+    // An operator disables the shared crypto flag at runtime.
+    live = false;
+    const tr = await svc.executeTreasuryAction('r', {
+      category: 'transparency_report',
+      amount: 0,
+      asset: null,
+      coiDeclared: false,
+      proposedAt: '2026-06-19T00:00:00.000Z',
+    });
+    expect(tr.ok).toBe(false);
+    if (!tr.ok) expect(tr.code).toBe('crypto_disabled');
+  });
+
   it('executes a within-bounds action via the kernel when crypto is enabled', async () => {
     const h = makeService(true);
     await h.svc.bootstrapSeat('r', 's');

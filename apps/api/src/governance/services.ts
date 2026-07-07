@@ -17,6 +17,9 @@ export function sha256Hex(input: string): string {
 export interface GovernanceServiceOptions {
   stores?: GovernanceStores;
   config?: GovernanceConfig;
+  /** LIVE crypto-flag reader (boot wires the shared knomosis runtime config); a
+   *  runtime disable then stops treasury execution without a reboot. */
+  cryptoFlag?: () => boolean;
   now?: () => Date;
   uuid?: () => string;
   /** WS-L.3.5d/e kill-switch guards (boot wires the knomosis registry in). */
@@ -33,6 +36,7 @@ export function createGovernanceService(opts: GovernanceServiceOptions = {}): Go
     now: opts.now ?? (() => new Date()),
     uuid: opts.uuid ?? randomUUID,
     digest: sha256Hex,
+    ...(opts.cryptoFlag ? { cryptoFlag: opts.cryptoFlag } : {}),
     ...(opts.killSwitches ? { killSwitches: opts.killSwitches } : {}),
   });
 }

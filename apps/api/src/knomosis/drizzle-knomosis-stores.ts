@@ -55,6 +55,7 @@ import type {
   WalletActorMappingRecord,
   WalletActorMappingStore,
 } from './stores.js';
+import { READINESS_QUALIFYING_AUDIT_ACTIONS } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -378,6 +379,25 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
         and(
           eq(knomosisActionRecords.deploymentId, deploymentId),
           eq(knomosisActionRecords.reconciliationState, 'pending'),
+        ),
+      )
+      .orderBy(asc(knomosisActionRecords.createdAt))
+      .limit(limit);
+    return rows.map(mapAction);
+  }
+
+  async listFinalizedDeposits(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(
+        and(
+          eq(knomosisActionRecords.deploymentId, deploymentId),
+          eq(knomosisActionRecords.submissionState, 'finalized'),
+          eq(knomosisActionRecords.actionType, 'treasury_deposit'),
         ),
       )
       .orderBy(asc(knomosisActionRecords.createdAt))
@@ -1008,6 +1028,20 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
       .select({ count: sql<number>`count(*)::int` })
       .from(governanceAuditLogs)
       .where(eq(governanceAuditLogs.roomId, roomId));
+    return rows[0]?.count ?? 0;
+  }
+
+  async countQualifyingByRoom(roomId: string): Promise<number> {
+    const rows = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(governanceAuditLogs)
+      .where(
+        and(
+          eq(governanceAuditLogs.roomId, roomId),
+          eq(governanceAuditLogs.simulationMode, true),
+          inArray(governanceAuditLogs.actionType, [...READINESS_QUALIFYING_AUDIT_ACTIONS]),
+        ),
+      );
     return rows[0]?.count ?? 0;
   }
 

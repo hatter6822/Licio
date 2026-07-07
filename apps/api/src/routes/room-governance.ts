@@ -268,6 +268,12 @@ export function createRoomGovernanceSimRoutes() {
           const params = c.req.valid('param');
           const gate = await simGate(services, params.roomId, auth.userId, true);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          // Simulated voting exists only in simulated mode: once a room moves to
+          // testnet/capped, old simulated proposals can no longer be voted on or
+          // have their state/timelocks mutated through the simulation store.
+          if (gate.mode !== 'simulated') {
+            return c.json(deny('mode_invalid', 'Voting here exists in simulated mode.'), 409);
+          }
           const result = await castSimVote(simulationDeps(services), {
             roomId: params.roomId,
             proposalId: params.proposalId,
@@ -289,6 +295,11 @@ export function createRoomGovernanceSimRoutes() {
           const params = c.req.valid('param');
           const gate = await simGate(services, params.roomId, auth.userId, true);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          // Simulated execution exists only in simulated mode (real modes execute
+          // through preflight → submit, never the simulation store).
+          if (gate.mode !== 'simulated') {
+            return c.json(deny('mode_invalid', 'Execution here exists in simulated mode.'), 409);
+          }
           const result = await executeSimProposal(simulationDeps(services), {
             roomId: params.roomId,
             proposalId: params.proposalId,
