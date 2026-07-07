@@ -62,7 +62,7 @@ CREATE TYPE "knomosis"."knomosis_deployment_status" AS ENUM('provisioning', 'act
 CREATE TYPE "knomosis"."knomosis_event_source" AS ENUM('chain', 'gateway');--> statement-breakpoint
 CREATE TYPE "knomosis"."knomosis_reorg_state" AS ENUM('pending', 'confirmed', 'reorged');--> statement-breakpoint
 CREATE TYPE "knomosis"."knomosis_action_type" AS ENUM('proposal_sign', 'treasury_deposit', 'grant_payout', 'charter_update', 'bounty_contribution', 'steward_rotation');--> statement-breakpoint
-CREATE TYPE "knomosis"."knomosis_submission_state" AS ENUM('submitted', 'accepted', 'settled', 'finalized', 'challenged', 'reverted', 'frozen', 'failed');--> statement-breakpoint
+CREATE TYPE "knomosis"."knomosis_submission_state" AS ENUM('reserving', 'submitted', 'accepted', 'settled', 'finalized', 'challenged', 'reverted', 'frozen', 'failed');--> statement-breakpoint
 CREATE TYPE "knomosis"."knomosis_reconciliation_state" AS ENUM('pending', 'matched', 'mismatch', 'halted_unsupported_version');--> statement-breakpoint
 CREATE TYPE "knomosis"."governance_proposal_type" AS ENUM('charter_update', 'bounty', 'capped_grant');--> statement-breakpoint
 CREATE TYPE "knomosis"."proposal_preflight_state" AS ENUM('pending', 'passed', 'failed');--> statement-breakpoint

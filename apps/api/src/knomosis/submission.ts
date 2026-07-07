@@ -47,6 +47,10 @@ import type {
 export const VALID_SUBMISSION_TRANSITIONS: Readonly<
   Record<SubmissionState, readonly SubmissionState[]>
 > = {
+  // The pre-submit reservation: it advances to `submitted` once every submit
+  // gate passes, or `failed` when a gate rejects / the reservation is swept
+  // (WS-L.3.2a).  It is NEVER forwarded and NEVER reconciled.
+  reserving: ['submitted', 'failed'],
   submitted: ['accepted', 'failed', 'frozen'],
   accepted: ['settled', 'challenged', 'reverted', 'frozen', 'failed'],
   settled: ['finalized', 'challenged', 'reverted', 'frozen'],
@@ -150,15 +154,19 @@ export async function submitAction(
     };
   }
 
-  // Validate the deployment + compute the typed-data hash — PURE, nothing consumed
-  // yet — so the idempotency key can be RESERVED before any destructive op.
+  // Validate the deployment + compute the typed-data hash — PURE reads, nothing
+  // consumed yet.  Mirror preflight's ACTIVE-status gate (WS-L.3.1b): reject a
+  // deployment that has been frozen/retired (e.g. removed from the pin file) since
+  // the still-alive preflight token was minted, not just a missing one — otherwise
+  // submit could forward an action on a deployment an operator has taken out of
+  // service (WS-L.3.2a).
   const deployment = pinnedDeployment(input.deploymentId);
-  if (!deployment) {
+  if (deployment?.status !== 'active') {
     return {
       ok: false,
       status: 409,
       code: 'DEPLOYMENT_UNKNOWN',
-      message: 'Unknown deployment.',
+      message: 'Unknown or inactive deployment.',
     };
   }
   const actionType = input.actionType as KnomosisSignedActionType;
@@ -178,12 +186,104 @@ export async function submitAction(
     };
   }
 
+  // ---- PRE-RESERVATION GATES (pure, idempotent reads) -----------------------
+  // Everything that does NOT consume a single-use token is validated BEFORE the
+  // reservation insert, so (a) a rejected request NEVER persists a row — in
+  // particular a row whose `actorWalletAccountId` FK points at a wallet the
+  // submitter does not own (which would otherwise block the victim's financial
+  // purge, WS-L.3.2a), and (b) a concurrent duplicate re-runs the same
+  // deterministic checks harmlessly.  Only the single-use preflight token + nonce
+  // are consumed AFTER the reservation (see below).
+
+  // RE-CHECK the signed EXPIRATION: the preflight token can outlive the signed
+  // payload (it lives minutes), so a payload valid at preflight may have expired
+  // before submit — never reserve/forward an expired action (WS-L.3.2a).
+  const expirationSeconds = Number(input.typedDataMessage['expiration'] ?? '');
+  if (!Number.isFinite(expirationSeconds) || expirationSeconds * 1000 <= deps.now()) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'EXPIRED',
+      message: 'The signed action has expired; re-sign and resubmit.',
+    };
+  }
+
+  // RE-CHECK the WALLET at submit BEFORE reserving: preflight's ownership/active/
+  // risk gates can go stale, and — critically — the reserved row's FK must never
+  // point at a wallet the submitter does not own.  A wallet that is missing, owned
+  // by another account, or no longer active fails HERE, before any row exists
+  // (WS-L.3.2a mirrors the WS-L.3.1b gates).
+  const wallet = await deps.wallets.getById(input.walletAccountId);
+  if (wallet === null || wallet.userId !== input.userId || wallet.unlinkState !== 'active') {
+    return {
+      ok: false,
+      status: 409,
+      code: 'WALLET_NOT_ACTIVE',
+      message: 'The selected wallet is not active.',
+    };
+  }
+  if (
+    wallet.riskState === 'high' ||
+    (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType))
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'RISK_BLOCKED',
+      message: 'This wallet is currently restricted from this financial action.',
+    };
+  }
+
+  // RE-RUN the MUTABLE governance gates (room mode + role) BEFORE reserving: a
+  // room can be FROZEN or a mode changed, and a steward/member role revoked,
+  // during the token TTL — a high-impact grant_payout/steward_rotation must not
+  // reserve/forward on the stale preflight authorization (WS-L.3.2a re-runs
+  // WS-L.3.1a steps 2 + 4).
+  const room = await deps.rooms.roomGovernance(input.roomId);
+  if (room === null || room.mode === 'frozen') {
+    return {
+      ok: false,
+      status: 409,
+      code: 'GOVERNANCE_FROZEN',
+      message: 'This room’s governance is frozen or unavailable.',
+    };
+  }
+  if (!MODE_ENVIRONMENTS[room.mode]?.includes(deployment.environment)) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'GOVERNANCE_MODE_INVALID',
+      message: 'This room’s governance mode no longer permits real actions on this deployment.',
+    };
+  }
+  const stewardOnly =
+    actionType === 'grant_payout' ||
+    actionType === 'charter_update' ||
+    actionType === 'steward_rotation';
+  const permitted = stewardOnly
+    ? await deps.rooms.isSteward(input.roomId, input.userId)
+    : await deps.rooms.isMember(input.roomId, input.userId);
+  if (!permitted) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ROLE_INSUFFICIENT',
+      message: stewardOnly
+        ? 'This action requires a room steward.'
+        : 'This action requires room membership.',
+    };
+  }
+
+  // ---- RESERVE (state `reserving`) ------------------------------------------
   // RESERVE the idempotency key by inserting the action record BEFORE consuming
   // the single-use preflight token / nonce.  A concurrent duplicate loses the
   // `(user, idempotency_key)` unique insert and REPLAYS the winner instead of
   // burning a token and returning PREFLIGHT_EXPIRED/NONCE_REUSED to the loser
-  // (WS-L.3.2a).  The record starts `submitted`; a validation failure below marks
-  // it `failed` (so a retry replays the failure, never re-processes).
+  // (WS-L.3.2a).  The record starts `reserving` — a NON-retryable, non-reconciled
+  // state — and advances to `submitted` ONLY after every single-use gate passes
+  // (below).  A gate failure marks it `failed`; a process crash mid-validation
+  // leaves it `reserving`, which the retry sweep (submitted-only) never forwards,
+  // so an unverified action can never reach the gateway (WS-L.3.2a).
   const record: KnomosisActionRecordEntity = {
     actionRecordId: deps.uuid(),
     deploymentId: input.deploymentId,
@@ -194,7 +294,7 @@ export async function submitAction(
     payloadHash: typedDataHash,
     typedDataHash,
     signedAction: { message: input.typedDataMessage, signature: input.signature },
-    submissionState: 'submitted',
+    submissionState: 'reserving',
     failureReason: null,
     indexedEventRef: null,
     reconciliationState: 'pending',
@@ -230,6 +330,7 @@ export async function submitAction(
     return { ok: false, status, code, message };
   };
 
+  // ---- POST-RESERVATION GATES (single-use consumables) ----------------------
   // Single-use preflight token; its binding must match this submission exactly.
   const binding = await consumePreflightToken(deps.ephemeral, input.preflightToken);
   if (binding === null) {
@@ -268,7 +369,7 @@ export async function submitAction(
   // malleable twin over the same payload, so re-run the low-s/EIP-1271 check
   // that minted the token before forwarding to the gateway (WS-L.3.2a).
   const verified = await verifyActionSignature({
-    actionType: binding.actionType,
+    actionType,
     domain: buildEip712Domain(deployment),
     message: input.typedDataMessage,
     signature: input.signature,
@@ -283,83 +384,6 @@ export async function submitAction(
     );
   }
 
-  // RE-CHECK the signed EXPIRATION: the preflight token can outlive the signed
-  // payload (it lives minutes), so a payload valid at preflight may have expired
-  // before submit — never forward an expired action (WS-L.3.2a).
-  const expirationSeconds = Number(input.typedDataMessage['expiration'] ?? '');
-  if (!Number.isFinite(expirationSeconds) || expirationSeconds * 1000 <= deps.now()) {
-    return failReserved(
-      409,
-      'EXPIRED',
-      'The signed action has expired; re-sign and resubmit.',
-      'signed action expired',
-    );
-  }
-
-  // RE-CHECK the WALLET at submit: preflight's ownership/active/risk gates can go
-  // stale in the minutes between preflight and submit — the wallet may have moved
-  // to pending_unlink/finalized or had its risk raised.  Never forward on a wallet
-  // that would now FAIL preflight (WS-L.3.2a mirrors the WS-L.3.1b gates).
-  const wallet = await deps.wallets.getById(input.walletAccountId);
-  if (wallet === null || wallet.userId !== input.userId || wallet.unlinkState !== 'active') {
-    return failReserved(
-      409,
-      'WALLET_NOT_ACTIVE',
-      'The selected wallet is not active.',
-      'wallet not active at submit',
-    );
-  }
-  if (
-    wallet.riskState === 'high' ||
-    (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(binding.actionType))
-  ) {
-    return failReserved(
-      409,
-      'RISK_BLOCKED',
-      'This wallet is currently restricted from this financial action.',
-      'wallet risk blocked at submit',
-    );
-  }
-
-  // RE-RUN the MUTABLE governance gates (room mode + role): a room can be FROZEN
-  // or a mode changed, and a steward/member role revoked, during the token TTL —
-  // a high-impact grant_payout/steward_rotation must not forward on the stale
-  // preflight authorization (WS-L.3.2a re-runs WS-L.3.1a steps 2 + 4).
-  const room = await deps.rooms.roomGovernance(input.roomId);
-  if (room === null || room.mode === 'frozen') {
-    return failReserved(
-      409,
-      'GOVERNANCE_FROZEN',
-      'This room’s governance is frozen or unavailable.',
-      'room frozen/unavailable at submit',
-    );
-  }
-  if (!MODE_ENVIRONMENTS[room.mode]?.includes(deployment.environment)) {
-    return failReserved(
-      409,
-      'GOVERNANCE_MODE_INVALID',
-      'This room’s governance mode no longer permits real actions on this deployment.',
-      'governance mode no longer permits',
-    );
-  }
-  const stewardOnly =
-    binding.actionType === 'grant_payout' ||
-    binding.actionType === 'charter_update' ||
-    binding.actionType === 'steward_rotation';
-  const permitted = stewardOnly
-    ? await deps.rooms.isSteward(input.roomId, input.userId)
-    : await deps.rooms.isMember(input.roomId, input.userId);
-  if (!permitted) {
-    return failReserved(
-      409,
-      'ROLE_INSUFFICIENT',
-      stewardOnly
-        ? 'This action requires a room steward.'
-        : 'This action requires room membership.',
-      'role revoked at submit',
-    );
-  }
-
   // Anti-replay nonce: consumed atomically per (user, deployment) BEFORE the
   // gateway call (WS-L.3.2c).  Gaps are allowed; reuse is not.
   const nonce = input.typedDataMessage['nonce'] ?? '';
@@ -371,8 +395,27 @@ export async function submitAction(
     actorUserId: input.userId,
     eventType: 'knomosis_action_submit',
     targetRef: record.actionRecordId,
-    context: { setting: binding.actionType },
+    context: { setting: actionType },
   });
+
+  // ALL gates passed — promote the reservation to `submitted` (the retryable,
+  // reconciled state) BEFORE forwarding.  If the CAS loses (a stale-reservation
+  // sweep or another writer advanced the row concurrently — near-impossible given
+  // the generous stale threshold), DO NOT forward: the reservation went terminal,
+  // so surface an EXPIRED and let the caller re-submit (WS-L.3.2a).
+  const submitted = await applyTransition(deps, record, 'submitted', null);
+  if (submitted === null) {
+    deps.log('knomosis.action.reserve_superseded', {
+      action_record_id: record.actionRecordId,
+      from: record.submissionState,
+    });
+    return {
+      ok: false,
+      status: 409,
+      code: 'EXPIRED',
+      message: 'The submission expired before it could be forwarded; re-submit.',
+    };
+  }
 
   // The governance-signature ledger row for a `proposal_sign` is recorded by
   // `forwardToGateway` ONLY when the gateway ACCEPTS — not here — so a declined
@@ -381,7 +424,7 @@ export async function submitAction(
   // wallet) key.  This also covers the outage path: a `submitted` record's
   // scheduler retry runs the same `forwardToGateway` and records on acceptance
   // (WS-L.3.2a).
-  const outcome = await forwardToGateway(deps, gateway, record);
+  const outcome = await forwardToGateway(deps, gateway, submitted);
   return {
     ok: true,
     actionRecordId: record.actionRecordId,
@@ -399,7 +442,7 @@ export async function submitAction(
  * leaves NO signature — the unique (proposal, wallet) key then lets a re-signed
  * retry insert cleanly (WS-L.3.2a).  Insert-once: a duplicate is a no-op.
  */
-async function recordAcceptedProposalSignature(
+export async function recordAcceptedProposalSignature(
   deps: Pick<SubmissionDeps, 'signatures' | 'uuid' | 'now'>,
   record: KnomosisActionRecordEntity,
 ): Promise<void> {
@@ -573,6 +616,38 @@ export async function resubmitPendingActions(
     forwarded += 1;
   }
   return forwarded;
+}
+
+/**
+ * Scheduler sweep: FAIL reservations abandoned before their submit gates
+ * completed — a process crash (or thrown dependency) between the reservation
+ * insert and the `reserving → submitted` promotion leaves a `reserving` row that
+ * is never forwarded and never reconciled, but would otherwise pin its
+ * idempotency key and keep the wallet's unlink blocked (WS-L.3.2a).  The CAS
+ * transition makes the sweep race-safe against a slow-but-live submit: whichever
+ * of the sweep (→ failed) or the submit (→ submitted) wins, the loser's CAS
+ * matches nothing.  `staleAfterMs` is set well beyond any submit's wall-clock so
+ * a live submission is never swept.
+ */
+export async function failStaleReservations(
+  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log'>,
+  deploymentId: string,
+  staleAfterMs: number,
+  limit = 50,
+): Promise<number> {
+  const cutoff = new Date(deps.now() - staleAfterMs).toISOString();
+  const stale = await deps.actions.listReservingOlderThan(deploymentId, cutoff, limit);
+  let failed = 0;
+  for (const record of stale) {
+    const updated = await applyTransition(
+      deps,
+      record,
+      'failed',
+      'reservation abandoned before submit validation completed',
+    );
+    if (updated !== null) failed += 1;
+  }
+  return failed;
 }
 
 export type { KnomosisSignedActionType };

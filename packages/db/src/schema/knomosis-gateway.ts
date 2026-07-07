@@ -145,6 +145,12 @@ export const knomosisActionTypeEnum = knomosisSchema.enum('knomosis_action_type'
 ]);
 
 export const submissionStateEnum = knomosisSchema.enum('knomosis_submission_state', [
+  // `reserving` is the pre-submit idempotency reservation (WS-L.3.2a): inserted
+  // before the single-use preflight token/nonce are consumed, advanced to
+  // `submitted` only after every submit gate passes.  Never forwarded to the
+  // gateway and never reconciled — an abandoned reservation cannot reach the
+  // kernel unvalidated.
+  'reserving',
   'submitted',
   'accepted',
   'settled',

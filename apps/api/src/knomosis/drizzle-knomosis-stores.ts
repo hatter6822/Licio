@@ -494,6 +494,9 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       .where(
         and(
           eq(knomosisActionRecords.deploymentId, deploymentId),
+          // A pre-submit reservation never reached the gateway — exclude it so it
+          // never manufactures a spurious mismatch (WS-L.3.2a).
+          ne(knomosisActionRecords.submissionState, 'reserving'),
           // `pending` OR `mismatch` — a mismatch stays eligible so a later tick can
           // resolve it to a superseding match (WS-L.3.4b).
           inArray(knomosisActionRecords.reconciliationState, ['pending', 'mismatch']),
@@ -515,6 +518,26 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
         and(
           eq(knomosisActionRecords.deploymentId, deploymentId),
           eq(knomosisActionRecords.submissionState, 'submitted'),
+        ),
+      )
+      .orderBy(asc(knomosisActionRecords.createdAt))
+      .limit(limit);
+    return rows.map(mapAction);
+  }
+
+  async listReservingOlderThan(
+    deploymentId: string,
+    createdBefore: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(
+        and(
+          eq(knomosisActionRecords.deploymentId, deploymentId),
+          eq(knomosisActionRecords.submissionState, 'reserving'),
+          lt(knomosisActionRecords.createdAt, new Date(createdBefore)),
         ),
       )
       .orderBy(asc(knomosisActionRecords.createdAt))

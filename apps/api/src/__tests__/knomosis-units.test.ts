@@ -6,7 +6,7 @@
 // the submission state machine + resubmit, the contract-verifier factory, the
 // in-memory store adapter methods, and the receipt pairing.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpKnomosisGateway } from '../knomosis/gateway.js';
 import { ingestGatewayEvents } from '../knomosis/ingest.js';
 import {
@@ -778,10 +778,36 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
 
   it('a missing preflight token is rejected (PREFLIGHT_EXPIRED)', async () => {
     const fixture = await freshKnomosisServices();
+    // The pre-reservation gates (deployment/wallet/room) now run BEFORE the
+    // single-use preflight token is consumed (WS-L.3.2a), so seed an active,
+    // owned wallet + a testnet room the user belongs to — otherwise the flow
+    // would (correctly) reject on the wallet/room before reaching the token.
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    await fixture.knomosis.wallets.insert({
+      walletAccountId: 'w1',
+      userId: 'u1',
+      addressHashHex: 'deadbeef',
+      addressTruncated: '0x00…00',
+      chainId: 1,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
     const { submitAction } = await import('../knomosis/submission.js');
     const result = await submitAction(s(fixture), {
       userId: 'u1',
-      preflightToken: 'nonexistent',
+      preflightToken: 'nonexistent-token',
       idempotencyKey: crypto.randomUUID(),
       actionType: 'treasury_deposit',
       roomId: '33333333-3333-4333-8333-333333333333',
@@ -803,6 +829,150 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('PREFLIGHT_EXPIRED');
+    // The reservation was FAILED (never left in `reserving`), so a retry replays
+    // the failure rather than re-processing (WS-L.3.2a).
+    const reserved = (await fixture.knomosis.actions.listByActor('u1', 10)).find(
+      (r) => r.actorWalletAccountId === 'w1',
+    );
+    expect(reserved?.submissionState).toBe('failed');
+  });
+
+  const activeWallet = (walletAccountId: string, userId: string) => ({
+    walletAccountId,
+    userId,
+    addressHashHex: 'deadbeef',
+    addressTruncated: '0x00…00',
+    chainId: 1,
+    walletType: 'eoa' as const,
+    unlinkState: 'active' as const,
+    riskState: 'normal' as const,
+    label: null,
+    linkedAt: new Date().toISOString(),
+    lastUsedAt: null,
+    unlinkRequestedAt: null,
+    unlinkFinalizeAfter: null,
+    unlinkedAt: null,
+  });
+  const testnetRooms = {
+    roomGovernance: async () => ({ mode: 'testnet' as const, name: 'Test Room' }),
+    isMember: async () => true,
+    isSteward: async () => false,
+    contentVisibleToUser: async () => true,
+  };
+  const validDeposit = (deploymentId: string, roomId: string) => ({
+    roomId,
+    treasuryId: '44444444-4444-4444-8444-444444444444',
+    asset: 'USDC',
+    amount: '1000000',
+    actor: '0x0000000000000000000000000000000000000001',
+    nonce: '1',
+    expiration: String(Math.floor(Date.now() / 1000) + 600),
+    deploymentId,
+  });
+
+  it('rejects a submit for a wallet owned by ANOTHER user WITHOUT reserving a row (R11-1)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = testnetRooms;
+    // A wallet owned by the VICTIM, not the submitter.
+    await fixture.knomosis.wallets.insert(activeWallet('victim-wallet', 'victim'));
+    const room = crypto.randomUUID();
+    const { submitAction } = await import('../knomosis/submission.js');
+    const result = await submitAction(s(fixture), {
+      userId: 'attacker',
+      preflightToken: 'irrelevant-token-here',
+      idempotencyKey: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: room,
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      walletAccountId: 'victim-wallet',
+      typedDataMessage: validDeposit(LOCAL_DEPLOYMENT.deployment_id, room),
+      signature: '0x',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('WALLET_NOT_ACTIVE');
+    // CRUCIAL: NO action row was ever inserted — the attacker cannot persist a row
+    // whose FK points at the victim's wallet and blocks the victim's purge (R11-1).
+    expect(await fixture.knomosis.actions.listByActor('attacker', 10)).toHaveLength(0);
+    expect(await fixture.knomosis.actions.listOpenByWallet('victim-wallet')).toHaveLength(0);
+  });
+
+  it('rejects a submit on a FROZEN deployment at submit time (R11-5)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = testnetRooms;
+    await fixture.knomosis.wallets.insert(activeWallet('w1', 'u1'));
+    const room = crypto.randomUUID();
+    const pinModule = await import('../knomosis/pin.js');
+    const real = pinModule.pinnedDeployment(LOCAL_DEPLOYMENT.deployment_id);
+    // The deployment is FROZEN in the pin file AFTER the still-alive preflight
+    // token was minted — submit must reject it, not just a missing one.
+    const spy = vi
+      .spyOn(pinModule, 'pinnedDeployment')
+      .mockReturnValue(real ? { ...real, status: 'frozen' } : undefined);
+    try {
+      const { submitAction } = await import('../knomosis/submission.js');
+      const result = await submitAction(s(fixture), {
+        userId: 'u1',
+        preflightToken: 'irrelevant-token-here',
+        idempotencyKey: crypto.randomUUID(),
+        actionType: 'treasury_deposit',
+        roomId: room,
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+        walletAccountId: 'w1',
+        typedDataMessage: validDeposit(LOCAL_DEPLOYMENT.deployment_id, room),
+        signature: '0x',
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe('DEPLOYMENT_UNKNOWN');
+      // No row reserved for an inactive deployment.
+      expect(await fixture.knomosis.actions.listByActor('u1', 10)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('never forwards/reconciles a `reserving` row, and sweeps a stale one to failed (R11-3)', async () => {
+    const fixture = await freshKnomosisServices();
+    const dep = LOCAL_DEPLOYMENT.deployment_id;
+    const mkReserving = (createdAt: string) => {
+      const id = crypto.randomUUID();
+      return fixture.knomosis.actions
+        .insert({
+          actionRecordId: id,
+          deploymentId: dep,
+          actionType: 'treasury_deposit',
+          roomId: crypto.randomUUID(),
+          actorWalletAccountId: crypto.randomUUID(),
+          actorUserId: crypto.randomUUID(),
+          payloadHash: '0x',
+          typedDataHash: `0x${'ab'.repeat(32)}`,
+          signedAction: { message: {}, signature: '0x' },
+          submissionState: 'reserving',
+          failureReason: null,
+          indexedEventRef: null,
+          reconciliationState: 'pending',
+          idempotencyKey: crypto.randomUUID(),
+          createdAt,
+          updatedAt: createdAt,
+        })
+        .then(() => id);
+    };
+    const staleId = await mkReserving(new Date(fixture.knomosis.now() - 60 * 60_000).toISOString());
+    const freshId = await mkReserving(new Date(fixture.knomosis.now()).toISOString());
+    // A `reserving` row is NEVER in the retry (submitted-only) set…
+    expect(await fixture.knomosis.actions.listSubmittedRetryable(dep, 50)).toHaveLength(0);
+    // …and NEVER in the reconciliation set (it never reached the gateway).
+    expect(await fixture.knomosis.actions.listUnreconciled(dep, 50)).toHaveLength(0);
+    // The sweep FAILS the stale reservation but LEAVES the fresh one (a live,
+    // in-flight submit is never clobbered — the threshold ≫ any submit duration).
+    const { failStaleReservations } = await import('../knomosis/submission.js');
+    const failed = await failStaleReservations(
+      { actions: fixture.knomosis.actions, now: fixture.knomosis.now, log: fixture.knomosis.log },
+      dep,
+      5 * 60_000,
+    );
+    expect(failed).toBe(1);
+    expect((await fixture.knomosis.actions.getById(staleId))?.submissionState).toBe('failed');
+    expect((await fixture.knomosis.actions.getById(freshId))?.submissionState).toBe('reserving');
   });
 
   it('an unconfigured gateway rejects submission (GATEWAY_UNAVAILABLE)', async () => {

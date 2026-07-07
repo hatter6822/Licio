@@ -1293,6 +1293,120 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(0);
   });
 
+  it('records an accepted proposal_sign signature when INGESTION wins the accept race (R11-4)', async () => {
+    const fixture = await freshKnomosisServices();
+    const proposalId = crypto.randomUUID();
+    const walletAccountId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const actionRecordId = crypto.randomUUID();
+    const typedDataHash = `0x${'ab'.repeat(32)}`;
+    const nowIso = new Date().toISOString();
+    // A proposal_sign action STILL `submitted`: the submit path never got an
+    // acceptance verdict (gateway outage / lost the accept-CAS race), so NO
+    // signature was recorded yet.
+    await fixture.knomosis.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      actorWalletAccountId: walletAccountId,
+      actorUserId: userId,
+      payloadHash: '0x',
+      typedDataHash,
+      signedAction: { message: { proposalId }, signature: `0x${'cd'.repeat(65)}` },
+      submissionState: 'submitted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(0);
+    // Ingestion sees the ACCEPTED event and WINS the submitted→accepted transition.
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.accepted',
+            payload: { typed_data_hash: typedDataHash },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    expect((await fixture.knomosis.actions.getById(actionRecordId))?.submissionState).toBe(
+      'accepted',
+    );
+    // The governance signature IS now recorded, even though the submit path's own
+    // accept-CAS lost the race — it counts in the tally + blocks unlink (R11-4).
+    const sigs = await fixture.knomosis.proposalSignatures.listByProposal(proposalId);
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0]).toMatchObject({ proposalId, walletAccountId, signatureRef: actionRecordId });
+    // The recording is insert-once: a second ingest pass does not duplicate it.
+    await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(1);
+  });
+
+  it('records a CRITICAL divergence for a known event matching NO action row (R11-6)', async () => {
+    const fixture = await freshKnomosisServices();
+    const orphanHash = `0x${'dd'.repeat(32)}`;
+    // A KNOWN, well-formed accepted event whose typed_data_hash matches NO action
+    // row — an unexpected governance event or an action lost before persistence.
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.accepted',
+            payload: { typed_data_hash: orphanHash },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    const outcome = await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    // Ingestion CONTINUES (the event is stored so a late-arriving action row still
+    // reconciles against it, and the cursor advances) — but the anomaly is NOT
+    // silently dropped: a CRITICAL divergence surfaces it for operator review.
+    expect(outcome.kind).toBe('ok');
+    const divergences = await fixture.knomosis.reconciliation.listUnresolvedMismatches(DEPLOYMENT);
+    const orphan = divergences.find(
+      (d) => (d.details as { kind?: string }).kind === 'event_without_action',
+    );
+    expect(orphan).toBeDefined();
+    expect(orphan?.severity).toBe('critical');
+    expect(orphan?.entityRef).toBe('event:1.0');
+  });
+
   it('reconciliation matches a finalized action against the indexed stream', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);

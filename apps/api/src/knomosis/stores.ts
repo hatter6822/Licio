@@ -297,12 +297,26 @@ export interface KnomosisActionStore {
   ): Promise<KnomosisActionRecordEntity | null>;
   /** Actions still eligible for reconciliation — `pending` (never reconciled) OR
    *  `mismatch` (re-checked each tick so a transient divergence can resolve to a
-   *  superseding match), oldest first.  `matched` is terminal (WS-L.3.4b). */
+   *  superseding match), oldest first.  `matched` is terminal (WS-L.3.4b).
+   *  EXCLUDES `reserving` rows: a pre-submit reservation was never forwarded to the
+   *  gateway, so there is no gateway state to reconcile it against and it must not
+   *  manufacture a spurious mismatch (WS-L.3.2a). */
   listUnreconciled(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
   /** Actions STUCK in `submitted` (the scheduler's idempotent retry set), oldest
    *  first — queried directly so retries cannot starve behind older in-flight rows. */
   listSubmittedRetryable(
     deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]>;
+  /** Reservations STUCK in `reserving` past `createdBefore` — a submission whose
+   *  process crashed between the reservation insert and the completion of its
+   *  single-use gates (WS-L.3.2a).  The scheduler fails these so an abandoned
+   *  reservation cannot pin an idempotency key or block the wallet's unlink
+   *  forever; the CAS transition makes the sweep race-safe against a slow-but-live
+   *  submit.  Oldest first. */
+  listReservingOlderThan(
+    deploymentId: string,
+    createdBefore: string,
     limit: number,
   ): Promise<KnomosisActionRecordEntity[]>;
   /** Pending obligations for the unlink check (WS-L.2.5b): non-terminal actions
@@ -750,6 +764,9 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       .filter(
         (r) =>
           r.deploymentId === deploymentId &&
+          // A pre-submit reservation never reached the gateway — nothing to
+          // reconcile, and it must not manufacture a mismatch (WS-L.3.2a).
+          r.submissionState !== 'reserving' &&
           (r.reconciliationState === 'pending' || r.reconciliationState === 'mismatch'),
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
@@ -763,6 +780,23 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
   ): Promise<KnomosisActionRecordEntity[]> {
     return [...this.#rows.values()]
       .filter((r) => r.deploymentId === deploymentId && r.submissionState === 'submitted')
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit)
+      .map((r) => structuredClone(r));
+  }
+
+  async listReservingOlderThan(
+    deploymentId: string,
+    createdBefore: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.deploymentId === deploymentId &&
+          r.submissionState === 'reserving' &&
+          r.createdAt < createdBefore,
+      )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(0, limit)
       .map((r) => structuredClone(r));
@@ -818,7 +852,7 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       const amount = r.signedAction.message['amount'];
       if (typeof asset !== 'string' || typeof amount !== 'string' || !/^\d+$/.test(amount))
         continue;
-      const key = `${r.actorWalletAccountId} ${asset}`;
+      const key = `${r.actorWalletAccountId}\0${asset}`;
       totals.set(key, (totals.get(key) ?? 0n) + BigInt(amount));
       if (!meta.has(key)) meta.set(key, { walletAccountId: r.actorWalletAccountId, asset });
     }

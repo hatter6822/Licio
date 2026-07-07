@@ -16,7 +16,7 @@ import { ACTION_KILL_SWITCH, killSwitchDecision } from './killswitch.js';
 import { reconcileDeployment } from './reconciliation.js';
 import { type KnomosisServices, simulationDeps } from './services.js';
 import { executeElapsedSimProposals } from './simulation.js';
-import { resubmitPendingActions } from './submission.js';
+import { failStaleReservations, resubmitPendingActions } from './submission.js';
 import { finalizeElapsedUnlinks } from './wallet.js';
 
 export const KNOMOSIS_JOB_LEASE = 'knomosis:maintenance';
@@ -28,6 +28,7 @@ export type KnomosisSchedulerTask =
   | 'unlink_finalize'
   | 'event_ingest'
   | 'resubmit'
+  | 'fail_stale_reservations'
   | 'reconcile'
   | 'sim_execute';
 
@@ -103,6 +104,24 @@ export async function runKnomosisTick(
       );
     } catch (error) {
       onError(error, 'resubmit');
+    }
+    try {
+      // Fail reservations abandoned mid-validation (a crash between the reservation
+      // insert and the `reserving → submitted` promotion, WS-L.3.2a).  The stale
+      // threshold is the preflight-token TTL — vastly longer than any submit's
+      // wall-clock — so a live submission is never swept, and the CAS in
+      // `applyTransition` makes a rare collision safe either way.
+      await failStaleReservations(
+        {
+          actions: services.actions,
+          now: services.now,
+          log: services.log,
+        },
+        deployment.deploymentId,
+        services.config().preflightTokenTtlMs,
+      );
+    } catch (error) {
+      onError(error, 'fail_stale_reservations');
     }
     try {
       await reconcileDeployment(services, deployment.deploymentId);

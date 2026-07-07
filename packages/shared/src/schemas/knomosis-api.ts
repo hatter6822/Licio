@@ -203,8 +203,19 @@ export type KnomosisPreflightResponse = z.infer<typeof knomosisPreflightResponse
 // Submission + action status (WS-L.3.2a/b; §23.5 state machine)
 // ---------------------------------------------------------------------------
 
-/** The eight ratified §23.5 submission states. */
+/**
+ * The §23.5 submission states.  `reserving` is the pre-submit idempotency
+ * reservation state (WS-L.3.2a): the action row is inserted `reserving` BEFORE
+ * the single-use preflight token / nonce are consumed, and advances to
+ * `submitted` ONLY after every submit gate passes.  A `reserving` row is never
+ * forwarded to the gateway (the retry sweep lists `submitted` only) and is never
+ * reconciled, so a submission abandoned mid-validation (e.g. a process crash)
+ * cannot reach the kernel without completing verification.  The other eight are
+ * the ratified post-submit lifecycle states; `finalized`/`reverted`/`failed`
+ * are terminal.
+ */
 export const SUBMISSION_STATES = [
+  'reserving',
   'submitted',
   'accepted',
   'settled',

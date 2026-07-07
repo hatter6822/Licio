@@ -30,7 +30,7 @@ import type {
   OnChainEventStore,
   ReconciliationStore,
 } from './stores.js';
-import { applyTransition } from './submission.js';
+import { applyTransition, recordAcceptedProposalSignature } from './submission.js';
 
 /** The gateway event types this schema version understands (fail-closed set). */
 export const KNOWN_GATEWAY_EVENT_TYPES = [
@@ -228,7 +228,38 @@ export async function ingestGatewayEvents(
     if (inserted) ingested += 1;
 
     const action = await actionForEvent(deps, deploymentId, event);
-    if (action === null) continue;
+    if (action === null) {
+      // A KNOWN, well-formed action event whose `typed_data_hash` matches NO action
+      // row: an unexpected governance event, or an action row lost before it
+      // persisted.  The event itself IS stored (above), so a late-arriving action
+      // row still reconciles against it — but we MUST NOT silently drop it and let
+      // it vanish without a mismatch or receipt.  Record a CRITICAL divergence
+      // (reconciliation is driven from action rows, so nothing else would surface
+      // it) and alert for operator review (WS-L.3.3b).
+      await deps.reconciliation.append({
+        resultId: deps.uuid(),
+        deploymentId,
+        entityType: 'action',
+        entityRef: `event:${event.seq}.${event.index}`,
+        outcome: 'mismatch',
+        severity: 'critical',
+        details: {
+          kind: 'event_without_action',
+          event_type: event.type,
+          typed_data_hash: event.payload['typed_data_hash'],
+          seq: event.seq,
+          index: event.index,
+        },
+        lowWatermarkSeq: event.seq,
+        createdAt: new Date(deps.now()).toISOString(),
+      });
+      deps.alert('knomosis.ingest.event_without_action', {
+        deployment_id: deploymentId,
+        event_type: event.type,
+        seq: event.seq,
+      });
+      continue;
+    }
     const targetState = EVENT_STATE[event.type as KnownGatewayEventType];
     const updated = await applyTransition(
       deps,
@@ -238,11 +269,29 @@ export async function ingestGatewayEvents(
     );
     if (updated === null) continue;
 
-    // A `proposal_sign` that REVERTS after acceptance must not keep a live
-    // governance signature — remove it so the vote no longer counts in the tally
-    // or blocks unlink, and a re-signed retry can insert again (WS-L.3.4c).
-    if (updated.submissionState === 'reverted' && updated.actionType === 'proposal_sign') {
-      await deps.proposalSignatures.removeByAction(updated.actionRecordId);
+    if (updated.actionType === 'proposal_sign') {
+      if (updated.submissionState === 'reverted') {
+        // A `proposal_sign` that REVERTS after acceptance must not keep a live
+        // governance signature — remove it so the vote no longer counts in the
+        // tally or blocks unlink, and a re-signed retry can insert again (WS-L.3.4c).
+        await deps.proposalSignatures.removeByAction(updated.actionRecordId);
+      } else if (
+        updated.submissionState === 'accepted' ||
+        updated.submissionState === 'settled' ||
+        updated.submissionState === 'finalized'
+      ) {
+        // Ingestion can WIN the accept-CAS race with `forwardToGateway`
+        // (submitted → accepted): the submit path then SKIPS its signature insert
+        // (its own CAS returned null).  Record the accepted governance signature
+        // HERE too so a proposal signature the kernel accepted always powers the
+        // tally + blocks unlink, whichever path advanced the row.  The insert is
+        // insert-once per (proposal, wallet), so the submit path and ingestion
+        // recording the same acceptance is a no-op (WS-L.3.2a/3.4c).
+        await recordAcceptedProposalSignature(
+          { signatures: deps.proposalSignatures, uuid: deps.uuid, now: deps.now },
+          updated,
+        );
+      }
     }
 
     // Stable states produce/refresh receipts and a user-visible status.
