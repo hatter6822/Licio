@@ -59,6 +59,7 @@ import type {
   VoteRecord,
   VoteStore,
 } from './stores.js';
+import { canonicalTreasuryAmount } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -202,9 +203,12 @@ function toTreasury(row: typeof agentTreasuryActions.$inferSelect): TreasuryActi
     actionId: row.actionId,
     roomId: row.roomId,
     category: row.category,
-    // Preserve the numeric string EXACTLY (a minor-unit amount can exceed 2^53;
-    // Number() would silently round it — the kernel does exact decimal math).
-    amount: row.amount,
+    // Postgres `numeric` always deserializes to a string; canonicalize it the
+    // SAME way the in-memory store does so both adapters return the identical
+    // form for a given value — a lossless number, else the exact string (a
+    // minor-unit amount above 2^53 stays a string; the kernel does exact decimal
+    // math either way).
+    amount: canonicalTreasuryAmount(row.amount),
     asset: row.asset,
     targetAllocation:
       (row.targetAllocation as TreasuryActionRecord['targetAllocation'] | null) ?? null,

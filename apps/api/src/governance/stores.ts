@@ -160,6 +160,23 @@ export interface TreasuryActionRecord {
   executedAt: string;
 }
 
+/**
+ * Canonicalize a persisted treasury amount to its most faithful in-memory form:
+ * a `number` when the decimal round-trips through IEEE-754 without loss (so the
+ * pre-existing simulation-unit callers keep numbers), otherwise the exact decimal
+ * string (so a minor-unit / uint256 amount is never silently rounded).  BOTH the
+ * in-memory store and the Drizzle adapter (Postgres `numeric` always deserializes
+ * to a string) apply this on READ, so the same stored value reads back identically
+ * regardless of backend — the store-interface symmetry the house pattern requires.
+ */
+export function canonicalTreasuryAmount(raw: number | string): number | string {
+  const text = typeof raw === 'number' ? String(raw) : raw;
+  const asNumber = Number(text);
+  // Faithful iff number → string reproduces the exact stored decimal; this rejects
+  // > 2^53 integers and precision-losing fractions, which stay exact strings.
+  return Number.isFinite(asNumber) && String(asNumber) === text ? asNumber : raw;
+}
+
 export interface SeatStore {
   get(roomId: string): Promise<StewardSeatRecord | null>;
   put(seat: StewardSeatRecord): Promise<StewardSeatRecord>;
@@ -472,7 +489,9 @@ export class InMemoryTreasuryActionStore implements TreasuryActionStore {
     return action;
   }
   async acceptedByRoom(roomId: string) {
-    return this.actions.filter((a) => a.roomId === roomId && a.accepted);
+    return this.actions
+      .filter((a) => a.roomId === roomId && a.accepted)
+      .map((a) => ({ ...a, amount: canonicalTreasuryAmount(a.amount) }));
   }
   async clear() {
     this.actions.length = 0;
