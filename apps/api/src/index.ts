@@ -140,6 +140,7 @@ import {
   registerInvariantConsumers,
   setInvariantServices,
 } from './invariants/services.js';
+import { storeKnomosisConfigValue } from './knomosis/config.js';
 import { exportFinancialWalletData, purgeFinancialWalletData } from './knomosis/data-rights.js';
 import { createDrizzleKnomosisStores } from './knomosis/drizzle-knomosis-stores.js';
 import { FakeKnomosisGateway, HttpKnomosisGateway } from './knomosis/gateway.js';
@@ -935,6 +936,21 @@ if (env.KNOMOSIS_GATEWAY_URL !== undefined && env.KNOMOSIS_GATEWAY_TOKEN_FILE !=
   );
 } else if (env.NODE_ENV !== 'production') {
   setServicesGateway(knomosisServices, new FakeKnomosisGateway());
+}
+// DEV convenience (NEVER in production): a bare `pnpm dev` box has no admin surface
+// to flip the fail-closed WS-L runtime flags, so the wallet + governance surfaces
+// would render "disabled" (503) out of the box even though the feature is complete.
+// Default `cryptoEnabled` + `governanceEnabled` ON for non-production ONLY, and ONLY
+// when the key is not already explicitly set — so a durable (Redis/admin) dev config
+// still wins and can force fail-closed testing.  Production is untouched: the flags
+// stay `false` unless an operator enables them through the admin surface.
+if (env.NODE_ENV !== 'production') {
+  for (const key of ['cryptoEnabled', 'governanceEnabled'] as const) {
+    const existing = await eventServices.configStore.get(`knomosis.${key}`);
+    if (existing === null || !Object.hasOwn(existing, 'value')) {
+      await storeKnomosisConfigValue(eventServices.configStore, key, true);
+    }
+  }
 }
 await knomosisServices.reloadConfig();
 await syncPinnedDeployments(knomosisServices);
