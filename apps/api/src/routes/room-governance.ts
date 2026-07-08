@@ -368,7 +368,8 @@ export function createRoomGovernanceSimRoutes() {
             userId: auth.userId,
             asset: body.asset,
             amount: body.amount,
-            ...(body.idempotency_key !== undefined ? { idempotencyKey: body.idempotency_key } : {}),
+            // REQUIRED by the schema — a deposit is idempotent by this client key.
+            idempotencyKey: body.idempotency_key,
           });
           if (!result.ok) return c.json(deny(result.code, result.message), result.status);
           return c.json(simTreasuryResponseSchema.parse(result.treasury));

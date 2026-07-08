@@ -81,6 +81,7 @@ function ingestDeps(fixture: KnomosisFixture) {
   return {
     actions: s.actions,
     proposalSignatures: s.proposalSignatures,
+    actorMappings: s.actorMappings,
     events: s.events,
     reconciliation: s.reconciliation,
     receipts: s.receipts,
@@ -541,6 +542,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       executableAfter: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     const message = {
       roomId: ROOM,
@@ -712,6 +714,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       executableAfter: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const message = {
@@ -769,6 +772,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
       executableAfter: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     const walletAccountId = await linkWalletDirectly(fixture, userId);
     const message = {
@@ -978,6 +982,7 @@ describe('WS-L.3.2 submission + state machine', () => {
       executableAfter: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     const message = {
       roomId: ROOM,
@@ -1058,6 +1063,7 @@ describe('WS-L.3.2 submission + state machine', () => {
       executableAfter: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     };
     await fixture.knomosis.proposals.insert(openProposal);
     const message = {
@@ -1293,6 +1299,55 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     );
     expect(second.kind).toBe('ok');
     if (second.kind === 'ok') expect(second.ingested).toBe(0);
+  });
+
+  it('ingest REPAIRS a missing wallet→actor mapping from the confirmed events (N4)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    // submitAction (NOT the HTTP route) forwards the action but never writes the
+    // wallet→actor mapping — modelling a crash after submit, before the post-submit
+    // mapping side effect ran.  /standing would then read `no_actor_mapping` forever.
+    const { actionRecordId } = await submitDeposit(fixture, userId, walletAccountId, '1');
+    expect(await fixture.knomosis.actorMappings.get(walletAccountId, DEPLOYMENT)).toBeNull();
+    // Ingesting the confirmed accepted/settled/finalized events rebuilds it.
+    await ingestGatewayEvents(ingestDeps(fixture), DEPLOYMENT, LOCAL_DEPLOYMENT.chain_id);
+    const mapping = await fixture.knomosis.actorMappings.get(walletAccountId, DEPLOYMENT);
+    expect(mapping).not.toBeNull();
+    const rec = await fixture.knomosis.actions.getById(actionRecordId);
+    expect(mapping?.actorId).toBe(String(rec?.signedAction.message['actor']).toLowerCase());
+  });
+
+  it('rebuildFromSnapshot re-anchors a MATCHED in-flight action after a gap (N5)', async () => {
+    const fixture = await freshKnomosisServices();
+    const actionRecordId = crypto.randomUUID();
+    // A forwarded, in-flight (accepted) action that PREVIOUSLY reconciled as matched.
+    // Its finalizing/reverting event fell in the lost retention window.
+    await fixture.knomosis.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit',
+      roomId: crypto.randomUUID(),
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: crypto.randomUUID(),
+      payloadHash: '0x',
+      typedDataHash: `0x${'d5'.repeat(32)}`,
+      signedAction: { message: { asset: 'USDC', amount: '10' }, signature: '0x' },
+      submissionState: 'accepted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'matched',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const rebuilt = await rebuildFromSnapshot(ingestDeps(fixture), DEPLOYMENT);
+    const after = await fixture.knomosis.actions.getById(actionRecordId);
+    // `listUnreconciled` would have SKIPPED this matched row; the rebuild now uses
+    // `listInFlightByDeployment`, so it is reset to `pending` for re-reconciliation
+    // instead of being silently treated as clean forever (N5).
+    expect(after?.reconciliationState).toBe('pending');
+    expect(rebuilt.remarked).toBeGreaterThanOrEqual(1);
   });
 
   it('a post-reorg revert event flips the action to reverted and updates receipts', async () => {

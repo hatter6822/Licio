@@ -25,7 +25,7 @@ import {
   walletAccounts,
   walletActorMappings,
 } from '@licio/db';
-import { and, asc, desc, eq, inArray, lt, lte, ne, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { ActionNonceStore } from './services.js';
 import type {
   AuditLogCursor,
@@ -57,7 +57,11 @@ import type {
   WalletActorMappingRecord,
   WalletActorMappingStore,
 } from './stores.js';
-import { READINESS_QUALIFYING_AUDIT_ACTIONS, selectGatewayBoundAction } from './stores.js';
+import {
+  READINESS_QUALIFYING_AUDIT_ACTIONS,
+  selectGatewayBoundAction,
+  TERMINAL_SUBMISSION_STATES,
+} from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -631,6 +635,30 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     return rows.map(mapAction);
   }
 
+  async listInFlightByDeployment(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(
+        and(
+          eq(knomosisActionRecords.deploymentId, deploymentId),
+          // Every forwarded, still-in-flight row (any reconciliationState) — so the
+          // gap-rebuild re-anchors already-`matched` in-flight actions whose terminal
+          // event fell in the lost window, not only pending/mismatch (WS-L.3.3a).
+          notInArray(knomosisActionRecords.submissionState, [
+            'reserving',
+            ...TERMINAL_SUBMISSION_STATES,
+          ]),
+        ),
+      )
+      .orderBy(asc(knomosisActionRecords.createdAt))
+      .limit(limit);
+    return rows.map(mapAction);
+  }
+
   async listSubmittedRetryable(
     deploymentId: string,
     limit: number,
@@ -1101,6 +1129,7 @@ function mapProposal(row: typeof governanceProposals.$inferSelect): GovernancePr
     executableAfter: isoOrNull(row.executableAfter),
     createdAt: iso(row.createdAt),
     executedAt: isoOrNull(row.executedAt),
+    executionClaimedAt: isoOrNull(row.executionClaimedAt),
   };
 }
 
@@ -1130,6 +1159,7 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
       executableAfter: dateOrNull(record.executableAfter),
       createdAt: new Date(record.createdAt),
       executedAt: dateOrNull(record.executedAt),
+      executionClaimedAt: dateOrNull(record.executionClaimedAt),
     });
     return record;
   }
@@ -1163,18 +1193,24 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
         executionState: record.executionState,
         executableAfter: dateOrNull(record.executableAfter),
         executedAt: dateOrNull(record.executedAt),
+        executionClaimedAt: dateOrNull(record.executionClaimedAt),
       })
       .where(eq(governanceProposals.proposalId, record.proposalId));
     return record;
   }
 
-  async claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null> {
+  async claimForExecution(
+    proposalId: string,
+    claimedAt: string,
+  ): Promise<GovernanceProposalRecord | null> {
     // Atomic CAS timelocked→EXECUTING: only ONE racing execute wins the claim, so
     // the treasury cannot be debited twice.  The proposal advances to `executed`
     // only via finalizeExecution AFTER the debit + ledger are durable (WS-L.4.1c).
+    // Stamps `executionClaimedAt` so the recovery sweep can distinguish a fresh
+    // live claim from a genuinely stranded one (N2).
     const rows = await this.db
       .update(governanceProposals)
-      .set({ executionState: 'executing' })
+      .set({ executionState: 'executing', executionClaimedAt: new Date(claimedAt) })
       .where(
         and(
           eq(governanceProposals.proposalId, proposalId),
@@ -1247,7 +1283,7 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows.map(mapProposal);
   }
 
-  async listRecoverableExecuting(): Promise<GovernanceProposalRecord[]> {
+  async listRecoverableExecuting(claimedBeforeIso: string): Promise<GovernanceProposalRecord[]> {
     const rows = await this.db
       .select()
       .from(governanceProposals)
@@ -1255,6 +1291,13 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
         and(
           eq(governanceProposals.executionState, 'executing'),
           eq(governanceProposals.votingState, 'passed'),
+          // A legacy null claim is always recoverable; a stamped claim only once it
+          // is older than the cutoff — so a just-claimed live execution is left to
+          // its initiating caller and never raced by the null-actor sweep (N2).
+          or(
+            isNull(governanceProposals.executionClaimedAt),
+            lte(governanceProposals.executionClaimedAt, new Date(claimedBeforeIso)),
+          ),
         ),
       );
     return rows.map(mapProposal);

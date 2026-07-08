@@ -19,13 +19,29 @@ describe('positiveMinorUnitAmountSchema (WS-L.4.1c)', () => {
   });
 });
 
-describe('simTreasuryDepositRequestSchema (M4)', () => {
-  it('rejects a zero-amount deposit so it cannot pad the readiness track record', () => {
+describe('simTreasuryDepositRequestSchema (M4/N3)', () => {
+  const key = '11111111-1111-4111-8111-111111111111';
+  it('rejects a zero-amount deposit so it cannot pad the readiness track record (M4)', () => {
     expect(
-      simTreasuryDepositRequestSchema.safeParse({ asset: 'SIM-USDC', amount: '0' }).success,
+      simTreasuryDepositRequestSchema.safeParse({
+        asset: 'SIM-USDC',
+        amount: '0',
+        idempotency_key: key,
+      }).success,
     ).toBe(false);
     expect(
-      simTreasuryDepositRequestSchema.safeParse({ asset: 'SIM-USDC', amount: '1000000' }).success,
+      simTreasuryDepositRequestSchema.safeParse({
+        asset: 'SIM-USDC',
+        amount: '1000000',
+        idempotency_key: key,
+      }).success,
     ).toBe(true);
+  });
+
+  it('REQUIRES an idempotency key so replays cannot inflate balances/readiness (N3)', () => {
+    // Omitting the key is rejected — a retry must be idempotent.
+    expect(
+      simTreasuryDepositRequestSchema.safeParse({ asset: 'SIM-USDC', amount: '1000000' }).success,
+    ).toBe(false);
   });
 });

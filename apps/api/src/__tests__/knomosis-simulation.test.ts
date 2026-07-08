@@ -377,6 +377,7 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       executableAfter: new Date(clock - 1000).toISOString(),
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     // The room transitions OUT of `simulated` before the timelock sweep runs.
     fixture.knomosis.rooms = {
@@ -426,6 +427,7 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       executableAfter: new Date(clock - 1000).toISOString(),
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     // Both pass the stale `timelocked` check; only the claim winner may debit.
     const [a, b] = await Promise.all([
@@ -471,6 +473,7 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       executableAfter: new Date(clock - 1000).toISOString(),
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     // Two sweep pods recover it at once: idempotent debit + single-owner finalize.
     const [a, b] = await Promise.all([
@@ -517,6 +520,7 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       executableAfter: new Date(clock - 1000).toISOString(),
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     // A double-click / manual retry of an in-flight execution is refused — only the
     // scheduler sweep (a null actor) recovers `executing`.
@@ -559,6 +563,7 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       executableAfter: new Date(clock - 1000).toISOString(),
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     // The sweep re-drives the stranded `executing` proposal to completion.
     expect(await executeElapsedSimProposals(deps)).toBe(1);
@@ -621,6 +626,7 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       executableAfter: new Date(clock - 1000).toISOString(),
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     // Recovery finalizes WITHOUT re-debiting: the balance stays at the post-debit
     // value and there is still exactly one grant_execution entry (idempotent by id).
@@ -659,6 +665,7 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       executableAfter: new Date(clock - 1000).toISOString(),
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     // Engage the treasury-execution switch GLOBALLY.
     await fixture.knomosis.configStore.set(switchConfigKey('treasury_execution'), {

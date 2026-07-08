@@ -120,6 +120,8 @@ export class FakeKnomosisGateway implements KnomosisGateway {
   readonly #verdictByIdempotency = new Map<string, GatewayVerdict>();
   /** typed-data hashes the next submit should decline (test control). */
   readonly #declineHashes = new Set<string>();
+  /** Test override for the standing-snapshot seq (see `setStandingSeq`). */
+  #standingSeqOverride: bigint | null = null;
   /** When true, every call reports `unavailable` (outage simulation). */
   offline = false;
 
@@ -152,6 +154,14 @@ export class FakeKnomosisGateway implements KnomosisGateway {
     const cells = this.#balances.get(actorId) ?? new Map<string, bigint>();
     cells.set(resource, BigInt(amount));
     this.#balances.set(actorId, cells);
+  }
+
+  /** Test/dev control: pin the seq reported by the standing snapshots (getBalances/
+   *  getBudget) BELOW the event cursor, so a reconciliation watermark-mismatch (the
+   *  snapshot lagging the event stream) can be exercised.  `null` restores the
+   *  live event-counter seq. */
+  setStandingSeq(seq: string | null): void {
+    this.#standingSeqOverride = seq === null ? null : BigInt(seq);
   }
 
   #push(type: string, payload: Record<string, unknown>): GatewayEvent {
@@ -218,7 +228,7 @@ export class FakeKnomosisGateway implements KnomosisGateway {
     const cells = this.#balances.get(actorId.toLowerCase()) ?? new Map<string, bigint>();
     const value: GatewayBalances = {};
     for (const [resource, amount] of cells) value[resource] = amount.toString();
-    const seq = this.#seq.toString();
+    const seq = (this.#standingSeqOverride ?? this.#seq).toString();
     const currentEtag = `W/"bal-${actorId.toLowerCase()}-${seq}"`;
     if (etag !== undefined && etag !== null && etag === currentEtag) {
       return { kind: 'not_modified' };
@@ -232,7 +242,7 @@ export class FakeKnomosisGateway implements KnomosisGateway {
   ): Promise<GatewayReadResult<GatewayBudget>> {
     if (this.offline) return { kind: 'unavailable', detail: 'gateway offline (simulated)' };
     const amount = (this.#budgets.get(actorId.toLowerCase()) ?? 0n).toString();
-    const seq = this.#seq.toString();
+    const seq = (this.#standingSeqOverride ?? this.#seq).toString();
     const currentEtag = `W/"bud-${actorId.toLowerCase()}-${seq}"`;
     if (etag !== undefined && etag !== null && etag === currentEtag) {
       return { kind: 'not_modified' };

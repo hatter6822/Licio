@@ -228,6 +228,7 @@ describe('WS-L financial wallet data-rights', () => {
       executableAfter: null,
       createdAt: now,
       executedAt: null,
+      executionClaimedAt: null,
     });
     // A separate OPEN proposal the user voted on (cast now requires it to be open).
     await knomosis.proposals.insert({
@@ -252,6 +253,7 @@ describe('WS-L financial wallet data-rights', () => {
       executableAfter: null,
       createdAt: now,
       executedAt: null,
+      executionClaimedAt: null,
     });
     await knomosis.votes.cast({
       proposalId: 'p-x',

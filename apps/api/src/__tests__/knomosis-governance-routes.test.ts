@@ -190,6 +190,7 @@ describe('WS-L.4.1d proposal → vote → execute + treasury over HTTP', () => {
       {
         asset: 'SIM-USDC',
         amount: '1000000',
+        idempotency_key: crypto.randomUUID(),
       },
     );
     expect(deposit.status).toBe(200);
@@ -340,6 +341,7 @@ describe('governance surface fail-closed gates', () => {
     const res = await req('POST', `/rooms/${ROOM}/governance/treasury/deposits`, cookie, {
       asset: 'SIM-USDC',
       amount: '1',
+      idempotency_key: crypto.randomUUID(),
     });
     expect(res.status).toBe(409);
   });

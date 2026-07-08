@@ -681,7 +681,10 @@ export function useWalletsQuery(enabled: boolean, includeUnlinked = false) {
   return useQuery({
     queryKey: [...queryKeys.wallets(), includeUnlinked] as const,
     queryFn: () => wallet.fetchWallets(includeUnlinked),
-    ...cachePolicy.profile,
+    // The wallet-connection gate reads this query's success/failure: it must be
+    // always-fresh + polled so a mid-session `wallet_connection` kill switch (503)
+    // is surfaced promptly, never masked by a cached 200 (WS-L.3.5a / N1).
+    ...cachePolicy.walletGate,
     enabled,
   });
 }

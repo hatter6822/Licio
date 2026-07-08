@@ -322,8 +322,17 @@ export const governanceProposals = knomosisSchema.table(
     executableAfter: tz('executable_after'),
     createdAt: tz('created_at').notNull().defaultNow(),
     executedAt: tz('executed_at'),
+    /** When `claimForExecution` CAS'd this row `timelocked`→`executing`.  The
+     *  recovery sweep only re-drives a claim OLDER than its stale cutoff, so a
+     *  live manual execution is never raced (and its `execution_simulated` audit
+     *  row never mis-attributed to the null-actor sweep) — WS-L.4.1c / N2. */
+    executionClaimedAt: tz('execution_claimed_at'),
   },
-  (t) => [index('governance_proposal_room_idx').on(t.roomId, t.createdAt)],
+  (t) => [
+    index('governance_proposal_room_idx').on(t.roomId, t.createdAt),
+    // Serves the recovery-sweep query: stranded (`executing`) proposals by claim age.
+    index('governance_proposal_recovery_idx').on(t.executionState, t.executionClaimedAt),
+  ],
 );
 export type GovernanceProposalRow = typeof governanceProposals.$inferSelect;
 

@@ -134,6 +134,12 @@ export interface GovernanceProposalRecord {
   executableAfter: string | null;
   createdAt: string;
   executedAt: string | null;
+  /** When `claimForExecution` CAS'd this row `timelocked`→`executing` (null while
+   *  never claimed).  The recovery sweep only re-drives a claim OLDER than its stale
+   *  cutoff, so a live manual execution — freshly claimed — is never raced by the
+   *  scheduler, which would otherwise mis-attribute the `execution_simulated` audit
+   *  row to the (null-actor) sweep instead of the initiating user (WS-L.4.1c / N2). */
+  executionClaimedAt: string | null;
 }
 
 export type ProposalVoteChoice = 'approve' | 'reject' | 'abstain';
@@ -364,6 +370,15 @@ export interface KnomosisActionStore {
    *  gateway, so there is no gateway state to reconcile it against and it must not
    *  manufacture a spurious mismatch (WS-L.3.2a). */
   listUnreconciled(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
+  /** EVERY forwarded, still-in-flight action for the deployment (non-terminal,
+   *  excluding pre-submit `reserving`), REGARDLESS of reconciliationState — the
+   *  gap-rebuild uses this to re-mark even already-`matched` in-flight rows whose
+   *  finalizing/reverting event may have fallen in the lost retention window, which
+   *  `listUnreconciled` (pending/mismatch only) would silently skip (WS-L.3.3a). */
+  listInFlightByDeployment(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]>;
   /** Actions STUCK in `submitted` (the scheduler's idempotent retry set), oldest
    *  first — queried directly so retries cannot starve behind older in-flight rows. */
   listSubmittedRetryable(
@@ -474,8 +489,13 @@ export interface GovernanceProposalStore {
    *  single-execution gate so two concurrent executes cannot both debit the
    *  simulated treasury.  The claim leaves the proposal in the RECOVERABLE
    *  `executing` state — it advances to `executed` only via `finalizeExecution`
-   *  AFTER the debit + ledger are durable (WS-L.4.1c). */
-  claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null>;
+   *  AFTER the debit + ledger are durable (WS-L.4.1c).  Stamps `executionClaimedAt`
+   *  = `claimedAt` so the recovery sweep can tell a fresh live claim from a stale
+   *  stranded one (N2). */
+  claimForExecution(
+    proposalId: string,
+    claimedAt: string,
+  ): Promise<GovernanceProposalRecord | null>;
   /** ATOMICALLY finalize a claimed proposal: CAS `executing` → `executed` with
    *  the given `executedAt`, returning the finalized row or null if it is no longer
    *  `executing`.  Called ONLY after the debit + ledger entry are durable, so a
@@ -498,9 +518,12 @@ export interface GovernanceProposalStore {
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
   /** Proposals stranded mid-execution (claimed `executing` but never finalized —
-   *  a crash between the claim and finalize).  The recovery sweep re-drives these
-   *  idempotently so a partial execution always settles (WS-L.4.1c). */
-  listRecoverableExecuting(): Promise<GovernanceProposalRecord[]>;
+   *  a crash between the claim and finalize) whose claim is OLDER than
+   *  `claimedBeforeIso` (a legacy null claim counts as stale).  The recovery sweep
+   *  re-drives these idempotently so a partial execution always settles WITHOUT
+   *  racing a still-live manual execution that was only just claimed — which would
+   *  mis-attribute its audit row to the null-actor sweep (WS-L.4.1c / N2). */
+  listRecoverableExecuting(claimedBeforeIso: string): Promise<GovernanceProposalRecord[]>;
   /** Open proposals in a room of a given type (policy-conflict check). */
   listOpenByRoomAndType(
     roomId: string,
@@ -1042,6 +1065,22 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       .map((r) => structuredClone(r));
   }
 
+  async listInFlightByDeployment(
+    deploymentId: string,
+    limit: number,
+  ): Promise<KnomosisActionRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.deploymentId === deploymentId &&
+          r.submissionState !== 'reserving' &&
+          !TERMINAL_SUBMISSION_STATES.has(r.submissionState),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit)
+      .map((r) => structuredClone(r));
+  }
+
   async listSubmittedRetryable(
     deploymentId: string,
     limit: number,
@@ -1322,12 +1361,15 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     return structuredClone(record);
   }
 
-  async claimForExecution(proposalId: string): Promise<GovernanceProposalRecord | null> {
+  async claimForExecution(
+    proposalId: string,
+    claimedAt: string,
+  ): Promise<GovernanceProposalRecord | null> {
     const row = this.#rows.get(proposalId);
     if (row === undefined || row.executionState !== 'timelocked' || row.votingState !== 'passed') {
       return null;
     }
-    const claimed = { ...row, executionState: 'executing' as const };
+    const claimed = { ...row, executionState: 'executing' as const, executionClaimedAt: claimedAt };
     this.#rows.set(proposalId, structuredClone(claimed));
     return structuredClone(claimed);
   }
@@ -1367,9 +1409,17 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
       .map((r) => structuredClone(r));
   }
 
-  async listRecoverableExecuting(): Promise<GovernanceProposalRecord[]> {
+  async listRecoverableExecuting(claimedBeforeIso: string): Promise<GovernanceProposalRecord[]> {
     return [...this.#rows.values()]
-      .filter((r) => r.executionState === 'executing' && r.votingState === 'passed')
+      .filter(
+        (r) =>
+          r.executionState === 'executing' &&
+          r.votingState === 'passed' &&
+          // A null claim is a legacy pre-N2 stranded row → always recoverable; a
+          // stamped claim is recoverable only once it is older than the cutoff, so
+          // a just-claimed live execution is left to its initiating caller.
+          (r.executionClaimedAt === null || r.executionClaimedAt <= claimedBeforeIso),
+      )
       .map((r) => structuredClone(r));
   }
 

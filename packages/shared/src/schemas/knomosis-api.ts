@@ -529,9 +529,12 @@ export const simTreasuryDepositRequestSchema = z
     // A deposit must move real (simulated) value — a zero deposit is rejected so it
     // cannot pad the readiness track record (WS-L.4.1c).
     amount: positiveMinorUnitAmountSchema,
-    /** Client-generated idempotency key (WS-L.4.1c): a retried deposit (double-tap
-     *  or network retry) carrying the SAME key credits the treasury at most once. */
-    idempotency_key: uuidSchema.optional(),
+    /** Client-generated idempotency key (WS-L.4.1c) — REQUIRED: a retried deposit
+     *  (double-tap or network retry) carrying the SAME key credits the treasury at
+     *  most once.  Without it every replay would credit again AND append another
+     *  qualifying audit entry, letting a client inflate balances + the readiness track
+     *  record by resubmitting the same action. */
+    idempotency_key: uuidSchema,
   })
   .strict();
 export type SimTreasuryDepositRequest = z.infer<typeof simTreasuryDepositRequestSchema>;

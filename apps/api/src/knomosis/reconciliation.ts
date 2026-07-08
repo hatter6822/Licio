@@ -138,11 +138,18 @@ const FUND_MOVEMENT_ACTION_TYPES: ReadonlySet<string> = new Set([
   'bounty_contribution',
 ]);
 
-const EVENT_STATE_OF_TYPE: Record<string, string> = {
+// MUST cover the SAME event types ingest's `EVENT_STATE` maps (asserted by a parity
+// test): a `challenged`/`frozen` event proves the gateway SAW the action, so dropping
+// it here would feed `decideActionReconciliation` a `null` latest-event state and let
+// a genuinely-diverged (e.g. failed) row reconcile as a clean pre-execution failure
+// (WS-L.3.4a).
+export const EVENT_STATE_OF_TYPE: Record<string, string> = {
   'knomosis.action.accepted': 'accepted',
   'knomosis.action.settled': 'settled',
   'knomosis.action.finalized': 'finalized',
   'knomosis.action.reverted': 'reverted',
+  'knomosis.action.challenged': 'challenged',
+  'knomosis.action.frozen': 'frozen',
 };
 
 /**
@@ -342,11 +349,23 @@ async function reconcileActorLedgers(
     const ledger = ledgerByWallet.get(walletAccountId) ?? [];
     const read = await gateway.getBalances(mapping.actorId, null);
     if (read.kind !== 'ok') continue; // unavailable / not-modified: retry next tick
+    // Compare at a COMMON watermark: if the standing snapshot is BEHIND the product
+    // event cursor, the product ledger may already include a deposit finalized by an
+    // event the snapshot has not yet reflected, manufacturing a false shortfall.
+    // Defer this actor's comparison until the snapshot catches up (WS-L.3.4a).
+    if (lowWatermarkSeq !== null && BigInt(read.knomosisSeq) < BigInt(lowWatermarkSeq)) {
+      continue;
+    }
     // Sum the pending in-flight fund-movement AMOUNT per asset — a timing
     // shortfall is only explained up to that amount; a larger gap stays critical,
     // and an open proposal_sign/charter_update (no asset/amount) contributes 0.
     const inFlightByAsset = new Map<string, string>();
     for (const open of await deps.actions.listOpenByWallet(walletAccountId)) {
+      // Only THIS deployment's FORWARDED actions can explain THIS deployment's balance
+      // shortfall: a `reserving` row was never sent to the gateway, and an in-flight
+      // action on ANOTHER deployment moves a different treasury — either would wrongly
+      // inflate the explained amount and downgrade a real critical delta (WS-L.3.4b).
+      if (open.deploymentId !== deploymentId || open.submissionState === 'reserving') continue;
       if (!FUND_MOVEMENT_ACTION_TYPES.has(open.actionType)) continue;
       const asset = open.signedAction.message['asset'];
       const amount = open.signedAction.message['amount'];

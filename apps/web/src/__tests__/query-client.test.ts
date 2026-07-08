@@ -50,4 +50,16 @@ describe('cachePolicy', () => {
   it('gives profile the longest stale time', () => {
     expect(cachePolicy.profile.staleTime).toBeGreaterThan(cachePolicy.feed.staleTime);
   });
+
+  it('keeps the wallet-connection gate always-fresh and polled so a mid-session pause surfaces (N1)', () => {
+    // The gate must NOT trust a cached /wallets success while the wallet_connection
+    // kill switch is engaged: zero stale/gc time + refetch-on-mount + a short poll
+    // guarantee the 503 (failureReason) is surfaced instead of a stale 200.
+    expect(cachePolicy.walletGate.staleTime).toBe(0);
+    expect(cachePolicy.walletGate.gcTime).toBe(0);
+    expect(cachePolicy.walletGate.refetchOnMount).toBe('always');
+    expect(cachePolicy.walletGate.refetchInterval).toBeGreaterThan(0);
+    // A pause must never be masked for as long as the profile cache would (5 min).
+    expect(cachePolicy.walletGate.refetchInterval).toBeLessThan(cachePolicy.profile.staleTime);
+  });
 });

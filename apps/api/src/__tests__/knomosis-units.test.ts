@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpKnomosisGateway } from '../knomosis/gateway.js';
-import { ingestGatewayEvents } from '../knomosis/ingest.js';
+import { ingestGatewayEvents, KNOWN_GATEWAY_EVENT_TYPES } from '../knomosis/ingest.js';
 import { KNOMOSIS_PIN } from '../knomosis/pin.js';
 import {
   createIdentityRegionResolver,
@@ -22,6 +22,7 @@ import {
   classifyDivergence,
   compareActorLedger,
   decideActionReconciliation,
+  EVENT_STATE_OF_TYPE,
   reconcileDeployment,
 } from '../knomosis/reconciliation.js';
 import { getKnomosisServices, resetKnomosisServicesForTests } from '../knomosis/services.js';
@@ -272,6 +273,125 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     // The divergence blocks treasury expansion (§28.3) even though action states agree.
     const gate = await canExpandTreasury(fixture.knomosis, deploymentId);
     expect(gate.allowed).toBe(false);
+  });
+
+  it('EVENT_STATE_OF_TYPE covers EVERY known gateway event type (N6 parity)', () => {
+    // Reconciliation must map the SAME set ingest understands; a missing mapping
+    // feeds decideActionReconciliation a null latest-event state and lets a diverged
+    // row reconcile as a clean pre-execution failure.
+    for (const type of KNOWN_GATEWAY_EVENT_TYPES) {
+      expect(EVENT_STATE_OF_TYPE[type]).toBeDefined();
+    }
+    expect(EVENT_STATE_OF_TYPE['knomosis.action.challenged']).toBe('challenged');
+    expect(EVENT_STATE_OF_TYPE['knomosis.action.frozen']).toBe('frozen');
+  });
+
+  it('a CHALLENGED event on a `failed` record surfaces a divergence, not a clean pass (N6)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const typedDataHash = `0x${'c6'.repeat(32)}`;
+    // Product state says the action FAILED pre-execution, but the gateway emitted a
+    // `challenged` event for it — proof it reached execution.  Before N6 this event
+    // was dropped (unmapped) and the row reconciled as a clean failure.
+    await fixture.knomosis.actions.insert(
+      baseAction({ deploymentId, typedDataHash, submissionState: 'failed' }),
+    );
+    await fixture.knomosis.events.ingest({
+      eventId: crypto.randomUUID(),
+      deploymentId,
+      chainId: LOCAL_DEPLOYMENT.chain_id,
+      blockNumber: null,
+      txHash: null,
+      logIndex: null,
+      eventType: 'knomosis.action.challenged',
+      decodedPayload: { typed_data_hash: typedDataHash },
+      eventSource: 'gateway',
+      gatewaySeq: '1',
+      gatewayIndex: 0,
+      reorgState: 'confirmed',
+      reorgDetectedAt: null,
+      indexedAt: new Date().toISOString(),
+    });
+    const summary = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(summary.mismatched).toBe(1);
+    expect(summary.matched).toBe(0);
+  });
+
+  it('DEFERS a treasury comparison when the standing snapshot lags the event cursor (N7)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const walletAccountId = crypto.randomUUID();
+    await fixture.knomosis.actions.insert(
+      baseAction({
+        deploymentId,
+        actionType: 'treasury_deposit',
+        actorWalletAccountId: walletAccountId,
+        typedDataHash: `0x${'77'.repeat(32)}`,
+        signedAction: { message: { asset: 'USDC', amount: '150' }, signature: '0x' },
+        submissionState: 'finalized',
+        reconciliationState: 'matched',
+      }),
+    );
+    await fixture.knomosis.actorMappings.put({
+      walletAccountId,
+      deploymentId,
+      actorId: 'actor-lag',
+      createdAt: new Date().toISOString(),
+    });
+    fixture.gateway.setBalance('actor-lag', 'USDC', '120'); // a 30-unit gap
+    // The event cursor is at 100 but the standing snapshot is BEHIND at 50: the gap
+    // may be a deposit the snapshot has not reflected yet, so the comparison DEFERS.
+    await fixture.knomosis.events.recordGatewayCursor(deploymentId, '100');
+    fixture.gateway.setStandingSeq('50');
+    const deferred = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(deferred.mismatched).toBe(0);
+    expect((await canExpandTreasury(fixture.knomosis, deploymentId)).allowed).toBe(true);
+    // Once the snapshot CATCHES UP to the cursor, the real divergence surfaces.
+    fixture.gateway.setStandingSeq('100');
+    const caughtUp = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(caughtUp.mismatched).toBeGreaterThanOrEqual(1);
+    expect((await canExpandTreasury(fixture.knomosis, deploymentId)).allowed).toBe(false);
+  });
+
+  it('an in-flight action on ANOTHER deployment does NOT explain this deployment’s shortfall (N8)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const walletAccountId = crypto.randomUUID();
+    await fixture.knomosis.actions.insert(
+      baseAction({
+        deploymentId,
+        actionType: 'treasury_deposit',
+        actorWalletAccountId: walletAccountId,
+        typedDataHash: `0x${'88'.repeat(32)}`,
+        signedAction: { message: { asset: 'USDC', amount: '150' }, signature: '0x' },
+        submissionState: 'finalized',
+        reconciliationState: 'matched',
+      }),
+    );
+    await fixture.knomosis.actorMappings.put({
+      walletAccountId,
+      deploymentId,
+      actorId: 'actor-cross',
+      createdAt: new Date().toISOString(),
+    });
+    fixture.gateway.setBalance('actor-cross', 'USDC', '120'); // a 30-unit shortfall
+    // A forwarded 30-USDC deposit that could "explain" the gap — but it belongs to a
+    // DIFFERENT deployment (moves a different treasury), so it must NOT downgrade this
+    // deployment's critical divergence.
+    await fixture.knomosis.actions.insert(
+      baseAction({
+        deploymentId: 'other-deployment',
+        actionType: 'treasury_deposit',
+        actorWalletAccountId: walletAccountId,
+        typedDataHash: `0x${'89'.repeat(32)}`,
+        signedAction: { message: { asset: 'USDC', amount: '30' }, signature: '0x' },
+        submissionState: 'accepted',
+        reconciliationState: 'pending',
+      }),
+    );
+    const summary = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(summary.mismatched).toBeGreaterThanOrEqual(1);
+    expect((await canExpandTreasury(fixture.knomosis, deploymentId)).allowed).toBe(false);
   });
 
   it('reconcileDeployment flags a finalized action whose RECEIPT is missing/mismatched (WS-L.3.4a receipt source)', async () => {
@@ -1287,6 +1407,7 @@ describe('ingest unsupported-event halt (WS-L.3.3a)', () => {
     return {
       actions: fixture.knomosis.actions,
       proposalSignatures: fixture.knomosis.proposalSignatures,
+      actorMappings: fixture.knomosis.actorMappings,
       events: fixture.knomosis.events,
       reconciliation: fixture.knomosis.reconciliation,
       receipts: fixture.knomosis.receipts,
@@ -1828,6 +1949,7 @@ describe('in-memory store adapters + services getter', () => {
       executableAfter: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     const notReady = await executeSimProposal(sim, {
       roomId,
@@ -1861,6 +1983,7 @@ describe('in-memory store adapters + services getter', () => {
       executableAfter: new Date(Date.now() + 3_600_000).toISOString(),
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     const timelocked = await executeSimProposal(sim, {
       roomId,
@@ -1894,6 +2017,7 @@ describe('in-memory store adapters + services getter', () => {
       executableAfter: new Date(Date.now() - 1000).toISOString(),
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     expect(await executeElapsedSimProposals(sim)).toBeGreaterThanOrEqual(1);
   });
@@ -2053,6 +2177,7 @@ describe('in-memory store adapters + services getter', () => {
       executableAfter: new Date(Date.now() - 1000).toISOString(),
       createdAt: new Date().toISOString(),
       executedAt: null,
+      executionClaimedAt: null,
     });
     const result = await executeSimProposal(sim, { roomId, proposalId, actorUserId: null });
     expect(result.ok).toBe(false);
@@ -2066,6 +2191,7 @@ describe('in-memory store adapters + services getter', () => {
       {
         actions: fixture.knomosis.actions,
         proposalSignatures: fixture.knomosis.proposalSignatures,
+        actorMappings: fixture.knomosis.actorMappings,
         events: fixture.knomosis.events,
         reconciliation: fixture.knomosis.reconciliation,
         receipts: fixture.knomosis.receipts,

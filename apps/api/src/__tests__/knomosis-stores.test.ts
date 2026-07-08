@@ -91,6 +91,7 @@ function proposal(over: Partial<GovernanceProposalRecord> = {}): GovernancePropo
     executableAfter: null,
     createdAt: now(),
     executedAt: null,
+    executionClaimedAt: null,
     ...over,
   };
 }
@@ -437,17 +438,42 @@ describe('InMemoryGovernanceProposalStore + votes + signatures', () => {
     await expect(store.update(proposal({ proposalId: 'nope' }))).rejects.toThrow();
   });
 
-  it('listRecoverableExecuting returns only stranded `executing` proposals (H2)', async () => {
+  it('listRecoverableExecuting returns only STALE stranded `executing` proposals (H2/N2)', async () => {
     const store = new InMemoryGovernanceProposalStore();
-    // Stranded mid-execution → recoverable.
-    await store.insert(proposal({ votingState: 'passed', executionState: 'executing' }));
+    const cutoff = '2026-07-01T00:02:00.000Z';
+    // Legacy null claim (pre-N2 stranded row) → always recoverable.
+    await store.insert(
+      proposal({ proposalId: 'legacy', votingState: 'passed', executionState: 'executing' }),
+    );
+    // Stranded with a claim OLDER than the cutoff → recoverable.
+    await store.insert(
+      proposal({
+        proposalId: 'stale',
+        votingState: 'passed',
+        executionState: 'executing',
+        executionClaimedAt: '2026-07-01T00:00:00.000Z',
+      }),
+    );
+    // FRESH claim (NEWER than the cutoff) → a LIVE execution the sweep must NOT
+    // race, else it would steal the `execution_simulated` audit attribution (N2).
+    await store.insert(
+      proposal({
+        proposalId: 'fresh',
+        votingState: 'passed',
+        executionState: 'executing',
+        executionClaimedAt: '2026-07-01T00:05:00.000Z',
+      }),
+    );
     // Already executed → NOT recoverable.
-    await store.insert(proposal({ votingState: 'passed', executionState: 'executed' }));
+    await store.insert(
+      proposal({ proposalId: 'done', votingState: 'passed', executionState: 'executed' }),
+    );
     // Timelocked (not yet started) → belongs to listExecutable, not recovery.
-    await store.insert(proposal({ votingState: 'passed', executionState: 'timelocked' }));
-    const recoverable = await store.listRecoverableExecuting();
-    expect(recoverable).toHaveLength(1);
-    expect(recoverable[0]?.executionState).toBe('executing');
+    await store.insert(
+      proposal({ proposalId: 'tl', votingState: 'passed', executionState: 'timelocked' }),
+    );
+    const recoverable = await store.listRecoverableExecuting(cutoff);
+    expect(recoverable.map((r) => r.proposalId).sort()).toEqual(['legacy', 'stale']);
   });
 
   it('claimForExecution→executing then finalizeExecution→executed, each once (F10)', async () => {
@@ -455,9 +481,11 @@ describe('InMemoryGovernanceProposalStore + votes + signatures', () => {
     await store.insert(
       proposal({ proposalId: 'p', votingState: 'passed', executionState: 'timelocked' }),
     );
-    const claimed = await store.claimForExecution('p');
+    const claimedAt = '2026-06-30T12:00:00.000Z';
+    const claimed = await store.claimForExecution('p', claimedAt);
     expect(claimed?.executionState).toBe('executing'); // NOT executed (recoverable)
-    expect(await store.claimForExecution('p')).toBeNull(); // no double execution
+    expect(claimed?.executionClaimedAt).toBe(claimedAt); // stamps the recovery clock (N2)
+    expect(await store.claimForExecution('p', claimedAt)).toBeNull(); // no double execution
     const finalized = await store.finalizeExecution('p', '2026-07-01T00:00:00.000Z');
     expect(finalized?.executionState).toBe('executed');
     expect(finalized?.executedAt).toBe('2026-07-01T00:00:00.000Z');

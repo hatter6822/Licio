@@ -23,12 +23,14 @@
 import type { AuditStore } from '../identity/audit.js';
 import type { GatewayEvent, KnomosisGateway } from './gateway.js';
 import { type ReceiptDeps, writeReceipts } from './receipts.js';
+import { ensureActorMapping } from './standing.js';
 import type {
   GovernanceSignatureStore,
   KnomosisActionRecordEntity,
   KnomosisActionStore,
   OnChainEventStore,
   ReconciliationStore,
+  WalletActorMappingStore,
 } from './stores.js';
 import { applyTransition, recordAcceptedProposalSignature } from './submission.js';
 
@@ -59,6 +61,9 @@ export interface IngestDeps extends ReceiptDeps {
   /** Governance-signature ledger — a reverted proposal_sign's signature is
    *  removed here so it stops counting/blocking (WS-L.3.4c). */
   proposalSignatures: GovernanceSignatureStore;
+  /** Wallet→actor mapping — REPAIRED here from a confirmed gateway event when the
+   *  post-submit HTTP side effect that normally writes it crashed (N4). */
+  actorMappings: WalletActorMappingStore;
   events: OnChainEventStore;
   reconciliation: ReconciliationStore;
   audit: AuditStore;
@@ -317,6 +322,23 @@ export async function ingestGatewayEvents(
       const effective = updated ?? (await deps.actions.getById(action.actionRecordId));
       if (effective === null || effective.submissionState !== targetState) continue;
 
+      // REPAIR the wallet→actor mapping from this confirmed gateway event.  The
+      // mapping is normally written as a post-submit HTTP side effect; if that
+      // write crashed AFTER the action was forwarded (and the caller never replays
+      // the idempotency key), `/standing` would read `no_actor_mapping` forever and
+      // `reconcileActorLedgers` would skip the wallet (it iterates only mapped
+      // wallets).  A forwarded gateway event PROVES the actor↔wallet binding passed
+      // every submit gate, so rebuild it here — `ensureActorMapping` is
+      // first-write-wins, so this never overwrites a good mapping (WS-L.3.3a / N4).
+      const mappedActor = effective.signedAction.message['actor'];
+      if (typeof mappedActor === 'string') {
+        await ensureActorMapping(deps, {
+          walletAccountId: effective.actorWalletAccountId,
+          deploymentId,
+          actorLower: mappedActor.toLowerCase(),
+        });
+      }
+
       if (effective.actionType === 'proposal_sign') {
         if (effective.submissionState === 'reverted') {
           // A `proposal_sign` that REVERTS after acceptance must not keep a live
@@ -422,9 +444,16 @@ export async function rebuildFromSnapshot(
   deploymentId: string,
 ): Promise<{ remarked: number }> {
   const nowIso = new Date(deps.now()).toISOString();
-  const open = await deps.actions.listUnreconciled(deploymentId, 10_000);
+  // EVERY forwarded, still-in-flight action — not only the pending/mismatch set.
+  // A previously-`matched` accepted/settled action whose finalizing or reverting
+  // event fell in the lost retention window must be reset to `pending` too, else
+  // reconcileDeployment keeps skipping it as clean and its terminal outcome is lost
+  // forever (WS-L.3.3a).  This makes the code match this function's own contract
+  // ("marking all non-terminal actions for re-reconciliation").
+  const open = await deps.actions.listInFlightByDeployment(deploymentId, 10_000);
   let remarked = 0;
   for (const record of open) {
+    if (record.reconciliationState === 'pending') continue;
     await deps.actions.update({
       ...record,
       reconciliationState: 'pending',

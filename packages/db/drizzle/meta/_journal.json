@@ -428,6 +428,13 @@
       "when": 1782296000000,
       "tag": "0061_ws_l_finalized_release",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1782386000000,
+      "tag": "0062_ws_l_execution_claim_ts",
+      "breakpoints": true
     }
   ]
 }

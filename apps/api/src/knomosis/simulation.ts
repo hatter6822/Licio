@@ -207,6 +207,13 @@ async function requireComprehension(
  *  digits, matching `minorUnitAmountSchema` on the response boundary. */
 const SIM_TREASURY_MAX_BALANCE_DIGITS = 78;
 
+/** How long a claimed-but-unfinalized (`executing`) proposal must sit before the
+ *  recovery sweep re-drives it.  A live manual execution completes in well under a
+ *  second; this margin (2 min, far above the 60s sweep cadence) guarantees the
+ *  sweep never races an in-flight execution and steals its `execution_simulated`
+ *  audit attribution — it only recovers genuinely stranded (crashed) claims (N2). */
+const RECOVERY_STALE_CLAIM_MS = 120_000;
+
 /** Idempotent bootstrap with the configured starting balance. */
 export async function ensureSimTreasury(
   deps: SimulationDeps,
@@ -472,6 +479,7 @@ export async function createSimProposal(
     executableAfter: null,
     createdAt: nowIso,
     executedAt: null,
+    executionClaimedAt: null,
   };
   await deps.proposals.insert(proposal);
   await deps.governanceAudit.append({
@@ -697,7 +705,10 @@ export async function executeSimProposal(
   // re-runs it; only this recovery path (or the scheduler sweep) re-drives it.
   let claimed: GovernanceProposalRecord = proposal;
   if (proposal.executionState === 'timelocked') {
-    const c = await deps.proposals.claimForExecution(args.proposalId);
+    const c = await deps.proposals.claimForExecution(
+      args.proposalId,
+      new Date(nowMs).toISOString(),
+    );
     if (c === null) {
       return err(409, 'not_executable', 'This proposal is already being executed.');
     }
@@ -757,6 +768,9 @@ export async function executeSimProposal(
           ...claimed,
           executionState: applied.code === 'insufficient_sim_funds' ? 'blocked' : 'timelocked',
           executedAt: null,
+          // Release the claim so the row honestly reflects "not currently executing"
+          // and a retry's fresh claim re-stamps the recovery clock (N2).
+          executionClaimedAt: null,
         });
         return applied;
       }
@@ -796,7 +810,12 @@ export async function executeSimProposal(
  *  idempotent for it (its debit is skipped if already committed, WS-L.4.1c). */
 export async function executeElapsedSimProposals(deps: SimulationDeps): Promise<number> {
   const elapsed = await deps.proposals.listExecutable(new Date(deps.now()).toISOString());
-  const stranded = await deps.proposals.listRecoverableExecuting();
+  // Only re-drive claims OLDER than the stale window, so a still-live manual
+  // execution — freshly claimed — is left to its initiating caller and never has
+  // its audit row mis-attributed to this null-actor sweep (N2).
+  const stranded = await deps.proposals.listRecoverableExecuting(
+    new Date(deps.now() - RECOVERY_STALE_CLAIM_MS).toISOString(),
+  );
   // Dedup by proposalId (a proposal is only ever in one of the two sets, but guard
   // against overlap so a single sweep never runs a proposal twice).
   const seen = new Set<string>();
