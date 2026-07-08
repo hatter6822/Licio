@@ -40,7 +40,13 @@ export interface ReceiptDeps {
   uuid: () => string;
 }
 
-function humanSummary(record: KnomosisActionRecordEntity, finalState: string): string {
+/** The summary the receipt pairs to its payload.  A forwarded action carries the
+ *  EXACT `preflightSummary` the user saw and signed, so the receipt's
+ *  `summary_payload_hash` matches the preflight hash and genuinely audits what was
+ *  shown before signing (WS-L.3.4c / O2).  Only a pre-O2 / non-forwarded row lacks
+ *  it, and falls back to a state-derived summary. */
+function receiptSummary(record: KnomosisActionRecordEntity, finalState: string): string {
+  if (record.preflightSummary !== undefined) return record.preflightSummary;
   const struct = getTypedDataStruct(record.actionType);
   const name = struct?.actionName ?? record.actionType;
   return `${name} — ${finalState} (${record.typedDataHash.slice(0, 10)}…)`;
@@ -53,7 +59,7 @@ export async function writeReceipts(
 ): Promise<{ publicReceipt: KnomosisReceiptRecord; privateReceipt: KnomosisReceiptRecord }> {
   const nowIso = new Date(deps.now()).toISOString();
   const finalState = record.submissionState;
-  const summary = humanSummary(record, finalState);
+  const summary = receiptSummary(record, finalState);
   const message = record.signedAction.message;
 
   const publicPayload: Record<string, unknown> = {
@@ -111,6 +117,6 @@ export function verifyReceiptPairing(
 ): boolean {
   return (
     receipt.summaryPayloadHash ===
-    pairSummaryToPayload(humanSummary(record, receipt.finalState), record.typedDataHash)
+    pairSummaryToPayload(receiptSummary(record, receipt.finalState), record.typedDataHash)
   );
 }

@@ -193,6 +193,47 @@ describe('WS-L financial wallet data-rights', () => {
     expect(pub).not.toBeNull();
   });
 
+  it('purge marks EVERY in-flight action even beyond a full page of terminal rows (O1)', async () => {
+    const { knomosis } = await freshKnomosisServices();
+    // 1000 TERMINAL rows with EARLIER timestamps — a full `listByActor(userId, 1000)`
+    // page that would exclude anything sorted after them.
+    for (let i = 0; i < 1000; i += 1) {
+      await knomosis.actions.insert({
+        ...action(USER, `term-${i}`),
+        submissionState: 'finalized',
+        typedDataHash: `0xterm${i}`,
+        idempotencyKey: crypto.randomUUID(),
+        createdAt: `2026-07-01T00:00:00.${String(i % 1000).padStart(3, '0')}Z`,
+      });
+    }
+    // One IN-FLIGHT row with a LATER timestamp — it sorts PAST the 1000-row page, so
+    // the old capped scan would delete it WITHOUT a `purged_action` marker.
+    const inflightHash = '0xinflight';
+    await knomosis.actions.insert({
+      ...action(USER, 'inflight'),
+      submissionState: 'accepted',
+      typedDataHash: inflightHash,
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: '2026-07-01T00:00:01.000Z',
+    });
+
+    await purgeFinancialWalletData(knomosis, USER);
+
+    // The in-flight action's hash carries a `purged_action` marker, so a later gateway
+    // event for it is recognised as legitimately deleted — never a critical orphan
+    // that blocks treasury expansion forever (O1).
+    const marker = await knomosis.reconciliation.latestForEntity(
+      'action',
+      `event-orphan:${inflightHash}`,
+    );
+    expect(marker?.outcome).toBe('match');
+    expect((marker?.details as { kind?: string }).kind).toBe('purged_action');
+    // A TERMINAL action gets NO marker (it can never receive a further event).
+    expect(
+      await knomosis.reconciliation.latestForEntity('action', 'event-orphan:0xterm0'),
+    ).toBeNull();
+  });
+
   it('purge is idempotent (a second run removes nothing more)', async () => {
     const { knomosis } = await freshKnomosisServices();
     await knomosis.wallets.insert(wallet(USER, 'w-user', USER_HASH));

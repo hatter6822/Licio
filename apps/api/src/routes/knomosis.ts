@@ -405,6 +405,21 @@ export function createKnomosisRoutes() {
             walletAccountId: params.walletId,
             deploymentId: params.deploymentId,
           });
+          // `readBudget` re-runs the SAME fail-closed gates as `readBalances`
+          // (crypto flag, wallet_connection kill switch, wallet-active, actor
+          // mapping).  If one TRIPPED between the two reads — the wallet was
+          // unlinked, or crypto / wallet_connection was paused — abort rather than
+          // leak balances with `budget: null` during the pause.  A merely transient
+          // gateway outage (`standing_unavailable`) still degrades to `budget: null`
+          // since the already-read balances remain valid (WS-L.3.5a / O3).
+          if (
+            !budget.ok &&
+            budget.code !== 'standing_unavailable' &&
+            budget.code !== 'not_modified'
+          ) {
+            const status = budget.code === 'wallet_not_active' ? 404 : 503;
+            return c.json(deny(budget.code, 'Standing is unavailable.'), status);
+          }
           const compositeEtag = composeStandingEtag(balances, budget);
           if (clientEtag !== null && clientEtag === compositeEtag) return c.body(null, 304);
           c.header('x-knomosis-seq', balances.knomosisSeq);

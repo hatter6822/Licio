@@ -15,7 +15,7 @@ import {
   defaultCompliancePort,
   localeRegionSubtag,
 } from '../knomosis/ports.js';
-import { buildHumanSummary } from '../knomosis/preflight.js';
+import { buildHumanSummary, pairSummaryToPayload } from '../knomosis/preflight.js';
 import { verifyReceiptPairing, writeReceipts } from '../knomosis/receipts.js';
 import {
   canExpandTreasury,
@@ -1399,6 +1399,32 @@ describe('signature verifier factory + receipts', () => {
     expect(verifyReceiptPairing(publicReceipt, record)).toBe(true);
     const tampered = { ...publicReceipt, summaryPayloadHash: `0x${'ff'.repeat(32)}` };
     expect(verifyReceiptPairing(tampered, record)).toBe(false);
+  });
+
+  it('receipts pair against the PERSISTED preflight summary, matching the preflight hash (O2)', async () => {
+    const fixture = await freshKnomosisServices();
+    const message = {
+      amount: '150',
+      asset: 'SIM-USDC',
+      expiration: '9999999999',
+      nonce: '1',
+    };
+    // The EXACT summary the preflight built + showed + hashed for this action.
+    const preflightSummary = buildHumanSummary('treasury_deposit', 'My Room', message);
+    const record = baseAction({
+      submissionState: 'finalized',
+      preflightSummary,
+      signedAction: { message, signature: '0x' },
+    });
+    await fixture.knomosis.actions.insert(record);
+    const { publicReceipt, privateReceipt } = await writeReceipts(fixture.knomosis, record);
+    // The receipt's summary_payload_hash equals the hash the PREFLIGHT computed over
+    // the SAME summary — so the receipt audits exactly what the user saw and signed,
+    // not a receipt-specific state string whose hash could never match (O2).
+    const preflightHash = pairSummaryToPayload(preflightSummary, record.typedDataHash);
+    expect(publicReceipt.summaryPayloadHash).toBe(preflightHash);
+    expect(privateReceipt.summaryPayloadHash).toBe(preflightHash);
+    expect(verifyReceiptPairing(publicReceipt, record)).toBe(true);
   });
 });
 

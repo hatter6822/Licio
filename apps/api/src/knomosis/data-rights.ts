@@ -10,18 +10,17 @@
 // wallet projection.  Reporter/counterparty identities are never included.
 
 import type { ActionNonceStore } from './services.js';
-import {
-  type ComprehensionStore,
-  type FinancialWalletStore,
-  type GovernanceAuditStore,
-  type GovernanceProposalStore,
-  type GovernanceSignatureStore,
-  type KnomosisActionStore,
-  type KnomosisReceiptStore,
-  type ProposalVoteStore,
-  type ReconciliationStore,
-  type SimTreasuryStore,
-  TERMINAL_SUBMISSION_STATES,
+import type {
+  ComprehensionStore,
+  FinancialWalletStore,
+  GovernanceAuditStore,
+  GovernanceProposalStore,
+  GovernanceSignatureStore,
+  KnomosisActionStore,
+  KnomosisReceiptStore,
+  ProposalVoteStore,
+  ReconciliationStore,
+  SimTreasuryStore,
 } from './stores.js';
 
 export interface WalletDataRightsDeps {
@@ -146,8 +145,10 @@ export async function purgeFinancialWalletData(
   // marker for each in-flight action's hash FIRST, so ingestion recognises the event
   // as legitimately-deleted (not lost) and skips the blocking mismatch (WS-L.3.3b).
   const nowIso = new Date(deps.now()).toISOString();
-  for (const action of await deps.actions.listByActor(userId, 1000)) {
-    if (TERMINAL_SUBMISSION_STATES.has(action.submissionState)) continue;
+  // UNCAPPED over EVERY in-flight action — a capped `listByActor` could leave later
+  // in-flight rows (behind ≥limit terminal rows) unmarked, so a subsequent gateway
+  // event would still block treasury expansion as a critical orphan (WS-L.3.3b / O1).
+  for (const action of await deps.actions.listInFlightByActor(userId)) {
     await deps.reconciliation.append({
       resultId: deps.uuid(),
       deploymentId: action.deploymentId,

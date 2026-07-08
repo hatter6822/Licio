@@ -536,6 +536,38 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     expect(standing.status).toBe(200);
   });
 
+  it('standing FAILS CLOSED when a gate trips between the balances and budget reads (O3)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkAndMapWallet(fixture, userId);
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    await fixture.knomosis.actorMappings.put({
+      walletAccountId,
+      deploymentId,
+      actorId: testAccount.address.toLowerCase(),
+      createdAt: new Date().toISOString(),
+    });
+    // `resolveActor` reads the wallet ONCE per standing dimension.  Let the FIRST read
+    // (balances) see the ACTIVE wallet and the SECOND (budget) see it UNLINKED —
+    // modelling the wallet being unlinked BETWEEN the two reads within one request.
+    const realGetById = fixture.knomosis.wallets.getById.bind(fixture.knomosis.wallets);
+    let reads = 0;
+    fixture.knomosis.wallets.getById = async (id: string) => {
+      reads += 1;
+      const w = await realGetById(id);
+      return reads >= 2 && w !== null ? { ...w, unlinkState: 'pending_unlink' as const } : w;
+    };
+    const res = await get(`/knomosis/standing/${walletAccountId}/${deploymentId}`, cookie);
+    // Fail closed: 404 (wallet_not_active) — NOT 200 leaking balances with budget:null.
+    expect(res.status).toBe(404);
+  });
+
   it('a REPLAY of a FAILED (unvalidated) reservation does NOT rebuild the mapping (F8)', async () => {
     const fixture = await freshKnomosisServices();
     fixture.knomosis.rooms = {

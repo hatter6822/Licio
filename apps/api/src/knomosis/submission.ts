@@ -23,6 +23,7 @@ import { pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
 import {
   buildEip712Domain,
+  buildHumanSummary,
   CAP_CATEGORY,
   consumePreflightToken,
   FUND_TRANSFER_ACTIONS,
@@ -471,6 +472,10 @@ export async function submitAction(
     payloadHash: typedDataHash,
     typedDataHash,
     signedAction: { message: input.typedDataMessage, signature: input.signature },
+    // The SAME deterministic summary the preflight showed + hashed (same function,
+    // same room name source), persisted so the receipt written later pairs against
+    // what the user saw and signed (WS-L.3.4c / O2).
+    preflightSummary: buildHumanSummary(actionType, room.name, input.typedDataMessage),
     submissionState: 'reserving',
     failureReason: null,
     indexedEventRef: null,

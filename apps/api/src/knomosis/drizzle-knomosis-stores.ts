@@ -476,6 +476,8 @@ function mapAction(row: typeof knomosisActionRecords.$inferSelect): KnomosisActi
     payloadHash: row.payloadHash,
     typedDataHash: row.typedDataHash,
     signedAction: row.signedAction as KnomosisActionRecordEntity['signedAction'],
+    // Optional (exactOptionalPropertyTypes): include the key only when non-null.
+    ...(row.preflightSummary !== null ? { preflightSummary: row.preflightSummary } : {}),
     submissionState: row.submissionState,
     failureReason: row.failureReason,
     indexedEventRef: row.indexedEventRef,
@@ -500,6 +502,7 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       payloadHash: record.payloadHash,
       typedDataHash: record.typedDataHash,
       signedAction: record.signedAction,
+      preflightSummary: record.preflightSummary ?? null,
       submissionState: record.submissionState,
       failureReason: record.failureReason,
       indexedEventRef: record.indexedEventRef,
@@ -769,6 +772,26 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       .where(eq(knomosisActionRecords.actorUserId, userId))
       .orderBy(asc(knomosisActionRecords.createdAt))
       .limit(limit);
+    return rows.map(mapAction);
+  }
+
+  async listInFlightByActor(userId: string): Promise<KnomosisActionRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(
+        and(
+          eq(knomosisActionRecords.actorUserId, userId),
+          // Every forwarded, still-in-flight row — UNCAPPED — so the purge marks all
+          // of them before deleting, never leaving one behind a page of terminal rows
+          // to resurface as a critical orphan divergence (WS-L.3.3b / O1).
+          notInArray(knomosisActionRecords.submissionState, [
+            'reserving',
+            ...TERMINAL_SUBMISSION_STATES,
+          ]),
+        ),
+      )
+      .orderBy(asc(knomosisActionRecords.createdAt));
     return rows.map(mapAction);
   }
 

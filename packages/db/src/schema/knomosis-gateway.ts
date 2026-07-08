@@ -191,6 +191,10 @@ export const knomosisActionRecords = knomosisSchema.table(
      *  gateway forwarding, and receipt pairing — the financial record of what
      *  was signed (never joins the social schema; isolation above). */
     signedAction: jsonb('signed_action').notNull(),
+    /** The deterministic human summary the user saw + signed at preflight, persisted
+     *  so a receipt written later pairs its `summary_payload_hash` against what was
+     *  actually shown before signing (WS-L.3.4c / O2).  Nullable for pre-O2 rows. */
+    preflightSummary: text('preflight_summary'),
     submissionState: submissionStateEnum('submission_state').notNull().default('submitted'),
     failureReason: text('failure_reason'),
     indexedEventRef: uuid('indexed_event_ref').references(() => onChainEvents.eventId, {

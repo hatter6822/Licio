@@ -71,6 +71,13 @@ export interface KnomosisActionRecordEntity {
   typedDataHash: string;
   /** The exact signed payload: typed-data message + signature (audit/forwarding). */
   signedAction: { message: Record<string, string>; signature: string };
+  /** The deterministic human summary the user was shown at PREFLIGHT (the
+   *  `buildHumanSummary` output paired with `summary_payload_hash`).  Persisted so a
+   *  receipt written later — at a stable state, during ingest — pairs against WHAT THE
+   *  USER SAW AND SIGNED, not a receipt-specific string whose hash could never match
+   *  the preflight hash (WS-L.3.4c / O2).  Absent only on pre-O2 / non-forwarded rows,
+   *  where `writeReceipts` falls back to a state-derived summary. */
+  preflightSummary?: string;
   submissionState: SubmissionState;
   failureReason: string | null;
   indexedEventRef: string | null;
@@ -421,6 +428,13 @@ export interface KnomosisActionStore {
    *  export would omit personal financial data the account still holds (WS-L
    *  data-rights). */
   listByActor(userId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
+  /** EVERY forwarded, still-in-flight action a user signed (non-terminal, excluding
+   *  pre-submit `reserving`), UNCAPPED.  Data-rights purge marks each of these with a
+   *  `purged_action` reconciliation marker BEFORE deleting the rows — a capped
+   *  `listByActor` could leave later in-flight rows unmarked (behind ≥limit terminal
+   *  rows) so a subsequent gateway event would still block treasury expansion as a
+   *  critical orphan (WS-L.3.3b / O1). */
+  listInFlightByActor(userId: string): Promise<KnomosisActionRecordEntity[]>;
   /** Finalized deposit-type actions for the deployment — the product-side deposit
    *  ledger the WS-L.3.4a treasury reconciliation compares against gateway standing. */
   listFinalizedDeposits(deploymentId: string, limit: number): Promise<KnomosisActionRecordEntity[]>;
@@ -1145,6 +1159,18 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       .filter((r) => r.actorUserId === userId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(0, limit)
+      .map((r) => structuredClone(r));
+  }
+
+  async listInFlightByActor(userId: string): Promise<KnomosisActionRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.actorUserId === userId &&
+          r.submissionState !== 'reserving' &&
+          !TERMINAL_SUBMISSION_STATES.has(r.submissionState),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map((r) => structuredClone(r));
   }
 
