@@ -29,7 +29,7 @@ const ADDR = '0x1111111111111111111111111111111111111111';
 const DOMAIN: KnomosisEip712Domain = {
   name: 'Licio',
   version: '1',
-  chainId: 31337,
+  chainId: 8357,
   verifyingContract: '0x0000000000000000000000000000000000000002',
 };
 

@@ -31,7 +31,7 @@ function wallet(userId: string, id: string, addressHashHex: string): FinancialWa
     userId,
     addressHashHex,
     addressTruncated: '0x1234…5678',
-    chainId: 31337,
+    chainId: 8357,
     walletType: 'eoa',
     unlinkState: 'active',
     riskState: 'normal',

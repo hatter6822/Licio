@@ -38,6 +38,7 @@ const deploymentSchema = z
     environment: z.enum(['local', 'testnet', 'capped_production', 'mature_production']),
     chain_id: z.number().int().positive(),
     chain_name: z.string().min(1).max(64),
+    l1_chain_id: z.number().int().positive(),
     l1_bridge_address: lowercaseAddress,
     verifying_contract_address: lowercaseAddress,
     runtime_endpoint_ref: z.string().min(1).max(128),

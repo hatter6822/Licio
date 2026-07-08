@@ -21,7 +21,7 @@ import {
 import { requestWalletNonce } from '../../lib/wallet-api.js';
 import { startProviderDiscovery } from '../../wallet/discovery.js';
 import type { Eip6963ProviderDetail } from '../../wallet/eip1193.js';
-import { buildSiweMessage, normalizeAddress } from '../../wallet/siwe.js';
+import { buildSiweMessage, LICIO_WALLET_CHAIN_ID, normalizeAddress } from '../../wallet/siwe.js';
 import { StepUpDialog, useStepUpGate } from '../security/StepUpDialog/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Icon } from '../ui/Icon/index.js';
@@ -35,17 +35,15 @@ function safeIconSrc(icon: string): string | null {
   return /^data:image\//i.test(icon.trim()) ? icon : null;
 }
 
-/** Ask the connected provider for its accounts + chain id (EIP-1193). */
-async function connectProvider(
-  detail: Eip6963ProviderDetail,
-): Promise<{ address: string; chainId: number } | null> {
+/** Ask the connected provider for its selected account (EIP-1193).  We do NOT read
+ *  the wallet's active `eth_chainId`: the link message is bound to the Knomosis chain
+ *  (`LICIO_WALLET_CHAIN_ID`) regardless of the extension's current network, so a wallet
+ *  on mainnet never produces a `Chain ID: 1` link message. */
+async function connectProvider(detail: Eip6963ProviderDetail): Promise<{ address: string } | null> {
   try {
     const accounts = (await detail.provider.request({ method: 'eth_requestAccounts' })) as unknown;
-    const chainHex = (await detail.provider.request({ method: 'eth_chainId' })) as unknown;
     if (!Array.isArray(accounts) || typeof accounts[0] !== 'string') return null;
-    const chainId = typeof chainHex === 'string' ? Number.parseInt(chainHex, 16) : Number(chainHex);
-    if (!Number.isFinite(chainId)) return null;
-    return { address: accounts[0], chainId };
+    return { address: accounts[0] };
   } catch {
     return null;
   }
@@ -117,7 +115,9 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
         const nonce = await requestWalletNonce();
         const message = buildSiweMessage({
           address: connection.address,
-          chainId: connection.chainId,
+          // Bind to the Knomosis chain, NOT the wallet's active network, so the signed
+          // message is never scoped to mainnet (WS-L.2.3b).
+          chainId: LICIO_WALLET_CHAIN_ID,
           nonce: nonce.nonce,
         });
         // The EXACT message the user sees is the string passed to personal_sign.

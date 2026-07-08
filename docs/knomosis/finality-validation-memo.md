@@ -20,9 +20,10 @@ configuration constants they imply.
 **Current state: NO live Knomosis deployment exists.** The only deployment
 pinned in `apps/api/src/knomosis/pin.config.json` is `environment = local` —
 the deterministic in-memory `FakeKnomosisGateway`
-(`apps/api/src/knomosis/gateway.ts`), chain id 31337, with all-zero sentinel
-commit/manifest hashes. There is no chain, no L1 bridge, no fault-proof
-window, and no real asset behind it. Consequently:
+(`apps/api/src/knomosis/gateway.ts`), scoped to the Knomosis L2 chain id
+`8357` (settling to its Sepolia L1, `l1_chain_id = 11155111`), with all-zero
+sentinel commit/manifest hashes. There is no chain, no L1 bridge, no
+fault-proof window, and no real asset behind it. Consequently:
 
 - **Every "measured value" in this memo is UNMEASURED.** The tables below are
   the measurement *template*; no row may be treated as validated.

@@ -26,6 +26,21 @@ export const LICIO_SIWE_DOMAIN =
   (import.meta.env['VITE_SIWE_DOMAIN'] as string | undefined) ?? appHost();
 export const LICIO_SIWE_URI = (import.meta.env['VITE_SIWE_URI'] as string | undefined) ?? APP_URL;
 
+/**
+ * The chain id the wallet-LINK SIWE message is scoped to.  Licio links wallets on the
+ * Knomosis L2 (chain `8357`); the link is a `personal_sign` of a text message, so the
+ * wallet's ACTIVE network is irrelevant — we bind the message to this chain rather
+ * than whatever network the extension happens to be on (which could be mainnet).  This
+ * is why a dev wallet never signs a `Chain ID: 1` message.  Overridable via
+ * `VITE_WALLET_CHAIN_ID`, kept in lockstep with the server's pinned deployment chain
+ * (like `LICIO_SIWE_DOMAIN`).
+ */
+export const LICIO_WALLET_CHAIN_ID = ((): number => {
+  const raw = import.meta.env['VITE_WALLET_CHAIN_ID'] as string | undefined;
+  const parsed = raw !== undefined ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 8357;
+})();
+
 /** EIP-55 checksum an address (pure keccak-free: uppercase per the algorithm
  *  needs keccak, so we defer checksumming to the wallet — here we only lowercase
  *  for the message and rely on the wallet returning its own checksummed form).

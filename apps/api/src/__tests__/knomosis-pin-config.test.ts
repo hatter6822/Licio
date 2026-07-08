@@ -26,6 +26,10 @@ describe('WS-L.1.1a pin loader', () => {
     expect(KNOMOSIS_PIN.deployments.length).toBeGreaterThan(0);
     const local = KNOMOSIS_PIN.deployments[0];
     expect(local?.environment).toBe('local');
+    // The dev deployment is scoped to the Knomosis L2 (8357), settling to its
+    // Sepolia L1 (11155111) — NOT a local-anvil or mainnet chain.
+    expect(local?.chain_id).toBe(8357);
+    expect(local?.l1_chain_id).toBe(11155111);
     // Every registered action type has a reversibility statement (WS-L.2.6a).
     for (const actionType of [
       'proposal_sign',

@@ -14,8 +14,9 @@
     {
       "deployment_id": "d0000000-0000-4000-8000-000000000001",
       "environment": "local",
-      "chain_id": 31337,
-      "chain_name": "Licio local devnet (in-memory gateway)",
+      "chain_id": 8357,
+      "chain_name": "Knomosis L2 (in-memory gateway)",
+      "l1_chain_id": 11155111,
       "l1_bridge_address": "0x0000000000000000000000000000000000000001",
       "verifying_contract_address": "0x0000000000000000000000000000000000000002",
       "runtime_endpoint_ref": "knomosis.gateway.local",

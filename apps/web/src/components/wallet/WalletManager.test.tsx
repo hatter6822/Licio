@@ -70,7 +70,9 @@ describe('WalletManager', () => {
     const providerRequest = vi.fn(async (args: { method: string }) => {
       if (args.method === 'eth_requestAccounts')
         return ['0xAbC0000000000000000000000000000000000001'];
-      if (args.method === 'eth_chainId') return '0x7a69'; // 31337
+      // The extension is on MAINNET — but the link binds to the Knomosis chain, so
+      // this is never read (asserted below).
+      if (args.method === 'eth_chainId') return '0x1';
       if (args.method === 'personal_sign') return '0xsignature';
       return null;
     });
@@ -95,6 +97,10 @@ describe('WalletManager', () => {
     expect(linkArgs.signature).toBe('0xsignature');
     // The message binds Licio's domain (anti-phishing).
     expect(linkArgs.message).toContain('wants you to sign in');
+    // It is scoped to the Knomosis chain (8357), NOT the extension's active network
+    // (mainnet) — a dev never signs a mainnet-bound link message.
+    expect(linkArgs.message).toContain('Chain ID: 8357');
+    expect(providerRequest.mock.calls.some((c) => c[0].method === 'eth_chainId')).toBe(false);
   });
 
   it('does NOT start discovery while wallet_connection is paused (K2)', () => {

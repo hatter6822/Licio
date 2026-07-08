@@ -66,8 +66,16 @@ function walletDeps(services: KnomosisServices): WalletServiceDeps {
     abuse: services.abuse,
     masterSecret: services.masterSecret,
     siweBase: services.siweBase,
-    chainAllowlist: () =>
-      KNOMOSIS_PIN.deployments.filter((d) => d.status === 'active').map((d) => d.chain_id),
+    // A wallet may be linked on the Knomosis L2 (`chain_id`) OR its L1 settlement
+    // chain (`l1_chain_id`, where bridge deposits/withdrawals live), so both join the
+    // SIWE allowlist (WS-L.2.5a).  Deduped across active deployments.
+    chainAllowlist: () => [
+      ...new Set(
+        KNOMOSIS_PIN.deployments
+          .filter((d) => d.status === 'active')
+          .flatMap((d) => [d.chain_id, d.l1_chain_id]),
+      ),
+    ],
     contractVerifier: services.contractSiweVerifier,
     config: services.config,
     now: services.now,

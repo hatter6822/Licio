@@ -122,15 +122,15 @@ describe('InMemoryFinancialWalletStore', () => {
     const addr = 'addr-x';
     await store.insert(wallet({ addressHashHex: addr, chainId: 1 }));
     // The SAME address on a DIFFERENT chain is allowed — a distinct per-chain row.
-    await store.insert(wallet({ addressHashHex: addr, chainId: 42161 }));
+    await store.insert(wallet({ addressHashHex: addr, chainId: 11155111 }));
     // The same (address, chain) is rejected (mirrors the DB unique index).
     await expect(store.insert(wallet({ addressHashHex: addr, chainId: 1 }))).rejects.toThrow();
     // Per-chain lookup (scoped to the owner) resolves the right row; a chain with no
     // row for this user is null; chain-agnostic getByAddressHash returns any.
-    expect((await store.getByAddressHashAndChain(addr, 42161, 'u1'))?.chainId).toBe(42161);
+    expect((await store.getByAddressHashAndChain(addr, 11155111, 'u1'))?.chainId).toBe(11155111);
     expect(await store.getByAddressHashAndChain(addr, 999, 'u1')).toBeNull();
     // A DIFFERENT account has no row for (addr, chain), even one this address exists on.
-    expect(await store.getByAddressHashAndChain(addr, 42161, 'u2')).toBeNull();
+    expect(await store.getByAddressHashAndChain(addr, 11155111, 'u2')).toBeNull();
     expect(await store.getByAddressHash(addr)).not.toBeNull();
   });
 
@@ -148,7 +148,7 @@ describe('InMemoryFinancialWalletStore', () => {
     ).toBe('address_taken');
     expect(
       await store.insertIfUnderCap(
-        wallet({ userId: 'u2', addressHashHex: addr, chainId: 42161 }),
+        wallet({ userId: 'u2', addressHashHex: addr, chainId: 11155111 }),
         5,
       ),
     ).toBe('address_taken');
@@ -245,7 +245,7 @@ describe('InMemoryFinancialWalletStore', () => {
     // Account B links the SAME address on a DIFFERENT chain (allowed — A released it),
     // becoming the live owner across the address.
     const b = await store.insertIfUnderCap(
-      wallet({ userId: 'B', addressHashHex: addr, chainId: 42161 }),
+      wallet({ userId: 'B', addressHashHex: addr, chainId: 11155111 }),
       5,
     );
     if (typeof b === 'string') throw new Error(`expected a wallet, got ${b}`);

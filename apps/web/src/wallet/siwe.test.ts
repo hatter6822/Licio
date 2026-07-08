@@ -11,7 +11,7 @@ import { buildSiweMessage, LICIO_SIWE_DOMAIN, normalizeAddress } from './siwe.js
 describe('buildSiweMessage', () => {
   const params = {
     address: '0xAbC0000000000000000000000000000000000001',
-    chainId: 31337,
+    chainId: 8357,
     nonce: 'deadbeefcafe',
     issuedAt: '2026-07-06T12:00:00.000Z',
   };
@@ -27,7 +27,7 @@ describe('buildSiweMessage', () => {
     const message = buildSiweMessage(params);
     expect(message).toContain(params.address);
     expect(message).toContain('Version: 1');
-    expect(message).toContain('Chain ID: 31337');
+    expect(message).toContain('Chain ID: 8357');
     expect(message).toContain('Nonce: deadbeefcafe');
     expect(message).toContain('Issued At: 2026-07-06T12:00:00.000Z');
     expect(message).toContain('Expiration Time:');
