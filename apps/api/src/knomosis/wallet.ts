@@ -313,14 +313,18 @@ export async function setWalletLabel(
   if (wallet === null || wallet.userId !== args.userId) {
     return err(404, 'not_found', 'Resource not found');
   }
-  const updated = await deps.wallets.update({ ...wallet, label: args.label });
+  // Column-scoped: writing back the full `wallet` snapshot could restore
+  // `unlinkState: 'active'` and clear the cooling-off fields of an unlink that
+  // committed concurrently, silently cancelling it — a label edit must touch ONLY
+  // the label column (WS-L.2.5c).
+  await deps.wallets.updateLabel(args.walletAccountId, args.label);
   await deps.audit.append({
     actorUserId: args.userId,
     eventType: 'wallet_label_change',
     targetRef: wallet.addressTruncated,
     context: { setting: 'label' },
   });
-  return { ok: true, wallet: updated };
+  return { ok: true, wallet: { ...wallet, label: args.label } };
 }
 
 /** Map an open signed action to its blocking-obligation description. */

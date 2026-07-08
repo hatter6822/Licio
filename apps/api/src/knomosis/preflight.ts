@@ -301,14 +301,18 @@ export async function runPreflight(
       ),
     );
   }
-  // READ-THROUGH the WS-N risk seam for a still-`pending` wallet BEFORE blocking
-  // it: a newly-linked wallet is `pending` until its first assessment, and the
-  // ONLY other refresh path (GET /wallets/:id/risk-state) is not mounted by the
-  // wallet UI — so a wallet the engine would clear would otherwise be PERMANENTLY
-  // unable to move funds.  An `unavailable` engine leaves `pending` in place (fail
-  // closed); a resolved assessment persists the concrete state (WS-L.2.5c-1/3.1b).
+  // READ-THROUGH the WS-N risk seam BEFORE trusting the stored state.  ALWAYS for a
+  // still-`pending` wallet (a newly-linked wallet is `pending` until its first
+  // assessment; the only other refresh path — GET /wallets/:id/risk-state — is not
+  // mounted by the wallet UI, so a wallet the engine would clear would otherwise be
+  // PERMANENTLY unable to move funds).  ALSO for a FUND-TRANSFER action on a
+  // non-pending wallet: a wallet stored `normal`/`elevated` may have since escalated
+  // to `high` on a new signal, and NO scheduler or submit gate re-checks it, so an
+  // unrefreshed transfer could forward against a stale clearance.  An `unavailable`
+  // engine leaves the stored state in place (fail closed); a resolved assessment
+  // persists the concrete state (WS-L.2.5c-1/3.1b).
   let riskState = wallet.riskState;
-  if (riskState === 'pending') {
+  if (riskState === 'pending' || FUND_TRANSFER_ACTIONS.has(actionType)) {
     const assessment = await deps.compliance.walletRisk({
       walletAccountId: wallet.walletAccountId,
       userId: input.userId,

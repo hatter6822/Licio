@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
+import { purgeFinancialWalletData } from '../knomosis/data-rights.js';
 import type { KnomosisGateway } from '../knomosis/gateway.js';
 import { ingestGatewayEvents, rebuildFromSnapshot } from '../knomosis/ingest.js';
 import type { CompliancePort } from '../knomosis/ports.js';
@@ -216,6 +217,32 @@ describe('WS-L.3.1 preflight pipeline', () => {
     expect(result.result).toBe('pass');
     // The refreshed state is PERSISTED (the wallet UI + future actions see it).
     expect((await fixture.knomosis.wallets.getById(walletAccountId))?.riskState).toBe('normal');
+  });
+
+  it('RE-ASSESSES a NON-pending wallet risk for a fund transfer — a since-HIGH wallet blocks (M6)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    // The wallet was already assessed `normal` (NOT pending).
+    const walletAccountId = await linkWalletDirectly(fixture, userId, 'normal');
+    // The WS-N engine now escalates to `high` on a new risk signal.
+    fixture.knomosis.compliance = {
+      ...clearCompliance,
+      walletRisk: async () => ({ state: 'high', explanation: 'new signal', nextStep: null }),
+    };
+    const req = await buildDeposit(userId, walletAccountId);
+    const result = await runPreflight(preflightDeps(fixture), req);
+    // A fund transfer re-assesses even a non-pending wallet, so the escalation blocks it
+    // (a stale `normal` clearance can no longer forward a transfer).
+    expect(result.result).toBe('fail');
+    if (result.result === 'fail') expect(result.reason_code).toBe('RISK_BLOCKED');
+    // The escalated state is persisted for the submit gate + the wallet UI.
+    expect((await fixture.knomosis.wallets.getById(walletAccountId))?.riskState).toBe('high');
   });
 
   it('re-runs compliance at submit — a jurisdiction blocked after preflight is rejected (G4)', async () => {
@@ -1728,6 +1755,72 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     // Keyed by the ACTION IDENTITY (its typed_data_hash), NOT event:seq.index, so a
     // late-arriving action row can supersede it on reconciliation (J5).
     expect(orphan?.entityRef).toBe(`event-orphan:${orphanHash}`);
+  });
+
+  it('a DSAR purge of an in-flight action does NOT orphan its later gateway events (M3)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const typedDataHash = `0x${'f3'.repeat(32)}`;
+    const actionRecordId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    // An in-flight (submitted) action the user signed — the gateway may still emit a
+    // finalized/reverted event for it.
+    await fixture.knomosis.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: userId,
+      payloadHash: '0x',
+      typedDataHash,
+      signedAction: { message: { amount: '1', asset: 'USDC' }, signature: '0x' },
+      submissionState: 'submitted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    // Hard-delete the user's financial data: records a `purged_action` marker for the
+    // in-flight action's hash, then deletes the row.
+    await purgeFinancialWalletData(fixture.knomosis, userId);
+    expect(await fixture.knomosis.actions.getById(actionRecordId)).toBeNull();
+    // The gateway LATER emits a finalized event for the purged action's hash.
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.finalized',
+            payload: { typed_data_hash: typedDataHash },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    // The event is recognised as legitimately-purged (not lost): NO blocking orphan
+    // divergence, so treasury expansion is not wedged for the deployment.
+    expect((await canExpandTreasury(fixture.knomosis, DEPLOYMENT)).allowed).toBe(true);
+    const unresolved = await fixture.knomosis.reconciliation.listUnresolvedMismatches(DEPLOYMENT);
+    expect(
+      unresolved.some(
+        (d) => (d.details as { typed_data_hash?: string }).typed_data_hash === typedDataHash,
+      ),
+    ).toBe(false);
   });
 
   it('reconciliation matches a finalized action against the indexed stream', async () => {

@@ -283,6 +283,40 @@ describe('InMemoryFinancialWalletStore', () => {
     // A missing wallet is a silent no-op (never throws).
     await expect(store.updateRiskState('nope', 'high')).resolves.toBeUndefined();
   });
+
+  it('updateLabel changes ONLY the label — never the lifecycle fields (M1)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const finalizeAfter = new Date(Date.now() + 60_000).toISOString();
+    const w = wallet({
+      unlinkState: 'pending_unlink',
+      unlinkFinalizeAfter: finalizeAfter,
+      riskState: 'elevated',
+      label: 'old',
+    });
+    await store.insert(w);
+    // A label edit writes ONLY the label; a concurrent unlink's fields survive, so it
+    // cannot restore unlinkState:'active' and cancel the audited unlink.
+    await store.updateLabel(w.walletAccountId, 'renamed');
+    const after = await store.getById(w.walletAccountId);
+    expect(after?.label).toBe('renamed');
+    expect(after?.unlinkState).toBe('pending_unlink');
+    expect(after?.unlinkFinalizeAfter).toBe(finalizeAfter);
+    expect(after?.riskState).toBe('elevated');
+    await expect(store.updateLabel('nope', 'x')).resolves.toBeUndefined();
+  });
+
+  it('comprehension record keeps a pass monotonic — a later fail never downgrades it (M2)', async () => {
+    const store = new InMemoryComprehensionStore();
+    const now = () => new Date().toISOString();
+    const passed = await store.record('u1', 'v1', true, now());
+    expect(passed.passed).toBe(true);
+    // A later FAILING attempt must NOT revert the pass (the race the SQL merge guards).
+    const thenFailed = await store.record('u1', 'v1', false, now());
+    expect(thenFailed.passed).toBe(true);
+    expect(thenFailed.attempts).toBe(2);
+    expect(thenFailed.passedAt).not.toBeNull();
+    expect((await store.get('u1', 'v1'))?.passed).toBe(true);
+  });
 });
 
 describe('InMemoryKnomosisActionStore', () => {

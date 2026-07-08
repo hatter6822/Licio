@@ -30,6 +30,14 @@ export const minorUnitAmountSchema = z
   .string()
   .regex(/^\d{1,78}$/, { message: 'amount must be an integer string (minor units)' });
 
+/** A STRICTLY POSITIVE minor-unit amount (at least one non-zero digit) — for value
+ *  transfers where a zero is meaningless and would otherwise let repeated `"0"`
+ *  actions pad the §23.4 readiness track record without real governance (WS-L.4.1c). */
+export const positiveMinorUnitAmountSchema = minorUnitAmountSchema.refine(
+  (amount) => /[1-9]/.test(amount),
+  { message: 'amount must be a positive integer (minor units)' },
+);
+
 // ---------------------------------------------------------------------------
 // Deployments (WS-L.1.1a-1; SPEC §22.2 KnomosisDeployment)
 // ---------------------------------------------------------------------------
@@ -518,7 +526,9 @@ export type SimTreasuryResponse = z.infer<typeof simTreasuryResponseSchema>;
 export const simTreasuryDepositRequestSchema = z
   .object({
     asset: simAssetSchema,
-    amount: minorUnitAmountSchema,
+    // A deposit must move real (simulated) value — a zero deposit is rejected so it
+    // cannot pad the readiness track record (WS-L.4.1c).
+    amount: positiveMinorUnitAmountSchema,
     /** Client-generated idempotency key (WS-L.4.1c): a retried deposit (double-tap
      *  or network retry) carrying the SAME key credits the treasury at most once. */
     idempotency_key: uuidSchema.optional(),

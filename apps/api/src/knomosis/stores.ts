@@ -293,6 +293,11 @@ export interface FinancialWalletStore {
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
   ): Promise<void>;
+  /** Update ONLY the `label` column (WS-L.2.5c) — never a full-record write.  A
+   *  label edit can overlap an unlink/risk mutation, so a stale full snapshot would
+   *  restore `unlinkState: 'active'` + clear the cooling-off fields and silently
+   *  cancel the audited unlink; a column-scoped update touches nothing else. */
+  updateLabel(walletAccountId: string, label: string | null): Promise<void>;
   /** Wallets whose cooling-off elapsed (unlink finalization sweep, WS-L.2.5b). */
   listPendingFinalization(nowIso: string): Promise<FinancialWalletRecord[]>;
   /** CONDITIONALLY finalize an elapsed unlink: set `finalized` ONLY if the row is
@@ -808,6 +813,13 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
     this.#rows.set(walletAccountId, { ...row, riskState });
   }
 
+  async updateLabel(walletAccountId: string, label: string | null): Promise<void> {
+    // Column-scoped: set only the label on the CURRENT row (never a stale snapshot).
+    const row = this.#rows.get(walletAccountId);
+    if (row === undefined) return;
+    this.#rows.set(walletAccountId, { ...row, label });
+  }
+
   async listPendingFinalization(nowIso: string): Promise<FinancialWalletRecord[]> {
     return [...this.#rows.values()]
       .filter(
@@ -878,7 +890,10 @@ export class InMemoryKnomosisDeploymentStore implements KnomosisDeploymentStore 
   }
 }
 
-const TERMINAL_SUBMISSION_STATES: ReadonlySet<SubmissionState> = new Set([
+/** The settled submission states — no further gateway event can move them.  An
+ *  action NOT in this set is still in-flight (the gateway may yet emit an
+ *  accepted/finalized/reverted event for its typed-data hash). */
+export const TERMINAL_SUBMISSION_STATES: ReadonlySet<SubmissionState> = new Set([
   'finalized',
   'reverted',
   'failed',

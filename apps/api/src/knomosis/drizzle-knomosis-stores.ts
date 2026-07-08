@@ -283,6 +283,15 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
       .where(eq(walletAccounts.walletAccountId, walletAccountId));
   }
 
+  async updateLabel(walletAccountId: string, label: string | null): Promise<void> {
+    // Column-scoped UPDATE: sets ONLY label, so a concurrent unlink/risk mutation is
+    // never clobbered by a stale full-record snapshot (WS-L.2.5c).
+    await this.db
+      .update(walletAccounts)
+      .set({ label })
+      .where(eq(walletAccounts.walletAccountId, walletAccountId));
+  }
+
   async reactivateIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
@@ -1929,35 +1938,45 @@ export class DrizzleComprehensionStore implements ComprehensionStore {
     passed: boolean,
     nowIso: string,
   ): Promise<ComprehensionResultRecord> {
-    const existing = await this.get(userId, quizVersion);
-    const next: ComprehensionResultRecord = {
-      userId,
-      quizVersion,
-      passed: (existing?.passed ?? false) || passed,
-      attempts: (existing?.attempts ?? 0) + 1,
-      passedAt: existing?.passedAt ?? (passed ? nowIso : null),
-      updatedAt: nowIso,
-    };
+    const now = new Date(nowIso);
+    const passedAtValue = passed ? now : null;
+    // MERGE in SQL against the CURRENT row rather than a stale pre-read snapshot: a
+    // concurrent FAILING attempt must NOT downgrade a pass that committed between
+    // this call's read and its write.  `passed` is monotonic (OR), `attempts`
+    // increments the stored value, and `passed_at` keeps the FIRST pass time
+    // (COALESCE) — so an already-passed steward never reverts to unpassed and gets
+    // blocked from governance/readiness (WS-L.4.1e).
     await this.db
       .insert(comprehensionResults)
       .values({
-        userId: next.userId,
-        quizVersion: next.quizVersion,
-        passed: next.passed,
-        attempts: next.attempts,
-        passedAt: dateOrNull(next.passedAt),
-        updatedAt: new Date(next.updatedAt),
+        userId,
+        quizVersion,
+        passed,
+        attempts: 1,
+        passedAt: dateOrNull(passedAtValue?.toISOString() ?? null),
+        updatedAt: now,
       })
       .onConflictDoUpdate({
         target: [comprehensionResults.userId, comprehensionResults.quizVersion],
         set: {
-          passed: next.passed,
-          attempts: next.attempts,
-          passedAt: dateOrNull(next.passedAt),
-          updatedAt: new Date(next.updatedAt),
+          passed: sql`${comprehensionResults.passed} OR ${passed}`,
+          attempts: sql`${comprehensionResults.attempts} + 1`,
+          passedAt: sql`coalesce(${comprehensionResults.passedAt}, ${passedAtValue})`,
+          updatedAt: now,
         },
       });
-    return next;
+    // Return the authoritative merged row (the SQL merge is the source of truth).
+    const merged = await this.get(userId, quizVersion);
+    return (
+      merged ?? {
+        userId,
+        quizVersion,
+        passed,
+        attempts: 1,
+        passedAt: passed ? nowIso : null,
+        updatedAt: nowIso,
+      }
+    );
   }
 
   async listByUser(userId: string): Promise<ComprehensionResultRecord[]> {

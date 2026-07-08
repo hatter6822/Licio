@@ -20,6 +20,7 @@ import {
   buildRoomModePort,
   syncPinnedDeployments,
 } from '../knomosis/wiring.js';
+import { seedUserWithSession } from './event-test-helpers.js';
 import { freshForumServices } from './forum-test-helpers.js';
 import { freshKnomosisServices, resetKnomosisFixture } from './knomosis-test-helpers.js';
 
@@ -66,6 +67,23 @@ describe('WS-L wiring ports over real in-memory services', () => {
     expect(await roomMode.setMode(roomId, 'testnet')).toBe(true);
     expect(await roomMode.currentMode(roomId)).toBe('testnet');
     expect(await roomMode.setMode(randomUUID(), 'testnet')).toBe(false);
+  });
+
+  it('isMember treats a room STEWARD (no subscription) as a governance member (M5)', async () => {
+    const forumFixture = freshForumServices();
+    const knomosisFixture = await freshKnomosisServices();
+    const roomId = await seedRoom(forumFixture.forum, { governanceMode: 'simulated' });
+    const rooms = buildRoomGovernancePort(forumFixture.forum, knomosisFixture.identity);
+    // A platform steward who never subscribed to the room.
+    const steward = await seedUserWithSession(knomosisFixture.identity, { steward: true });
+    expect(await forumFixture.forum.rooms.getSubscription(roomId, steward.userId)).toBeNull();
+    // Governance eligibility = active subscribers ∪ stewards, so the steward IS a
+    // member (preflight/simulation write gates must accept them).
+    expect(await rooms.isMember(roomId, steward.userId)).toBe(true);
+    expect(await rooms.isSteward(roomId, steward.userId)).toBe(true);
+    // A non-subscriber, non-steward is still NOT a member.
+    const outsider = await seedUserWithSession(knomosisFixture.identity, {});
+    expect(await rooms.isMember(roomId, outsider.userId)).toBe(false);
   });
 
   it('the readiness checklist reflects charter + stewards + treasury policy', async () => {

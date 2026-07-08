@@ -245,10 +245,23 @@ export async function submitAction(
       message: 'The selected wallet is not active.',
     };
   }
-  if (
-    wallet.riskState === 'high' ||
-    (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType))
-  ) {
+  // RE-ASSESS the WS-N risk seam for a FUND-TRANSFER at submit: the stored risk can
+  // go stale during the preflight-token TTL, and a wallet that escalated to `high`
+  // on a new signal after preflight must not forward.  An `unavailable` engine leaves
+  // the stored state (fail closed); non-fund governance signatures trust the
+  // preflight-refreshed state (WS-L.3.2a / 2.5c-1).
+  let riskState = wallet.riskState;
+  if (FUND_TRANSFER_ACTIONS.has(actionType)) {
+    const assessment = await deps.compliance.walletRisk({
+      walletAccountId: wallet.walletAccountId,
+      userId: input.userId,
+    });
+    if (assessment !== 'unavailable' && assessment.state !== riskState) {
+      riskState = assessment.state;
+      await deps.wallets.updateRiskState(wallet.walletAccountId, riskState);
+    }
+  }
+  if (riskState === 'high' || (riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType))) {
     return {
       ok: false,
       status: 409,

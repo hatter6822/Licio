@@ -264,6 +264,15 @@ export async function ingestGatewayEvents(
           typeof orphanHash === 'string' && orphanHash.length > 0
             ? `event-orphan:${orphanHash}`
             : `event:${event.seq}.${event.index}`;
+        // If a prior resolving `match` already exists for this hash — a
+        // `purged_action` marker written by the DSAR purge, or a reconciliation that
+        // already accounted for it — the event is EXPECTED (the action was
+        // legitimately deleted / already settled), NOT lost.  Do not record a
+        // blocking orphan divergence or alert (WS-L.3.3b).
+        const priorForHash = await deps.reconciliation.latestForEntity('action', entityRef);
+        if (priorForHash !== null && priorForHash.outcome === 'match') {
+          continue;
+        }
         await deps.reconciliation.append({
           resultId: deps.uuid(),
           deploymentId,

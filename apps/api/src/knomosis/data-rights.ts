@@ -10,16 +10,18 @@
 // wallet projection.  Reporter/counterparty identities are never included.
 
 import type { ActionNonceStore } from './services.js';
-import type {
-  ComprehensionStore,
-  FinancialWalletStore,
-  GovernanceAuditStore,
-  GovernanceProposalStore,
-  GovernanceSignatureStore,
-  KnomosisActionStore,
-  KnomosisReceiptStore,
-  ProposalVoteStore,
-  SimTreasuryStore,
+import {
+  type ComprehensionStore,
+  type FinancialWalletStore,
+  type GovernanceAuditStore,
+  type GovernanceProposalStore,
+  type GovernanceSignatureStore,
+  type KnomosisActionStore,
+  type KnomosisReceiptStore,
+  type ProposalVoteStore,
+  type ReconciliationStore,
+  type SimTreasuryStore,
+  TERMINAL_SUBMISSION_STATES,
 } from './stores.js';
 
 export interface WalletDataRightsDeps {
@@ -35,6 +37,12 @@ export interface WalletDataRightsDeps {
   governanceAudit: GovernanceAuditStore;
   comprehension: ComprehensionStore;
   nonces: ActionNonceStore;
+  // Purging an in-flight action must not orphan its future gateway events — a
+  // "purged" reconciliation marker is recorded for each so ingestion skips the
+  // blocking orphan divergence (WS-L.3.3b).
+  reconciliation: ReconciliationStore;
+  uuid: () => string;
+  now: () => number;
 }
 
 /** A high ceiling that covers realistic per-user receipt volume, so a DSAR
@@ -131,6 +139,27 @@ export async function purgeFinancialWalletData(
   userId: string,
 ): Promise<void> {
   await deps.receipts.purgeByUser(userId);
+  // A NON-TERMINAL (in-flight) action can still receive gateway events AFTER it is
+  // deleted; ingestion would then record a CRITICAL orphan divergence for its
+  // typed-data hash and block treasury expansion for the deployment forever (the
+  // action is gone, so it never reconciles).  Record a "purged" reconciliation
+  // marker for each in-flight action's hash FIRST, so ingestion recognises the event
+  // as legitimately-deleted (not lost) and skips the blocking mismatch (WS-L.3.3b).
+  const nowIso = new Date(deps.now()).toISOString();
+  for (const action of await deps.actions.listByActor(userId, 1000)) {
+    if (TERMINAL_SUBMISSION_STATES.has(action.submissionState)) continue;
+    await deps.reconciliation.append({
+      resultId: deps.uuid(),
+      deploymentId: action.deploymentId,
+      entityType: 'action',
+      entityRef: `event-orphan:${action.typedDataHash}`,
+      outcome: 'match',
+      severity: null,
+      details: { kind: 'purged_action', typed_data_hash: action.typedDataHash },
+      lowWatermarkSeq: null,
+      createdAt: nowIso,
+    });
+  }
   await deps.actions.purgeByUser(userId);
   await deps.proposalSignatures.purgeByUser(userId);
   await deps.wallets.purgeByUser(userId);

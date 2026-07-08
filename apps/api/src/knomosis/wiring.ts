@@ -31,7 +31,14 @@ export function buildRoomGovernancePort(
     },
     isMember: async (roomId, userId) => {
       const subscription = await forum.rooms.getSubscription(roomId, userId);
-      return subscription !== null && subscription.status === 'active';
+      if (subscription !== null && subscription.status === 'active') return true;
+      // The governance-eligible set is active subscribers ∪ STEWARDS: a room steward
+      // may sign proposals, deposit, contribute bounties, and take simulated actions
+      // WITHOUT a separate active subscription — the same set the forum/governance
+      // routes use — so the preflight + simulation write gates must not reject them
+      // (WS-L.3.1a).
+      const user = await identity.store.getUser(userId);
+      return isRoomSteward(forum, roomId, userId, user?.roles ?? []);
     },
     isSteward: async (roomId, userId) => {
       const user = await identity.store.getUser(userId);
