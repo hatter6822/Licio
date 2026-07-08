@@ -26,6 +26,15 @@ const EMBEDDING_REQUIRED_KEYS = [
   'EMBEDDING_DIMENSION',
 ] as const;
 
+/** The WS-L knomosis-gateway transport is all-or-none: a URL with no token file
+ *  (or vice versa) is a deployment typo that would silently leave the gateway
+ *  null and degrade every submission/standing read closed, so reject it at
+ *  startup rather than at first use. */
+const KNOMOSIS_GATEWAY_REQUIRED_KEYS = [
+  'KNOMOSIS_GATEWAY_URL',
+  'KNOMOSIS_GATEWAY_TOKEN_FILE',
+] as const;
+
 /** Report a partial all-or-none env group as a validation issue. */
 function refineGroup(
   env: Record<string, unknown>,
@@ -69,6 +78,17 @@ export const serverEnvSchema = z.object({
   // sign-in verification, as JSON: {"1":"https://...","8453":"https://..."}.
   // When unset, only EOA wallet sign-in is available.
   CHAIN_RPC_URLS: z.string().optional(),
+  // WS-L knomosis-gateway service transport (BFF → gateway, contract v0.4).
+  // ALL-OR-NONE: when unset, no HTTP gateway is configured — in development a
+  // deterministic in-memory fake serves the local pinned deployment; in
+  // production every gateway consumer degrades CLOSED (submission rejected,
+  // standing unavailable).  The bearer token is FILE-loaded (never inline env,
+  // never logged).
+  KNOMOSIS_GATEWAY_URL: z
+    .string()
+    .url({ message: 'KNOMOSIS_GATEWAY_URL must be a valid URL' })
+    .optional(),
+  KNOMOSIS_GATEWAY_TOKEN_FILE: z.string().min(1).optional(),
   // Web Push / VAPID (WS-C.2.4a). All optional: when unset, push is disabled and
   // the push endpoints report unconfigured rather than failing. The private key
   // lives ONLY here (server env), never in the client bundle (SPEC §6.8, §21.2).
@@ -151,6 +171,7 @@ export const serverEnvSchemaRefined = serverEnvSchema
     refineGroup(env, ctx, S3_REQUIRED_KEYS, 'S3');
     refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
     refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
+    refineGroup(env, ctx, KNOMOSIS_GATEWAY_REQUIRED_KEYS, 'KNOMOSIS_GATEWAY');
     if (env.NODE_ENV === 'production') {
       for (const key of PRODUCTION_REQUIRED_KEYS) {
         if (env[key] === undefined) {

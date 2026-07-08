@@ -29,15 +29,15 @@ describe('unlink state machine', () => {
     }
   });
 
-  it('treats `unlinked` as terminal', () => {
-    expect(UNLINK_TRANSITIONS.unlinked).toHaveLength(0);
+  it('treats `finalized` as terminal', () => {
+    expect(UNLINK_TRANSITIONS.finalized).toHaveLength(0);
   });
 
-  it('allows linked → unlink_requested → unlinked and a cancel back to linked', () => {
-    expect(canTransitionUnlinkState('linked', 'unlink_requested')).toBe(true);
-    expect(canTransitionUnlinkState('unlink_requested', 'unlinked')).toBe(true);
-    expect(canTransitionUnlinkState('unlink_requested', 'linked')).toBe(true);
-    expect(canTransitionUnlinkState('linked', 'unlinked')).toBe(false);
+  it('allows active → pending_unlink → finalized and a cancel back to active', () => {
+    expect(canTransitionUnlinkState('active', 'pending_unlink')).toBe(true);
+    expect(canTransitionUnlinkState('pending_unlink', 'finalized')).toBe(true);
+    expect(canTransitionUnlinkState('pending_unlink', 'active')).toBe(true);
+    expect(canTransitionUnlinkState('active', 'finalized')).toBe(false);
   });
 });
 
@@ -167,8 +167,9 @@ describe('walletAuthCredentialSchema and walletAccountSchema store no plaintext 
       address_truncated: '0x12ab…cd34',
       chain_id: 1,
       wallet_type: 'contract',
-      unlink_state: 'linked',
-      risk_state: 'none',
+      unlink_state: 'active',
+      risk_state: 'pending',
+      label: null,
       linked_at: TS,
       last_used_at: null,
     });

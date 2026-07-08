@@ -62,6 +62,7 @@ import { loadContentFlags } from '../ingestion/content-flags.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 import { tryGetInvariantServices } from '../invariants/services.js';
+import { getKnomosisServices, knomosisServicesConfigured } from '../knomosis/services.js';
 import { DEMO_FEED, demoStory } from '../lib/demo-data.js';
 import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import {
@@ -91,12 +92,15 @@ import {
   exposureLabelForGain,
   latestMeriGains,
 } from './invariants-public.js';
+import { createKnomosisRoutes } from './knomosis.js';
 import { createModerationConsoleRoutes } from './moderation-console.js';
 import { createPrivacyRoutes } from './privacy.js';
 import { createRankingAdminRoutes } from './ranking-admin.js';
+import { createRoomGovernanceSimRoutes } from './room-governance.js';
 import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
 import { createTrustSafetyRoutes } from './trust-safety.js';
+import { createWalletRoutes } from './wallet.js';
 
 /** Read the session id from the `__Host-session` cookie (or undefined). */
 function sessionIdOf(cookieHeader: string | undefined): string | undefined {
@@ -558,6 +562,17 @@ export function createV1Routes() {
       // service; treasury powers stay behind the fail-closed crypto flag.
       .route('/', createGovernanceRoutes())
 
+      // --- Knomosis gateway, wallets, and receipts (WS-L) ---------------------
+      // Wallet link/unlink/list/risk (SIWE + abuse limits), the pinned
+      // deployment/manifest reads, the preflight → submit pipeline with the
+      // §23.5 state machine, ranking-firewalled standing reads, private
+      // receipts, the kill-switch admin, and the K1 governance-simulation
+      // surface (proposals/treasury/audit-log/comprehension/readiness).
+      // Everything fails closed behind the runtime crypto/governance flags.
+      .route('/', createWalletRoutes())
+      .route('/knomosis', createKnomosisRoutes())
+      .route('/', createRoomGovernanceSimRoutes())
+
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {
         const key = stateKey(c.req.header('cookie'));
@@ -581,9 +596,23 @@ export function createV1Routes() {
         const ingestion = getIngestionServices();
         const flags = await loadContentFlags(events.configStore);
         const cfg = ingestion.config();
+        // WS-L: crypto/governance/region flags come from the SINGLE runtime
+        // source of truth (knomosis.* config; fail-closed false).  An
+        // unconfigured container serves the hard fail-closed defaults.
+        const knomosisFlags = knomosisServicesConfigured()
+          ? (() => {
+              const kc = getKnomosisServices().config();
+              return {
+                cryptoEnabled: kc.cryptoEnabled,
+                governanceEnabled: kc.governanceEnabled,
+                regionFlags: kc.regionFlags,
+              };
+            })()
+          : {};
         return c.json(
           featureFlagsResponseSchema.parse({
             ...FAIL_CLOSED_FLAGS,
+            ...knomosisFlags,
             content: {
               media_posts_enabled: flags.mediaPostsEnabled,
               in_room_visibility_enabled: flags.inRoomVisibilityEnabled,

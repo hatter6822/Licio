@@ -102,6 +102,24 @@ describe('validateServerEnv', () => {
       /Incomplete SES configuration/,
     );
   });
+
+  it('accepts a COMPLETE Knomosis gateway pair and rejects a PARTIAL one (WS-L)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      KNOMOSIS_GATEWAY_URL: 'https://gateway.knomosis.example',
+      KNOMOSIS_GATEWAY_TOKEN_FILE: '/run/secrets/knomosis-gateway-token',
+    });
+    expect(result.KNOMOSIS_GATEWAY_URL).toBe('https://gateway.knomosis.example');
+
+    // A URL with no token file (or vice versa) is a deployment typo that would
+    // silently leave the gateway null — reject it at startup, not at first use.
+    expect(() =>
+      validateServerEnv({ ...validEnv, KNOMOSIS_GATEWAY_URL: 'https://gateway.knomosis.example' }),
+    ).toThrow(/Incomplete KNOMOSIS_GATEWAY configuration/);
+    expect(() =>
+      validateServerEnv({ ...validEnv, KNOMOSIS_GATEWAY_TOKEN_FILE: '/run/secrets/tok' }),
+    ).toThrow(/Incomplete KNOMOSIS_GATEWAY configuration/);
+  });
 });
 
 describe('validateClientEnv', () => {

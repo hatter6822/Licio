@@ -55,10 +55,23 @@ import type {
 export interface GovernanceServiceDeps {
   stores: GovernanceStores;
   config: GovernanceConfig;
+  /** LIVE crypto-flag reader (wired at boot to the shared knomosis runtime
+   *  config).  When present it OVERRIDES the boot-time `config.cryptoEnabled`
+   *  snapshot, so disabling the flag at runtime immediately stops treasury
+   *  execution rather than only affecting freshly-booted processes.  Absent ⇒
+   *  the static snapshot (the test/default behaviour). */
+  cryptoFlag?: () => boolean;
   now: () => Date;
   uuid: () => string;
   /** sha-256 hex over a canonical string (node:crypto in prod). */
   digest: (input: string) => string;
+  /** WS-L.3.5d/e emergency kill switches (wired at boot over the knomosis
+   *  registry).  Guarding INSIDE the service covers every caller — user
+   *  routes AND the bounded agent runtime — with one mechanism. */
+  killSwitches?: {
+    treasuryExecutionBlocked(roomId: string): Promise<boolean>;
+    votingBlocked(roomId: string, voterUserId: string | null): Promise<boolean>;
+  };
 }
 
 export type GovernanceResult<T> =
@@ -129,6 +142,12 @@ export class GovernanceService {
 
   private iso(): string {
     return this.deps.now().toISOString();
+  }
+
+  /** The LIVE crypto flag: the wired runtime reader if present, else the
+   *  boot-time config snapshot (WS-L review fix — no stale treasury powers). */
+  private cryptoEnabled(): boolean {
+    return this.deps.cryptoFlag ? this.deps.cryptoFlag() : this.deps.config.cryptoEnabled;
   }
 
   // --- Stage 1: seat + elections -------------------------------------------
@@ -233,6 +252,14 @@ export class GovernanceService {
     candidateEligible = true,
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote in a steward election.');
+    // WS-L.3.5e: the governance-voting kill switch blocks NEW ballots only —
+    // proposals/discussion stay visible and existing tallies are untouched.
+    if (
+      this.deps.killSwitches &&
+      (await this.deps.killSwitches.votingBlocked(roomId, voterUserId))
+    ) {
+      return err('kill_switch_active', 'Voting is temporarily paused.');
+    }
     const election = await this.deps.stores.elections.get(electionId);
     // The election must belong to THIS room: the membership/candidate gate was
     // computed for the URL room, so a foreign election id must never be voted on
@@ -565,6 +592,13 @@ export class GovernanceService {
     eligible: boolean,
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote on ratification.');
+    // WS-L.3.5e governance-voting kill switch (same semantics as castVote).
+    if (
+      this.deps.killSwitches &&
+      (await this.deps.killSwitches.votingBlocked(roomId, voterUserId))
+    ) {
+      return err('kill_switch_active', 'Voting is temporarily paused.');
+    }
     const vote = await this.deps.stores.ratifications.get(voteId);
     // The vote must belong to THIS room (the eligibility gate was computed for the
     // URL room) — never count a foreign room's vote with it.
@@ -916,7 +950,8 @@ export class GovernanceService {
     roomId: string,
     input: {
       category: string;
-      amount: number;
+      /** `number` (simulation units) or an exact decimal string (minor units). */
+      amount: number | string;
       asset: string | null;
       coiDeclared: boolean;
       proposedAt: string;
@@ -926,8 +961,13 @@ export class GovernanceService {
       targetAllocation?: readonly { asset: string; fraction: number }[] | null;
     },
   ): Promise<GovernanceResult<Verdict>> {
-    if (!this.deps.config.cryptoEnabled)
-      return err('crypto_disabled', 'Crypto features are disabled.');
+    if (!this.cryptoEnabled()) return err('crypto_disabled', 'Crypto features are disabled.');
+    // WS-L.3.5d: the treasury-execution kill switch blocks NEW executions for
+    // every caller (routes + agent runtime); in-flight on-chain executions are
+    // upstream and unaffected.
+    if (this.deps.killSwitches && (await this.deps.killSwitches.treasuryExecutionBlocked(roomId))) {
+      return err('kill_switch_active', 'Treasury execution is temporarily paused.');
+    }
     const binding = await this.deps.stores.bindings.get(roomId);
     if (binding === null || !binding.active)
       return err('no_agent', 'No active agent for the room.');
@@ -962,7 +1002,7 @@ export class GovernanceService {
       timestamp: a.executedAt,
     }));
     const verdict = evaluateTreasuryAction(action.data, lawPack.treasury, history, {
-      cryptoEnabled: this.deps.config.cryptoEnabled,
+      cryptoEnabled: this.cryptoEnabled(),
       now: this.iso(),
     });
     const record: TreasuryActionRecord = {

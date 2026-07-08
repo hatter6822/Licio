@@ -128,7 +128,8 @@ fail-closed guards, and CI gates rather than by policy prose alone.
 | WS-U — AI-governed rooms redesign | Doctrine ratified; runtime stages 1-4 and 5-core shipped |
 | WS-R — LCAP offline content availability | Core protocol, client/server I/O, transport seams, native courier shell, and simulator-tested live transports shipped; remaining emphasis is physical-device field confirmation |
 | WS-S — private-P2P rooms | Foundation, crypto, reducer, sync decision plane, blind rendezvous endpoint, WebRTC carrier, hardened update channel, and server→private migration shipped; remaining emphasis is full two-browser create→invite→join→connect→converge E2E and grant/media UI affordances |
-| WS-L / WS-M / WS-N / WS-O / WS-P | Planned or partially seeded; WS-O adversarial suite and WS-P BFF-in-the-loop E2E harness seed exist |
+| WS-L — Knomosis gateway, wallets, and receipts | Complete behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags: wallet link (SIWE + ECDSA/EIP-1271), no-blind-signing EIP-712 preview, the `knomosis-gateway` v0.4 preflight→submit→reconcile pipeline, ranking-firewalled standing reads, five emergency kill switches, and K1 governance simulation; residuals (live finality, WalletConnect, WS-N/WS-M real-funds engines) tracked in `docs/knomosis/README.md` |
+| WS-M / WS-N / WS-O / WS-P | Planned or partially seeded; WS-O adversarial suite and WS-P BFF-in-the-loop E2E harness seed exist |
 
 ## Quick start
 

@@ -9,13 +9,16 @@
 // seam the real Lean/Solidity/Rust deployment plugs into later. Pure: all state
 // (history, clock, crypto flag) is passed in, so serving and replay cannot drift.
 
+import { decCompare, decIsNegative, decSum, isValidDecimal } from './decimal.js';
 import type { InvestmentPolicy, TreasuryBounds, TreasuryCategory } from './schemas/law-pack.js';
 import type { ProofCheck, TreasuryAction, Verdict } from './schemas/treasury.js';
 
-/** A prior executed treasury action, for window/interval accounting. */
+/** A prior executed treasury action, for window/interval accounting.  Amounts
+ *  are `number | string`; all kernel arithmetic is exact decimal (`decimal.ts`),
+ *  so a 78-digit uint256 minor-unit string compares without precision loss. */
 export interface TreasuryHistoryEntry {
   category: TreasuryCategory;
-  amount: number;
+  amount: number | string;
   /** ISO-8601 execution time. */
   timestamp: string;
 }
@@ -51,13 +54,15 @@ export function evaluateTreasuryAction(
   }
 
   // Self-guard the proof-carrying contract independent of any front-door schema:
-  // a non-finite (NaN/±Infinity) or negative amount would make every cap
-  // comparison silently pass, so reject it up front (fail-closed).
-  if (!Number.isFinite(action.amount) || action.amount < 0) {
+  // a non-finite (NaN/±Infinity), malformed, or negative amount would make every
+  // cap comparison silently pass, so reject it up front (fail-closed).  All
+  // arithmetic below is exact decimal math — never IEEE floats — so minor-unit
+  // (wei-scale) string amounts above 2^53 stay mathematically sound.
+  if (!isValidDecimal(action.amount) || decIsNegative(action.amount)) {
     return {
       accepted: false,
       code: 'invalid_amount',
-      reason: 'The treasury action amount must be a finite, non-negative number.',
+      reason: 'The treasury action amount must be a finite, non-negative decimal.',
     };
   }
 
@@ -72,7 +77,7 @@ export function evaluateTreasuryAction(
   }
   checks.push({ name: 'category_permitted', passed: true });
 
-  if (action.amount > cap.perActionMax) {
+  if (decCompare(action.amount, cap.perActionMax) > 0) {
     return {
       accepted: false,
       code: 'per_action_cap_exceeded',
@@ -83,14 +88,17 @@ export function evaluateTreasuryAction(
 
   const nowMs = ms(options.now);
   const windowStart = nowMs - cap.windowSeconds * 1000;
-  const windowSum = history
-    .filter((h) => h.category === action.category && ms(h.timestamp) >= windowStart)
-    .reduce((sum, h) => sum + h.amount, 0);
-  if (windowSum + action.amount > cap.perWindowMax) {
+  const windowTotal = decSum([
+    ...history
+      .filter((h) => h.category === action.category && ms(h.timestamp) >= windowStart)
+      .map((h) => h.amount),
+    action.amount,
+  ]);
+  if (decCompare(windowTotal, cap.perWindowMax) > 0) {
     return {
       accepted: false,
       code: 'per_window_cap_exceeded',
-      reason: `Window total ${windowSum + action.amount} exceeds the per-window maximum ${cap.perWindowMax}.`,
+      reason: `Window total ${windowTotal} exceeds the per-window maximum ${cap.perWindowMax}.`,
     };
   }
   checks.push({ name: 'per_window_cap', passed: true });
@@ -107,7 +115,7 @@ export function evaluateTreasuryAction(
   }
   checks.push({ name: 'min_interval', passed: true });
 
-  if (action.amount >= bounds.materialThreshold && bounds.timelockSeconds > 0) {
+  if (decCompare(action.amount, bounds.materialThreshold) >= 0 && bounds.timelockSeconds > 0) {
     if (nowMs - ms(action.proposedAt) < bounds.timelockSeconds * 1000) {
       return {
         accepted: false,

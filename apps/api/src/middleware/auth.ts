@@ -123,6 +123,24 @@ export function getAuth(c: {
   return c.get('auth');
 }
 
+/**
+ * Read the AuthContext AFTER `authMiddleware()` has attached it, narrowed to
+ * non-null.  `authMiddleware()` always sets `auth` or returns 401 before the
+ * handler runs, so any handler reaching this call is guaranteed a context —
+ * this discharges the `getAuth` optionality ONCE, instead of a dead
+ * `if (!auth) return 401` branch repeated at every call site.  The fail-safe
+ * throw guards against a route wired without `authMiddleware()` (a
+ * programming error, surfaced as 500) and is exercised in the middleware unit
+ * test, so the branch is genuinely covered rather than defensively unreachable.
+ */
+export function requireAuth(c: { get: (k: 'auth') => AuthContext | undefined }): AuthContext {
+  const auth = getAuth(c);
+  if (auth === undefined) {
+    throw new Error('requireAuth() called without authMiddleware() — routing misconfiguration');
+  }
+  return auth;
+}
+
 /** Require any verified credential — passkey/wallet/verified email (WS-D.1.6a). */
 export function requireVerifiedAccount(): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {

@@ -16,6 +16,7 @@ export * from './governance.js';
 export * from './ingestion-review.js';
 export * from './invariants.js';
 export * from './job-lease.js';
+export * from './knomosis-gateway.js';
 export * from './lcap.js';
 export * from './moderation.js';
 export * from './privacy.js';

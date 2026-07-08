@@ -2,6 +2,21 @@
 
 **Milestone:** M4 | **Priority:** 4 | **Dependencies:** WS-D.3, WS-J, WS-O | **Wave:** 1 (L.1), 7 (L.2-L.4) | **Estimated duration:** 5-6 weeks (L.2-L.4)
 
+> **Implementation status: COMPLETE** (residuals tracked in
+> `docs/knomosis/README.md`).  The wallet link lifecycle (SIWE/EIP-4361 +
+> ECDSA/EIP-1271), the shared EIP-712 typed-data registry + no-blind-signing
+> transaction preview, the `knomosis-gateway` v0.4 seam (preflight → signed-action
+> submit → the §23.5 state machine → event ingestion → three-source
+> reconciliation → public/private receipts), the ranking-firewalled standing
+> reads (WS-L.3.6a), the five emergency kill switches (WS-L.3.5a-f), and the K1
+> governance simulation (WS-L.4) are all implemented and tested behind the
+> fail-closed `cryptoEnabled`/`governanceEnabled` flags.  The WS-L.1
+> due-diligence artefacts (ADR, five threat models, audit scope, bug bounty,
+> license analysis, finality memo, gateway contract) are in `docs/knomosis/`.
+> Deferred: live finality measurements, WalletConnect, the WS-N/WS-M
+> real-funds engines, and the cross-stack fixture CI / external audit / bug
+> bounty *execution* — each tracked with a closure target in the README.
+
 ## Overview
 
 ALL Knomosis and wallet features are behind feature flags, disabled by default. Crypto NEVER blocks the core social product. No crypto task blocks steps 1-9 of the implementation plan (Section 30.2). Wallet data is schema-isolated from ranking -- the WalletAccount table lives in the Knomosis bounded context, separated from feed ranking and ordinary social analytics (Sections 21.5, 22.2). Every transaction gets a full-disclosure preview before signing (Section 17.8). Fail-closed: unknown jurisdiction = no crypto features; unknown contract = rejected; missing flag = disabled. The Knomosis integration follows a staged critical path: K0 due diligence, K1 simulation, K2 testnet gateway, K3 testnet treasury, K4 capped production, K5 mature governance (Section 30.7).

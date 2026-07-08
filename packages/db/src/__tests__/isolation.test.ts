@@ -229,6 +229,96 @@ describe('WS-U knomosis governance context isolation', () => {
   });
 });
 
+describe('WS-L knomosis gateway/wallets context isolation (migration 0059)', () => {
+  const KNOMOSIS_L = [
+    'knomosis.knomosis_deployment',
+    'knomosis.on_chain_event',
+    'knomosis.knomosis_action_record',
+    'knomosis.knomosis_action_nonce',
+    'knomosis.wallet_actor_mapping',
+    'knomosis.governance_proposal',
+    'knomosis.governance_proposal_vote',
+    'knomosis.governance_signature',
+    'knomosis.sim_treasury',
+    'knomosis.sim_treasury_entry',
+    'knomosis.governance_audit_log',
+    'knomosis.knomosis_reconciliation_result',
+    'knomosis.knomosis_receipt',
+    'knomosis.comprehension_result',
+  ];
+
+  it('classifies every WS-L financial table into the wallet/Knomosis context', () => {
+    for (const table of KNOMOSIS_L) {
+      expect(ISOLATION_CONTEXTS.walletTables.has(table), `${table} classified`).toBe(true);
+    }
+  });
+
+  it('holds isolation for the real WS-L FK shape (users + intra-context only)', () => {
+    // The genuine hard FKs the WS-L schema declares (migration 0059): each is
+    // either to public.users (the articulation root) or WITHIN the wallet/
+    // knomosis context.  Room/content references are SOFT (bare uuid, no FK).
+    const graph: SchemaGraph = {
+      foreignKeys: [
+        { from: 'knomosis.on_chain_event', to: 'knomosis.knomosis_deployment' },
+        { from: 'knomosis.knomosis_action_record', to: 'knomosis.knomosis_deployment' },
+        { from: 'knomosis.knomosis_action_record', to: 'wallet.wallet_accounts' },
+        { from: 'knomosis.knomosis_action_record', to: USERS },
+        { from: 'knomosis.knomosis_action_record', to: 'knomosis.on_chain_event' },
+        { from: 'knomosis.knomosis_action_nonce', to: USERS },
+        { from: 'knomosis.knomosis_action_nonce', to: 'knomosis.knomosis_deployment' },
+        { from: 'knomosis.wallet_actor_mapping', to: 'wallet.wallet_accounts' },
+        { from: 'knomosis.wallet_actor_mapping', to: 'knomosis.knomosis_deployment' },
+        { from: 'knomosis.governance_proposal', to: USERS },
+        { from: 'knomosis.governance_proposal_vote', to: 'knomosis.governance_proposal' },
+        { from: 'knomosis.governance_proposal_vote', to: USERS },
+        { from: 'knomosis.governance_signature', to: 'knomosis.governance_proposal' },
+        { from: 'knomosis.governance_signature', to: 'wallet.wallet_accounts' },
+        { from: 'knomosis.governance_signature', to: USERS },
+        { from: 'knomosis.sim_treasury_entry', to: USERS },
+        { from: 'knomosis.sim_treasury_entry', to: 'knomosis.governance_proposal' },
+        { from: 'knomosis.governance_audit_log', to: USERS },
+        { from: 'knomosis.knomosis_reconciliation_result', to: 'knomosis.knomosis_deployment' },
+        { from: 'knomosis.knomosis_receipt', to: 'knomosis.knomosis_action_record' },
+        { from: 'knomosis.knomosis_receipt', to: USERS },
+        { from: 'knomosis.comprehension_result', to: USERS },
+        // Ranking/content tables independently reference the identity root.
+        { from: 'public.rooms', to: USERS },
+        { from: 'public.ranking_feature_vectors', to: USERS },
+      ],
+      views: [],
+    };
+    expect(checkSchemaIsolation(graph, ISOLATION_CONTEXTS).isolated).toBe(true);
+  });
+
+  it('would fail if a WS-L standing/action table ever hard-referenced a ranking table', () => {
+    // A deliberately-added FK from the gateway standing surface to the ranking
+    // feature store — the exact pay-to-rank bridge the firewall forbids.
+    const graph: SchemaGraph = {
+      foreignKeys: [
+        { from: 'knomosis.wallet_actor_mapping', to: 'public.ranking_feature_vectors' },
+      ],
+      views: [],
+    };
+    const result = checkSchemaIsolation(graph, ISOLATION_CONTEXTS);
+    expect(result.isolated).toBe(false);
+    expect(result.offendingPath).toContain('public.ranking_feature_vectors');
+  });
+
+  it('would fail if a view ever joined a WS-L balance table to a ranking table', () => {
+    const graph: SchemaGraph = {
+      foreignKeys: [],
+      views: [
+        {
+          view: 'public.pay_to_rank_view',
+          dependsOn: ['knomosis.knomosis_action_record', 'public.attention_aggregates'],
+        },
+      ],
+    };
+    const result = checkSchemaIsolation(graph, ISOLATION_CONTEXTS);
+    expect(result.isolated).toBe(false);
+  });
+});
+
 describe('introspectSchemaGraph', () => {
   it('assembles FK and view edges from injected information_schema rows', async () => {
     const runQuery = async (sql: string): Promise<IntrospectionRow[]> => {

@@ -383,6 +383,7 @@ pnpm check:p2p-search-exclusion     # WS-S.1.5: server search indexes/serves onl
 pnpm check:update-channel           # WS-S.10.2b: the private-mode bundle is signature + transparency-log + digest verified BEFORE activation (untrusted ⇒ rooms locked)
 pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes + LCAP + private-p2p
 pnpm check:no-raw-egress            # no raw attention traces leaving the browser (+ the LCAP + private-p2p planes)
+pnpm check:knomosis-pins            # WS-L.1.1a: every non-local Knomosis deployment pins real finality values (sentinel commit/manifest rejected outside `local`)
 pnpm check:sw                       # SW security scan (run after build)
 
 # Supply chain and build validation.
@@ -1602,7 +1603,7 @@ Status:
 | WS-I | Ranking and distribution | Complete |
 | WS-J | Trust, safety, and abuse operations | Complete (residuals tracked, `docs/trust-safety/README.md`) |
 | WS-K | AI and model governance | Complete (residuals tracked, `docs/ai-governance/README.md`); **re-scoped by WS-U** into the platform eval/transparency substrate for community room models |
-| WS-L | Knomosis and wallets | Planned |
+| WS-L | Knomosis and wallets | Complete (residuals tracked, `docs/knomosis/README.md`); all behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags |
 | WS-M | Treasury and governance | Planned |
 | WS-N | Compliance | Planned |
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |

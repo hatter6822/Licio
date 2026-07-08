@@ -76,6 +76,7 @@ import {
   getGovernanceService,
   setGovernanceService,
 } from './governance/services.js';
+import { createInMemoryGovernanceStores } from './governance/stores.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -96,6 +97,7 @@ import {
   selectMailer,
   setIdentityServices,
 } from './identity/services.js';
+import { createContractVerifier } from './identity/siwe.js';
 import {
   DrizzleClaimStore,
   DrizzleEmbeddingStore,
@@ -138,6 +140,29 @@ import {
   registerInvariantConsumers,
   setInvariantServices,
 } from './invariants/services.js';
+import { storeKnomosisConfigValue } from './knomosis/config.js';
+import { exportFinancialWalletData, purgeFinancialWalletData } from './knomosis/data-rights.js';
+import { createDrizzleKnomosisStores } from './knomosis/drizzle-knomosis-stores.js';
+import { FakeKnomosisGateway, HttpKnomosisGateway } from './knomosis/gateway.js';
+import { KNOMOSIS_PIN } from './knomosis/pin.js';
+import { RedisWalletAbuseLimiter } from './knomosis/redis-stores.js';
+import { KNOMOSIS_SCHEDULER_INTERVAL_MS, startKnomosisScheduler } from './knomosis/scheduler.js';
+import {
+  createInMemoryKnomosisServices,
+  setKnomosisServices,
+  setServicesGateway,
+} from './knomosis/services.js';
+import { createContractTypedDataVerifier } from './knomosis/signatures.js';
+import {
+  assertSingleActiveGatewayDeployment,
+  buildGovernanceKillSwitchGuards,
+  buildLawPackPort,
+  buildReadinessChecklistPort,
+  buildRegionResolver,
+  buildRoomGovernancePort,
+  buildRoomModePort,
+  syncPinnedDeployments,
+} from './knomosis/wiring.js';
 import { LCAP_SCHEDULER_INTERVAL_MS, startLcapScheduler } from './lcap/scheduler.js';
 import { getLcapIngestServer } from './lcap/service.js';
 import { demoStory } from './lib/demo-data.js';
@@ -809,12 +834,147 @@ registerAiGovernanceConsumers(eventServices, aiGovernanceServices, (storyId) =>
 // the room-create seat bootstrap resolve the bound service. The crypto flag stays
 // fail-closed by default (no treasury powers); in-room moderation + simulated
 // elections need no crypto.
+// WS-L Knomosis gateway, wallets, and receipts: the financial bounded context.
+// In-memory container first, then the gated Drizzle adapters, then the REAL
+// ports over the sibling services.  The container's fail-closed config
+// (`knomosis.*`) is THE runtime source of the crypto/governance flags: the
+// `/v1/feature-flags` route reads it, the WS-E pipeline's `cryptoFlagEnabled`
+// closure below reads it, and the WS-U governance service boot-resolves from
+// the same loaded value.  Deployments sync from pin.config.json (the reviewed
+// WS-L.1.1a-1 config-sync; the ONLY deployment writer).
+const knomosisServices = createInMemoryKnomosisServices({
+  configStore: eventServices.configStore,
+  ephemeral: identityServices.challenges,
+  audit: identityServices.audit,
+  masterSecret: identityServices.config.masterSecret,
+  siweBase: {
+    domain: identityServices.config.siwe.domain,
+    uri: identityServices.config.siwe.uri,
+  },
+  log: (event, meta) => logger.info(meta, event),
+  alert: (event, meta) => logger.error(meta, `ALERT ${event}`),
+});
+if (db) {
+  const knomosisStores = createDrizzleKnomosisStores(db);
+  knomosisServices.wallets = knomosisStores.wallets;
+  knomosisServices.deployments = knomosisStores.deployments;
+  knomosisServices.actions = knomosisStores.actions;
+  knomosisServices.events = knomosisStores.events;
+  knomosisServices.nonces = knomosisStores.nonces;
+  knomosisServices.actorMappings = knomosisStores.actorMappings;
+  knomosisServices.proposals = knomosisStores.proposals;
+  knomosisServices.votes = knomosisStores.votes;
+  knomosisServices.proposalSignatures = knomosisStores.proposalSignatures;
+  knomosisServices.simTreasury = knomosisStores.simTreasury;
+  knomosisServices.governanceAudit = knomosisStores.governanceAudit;
+  knomosisServices.reconciliation = knomosisStores.reconciliation;
+  knomosisServices.receipts = knomosisStores.receipts;
+  knomosisServices.comprehension = knomosisStores.comprehension;
+}
+// WS-L.2.5d: back the wallet abuse limiter with a SHARED Redis counter when
+// REDIS_URL is set, so the per-endpoint link/unlink limits hold across pods (the
+// default in-memory limiter is per-process and multipliable on a multi-instance
+// deployment).
+if (env.REDIS_URL !== undefined) {
+  const IORedis = (await import('ioredis')).default;
+  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redis.on('error', (err) =>
+    logger.warn({ err }, 'Redis connection error (knomosis abuse limiter)'),
+  );
+  knomosisServices.abuse = new RedisWalletAbuseLimiter(redis, knomosisServices.now);
+}
+// WS-L data-rights: fold the financial wallet footprint into the WS-D DSAR
+// export + hard-deletion lifecycle (truncated address only on export; wallets +
+// actions + signatures + private receipts purged on account deletion).
+identityServices.exportFinancialWallets = (userId) =>
+  exportFinancialWalletData(knomosisServices, userId);
+identityServices.purgeFinancialWallets = (userId) =>
+  purgeFinancialWalletData(knomosisServices, userId);
+// The WS-U governance stores are SHARED with the law-pack port below.
+const governanceStores = db ? createDrizzleGovernanceStores(db) : createInMemoryGovernanceStores();
+knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
+knomosisServices.roomMode = buildRoomModePort(forumServices);
+knomosisServices.regionResolver = buildRegionResolver(identityServices);
+// EIP-1271/6492 contract-wallet verification shares the CHAIN_RPC_URLS map
+// the identity SIWE flow uses; without endpoints only EOA signatures verify.
+const knomosisRpcUrls = identityServices.config.siwe.chainRpcUrls ?? {};
+knomosisServices.contractSiweVerifier = createContractVerifier(knomosisRpcUrls);
+knomosisServices.contractTypedDataVerifier = createContractTypedDataVerifier(knomosisRpcUrls);
+// Gateway selection (fail-closed): production uses the HTTP client ONLY when
+// both env values are set (bearer token FILE-loaded, never inline); otherwise
+// null — every gateway consumer degrades closed.  Non-production gets the
+// deterministic in-memory fake bound to the local pinned deployment.
+if (env.KNOMOSIS_GATEWAY_URL !== undefined && env.KNOMOSIS_GATEWAY_TOKEN_FILE !== undefined) {
+  // FAIL CLOSED on a multi-deployment MISCONFIGURATION: a single process-wide HTTP
+  // gateway (bound to the one KNOMOSIS_GATEWAY_URL) cannot correctly serve more than
+  // one active deployment, so refuse to start rather than silently corrupt
+  // cross-deployment state (WS-L.3).
+  assertSingleActiveGatewayDeployment(KNOMOSIS_PIN.deployments);
+  // The gateway is CONFIGURED (both env values set) — an unreadable/empty token
+  // file is a fatal MISCONFIGURATION of a financial surface, not a soft
+  // degradation.  Failing here (rather than logging and leaving the gateway
+  // null) prevents the server from starting up and silently serving a broken
+  // gateway surface where every submission / standing read / retry / ingest
+  // degrades to unavailable (WS-L.3 fail-closed boot).
+  let bearerToken: string;
+  try {
+    bearerToken = readFileSync(env.KNOMOSIS_GATEWAY_TOKEN_FILE, 'utf8').trim();
+  } catch (error) {
+    throw new Error(
+      `KNOMOSIS_GATEWAY_TOKEN_FILE (${env.KNOMOSIS_GATEWAY_TOKEN_FILE}) is set but unreadable — refusing to start with a broken gateway surface`,
+      { cause: error },
+    );
+  }
+  if (bearerToken.length === 0) {
+    throw new Error(
+      `KNOMOSIS_GATEWAY_TOKEN_FILE (${env.KNOMOSIS_GATEWAY_TOKEN_FILE}) is empty — refusing to start with a broken gateway surface`,
+    );
+  }
+  setServicesGateway(
+    knomosisServices,
+    new HttpKnomosisGateway({ baseUrl: env.KNOMOSIS_GATEWAY_URL, bearerToken }),
+  );
+} else if (env.NODE_ENV !== 'production') {
+  setServicesGateway(knomosisServices, new FakeKnomosisGateway());
+}
+// DEV convenience (NEVER in production): a bare `pnpm dev` box has no admin surface
+// to flip the fail-closed WS-L runtime flags, so the wallet + governance surfaces
+// would render "disabled" (503) out of the box even though the feature is complete.
+// Default `cryptoEnabled` + `governanceEnabled` ON for non-production ONLY, and ONLY
+// when the key is not already explicitly set — so a durable (Redis/admin) dev config
+// still wins and can force fail-closed testing.  Production is untouched: the flags
+// stay `false` unless an operator enables them through the admin surface.
+if (env.NODE_ENV !== 'production') {
+  for (const key of ['cryptoEnabled', 'governanceEnabled'] as const) {
+    const existing = await eventServices.configStore.get(`knomosis.${key}`);
+    if (existing === null || !Object.hasOwn(existing, 'value')) {
+      await storeKnomosisConfigValue(eventServices.configStore, key, true);
+    }
+  }
+}
+await knomosisServices.reloadConfig();
+await syncPinnedDeployments(knomosisServices);
+setKnomosisServices(knomosisServices);
+// The WS-E event pipeline's crypto gate reads the SAME runtime flag (live).
+eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
+
 setGovernanceService(
   createGovernanceService({
-    config: resolveGovernanceConfig(),
-    ...(db ? { stores: createDrizzleGovernanceStores(db) } : {}),
+    // Boot-resolved from the SAME knomosis.* source for the static election/agent
+    // config, but the crypto gate reads a LIVE getter so disabling the runtime
+    // flag immediately stops treasury execution (not just after a reboot).
+    config: resolveGovernanceConfig({
+      cryptoEnabled: knomosisServices.config().cryptoEnabled,
+    }),
+    cryptoFlag: () => knomosisServices.config().cryptoEnabled,
+    stores: governanceStores,
+    killSwitches: buildGovernanceKillSwitchGuards(knomosisServices),
   }),
 );
+// The WS-L law-pack + readiness ports read the SAME governance stores the
+// service binds.
+knomosisServices.lawPacks = buildLawPackPort(governanceStores);
+knomosisServices.readinessChecklist = buildReadinessChecklistPort(forumServices, governanceStores);
 // The forum contribution path consults the in-room agent (subordinate to the
 // platform floor) for any room with an active community-approved binding. The
 // agent's author-history signals are read from the real identity + forum +
@@ -1027,6 +1187,16 @@ startGovernanceScheduler(
   },
   (err, task) => logger.error({ err, task }, 'governance scheduler task failed'),
   GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// WS-L knomosis maintenance: unlink cooling-off finalization, gateway event
+// ingestion + idempotent re-submission, the periodic three-source
+// reconciliation, and the simulated timelock-execution sweep.
+startKnomosisScheduler(
+  knomosisServices,
+  (err, task) => logger.error({ err, task }, 'knomosis scheduler task failed'),
+  KNOMOSIS_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

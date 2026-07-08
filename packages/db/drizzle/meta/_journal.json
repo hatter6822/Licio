@@ -407,6 +407,48 @@
       "when": 1782199100000,
       "tag": "0058_ws_g_room_subscription_lens",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1782199101000,
+      "tag": "0059_ws_l_knomosis_gateway_wallets",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1782199102000,
+      "tag": "0060_ws_l_per_chain_wallet",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1782296000000,
+      "tag": "0061_ws_l_finalized_release",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1782386000000,
+      "tag": "0062_ws_l_execution_claim_ts",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1782476000000,
+      "tag": "0063_ws_l_preflight_summary",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1782566000000,
+      "tag": "0064_ws_l_audit_dedupe_key",
+      "breakpoints": true
     }
   ]
 }

@@ -175,8 +175,14 @@ export interface IdentityServices {
   exportContributions?: (userId: string) => Promise<unknown[]>;
   /** WS-J: moderation notices received (reason only, never reporter identity). */
   exportModerationNotices?: (userId: string) => Promise<unknown[]>;
+  /** WS-L: the user's own financial wallet links + receipts for the export —
+   *  truncated display address only, never the address hash (default none). */
+  exportFinancialWallets?: (userId: string) => Promise<Record<string, unknown[]>>;
   /** WS-G: anonymize the user's contributions on hard deletion (default no-op). */
   anonymizeContributions?: (userId: string) => Promise<void>;
+  /** WS-L: purge the user's financial wallet rows + receipts on hard deletion
+   *  (default no-op) — so a linked wallet never outlives the account. */
+  purgeFinancialWallets?: (userId: string) => Promise<void>;
   /**
    * Downstream propagation hook (WS-E): invoked when a settings change affects
    * collection, so disabling personalization / setting retention to `none`
@@ -192,6 +198,10 @@ export interface IdentityServices {
 }
 
 const DEFAULT_CHAIN_ALLOWLIST = [1, 8453, 42161, 10] as const; // mainnet, Base, Arbitrum, Optimism
+// A NON-PRODUCTION box never accepts a mainnet/L2 sign-in: dev/test wallet login is
+// scoped to the Knomosis L2 (8357) + its Sepolia L1 (11155111), so a dev never signs
+// a mainnet-bound message.  Production keeps the multi-chain default above.
+const DEV_CHAIN_ALLOWLIST = [8357, 11155111] as const; // Knomosis L2, Ethereum Sepolia
 
 /** Parse the optional per-chain RPC JSON map; tolerate malformed input → {}. */
 export function parseChainRpcUrls(raw: string | undefined): Record<number, string> {
@@ -216,7 +226,8 @@ export function parseChainRpcUrls(raw: string | undefined): Record<number, strin
 export function identityConfigFromEnv(env: {
   SESSION_SECRET: string;
   CORS_ORIGIN: string;
-  CHAIN_RPC_URLS?: string;
+  CHAIN_RPC_URLS?: string | undefined;
+  NODE_ENV?: string | undefined;
 }): IdentityConfig {
   const origin = env.CORS_ORIGIN.replace(/\/$/, '');
   const host = (() => {
@@ -232,7 +243,8 @@ export function identityConfigFromEnv(env: {
     siwe: {
       domain: host,
       uri: origin,
-      chainAllowlist: [...DEFAULT_CHAIN_ALLOWLIST],
+      chainAllowlist:
+        env.NODE_ENV === 'production' ? [...DEFAULT_CHAIN_ALLOWLIST] : [...DEV_CHAIN_ALLOWLIST],
       chainRpcUrls: parseChainRpcUrls(env.CHAIN_RPC_URLS),
     },
   };
@@ -289,7 +301,12 @@ export function setIdentityServices(services: IdentityServices): void {
  * in-memory (suitable for local single-process dev).
  */
 export function buildIdentityServicesFromEnv(
-  env: { SESSION_SECRET: string; CORS_ORIGIN: string },
+  env: {
+    SESSION_SECRET: string;
+    CORS_ORIGIN: string;
+    CHAIN_RPC_URLS?: string | undefined;
+    NODE_ENV?: string | undefined;
+  },
   adapters?: Partial<
     Pick<
       IdentityServices,

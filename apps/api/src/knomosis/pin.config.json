@@ -1,0 +1,43 @@
+{
+  "$comment": "WS-L.1.1a — THE version-controlled Knomosis pin file (SPEC §25.6, §30.7 K0). Deployment pipelines, the config-sync boot job (WS-L.1.1a-1), the contract allowlist (WS-L.3.1b-1), and the cross-stack fixture gate (WS-L.1.1d) all consume THIS file; no deployment value is ever hardcoded or derived at runtime. Changing any pinned value requires a reviewed PR with justification. The `local` deployment pins the in-memory dev/fake gateway: its commit/hash values are WELL-FORMED SENTINELS (all-zero). Both the boot-time loader (apps/api/src/knomosis/pin.ts) and the CI gate (scripts/check-knomosis-pins.ts, `pnpm check:knomosis-pins`) accept sentinels ONLY for environment=local — a testnet or production deployment with sentinel values fails closed (rejected at boot AND blocked in CI). Reversibility statements and confirmation depths are sourced from docs/knomosis/finality-validation-memo.md (WS-L.1.1b-1); values marked provisional there are launch-blocking for testnet promotion.",
+  "version": 1,
+  "typed_data_registry_version": "1",
+  "validation_memo": "docs/knomosis/finality-validation-memo.md",
+  "gateway_contract_version": "v0.4",
+  "toolchains": {
+    "lean": "sentinel-local-only",
+    "solidity": "sentinel-local-only",
+    "rust": "sentinel-local-only"
+  },
+  "fixture_corpus_ref": "sentinel-local-only",
+  "deployments": [
+    {
+      "deployment_id": "d0000000-0000-4000-8000-000000000001",
+      "environment": "local",
+      "chain_id": 8357,
+      "chain_name": "Knomosis L2 (in-memory gateway)",
+      "l1_chain_id": 11155111,
+      "l1_bridge_address": "0x0000000000000000000000000000000000000001",
+      "verifying_contract_address": "0x0000000000000000000000000000000000000002",
+      "runtime_endpoint_ref": "knomosis.gateway.local",
+      "contract_manifest_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "abi_manifest_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pinned_knomosis_commit": "0000000000000000000000000000000000000000",
+      "eip712_domain_version": "1",
+      "contract_allowlist": [
+        "0x0000000000000000000000000000000000000001",
+        "0x0000000000000000000000000000000000000002"
+      ],
+      "confirmation_depth": 0,
+      "reversibility": {
+        "proposal_sign": "This signature records your support for a proposal; it does not move funds and can be superseded by a later vote outcome.",
+        "treasury_deposit": "Deposits are final once settled; on the local devnet no real value exists.",
+        "grant_payout": "Payouts are irreversible after the challenge period ends.",
+        "charter_update": "Charter updates take effect after the timelock and are recorded permanently in the audit log.",
+        "bounty_contribution": "Bounty contributions are held in escrow and released or refunded per the bounty outcome.",
+        "steward_rotation": "Steward rotation takes effect after the timelock and is recorded permanently."
+      },
+      "status": "active"
+    }
+  ]
+}

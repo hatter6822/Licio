@@ -10,6 +10,7 @@
 
 export * from './canonical-json.js';
 export * from './capability-derive.js';
+export * from './decimal.js';
 export * from './election.js';
 export * from './kernel.js';
 export * from './lawmaking.js';

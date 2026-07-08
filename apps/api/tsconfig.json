@@ -20,7 +20,7 @@
       "@licio/governance/*": ["../../packages/governance/src/*"]
     }
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "src/**/*.json"],
   "references": [
     { "path": "../../packages/shared" },
     { "path": "../../packages/db" },

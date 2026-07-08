@@ -64,4 +64,15 @@ export const cachePolicy = {
   signalLedger: { staleTime: 60_000, gcTime: 10 * 60_000 },
   // Feature flags are always fresh and never cached (WS-C.1.3c).
   featureFlags: { staleTime: 0, gcTime: 0 },
+  // The /wallets availability gate must NEVER trust a cached success: the
+  // wallet_connection kill switch can engage mid-session, and a stale 200 would let
+  // the module keep discovering providers / prompting eth_requestAccounts during the
+  // pause.  Always-fresh + refetch-on-mount + a short poll surface the 503
+  // (`failureReason`) promptly so the gate closes (WS-L.3.5a / N1).
+  walletGate: {
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnMount: 'always',
+    refetchInterval: 15_000,
+  },
 } as const;

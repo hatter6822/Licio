@@ -19,11 +19,25 @@ export const treasuryCategorySchema = z.enum([
 ]);
 export type TreasuryCategory = z.infer<typeof treasuryCategorySchema>;
 
+/**
+ * A non-negative money amount: a finite number (simulation/display units) or an
+ * exact decimal string (on-chain minor units — the kernel compares these with
+ * exact decimal math, so uint256-scale values never round through a double).
+ */
+export const moneyAmountSchema = z.union([
+  z.number().finite().min(0),
+  z
+    .string()
+    .max(100)
+    .regex(/^\d+(\.\d+)?$/, { message: 'must be a non-negative decimal string' }),
+]);
+export type MoneyAmount = z.infer<typeof moneyAmountSchema>;
+
 /** A per-category spend cap over a rolling window (SPEC §17.6). */
 export const treasuryCapSchema = z.object({
   category: treasuryCategorySchema,
-  perActionMax: z.number().min(0),
-  perWindowMax: z.number().min(0),
+  perActionMax: moneyAmountSchema,
+  perWindowMax: moneyAmountSchema,
   windowSeconds: z.number().int().min(1),
 });
 export type TreasuryCap = z.infer<typeof treasuryCapSchema>;
@@ -51,7 +65,7 @@ export const treasuryBoundsSchema = z.object({
   /** Timelock (seconds) material actions must wait after proposal before execution. */
   timelockSeconds: z.number().int().min(0),
   /** Amount at/above which an action is "material" and trips the timelock. */
-  materialThreshold: z.number().min(0),
+  materialThreshold: moneyAmountSchema,
   /** Categories that require a conflict-of-interest declaration (SPEC §17.5/§17.6). */
   requireCoiFor: z.array(treasuryCategorySchema).max(8),
   investment: investmentPolicySchema.nullable(),

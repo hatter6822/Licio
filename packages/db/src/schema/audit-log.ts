@@ -63,6 +63,14 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   // WS-Q content–room model: visibility transitions (migration 0019).
   'story_visibility_change',
   'room_visibility_change',
+  // WS-L Knomosis gateway/wallets (mirrors AUDIT_EVENT_TYPES; migration 0059).
+  'wallet_label_change',
+  'knomosis_killswitch_change',
+  'knomosis_preflight',
+  'knomosis_action_submit',
+  'knomosis_config_change',
+  'governance_mode_change',
+  'governance_sim_action',
 ]);
 
 export const auditLog = pgTable(

@@ -81,6 +81,17 @@ export const AUDIT_EVENT_TYPES = [
   // `forum_config_change`; only visibility transitions use these two.
   'story_visibility_change',
   'room_visibility_change',
+  // WS-L Knomosis gateway, wallets, and receipts: financial-surface changes.
+  // `wallet_link`/`wallet_unlink` (WS-D block above) cover the link lifecycle;
+  // these add the label edit, the kill-switch registry, gateway submissions,
+  // governance-mode transitions, and the simulated-governance surface.
+  'wallet_label_change',
+  'knomosis_killswitch_change',
+  'knomosis_preflight',
+  'knomosis_action_submit',
+  'knomosis_config_change',
+  'governance_mode_change',
+  'governance_sim_action',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
