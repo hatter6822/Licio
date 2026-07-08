@@ -450,16 +450,33 @@ export async function rebuildFromSnapshot(
   // reconcileDeployment keeps skipping it as clean and its terminal outcome is lost
   // forever (WS-L.3.3a).  This makes the code match this function's own contract
   // ("marking all non-terminal actions for re-reconciliation").
-  const open = await deps.actions.listInFlightByDeployment(deploymentId, 10_000);
+  //
+  // KEYSET-PAGE the WHOLE in-flight set (by immutable actionRecordId): a deployment
+  // with >`PAGE` forwarded non-terminal actions must have ALL of them re-anchored
+  // before the gap halt is cleared below, or a later matched-in-flight row past the
+  // first page stays skipped and its lost terminal outcome is never recovered (P3).
+  const PAGE = 10_000;
   let remarked = 0;
-  for (const record of open) {
-    if (record.reconciliationState === 'pending') continue;
-    await deps.actions.update({
-      ...record,
-      reconciliationState: 'pending',
-      updatedAt: nowIso,
-    });
-    remarked += 1;
+  let cursor: string | undefined;
+  for (;;) {
+    const open = await deps.actions.listInFlightByDeployment(deploymentId, PAGE, cursor);
+    if (open.length === 0) break;
+    for (const record of open) {
+      if (record.reconciliationState !== 'pending') {
+        await deps.actions.update({
+          ...record,
+          reconciliationState: 'pending',
+          updatedAt: nowIso,
+        });
+        remarked += 1;
+      }
+    }
+    // Advance the cursor past this page's last row.  Re-marking to `pending` keeps the
+    // rows non-terminal (still in the in-flight set), so re-querying from the start
+    // would loop forever — the keyset cursor is what makes the paging terminate.
+    const last = open[open.length - 1];
+    if (open.length < PAGE || last === undefined) break;
+    cursor = last.actionRecordId;
   }
   // Clear the gap halt(s) this rebuild re-anchors: append a resolving `match`
   // for each unresolved `halted_event_gap` so reconcileDeployment resumes (the

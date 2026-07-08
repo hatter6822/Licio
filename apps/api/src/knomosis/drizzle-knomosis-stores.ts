@@ -25,7 +25,21 @@ import {
   walletAccounts,
   walletActorMappings,
 } from '@licio/db';
-import { and, asc, desc, eq, inArray, isNull, lt, lte, ne, notInArray, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  lte,
+  ne,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 import type { ActionNonceStore } from './services.js';
 import type {
   AuditLogCursor,
@@ -641,6 +655,7 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
   async listInFlightByDeployment(
     deploymentId: string,
     limit: number,
+    afterActionRecordId?: string,
   ): Promise<KnomosisActionRecordEntity[]> {
     const rows = await this.db
       .select()
@@ -655,9 +670,14 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
             'reserving',
             ...TERMINAL_SUBMISSION_STATES,
           ]),
+          // Keyset cursor on the immutable primary key so the rebuild can page the
+          // WHOLE in-flight set even as it re-marks rows to `pending` between pages (P3).
+          ...(afterActionRecordId !== undefined
+            ? [gt(knomosisActionRecords.actionRecordId, afterActionRecordId)]
+            : []),
         ),
       )
-      .orderBy(asc(knomosisActionRecords.createdAt))
+      .orderBy(asc(knomosisActionRecords.actionRecordId))
       .limit(limit);
     return rows.map(mapAction);
   }
@@ -1697,15 +1717,23 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
   constructor(private readonly db: Db) {}
 
   async append(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord> {
-    await this.db.insert(governanceAuditLogs).values({
-      entryId: entry.entryId,
-      roomId: entry.roomId,
-      actionType: entry.actionType,
-      actorUserId: entry.actorUserId,
-      actionDetails: entry.actionDetails,
-      simulationMode: entry.simulationMode,
-      createdAt: new Date(entry.createdAt),
-    });
+    // Idempotent on `dedupeKey`: the partial-null unique index means a duplicate key
+    // hits ON CONFLICT DO NOTHING (a crash-retry REPAIRS a dropped audit exactly
+    // once); rows with a NULL key are unconstrained, so ordinary audits still append
+    // freely (WS-L.4.1c / P2).  The return value is unused by all callers.
+    await this.db
+      .insert(governanceAuditLogs)
+      .values({
+        entryId: entry.entryId,
+        roomId: entry.roomId,
+        actionType: entry.actionType,
+        actorUserId: entry.actorUserId,
+        actionDetails: entry.actionDetails,
+        simulationMode: entry.simulationMode,
+        createdAt: new Date(entry.createdAt),
+        dedupeKey: entry.dedupeKey ?? null,
+      })
+      .onConflictDoNothing({ target: governanceAuditLogs.dedupeKey });
     return entry;
   }
 

@@ -435,12 +435,21 @@ export const governanceAuditLogs = knomosisSchema.table(
     actionDetails: jsonb('action_details').notNull(),
     simulationMode: boolean('simulation_mode').notNull(),
     createdAt: tz('created_at').notNull().defaultNow(),
+    /** Optional idempotency key.  NULL for ordinary audits (Postgres treats NULLs as
+     *  DISTINCT, so the unique index leaves them unconstrained); a non-null key is
+     *  written at most once so a crash-retry REPAIRS a dropped audit — e.g.
+     *  `execution_simulated` keyed by proposal — without duplicating it
+     *  (WS-L.4.1c / P2). */
+    dedupeKey: text('dedupe_key'),
   },
   // (room_id, created_at, entry_id): the entry_id tail makes the keyset page
   // cursor a STRICT total order, so `ORDER BY created_at DESC, entry_id DESC`
   // over a room is served by a backward index scan with no same-ms ambiguity
   // (WS-L.4.1f).
-  (t) => [index('governance_audit_log_room_idx').on(t.roomId, t.createdAt, t.entryId)],
+  (t) => [
+    index('governance_audit_log_room_idx').on(t.roomId, t.createdAt, t.entryId),
+    uniqueIndex('governance_audit_log_dedupe_idx').on(t.dedupeKey),
+  ],
 );
 export type GovernanceAuditLogRow = typeof governanceAuditLogs.$inferSelect;
 

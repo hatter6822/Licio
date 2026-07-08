@@ -203,6 +203,12 @@ export interface GovernanceAuditRecord {
   actionDetails: Record<string, unknown>;
   simulationMode: boolean;
   createdAt: string;
+  /** Optional idempotency key: an append carrying a `dedupeKey` already present is a
+   *  NO-OP (returns the stored row).  Lets a retry REPAIR a durable audit that a
+   *  crash dropped without ever duplicating it — e.g. `execution_simulated` is keyed
+   *  by proposal so the execution row is written exactly once even if the executing
+   *  proposal is re-driven by the recovery sweep (WS-L.4.1c / P2). */
+  dedupeKey?: string;
 }
 
 export interface ReconciliationResultRecord {
@@ -381,10 +387,15 @@ export interface KnomosisActionStore {
    *  excluding pre-submit `reserving`), REGARDLESS of reconciliationState — the
    *  gap-rebuild uses this to re-mark even already-`matched` in-flight rows whose
    *  finalizing/reverting event may have fallen in the lost retention window, which
-   *  `listUnreconciled` (pending/mismatch only) would silently skip (WS-L.3.3a). */
+   *  `listUnreconciled` (pending/mismatch only) would silently skip (WS-L.3.3a).
+   *  Ordered by `actionRecordId` ASC and keyset-paged via `afterActionRecordId` (the
+   *  cursor is immutable, so re-marking rows to `pending` never disturbs paging) — the
+   *  rebuild pages until a short page so a deployment with >`limit` in-flight actions
+   *  re-anchors ALL of them, not just the first page (WS-L.3.3a / P3). */
   listInFlightByDeployment(
     deploymentId: string,
     limit: number,
+    afterActionRecordId?: string,
   ): Promise<KnomosisActionRecordEntity[]>;
   /** Actions STUCK in `submitted` (the scheduler's idempotent retry set), oldest
    *  first — queried directly so retries cannot starve behind older in-flight rows. */
@@ -1082,17 +1093,23 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
   async listInFlightByDeployment(
     deploymentId: string,
     limit: number,
+    afterActionRecordId?: string,
   ): Promise<KnomosisActionRecordEntity[]> {
-    return [...this.#rows.values()]
-      .filter(
-        (r) =>
-          r.deploymentId === deploymentId &&
-          r.submissionState !== 'reserving' &&
-          !TERMINAL_SUBMISSION_STATES.has(r.submissionState),
-      )
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .slice(0, limit)
-      .map((r) => structuredClone(r));
+    return (
+      [...this.#rows.values()]
+        .filter(
+          (r) =>
+            r.deploymentId === deploymentId &&
+            r.submissionState !== 'reserving' &&
+            !TERMINAL_SUBMISSION_STATES.has(r.submissionState) &&
+            (afterActionRecordId === undefined || r.actionRecordId > afterActionRecordId),
+        )
+        // Keyset order by the immutable actionRecordId so paging is stable even as the
+        // caller re-marks rows to `pending` between pages (P3).
+        .sort((a, b) => a.actionRecordId.localeCompare(b.actionRecordId))
+        .slice(0, limit)
+        .map((r) => structuredClone(r))
+    );
   }
 
   async listSubmittedRetryable(
@@ -1669,6 +1686,13 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
   readonly #rows: GovernanceAuditRecord[] = [];
 
   async append(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord> {
+    // Idempotent on `dedupeKey`: a second append with the same key is a no-op that
+    // returns the stored row, so a crash-retry REPAIRS a dropped audit exactly once
+    // (WS-L.4.1c / P2).
+    if (entry.dedupeKey !== undefined) {
+      const existing = this.#rows.find((r) => r.dedupeKey === entry.dedupeKey);
+      if (existing !== undefined) return structuredClone(existing);
+    }
     // Append-only by construction: the array is never mutated except push.
     this.#rows.push(structuredClone(entry));
     return structuredClone(entry);

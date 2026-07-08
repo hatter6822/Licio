@@ -225,6 +225,47 @@ describe('two-person deactivation (WS-L.3.5f)', () => {
     expect((await killSwitchDecision(configStore, 'treasury_execution')).engaged).toBe(false);
   });
 
+  it('a release AUDIT-store failure leaves the switch ENGAGED (fail-closed) (P4)', async () => {
+    const { identity } = freshEventServices();
+    const configStore = new InMemoryPwattConfigStore();
+    // An audit store that THROWS only on the two-person release append.
+    const throwingAudit = {
+      append: async (e: Parameters<AuditStore['append']>[0]) => {
+        if ((e.context as { setting?: string } | undefined)?.setting === 'confirm_deactivation') {
+          throw new Error('audit store unavailable');
+        }
+        return identity.audit.append(e);
+      },
+    } as unknown as AuditStore;
+    const deps = adminDeps(configStore, throwingAudit);
+    const OP1 = 'a1111111-1111-4111-8111-111111111111';
+    const OP2 = 'a2222222-2222-4222-8222-222222222222';
+    await activateKillSwitch(deps, {
+      switchId: 'treasury_execution',
+      scopes: { global: true, regions: [], room_ids: [] },
+      releaseCard: RELEASE_CARD,
+      actorUserId: OP1,
+      reason: 'incident',
+    });
+    await requestKillSwitchDeactivation(deps, {
+      switchId: 'treasury_execution',
+      actorUserId: OP1,
+      reason: 'resolved',
+    });
+    // A DIFFERENT operator confirms, but the release audit throws BEFORE the switch is
+    // cleared: the append is ordered before the state change, so the failure propagates.
+    await expect(
+      confirmKillSwitchDeactivation(deps, {
+        switchId: 'treasury_execution',
+        actorUserId: OP2,
+        reason: 'confirm',
+      }),
+    ).rejects.toThrow();
+    // FAIL-CLOSED: the switch is STILL engaged — never unblocked without a durable
+    // two-person release record (P4).
+    expect((await killSwitchDecision(configStore, 'treasury_execution')).engaged).toBe(true);
+  });
+
   it('confirming with no pending request is rejected', async () => {
     const { identity } = freshEventServices();
     const configStore = new InMemoryPwattConfigStore();

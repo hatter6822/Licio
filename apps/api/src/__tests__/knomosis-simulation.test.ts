@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import type { GovernanceProposalCreate } from '@licio/shared';
 import { afterEach, describe, expect, it } from 'vitest';
+import { storeKnomosisConfigValue } from '../knomosis/config.js';
 import { switchConfigKey } from '../knomosis/killswitch.js';
 import { evaluateReadiness, requestModeTransition } from '../knomosis/readiness.js';
 import { simulationDeps } from '../knomosis/services.js';
@@ -484,6 +485,139 @@ describe('WS-L.4.1d simulated voting + execution', () => {
     // Debited once, and EXACTLY ONE execution_simulated audit row — a live execution
     // never looks like a duplicate.
     expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('9999000000');
+    const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
+    expect(entries.filter((e) => e.kind === 'grant_execution')).toHaveLength(1);
+    const audits = await fixture.knomosis.governanceAudit.listByRoom(ROOM, 100);
+    expect(audits.filter((r) => r.actionType === 'execution_simulated')).toHaveLength(1);
+  });
+
+  it('a SUPERMAJORITY approval bar does NOT reject a minority of rejects — it stays OPEN (P1)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    // Require a 70% supermajority to PASS.
+    await storeKnomosisConfigValue(fixture.events.configStore, 'simApprovalThresholdPercent', 70);
+    await fixture.knomosis.reloadConfig();
+    const deps = simulationDeps(fixture.knomosis);
+    const proposer = await seedUserWithSession(fixture.identity, { handle: 'p1prop' });
+    const voters = await Promise.all(
+      Array.from({ length: 5 }, (_v, i) =>
+        seedUserWithSession(fixture.identity, { handle: `p1v${i}` }),
+      ),
+    );
+    for (const u of [proposer, ...voters]) await passComprehension(fixture, u.userId);
+    const created = await createSimProposal(deps, {
+      roomId: ROOM,
+      userId: proposer.userId,
+      create: bountyTemplate({ requested_amount: '1000000' }),
+    });
+    if (!created.ok) throw new Error('proposal failed');
+    const proposalId = created.proposal.proposalId;
+    // INTERLEAVE to the final 3 approve / 2 reject (60% approve, 40% reject) — the
+    // vote is evaluated after EACH cast, and no intermediate tally passes (approve
+    // never > 70%) or rejects (rejects never a strict majority > 50%), so it stays
+    // OPEN throughout: a supermajority approval bar must never fail a reject minority.
+    const order: Array<[string, 'approve' | 'reject']> = [
+      [voters[0]?.userId ?? '', 'approve'],
+      [voters[1]?.userId ?? '', 'reject'],
+      [voters[2]?.userId ?? '', 'approve'],
+      [voters[3]?.userId ?? '', 'reject'],
+      [voters[4]?.userId ?? '', 'approve'],
+    ];
+    for (const [userId, choice] of order) {
+      await castSimVote(deps, { roomId: ROOM, proposalId, userId, choice });
+      expect((await fixture.knomosis.proposals.getById(proposalId))?.votingState).toBe('open');
+    }
+  });
+
+  it('a strict rejecting MAJORITY still rejects under a supermajority approval bar (P1)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    await storeKnomosisConfigValue(fixture.events.configStore, 'simApprovalThresholdPercent', 70);
+    await fixture.knomosis.reloadConfig();
+    const deps = simulationDeps(fixture.knomosis);
+    const proposer = await seedUserWithSession(fixture.identity, { handle: 'p1rprop' });
+    const voters = await Promise.all(
+      Array.from({ length: 3 }, (_v, i) =>
+        seedUserWithSession(fixture.identity, { handle: `p1rv${i}` }),
+      ),
+    );
+    for (const u of [proposer, ...voters]) await passComprehension(fixture, u.userId);
+    const created = await createSimProposal(deps, {
+      roomId: ROOM,
+      userId: proposer.userId,
+      create: bountyTemplate({ requested_amount: '1000000' }),
+    });
+    if (!created.ok) throw new Error('proposal failed');
+    const proposalId = created.proposal.proposalId;
+    // 3 reject / 0 approve = 100% reject (a strict majority) → rejected at quorum.
+    for (const v of voters) {
+      await castSimVote(deps, { roomId: ROOM, proposalId, userId: v.userId, choice: 'reject' });
+    }
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.votingState).toBe('rejected');
+  });
+
+  it('an audit-store failure leaves the proposal RECOVERABLE; a retry completes it exactly once (P2)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const deps = simulationDeps(fixture.knomosis);
+    await ensureSimTreasury(deps, ROOM);
+    const proposalId = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      challengeState: 'none',
+      executionState: 'timelocked',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+    });
+    // The `execution_simulated` audit append THROWS on the first attempt (AFTER the
+    // debit is durable, BEFORE finalize) — the WS-L review scenario.
+    const realAppend = fixture.knomosis.governanceAudit.append.bind(
+      fixture.knomosis.governanceAudit,
+    );
+    let injectedFailure = false;
+    fixture.knomosis.governanceAudit.append = async (entry) => {
+      if (!injectedFailure && entry.actionType === 'execution_simulated') {
+        injectedFailure = true;
+        throw new Error('audit store unavailable');
+      }
+      return realAppend(entry);
+    };
+    await expect(
+      executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null }),
+    ).rejects.toThrow();
+    // The proposal is NOT `executed` — it stays RECOVERABLE (`executing`) with the
+    // debit already durable, so the required audit is never silently lost.
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe(
+      'executing',
+    );
+    // The recovery sweep re-drives it: debit skipped (idempotent), audit now succeeds
+    // (idempotent by proposal), finalize.
+    const recovered = await executeSimProposal(deps, {
+      roomId: ROOM,
+      proposalId,
+      actorUserId: null,
+    });
+    expect(recovered.ok).toBe(true);
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe('executed');
+    // EXACTLY ONE debit and ONE execution_simulated audit — the retry repaired, never
+    // duplicated.
     const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
     expect(entries.filter((e) => e.kind === 'grant_execution')).toHaveLength(1);
     const audits = await fixture.knomosis.governanceAudit.listByRoom(ROOM, 100);

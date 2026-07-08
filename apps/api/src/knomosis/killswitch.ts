@@ -350,7 +350,11 @@ export async function confirmKillSwitchDeactivation(
       message: 'Deactivation must be confirmed by a different operator (two-person rule).',
     };
   }
-  await persistSwitch(deps, input.switchId, structuredClone(INACTIVE_ENTRY));
+  // Write the two-person RELEASE audit BEFORE clearing the engaged scopes: if the
+  // append throws, the switch stays ENGAGED (fail-closed) rather than unblocking the
+  // wallet/action/treasury surfaces with no durable release record.  A persist
+  // failure AFTER a successful audit still leaves the switch engaged (safe
+  // over-blocking) and a retry re-audits + releases (WS-L.3.5f / P4).
   await deps.audit.append({
     actorUserId: input.actorUserId,
     eventType: 'knomosis_killswitch_change',
@@ -361,6 +365,7 @@ export async function confirmKillSwitchDeactivation(
       reason: input.reason.slice(0, 256),
     },
   });
+  await persistSwitch(deps, input.switchId, structuredClone(INACTIVE_ENTRY));
   deps.log('knomosis.killswitch.changed', {
     state: 'deactivated',
     switch_id: input.switchId,

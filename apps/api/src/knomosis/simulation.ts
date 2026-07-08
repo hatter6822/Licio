@@ -594,10 +594,14 @@ export async function evaluateSimVote(
     });
     return resolved;
   }
-  // STRICT rejecting majority (mirrors the strict approval bar): a tie — e.g. a
-  // quorum-reaching 1 approve / 1 reject / 1 abstain — crosses NEITHER threshold
-  // and stays OPEN rather than being prematurely rejected.
-  if ((tally.reject / decided) * 100 > 100 - config.simApprovalThresholdPercent) {
+  // STRICT rejecting MAJORITY — decoupled from the approval bar, NOT its complement
+  // `100 - approvalThreshold`.  Under a SUPERMAJORITY approval threshold (e.g. 67%)
+  // the complement (33%) would reject a mere MINORITY of rejects — a 60 approve / 40
+  // reject tally would fail even though rejects are not a majority.  Rejection instead
+  // requires rejects to be a strict majority of the DECIDED votes, mirroring the
+  // strict `>` approval bar so an exact 50/50 tie crosses NEITHER threshold and stays
+  // OPEN rather than being prematurely rejected (WS-L.4.1d).
+  if ((tally.reject / decided) * 100 > 50) {
     const resolved = await deps.proposals.resolveVotingIfOpen(proposal.proposalId, {
       votingState: 'rejected',
     });
@@ -777,20 +781,15 @@ export async function executeSimProposal(
     }
   }
 
-  // FINALIZE: CAS executing→executed ONLY now that the debit + ledger are durable.
-  // The CAS is the single-owner token: exactly ONE caller wins the transition and
-  // appends the `execution_simulated` audit row.  A null return means a concurrent
-  // writer (another sweep pod, or a live execution the recovery sweep re-entered)
-  // already finalized it — treat that as an idempotent no-op and DO NOT append a
-  // second audit row, so a live execution never looks like a duplicate (WS-L.4.1c).
-  const finalized = await deps.proposals.finalizeExecution(claimed.proposalId, nowIso);
-  if (finalized === null) {
-    const current = await deps.proposals.getById(claimed.proposalId);
-    return {
-      ok: true,
-      proposal: current ?? { ...claimed, executionState: 'executed', executedAt: nowIso },
-    };
-  }
+  // DURABLE AUDIT FIRST, BEFORE finalize.  The required `execution_simulated` row is
+  // written while the proposal is still `executing`, so there is NO window where the
+  // proposal is `executed` (terminal, un-re-drivable) yet the audit is missing: if
+  // this append throws, the proposal stays `executing` and the recovery sweep
+  // re-drives it (debit already idempotent) until the audit is durable.  The append is
+  // idempotent by proposal (dedupeKey), so a re-drive — or a concurrent executor —
+  // writes it EXACTLY ONCE, and the FIRST writer's actor attribution stands (a live
+  // manual execution keeps the user's attribution, never the null-actor sweep's)
+  // (WS-L.4.1c / P2).
   await deps.governanceAudit.append({
     entryId: deps.uuid(),
     roomId: args.roomId,
@@ -799,7 +798,20 @@ export async function executeSimProposal(
     actionDetails: { proposal_id: proposal.proposalId, proposal_type: proposal.proposalType },
     simulationMode: true,
     createdAt: nowIso,
+    dedupeKey: `execution_simulated:${proposal.proposalId}`,
   });
+  // FINALIZE: CAS executing→executed ONLY now that the debit + ledger + audit are all
+  // durable.  A null return means a concurrent writer (another sweep pod, or a live
+  // execution the recovery sweep re-entered) already finalized it — an idempotent
+  // no-op (the audit was already deduped above), so no double-audit (WS-L.4.1c).
+  const finalized = await deps.proposals.finalizeExecution(claimed.proposalId, nowIso);
+  if (finalized === null) {
+    const current = await deps.proposals.getById(claimed.proposalId);
+    return {
+      ok: true,
+      proposal: current ?? { ...claimed, executionState: 'executed', executedAt: nowIso },
+    };
+  }
   return { ok: true, proposal: finalized };
 }
 

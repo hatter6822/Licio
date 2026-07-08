@@ -1350,6 +1350,41 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     expect(rebuilt.remarked).toBeGreaterThanOrEqual(1);
   });
 
+  it('rebuildFromSnapshot pages the WHOLE in-flight set, not just the first 10k page (P3)', async () => {
+    const fixture = await freshKnomosisServices();
+    // One more than a single rebuild page (10_000): a matched in-flight action beyond
+    // the first page must ALSO be re-marked, or its lost terminal outcome is skipped.
+    const TOTAL = 10_001;
+    const nowIso = new Date().toISOString();
+    for (let i = 0; i < TOTAL; i += 1) {
+      await fixture.knomosis.actions.insert({
+        // Zero-padded id so ordering by actionRecordId is deterministic across pages.
+        actionRecordId: `act-${String(i).padStart(6, '0')}`,
+        deploymentId: DEPLOYMENT,
+        actionType: 'treasury_deposit',
+        roomId: 'r',
+        actorWalletAccountId: 'w',
+        actorUserId: 'u',
+        payloadHash: '0x',
+        typedDataHash: `0x${String(i)}`,
+        signedAction: { message: { asset: 'USDC', amount: '1' }, signature: '0x' },
+        submissionState: 'accepted',
+        failureReason: null,
+        indexedEventRef: null,
+        reconciliationState: 'matched',
+        idempotencyKey: `idem-${i}`,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    }
+    const rebuilt = await rebuildFromSnapshot(ingestDeps(fixture), DEPLOYMENT);
+    expect(rebuilt.remarked).toBe(TOTAL);
+    // EVERY row — including the one past the first page — is now `pending` (in the
+    // re-reconciliation set), so none is left silently skipped as clean.
+    const pending = await fixture.knomosis.actions.listUnreconciled(DEPLOYMENT, TOTAL + 10);
+    expect(pending).toHaveLength(TOTAL);
+  });
+
   it('a post-reorg revert event flips the action to reverted and updates receipts', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
