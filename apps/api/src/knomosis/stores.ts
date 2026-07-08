@@ -250,12 +250,16 @@ export interface FinancialWalletStore {
   >;
   /** REACTIVATE a finalized wallet only if the user is still below `maxActive` —
    *  count + update under the SAME per-user lock as `insertIfUnderCap`, so a
-   *  concurrent relink can't exceed the cap either (WS-L.2.5a).  Returns
-   *  'cap_exceeded' at the cap. */
+   *  concurrent relink can't exceed the cap either (WS-L.2.5a).  Takes the SAME
+   *  ADDRESS lock and re-checks the non-finalized owner FIRST: flipping a finalized
+   *  row back to active must not race a concurrent cross-chain link of the same
+   *  address by ANOTHER account into two live rows (the partial unique index is only
+   *  per `(address_hash, chain_id)`).  Returns 'address_taken' when another account
+   *  now owns a live row for the address, 'cap_exceeded' at the cap. */
   reactivateIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded'>;
+  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'>;
   getById(walletAccountId: string): Promise<FinancialWalletRecord | null>;
   /** ANY wallet for this address (any chain, any unlink state) — a generic lookup.
    *  NOT the cross-user ownership gate: a FINALIZED row is a released tombstone, so
@@ -718,7 +722,20 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   async reactivateIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
+  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'> {
+    // Cross-user: another account must not own a LIVE (non-finalized) row for this
+    // address (any chain).  The row being reactivated is still finalized here, so it
+    // is not a live owner; a live row owned by a DIFFERENT user blocks the flip back
+    // to active (WS-L.2.5a).
+    for (const r of this.#rows.values()) {
+      if (
+        r.addressHashHex === record.addressHashHex &&
+        r.unlinkState !== 'finalized' &&
+        r.userId !== record.userId
+      ) {
+        return 'address_taken';
+      }
+    }
     // The wallet being reactivated is currently `finalized`, so it is not in the
     // active count; single-threaded in memory ⇒ atomic.
     const active = [...this.#rows.values()].filter(

@@ -232,6 +232,36 @@ describe('InMemoryFinancialWalletStore', () => {
     ).toBe('address_taken');
   });
 
+  it('reactivation is blocked once another account owns a live row for the address (L2)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const addr = 'reactivate-addr';
+    // Account A links (chain 1), then finalizes the unlink.
+    const a = await store.insertIfUnderCap(
+      wallet({ userId: 'A', addressHashHex: addr, chainId: 1 }),
+      5,
+    );
+    if (typeof a === 'string') throw new Error('unreachable');
+    await store.update({ ...a.wallet, unlinkState: 'finalized', unlinkedAt: now() });
+    // Account B links the SAME address on a DIFFERENT chain (allowed — A released it),
+    // becoming the live owner across the address.
+    const b = await store.insertIfUnderCap(
+      wallet({ userId: 'B', addressHashHex: addr, chainId: 42161 }),
+      5,
+    );
+    if (typeof b === 'string') throw new Error(`expected a wallet, got ${b}`);
+    // A tries to RE-LINK (reactivate) its finalized chain-1 row → BLOCKED under the
+    // address lock: B now owns a live row, so two accounts must not both hold live
+    // rows for the same address (the partial index is only per (address, chain)).
+    expect(await store.reactivateIfUnderCap({ ...a.wallet, unlinkState: 'active' }, 5)).toBe(
+      'address_taken',
+    );
+    // Once B finalizes too, the address is free again and A can reactivate.
+    await store.update({ ...b.wallet, unlinkState: 'finalized', unlinkedAt: now() });
+    const reactivated = await store.reactivateIfUnderCap({ ...a.wallet, unlinkState: 'active' }, 5);
+    expect(typeof reactivated).not.toBe('string');
+    if (typeof reactivated !== 'string') expect(reactivated.unlinkState).toBe('active');
+  });
+
   it('updateRiskState changes ONLY riskState — never the lifecycle fields (H3)', async () => {
     const store = new InMemoryFinancialWalletStore();
     const finalizeAfter = new Date(Date.now() + 60_000).toISOString();

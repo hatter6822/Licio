@@ -295,18 +295,29 @@ export async function ingestGatewayEvents(
         targetState,
         targetState === 'reverted' ? 'reverted by the post-reorg event stream' : null,
       );
-      if (updated === null) continue;
+      // A NO-OP transition (updated === null) means the row is ALREADY in this event's
+      // target state (a self-transition, e.g. `forwardToGateway` already advanced
+      // submitted → accepted) or a concurrent writer advanced it there.  DON'T skip:
+      // re-read the CURRENT record and run the IDEMPOTENT side effects anyway, so a
+      // crash BETWEEN a prior state transition and its signature/receipt work is
+      // repaired on replay — otherwise e.g. a `proposal_sign` the kernel already
+      // ACCEPTED never records its signature, or a finalized/reverted action never
+      // gets its receipt (WS-L.3.3a).  Only when the current state IS the event's
+      // target state (the event is responsible for that state's effects); an event
+      // for a state the row already advanced past is skipped.
+      const effective = updated ?? (await deps.actions.getById(action.actionRecordId));
+      if (effective === null || effective.submissionState !== targetState) continue;
 
-      if (updated.actionType === 'proposal_sign') {
-        if (updated.submissionState === 'reverted') {
+      if (effective.actionType === 'proposal_sign') {
+        if (effective.submissionState === 'reverted') {
           // A `proposal_sign` that REVERTS after acceptance must not keep a live
           // governance signature — remove it so the vote no longer counts in the
           // tally or blocks unlink, and a re-signed retry can insert again (WS-L.3.4c).
-          await deps.proposalSignatures.removeByAction(updated.actionRecordId);
+          await deps.proposalSignatures.removeByAction(effective.actionRecordId);
         } else if (
-          updated.submissionState === 'accepted' ||
-          updated.submissionState === 'settled' ||
-          updated.submissionState === 'finalized'
+          effective.submissionState === 'accepted' ||
+          effective.submissionState === 'settled' ||
+          effective.submissionState === 'finalized'
         ) {
           // Ingestion can WIN the accept-CAS race with `forwardToGateway`
           // (submitted → accepted): the submit path then SKIPS its signature insert
@@ -317,23 +328,28 @@ export async function ingestGatewayEvents(
           // recording the same acceptance is a no-op (WS-L.3.2a/3.4c).
           await recordAcceptedProposalSignature(
             { signatures: deps.proposalSignatures, uuid: deps.uuid, now: deps.now },
-            updated,
+            effective,
           );
         }
       }
 
       // Stable states produce/refresh receipts and a user-visible status.
       if (
-        updated.submissionState === 'settled' ||
-        updated.submissionState === 'finalized' ||
-        updated.submissionState === 'reverted'
+        effective.submissionState === 'settled' ||
+        effective.submissionState === 'finalized' ||
+        effective.submissionState === 'reverted'
       ) {
-        await writeReceipts(deps, updated);
-        await deps.notifyActor(
-          updated.actorUserId,
-          updated.actionRecordId,
-          updated.submissionState,
-        );
+        await writeReceipts(deps, effective);
+        // NOTIFY only on a REAL transition this pass — a replayed no-op that merely
+        // repairs a receipt must not re-notify the actor (notifications are not
+        // deduped).
+        if (updated !== null) {
+          await deps.notifyActor(
+            effective.actorUserId,
+            effective.actionRecordId,
+            effective.submissionState,
+          );
+        }
       }
     }
     // The WHOLE seq group is now persisted + processed — advance the resume

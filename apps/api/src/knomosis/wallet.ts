@@ -196,8 +196,9 @@ export async function linkWallet(
       }
       // Reactivating a finalized wallet counts toward the cap exactly like a
       // fresh link.  The count + state change run ATOMICALLY under the SAME
-      // per-user lock as the new-link path, so two concurrent relinks can't both
-      // observe "under cap" and exceed maxWalletsPerUser (WS-L.2.5a).
+      // address + per-user locks as the new-link path, so two concurrent relinks
+      // can't exceed maxWalletsPerUser and a concurrent cross-chain link of the same
+      // address by ANOTHER account can't leave two live rows (WS-L.2.5a).
       const reactivated = await deps.wallets.reactivateIfUnderCap(
         {
           ...existing,
@@ -211,6 +212,12 @@ export async function linkWallet(
         },
         config.maxWalletsPerUser,
       );
+      if (reactivated === 'address_taken') {
+        // Another account claimed a live row for this address between the outer
+        // check and the reactivation — the store's address lock caught it.  No
+        // enumeration oracle: the caller learns only that the link failed.
+        return err(409, 'address_unavailable', 'This wallet cannot be linked to this account.');
+      }
       if (reactivated === 'cap_exceeded') {
         return err(
           429,

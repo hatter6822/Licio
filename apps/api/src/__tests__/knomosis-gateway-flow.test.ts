@@ -1572,6 +1572,120 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(1);
   });
 
+  it('repairs an accepted proposal_sign signature on a NO-OP replay (L1)', async () => {
+    const fixture = await freshKnomosisServices();
+    const proposalId = crypto.randomUUID();
+    const walletAccountId = crypto.randomUUID();
+    const actionRecordId = crypto.randomUUID();
+    const typedDataHash = `0x${'1a'.repeat(32)}`;
+    const nowIso = new Date().toISOString();
+    // forwardToGateway ALREADY advanced this proposal_sign submitted → ACCEPTED, but
+    // CRASHED before recordAcceptedProposalSignature — it sits `accepted` with NO
+    // signature.  (The submit path's own accept-CAS then finds it already accepted.)
+    await fixture.knomosis.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'proposal_sign',
+      roomId: ROOM,
+      actorWalletAccountId: walletAccountId,
+      actorUserId: crypto.randomUUID(),
+      payloadHash: '0x',
+      typedDataHash,
+      signedAction: { message: { proposalId }, signature: `0x${'cd'.repeat(65)}` },
+      submissionState: 'accepted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(proposalId)).toHaveLength(0);
+    // The kernel's accepted event arrives; applyTransition(accepted → accepted) is a
+    // NO-OP, but the idempotent signature work still runs (repair on replay).
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.accepted',
+            payload: { typed_data_hash: typedDataHash },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    const sigs = await fixture.knomosis.proposalSignatures.listByProposal(proposalId);
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0]).toMatchObject({ proposalId, walletAccountId, signatureRef: actionRecordId });
+  });
+
+  it('repairs a missing receipt on a NO-OP finalized replay (L1)', async () => {
+    const fixture = await freshKnomosisServices();
+    const actionRecordId = crypto.randomUUID();
+    const typedDataHash = `0x${'2b'.repeat(32)}`;
+    const nowIso = new Date().toISOString();
+    // Already FINALIZED, but the receipt write never happened (crash after the state
+    // transition, before writeReceipts).
+    await fixture.knomosis.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: crypto.randomUUID(),
+      payloadHash: '0x',
+      typedDataHash,
+      signedAction: { message: { amount: '1', asset: 'USDC' }, signature: '0x' },
+      submissionState: 'finalized',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    expect(await fixture.knomosis.receipts.getByAction(actionRecordId, 'public')).toBeNull();
+    const stub: KnomosisGateway = {
+      submitAction: async () => {
+        throw new Error('unused');
+      },
+      getBalances: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getBudget: async () => ({ kind: 'unavailable', detail: 'unused' }),
+      getEvents: async () => ({
+        kind: 'events',
+        events: [
+          {
+            seq: '1',
+            index: 0,
+            type: 'knomosis.action.finalized',
+            payload: { typed_data_hash: typedDataHash },
+          },
+        ],
+        latestSeq: '1',
+      }),
+    };
+    await ingestGatewayEvents(
+      { ...ingestDeps(fixture), gateway: () => stub },
+      DEPLOYMENT,
+      LOCAL_DEPLOYMENT.chain_id,
+    );
+    // The receipt is now written even though finalized → finalized was a no-op.
+    expect(await fixture.knomosis.receipts.getByAction(actionRecordId, 'public')).not.toBeNull();
+  });
+
   it('records a CRITICAL divergence for a known event matching NO action row (R11-6)', async () => {
     const fixture = await freshKnomosisServices();
     const orphanHash = `0x${'dd'.repeat(32)}`;

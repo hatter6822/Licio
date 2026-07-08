@@ -286,8 +286,29 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
   async reactivateIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
+  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'> {
     return this.db.transaction(async (tx) => {
+      // ADDRESS lock FIRST (namespace 2080) — the SAME lock, in the SAME order, as
+      // insertIfUnderCap — so flipping a finalized row back to active serializes
+      // against a concurrent cross-chain NEW-link of the same address.  The partial
+      // `(address_hash, chain_id)` unique index alone can't stop two accounts holding
+      // live rows for the same address on DIFFERENT chains (WS-L.2.5a).
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${record.addressHashHex}), 2080)`);
+      // Another account must not own a LIVE (non-finalized) row for the address.  The
+      // row being reactivated is still finalized here, so it is not a live owner.
+      const liveOwner = await tx
+        .select({ userId: walletAccounts.userId })
+        .from(walletAccounts)
+        .where(
+          and(
+            eq(walletAccounts.addressHash, Buffer.from(record.addressHashHex, 'hex')),
+            ne(walletAccounts.unlinkState, 'finalized'),
+          ),
+        )
+        .limit(1);
+      if (liveOwner[0] !== undefined && liveOwner[0].userId !== record.userId) {
+        return 'address_taken' as const;
+      }
       // SAME per-user advisory lock as insertIfUnderCap (namespace 2079), so a
       // relink and a new-link for one user serialize against the shared cap.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${record.userId}), 2079)`);
