@@ -50,7 +50,15 @@ export async function runKnomosisTick(
 
   let deployments: Awaited<ReturnType<typeof services.deployments.list>> = [];
   try {
-    deployments = (await services.deployments.list()).filter((d) => d.status === 'active');
+    const all = await services.deployments.list();
+    // Active deployments get full maintenance.  An INACTIVE (frozen/retired)
+    // deployment that still has FORWARDED, non-terminal actions ALSO needs
+    // ingest/reconcile until they settle — otherwise its finalized/reverted gateway
+    // events are never consumed, the rows stay open with no receipts, and they keep
+    // blocking wallet unlink.  New submits for inactive deployments are already
+    // rejected at the HTTP route (WS-L.3.3a).
+    const inFlight = new Set(await services.actions.deploymentIdsWithInFlightActions());
+    deployments = all.filter((d) => d.status === 'active' || inFlight.has(d.deploymentId));
   } catch (error) {
     onError(error, 'event_ingest');
   }

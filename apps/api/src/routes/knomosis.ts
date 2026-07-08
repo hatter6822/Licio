@@ -90,6 +90,7 @@ function submissionDeps(services: KnomosisServices): SubmissionDeps | null {
     proposals: services.proposals,
     compliance: services.compliance,
     regionForUser: (userId) => services.regionResolver.regionForUser(userId),
+    lawPacks: services.lawPacks,
     signatures: services.proposalSignatures,
     nonces: services.nonces,
     gateway: services.gateway,

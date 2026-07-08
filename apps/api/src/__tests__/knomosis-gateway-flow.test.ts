@@ -60,6 +60,7 @@ function submissionDeps(fixture: KnomosisFixture): SubmissionDeps {
     wallets: s.wallets,
     rooms: s.rooms,
     proposals: s.proposals,
+    lawPacks: s.lawPacks,
     compliance: s.compliance,
     regionForUser: (userId: string) => s.regionResolver.regionForUser(userId),
     signatures: s.proposalSignatures,
@@ -585,6 +586,71 @@ describe('WS-L.3.1 preflight pipeline', () => {
       expect(result.reason_code).toBe('CAP_EXCEEDED');
       expect(result.failed_step).toBe('caps');
     }
+  });
+
+  it('re-checks the law-pack cap at SUBMIT — a cap lowered during the token TTL blocks (H7)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => true,
+      contentVisibleToUser: async () => true,
+    };
+    fixture.knomosis.compliance = clearCompliance;
+    // The grant cap starts HIGH — the payout preflights cleanly at 5,000.
+    let perActionMax = '1000000';
+    fixture.knomosis.lawPacks = {
+      treasuryBounds: async () => ({
+        caps: [{ category: 'grant', perActionMax, perWindowMax: '100000000', windowSeconds: 3600 }],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: '100000000',
+        requireCoiFor: [],
+        investment: null,
+      }),
+    };
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const message = {
+      roomId: ROOM,
+      grantId: '55555555-5555-4555-8555-555555555555',
+      recipient: testAccount.address,
+      asset: 'USDC',
+      amount: '5000',
+      actor: testAccount.address,
+      nonce: '1',
+      expiration: String(Math.floor(Date.now() / 1000) + 600),
+      deploymentId: DEPLOYMENT,
+    };
+    const signature = await signedTypedData('grant_payout', message);
+    const pre = await runPreflight(preflightDeps(fixture), {
+      userId,
+      actionType: 'grant_payout',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    if (pre.result !== 'pass') throw new Error(`preflight should pass: ${JSON.stringify(pre)}`);
+    // The room LOWERS the per-action grant cap below the amount during the token TTL.
+    perActionMax = '100';
+    const idem = crypto.randomUUID();
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: idem,
+      actionType: 'grant_payout',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('CAP_EXCEEDED');
+    // The cap re-check runs PRE-reservation, so no action row was inserted/forwarded.
+    expect(await fixture.knomosis.actions.getByIdempotencyKey(userId, idem)).toBeNull();
   });
 
   it('a charter_update with a concurrent open charter proposal is a POLICY_CONFLICT', async () => {

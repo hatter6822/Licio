@@ -250,6 +250,12 @@ export async function linkWallet(
   // ATOMIC cap check + insert (per-user lock): a bare count-then-insert races two
   // concurrent links past `maxWalletsPerUser` (WS-L.2.5a).
   const inserted = await deps.wallets.insertIfUnderCap(record, config.maxWalletsPerUser);
+  if (inserted === 'address_taken') {
+    // The address was claimed by ANOTHER account between the pre-check and the
+    // insert (a concurrent cross-chain link) — the store's address lock caught it.
+    // No enumeration oracle: the caller learns only that the link failed (WS-L.2.5a).
+    return err(409, 'address_unavailable', 'This wallet cannot be linked to this account.');
+  }
   if (inserted === 'cap_exceeded') {
     return err(429, 'wallet_limit', `You can link at most ${config.maxWalletsPerUser} wallets.`);
   }
@@ -472,7 +478,8 @@ export async function walletRiskState(
   });
   if (assessment !== 'unavailable' && assessment.state !== state) {
     state = assessment.state;
-    await deps.wallets.update({ ...wallet, riskState: state });
+    // Column-scoped write — never clobber a concurrent unlink with a stale snapshot.
+    await deps.wallets.updateRiskState(wallet.walletAccountId, state);
   }
   const text =
     assessment !== 'unavailable'

@@ -194,6 +194,31 @@ describe('WS-L.2.3a nonce + WS-L.2.5a link (REAL SIWE)', () => {
     }
   });
 
+  it('maps the store address-lock race to address_unavailable (H1)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const deps = walletDeps(fixture);
+    // The fast pre-check sees no owner, but the store's per-address lock catches a
+    // CONCURRENT cross-chain link claiming the address at insert time → 'address_taken'.
+    // Simulate that race by forcing the atomic insert to report the address taken.
+    deps.wallets.insertIfUnderCap = async () => 'address_taken';
+    const nonce = await issueWalletLinkNonce(deps, { userId, sessionTokenHash: 's1' });
+    if (!nonce.ok) throw new Error('nonce failed');
+    const signed = await signedSiweLink(nonce.nonce);
+    const result = await linkWallet(deps, {
+      userId,
+      sessionTokenHash: 's1',
+      message: signed.message,
+      signature: signed.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(409);
+      // No enumeration oracle: the same opaque failure as the sequential pre-check.
+      expect(result.code).toBe('address_unavailable');
+    }
+  });
+
   it('links the SAME address on TWO active chains as distinct per-chain rows (G1)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);

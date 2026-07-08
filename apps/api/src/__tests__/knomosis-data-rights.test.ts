@@ -285,6 +285,7 @@ describe('WS-L financial wallet data-rights', () => {
       amount: '1',
       actorUserId: USER,
       proposalId: null,
+      idempotencyKey: null,
       createdAt: now,
     });
     await knomosis.nonces.tryConsume(USER, 'local', 'n1');

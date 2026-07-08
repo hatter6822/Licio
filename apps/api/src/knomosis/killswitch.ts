@@ -156,9 +156,15 @@ export async function killSwitchDecision(
   switchId: KillSwitchId,
   context: KillSwitchRequestContext = {},
 ): Promise<KillSwitchDecision> {
-  const entry = await readSwitchEntry(configStore, switchId);
-  if (entry === null) return { engaged: false };
-  if (entry === 'invalid') return { engaged: true, scope: 'unreadable_state' };
+  // FAIL-CLOSED DOCTRINE (WS-L.3.5f): an UNREADABLE or MALFORMED
+  // emergency-control surface engages EVERY switch globally.  Per-switch keys
+  // isolate WRITES (an activation of switch A never drops switch B), but a corrupt
+  // OTHER switch key must STILL fail THIS decision closed — so read the whole
+  // registry's health, not just the requested switch's own key.
+  const registry = await readKillSwitchRegistry(configStore);
+  if (registry === 'invalid') return { engaged: true, scope: 'unreadable_state' };
+  if (registry === null) return { engaged: false };
+  const entry = registry.switches[switchId] ?? INACTIVE_ENTRY;
 
   if (entry.scopes.global) return { engaged: true, scope: 'global' };
   if (entry.scopes.regions.length > 0) {

@@ -368,6 +368,7 @@ export function createRoomGovernanceSimRoutes() {
             userId: auth.userId,
             asset: body.asset,
             amount: body.amount,
+            ...(body.idempotency_key !== undefined ? { idempotencyKey: body.idempotency_key } : {}),
           });
           if (!result.ok) return c.json(deny(result.code, result.message), result.status);
           return c.json(simTreasuryResponseSchema.parse(result.treasury));

@@ -124,7 +124,7 @@ export const FUND_TRANSFER_ACTIONS: ReadonlySet<KnomosisSignedActionType> = new 
 ]);
 
 /** Law-pack cap category per amount-bearing action type. */
-const CAP_CATEGORY: Readonly<Partial<Record<KnomosisSignedActionType, string>>> = {
+export const CAP_CATEGORY: Readonly<Partial<Record<KnomosisSignedActionType, string>>> = {
   grant_payout: 'grant',
   bounty_contribution: 'bounty',
 };
@@ -156,6 +156,18 @@ export function buildEip712Domain(deployment: PinnedDeployment): KnomosisEip712D
   };
 }
 
+/**
+ * Minor-unit precision per SUPPORTED asset (the interim validated metadata until a
+ * formal asset registry ships).  An asset NOT listed here has no validated
+ * precision, so its amount is shown as RAW minor units rather than mis-scaled at a
+ * guessed 6 decimals — an 18-decimal asset formatted as 6 would grossly misstate
+ * the value in the signed summary + receipt (WS-L.3.1a).
+ */
+export const KNOMOSIS_ASSET_DECIMALS: Readonly<Record<string, number>> = {
+  USDC: 6,
+  'SIM-USDC': 6,
+};
+
 /** Deterministic plain-language summary the §23.5 hash pairing covers. */
 export function buildHumanSummary(
   actionType: KnomosisSignedActionType,
@@ -166,9 +178,12 @@ export function buildHumanSummary(
   const actionName = struct?.actionName ?? actionType;
   const amount = message['amount'];
   const asset = message['asset'];
+  const decimals = asset !== undefined ? KNOMOSIS_ASSET_DECIMALS[asset] : undefined;
   const amountPart =
     amount !== undefined && asset !== undefined
-      ? ` of ${formatMinorUnits(amount, 6)} ${asset}`
+      ? decimals !== undefined
+        ? ` of ${formatMinorUnits(amount, decimals)} ${asset}`
+        : ` of ${amount} ${asset} (minor units)`
       : '';
   return `${actionName}${amountPart} in room "${roomName}" (expires ${message['expiration'] ?? '?'}, nonce ${message['nonce'] ?? '?'})`;
 }
@@ -300,7 +315,9 @@ export async function runPreflight(
     });
     if (assessment !== 'unavailable' && assessment.state !== riskState) {
       riskState = assessment.state;
-      await deps.wallets.update({ ...wallet, riskState });
+      // Column-scoped write — never a stale full-record snapshot that could clobber
+      // a concurrent unlink (WS-L.2.5c-1).
+      await deps.wallets.updateRiskState(wallet.walletAccountId, riskState);
     }
   }
   if (riskState === 'high') {

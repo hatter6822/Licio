@@ -13,6 +13,7 @@
 // the action closed; a gateway OUTAGE leaves it `submitted` for the
 // scheduler's idempotent re-submit.
 
+import { decCompare } from '@licio/governance';
 import type { KnomosisReasonCode, KnomosisSignedActionType, SubmissionState } from '@licio/shared';
 import type { AuditStore } from '../identity/audit.js';
 import type { EphemeralStore } from '../identity/ephemeral-store.js';
@@ -22,8 +23,10 @@ import { pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
 import {
   buildEip712Domain,
+  CAP_CATEGORY,
   consumePreflightToken,
   FUND_TRANSFER_ACTIONS,
+  type LawPackPort,
   MODE_ENVIRONMENTS,
   REAL_FUNDS_ENVIRONMENTS,
   type RoomGovernancePort,
@@ -95,6 +98,10 @@ export interface SubmissionDeps {
   /** §19.1-safe region resolver for the jurisdiction re-check (self-declared
    *  account locale region — never an address). */
   regionForUser: (userId: string) => Promise<string | null>;
+  /** WS-U law-pack seam — the MUTABLE per-action treasury cap is RE-RUN at submit
+   *  (a room can lower/remove the grant/bounty cap during the token TTL) so a
+   *  preflighted spend cannot forward over the new cap (WS-L.3.2a re-runs step 5). */
+  lawPacks: LawPackPort;
   /** Durable governance-signature ledger — a `proposal_sign` submit is
    *  recorded here (insert-once per (proposal, wallet)) so the vote powers the
    *  tally + the unlink-obligation check, not just the on-chain action row. */
@@ -300,6 +307,30 @@ export async function submitAction(
         ? 'This action requires a room steward.'
         : 'This action requires room membership.',
     };
+  }
+
+  // RE-RUN the §23.5 step-5 LAW-PACK CAP gate at submit for spend actions: a room
+  // can LOWER or REMOVE the grant/bounty per-action cap during the preflight-token
+  // TTL, so a previously-preflighted `grant_payout`/`bounty_contribution` must not
+  // forward over the NEW cap (WS-L.3.2a re-runs WS-L.3.1a step 5).
+  const capCategory = CAP_CATEGORY[actionType];
+  if (capCategory !== undefined) {
+    const bounds = await deps.lawPacks.treasuryBounds(input.roomId);
+    const amount = input.typedDataMessage['amount'];
+    const cap = bounds?.caps.find((c) => c.category === capCategory);
+    if (
+      bounds === null ||
+      cap === undefined ||
+      amount === undefined ||
+      decCompare(amount, cap.perActionMax) > 0
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'CAP_EXCEEDED',
+        message: 'The amount exceeds this room’s per-action cap.',
+      };
+    }
   }
 
   // RE-RUN the §23.5 step-6 PROPOSAL-POLICY gate at submit (mirrors preflight):

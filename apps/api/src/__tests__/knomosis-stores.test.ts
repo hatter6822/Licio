@@ -130,6 +130,52 @@ describe('InMemoryFinancialWalletStore', () => {
     expect(await store.getByAddressHashAndChain(addr, 999)).toBeNull();
     expect(await store.getByAddressHash(addr)).not.toBeNull();
   });
+
+  it('insertIfUnderCap rejects an address ANOTHER account owns (H1)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const addr = 'shared-addr';
+    // u1 owns the address on chain 1.
+    expect(
+      typeof (await store.insertIfUnderCap(wallet({ userId: 'u1', addressHashHex: addr }), 5)),
+    ).toBe('object');
+    // u2 cannot link the same address — on ANY chain — an address is owned by ONE
+    // account across every chain (cross-user ownership check).
+    expect(
+      await store.insertIfUnderCap(wallet({ userId: 'u2', addressHashHex: addr, chainId: 1 }), 5),
+    ).toBe('address_taken');
+    expect(
+      await store.insertIfUnderCap(
+        wallet({ userId: 'u2', addressHashHex: addr, chainId: 42161 }),
+        5,
+      ),
+    ).toBe('address_taken');
+    // The owning account is still under the cap → a DIFFERENT address links fine.
+    expect(
+      typeof (await store.insertIfUnderCap(wallet({ userId: 'u1', addressHashHex: 'other' }), 5)),
+    ).toBe('object');
+  });
+
+  it('updateRiskState changes ONLY riskState — never the lifecycle fields (H3)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const finalizeAfter = new Date(Date.now() + 60_000).toISOString();
+    const w = wallet({
+      riskState: 'pending',
+      unlinkState: 'pending_unlink',
+      unlinkFinalizeAfter: finalizeAfter,
+      label: 'my-wallet',
+    });
+    await store.insert(w);
+    // A risk read-through writes ONLY the risk column; a concurrent unlink's fields
+    // (unlinkState / unlinkFinalizeAfter / label) survive untouched.
+    await store.updateRiskState(w.walletAccountId, 'elevated');
+    const after = await store.getById(w.walletAccountId);
+    expect(after?.riskState).toBe('elevated');
+    expect(after?.unlinkState).toBe('pending_unlink');
+    expect(after?.unlinkFinalizeAfter).toBe(finalizeAfter);
+    expect(after?.label).toBe('my-wallet');
+    // A missing wallet is a silent no-op (never throws).
+    await expect(store.updateRiskState('nope', 'high')).resolves.toBeUndefined();
+  });
 });
 
 describe('InMemoryKnomosisActionStore', () => {
@@ -152,6 +198,23 @@ describe('InMemoryKnomosisActionStore', () => {
     expect((await store.listByRoom('r1', 10)).length).toBeGreaterThan(0);
     expect((await store.listUnreconciled('d1', 10)).length).toBeGreaterThan(0);
     await expect(store.update(action({ actionRecordId: 'nope' }))).rejects.toThrow();
+  });
+
+  it('deploymentIdsWithInFlightActions lists deployments with settling actions only (H5)', async () => {
+    const store = new InMemoryKnomosisActionStore();
+    // dA: an in-flight (submitted) action → keep maintaining even if the deployment
+    // later goes inactive, so its gateway events settle and unblock wallet unlink.
+    await store.insert(action({ deploymentId: 'dA', submissionState: 'submitted' }));
+    // dB: only terminal actions → nothing to settle.
+    await store.insert(action({ deploymentId: 'dB', submissionState: 'finalized' }));
+    await store.insert(action({ deploymentId: 'dB', submissionState: 'reverted' }));
+    // dC: only a `reserving` row (pre-submit, nothing on-chain) → excluded; the
+    // stale-reservation sweep handles it, not ingest/reconcile.
+    await store.insert(action({ deploymentId: 'dC', submissionState: 'reserving' }));
+    const ids = new Set(await store.deploymentIdsWithInFlightActions());
+    expect(ids.has('dA')).toBe(true);
+    expect(ids.has('dB')).toBe(false);
+    expect(ids.has('dC')).toBe(false);
   });
 
   it('getByTypedDataHash resolves duplicates to the gateway-bound row, not the failed loser (F4)', async () => {
@@ -231,6 +294,19 @@ describe('InMemoryGovernanceProposalStore + votes + signatures', () => {
     expect(await store.listOpenByRoomAndType('r1', 'charter_update')).toHaveLength(1);
     expect((await store.listByRoom('r1', 50)).length).toBeGreaterThan(0);
     await expect(store.update(proposal({ proposalId: 'nope' }))).rejects.toThrow();
+  });
+
+  it('listRecoverableExecuting returns only stranded `executing` proposals (H2)', async () => {
+    const store = new InMemoryGovernanceProposalStore();
+    // Stranded mid-execution → recoverable.
+    await store.insert(proposal({ votingState: 'passed', executionState: 'executing' }));
+    // Already executed → NOT recoverable.
+    await store.insert(proposal({ votingState: 'passed', executionState: 'executed' }));
+    // Timelocked (not yet started) → belongs to listExecutable, not recovery.
+    await store.insert(proposal({ votingState: 'passed', executionState: 'timelocked' }));
+    const recoverable = await store.listRecoverableExecuting();
+    expect(recoverable).toHaveLength(1);
+    expect(recoverable[0]?.executionState).toBe('executing');
   });
 
   it('claimForExecution→executing then finalizeExecution→executed, each once (F10)', async () => {
@@ -329,10 +405,63 @@ describe('InMemorySimTreasuryStore + receipts + comprehension + deployments + ma
       amount: '100',
       actorUserId: 'u1',
       proposalId: null,
+      idempotencyKey: null,
       createdAt: now(),
     });
     expect((await store.get('r1'))?.balances['SIM-USDC']).toBe('100');
     expect(await store.listEntries('r1', 10)).toHaveLength(1);
+  });
+
+  it('put(record, expected, entry) commits balance + ledger atomically, idempotent by key (H8)', async () => {
+    const store = new InMemorySimTreasuryStore();
+    const seeded = await store.put({
+      roomId: 'r1',
+      balances: { 'SIM-USDC': '100' },
+      updatedAt: now(),
+    });
+    expect(seeded).not.toBeNull();
+    const key = 'idem-1';
+    const entry = {
+      entryId: crypto.randomUUID(),
+      roomId: 'r1',
+      kind: 'grant_execution' as const,
+      asset: 'SIM-USDC',
+      amount: '40',
+      actorUserId: null,
+      proposalId: 'p1',
+      idempotencyKey: key,
+      createdAt: now(),
+    };
+    // First write: balance changes AND the entry lands, together.
+    const first = await store.put(
+      {
+        roomId: 'r1',
+        balances: { 'SIM-USDC': '60' },
+        updatedAt: new Date(Date.parse(now()) + 1).toISOString(),
+      },
+      seeded?.updatedAt,
+      entry,
+    );
+    expect(first).not.toBeNull();
+    expect((await store.get('r1'))?.balances['SIM-USDC']).toBe('60');
+    expect(await store.findEntryByIdempotencyKey(key)).not.toBeNull();
+    // A retry carrying the SAME entry key is a no-op: neither the balance nor the
+    // ledger changes, and it still reports success (returns the current record).
+    const retry = await store.put(
+      {
+        roomId: 'r1',
+        balances: { 'SIM-USDC': '20' },
+        updatedAt: new Date(Date.parse(now()) + 2).toISOString(),
+      },
+      (await store.get('r1'))?.updatedAt,
+      { ...entry, entryId: crypto.randomUUID() },
+    );
+    expect(retry).not.toBeNull();
+    expect((await store.get('r1'))?.balances['SIM-USDC']).toBe('60');
+    expect(
+      (await store.listEntries('r1', 10)).filter((e) => e.idempotencyKey === key),
+    ).toHaveLength(1);
+    expect(await store.findEntryByIdempotencyKey('missing')).toBeNull();
   });
 
   it('receipts upsert-by-action-kind and list public/private', async () => {

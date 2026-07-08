@@ -14,6 +14,7 @@ import {
   defaultCompliancePort,
   localeRegionSubtag,
 } from '../knomosis/ports.js';
+import { buildHumanSummary } from '../knomosis/preflight.js';
 import { verifyReceiptPairing, writeReceipts } from '../knomosis/receipts.js';
 import {
   canExpandTreasury,
@@ -572,6 +573,42 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
   });
 });
 
+describe('signed human summary decimals (WS-L.3.1a / H6)', () => {
+  const msg = (over: Record<string, string>): Record<string, string> => ({
+    expiration: '2026-01-01T00:00:00Z',
+    nonce: '7',
+    ...over,
+  });
+
+  it('formats a KNOWN asset at its validated decimals', () => {
+    // 1_500_000 minor units of a 6-decimal asset → 1.5 (never a guessed scale).
+    const summary = buildHumanSummary(
+      'treasury_deposit',
+      'Test Room',
+      msg({ asset: 'USDC', amount: '1500000' }),
+    );
+    expect(summary).toContain('of 1.5 USDC');
+    expect(summary).not.toContain('minor units');
+  });
+
+  it('shows RAW minor units for an asset with no validated precision', () => {
+    // An unlisted (e.g. 18-decimal) asset is NEVER mis-scaled at a guessed 6 — it is
+    // shown as raw minor units and flagged as such, so the signed summary can't lie.
+    const summary = buildHumanSummary(
+      'treasury_deposit',
+      'Test Room',
+      msg({ asset: 'WETH', amount: '1000000000000000000' }),
+    );
+    expect(summary).toContain('of 1000000000000000000 WETH (minor units)');
+  });
+
+  it('omits the amount clause entirely when asset or amount is absent', () => {
+    const summary = buildHumanSummary('proposal_sign', 'Test Room', msg({}));
+    expect(summary).not.toContain(' of ');
+    expect(summary).toContain('room "Test Room"');
+  });
+});
+
 describe('ports (WS-L.3.1b / §19.1 region)', () => {
   it('the fail-closed compliance port never screens clear', async () => {
     expect(
@@ -771,6 +808,7 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
       contentVisibleToUser: async () => false,
     },
     proposals: fixture.knomosis.proposals,
+    lawPacks: fixture.knomosis.lawPacks,
     compliance: fixture.knomosis.compliance,
     regionForUser: (userId: string) => fixture.knomosis.regionResolver.regionForUser(userId),
     signatures: fixture.knomosis.proposalSignatures,
@@ -1226,6 +1264,53 @@ describe('ingest unsupported-event halt (WS-L.3.3a)', () => {
 });
 
 describe('scheduler error + lease handling', () => {
+  it('still maintains an INACTIVE deployment that has in-flight actions (H5)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { runKnomosisTick } = await import('../knomosis/scheduler.js');
+    const depId = LOCAL_DEPLOYMENT.deployment_id;
+    // Freeze the deployment — but it still has a FORWARDED (submitted, non-terminal)
+    // action awaiting settlement.
+    const existing = await fixture.knomosis.deployments.getById(depId);
+    if (!existing) throw new Error('expected the pinned local deployment');
+    await fixture.knomosis.deployments.upsert({ ...existing, status: 'frozen' });
+    await fixture.knomosis.actions.insert(
+      baseAction({ deploymentId: depId, submissionState: 'submitted' }),
+    );
+    // Observe which deployments reach reconciliation (reconcileDeployment →
+    // listUnreconciled) during the tick.
+    const reconciled = new Set<string>();
+    const originalList = fixture.knomosis.actions.listUnreconciled.bind(fixture.knomosis.actions);
+    fixture.knomosis.actions.listUnreconciled = async (deploymentId, limit) => {
+      reconciled.add(deploymentId);
+      return originalList(deploymentId, limit);
+    };
+    await runKnomosisTick(fixture.knomosis);
+    // The frozen-but-in-flight deployment is STILL ingested/reconciled so its
+    // finalized/reverted events settle and stop pinning the wallet's unlink.
+    expect(reconciled.has(depId)).toBe(true);
+  });
+
+  it('does NOT maintain an inactive deployment once its actions are terminal (H5)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { runKnomosisTick } = await import('../knomosis/scheduler.js');
+    const depId = LOCAL_DEPLOYMENT.deployment_id;
+    const existing = await fixture.knomosis.deployments.getById(depId);
+    if (!existing) throw new Error('expected the pinned local deployment');
+    await fixture.knomosis.deployments.upsert({ ...existing, status: 'retired' });
+    // Only a terminal (finalized) action remains → nothing left to settle.
+    await fixture.knomosis.actions.insert(
+      baseAction({ deploymentId: depId, submissionState: 'finalized' }),
+    );
+    const reconciled = new Set<string>();
+    const originalList = fixture.knomosis.actions.listUnreconciled.bind(fixture.knomosis.actions);
+    fixture.knomosis.actions.listUnreconciled = async (deploymentId, limit) => {
+      reconciled.add(deploymentId);
+      return originalList(deploymentId, limit);
+    };
+    await runKnomosisTick(fixture.knomosis);
+    expect(reconciled.has(depId)).toBe(false);
+  });
+
   it('reports a task error without aborting the tick, and a denied lease is a no-op', async () => {
     const fixture = await freshKnomosisServices();
     const { runKnomosisTick, startKnomosisScheduler } = await import('../knomosis/scheduler.js');

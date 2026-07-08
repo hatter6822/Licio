@@ -101,17 +101,23 @@ describe('kill-switch scope precedence + immediate effect', () => {
     ).toBe(true);
   });
 
-  it('an UNREADABLE switch entry fails closed (that switch engaged)', async () => {
+  it('a corrupt entry under ANY switch key fails EVERY switch closed (H4)', async () => {
     const configStore = new InMemoryPwattConfigStore();
     // Write garbage under ONE switch's per-switch key.
     await configStore.set(switchConfigKey('treasury_execution'), { not: 'an entry' });
-    // The corrupt entry fails the switch closed…
+    // The corrupt entry fails the queried switch closed…
     const decision = await killSwitchDecision(configStore, 'treasury_execution');
     expect(decision).toEqual({ engaged: true, scope: 'unreadable_state' });
     // …and a full-registry read reports the whole surface unreadable (fail closed).
     expect(await readKillSwitchRegistry(configStore)).toBe('invalid');
-    // A DIFFERENT, uncorrupted switch is still independently readable (inactive).
-    expect((await killSwitchDecision(configStore, 'action_submission')).engaged).toBe(false);
+    // The registry is the trust unit: a DIFFERENT, uncorrupted switch ALSO fails
+    // closed — the decision cannot trust ANY switch while ANY key is unparseable, so
+    // a corrupt kill-switch surface pauses everything rather than silently under-
+    // enforcing an unrelated switch (H4).
+    expect(await killSwitchDecision(configStore, 'action_submission')).toEqual({
+      engaged: true,
+      scope: 'unreadable_state',
+    });
   });
 
   it('an absent key is the normal all-inactive state', async () => {

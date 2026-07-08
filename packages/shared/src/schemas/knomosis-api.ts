@@ -519,6 +519,9 @@ export const simTreasuryDepositRequestSchema = z
   .object({
     asset: simAssetSchema,
     amount: minorUnitAmountSchema,
+    /** Client-generated idempotency key (WS-L.4.1c): a retried deposit (double-tap
+     *  or network retry) carrying the SAME key credits the treasury at most once. */
+    idempotency_key: uuidSchema.optional(),
   })
   .strict();
 export type SimTreasuryDepositRequest = z.infer<typeof simTreasuryDepositRequestSchema>;

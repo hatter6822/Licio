@@ -25,7 +25,7 @@ import {
   walletAccounts,
   walletActorMappings,
 } from '@licio/db';
-import { and, asc, desc, eq, inArray, lt, lte, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lt, lte, ne, notInArray, sql } from 'drizzle-orm';
 import type { ActionNonceStore } from './services.js';
 import type {
   AuditLogCursor,
@@ -118,8 +118,22 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
   async insertIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
+  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'> {
     return this.db.transaction(async (tx) => {
+      // ADDRESS-level advisory lock (namespace 2080): the DB unique index is
+      // per-`(address_hash, chain_id)`, so it does NOT stop two DIFFERENT accounts
+      // linking the SAME address on DIFFERENT chains concurrently.  Serialize on the
+      // address so the cross-user ownership check + insert are atomic — one address
+      // maps to ONE account across every chain (WS-L.2.5a).
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${record.addressHashHex}), 2080)`);
+      const owner = await tx
+        .select({ userId: walletAccounts.userId })
+        .from(walletAccounts)
+        .where(eq(walletAccounts.addressHash, Buffer.from(record.addressHashHex, 'hex')))
+        .limit(1);
+      if (owner[0] !== undefined && owner[0].userId !== record.userId) {
+        return 'address_taken' as const;
+      }
       // A per-user transaction-scoped advisory lock SERIALIZES concurrent links
       // for this user, so the active-count check and the insert are atomic across
       // pods — the DB otherwise enforces only address uniqueness, not the cap
@@ -208,6 +222,18 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
       .set(this.#updateSet(record))
       .where(eq(walletAccounts.walletAccountId, record.walletAccountId));
     return record;
+  }
+
+  async updateRiskState(
+    walletAccountId: string,
+    riskState: FinancialWalletRecord['riskState'],
+  ): Promise<void> {
+    // Column-scoped UPDATE: sets ONLY risk_state, so a concurrent unlink mutation
+    // is never clobbered by a stale full-record snapshot (WS-L.2.5c-1).
+    await this.db
+      .update(walletAccounts)
+      .set({ riskState })
+      .where(eq(walletAccounts.walletAccountId, walletAccountId));
   }
 
   async reactivateIfUnderCap(
@@ -582,6 +608,21 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       .orderBy(asc(knomosisActionRecords.createdAt))
       .limit(limit);
     return rows.map(mapAction);
+  }
+
+  async deploymentIdsWithInFlightActions(): Promise<string[]> {
+    const rows = await this.db
+      .selectDistinct({ deploymentId: knomosisActionRecords.deploymentId })
+      .from(knomosisActionRecords)
+      .where(
+        notInArray(knomosisActionRecords.submissionState, [
+          'reserving',
+          'finalized',
+          'reverted',
+          'failed',
+        ]),
+      );
+    return rows.map((r) => r.deploymentId);
   }
 
   async listFinalizedDeposits(
@@ -1129,6 +1170,19 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows.map(mapProposal);
   }
 
+  async listRecoverableExecuting(): Promise<GovernanceProposalRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(governanceProposals)
+      .where(
+        and(
+          eq(governanceProposals.executionState, 'executing'),
+          eq(governanceProposals.votingState, 'passed'),
+        ),
+      );
+    return rows.map(mapProposal);
+  }
+
   async listOpenByRoomAndType(
     roomId: string,
     proposalType: GovernanceProposalRecord['proposalType'],
@@ -1355,6 +1409,7 @@ export class DrizzleSimTreasuryStore implements SimTreasuryStore {
   async put(
     record: SimTreasuryRecord,
     expectedUpdatedAt?: string,
+    entry?: SimTreasuryEntryRecord,
   ): Promise<SimTreasuryRecord | null> {
     const values = {
       roomId: record.roomId,
@@ -1371,19 +1426,58 @@ export class DrizzleSimTreasuryStore implements SimTreasuryStore {
       if (inserted.length > 0) return record;
       return this.get(record.roomId);
     }
-    // Conditional (optimistic-concurrency) overwrite: the DO UPDATE applies only
-    // when the stored `updated_at` still matches the caller's snapshot, so two
-    // racing deposits/executions cannot each overwrite the balance map (lost update).
-    const rows = await this.db
-      .insert(simTreasuries)
-      .values(values)
-      .onConflictDoUpdate({
-        target: simTreasuries.roomId,
-        set: { balances: record.balances, updatedAt: new Date(record.updatedAt) },
-        setWhere: eq(simTreasuries.updatedAt, new Date(expectedUpdatedAt)),
-      })
-      .returning({ roomId: simTreasuries.roomId });
-    return rows.length > 0 ? record : null;
+    // ATOMIC balance write + ledger append (a single transaction), with idempotency.
+    return this.db.transaction(async (tx) => {
+      // IDEMPOTENCY: a crash-retry whose entry already exists applies NOTHING.
+      if (entry?.idempotencyKey != null) {
+        const dup = await tx
+          .select({ id: simTreasuryEntries.entryId })
+          .from(simTreasuryEntries)
+          .where(eq(simTreasuryEntries.idempotencyKey, entry.idempotencyKey))
+          .limit(1);
+        if (dup.length > 0) {
+          const cur = await tx
+            .select()
+            .from(simTreasuries)
+            .where(eq(simTreasuries.roomId, record.roomId))
+            .limit(1);
+          const row = cur[0];
+          return row
+            ? {
+                roomId: row.roomId,
+                balances: row.balances as Record<string, string>,
+                updatedAt: iso(row.updatedAt),
+              }
+            : null;
+        }
+      }
+      // Conditional (optimistic-concurrency) overwrite: applies only when the stored
+      // `updated_at` still matches the snapshot, so racing writes cannot lose an update.
+      const rows = await tx
+        .insert(simTreasuries)
+        .values(values)
+        .onConflictDoUpdate({
+          target: simTreasuries.roomId,
+          set: { balances: record.balances, updatedAt: new Date(record.updatedAt) },
+          setWhere: eq(simTreasuries.updatedAt, new Date(expectedUpdatedAt)),
+        })
+        .returning({ roomId: simTreasuries.roomId });
+      if (rows.length === 0) return null;
+      if (entry !== undefined) {
+        await tx.insert(simTreasuryEntries).values({
+          entryId: entry.entryId,
+          roomId: entry.roomId,
+          kind: entry.kind,
+          asset: entry.asset,
+          amount: entry.amount,
+          actorUserId: entry.actorUserId,
+          proposalId: entry.proposalId,
+          idempotencyKey: entry.idempotencyKey,
+          createdAt: new Date(entry.createdAt),
+        });
+      }
+      return record;
+    });
   }
 
   async appendEntry(entry: SimTreasuryEntryRecord): Promise<SimTreasuryEntryRecord> {
@@ -1395,6 +1489,7 @@ export class DrizzleSimTreasuryStore implements SimTreasuryStore {
       amount: entry.amount,
       actorUserId: entry.actorUserId,
       proposalId: entry.proposalId,
+      idempotencyKey: entry.idempotencyKey,
       createdAt: new Date(entry.createdAt),
     });
     return entry;
@@ -1415,8 +1510,29 @@ export class DrizzleSimTreasuryStore implements SimTreasuryStore {
       amount: row.amount,
       actorUserId: row.actorUserId,
       proposalId: row.proposalId,
+      idempotencyKey: row.idempotencyKey,
       createdAt: iso(row.createdAt),
     }));
+  }
+
+  async findEntryByIdempotencyKey(idempotencyKey: string): Promise<SimTreasuryEntryRecord | null> {
+    const [row] = await this.db
+      .select()
+      .from(simTreasuryEntries)
+      .where(eq(simTreasuryEntries.idempotencyKey, idempotencyKey))
+      .limit(1);
+    if (row === undefined) return null;
+    return {
+      entryId: row.entryId,
+      roomId: row.roomId,
+      kind: row.kind as SimTreasuryEntryRecord['kind'],
+      asset: row.asset,
+      amount: row.amount,
+      actorUserId: row.actorUserId,
+      proposalId: row.proposalId,
+      idempotencyKey: row.idempotencyKey,
+      createdAt: iso(row.createdAt),
+    };
   }
 
   async anonymizeActor(userId: string): Promise<number> {

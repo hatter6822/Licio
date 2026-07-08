@@ -126,6 +126,75 @@ describe('WS-L.4.1b/c proposal templates + simulated treasury', () => {
     }
   });
 
+  it('a deposit is atomic with its ledger entry (H8)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await passComprehension(fixture, userId);
+    const deps = simulationDeps(fixture.knomosis);
+    const result = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1000000',
+    });
+    expect(result.ok).toBe(true);
+    // The credit and its `deposit` ledger entry commit together — a read never sees
+    // a changed balance with no entry to explain it.
+    const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
+    const deposits = entries.filter((e) => e.kind === 'deposit');
+    expect(deposits).toHaveLength(1);
+    expect(deposits[0]?.amount).toBe('1000000');
+  });
+
+  it('an idempotency-keyed deposit credits AT MOST once on retry (H8)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await passComprehension(fixture, userId);
+    const deps = simulationDeps(fixture.knomosis);
+    const key = crypto.randomUUID();
+    const first = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1000000',
+      idempotencyKey: key,
+    });
+    expect(first.ok).toBe(true);
+    // The SAME key (a double-tap / network retry) is a no-op — the balance is
+    // unchanged and no second ledger entry is written.
+    const retry = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1000000',
+      idempotencyKey: key,
+    });
+    expect(retry.ok).toBe(true);
+    if (retry.ok) {
+      expect(retry.treasury.balances.find((b) => b.asset === 'SIM-USDC')?.amount).toBe(
+        '10001000000', // 10,000 + 1, NOT + 2
+      );
+    }
+    const deposits = (await fixture.knomosis.simTreasury.listEntries(ROOM, 10)).filter(
+      (e) => e.kind === 'deposit',
+    );
+    expect(deposits).toHaveLength(1);
+    // A DIFFERENT key credits again (distinct client intent).
+    const distinct = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1000000',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(distinct.ok).toBe(true);
+    if (distinct.ok) {
+      expect(distinct.treasury.balances.find((b) => b.asset === 'SIM-USDC')?.amount).toBe(
+        '10002000000',
+      );
+    }
+  });
+
   it('rejects a deposit whose SUMMED balance would overflow 78 digits (R7-6)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
@@ -373,13 +442,14 @@ describe('WS-L.4.1d simulated voting + execution', () => {
     expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe('executed');
   });
 
-  it('a crash-left `executing` proposal is NEVER re-executed — no double debit (F10)', async () => {
+  it('recovers a crash-left `executing` proposal whose debit never committed (H2)', async () => {
     const clock = Date.now();
     const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
     const deps = simulationDeps(fixture.knomosis);
     await ensureSimTreasury(deps, ROOM);
     const proposalId = crypto.randomUUID();
-    // A crash between claim and finalize left the proposal honestly `executing`.
+    // A crash between claim and DEBIT left the proposal honestly `executing` with NO
+    // ledger entry: the treasury was never touched, so recovery must debit exactly once.
     await fixture.knomosis.proposals.insert({
       proposalId,
       roomId: ROOM,
@@ -403,16 +473,75 @@ describe('WS-L.4.1d simulated voting + execution', () => {
       createdAt: new Date(clock).toISOString(),
       executedAt: null,
     });
-    // The sweep lists ONLY `timelocked` proposals, so an `executing` one is never
-    // re-run — the treasury can never be double-debited on recovery.
+    // The sweep re-drives the stranded `executing` proposal to completion.
+    expect(await executeElapsedSimProposals(deps)).toBe(1);
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe('executed');
+    // Debited EXACTLY once (10,000 − 1) with exactly one grant_execution entry.
+    expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('9999000000');
+    const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
+    expect(entries.filter((e) => e.kind === 'grant_execution')).toHaveLength(1);
+    // A SECOND sweep is a no-op — the proposal is already `executed`, never re-debited.
     expect(await executeElapsedSimProposals(deps)).toBe(0);
-    expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe(
-      'executing',
+    expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('9999000000');
+  });
+
+  it('recovers a crash-left `executing` proposal whose debit already committed — no double debit (H2)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const deps = simulationDeps(fixture.knomosis);
+    const current = await ensureSimTreasury(deps, ROOM);
+    const proposalId = crypto.randomUUID();
+    // A crash between the DEBIT and finalize: the ledger entry (keyed by proposalId)
+    // AND the reduced balance are already durable; only the finalize is missing.
+    await fixture.knomosis.simTreasury.put(
+      {
+        roomId: ROOM,
+        balances: { 'SIM-USDC': '9999000000' },
+        updatedAt: new Date(clock + 1).toISOString(),
+      },
+      current.updatedAt,
+      {
+        entryId: crypto.randomUUID(),
+        roomId: ROOM,
+        kind: 'grant_execution',
+        asset: 'SIM-USDC',
+        amount: '1000000',
+        actorUserId: null,
+        proposalId,
+        idempotencyKey: proposalId,
+        createdAt: new Date(clock).toISOString(),
+      },
     );
-    expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('10000000000');
-    // The manual route also refuses (not `timelocked`).
-    const manual = await executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null });
-    expect(manual.ok).toBe(false);
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      executionState: 'executing',
+      challengeState: 'none',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+    });
+    // Recovery finalizes WITHOUT re-debiting: the balance stays at the post-debit
+    // value and there is still exactly one grant_execution entry (idempotent by id).
+    expect(await executeElapsedSimProposals(deps)).toBe(1);
+    expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe('executed');
+    expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('9999000000');
+    const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
+    expect(entries.filter((e) => e.kind === 'grant_execution')).toHaveLength(1);
   });
 
   it('an engaged treasury_execution kill switch pauses simulated execution (F7)', async () => {

@@ -393,9 +393,18 @@ export const simTreasuryEntries = knomosisSchema.table(
     proposalId: uuid('proposal_id').references(() => governanceProposals.proposalId, {
       onDelete: 'set null',
     }),
+    // Natural dedup key for the atomic balance+ledger write (WS-L.4.1c): the
+    // proposalId for a grant_execution, a client key for a deposit.  Partial-unique
+    // (below) so a crash-retry can never double-apply.
+    idempotencyKey: text('idempotency_key'),
     createdAt: tz('created_at').notNull().defaultNow(),
   },
-  (t) => [index('sim_treasury_entry_room_idx').on(t.roomId, t.createdAt)],
+  (t) => [
+    index('sim_treasury_entry_room_idx').on(t.roomId, t.createdAt),
+    uniqueIndex('sim_treasury_entry_idem_idx')
+      .on(t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
+  ],
 );
 export type SimTreasuryEntryRow = typeof simTreasuryEntries.$inferSelect;
 

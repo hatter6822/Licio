@@ -33,6 +33,7 @@ import type {
   GovernanceProposalStore,
   ProposalVoteChoice,
   ProposalVoteStore,
+  SimTreasuryEntryRecord,
   SimTreasuryStore,
 } from './stores.js';
 
@@ -236,6 +237,10 @@ async function mutateSimTreasury<T>(
   compute: (
     balances: Record<string, string>,
   ) => { balances: Record<string, string>; result: T } | { error: SimulationError },
+  // When given, the ledger `entry` is appended ATOMICALLY with the balance write
+  // (and idempotently by `entry.idempotencyKey`), so a crash can never leave the
+  // balance changed with no durable entry to explain it (WS-L.4.1c).
+  entry?: SimTreasuryEntryRecord,
 ): Promise<{ ok: true; result: T } | SimulationError> {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const current = await ensureSimTreasury(deps, roomId);
@@ -249,6 +254,7 @@ async function mutateSimTreasury<T>(
     const written = await deps.simTreasury.put(
       { roomId, balances: computed.balances, updatedAt: nextUpdatedAt },
       current.updatedAt,
+      entry,
     );
     if (written !== null) return { ok: true, result: computed.result };
   }
@@ -271,7 +277,13 @@ export async function simTreasuryView(
 /** Simulated deposit; gated by the payment-intent kill switch (WS-L.3.5b). */
 export async function simDeposit(
   deps: SimulationDeps,
-  args: { roomId: string; userId: string; asset: string; amount: string },
+  args: {
+    roomId: string;
+    userId: string;
+    asset: string;
+    amount: string;
+    idempotencyKey?: string;
+  },
 ): Promise<{ ok: true; treasury: SimTreasuryResponse } | SimulationError> {
   const comprehension = await requireComprehension(deps, args.userId);
   if (comprehension !== null) return comprehension;
@@ -285,51 +297,74 @@ export async function simDeposit(
     return err(503, 'kill_switch_active', 'Payment creation is temporarily paused.');
   }
 
-  // Atomic read-modify-write: the asset-cap check + the balance add re-run against
-  // the LATEST balances each attempt, so concurrent deposits cannot lose an update
-  // or slip a distinct asset past the schema cap (WS-L.4.1c).
-  const applied = await mutateSimTreasury(deps, args.roomId, (balances) => {
-    const isNewAsset = !Object.hasOwn(balances, args.asset);
-    if (isNewAsset && Object.keys(balances).length >= SIM_TREASURY_MAX_ASSETS) {
-      return {
-        error: err(
-          409,
-          'too_many_sim_assets',
-          `A simulated treasury holds at most ${SIM_TREASURY_MAX_ASSETS} distinct assets.`,
-        ),
-      };
+  // A client-supplied idempotency key makes a retried deposit (a double-tap, or a
+  // network retry after a lost response) apply the credit AT MOST ONCE.  Namespaced
+  // with `deposit:` so a client key can never collide with a grant-execution key
+  // (a raw proposalId UUID) that shares the ledger's unique idempotency column.
+  const idempotencyKey =
+    args.idempotencyKey !== undefined
+      ? `deposit:${args.roomId}:${args.userId}:${args.idempotencyKey}`
+      : null;
+  if (idempotencyKey !== null) {
+    const prior = await deps.simTreasury.findEntryByIdempotencyKey(idempotencyKey);
+    if (prior !== null) {
+      // Already applied — return the current treasury without re-crediting.
+      return { ok: true, treasury: await simTreasuryView(deps, args.roomId) };
     }
-    // Each deposit fits `minorUnitAmountSchema` (≤ 78 digits), but the SUM can
-    // overflow the numeric(78,0) balance.  Reject BEFORE persisting — else the
-    // oversized row saves and then fails `simTreasuryResponseSchema` on every
-    // future read, wedging the treasury behind 500s (WS-L.4.1c).
-    const next = decSum([balances[args.asset] ?? '0', args.amount]);
-    if (next.replace('-', '').length > SIM_TREASURY_MAX_BALANCE_DIGITS) {
-      return {
-        error: err(
-          409,
-          'sim_balance_overflow',
-          'This deposit would overflow the simulated treasury balance.',
-        ),
-      };
-    }
-    return {
-      balances: { ...balances, [args.asset]: next },
-      result: null,
-    };
-  });
-  if (!applied.ok) return applied;
+  }
+
   const nowIso = new Date(deps.now()).toISOString();
-  await deps.simTreasury.appendEntry({
-    entryId: deps.uuid(),
-    roomId: args.roomId,
-    kind: 'deposit',
-    asset: args.asset,
-    amount: args.amount,
-    actorUserId: args.userId,
-    proposalId: null,
-    createdAt: nowIso,
-  });
+  // Atomic read-modify-write: the asset-cap check + the balance add re-run against
+  // the LATEST balances each attempt, and the `deposit` ledger entry is appended in
+  // the SAME write — so concurrent deposits cannot lose an update, slip a distinct
+  // asset past the schema cap, or leave the balance changed with no ledger entry
+  // to explain it (WS-L.4.1c).  The append is idempotent by `idempotencyKey`.
+  const applied = await mutateSimTreasury(
+    deps,
+    args.roomId,
+    (balances) => {
+      const isNewAsset = !Object.hasOwn(balances, args.asset);
+      if (isNewAsset && Object.keys(balances).length >= SIM_TREASURY_MAX_ASSETS) {
+        return {
+          error: err(
+            409,
+            'too_many_sim_assets',
+            `A simulated treasury holds at most ${SIM_TREASURY_MAX_ASSETS} distinct assets.`,
+          ),
+        };
+      }
+      // Each deposit fits `minorUnitAmountSchema` (≤ 78 digits), but the SUM can
+      // overflow the numeric(78,0) balance.  Reject BEFORE persisting — else the
+      // oversized row saves and then fails `simTreasuryResponseSchema` on every
+      // future read, wedging the treasury behind 500s (WS-L.4.1c).
+      const next = decSum([balances[args.asset] ?? '0', args.amount]);
+      if (next.replace('-', '').length > SIM_TREASURY_MAX_BALANCE_DIGITS) {
+        return {
+          error: err(
+            409,
+            'sim_balance_overflow',
+            'This deposit would overflow the simulated treasury balance.',
+          ),
+        };
+      }
+      return {
+        balances: { ...balances, [args.asset]: next },
+        result: null,
+      };
+    },
+    {
+      entryId: deps.uuid(),
+      roomId: args.roomId,
+      kind: 'deposit',
+      asset: args.asset,
+      amount: args.amount,
+      actorUserId: args.userId,
+      proposalId: null,
+      idempotencyKey,
+      createdAt: nowIso,
+    },
+  );
+  if (!applied.ok) return applied;
   await deps.governanceAudit.append({
     entryId: deps.uuid(),
     roomId: args.roomId,
@@ -631,7 +666,13 @@ export async function executeSimProposal(
       'This room has left simulated mode; simulated execution is disabled.',
     );
   }
-  if (proposal.executionState !== 'timelocked' || proposal.votingState !== 'passed') {
+  // Accept a `timelocked` proposal (the normal path) OR one ALREADY `executing`
+  // (recovery: a prior attempt claimed it but crashed before finalize; its debit is
+  // idempotent below, so re-driving it is safe and never double-debits, WS-L.4.1c).
+  if (
+    proposal.votingState !== 'passed' ||
+    (proposal.executionState !== 'timelocked' && proposal.executionState !== 'executing')
+  ) {
     return err(409, 'not_executable', 'This proposal is not ready to execute.');
   }
   const nowMs = deps.now();
@@ -646,49 +687,74 @@ export async function executeSimProposal(
   // leaves the proposal in the RECOVERABLE `executing` state — it becomes
   // `executed` ONLY via finalizeExecution AFTER the debit + ledger are durable, so
   // a crash between the claim and the debit leaves it honestly `executing` (never
-  // falsely `executed` without a debit) and the timelocked-only sweep never
-  // re-runs it, so the treasury is never double-debited (WS-L.4.1c).
-  const claimed = await deps.proposals.claimForExecution(args.proposalId);
-  if (claimed === null) {
-    return err(409, 'not_executable', 'This proposal is already being executed.');
+  // falsely `executed` without a debit) and the timelocked-only manual gate never
+  // re-runs it; only this recovery path (or the scheduler sweep) re-drives it.
+  let claimed: GovernanceProposalRecord = proposal;
+  if (proposal.executionState === 'timelocked') {
+    const c = await deps.proposals.claimForExecution(args.proposalId);
+    if (c === null) {
+      return err(409, 'not_executable', 'This proposal is already being executed.');
+    }
+    claimed = c;
   }
 
   const nowIso = new Date(nowMs).toISOString();
   if (claimed.requestedAmount !== null && claimed.asset !== null) {
     const asset = claimed.asset;
     const amount = claimed.requestedAmount;
-    // Atomic sufficiency-check + debit: a lost-update race can never drive the
-    // balance negative or double-spend the same grant (WS-L.4.1c).
-    const applied = await mutateSimTreasury(deps, args.roomId, (balances) => {
-      const available = balances[asset] ?? '0';
-      if (decCompare(amount, available) > 0) {
-        return {
-          error: err(409, 'insufficient_sim_funds', 'The simulated treasury cannot cover this.'),
-        };
+    // If the grant's ledger entry already exists, a prior attempt DID commit the
+    // debit before crashing — skip re-applying it (recovery is idempotent by
+    // proposalId).  Checked BEFORE the compute so a since-depleted balance can never
+    // spuriously fail the sufficiency check of an ALREADY-executed debit.
+    const priorDebit = await deps.simTreasury.findEntryByIdempotencyKey(claimed.proposalId);
+    if (priorDebit === null) {
+      // Atomic sufficiency-check + debit + ledger append, idempotent by proposalId:
+      // a lost-update race can never drive the balance negative or double-spend the
+      // same grant, and a crash can never leave the balance changed with no ledger
+      // entry to explain it (WS-L.4.1c).
+      const applied = await mutateSimTreasury(
+        deps,
+        args.roomId,
+        (balances) => {
+          const available = balances[asset] ?? '0';
+          if (decCompare(amount, available) > 0) {
+            return {
+              error: err(
+                409,
+                'insufficient_sim_funds',
+                'The simulated treasury cannot cover this.',
+              ),
+            };
+          }
+          return {
+            balances: { ...balances, [asset]: subtractMinor(available, amount) },
+            result: null,
+          };
+        },
+        {
+          entryId: deps.uuid(),
+          roomId: args.roomId,
+          kind: 'grant_execution',
+          asset,
+          amount,
+          actorUserId: args.actorUserId,
+          proposalId: claimed.proposalId,
+          idempotencyKey: claimed.proposalId,
+          createdAt: nowIso,
+        },
+      );
+      if (!applied.ok) {
+        // Insufficient funds BLOCKS the (already-claimed) proposal; a transient
+        // treasury contention RELEASES the claim back to `timelocked` so a retry
+        // can execute — never leaving it stranded as `executed` without a debit.
+        await deps.proposals.update({
+          ...claimed,
+          executionState: applied.code === 'insufficient_sim_funds' ? 'blocked' : 'timelocked',
+          executedAt: null,
+        });
+        return applied;
       }
-      return { balances: { ...balances, [asset]: subtractMinor(available, amount) }, result: null };
-    });
-    if (!applied.ok) {
-      // Insufficient funds BLOCKS the (already-claimed) proposal; a transient
-      // treasury contention RELEASES the claim back to `timelocked` so a retry
-      // can execute — never leaving it stranded as `executed` without a debit.
-      await deps.proposals.update({
-        ...claimed,
-        executionState: applied.code === 'insufficient_sim_funds' ? 'blocked' : 'timelocked',
-        executedAt: null,
-      });
-      return applied;
     }
-    await deps.simTreasury.appendEntry({
-      entryId: deps.uuid(),
-      roomId: args.roomId,
-      kind: 'grant_execution',
-      asset,
-      amount,
-      actorUserId: args.actorUserId,
-      proposalId: claimed.proposalId,
-      createdAt: nowIso,
-    });
   }
 
   // FINALIZE: CAS executing→executed ONLY now that the debit + ledger are durable.
@@ -710,11 +776,21 @@ export async function executeSimProposal(
   return { ok: true, proposal: finalized };
 }
 
-/** Scheduler sweep: execute every timelock-elapsed simulated proposal. */
+/** Scheduler sweep: execute every timelock-elapsed simulated proposal, AND re-drive
+ *  any stranded mid-execution (`executing`) proposal to completion.  A proposal that
+ *  crashed between its claim and finalize is stuck in `executing` — the manual route
+ *  requires `timelocked`, so ONLY this sweep can settle it; `executeSimProposal` is
+ *  idempotent for it (its debit is skipped if already committed, WS-L.4.1c). */
 export async function executeElapsedSimProposals(deps: SimulationDeps): Promise<number> {
   const elapsed = await deps.proposals.listExecutable(new Date(deps.now()).toISOString());
+  const stranded = await deps.proposals.listRecoverableExecuting();
+  // Dedup by proposalId (a proposal is only ever in one of the two sets, but guard
+  // against overlap so a single sweep never runs a proposal twice).
+  const seen = new Set<string>();
   let executed = 0;
-  for (const proposal of elapsed) {
+  for (const proposal of [...elapsed, ...stranded]) {
+    if (seen.has(proposal.proposalId)) continue;
+    seen.add(proposal.proposalId);
     const result = await executeSimProposal(deps, {
       roomId: proposal.roomId,
       proposalId: proposal.proposalId,

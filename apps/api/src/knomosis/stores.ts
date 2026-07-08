@@ -173,6 +173,12 @@ export interface SimTreasuryEntryRecord {
   amount: string;
   actorUserId: string | null;
   proposalId: string | null;
+  /** Natural dedup key for the ATOMIC balance-mutation-with-ledger (WS-L.4.1c):
+   *  the `proposalId` for a `grant_execution` (one debit per proposal) and a
+   *  client-supplied deposit key for a `deposit` (retry-safe).  When `put` is given
+   *  an entry whose `idempotencyKey` already exists, it applies NOTHING (no balance
+   *  change, no duplicate entry) so a crash-retry cannot double-apply. */
+  idempotencyKey: string | null;
   createdAt: string;
 }
 
@@ -225,15 +231,18 @@ export interface ComprehensionResultRecord {
 
 export interface FinancialWalletStore {
   insert(record: FinancialWalletRecord): Promise<FinancialWalletRecord>;
-  /** Insert a NEW wallet ONLY if the user is still below `maxActive` non-finalized
-   *  wallets — the count and the insert are ATOMIC (a per-user lock).  A plain
-   *  count-then-insert lets two concurrent links slip past the cap since the DB
-   *  enforces only address uniqueness, not a per-user active-count (WS-L.2.5a).
-   *  Returns 'cap_exceeded' when already at the cap. */
+  /** Insert a NEW wallet ONLY if (a) the address is not already owned by a DIFFERENT
+   *  account on ANY chain and (b) the user is still below `maxActive` non-finalized
+   *  wallets.  Both the cross-user ownership check and the active-count check are
+   *  ATOMIC with the insert (an address-level + a per-user advisory lock), so two
+   *  concurrent links can neither give one address to two accounts (the DB unique
+   *  index is only per-`(address, chain)`) nor slip past the cap (WS-L.2.5a).
+   *  Returns 'address_taken' when another account owns the address, 'cap_exceeded'
+   *  at the cap. */
   insertIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded'>;
+  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'>;
   /** REACTIVATE a finalized wallet only if the user is still below `maxActive` —
    *  count + update under the SAME per-user lock as `insertIfUnderCap`, so a
    *  concurrent relink can't exceed the cap either (WS-L.2.5a).  Returns
@@ -257,6 +266,15 @@ export interface FinancialWalletStore {
   ): Promise<FinancialWalletRecord | null>;
   listByUser(userId: string, includeUnlinked: boolean): Promise<FinancialWalletRecord[]>;
   update(record: FinancialWalletRecord): Promise<FinancialWalletRecord>;
+  /** Update ONLY the `riskState` column (WS-L.2.5c-1) — never a full-record write.
+   *  A risk read-through (preflight / risk-state route) can overlap another wallet
+   *  mutation (e.g. an unlink), so writing back a stale full snapshot would clobber
+   *  the lifecycle fields and silently cancel the audited unlink; a column-scoped
+   *  update touches nothing else. */
+  updateRiskState(
+    walletAccountId: string,
+    riskState: FinancialWalletRecord['riskState'],
+  ): Promise<void>;
   /** Wallets whose cooling-off elapsed (unlink finalization sweep, WS-L.2.5b). */
   listPendingFinalization(nowIso: string): Promise<FinancialWalletRecord[]>;
   /** CONDITIONALLY finalize an elapsed unlink: set `finalized` ONLY if the row is
@@ -350,6 +368,13 @@ export interface KnomosisActionStore {
     createdBefore: string,
     limit: number,
   ): Promise<KnomosisActionRecordEntity[]>;
+  /** DISTINCT deployment ids that have a FORWARDED, non-terminal action
+   *  (`submitted`/`accepted`/`settled`/`challenged`/`frozen`).  The scheduler must
+   *  keep ingesting + reconciling these even after their deployment is frozen/retired
+   *  and dropped from the active loop, or their finalized/reverted gateway events are
+   *  never consumed and the rows stay open forever, blocking wallet unlink
+   *  (WS-L.3.3a).  Excludes `reserving` (never forwarded) + terminal states. */
+  deploymentIdsWithInFlightActions(): Promise<string[]>;
   /** Pending obligations for the unlink check (WS-L.2.5b): non-terminal actions
    *  signed by this wallet. */
   listOpenByWallet(walletAccountId: string): Promise<KnomosisActionRecordEntity[]>;
@@ -449,6 +474,10 @@ export interface GovernanceProposalStore {
   ): Promise<GovernanceProposalRecord | null>;
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
+  /** Proposals stranded mid-execution (claimed `executing` but never finalized —
+   *  a crash between the claim and finalize).  The recovery sweep re-drives these
+   *  idempotently so a partial execution always settles (WS-L.4.1c). */
+  listRecoverableExecuting(): Promise<GovernanceProposalRecord[]>;
   /** Open proposals in a room of a given type (policy-conflict check). */
   listOpenByRoomAndType(
     roomId: string,
@@ -499,10 +528,23 @@ export interface SimTreasuryStore {
   /** Persist the balance map.  When `expectedUpdatedAt` is given, the write is
    *  CONDITIONAL (optimistic concurrency): it applies only if the stored row's
    *  `updatedAt` still equals it, returning null on a lost-update race so the
-   *  caller can retry.  Omit it for the unconditional bootstrap create. */
-  put(record: SimTreasuryRecord, expectedUpdatedAt?: string): Promise<SimTreasuryRecord | null>;
+   *  caller can retry.  Omit it for the unconditional bootstrap create.
+   *
+   *  When `entry` is given, the balance write and the ledger append are ATOMIC —
+   *  so a crash can never leave the balance changed with no durable entry to
+   *  explain it (WS-L.4.1c).  If `entry.idempotencyKey` is non-null and a ledger
+   *  entry with that key already exists, NOTHING is applied (no balance change, no
+   *  duplicate entry) and the CURRENT record is returned — a crash-retry is a no-op. */
+  put(
+    record: SimTreasuryRecord,
+    expectedUpdatedAt?: string,
+    entry?: SimTreasuryEntryRecord,
+  ): Promise<SimTreasuryRecord | null>;
   appendEntry(entry: SimTreasuryEntryRecord): Promise<SimTreasuryEntryRecord>;
   listEntries(roomId: string, limit: number): Promise<SimTreasuryEntryRecord[]>;
+  /** The ledger entry with this `idempotencyKey`, or null — the durable marker that
+   *  a debit/credit already committed (recovery skips re-applying it, WS-L.4.1c). */
+  findEntryByIdempotencyKey(idempotencyKey: string): Promise<SimTreasuryEntryRecord | null>;
   /** WS-L data-rights: ANONYMIZE (null the actor) on account deletion — the
    *  simulated ledger entries are append-only, so the actor id is scrubbed
    *  rather than the row deleted.  Returns the rows anonymized. */
@@ -619,8 +661,14 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   async insertIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded'> {
-    // Single-threaded in memory ⇒ count + insert is already atomic.
+  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'> {
+    // Single-threaded in memory ⇒ the cross-user check + count + insert are atomic.
+    // Cross-user: the address must not be owned by a DIFFERENT account on any chain.
+    for (const r of this.#rows.values()) {
+      if (r.addressHashHex === record.addressHashHex && r.userId !== record.userId) {
+        return 'address_taken';
+      }
+    }
     const active = [...this.#rows.values()].filter(
       (r) => r.userId === record.userId && r.unlinkState !== 'finalized',
     ).length;
@@ -675,6 +723,17 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
     if (!this.#rows.has(record.walletAccountId)) throw new Error('wallet not found');
     this.#rows.set(record.walletAccountId, { ...record });
     return { ...record };
+  }
+
+  async updateRiskState(
+    walletAccountId: string,
+    riskState: FinancialWalletRecord['riskState'],
+  ): Promise<void> {
+    // Column-scoped: re-read the CURRENT row and set only riskState, so a
+    // concurrent lifecycle mutation (unlink) is never clobbered by a stale snapshot.
+    const row = this.#rows.get(walletAccountId);
+    if (row === undefined) return;
+    this.#rows.set(walletAccountId, { ...row, riskState });
   }
 
   async listPendingFinalization(nowIso: string): Promise<FinancialWalletRecord[]> {
@@ -933,6 +992,16 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(0, limit)
       .map((r) => structuredClone(r));
+  }
+
+  async deploymentIdsWithInFlightActions(): Promise<string[]> {
+    const ids = new Set<string>();
+    for (const r of this.#rows.values()) {
+      if (!TERMINAL_SUBMISSION_STATES.has(r.submissionState) && r.submissionState !== 'reserving') {
+        ids.add(r.deploymentId);
+      }
+    }
+    return [...ids];
   }
 
   async listOpenByWallet(walletAccountId: string): Promise<KnomosisActionRecordEntity[]> {
@@ -1211,6 +1280,12 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
       .map((r) => structuredClone(r));
   }
 
+  async listRecoverableExecuting(): Promise<GovernanceProposalRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.executionState === 'executing' && r.votingState === 'passed')
+      .map((r) => structuredClone(r));
+  }
+
   async listOpenByRoomAndType(
     roomId: string,
     proposalType: GovernanceProposalRecord['proposalType'],
@@ -1365,6 +1440,7 @@ export class InMemorySimTreasuryStore implements SimTreasuryStore {
   async put(
     record: SimTreasuryRecord,
     expectedUpdatedAt?: string,
+    entry?: SimTreasuryEntryRecord,
   ): Promise<SimTreasuryRecord | null> {
     const current = this.#treasuries.get(record.roomId);
     if (expectedUpdatedAt === undefined) {
@@ -1374,9 +1450,19 @@ export class InMemorySimTreasuryStore implements SimTreasuryStore {
       this.#treasuries.set(record.roomId, structuredClone(record));
       return structuredClone(record);
     }
+    // IDEMPOTENCY: a crash-retry whose ledger entry already exists applies NOTHING
+    // (no double credit/debit), returning the current record as success.
+    if (
+      entry?.idempotencyKey != null &&
+      this.#entries.some((e) => e.idempotencyKey === entry.idempotencyKey)
+    ) {
+      return current ? structuredClone(current) : null;
+    }
     // Conditional overwrite: a lost-update race (the row moved on) returns null.
     if ((current?.updatedAt ?? null) !== expectedUpdatedAt) return null;
     this.#treasuries.set(record.roomId, structuredClone(record));
+    // ATOMIC with the balance write (single-threaded in memory).
+    if (entry !== undefined) this.#entries.push({ ...entry });
     return structuredClone(record);
   }
 
@@ -1391,6 +1477,11 @@ export class InMemorySimTreasuryStore implements SimTreasuryStore {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
       .map((e) => ({ ...e }));
+  }
+
+  async findEntryByIdempotencyKey(idempotencyKey: string): Promise<SimTreasuryEntryRecord | null> {
+    const found = this.#entries.find((e) => e.idempotencyKey === idempotencyKey);
+    return found === undefined ? null : { ...found };
   }
 
   async anonymizeActor(userId: string): Promise<number> {

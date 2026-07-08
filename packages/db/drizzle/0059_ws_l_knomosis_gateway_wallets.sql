@@ -232,6 +232,7 @@ CREATE TABLE "knomosis"."sim_treasury_entry" (
 	"amount" numeric(78, 0) NOT NULL,
 	"actor_user_id" uuid,
 	"proposal_id" uuid,
+	"idempotency_key" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "sim_treasury_entry_kind_chk" CHECK ("kind" IN ('deposit', 'grant_execution')),
 	CONSTRAINT "sim_treasury_entry_amount_chk" CHECK ("amount" >= 0),
@@ -241,6 +242,7 @@ CREATE TABLE "knomosis"."sim_treasury_entry" (
 ALTER TABLE "knomosis"."sim_treasury_entry" ADD CONSTRAINT "sim_treasury_entry_actor_fk" FOREIGN KEY ("actor_user_id") REFERENCES "public"."users"("user_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "knomosis"."sim_treasury_entry" ADD CONSTRAINT "sim_treasury_entry_proposal_fk" FOREIGN KEY ("proposal_id") REFERENCES "knomosis"."governance_proposal"("proposal_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "sim_treasury_entry_room_idx" ON "knomosis"."sim_treasury_entry" USING btree ("room_id", "created_at");--> statement-breakpoint
+CREATE UNIQUE INDEX "sim_treasury_entry_idem_idx" ON "knomosis"."sim_treasury_entry" USING btree ("idempotency_key") WHERE "idempotency_key" IS NOT NULL;--> statement-breakpoint
 CREATE TABLE "knomosis"."governance_audit_log" (
 	"entry_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"room_id" uuid NOT NULL,
