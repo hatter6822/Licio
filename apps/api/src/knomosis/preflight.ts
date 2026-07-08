@@ -101,7 +101,7 @@ export interface PreflightTokenBinding {
   typedDataHash: string;
 }
 
-const REAL_FUNDS_ENVIRONMENTS: ReadonlySet<KnomosisEnvironment> = new Set([
+export const REAL_FUNDS_ENVIRONMENTS: ReadonlySet<KnomosisEnvironment> = new Set([
   'capped_production',
   'mature_production',
 ]);
@@ -286,7 +286,24 @@ export async function runPreflight(
       ),
     );
   }
-  if (wallet.riskState === 'high') {
+  // READ-THROUGH the WS-N risk seam for a still-`pending` wallet BEFORE blocking
+  // it: a newly-linked wallet is `pending` until its first assessment, and the
+  // ONLY other refresh path (GET /wallets/:id/risk-state) is not mounted by the
+  // wallet UI — so a wallet the engine would clear would otherwise be PERMANENTLY
+  // unable to move funds.  An `unavailable` engine leaves `pending` in place (fail
+  // closed); a resolved assessment persists the concrete state (WS-L.2.5c-1/3.1b).
+  let riskState = wallet.riskState;
+  if (riskState === 'pending') {
+    const assessment = await deps.compliance.walletRisk({
+      walletAccountId: wallet.walletAccountId,
+      userId: input.userId,
+    });
+    if (assessment !== 'unavailable' && assessment.state !== riskState) {
+      riskState = assessment.state;
+      await deps.wallets.update({ ...wallet, riskState });
+    }
+  }
+  if (riskState === 'high') {
     return audited(
       fail(
         'signature',
@@ -297,11 +314,11 @@ export async function runPreflight(
       ),
     );
   }
-  // A newly linked wallet is `pending` until its FIRST compliance assessment —
-  // the fail-closed risk state.  Never let an unassessed wallet move funds:
-  // fund-transfer actions REJECT until an assessment resolves the risk to a
-  // concrete state (the non-fund governance signatures are unaffected).
-  if (wallet.riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType)) {
+  // A wallet that is STILL `pending` after the refresh (the engine could not clear
+  // it) may not move funds: fund-transfer actions REJECT until an assessment
+  // resolves the risk to a concrete state (non-fund governance signatures are
+  // unaffected).
+  if (riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType)) {
     return audited(
       fail(
         'signature',

@@ -194,6 +194,38 @@ describe('WS-L.2.3a nonce + WS-L.2.5a link (REAL SIWE)', () => {
     }
   });
 
+  it('links the SAME address on TWO active chains as distinct per-chain rows (G1)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // Two active chains in the allowlist for this test.
+    const deps = { ...walletDeps(fixture), chainAllowlist: () => [31337, 42161] };
+    const linkOn = async (session: string, chainId: number) => {
+      const nonce = await issueWalletLinkNonce(deps, { userId, sessionTokenHash: session });
+      if (!nonce.ok) throw new Error('nonce failed');
+      const signed = await signedSiweLink(nonce.nonce, testAccount, { chainId });
+      return linkWallet(deps, {
+        userId,
+        sessionTokenHash: session,
+        message: signed.message,
+        signature: signed.signature,
+      });
+    };
+    const link1 = await linkOn('s1', 31337);
+    expect(link1.ok).toBe(true);
+    if (link1.ok) expect(link1.alreadyLinked).toBe(false);
+    // The SAME address on a DIFFERENT active chain → a NEW row (not already_linked),
+    // instead of returning the chain-1 wallet that the chain gate would then reject.
+    const link2 = await linkOn('s2', 42161);
+    expect(link2.ok).toBe(true);
+    if (link2.ok) {
+      expect(link2.alreadyLinked).toBe(false);
+      expect(link2.wallet.chainId).toBe(42161);
+    }
+    const wallets = await fixture.knomosis.wallets.listByUser(userId, false);
+    expect(wallets).toHaveLength(2);
+    expect(new Set(wallets.map((w) => w.chainId))).toEqual(new Set([31337, 42161]));
+  });
+
   it('enforces the max-wallets cap (WS-L.2.5d)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);

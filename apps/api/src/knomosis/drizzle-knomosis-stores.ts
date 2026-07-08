@@ -159,6 +159,23 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
     return rows[0] ? mapWallet(rows[0]) : null;
   }
 
+  async getByAddressHashAndChain(
+    addressHashHex: string,
+    chainId: number,
+  ): Promise<FinancialWalletRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(walletAccounts)
+      .where(
+        and(
+          eq(walletAccounts.addressHash, Buffer.from(addressHashHex, 'hex')),
+          eq(walletAccounts.chainId, chainId),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? mapWallet(rows[0]) : null;
+  }
+
   async listByUser(userId: string, includeUnlinked: boolean): Promise<FinancialWalletRecord[]> {
     const rows = await this.db
       .select()

@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import type { KnomosisGateway } from '../knomosis/gateway.js';
 import { ingestGatewayEvents, rebuildFromSnapshot } from '../knomosis/ingest.js';
+import type { CompliancePort } from '../knomosis/ports.js';
 import type { PreflightDeps, PreflightRequestInput } from '../knomosis/preflight.js';
 import { runPreflight } from '../knomosis/preflight.js';
 import { canExpandTreasury, reconcileDeployment } from '../knomosis/reconciliation.js';
@@ -59,6 +60,8 @@ function submissionDeps(fixture: KnomosisFixture): SubmissionDeps {
     wallets: s.wallets,
     rooms: s.rooms,
     proposals: s.proposals,
+    compliance: s.compliance,
+    regionForUser: (userId: string) => s.regionResolver.regionForUser(userId),
     signatures: s.proposalSignatures,
     nonces: s.nonces,
     gateway: s.gateway,
@@ -185,6 +188,67 @@ describe('WS-L.3.1 preflight pipeline', () => {
       expect(result.reason_code).toBe('RISK_BLOCKED');
       expect(result.failed_step).toBe('signature');
     }
+  });
+
+  const clearCompliance: CompliancePort = {
+    screenAddress: async () => 'clear',
+    fraudRisk: async () => 'normal',
+    jurisdiction: async () => 'allowed',
+    walletRisk: async () => ({ state: 'normal', explanation: 'cleared', nextStep: null }),
+  };
+
+  it('REFRESHES a pending wallet risk via the WS-N seam and passes once cleared (G3)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const walletAccountId = await linkWalletDirectly(fixture, userId, 'pending');
+    // The WS-N engine CLEARS the wallet (and the downstream compliance gates).
+    fixture.knomosis.compliance = clearCompliance;
+    const req = await buildDeposit(userId, walletAccountId);
+    const result = await runPreflight(preflightDeps(fixture), req);
+    // The read-through refresh cleared `pending`→`normal`, so it is NOT RISK_BLOCKED.
+    expect(result.result).toBe('pass');
+    // The refreshed state is PERSISTED (the wallet UI + future actions see it).
+    expect((await fixture.knomosis.wallets.getById(walletAccountId))?.riskState).toBe('normal');
+  });
+
+  it('re-runs compliance at submit — a jurisdiction blocked after preflight is rejected (G4)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    fixture.knomosis.compliance = clearCompliance;
+    const req = await buildDeposit(userId, walletAccountId);
+    const pre = await runPreflight(preflightDeps(fixture), req);
+    if (pre.result !== 'pass') throw new Error(`preflight should pass: ${JSON.stringify(pre)}`);
+    // The user's region becomes BLOCKED during the preflight-token TTL.
+    fixture.knomosis.compliance = { ...clearCompliance, jurisdiction: async () => 'blocked' };
+    const idem = crypto.randomUUID();
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: idem,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: req.typedDataMessage,
+      signature: req.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('JURISDICTION_BLOCKED');
+    // The compliance gate runs PRE-reservation, so no action row was inserted.
+    expect(await fixture.knomosis.actions.getByIdempotencyKey(userId, idem)).toBeNull();
   });
 
   it('rejects an unregistered action type (ACTION_TYPE_UNKNOWN, fail closed)', async () => {

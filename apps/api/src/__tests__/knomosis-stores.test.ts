@@ -116,6 +116,20 @@ describe('InMemoryFinancialWalletStore', () => {
     await store.insert(wallet({ unlinkState: 'pending_unlink', unlinkFinalizeAfter: null }));
     expect(await store.listPendingFinalization(now())).toHaveLength(1);
   });
+
+  it('uniqueness is PER (address, chain): same address on two chains, not one chain twice (G1)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const addr = 'addr-x';
+    await store.insert(wallet({ addressHashHex: addr, chainId: 1 }));
+    // The SAME address on a DIFFERENT chain is allowed — a distinct per-chain row.
+    await store.insert(wallet({ addressHashHex: addr, chainId: 42161 }));
+    // The same (address, chain) is rejected (mirrors the DB unique index).
+    await expect(store.insert(wallet({ addressHashHex: addr, chainId: 1 }))).rejects.toThrow();
+    // Per-chain lookup resolves the right row; chain-agnostic returns any (cross-user).
+    expect((await store.getByAddressHashAndChain(addr, 42161))?.chainId).toBe(42161);
+    expect(await store.getByAddressHashAndChain(addr, 999)).toBeNull();
+    expect(await store.getByAddressHash(addr)).not.toBeNull();
+  });
 });
 
 describe('InMemoryKnomosisActionStore', () => {

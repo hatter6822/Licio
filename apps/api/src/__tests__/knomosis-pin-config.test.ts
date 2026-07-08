@@ -64,6 +64,27 @@ describe('WS-L.1.1a pin loader', () => {
     ).toThrow();
   });
 
+  it('rejects two NON-RETIRED deployments for the same (environment, chain_id) (G2)', () => {
+    const base = KNOMOSIS_PIN.deployments[0];
+    if (!base) throw new Error('no local deployment');
+    // Two active rows for the same env/chain (distinct ids) → collides with the DB
+    // active-only partial unique index; the pin validator must reject it.
+    expect(() =>
+      parsePinConfig({
+        ...KNOMOSIS_PIN,
+        deployments: [base, { ...base, deployment_id: crypto.randomUUID() }],
+      }),
+    ).toThrow();
+    // A RETIRED duplicate alongside the active one is allowed (the index excludes
+    // retired), so a rotated-away deployment can stay pinned for audit.
+    expect(() =>
+      parsePinConfig({
+        ...KNOMOSIS_PIN,
+        deployments: [base, { ...base, deployment_id: crypto.randomUUID(), status: 'retired' }],
+      }),
+    ).not.toThrow();
+  });
+
   it('allowlist lookups are exact-match and case-insensitive', () => {
     const local = KNOMOSIS_PIN.deployments[0];
     if (!local) throw new Error('no local deployment');

@@ -19,11 +19,13 @@ import type { EphemeralStore } from '../identity/ephemeral-store.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
+import type { CompliancePort } from './ports.js';
 import {
   buildEip712Domain,
   consumePreflightToken,
   FUND_TRANSFER_ACTIONS,
   MODE_ENVIRONMENTS,
+  REAL_FUNDS_ENVIRONMENTS,
   type RoomGovernancePort,
 } from './preflight.js';
 import {
@@ -85,6 +87,14 @@ export interface SubmissionDeps {
    *  close during the token TTL, so a late token must not forward or record a
    *  signature for a proposal that is no longer open (WS-L.3.2a). */
   proposals: GovernanceProposalStore;
+  /** Compliance seam — the §23.5 step-7/7b/8 sanctions/jurisdiction/fraud gates
+   *  are RE-RUN at submit (a recipient can be sanctioned, a region blocked, or a
+   *  fraud signal flip during the token TTL) so a stale token never forwards on a
+   *  compliance decision that has since changed (WS-L.3.2a). */
+  compliance: CompliancePort;
+  /** §19.1-safe region resolver for the jurisdiction re-check (self-declared
+   *  account locale region — never an address). */
+  regionForUser: (userId: string) => Promise<string | null>;
   /** Durable governance-signature ledger — a `proposal_sign` submit is
    *  recorded here (insert-once per (proposal, wallet)) so the vote powers the
    *  tally + the unlink-obligation check, not just the on-chain action row. */
@@ -330,6 +340,71 @@ export async function submitAction(
         message: 'A conflicting charter-update proposal is already open.',
       };
     }
+  }
+
+  // RE-RUN the §23.5 step-7/7b/8 COMPLIANCE gates at submit: sanctions can be
+  // listed, a region blocked, or a fraud signal flip during the preflight-token
+  // TTL, so a stale token must NOT forward on a compliance decision that has since
+  // changed (WS-L.3.2a re-runs WS-L.3.1b steps 7/7b/8).  Real-funds environments
+  // fail closed on unavailable screening / unknown jurisdiction.
+  const realFunds = REAL_FUNDS_ENVIRONMENTS.has(deployment.environment);
+  if (FUND_TRANSFER_ACTIONS.has(actionType)) {
+    const screenTarget = (
+      input.typedDataMessage['recipient'] ??
+      input.typedDataMessage['actor'] ??
+      ''
+    ).toLowerCase();
+    const sanctions = await deps.compliance.screenAddress({
+      addressLower: screenTarget,
+      deploymentId: input.deploymentId,
+    });
+    if (sanctions === 'blocked') {
+      return {
+        ok: false,
+        status: 409,
+        code: 'SANCTIONS_BLOCKED',
+        message: 'This action cannot be completed.',
+      };
+    }
+    if (sanctions === 'unavailable' && realFunds) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'JURISDICTION_UNKNOWN',
+        message: 'Compliance screening is unavailable; real-fund actions are paused.',
+      };
+    }
+  }
+  const region = await deps.regionForUser(input.userId);
+  const jurisdiction = await deps.compliance.jurisdiction({ userId: input.userId, region });
+  if (jurisdiction === 'blocked') {
+    return {
+      ok: false,
+      status: 409,
+      code: 'JURISDICTION_BLOCKED',
+      message: 'This feature is not available in your region.',
+    };
+  }
+  if (jurisdiction === 'unknown' && realFunds) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'JURISDICTION_UNKNOWN',
+      message: 'Your region could not be verified; real-fund actions are unavailable.',
+    };
+  }
+  const fraud = await deps.compliance.fraudRisk({
+    userId: input.userId,
+    actionType,
+    amountMinorUnits: input.typedDataMessage['amount'] ?? null,
+  });
+  if (fraud === 'blocked' || (fraud === 'unavailable' && realFunds)) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'FRAUD_RISK',
+      message: 'This action was flagged by risk checks.',
+    };
   }
 
   // ---- RESERVE (state `reserving`) ------------------------------------------
@@ -656,20 +731,16 @@ export async function resubmitPendingActions(
       (await deps.submissionPaused(record.roomId, record.actionType, record.actorUserId))
     )
       continue;
-    // The signed payload can EXPIRE while the action sits in `submitted` during a
-    // gateway outage — never forward a signature past the time the user authorized
-    // (the submit path checks this, so the retry must too, WS-L.3.2a).  An expired
-    // record fails terminally rather than being retried forever.
-    const expirationSeconds = Number(record.signedAction.message['expiration'] ?? '');
-    if (!Number.isFinite(expirationSeconds) || expirationSeconds * 1000 <= deps.now()) {
-      await applyTransition(
-        deps,
-        record,
-        'failed',
-        'the signed action expired before it was accepted',
-      );
-      continue;
-    }
+    // A `submitted` row was ALREADY forwarded once (submit only reserves→submits
+    // after the expiration gate passes; it reaches `submitted` via the gateway
+    // OUTAGE path).  The first POST may have REACHED the gateway before timing out,
+    // so the gateway can still hold — or later emit — an ACCEPTED verdict for it.
+    // Therefore DO NOT fail an expired `submitted` row terminally here: re-forward
+    // it (the same idempotency key makes this safe) and let the gateway's own
+    // verdict decide — an accepted action returns its cached accept (→ accepted),
+    // a genuinely-expired-and-unaccepted one is DECLINED by the gateway (→ failed).
+    // Pre-emptively failing on expiry could strand a real accepted action as
+    // terminally `failed` so later finalized events can never advance it (WS-L.3.2a).
     await forwardToGateway(deps, gateway, record);
     forwarded += 1;
   }

@@ -414,6 +414,13 @@
       "when": 1782199101000,
       "tag": "0059_ws_l_knomosis_gateway_wallets",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1782199102000,
+      "tag": "0060_ws_l_per_chain_wallet",
+      "breakpoints": true
     }
   ]
 }

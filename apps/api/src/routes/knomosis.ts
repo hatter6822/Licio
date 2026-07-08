@@ -88,6 +88,8 @@ function submissionDeps(services: KnomosisServices): SubmissionDeps | null {
     wallets: services.wallets,
     rooms: services.rooms,
     proposals: services.proposals,
+    compliance: services.compliance,
+    regionForUser: (userId) => services.regionResolver.regionForUser(userId),
     signatures: services.proposalSignatures,
     nonces: services.nonces,
     gateway: services.gateway,

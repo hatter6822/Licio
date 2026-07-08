@@ -64,7 +64,11 @@ export const walletAccounts = walletSchema.table(
   },
   (t) => [
     index('wallet_accounts_user_idx').on(t.userId),
-    uniqueIndex('wallet_accounts_addr_idx').on(t.addressHash),
+    // PER-CHAIN uniqueness (WS-L.2.5a): one address may be linked on multiple
+    // active chains (distinct rows), but never twice on the SAME chain.  The
+    // cross-user "one address → one account" rule is enforced in the link flow via
+    // a chain-agnostic `getByAddressHash` ownership check.
+    uniqueIndex('wallet_accounts_addr_chain_idx').on(t.addressHash, t.chainId),
   ],
 );
 

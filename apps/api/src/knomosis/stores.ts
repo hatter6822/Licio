@@ -243,7 +243,18 @@ export interface FinancialWalletStore {
     maxActive: number,
   ): Promise<FinancialWalletRecord | 'cap_exceeded'>;
   getById(walletAccountId: string): Promise<FinancialWalletRecord | null>;
+  /** ANY wallet for this address (any chain) — the CROSS-USER ownership check: an
+   *  address is owned by ONE account across every chain, so a different account can
+   *  never link it (WS-L.2.5a). */
   getByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null>;
+  /** The wallet for this address ON a specific chain — wallets are PER-CHAIN rows,
+   *  so the SAME owner can link one address on multiple active chains (uniqueness is
+   *  `(address_hash, chain_id)`).  Used for the per-chain relink/idempotency path
+   *  (WS-L.2.5a). */
+  getByAddressHashAndChain(
+    addressHashHex: string,
+    chainId: number,
+  ): Promise<FinancialWalletRecord | null>;
   listByUser(userId: string, includeUnlinked: boolean): Promise<FinancialWalletRecord[]>;
   update(record: FinancialWalletRecord): Promise<FinancialWalletRecord>;
   /** Wallets whose cooling-off elapsed (unlink finalization sweep, WS-L.2.5b). */
@@ -590,8 +601,14 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   readonly #rows = new Map<string, FinancialWalletRecord>();
 
   async insert(record: FinancialWalletRecord): Promise<FinancialWalletRecord> {
+    // Uniqueness is PER (address, chain) — mirrors the `(address_hash, chain_id)`
+    // DB unique index — so the same address can be linked on multiple chains, but
+    // never twice on the SAME chain (WS-L.2.5a).
     for (const existing of this.#rows.values()) {
-      if (existing.addressHashHex === record.addressHashHex) {
+      if (
+        existing.addressHashHex === record.addressHashHex &&
+        existing.chainId === record.chainId
+      ) {
         throw new Error('wallet address already linked');
       }
     }
@@ -633,6 +650,16 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   async getByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null> {
     for (const row of this.#rows.values()) {
       if (row.addressHashHex === addressHashHex) return { ...row };
+    }
+    return null;
+  }
+
+  async getByAddressHashAndChain(
+    addressHashHex: string,
+    chainId: number,
+  ): Promise<FinancialWalletRecord | null> {
+    for (const row of this.#rows.values()) {
+      if (row.addressHashHex === addressHashHex && row.chainId === chainId) return { ...row };
     }
     return null;
   }

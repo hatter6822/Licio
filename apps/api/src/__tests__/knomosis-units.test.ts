@@ -720,9 +720,10 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
     expect(after?.submissionState).toBe('accepted');
   });
 
-  it('resubmitPendingActions FAILS an expired submitted action instead of forwarding (R7-3)', async () => {
+  it('resubmitPendingActions FORWARDS an expired submitted action — the gateway decides (G5)', async () => {
     const fixture = await freshKnomosisServices();
-    // A submitted action whose signed expiration has already passed.
+    // A `submitted` action (already forwarded once, gateway outage) whose signed
+    // expiration has since passed.
     const expired = baseAction({
       submissionState: 'submitted',
       reconciliationState: 'pending',
@@ -747,9 +748,13 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
       },
       LOCAL_DEPLOYMENT.deployment_id,
     );
-    expect(count).toBe(0); // NOT forwarded past the authorized expiration
+    // The row already reached the gateway once, so the retry RE-FORWARDS it (the
+    // idempotency key makes it safe) and lets the GATEWAY's verdict decide — it is
+    // NOT pre-emptively marked terminally `failed` on expiry, which would strand a
+    // possibly-accepted action so later finalized events could never advance it (G5).
+    expect(count).toBe(1);
     const after = await fixture.knomosis.actions.getById(expired.actionRecordId);
-    expect(after?.submissionState).toBe('failed');
+    expect(after?.submissionState).not.toBe('failed');
   });
 });
 
@@ -766,6 +771,8 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
       contentVisibleToUser: async () => false,
     },
     proposals: fixture.knomosis.proposals,
+    compliance: fixture.knomosis.compliance,
+    regionForUser: (userId: string) => fixture.knomosis.regionResolver.regionForUser(userId),
     signatures: fixture.knomosis.proposalSignatures,
     nonces: fixture.knomosis.nonces,
     gateway: fixture.knomosis.gateway,
