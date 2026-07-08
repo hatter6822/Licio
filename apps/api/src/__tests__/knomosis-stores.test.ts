@@ -150,9 +150,45 @@ describe('InMemoryFinancialWalletStore', () => {
       ),
     ).toBe('address_taken');
     // The owning account is still under the cap → a DIFFERENT address links fine.
-    expect(
-      typeof (await store.insertIfUnderCap(wallet({ userId: 'u1', addressHashHex: 'other' }), 5)),
-    ).toBe('object');
+    const created = await store.insertIfUnderCap(
+      wallet({ userId: 'u1', addressHashHex: 'other' }),
+      5,
+    );
+    expect(created).not.toBe('address_taken');
+    expect(created).not.toBe('cap_exceeded');
+    if (typeof created !== 'string') expect(created.created).toBe(true);
+  });
+
+  it('insertIfUnderCap is idempotent for a concurrent same-user (address,chain) relink (J1)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const addr = 'race-addr';
+    const first = await store.insertIfUnderCap(
+      wallet({ userId: 'u1', addressHashHex: addr, chainId: 1 }),
+      5,
+    );
+    expect(typeof first).not.toBe('string');
+    if (typeof first === 'string') throw new Error('unreachable');
+    expect(first.created).toBe(true);
+    // A concurrent same-user link for the SAME (address, chain) — the caller's outer
+    // pre-check saw no row — returns the EXISTING wallet as an idempotent relink, NOT
+    // a thrown unique-constraint or a spurious cap_exceeded.
+    const again = await store.insertIfUnderCap(
+      wallet({ userId: 'u1', addressHashHex: addr, chainId: 1 }),
+      5,
+    );
+    expect(typeof again).not.toBe('string');
+    if (typeof again === 'string') throw new Error('unreachable');
+    expect(again.created).toBe(false);
+    expect(again.wallet.walletAccountId).toBe(first.wallet.walletAccountId);
+    // The relink did NOT create a second row.
+    expect(await store.listByUser('u1', true)).toHaveLength(1);
+    // Even AT the cap, an idempotent relink still succeeds (it adds no new row).
+    const atCap = await store.insertIfUnderCap(
+      wallet({ userId: 'u1', addressHashHex: addr, chainId: 1 }),
+      1,
+    );
+    expect(atCap).not.toBe('cap_exceeded');
+    if (typeof atCap !== 'string') expect(atCap.created).toBe(false);
   });
 
   it('updateRiskState changes ONLY riskState — never the lifecycle fields (H3)', async () => {

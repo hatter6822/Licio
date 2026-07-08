@@ -238,11 +238,16 @@ export interface FinancialWalletStore {
    *  concurrent links can neither give one address to two accounts (the DB unique
    *  index is only per-`(address, chain)`) nor slip past the cap (WS-L.2.5a).
    *  Returns 'address_taken' when another account owns the address, 'cap_exceeded'
-   *  at the cap. */
+   *  at the cap, `{ wallet, created: true }` on a fresh insert, or — when a
+   *  concurrent same-user link already created this exact `(address, chain)` row
+   *  under the lock — `{ wallet, created: false }` (the IDEMPOTENT relink outcome:
+   *  it never throws the unique constraint or spuriously reports `cap_exceeded`). */
   insertIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'>;
+  ): Promise<
+    { wallet: FinancialWalletRecord; created: boolean } | 'cap_exceeded' | 'address_taken'
+  >;
   /** REACTIVATE a finalized wallet only if the user is still below `maxActive` —
    *  count + update under the SAME per-user lock as `insertIfUnderCap`, so a
    *  concurrent relink can't exceed the cap either (WS-L.2.5a).  Returns
@@ -661,7 +666,9 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   async insertIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'> {
+  ): Promise<
+    { wallet: FinancialWalletRecord; created: boolean } | 'cap_exceeded' | 'address_taken'
+  > {
     // Single-threaded in memory ⇒ the cross-user check + count + insert are atomic.
     // Cross-user: the address must not be owned by a DIFFERENT account on any chain.
     for (const r of this.#rows.values()) {
@@ -669,11 +676,24 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
         return 'address_taken';
       }
     }
+    // IDEMPOTENT relink: a concurrent same-user link for this exact `(address,
+    // chain)` may have already created the row after the caller's pre-check saw
+    // none.  Return it instead of inserting a duplicate (which would throw the
+    // unique constraint) or miscounting it toward the cap (WS-L.2.5a).
+    for (const r of this.#rows.values()) {
+      if (
+        r.addressHashHex === record.addressHashHex &&
+        r.chainId === record.chainId &&
+        r.userId === record.userId
+      ) {
+        return { wallet: { ...r }, created: false };
+      }
+    }
     const active = [...this.#rows.values()].filter(
       (r) => r.userId === record.userId && r.unlinkState !== 'finalized',
     ).length;
     if (active >= maxActive) return 'cap_exceeded';
-    return this.insert(record);
+    return { wallet: await this.insert(record), created: true };
   }
 
   async reactivateIfUnderCap(

@@ -13,7 +13,7 @@ import type { ForumServices } from '../forum/services.js';
 import type { GovernanceStores } from '../governance/stores.js';
 import type { IdentityServices } from '../identity/services.js';
 import { killSwitchDecision } from './killswitch.js';
-import { KNOMOSIS_PIN } from './pin.js';
+import { KNOMOSIS_PIN, type PinConfig } from './pin.js';
 import { createIdentityRegionResolver } from './ports.js';
 import type { LawPackPort, RoomGovernancePort } from './preflight.js';
 import type { ReadinessChecklistPort, RoomModePort } from './readiness.js';
@@ -135,8 +135,14 @@ export function buildGovernanceKillSwitchGuards(services: KnomosisServices): {
  * `knomosis_deployment` rows.  This reviewed boot job is the ONLY writer —
  * there is no user-facing mutation path.  Idempotent (upsert by id).
  */
-export async function syncPinnedDeployments(services: KnomosisServices): Promise<number> {
-  const pinnedIds = new Set(KNOMOSIS_PIN.deployments.map((p) => p.deployment_id));
+export async function syncPinnedDeployments(
+  services: KnomosisServices,
+  // The validated pin document (defaults to the SSOT).  Injectable ONLY so the
+  // rotation-ordering path can be exercised in tests — production always uses the
+  // module-level pin.
+  pin: PinConfig = KNOMOSIS_PIN,
+): Promise<number> {
+  const pinnedIds = new Set(pin.deployments.map((p) => p.deployment_id));
   // RETIRE first, THEN upsert.  A row no longer in the pin set is a split brain
   // (the list/scheduler trust the DB's active rows while manifest/preflight trust
   // the pin file).  Retiring BEFORE the pinned upserts also frees the active-only
@@ -151,7 +157,18 @@ export async function syncPinnedDeployments(services: KnomosisServices): Promise
     }
   }
   let synced = 0;
-  for (const pin of KNOMOSIS_PIN.deployments) {
+  // Upsert `retired` pins BEFORE the rest.  A rotation that keeps the OLD
+  // deployment in the pin file with `status: 'retired'` leaves its id in
+  // `pinnedIds`, so the orphan pre-pass above does NOT retire it.  If the NEW
+  // active deployment for the same `(environment, chain_id)` appears earlier in
+  // the pin file, upserting it to `active` first would collide with the still-
+  // active displaced row on the active-only `(environment, chain_id)` unique
+  // index.  Retiring the displaced pin FIRST frees that slot (WS-L.1.1a-1).
+  const orderedPins = [
+    ...pin.deployments.filter((p) => p.status === 'retired'),
+    ...pin.deployments.filter((p) => p.status !== 'retired'),
+  ];
+  for (const pin of orderedPins) {
     await services.deployments.upsert({
       deploymentId: pin.deployment_id,
       environment: pin.environment,

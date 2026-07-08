@@ -259,15 +259,24 @@ export async function linkWallet(
   if (inserted === 'cap_exceeded') {
     return err(429, 'wallet_limit', `You can link at most ${config.maxWalletsPerUser} wallets.`);
   }
+  if (!inserted.created) {
+    // A concurrent same-user link already created this exact `(address, chain)` row
+    // under the store's address lock — an idempotent relink, NOT a fresh link: return
+    // the existing wallet as `alreadyLinked` without a duplicate audit/log entry.
+    return { ok: true, wallet: inserted.wallet, alreadyLinked: true };
+  }
   await deps.audit.append({
     actorUserId: args.userId,
     eventType: 'wallet_link',
     // The truncation only — never the full address (§19.5).
-    targetRef: inserted.addressTruncated,
+    targetRef: inserted.wallet.addressTruncated,
     context: { setting: 'link' },
   });
-  deps.log('knomosis.wallet.linked', { chain_id: inserted.chainId, type: inserted.walletType });
-  return { ok: true, wallet: inserted, alreadyLinked: false };
+  deps.log('knomosis.wallet.linked', {
+    chain_id: inserted.wallet.chainId,
+    type: inserted.wallet.walletType,
+  });
+  return { ok: true, wallet: inserted.wallet, alreadyLinked: false };
 }
 
 /** WS-L.2.5c — the owner's wallet list with "Wallet N" label defaults. */

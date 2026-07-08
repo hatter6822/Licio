@@ -251,11 +251,24 @@ export async function ingestGatewayEvents(
         // it vanish without a mismatch or receipt.  Record a CRITICAL divergence
         // (reconciliation is driven from action rows, so nothing else would surface
         // it) and alert for operator review (WS-L.3.3b).
+        //
+        // KEY the divergence by the ACTION IDENTITY (its `typed_data_hash`), not by
+        // `event:${seq}.${index}`: when the late action row finally arrives it
+        // reconciles under this SAME hash, so `reconcileDeployment` can supersede this
+        // mismatch with a resolving `match` — otherwise an event-scoped entity that
+        // reconciliation (driven by action rows) never re-keys would block
+        // `canExpandTreasury` forever.  A malformed event with no hash falls back to
+        // the seq/index ref (operator review; it has no action to reconcile against).
+        const orphanHash = event.payload['typed_data_hash'];
+        const entityRef =
+          typeof orphanHash === 'string' && orphanHash.length > 0
+            ? `event-orphan:${orphanHash}`
+            : `event:${event.seq}.${event.index}`;
         await deps.reconciliation.append({
           resultId: deps.uuid(),
           deploymentId,
           entityType: 'action',
-          entityRef: `event:${event.seq}.${event.index}`,
+          entityRef,
           outcome: 'mismatch',
           severity: 'critical',
           details: {

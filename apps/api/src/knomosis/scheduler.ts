@@ -69,49 +69,62 @@ export async function runKnomosisTick(
     } catch (error) {
       onError(error, 'event_ingest');
     }
-    try {
-      // Gate scheduler retries by the SAME live crypto flag + kill switch the
-      // HTTP submit route honours, per record's room (WS-L.3.5c): an incident
-      // pause must stop the scheduler forwarding submitted actions too.
-      const submissionPaused = async (
-        roomId: string,
-        actionType: KnomosisSignedActionType,
-        actorUserId: string,
-      ): Promise<boolean> => {
-        if (!services.config().cryptoEnabled) return true;
-        // Resolve the actor's region — the SAME thing the HTTP submit path does —
-        // so a REGION-scoped switch pauses only that region's retries.  Omitting
-        // it makes killSwitchDecision treat the region as unknown (= inside every
-        // engaged region), pausing all users globally during a regional incident
-        // (WS-L.3.5c / §19.1).
-        const region = await services.regionResolver.regionForUser(actorUserId);
-        if (
-          (await killSwitchDecision(services.configStore, 'action_submission', { roomId, region }))
-            .engaged
-        )
-          return true;
-        // The action-type-specific switch (treasury_execution / governance_voting)
-        // must also pause the matching resubmissions (WS-L.3.5c).
-        const specific = ACTION_KILL_SWITCH[actionType];
-        return (
-          specific !== undefined &&
-          (await killSwitchDecision(services.configStore, specific, { roomId, region })).engaged
+    // RESUBMISSION forwards a `submitted` action to the gateway — a NEW write to
+    // chain.  It must run ONLY for ACTIVE deployments: a deployment the pin file
+    // froze/retired while an action was mid-flight is kept in this loop for
+    // ingest/reconcile (so its settling events still land, WS-L.3.3a), but the
+    // scheduler must NOT keep forwarding to it after the pin status changed —
+    // that is exactly the "no new forwarding to an inactive deployment" rule the
+    // HTTP submit route already enforces (WS-L.3.5c).
+    if (deployment.status === 'active') {
+      try {
+        // Gate scheduler retries by the SAME live crypto flag + kill switch the
+        // HTTP submit route honours, per record's room (WS-L.3.5c): an incident
+        // pause must stop the scheduler forwarding submitted actions too.
+        const submissionPaused = async (
+          roomId: string,
+          actionType: KnomosisSignedActionType,
+          actorUserId: string,
+        ): Promise<boolean> => {
+          if (!services.config().cryptoEnabled) return true;
+          // Resolve the actor's region — the SAME thing the HTTP submit path does —
+          // so a REGION-scoped switch pauses only that region's retries.  Omitting
+          // it makes killSwitchDecision treat the region as unknown (= inside every
+          // engaged region), pausing all users globally during a regional incident
+          // (WS-L.3.5c / §19.1).
+          const region = await services.regionResolver.regionForUser(actorUserId);
+          if (
+            (
+              await killSwitchDecision(services.configStore, 'action_submission', {
+                roomId,
+                region,
+              })
+            ).engaged
+          )
+            return true;
+          // The action-type-specific switch (treasury_execution / governance_voting)
+          // must also pause the matching resubmissions (WS-L.3.5c).
+          const specific = ACTION_KILL_SWITCH[actionType];
+          return (
+            specific !== undefined &&
+            (await killSwitchDecision(services.configStore, specific, { roomId, region })).engaged
+          );
+        };
+        await resubmitPendingActions(
+          {
+            actions: services.actions,
+            signatures: services.proposalSignatures,
+            uuid: services.uuid,
+            now: services.now,
+            log: services.log,
+            gateway: services.gateway,
+            submissionPaused,
+          },
+          deployment.deploymentId,
         );
-      };
-      await resubmitPendingActions(
-        {
-          actions: services.actions,
-          signatures: services.proposalSignatures,
-          uuid: services.uuid,
-          now: services.now,
-          log: services.log,
-          gateway: services.gateway,
-          submissionPaused,
-        },
-        deployment.deploymentId,
-      );
-    } catch (error) {
-      onError(error, 'resubmit');
+      } catch (error) {
+        onError(error, 'resubmit');
+      }
     }
     try {
       await reconcileDeployment(services, deployment.deploymentId);

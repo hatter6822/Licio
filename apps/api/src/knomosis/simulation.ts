@@ -666,12 +666,18 @@ export async function executeSimProposal(
       'This room has left simulated mode; simulated execution is disabled.',
     );
   }
-  // Accept a `timelocked` proposal (the normal path) OR one ALREADY `executing`
-  // (recovery: a prior attempt claimed it but crashed before finalize; its debit is
-  // idempotent below, so re-driving it is safe and never double-debits, WS-L.4.1c).
+  // Accept a `timelocked` proposal (the normal path) OR — for the SCHEDULER SWEEP
+  // ONLY (a null actor) — one ALREADY `executing` (recovery: a prior attempt
+  // claimed it but crashed before finalize).  A MANUAL actor is never allowed to
+  // re-enter an `executing` proposal: a double-click must not race a live execution
+  // (both would reach finalize and log a duplicate `execution_simulated` row).  The
+  // recovery debit is idempotent by proposalId and the audit is written only by the
+  // finalize-CAS winner below, so even the sweep re-driving a still-live execution
+  // never double-debits or double-audits (WS-L.4.1c).
+  const recoverable = proposal.executionState === 'executing' && args.actorUserId === null;
   if (
     proposal.votingState !== 'passed' ||
-    (proposal.executionState !== 'timelocked' && proposal.executionState !== 'executing')
+    (proposal.executionState !== 'timelocked' && !recoverable)
   ) {
     return err(409, 'not_executable', 'This proposal is not ready to execute.');
   }
@@ -758,12 +764,19 @@ export async function executeSimProposal(
   }
 
   // FINALIZE: CAS executing→executed ONLY now that the debit + ledger are durable.
-  // We exclusively own the `executing` claim, so this succeeds; a null return would
-  // mean a concurrent writer advanced it (treat as already executed, idempotent).
-  const finalized: GovernanceProposalRecord = (await deps.proposals.finalizeExecution(
-    claimed.proposalId,
-    nowIso,
-  )) ?? { ...claimed, executionState: 'executed', executedAt: nowIso };
+  // The CAS is the single-owner token: exactly ONE caller wins the transition and
+  // appends the `execution_simulated` audit row.  A null return means a concurrent
+  // writer (another sweep pod, or a live execution the recovery sweep re-entered)
+  // already finalized it — treat that as an idempotent no-op and DO NOT append a
+  // second audit row, so a live execution never looks like a duplicate (WS-L.4.1c).
+  const finalized = await deps.proposals.finalizeExecution(claimed.proposalId, nowIso);
+  if (finalized === null) {
+    const current = await deps.proposals.getById(claimed.proposalId);
+    return {
+      ok: true,
+      proposal: current ?? { ...claimed, executionState: 'executed', executedAt: nowIso },
+    };
+  }
   await deps.governanceAudit.append({
     entryId: deps.uuid(),
     roomId: args.roomId,

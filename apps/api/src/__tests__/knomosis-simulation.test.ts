@@ -442,6 +442,93 @@ describe('WS-L.4.1d simulated voting + execution', () => {
     expect((await fixture.knomosis.proposals.getById(proposalId))?.executionState).toBe('executed');
   });
 
+  it('concurrent recovery of an `executing` proposal appends ONE audit row (J3)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const deps = simulationDeps(fixture.knomosis);
+    await ensureSimTreasury(deps, ROOM);
+    const proposalId = crypto.randomUUID();
+    // Already claimed (executing) with NO ledger entry yet — a crash before finalize.
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      executionState: 'executing',
+      challengeState: 'none',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+    });
+    // Two sweep pods recover it at once: idempotent debit + single-owner finalize.
+    const [a, b] = await Promise.all([
+      executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null }),
+      executeSimProposal(deps, { roomId: ROOM, proposalId, actorUserId: null }),
+    ]);
+    expect(a.ok && b.ok).toBe(true); // both report success (idempotent)
+    // Debited once, and EXACTLY ONE execution_simulated audit row — a live execution
+    // never looks like a duplicate.
+    expect((await ensureSimTreasury(deps, ROOM)).balances['SIM-USDC']).toBe('9999000000');
+    const entries = await fixture.knomosis.simTreasury.listEntries(ROOM, 10);
+    expect(entries.filter((e) => e.kind === 'grant_execution')).toHaveLength(1);
+    const audits = await fixture.knomosis.governanceAudit.listByRoom(ROOM, 100);
+    expect(audits.filter((r) => r.actionType === 'execution_simulated')).toHaveLength(1);
+  });
+
+  it('a MANUAL actor may NOT re-enter an `executing` proposal (J3)', async () => {
+    const clock = Date.now();
+    const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await passComprehension(fixture, userId);
+    const deps = simulationDeps(fixture.knomosis);
+    await ensureSimTreasury(deps, ROOM);
+    const proposalId = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: '1000000',
+      asset: 'SIM-USDC',
+      recipientRef: 'r',
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed',
+      votingState: 'passed',
+      executionState: 'executing',
+      challengeState: 'none',
+      simulationMode: true,
+      executableAfter: new Date(clock - 1000).toISOString(),
+      createdAt: new Date(clock).toISOString(),
+      executedAt: null,
+    });
+    // A double-click / manual retry of an in-flight execution is refused — only the
+    // scheduler sweep (a null actor) recovers `executing`.
+    const manual = await executeSimProposal(deps, {
+      roomId: ROOM,
+      proposalId,
+      actorUserId: userId,
+    });
+    expect(manual.ok).toBe(false);
+    if (!manual.ok) expect(manual.code).toBe('not_executable');
+  });
+
   it('recovers a crash-left `executing` proposal whose debit never committed (H2)', async () => {
     const clock = Date.now();
     const fixture = await freshKnomosisServices({ rooms: { mode: 'simulated' }, now: () => clock });

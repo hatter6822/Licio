@@ -118,7 +118,9 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
   async insertIfUnderCap(
     record: FinancialWalletRecord,
     maxActive: number,
-  ): Promise<FinancialWalletRecord | 'cap_exceeded' | 'address_taken'> {
+  ): Promise<
+    { wallet: FinancialWalletRecord; created: boolean } | 'cap_exceeded' | 'address_taken'
+  > {
     return this.db.transaction(async (tx) => {
       // ADDRESS-level advisory lock (namespace 2080): the DB unique index is
       // per-`(address_hash, chain_id)`, so it does NOT stop two DIFFERENT accounts
@@ -126,13 +128,31 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
       // address so the cross-user ownership check + insert are atomic — one address
       // maps to ONE account across every chain (WS-L.2.5a).
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${record.addressHashHex}), 2080)`);
+      const addressBytes = Buffer.from(record.addressHashHex, 'hex');
       const owner = await tx
         .select({ userId: walletAccounts.userId })
         .from(walletAccounts)
-        .where(eq(walletAccounts.addressHash, Buffer.from(record.addressHashHex, 'hex')))
+        .where(eq(walletAccounts.addressHash, addressBytes))
         .limit(1);
       if (owner[0] !== undefined && owner[0].userId !== record.userId) {
         return 'address_taken' as const;
+      }
+      // IDEMPOTENT relink: re-read the exact `(address, chain)` row UNDER the lock.
+      // A concurrent same-user link may have committed it after the caller's outer
+      // pre-check saw none; return it instead of hitting the `(address_hash,
+      // chain_id)` unique constraint or miscounting it toward the cap (WS-L.2.5a).
+      const existing = await tx
+        .select()
+        .from(walletAccounts)
+        .where(
+          and(
+            eq(walletAccounts.addressHash, addressBytes),
+            eq(walletAccounts.chainId, record.chainId),
+          ),
+        )
+        .limit(1);
+      if (existing[0] !== undefined) {
+        return { wallet: mapWallet(existing[0]), created: false };
       }
       // A per-user transaction-scoped advisory lock SERIALIZES concurrent links
       // for this user, so the active-count check and the insert are atomic across
@@ -151,7 +171,7 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
         );
       if ((counted[0]?.n ?? 0) >= maxActive) return 'cap_exceeded' as const;
       await tx.insert(walletAccounts).values(this.#insertValues(record));
-      return record;
+      return { wallet: record, created: true };
     });
   }
 

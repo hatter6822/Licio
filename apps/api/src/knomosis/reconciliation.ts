@@ -252,6 +252,27 @@ export async function reconcileDeployment(
       // blocking canExpandTreasury.  This resolution pass only runs because
       // mismatched actions stay in the re-check set (listUnreconciled, WS-L.3.4b).
       await deps.reconciliation.append(result);
+      // Also supersede any ORPHAN-EVENT mismatch recorded (keyed by this action's
+      // `typed_data_hash`) when a gateway event arrived BEFORE this action row
+      // existed: now that the action reconciles, that event is accounted for and
+      // must stop blocking canExpandTreasury (WS-L.3.3b).  Only append the resolving
+      // match when such a mismatch is actually outstanding, so a normal match never
+      // writes a redundant row every tick.
+      const orphanRef = `event-orphan:${record.typedDataHash}`;
+      const orphan = await deps.reconciliation.latestForEntity('action', orphanRef);
+      if (orphan !== null && orphan.outcome !== 'match') {
+        await deps.reconciliation.append({
+          resultId: deps.uuid(),
+          deploymentId,
+          entityType: 'action',
+          entityRef: orphanRef,
+          outcome: 'match',
+          severity: null,
+          details: { kind: 'orphan_event_resolved', resolved_by: record.actionRecordId },
+          lowWatermarkSeq: lowWatermark,
+          createdAt: nowIso,
+        });
+      }
       await deps.actions.update({ ...record, reconciliationState: 'matched', updatedAt: nowIso });
       matched += 1;
     } else {

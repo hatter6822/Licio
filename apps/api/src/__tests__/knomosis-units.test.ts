@@ -9,6 +9,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpKnomosisGateway } from '../knomosis/gateway.js';
 import { ingestGatewayEvents } from '../knomosis/ingest.js';
+import { KNOMOSIS_PIN } from '../knomosis/pin.js';
 import {
   createIdentityRegionResolver,
   defaultCompliancePort,
@@ -40,6 +41,7 @@ import {
   resubmitPendingActions,
   VALID_SUBMISSION_TRANSITIONS,
 } from '../knomosis/submission.js';
+import { syncPinnedDeployments } from '../knomosis/wiring.js';
 import { seedUserWithSession } from './event-test-helpers.js';
 import {
   freshKnomosisServices,
@@ -312,6 +314,63 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     const withReceipt = await reconcileDeployment(fixture.knomosis, deploymentId);
     expect(withReceipt.matched).toBe(1);
     expect(withReceipt.mismatched).toBe(0);
+  });
+
+  it('resolves an orphan-event divergence once the late action reconciles (J5)', async () => {
+    const fixture = await freshKnomosisServices();
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const typedDataHash = `0x${'ef'.repeat(32)}`;
+    // A gateway event arrived BEFORE its action row: ingest recorded a CRITICAL
+    // orphan divergence keyed by the action identity (its typed_data_hash).
+    await fixture.knomosis.reconciliation.append({
+      resultId: crypto.randomUUID(),
+      deploymentId,
+      entityType: 'action',
+      entityRef: `event-orphan:${typedDataHash}`,
+      outcome: 'mismatch',
+      severity: 'critical',
+      details: { kind: 'event_without_action', typed_data_hash: typedDataHash },
+      lowWatermarkSeq: '1',
+      createdAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    // It blocks treasury expansion while unresolved.
+    expect((await canExpandTreasury(fixture.knomosis, deploymentId)).allowed).toBe(false);
+
+    // The late action row + its confirming event + receipt now arrive.
+    const record = baseAction({
+      deploymentId,
+      typedDataHash,
+      submissionState: 'finalized',
+      reconciliationState: 'pending',
+      signedAction: { message: { amount: '0', asset: 'USDC' }, signature: '0x' },
+    });
+    await fixture.knomosis.actions.insert(record);
+    await fixture.knomosis.events.ingest({
+      eventId: crypto.randomUUID(),
+      deploymentId,
+      chainId: LOCAL_DEPLOYMENT.chain_id,
+      blockNumber: null,
+      txHash: null,
+      logIndex: null,
+      eventType: 'knomosis.action.finalized',
+      decodedPayload: { typed_data_hash: typedDataHash },
+      eventSource: 'gateway',
+      gatewaySeq: '1',
+      gatewayIndex: 0,
+      reorgState: 'confirmed',
+      reorgDetectedAt: null,
+      indexedAt: new Date().toISOString(),
+    });
+    await writeReceipts(fixture.knomosis, record);
+
+    const summary = await reconcileDeployment(fixture.knomosis, deploymentId);
+    expect(summary.matched).toBe(1);
+    // The orphan-event divergence is SUPERSEDED by the resolving match — it no longer
+    // blocks canExpandTreasury (J5: reconciliation, driven by action rows, can now
+    // re-key and clear the earlier event-scoped divergence).
+    const unresolved = await fixture.knomosis.reconciliation.listUnresolvedMismatches(deploymentId);
+    expect(unresolved.some((d) => d.entityRef === `event-orphan:${typedDataHash}`)).toBe(false);
+    expect((await canExpandTreasury(fixture.knomosis, deploymentId)).allowed).toBe(true);
   });
 
   it('a MISMATCHED action AUTO-resolves on a later tick, no manual reset (R9-3)', async () => {
@@ -1277,17 +1336,28 @@ describe('scheduler error + lease handling', () => {
       baseAction({ deploymentId: depId, submissionState: 'submitted' }),
     );
     // Observe which deployments reach reconciliation (reconcileDeployment →
-    // listUnreconciled) during the tick.
+    // listUnreconciled) vs RESUBMISSION (resubmitPendingActions → listSubmittedRetryable).
     const reconciled = new Set<string>();
+    const resubmitted = new Set<string>();
     const originalList = fixture.knomosis.actions.listUnreconciled.bind(fixture.knomosis.actions);
     fixture.knomosis.actions.listUnreconciled = async (deploymentId, limit) => {
       reconciled.add(deploymentId);
       return originalList(deploymentId, limit);
     };
+    const originalRetryable = fixture.knomosis.actions.listSubmittedRetryable.bind(
+      fixture.knomosis.actions,
+    );
+    fixture.knomosis.actions.listSubmittedRetryable = async (deploymentId, limit) => {
+      resubmitted.add(deploymentId);
+      return originalRetryable(deploymentId, limit);
+    };
     await runKnomosisTick(fixture.knomosis);
     // The frozen-but-in-flight deployment is STILL ingested/reconciled so its
-    // finalized/reverted events settle and stop pinning the wallet's unlink.
+    // finalized/reverted events settle and stop pinning the wallet's unlink…
     expect(reconciled.has(depId)).toBe(true);
+    // …but resubmission (a NEW forward to the gateway) is NOT run for it — freezing
+    // the deployment stops new forwarding even for its in-flight actions (J2).
+    expect(resubmitted.has(depId)).toBe(false);
   });
 
   it('does NOT maintain an inactive deployment once its actions are terminal (H5)', async () => {
@@ -1309,6 +1379,39 @@ describe('scheduler error + lease handling', () => {
     };
     await runKnomosisTick(fixture.knomosis);
     expect(reconciled.has(depId)).toBe(false);
+  });
+
+  it('syncPinnedDeployments retires a rotated pin BEFORE its active replacement (J4)', async () => {
+    const fixture = await freshKnomosisServices();
+    // freshKnomosisServices already synced the base deployment as ACTIVE.
+    const base = LOCAL_DEPLOYMENT;
+    const oldId = base.deployment_id;
+    const newId = 'd0000000-0000-4000-8000-0000000000ff';
+    // A rotation pin for the SAME (environment, chain_id): the NEW active deployment
+    // appears BEFORE the OLD one (now marked retired) in the deployments array.
+    const rotationPin = {
+      ...KNOMOSIS_PIN,
+      deployments: [
+        { ...base, deployment_id: newId, status: 'active' as const },
+        { ...base, deployment_id: oldId, status: 'retired' as const },
+      ],
+    };
+    const order: Array<{ id: string; status: string }> = [];
+    const originalUpsert = fixture.knomosis.deployments.upsert.bind(fixture.knomosis.deployments);
+    fixture.knomosis.deployments.upsert = async (r) => {
+      order.push({ id: r.deploymentId, status: r.status });
+      return originalUpsert(r);
+    };
+    await syncPinnedDeployments(fixture.knomosis, rotationPin);
+    // The displaced OLD deployment is retired BEFORE the NEW active replacement is
+    // upserted, so the active-only (env,chain) unique index never sees two active rows.
+    const oldRetiredAt = order.findIndex((o) => o.id === oldId && o.status === 'retired');
+    const newActiveAt = order.findIndex((o) => o.id === newId && o.status === 'active');
+    expect(oldRetiredAt).toBeGreaterThanOrEqual(0);
+    expect(newActiveAt).toBeGreaterThanOrEqual(0);
+    expect(oldRetiredAt).toBeLessThan(newActiveAt);
+    expect((await fixture.knomosis.deployments.getById(oldId))?.status).toBe('retired');
+    expect((await fixture.knomosis.deployments.getById(newId))?.status).toBe('active');
   });
 
   it('reports a task error without aborting the tick, and a denied lease is a no-op', async () => {

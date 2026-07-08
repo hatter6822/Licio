@@ -1611,7 +1611,9 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     );
     expect(orphan).toBeDefined();
     expect(orphan?.severity).toBe('critical');
-    expect(orphan?.entityRef).toBe('event:1.0');
+    // Keyed by the ACTION IDENTITY (its typed_data_hash), NOT event:seq.index, so a
+    // late-arriving action row can supersede it on reconciliation (J5).
+    expect(orphan?.entityRef).toBe(`event-orphan:${orphanHash}`);
   });
 
   it('reconciliation matches a finalized action against the indexed stream', async () => {
