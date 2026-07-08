@@ -41,7 +41,7 @@ import {
   resubmitPendingActions,
   VALID_SUBMISSION_TRANSITIONS,
 } from '../knomosis/submission.js';
-import { syncPinnedDeployments } from '../knomosis/wiring.js';
+import { assertSingleActiveGatewayDeployment, syncPinnedDeployments } from '../knomosis/wiring.js';
 import { seedUserWithSession } from './event-test-helpers.js';
 import {
   freshKnomosisServices,
@@ -1379,6 +1379,26 @@ describe('scheduler error + lease handling', () => {
     };
     await runKnomosisTick(fixture.knomosis);
     expect(reconciled.has(depId)).toBe(false);
+  });
+
+  it('assertSingleActiveGatewayDeployment fails closed on >1 active deployment (K1)', () => {
+    const active = (id: string) => ({ deployment_id: id, status: 'active' });
+    // One active deployment (the norm) is fine.
+    expect(() => assertSingleActiveGatewayDeployment([active('d1')])).not.toThrow();
+    // A retired/frozen sibling does NOT count toward the single-gateway limit.
+    expect(() =>
+      assertSingleActiveGatewayDeployment([
+        active('d1'),
+        { deployment_id: 'd0', status: 'retired' },
+        { deployment_id: 'df', status: 'frozen' },
+      ]),
+    ).not.toThrow();
+    // TWO active deployments a single gateway cannot route → refuse to boot.
+    expect(() => assertSingleActiveGatewayDeployment([active('d1'), active('d2')])).toThrow(
+      /refusing to start/,
+    );
+    // The real pin satisfies the invariant (a single active local deployment).
+    expect(() => assertSingleActiveGatewayDeployment(KNOMOSIS_PIN.deployments)).not.toThrow();
   });
 
   it('syncPinnedDeployments retires a rotated pin BEFORE its active replacement (J4)', async () => {

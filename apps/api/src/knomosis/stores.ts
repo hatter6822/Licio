@@ -257,17 +257,26 @@ export interface FinancialWalletStore {
     maxActive: number,
   ): Promise<FinancialWalletRecord | 'cap_exceeded'>;
   getById(walletAccountId: string): Promise<FinancialWalletRecord | null>;
-  /** ANY wallet for this address (any chain) — the CROSS-USER ownership check: an
-   *  address is owned by ONE account across every chain, so a different account can
-   *  never link it (WS-L.2.5a). */
+  /** ANY wallet for this address (any chain, any unlink state) — a generic lookup.
+   *  NOT the cross-user ownership gate: a FINALIZED row is a released tombstone, so
+   *  use `getActiveOwnerByAddressHash` to decide cross-account availability. */
   getByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null>;
-  /** The wallet for this address ON a specific chain — wallets are PER-CHAIN rows,
-   *  so the SAME owner can link one address on multiple active chains (uniqueness is
-   *  `(address_hash, chain_id)`).  Used for the per-chain relink/idempotency path
-   *  (WS-L.2.5a). */
+  /** The NON-FINALIZED owner of this address (any chain), or null — THE cross-user
+   *  ownership gate: an address is owned by ONE account across every chain WHILE it
+   *  has a live (active/pending_unlink) row, so a different account can never link
+   *  it.  A FINALIZED unlink releases the address, so finalized rows are excluded
+   *  here and a new key-proving owner may link it (WS-L.2.5a). */
+  getActiveOwnerByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null>;
+  /** THIS user's wallet for this address ON a specific chain — wallets are PER-CHAIN
+   *  rows, so the SAME owner can link one address on multiple active chains.  Scoped
+   *  to `userId` because a released (finalized) row for the same (address, chain) may
+   *  now belong to a DIFFERENT account, so an unscoped lookup could return another
+   *  account's tombstone; the relink/idempotency path must only ever see the caller's
+   *  own row (WS-L.2.5a). */
   getByAddressHashAndChain(
     addressHashHex: string,
     chainId: number,
+    userId: string,
   ): Promise<FinancialWalletRecord | null>;
   listByUser(userId: string, includeUnlinked: boolean): Promise<FinancialWalletRecord[]>;
   update(record: FinancialWalletRecord): Promise<FinancialWalletRecord>;
@@ -648,13 +657,16 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   readonly #rows = new Map<string, FinancialWalletRecord>();
 
   async insert(record: FinancialWalletRecord): Promise<FinancialWalletRecord> {
-    // Uniqueness is PER (address, chain) — mirrors the `(address_hash, chain_id)`
-    // DB unique index — so the same address can be linked on multiple chains, but
-    // never twice on the SAME chain (WS-L.2.5a).
+    // Uniqueness is PER (address, chain) EXCLUDING finalized rows — mirrors the
+    // partial `(address_hash, chain_id) WHERE unlink_state <> 'finalized'` DB index —
+    // so the same address can be linked on multiple chains and a released (finalized)
+    // row does not block a new live row, but never twice-live on the SAME chain
+    // (WS-L.2.5a).
     for (const existing of this.#rows.values()) {
       if (
         existing.addressHashHex === record.addressHashHex &&
-        existing.chainId === record.chainId
+        existing.chainId === record.chainId &&
+        existing.unlinkState !== 'finalized'
       ) {
         throw new Error('wallet address already linked');
       }
@@ -670,21 +682,28 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
     { wallet: FinancialWalletRecord; created: boolean } | 'cap_exceeded' | 'address_taken'
   > {
     // Single-threaded in memory ⇒ the cross-user check + count + insert are atomic.
-    // Cross-user: the address must not be owned by a DIFFERENT account on any chain.
+    // Cross-user: the address must not be owned by a DIFFERENT account on any chain
+    // via a LIVE (non-finalized) row.  A finalized tombstone is a released address,
+    // so it does not block a new owner (WS-L.2.5a).
     for (const r of this.#rows.values()) {
-      if (r.addressHashHex === record.addressHashHex && r.userId !== record.userId) {
+      if (
+        r.addressHashHex === record.addressHashHex &&
+        r.unlinkState !== 'finalized' &&
+        r.userId !== record.userId
+      ) {
         return 'address_taken';
       }
     }
     // IDEMPOTENT relink: a concurrent same-user link for this exact `(address,
-    // chain)` may have already created the row after the caller's pre-check saw
+    // chain)` may have already created a LIVE row after the caller's pre-check saw
     // none.  Return it instead of inserting a duplicate (which would throw the
-    // unique constraint) or miscounting it toward the cap (WS-L.2.5a).
+    // partial unique constraint) or miscounting it toward the cap (WS-L.2.5a).
     for (const r of this.#rows.values()) {
       if (
         r.addressHashHex === record.addressHashHex &&
         r.chainId === record.chainId &&
-        r.userId === record.userId
+        r.userId === record.userId &&
+        r.unlinkState !== 'finalized'
       ) {
         return { wallet: { ...r }, created: false };
       }
@@ -722,12 +741,28 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
     return null;
   }
 
+  async getActiveOwnerByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null> {
+    for (const row of this.#rows.values()) {
+      if (row.addressHashHex === addressHashHex && row.unlinkState !== 'finalized') {
+        return { ...row };
+      }
+    }
+    return null;
+  }
+
   async getByAddressHashAndChain(
     addressHashHex: string,
     chainId: number,
+    userId: string,
   ): Promise<FinancialWalletRecord | null> {
     for (const row of this.#rows.values()) {
-      if (row.addressHashHex === addressHashHex && row.chainId === chainId) return { ...row };
+      if (
+        row.addressHashHex === addressHashHex &&
+        row.chainId === chainId &&
+        row.userId === userId
+      ) {
+        return { ...row };
+      }
     }
     return null;
   }

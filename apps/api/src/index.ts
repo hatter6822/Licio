@@ -143,6 +143,7 @@ import {
 import { exportFinancialWalletData, purgeFinancialWalletData } from './knomosis/data-rights.js';
 import { createDrizzleKnomosisStores } from './knomosis/drizzle-knomosis-stores.js';
 import { FakeKnomosisGateway, HttpKnomosisGateway } from './knomosis/gateway.js';
+import { KNOMOSIS_PIN } from './knomosis/pin.js';
 import { RedisWalletAbuseLimiter } from './knomosis/redis-stores.js';
 import { KNOMOSIS_SCHEDULER_INTERVAL_MS, startKnomosisScheduler } from './knomosis/scheduler.js';
 import {
@@ -152,6 +153,7 @@ import {
 } from './knomosis/services.js';
 import { createContractTypedDataVerifier } from './knomosis/signatures.js';
 import {
+  assertSingleActiveGatewayDeployment,
   buildGovernanceKillSwitchGuards,
   buildLawPackPort,
   buildReadinessChecklistPort,
@@ -902,6 +904,11 @@ knomosisServices.contractTypedDataVerifier = createContractTypedDataVerifier(kno
 // null — every gateway consumer degrades closed.  Non-production gets the
 // deterministic in-memory fake bound to the local pinned deployment.
 if (env.KNOMOSIS_GATEWAY_URL !== undefined && env.KNOMOSIS_GATEWAY_TOKEN_FILE !== undefined) {
+  // FAIL CLOSED on a multi-deployment MISCONFIGURATION: a single process-wide HTTP
+  // gateway (bound to the one KNOMOSIS_GATEWAY_URL) cannot correctly serve more than
+  // one active deployment, so refuse to start rather than silently corrupt
+  // cross-deployment state (WS-L.3).
+  assertSingleActiveGatewayDeployment(KNOMOSIS_PIN.deployments);
   // The gateway is CONFIGURED (both env values set) — an unreadable/empty token
   // file is a fatal MISCONFIGURATION of a financial surface, not a soft
   // degradation.  Failing here (rather than logging and leaving the gateway

@@ -159,17 +159,26 @@ export async function linkWallet(
 
   const addressHashHex = hashFinancialWalletAddress(deps.masterSecret, verified.addressLower);
   // CROSS-USER ownership (chain-AGNOSTIC): an address belongs to ONE account across
-  // every chain, so a DIFFERENT account can never link it — enforced here so that a
-  // per-chain row (below) never lets a second user claim an address on another chain
-  // (no enumeration oracle: the caller learns only that the link failed, WS-L.2.5a).
-  const ownedElsewhere = await deps.wallets.getByAddressHash(addressHashHex);
+  // every chain WHILE it has a LIVE (non-finalized) row, so a DIFFERENT account can
+  // never link it — enforced here so that a per-chain row (below) never lets a second
+  // user claim an address on another chain.  A FINALIZED unlink RELEASES the address,
+  // so a finalized tombstone (this or another account's) does NOT block a new
+  // key-proving owner (no enumeration oracle: the caller learns only that the link
+  // failed, WS-L.2.5a).
+  const ownedElsewhere = await deps.wallets.getActiveOwnerByAddressHash(addressHashHex);
   if (ownedElsewhere !== null && ownedElsewhere.userId !== args.userId) {
     return err(409, 'address_unavailable', 'This wallet cannot be linked to this account.');
   }
-  // The PER-CHAIN row (this address on the SIWE `chainId`) drives relink/idempotency;
-  // the SAME address on a DIFFERENT active chain is a distinct, freshly-linkable row,
-  // so a user can use one address across every active chain (WS-L.2.5a).
-  const existing = await deps.wallets.getByAddressHashAndChain(addressHashHex, verified.chainId);
+  // The caller's OWN per-chain row (this address on the SIWE `chainId`) drives
+  // relink/idempotency; the SAME address on a DIFFERENT active chain is a distinct,
+  // freshly-linkable row.  Scoped to args.userId so a DIFFERENT account's released
+  // (finalized) tombstone for the same (address, chain) is never mistaken for the
+  // caller's row (WS-L.2.5a).
+  const existing = await deps.wallets.getByAddressHashAndChain(
+    addressHashHex,
+    verified.chainId,
+    args.userId,
+  );
   const nowIso = new Date(nowMs).toISOString();
 
   if (existing !== null) {

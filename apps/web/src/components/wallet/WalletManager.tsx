@@ -11,6 +11,7 @@ import type { UnlinkObligation, WalletSummary } from '@licio/shared';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useT } from '../../i18n/index.js';
+import { ApiClientError } from '../../lib/api.js';
 import { StepUpRequiredError } from '../../lib/auth-api.js';
 import {
   useLinkWalletMutation,
@@ -70,14 +71,41 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
   // challenge dialog and retries the SAME action once satisfied (WS-L.2.5a/b).
   const gate = useStepUpGate();
 
+  // The GET /wallets gate returns 503 `wallet_disabled` / `crypto_disabled` when the
+  // wallet_connection kill switch is engaged (or crypto is off).  Wallet discovery +
+  // connect must consume THAT state, not just the page-level crypto flag, so the
+  // module never starts EIP-6963 discovery or prompts `eth_requestAccounts` while
+  // wallet connection is paused (WS-L.3.5a — the switch disables the wallet module
+  // immediately).  `failureReason` catches a switch that engages MID-SESSION: a
+  // background refetch fails 503 while TanStack retains the prior (stale) data.
+  const gateError = walletsQuery.error ?? walletsQuery.failureReason;
+  const walletConnectionPaused =
+    gateError instanceof ApiClientError &&
+    (gateError.code === 'wallet_disabled' || gateError.code === 'crypto_disabled');
+  // Wait for the /wallets gate to CONFIRM availability before discovering, so a
+  // page load while the switch is engaged never races a provider prompt in first.
+  const walletConnectionAvailable = enabled && walletsQuery.isSuccess && !walletConnectionPaused;
+
   useEffect(() => {
-    if (!enabled) return;
-    // Torn down on unmount / when the flag flips off (WS-L.2.1a).
+    if (!walletConnectionAvailable) {
+      // Crypto off, wallet connection paused, or availability not yet confirmed: do
+      // NOT start discovery, and drop any previously-discovered providers so no
+      // connect button survives into the pause to prompt a wallet (WS-L.2.1a/3.5a).
+      setProviders([]);
+      return;
+    }
+    // Torn down on unmount / when availability flips off (WS-L.2.1a).
     return startProviderDiscovery(setProviders);
-  }, [enabled]);
+  }, [walletConnectionAvailable]);
 
   const linkFlow = useCallback(
     async (detail: Eip6963ProviderDetail) => {
+      // Defence in depth: never prompt the wallet while connection is paused, even
+      // if a stale button somehow survives (WS-L.3.5a).
+      if (!walletConnectionAvailable) {
+        setStatus(t('wallet.paused', 'Wallet connection is temporarily disabled.'));
+        return;
+      }
       setBusyRdns(detail.info.rdns);
       setStatus(null);
       try {
@@ -120,7 +148,7 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
         setBusyRdns(null);
       }
     },
-    [gate, linkMutation, t],
+    [gate, linkMutation, t, walletConnectionAvailable],
   );
 
   const unlinkFlow = useCallback(
@@ -181,7 +209,17 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
             'Linking a wallet is optional and never affects your ranking or reach.',
           )}
         </p>
-        {providers.length === 0 ? (
+        {enabled && walletConnectionPaused ? (
+          <p
+            role="status"
+            className="rounded-md border border-line bg-surface-sunken p-3 text-sm text-ink-muted"
+          >
+            {t(
+              'wallet.paused',
+              'Wallet connection is temporarily disabled. Please try again later.',
+            )}
+          </p>
+        ) : providers.length === 0 ? (
           <p className="rounded-md border border-line bg-surface-sunken p-3 text-sm text-ink-muted">
             {t(
               'wallet.providers.empty',

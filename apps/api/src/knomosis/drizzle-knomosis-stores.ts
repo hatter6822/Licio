@@ -129,18 +129,27 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
       // maps to ONE account across every chain (WS-L.2.5a).
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${record.addressHashHex}), 2080)`);
       const addressBytes = Buffer.from(record.addressHashHex, 'hex');
+      // Cross-user gate: another account owns this address ONLY while it has a LIVE
+      // (non-finalized) row.  A finalized tombstone is a released address, so exclude
+      // it — a new key-proving owner may link the released address (WS-L.2.5a).
       const owner = await tx
         .select({ userId: walletAccounts.userId })
         .from(walletAccounts)
-        .where(eq(walletAccounts.addressHash, addressBytes))
+        .where(
+          and(
+            eq(walletAccounts.addressHash, addressBytes),
+            ne(walletAccounts.unlinkState, 'finalized'),
+          ),
+        )
         .limit(1);
       if (owner[0] !== undefined && owner[0].userId !== record.userId) {
         return 'address_taken' as const;
       }
-      // IDEMPOTENT relink: re-read the exact `(address, chain)` row UNDER the lock.
-      // A concurrent same-user link may have committed it after the caller's outer
-      // pre-check saw none; return it instead of hitting the `(address_hash,
-      // chain_id)` unique constraint or miscounting it toward the cap (WS-L.2.5a).
+      // IDEMPOTENT relink: re-read the caller's OWN live `(address, chain)` row UNDER
+      // the lock.  A concurrent same-user link may have committed it after the outer
+      // pre-check saw none; return it instead of hitting the partial unique constraint
+      // or miscounting it toward the cap.  Scoped to this user + non-finalized so a
+      // DIFFERENT account's released tombstone is never returned (WS-L.2.5a).
       const existing = await tx
         .select()
         .from(walletAccounts)
@@ -148,6 +157,8 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
           and(
             eq(walletAccounts.addressHash, addressBytes),
             eq(walletAccounts.chainId, record.chainId),
+            eq(walletAccounts.userId, record.userId),
+            ne(walletAccounts.unlinkState, 'finalized'),
           ),
         )
         .limit(1);
@@ -193,9 +204,24 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
     return rows[0] ? mapWallet(rows[0]) : null;
   }
 
+  async getActiveOwnerByAddressHash(addressHashHex: string): Promise<FinancialWalletRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(walletAccounts)
+      .where(
+        and(
+          eq(walletAccounts.addressHash, Buffer.from(addressHashHex, 'hex')),
+          ne(walletAccounts.unlinkState, 'finalized'),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? mapWallet(rows[0]) : null;
+  }
+
   async getByAddressHashAndChain(
     addressHashHex: string,
     chainId: number,
+    userId: string,
   ): Promise<FinancialWalletRecord | null> {
     const rows = await this.db
       .select()
@@ -204,6 +230,7 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
         and(
           eq(walletAccounts.addressHash, Buffer.from(addressHashHex, 'hex')),
           eq(walletAccounts.chainId, chainId),
+          eq(walletAccounts.userId, userId),
         ),
       )
       .limit(1);

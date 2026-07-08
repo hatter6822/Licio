@@ -125,9 +125,12 @@ describe('InMemoryFinancialWalletStore', () => {
     await store.insert(wallet({ addressHashHex: addr, chainId: 42161 }));
     // The same (address, chain) is rejected (mirrors the DB unique index).
     await expect(store.insert(wallet({ addressHashHex: addr, chainId: 1 }))).rejects.toThrow();
-    // Per-chain lookup resolves the right row; chain-agnostic returns any (cross-user).
-    expect((await store.getByAddressHashAndChain(addr, 42161))?.chainId).toBe(42161);
-    expect(await store.getByAddressHashAndChain(addr, 999)).toBeNull();
+    // Per-chain lookup (scoped to the owner) resolves the right row; a chain with no
+    // row for this user is null; chain-agnostic getByAddressHash returns any.
+    expect((await store.getByAddressHashAndChain(addr, 42161, 'u1'))?.chainId).toBe(42161);
+    expect(await store.getByAddressHashAndChain(addr, 999, 'u1')).toBeNull();
+    // A DIFFERENT account has no row for (addr, chain), even one this address exists on.
+    expect(await store.getByAddressHashAndChain(addr, 42161, 'u2')).toBeNull();
     expect(await store.getByAddressHash(addr)).not.toBeNull();
   });
 
@@ -189,6 +192,44 @@ describe('InMemoryFinancialWalletStore', () => {
     );
     expect(atCap).not.toBe('cap_exceeded');
     if (typeof atCap !== 'string') expect(atCap.created).toBe(false);
+  });
+
+  it('a FINALIZED unlink releases the (address,chain) for a new owner (K3)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const addr = 'released-addr';
+    // Account A links the address (active).
+    const a = await store.insertIfUnderCap(
+      wallet({ userId: 'A', addressHashHex: addr, chainId: 1 }),
+      5,
+    );
+    if (typeof a === 'string') throw new Error('unreachable');
+    // While A's row is LIVE, account B cannot link the same address (cross-user).
+    expect(
+      await store.insertIfUnderCap(wallet({ userId: 'B', addressHashHex: addr, chainId: 1 }), 5),
+    ).toBe('address_taken');
+    // A finalizes the unlink (the tombstone is RETAINED for audit + A's cooldown).
+    await store.update({ ...a.wallet, unlinkState: 'finalized', unlinkedAt: now() });
+    // Now the address is RELEASED: it has no live owner, so the cross-user check
+    // ignores A's finalized tombstone…
+    expect(await store.getActiveOwnerByAddressHash(addr)).toBeNull();
+    // …and account B (who proves key control via SIWE upstream) can link it.
+    const b = await store.insertIfUnderCap(
+      wallet({ userId: 'B', addressHashHex: addr, chainId: 1 }),
+      5,
+    );
+    if (typeof b === 'string') throw new Error(`expected a wallet, got ${b}`);
+    expect(b.created).toBe(true);
+    // Both rows coexist: A's finalized tombstone + B's active row.
+    expect(await store.getActiveOwnerByAddressHash(addr)).not.toBeNull();
+    expect((await store.getActiveOwnerByAddressHash(addr))?.userId).toBe('B');
+    expect(await store.listByUser('A', true)).toHaveLength(1); // A's tombstone retained
+    // The per-chain lookup is per-owner: B sees its row, A sees only its finalized one.
+    expect((await store.getByAddressHashAndChain(addr, 1, 'B'))?.userId).toBe('B');
+    expect((await store.getByAddressHashAndChain(addr, 1, 'A'))?.unlinkState).toBe('finalized');
+    // With B now the LIVE owner, a THIRD account is blocked again.
+    expect(
+      await store.insertIfUnderCap(wallet({ userId: 'C', addressHashHex: addr, chainId: 1 }), 5),
+    ).toBe('address_taken');
   });
 
   it('updateRiskState changes ONLY riskState — never the lifecycle fields (H3)', async () => {

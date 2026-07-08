@@ -131,6 +131,29 @@ export function buildGovernanceKillSwitchGuards(services: KnomosisServices): {
 }
 
 /**
+ * WS-L.3 — the SINGLE-GATEWAY invariant.  A process-wide HTTP gateway is bound to
+ * ONE `KNOMOSIS_GATEWAY_URL`, and the gateway protocol carries NO per-deployment
+ * selector (submitAction/getBalances/getBudget/getEvents each address a single
+ * endpoint).  So a single gateway cannot serve more than one ACTIVE deployment: it
+ * would read deployment A's event stream while the scheduler records it under B and
+ * forward B's submissions to A's endpoint.  Throw (refuse to boot) when the pin
+ * declares more than one active deployment for a single gateway URL — fail closed
+ * rather than silently corrupt cross-deployment state.
+ */
+export function assertSingleActiveGatewayDeployment(
+  deployments: readonly { deployment_id: string; status: string }[],
+): void {
+  const active = deployments.filter((d) => d.status === 'active');
+  if (active.length > 1) {
+    throw new Error(
+      `KNOMOSIS_GATEWAY_URL binds ONE gateway, but the pin declares ${active.length} active deployments ` +
+        `(${active.map((d) => d.deployment_id).join(', ')}); the HTTP gateway has no per-deployment routing — ` +
+        'refusing to start with a single gateway serving multiple deployments',
+    );
+  }
+}
+
+/**
  * WS-L.1.1a-1 config-sync: mirror the pinned deployments into the
  * `knomosis_deployment` rows.  This reviewed boot job is the ONLY writer —
  * there is no user-facing mutation path.  Idempotent (upsert by id).

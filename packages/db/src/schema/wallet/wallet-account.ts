@@ -12,6 +12,7 @@
 //
 // The address is treated as personal data (§19.5): stored only as a keyed hash
 // (distinct HMAC namespace from the auth-wallet) plus a truncated display form.
+import { sql } from 'drizzle-orm';
 import { index, integer, pgSchema, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { bytea } from '../_custom.js';
 import { users } from '../user.js';
@@ -64,11 +65,17 @@ export const walletAccounts = walletSchema.table(
   },
   (t) => [
     index('wallet_accounts_user_idx').on(t.userId),
-    // PER-CHAIN uniqueness (WS-L.2.5a): one address may be linked on multiple
-    // active chains (distinct rows), but never twice on the SAME chain.  The
-    // cross-user "one address → one account" rule is enforced in the link flow via
-    // a chain-agnostic `getByAddressHash` ownership check.
-    uniqueIndex('wallet_accounts_addr_chain_idx').on(t.addressHash, t.chainId),
+    // PER-CHAIN uniqueness (WS-L.2.5a) — EXCLUDING finalized rows: one address may be
+    // linked on multiple active chains (distinct rows), but never twice-non-finalized
+    // on the SAME chain.  Finalized (unlinked) rows are excluded so a FINALIZED unlink
+    // RELEASES the (address, chain): the original owner's finalized tombstone is
+    // retained for audit + the same-user re-link cooldown, yet a NEW owner (who proves
+    // key control via SIWE) can link the released address alongside it.  The cross-user
+    // "one address → one account" rule is enforced in the link flow via the
+    // `getActiveOwnerByAddressHash` (non-finalized) ownership check.
+    uniqueIndex('wallet_accounts_addr_chain_idx')
+      .on(t.addressHash, t.chainId)
+      .where(sql`${t.unlinkState} <> 'finalized'`),
   ],
 );
 

@@ -421,6 +421,13 @@
       "when": 1782199102000,
       "tag": "0060_ws_l_per_chain_wallet",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1782296000000,
+      "tag": "0061_ws_l_finalized_release",
+      "breakpoints": true
     }
   ]
 }

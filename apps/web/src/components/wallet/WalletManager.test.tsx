@@ -33,6 +33,7 @@ vi.mock('../../wallet/discovery.js', () => ({
   },
 }));
 
+import { ApiClientError } from '../../lib/api.js';
 import { WalletManager } from './WalletManager.js';
 
 beforeEach(() => {
@@ -41,7 +42,14 @@ beforeEach(() => {
   mockUnlinkMutate.mockReset();
   mockRequestNonce.mockReset();
   discoveryCallback = null;
-  mockUseWallets.mockReturnValue({ data: { items: [] } });
+  // The default: the /wallets gate is OPEN (crypto on + wallet_connection not
+  // engaged), so discovery is allowed to start.
+  mockUseWallets.mockReturnValue({
+    data: { items: [] },
+    isSuccess: true,
+    error: null,
+    failureReason: null,
+  });
 });
 
 describe('WalletManager', () => {
@@ -89,6 +97,52 @@ describe('WalletManager', () => {
     expect(linkArgs.message).toContain('wants you to sign in');
   });
 
+  it('does NOT start discovery while wallet_connection is paused (K2)', () => {
+    // The /wallets gate returns 503 wallet_disabled (kill switch engaged).
+    mockUseWallets.mockReturnValue({
+      data: undefined,
+      isSuccess: false,
+      error: new ApiClientError(
+        'wallet_disabled',
+        'Wallet connection is temporarily disabled.',
+        503,
+      ),
+      failureReason: null,
+    });
+    render(<WalletManager enabled />);
+    // The paused notice shows, discovery was never started, and there is no connect
+    // button that could prompt eth_requestAccounts during the pause.
+    expect(screen.getByText(/temporarily disabled/i)).toBeInTheDocument();
+    expect(discoveryCallback).toBeNull();
+    expect(screen.queryByRole('button', { name: /metamask/i })).not.toBeInTheDocument();
+  });
+
+  it('tears down discovery when wallet_connection engages MID-SESSION (K2)', async () => {
+    // Gate open → discovery starts and a provider announces.
+    const { rerender } = render(<WalletManager enabled />);
+    discoveryCallback?.([
+      {
+        info: { uuid: 'u', name: 'MetaMask', icon: 'data:,', rdns: 'io.metamask' },
+        provider: { request: vi.fn() },
+      },
+    ]);
+    expect(await screen.findByRole('button', { name: /metamask/i })).toBeInTheDocument();
+    // The switch engages: a background refetch fails 503 while TanStack keeps stale
+    // data (isSuccess stays true, failureReason carries the gate error).
+    mockUseWallets.mockReturnValue({
+      data: { items: [] },
+      isSuccess: true,
+      error: null,
+      failureReason: new ApiClientError('wallet_disabled', 'paused', 503),
+    });
+    rerender(<WalletManager enabled />);
+    // The connect button is gone (discovery torn down + providers cleared).
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /metamask/i })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText(/temporarily disabled/i)).toBeInTheDocument();
+  });
+
   it('lists linked wallets with truncated addresses and an unlink action', () => {
     mockUseWallets.mockReturnValue({
       data: {
@@ -106,6 +160,9 @@ describe('WalletManager', () => {
           },
         ],
       },
+      isSuccess: true,
+      error: null,
+      failureReason: null,
     });
     mockUnlinkMutate.mockResolvedValue({
       wallet_account_id: 'w1',

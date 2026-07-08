@@ -309,6 +309,40 @@ describe('WS-L.2.5b unlink lifecycle + WS-L.2.5c list/label', () => {
     expect(await listWallets(deps, { userId, includeUnlinked: true })).toHaveLength(1);
   });
 
+  it('a FINALIZED unlink releases the address for a DIFFERENT account (K3)', async () => {
+    let clock = Date.now();
+    const fixture = await freshKnomosisServices({ now: () => clock });
+    const alice = await seedUserWithSession(fixture.identity, { handle: 'alicek3' });
+    const bob = await seedUserWithSession(fixture.identity, { handle: 'bobk3' });
+    const aliceLink = await linkTestWallet(fixture, alice.userId, 'sA', testAccount, () => clock);
+    if (!aliceLink.ok) throw new Error('alice link failed');
+    const deps = walletDeps(fixture, () => clock);
+    // While Alice's link is LIVE, Bob cannot link the SAME wallet (cross-user).
+    const blocked = await linkTestWallet(fixture, bob.userId, 'sB', testAccount, () => clock);
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.code).toBe('address_unavailable');
+    // Alice unlinks; the cooling-off elapses → finalized (tombstone retained).
+    await requestUnlink(deps, {
+      userId: alice.userId,
+      walletAccountId: aliceLink.wallet.walletAccountId,
+    });
+    clock += 25 * 3_600_000;
+    expect(await finalizeElapsedUnlinks(deps)).toBe(1);
+    // The address is RELEASED: Bob (who proves key control by signing the SIWE
+    // message with the same key) can now link it — previously blocked forever.
+    const bobLink = await linkTestWallet(fixture, bob.userId, 'sB', testAccount, () => clock);
+    expect(bobLink.ok).toBe(true);
+    if (bobLink.ok) {
+      expect(bobLink.alreadyLinked).toBe(false);
+      expect(bobLink.wallet.unlinkState).toBe('active');
+    }
+    // Alice's finalized tombstone is retained for audit; Bob owns the live row.
+    expect(await listWallets(deps, { userId: alice.userId, includeUnlinked: true })).toHaveLength(
+      1,
+    );
+    expect(await listWallets(deps, { userId: bob.userId, includeUnlinked: false })).toHaveLength(1);
+  });
+
   it('re-linking during cooling-off CANCELS the unlink', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
