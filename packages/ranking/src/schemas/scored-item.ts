@@ -99,10 +99,24 @@ export type ConstraintFlag = (typeof CONSTRAINT_FLAGS)[number];
 export const scoredItemSchema = z
   .object({
     item_id: z.string().uuid(),
-    /** Final PWAtt score: baseline + positive − applied penalties. */
+    /** Final PWAtt score: (baseline + positive − applied penalties) × the SCOI
+     *  distribution multiplier, then − the dispute ordering sink + the validation
+     *  boost (both WS-T, applied outside the multiplier). */
     pwatt_score: z.number(),
     score_components: scoreComponentsSchema,
     penalty_components: penaltyComponentsSchema,
+    /** WS-T — the validation BOOST actually ADDED to `pwatt_score` for a
+     *  `validated` story (challenged by a sourced correction and proven accurate).
+     *  Recorded as a term (`applied` is ADDED, not subtracted) so the decision log
+     *  reconciles the score and the audit surfaces the validation signal.
+     *  DEFAULTED so decision-log snapshots written before this term still parse +
+     *  replay identically (the term was 0 for them). */
+    validation_boost: penaltyTermSchema.default({
+      value: 0,
+      coefficient: 0,
+      applied: 0,
+      enforced: false,
+    }),
     baseline: baselineBreakdownSchema,
     constraint_flags: z.array(z.enum(CONSTRAINT_FLAGS)).max(16),
   })

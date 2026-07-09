@@ -129,7 +129,24 @@ export function disputeValidationBoost(
   features: Pick<FeatureVector, 'dispute_validation'>,
   profile: RankingProfileConfig,
 ): number {
-  return (profile.penalties.vD ?? 0.25) * disputeValidationInput(features);
+  return validationBoostTerm(features, profile).applied;
+}
+
+/**
+ * The validation boost as a RECORDED term (parallels the penalty terms):
+ * `value` = the validated flag ∈ {0, 1}, `coefficient` = the profile's `vD`,
+ * `applied` = the boost ADDED to `pwatt_score` (nonnegative). `enforced` is always
+ * true — a resolved sourced-correction debate is authoritative, with no shadow
+ * gate. The pipeline records this on the ScoredItem so the decision log reconciles
+ * the score and the audit's `signals_used` surfaces the validation signal.
+ */
+export function validationBoostTerm(
+  features: Pick<FeatureVector, 'dispute_validation'>,
+  profile: RankingProfileConfig,
+): PenaltyTerm {
+  const value = disputeValidationInput(features);
+  const coefficient = profile.penalties.vD ?? 0.25;
+  return { value, coefficient, applied: coefficient * value, enforced: true };
 }
 
 function term(value: number, coefficient: number, enforced: boolean): PenaltyTerm {

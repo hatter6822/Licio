@@ -27,6 +27,7 @@ import {
   harmfulTensionInput,
   MFCI_RISK_PENALTY,
   SHADOW_ENFORCEMENT,
+  validationBoostTerm,
 } from '../scoring/penalties.js';
 import { computePositiveScore } from '../scoring/pwatt.js';
 import { makeFeatures, PROFILE } from './fixtures.js';
@@ -78,6 +79,25 @@ describe('WS-T disputeValidationBoost', () => {
   it('falls back to vD = 0.25 when the profile omits the boost coefficient', () => {
     const noVd = { ...PROFILE, penalties: { pM: 1, pT: 0.75, pR: 0.5 } };
     expect(disputeValidationBoost({ dispute_validation: 1 }, noVd)).toBeCloseTo(0.25, 12);
+  });
+
+  it('records the boost as a term for the decision log (value/coefficient/applied/enforced)', () => {
+    const zero = validationBoostTerm({}, PROFILE);
+    expect(zero).toEqual({
+      value: 0,
+      coefficient: PROFILE.penalties.vD ?? 0.25,
+      applied: 0,
+      enforced: true,
+    });
+    const term = validationBoostTerm({ dispute_validation: 1 }, PROFILE);
+    expect(term.value).toBe(1);
+    expect(term.enforced).toBe(true); // authoritative — no shadow gate
+    expect(term.applied).toBeCloseTo(PROFILE.penalties.vD ?? 0.25, 12);
+    // The recorded `applied` is exactly the number added to the score.
+    expect(term.applied).toBeCloseTo(
+      disputeValidationBoost({ dispute_validation: 1 }, PROFILE),
+      12,
+    );
   });
 });
 

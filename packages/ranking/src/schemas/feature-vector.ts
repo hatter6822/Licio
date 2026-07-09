@@ -38,7 +38,11 @@ import { findDeniedFields } from '../denylist.js';
 // v2: the WS-I topic-validation cut — the PHI penalty inputs (`phi_risk`,
 // `holonomy_risk`) were removed and `sensitivity_labels` added, changing the
 // stored field set, so serve/replay cohorts stay distinguishable by version.
-export const FEATURE_SCHEMA_VERSION = 2;
+// v3 (WS-T): added `dispute_validation` (the validation-boost input). It changes
+// the stored field set + the score for validated stories, so the version bumps —
+// stale v2 rows self-heal via the migration-on-read rebuild (service.ts) and
+// decision logs stay distinguishable, rather than silently mixing field sets.
+export const FEATURE_SCHEMA_VERSION = 3;
 
 /** MFCI risk states as ranking features (SPEC §8.5). */
 export const MFCI_RISK_STATE_FEATURES = ['normal', 'elevated', 'high', 'severe'] as const;

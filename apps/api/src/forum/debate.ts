@@ -320,8 +320,19 @@ export async function finalizeDebate(
   // ranking layer reading dispute_status); `upheld` ⇒ tagged `validated`
   // (challenged and proven accurate — no penalty, still re-challengeable);
   // `inconclusive`/absent ⇒ cleared back to `none`.
+  // A `validated` outcome earns a ranking / participation BOOST, so it must reflect
+  // INDEPENDENT scrutiny: a self-targeted arena (the challenger IS the target's own
+  // author) can never earn `validated` — an upheld self-challenge clears to `none`,
+  // closing the boost-farming vector. `corrected`/`inconclusive` are unaffected
+  // (self-marking incorrect is self-inflicted, never a reward).
+  const selfTargeted =
+    arena.incumbentUserId !== null && arena.incumbentUserId === arena.challengerUserId;
   const resolvedStatus: 'incorrect' | 'validated' | 'none' =
-    arena.verdict === 'corrected' ? 'incorrect' : arena.verdict === 'upheld' ? 'validated' : 'none';
+    arena.verdict === 'corrected'
+      ? 'incorrect'
+      : arena.verdict === 'upheld' && !selfTargeted
+        ? 'validated'
+        : 'none';
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
     await deps.contributions.setDisputeStatus(arena.targetContributionId, resolvedStatus);
   } else if (arena.targetType === 'story') {

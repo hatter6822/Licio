@@ -40,8 +40,10 @@ target is tagged `incorrect`), or `inconclusive` (cleared back to `none`). An
 `incorrect` contribution stays **VISIBLE** — an orthogonal `dispute_status`
 column, never a `moderation_state` — but sinks to the bottom of its section; a
 `validated` one is instead lifted ABOVE unchallenged content (a positive
-content-integrity signal, never applause). Fail-closed: a blocked/unavailable
-judge resolves `inconclusive`.
+content-integrity signal, never applause). A **self-targeted** arena (the
+challenger is the target's own author) can never earn `validated` — an upheld
+self-challenge clears to `none`, so the boost cannot be self-farmed. Fail-closed:
+a blocked/unavailable judge resolves `inconclusive`.
 
 ## The AI judge — a governed probabilistic neural model
 

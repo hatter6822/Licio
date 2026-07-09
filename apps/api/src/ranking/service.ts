@@ -396,6 +396,9 @@ function signalNamesOf(log: RankingDecisionLog, itemId: string): string[] {
       names.push(`penalty_${name}`);
     }
   }
+  // WS-T — the validation boost is an ADDED term (challenged + proven accurate);
+  // surface it as a used signal so the audit reflects the actual score arithmetic.
+  if (scored.validation_boost.applied > 0) names.push('validation_boost');
   return names.slice(0, 50);
 }
 

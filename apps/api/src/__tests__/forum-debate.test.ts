@@ -413,6 +413,36 @@ describe('WS-T debate arena lifecycle', () => {
     expect((await contributions.getById(targetId))?.disputeStatus).toBe('validated');
   });
 
+  it('does NOT tag a SELF-targeted upheld arena `validated` (no boost farming)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'My own claim.');
+    const debateId = randomUUID();
+    // The challenger IS the target's own author (self-challenge): the arena opens,
+    // but an upheld outcome must clear to `none`, never `validated`, so a user
+    // cannot stage a weak self-debate to farm the validation boost.
+    await maybeEnterDebate(
+      deps,
+      { ...correctionInput(randomUUID(), targetId), userId: INCUMBENT },
+      debateId,
+    );
+    deps.runJudge = async () => ({
+      verdict: {
+        model_version: '1.0.0',
+        winner: 'incumbent',
+        verdict: 'upheld',
+        confidence: 0.9,
+        probabilities: { incumbent: 0.9, challenger: 0.07, inconclusive: 0.03 },
+        rationale: 'The account held up.',
+      },
+      outputId: `out:${randomUUID()}`,
+    });
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    expect((await judgeDebateArena(deps, debateId))?.verdict).toBe('upheld');
+    clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
+    await finalizeDebate(deps, debateId);
+    // Suppressed to `none` — a self-challenge earns no validation boost.
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('none');
+  });
+
   it('broadcasts a live frame on each position edit / verdict / resolution', async () => {
     const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
     const debateId = randomUUID();
