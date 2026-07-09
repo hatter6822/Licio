@@ -37,7 +37,7 @@ Two constraints govern everything here (SPEC §30.4, the M2 gate):
 | Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the eleven service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
 | Routes | `apps/api/src/routes/invariants-admin.ts`, `invariants-public.ts` | Steward/analyst surface; public SCOI/MERI reads |
 | Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `scoi_context_actions` (WS-H.4.3d), `bridge_attempts` (WS-H.4.2d) |
-| Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `signals/topic-loops.ts`, `signals/topic-dampening.ts` | Exposure labels, the independent-sources drawer, interpretation differences, the composer context warning, PHI v0 topic-frequency feed dampening + wellbeing controls |
+| Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `signals/topic-loops.ts`, `signals/topic-dampening.ts` | Interpretation differences, the composer context warning, PHI v0 topic-frequency feed dampening + wellbeing controls (the MERI exposure label is no longer surfaced on feed cards) |
 
 ## The numeric kernels (`packages/invariants/src/math/`)
 
@@ -405,10 +405,12 @@ so a public story never surfaces a contained near-duplicate's id/title (the
 raw MinHash/syndication candidate sets are not tier-scoped). Served from
 STORED shadow outputs only — a page load never triggers computation.
 
-Client: `ExposureLabel` (four §7.6 labels — rendered on FEED CARDS from
-the `exposure_label` the feed wire carries, resolved from stored MERI
-gains; the standalone `IndependentSourcesDrawer` was retired as redundant
-with the card's exposure label, though its
+Client: the MERI exposure label was REMOVED as a user-facing surface — no
+`ExposureLabel` badge on feed cards, and the feed/story wire no longer
+carries an `exposure_label` field. The computed source-independence signal
+survives everywhere it does real work: the §5.6 Well-Sourced rating gate
+(`meriExposureIsIndependent`, a server-side derivation), the WS-I ranking
+features/penalty/quota, and the
 `GET /v1/stories/:id/independent-sources` lineage read — the "Same coverage
 elsewhere" co-group members (near-duplicates by MinHash + confirmed-
 syndication siblings, visibility-gated server-side) — remains available),
@@ -493,7 +495,12 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   context gates, PHI per-user diversification, the GWEI deployment gate) —
   promoted
   invariants ENFORCE; shadow invariants are computed and RECORDED in every
-  decision log with `enforced: false`. Nothing has been promoted yet, by
+  decision log with `enforced: false`. **MERI is promoted to
+  `soft_constraint` in every environment** (`seedMeriRankingEnforcement`,
+  appended on the unconditional boot path) so its §7.1 redundancy penalty
+  applies to the served feed — the maintainer decision to run the
+  lowest-blast-radius invariant live; the kill switch (a demotion append)
+  still reverts it on the next read. Every OTHER invariant remains shadow by
   design; the per-topic repeats preference and the deliberate-choice
   override remain consumable through the same surfaces.
 - **WS-J** takes ownership of the analyst queue UX and supplies the

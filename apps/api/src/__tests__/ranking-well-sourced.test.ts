@@ -141,15 +141,16 @@ describe('WS-I — §5.6 well-sourced gating is independence-aware', () => {
     expect(b).toBeDefined();
     expect(c).toBeDefined();
 
-    // Only the genuinely independent + verified story earns the label.
+    // Only the genuinely independent + verified story earns the label. MERI
+    // source-independence is a SEPARATE gate feeding this label — and it still
+    // works even though the MERI exposure label is no longer a user-facing field.
     expect(a?.rating_label).toBe('well-sourced');
     expect(b?.rating_label).not.toBe('well-sourced');
     expect(c?.rating_label).not.toBe('well-sourced');
 
-    // All three still attest the MERI exposure (independence is a SEPARATE gate).
-    expect(a?.exposure_label).toBe('independent_source');
-    expect(b?.exposure_label).toBe('independent_source');
-    expect(c?.exposure_label).toBe('independent_source');
+    // The MERI exposure label was removed as a user-facing surface — the feed
+    // item carries no such field anymore.
+    expect(a).not.toHaveProperty('exposure_label');
   });
 
   it('keeps the descriptive "N evidence cards" chip on the RAW total', async () => {

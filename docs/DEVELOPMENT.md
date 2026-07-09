@@ -731,9 +731,12 @@ Bridge Active.
 The invariant signals are computed through the same WS-H/WS-E paths used by
 production code, not hand-authored fixtures:
 
-- MERI exposure labels appear on feed cards and in the independent-sources
-  drawer. Near-duplicate reposts stay grouped as duplicate context rather than
-  counting as independent support.
+- MERI source-independence is computed by the real batch and enforced live
+  (MERI is promoted to `soft_constraint` in every environment): a near-duplicate
+  repost is demoted below its original rather than counting as independent
+  support. The exposure label is no longer shown on feed cards; the
+  independent-sources drawer (`GET /v1/stories/:id/independent-sources`) still
+  exposes the lineage.
 - SCOI divergence appears in the **Where interpretations differ** drawer
   (rendered right after the composer) for stories where seeded lenses genuinely
   interpret the context differently (S10). Lenses are authored end-to-end: a room

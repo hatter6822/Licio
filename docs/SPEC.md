@@ -676,7 +676,7 @@ Pseudo-code:
 
 ## 7.6 UI requirements
 
-Feed cards may show "New angle," "Independent source," "Duplicate context," or "Same claim, new evidence." Topic pages include an "independent sources" drawer. Users can choose "show fewer repeats" or "show all updates" per topic. The app must never say "this is true because many outlets repeated it" — repetition is not independence.
+The MERI exposure label ("New angle," "Independent source," "Duplicate context," "Same claim, new evidence") is computed but is NOT surfaced on feed cards — the source-independence signal drives ranking and the "Well-Sourced" rating gate instead. Topic pages include an "independent sources" drawer. Users can choose "show fewer repeats" or "show all updates" per topic. The app must never say "this is true because many outlets repeated it" — repetition is not independence.
 
 ## 7.7 Acceptance criteria
 

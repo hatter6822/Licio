@@ -5,7 +5,6 @@ import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
 import { DisputeBadge } from '../DisputeBadge/index.js';
-import { ExposureLabel } from '../ExposureLabel/index.js';
 import { RatingLabel } from '../RatingLabel/index.js';
 import { StoryMedia } from '../StoryMedia/index.js';
 import type { StoryCardData, StoryOrigin } from '../types.js';
@@ -42,7 +41,6 @@ function warnIfScoreLike(reason: string): void {
 export function StoryCard({
   story,
   ratingLabel,
-  exposureLabel,
   disputeStatus = 'none',
   distributionReason,
   contextChips,
@@ -62,13 +60,6 @@ export function StoryCard({
   warnIfScoreLike(distributionReason);
 
   const origin = ORIGIN_KEYS[story.origin];
-  // Exposure nonredundancy (WS-B.2.1c): the MERI "Independent source" exposure
-  // label (section 3) already says — more richly — that this is an independent
-  // source, so the plain "Independent" origin badge is a redundant echo. Suppress
-  // the origin badge in exactly that collision; every other origin still shows it.
-  const showOriginBadge = !(
-    story.origin === 'independent' && exposureLabel === 'independent_source'
-  );
   const readingEstimate = formatReadingEstimate(story.readingMinutes, locale, (m) =>
     t('reading.estimate', '{minutes} min read', { minutes: m }),
   );
@@ -99,11 +90,9 @@ export function StoryCard({
           items in a room feed; public items carry no chip) */}
       <p className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
         <span>{story.source}</span>
-        {showOriginBadge ? (
-          <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink">
-            {t(origin.key, origin.text)}
-          </span>
-        ) : null}
+        <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink">
+          {t(origin.key, origin.text)}
+        </span>
         {inRoom ? (
           <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink-muted">
             {t('storycard.inRoom', 'In room')}
@@ -127,11 +116,9 @@ export function StoryCard({
         />
       ) : null}
 
-      {/* 3. Rating label (conversation state) + MERI exposure label
-          (WS-H.2.3a; exposure nonredundancy — never truth-by-repetition) */}
+      {/* 3. Rating label (conversation state) */}
       <div className="flex flex-wrap items-center gap-2">
         <RatingLabel kind={ratingLabel} />
-        {exposureLabel ? <ExposureLabel label={exposureLabel} /> : null}
         {/* WS-T — a sourced correction has challenged (or prevailed against)
             this story. Renders nothing when undisputed. */}
         <DisputeBadge status={disputeStatus} />

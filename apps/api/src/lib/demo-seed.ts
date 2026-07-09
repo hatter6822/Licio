@@ -1957,22 +1957,26 @@ export async function seedOperationalSignals(
 }
 
 /**
- * DEVELOPMENT-only: lift the MERI invariant to `soft_constraint` so its ranking
- * effect actually applies on the dev server (NEVER in production — this is
- * called only from the NODE_ENV-guarded dev boot).
+ * Lift the MERI invariant to `soft_constraint` in EVERY environment so its
+ * ranking effect actually applies — the maintainer decision to run MERI live
+ * (not shadow-gated) platform-wide.
  *
- * Every WS-H invariant is persisted SHADOW-only and gated behind the promotion
- * store; with no promotion records (the default) the ranking pipeline computes
- * the invariant values but applies zero effect, so a near-duplicate repost is
- * never demoted below its original. Seeding a single MERI promotion makes the
- * §7.1 duplicate demotion visible in the served feed — the behaviour the demo
- * corpus (the S21↔S25 collision) and the dev traffic simulator's
- * `breaking_news` repost both rely on. Scoped to MERI on purpose: it is a pure
- * redundancy penalty (a demotion), so it carries none of the whole-feed
- * fallback risk of the GWEI deployment gate or the content-exclusion risk of an
- * MFCI severe state. Idempotent (a re-run finds the record already present).
+ * Every OTHER WS-H invariant is persisted SHADOW-only and gated behind the
+ * promotion store; with no promotion records the ranking pipeline computes the
+ * invariant values but applies zero effect, so a near-duplicate repost is never
+ * demoted below its original. Seeding a single MERI promotion makes the §7.1
+ * duplicate demotion visible in the served feed. Scoped to MERI on purpose: it
+ * is a pure redundancy penalty (a demotion), so it carries none of the
+ * whole-feed fallback risk of the GWEI deployment gate or the content-exclusion
+ * risk of an MFCI severe state — the lowest-blast-radius invariant to run live.
+ *
+ * `soft_constraint` (never `hard_constraint`) keeps MERI a soft ranking penalty
+ * rather than a hard feed-shaping exclusion. Idempotent: a re-run (or a later
+ * boot against the same durable promotion store) finds the record present and
+ * returns without appending. The kill switch (a demotion append) still reverts
+ * the effect on the next read without a redeploy.
  */
-export async function seedDevRankingEnforcement(
+export async function seedMeriRankingEnforcement(
   invariants: InvariantPlatformServices,
 ): Promise<void> {
   const existing = await invariants.promotions.listForInvariant('MERI');
@@ -1982,9 +1986,9 @@ export async function seedDevRankingEnforcement(
     fromStatus: 'shadow',
     toStatus: 'soft_constraint',
     evidence: {
-      note: 'development-only enforcement so the §7.1 duplicate demotion is visible',
+      note: 'maintainer decision: MERI runs live (soft_constraint) in all environments',
     },
-    owner: 'dev-boot',
+    owner: 'platform-boot',
     createdAt: new Date().toISOString(),
   });
 }

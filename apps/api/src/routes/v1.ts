@@ -262,7 +262,6 @@ function realStoryToDetail(
     distribution_reason: 'Recently submitted to Licio',
     context_chips: [],
     safety_state: signals.safetyState,
-    exposure_label: signals.meriExposure,
     // WS-T dispute posture — powers the "Challenged"/"Incorrect" badge on the
     // story detail page (parity with the feed card projection).
     dispute_status: story.disputeStatus ?? 'none',
@@ -355,14 +354,7 @@ export function createV1Routes() {
         const ingestion = getIngestionServices();
         const hasStories = (await ingestion.stories.listRecent(1)).length > 0;
         if (!hasStories) {
-          // WS-H.2.3a: demo cards still carry the MERI exposure label,
-          // resolved from the latest STORED output (never computed here).
-          const gains = await latestMeriGains(getEventPipelineServices());
-          const items = DEMO_FEED.map((item) => ({
-            ...item,
-            exposure_label: exposureLabelForGain(gains[item.story_id] ?? null),
-          }));
-          const response: FeedResponse = { items, nextCursor: null };
+          const response: FeedResponse = { items: [...DEMO_FEED], nextCursor: null };
           return c.json(feedResponseSchema.parse(response));
         }
         const ranking = getRankingServices();

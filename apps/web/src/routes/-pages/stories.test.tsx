@@ -29,7 +29,6 @@ const STORY: StoryDetail = {
   url: 'https://example.org/water-testing-dataset',
   reading_minutes: 6,
   rating_label: 'well-sourced',
-  exposure_label: null,
   more_on_this_story: [],
   context_card: null,
   distribution_reason:

@@ -30,6 +30,10 @@ export const meriScoreVectorSchema = z
     approximation: z.boolean(),
     per_class_bounds: z.record(z.string(), z.number().int().positive()),
     group_ids: z.array(z.string()),
+    /** §7.4 mean pairwise independence of the selected basis (WS-H.2.2a);
+     * null when fewer than two representatives carry independence features.
+     * Optional so pre-dimension MERI outputs still validate. */
+    dimensional_independence: score01.nullable().optional(),
   })
   .strict();
 export type MeriScoreVector = z.infer<typeof meriScoreVectorSchema>;

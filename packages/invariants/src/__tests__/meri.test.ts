@@ -27,6 +27,7 @@ import {
   matroidRank,
   meriScore,
   type PartitionMatroid,
+  selectedDimensionalIndependence,
   validateMeriGainConfig,
 } from '../meri/index.js';
 import { forAll, int, pick } from './prop.js';
@@ -459,5 +460,67 @@ describe('MERI independence dimensions (WS-H.2.2a)', () => {
         temporalUpdate: 0,
       }),
     ).toThrow(/sum to 1/);
+  });
+});
+
+describe('MERI §7.4 dimensional-independence fold (WS-H.2.2a)', () => {
+  const fullyIndependent = (id: string, ms: number): MeriCandidateInput =>
+    candidate(id, {
+      independence: {
+        publisherLineage: [`owner-${id}`],
+        claimGroupIds: [`claim-${id}`],
+        evidenceGroupIds: [`ev-${id}`],
+        communityId: `room-${id}`,
+        misleading: false,
+        publishedAtMs: ms,
+      },
+    });
+
+  it('reports null dimensionalIndependence when fewer than two reps carry features', () => {
+    const result = computeMeri([fullyIndependent('a', 0), candidate('b')]);
+    // Only one selected representative carries independence features → no pair.
+    expect(result.dimensionalIndependence).toBeNull();
+  });
+
+  it('reports null when no candidate carries independence features (back-compat)', () => {
+    const result = computeMeri([candidate('a'), candidate('b')]);
+    expect(result.dimensionalIndependence).toBeNull();
+  });
+
+  it('computes the mean pairwise independence over selected reps', () => {
+    const result = computeMeri([
+      fullyIndependent('a', 0),
+      fullyIndependent('b', 1),
+      fullyIndependent('c', 2),
+    ]);
+    expect(result.dimensionalIndependence).not.toBeNull();
+    // Distinct owners/claims/evidence/rooms score 1 on four dimensions; framing
+    // is neutral (0.5, no embedding) and temporal is 0 (no addsNewFacts):
+    // 0.3+0.2+0.2+0.1 + 0.1·0.5 + 0 = 0.85.
+    expect(result.dimensionalIndependence).toBeCloseTo(0.85, 12);
+  });
+
+  it('DISCOUNTS confidence by the dimensional factor, never inflating it', () => {
+    const cands = [fullyIndependent('a', 0), fullyIndependent('b', 1), fullyIndependent('c', 2)];
+    const withDims = computeMeri(cands);
+    // The same candidates stripped of independence features keep full confidence.
+    const withoutDims = computeMeri(cands.map((c) => candidate(c.id)));
+    const factor = 0.75 + 0.25 * (withDims.dimensionalIndependence ?? 0);
+    expect(withDims.confidence).toBeCloseTo(withoutDims.confidence * factor, 12);
+    expect(withDims.confidence).toBeLessThan(withoutDims.confidence);
+  });
+
+  it('is order-independent (symmetric over the selected pair set)', () => {
+    const a = fullyIndependent('a', 0);
+    const b = fullyIndependent('b', 1);
+    const c = fullyIndependent('c', 2);
+    const forward = computeMeri([a, b, c]).dimensionalIndependence;
+    const reversed = computeMeri([c, b, a]).dimensionalIndependence;
+    expect(forward).toBeCloseTo(reversed ?? Number.NaN, 12);
+  });
+
+  it('selectedDimensionalIndependence is null below two featured reps', () => {
+    const only = new Map<string, MeriCandidateInput>([['a', fullyIndependent('a', 0)]]);
+    expect(selectedDimensionalIndependence(['a'], only)).toBeNull();
   });
 });

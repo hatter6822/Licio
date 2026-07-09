@@ -764,7 +764,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
 });
 
 describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => {
-  it('feed items carry the MERI exposure label from stored gains', async () => {
+  it('feed items no longer carry a MERI exposure label (removed user-facing surface)', async () => {
     const fixture = freshInvariantServices();
     const demoId = '5f5e1000-0000-4000-8000-000000000001';
     await fixture.events.invariantStore.upsert({
@@ -791,14 +791,12 @@ describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => 
     });
     const response = await app().request('http://local/v1/feed');
     expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      items: Array<{ story_id: string; exposure_label: string | null }>;
-    };
-    const labeled = body.items.find((item) => item.story_id === demoId);
-    expect(labeled?.exposure_label).toBe('independent_source');
-    // Stories without a stored gain stay honestly unlabeled.
-    const unlabeled = body.items.find((item) => item.story_id !== demoId);
-    expect(unlabeled?.exposure_label).toBeNull();
+    const body = (await response.json()) as { items: Array<Record<string, unknown>> };
+    // The exposure label was removed from the wire; the MERI source-independence
+    // signal survives via the /independent-sources drawer + ranking, not the feed.
+    for (const item of body.items) {
+      expect(item).not.toHaveProperty('exposure_label');
+    }
   });
 
   it('interpretations resolve human lens names through the room', async () => {

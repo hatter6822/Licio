@@ -43,7 +43,6 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     distribution_reason: 'Rising from independent source opens',
     context_chips: [],
     safety_state: 'ok',
-    exposure_label: null,
     more_on_this_story: [],
     context_card: null,
     topic_ids: [],
