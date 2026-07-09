@@ -17,7 +17,7 @@ const sample: StoryCardData = {
   ratingLabel: 'well-sourced',
   distributionReason: 'Rising from independent source opens and evidence additions',
   contextChips: [
-    { id: 'c1', label: '3 lenses' },
+    { id: 'c1', label: '3 evidence cards' },
     { id: 'c2', label: '2 primary sources' },
     { id: 'c3', label: 'low coordination risk' },
   ],
@@ -39,10 +39,9 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
     expect(within(heading).queryByRole('link')).toBeNull();
 
     expect(screen.getByText('Delta Observer')).toBeInTheDocument();
-    expect(screen.getByText('Independent')).toBeInTheDocument();
     expect(screen.getByText('Well-Sourced')).toBeInTheDocument();
     expect(screen.getByText(sample.distributionReason)).toBeInTheDocument();
-    expect(screen.getByText('3 lenses')).toBeInTheDocument();
+    expect(screen.getByText('3 evidence cards')).toBeInTheDocument();
     expect(screen.getByText('4 min read')).toBeInTheDocument();
     expect(screen.getByText('What changed upstream?')).toBeInTheDocument();
   });
@@ -86,7 +85,7 @@ describe('StoryCard screen-reader order (WS-B.2.1c / WCAG 1.3.2)', () => {
       screen.getByText('Delta Observer'),
       screen.getByText('Well-Sourced'),
       screen.getByText(sample.distributionReason),
-      screen.getByText('3 lenses'),
+      screen.getByText('3 evidence cards'),
       screen.getByText('4 min read'),
       screen.getByText('What changed upstream?'),
     ];
@@ -133,12 +132,13 @@ describe('StoryCard distribution-reason guard (no-applause)', () => {
 });
 
 describe('origin badge', () => {
-  it('always renders the source-origin badge (no MERI exposure label surface)', () => {
-    // The MERI exposure label was removed as a user-facing surface, so the
-    // origin badge no longer collides with an "Independent source" echo and
-    // always shows for its origin.
+  it('renders no source-origin badge (the hardcoded "Independent" placeholder is gone)', () => {
+    // `story.origin` was never a real derived signal — the feed and detail reads
+    // hardcode it to 'independent', so the badge claimed every source was
+    // "Independent". The badge was removed; only the lowercase word inside the
+    // distribution reason ("independent source opens") remains, never the badge.
     render(<StoryCard {...sample} />);
-    expect(screen.getByText('Independent')).toBeInTheDocument();
+    expect(screen.queryByText('Independent')).not.toBeInTheDocument();
   });
 
   it('carries no MERI exposure label anywhere on the card', () => {
@@ -146,5 +146,28 @@ describe('origin badge', () => {
     expect(screen.queryByText('Independent source')).not.toBeInTheDocument();
     expect(screen.queryByText('New angle')).not.toBeInTheDocument();
     expect(screen.queryByText('Duplicate context')).not.toBeInTheDocument();
+  });
+});
+
+describe('lens-count chip removal', () => {
+  it('drops a lens-count chip from ANY producer at the render boundary', () => {
+    // Structural enforcement: whatever passes a lens-count chip (feed, styleguide,
+    // a stale cached card), the "N lenses" affordance never renders. Match both
+    // the `lenses` id and a bare "N lens(es)" label; keep every other chip.
+    render(
+      <StoryCard
+        {...sample}
+        contextChips={[
+          { id: 'lenses', label: '2 lenses' },
+          { id: 'c1', label: '3 lenses' },
+          { id: 'c2', label: '1 lens' },
+          { id: 'c3', label: '2 primary sources' },
+        ]}
+      />,
+    );
+    expect(screen.queryByText('2 lenses')).not.toBeInTheDocument();
+    expect(screen.queryByText('3 lenses')).not.toBeInTheDocument();
+    expect(screen.queryByText('1 lens')).not.toBeInTheDocument();
+    expect(screen.getByText('2 primary sources')).toBeInTheDocument();
   });
 });

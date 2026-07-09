@@ -20,7 +20,7 @@ const sample: StoryCardData = {
   ratingLabel: 'bridge-active',
   distributionReason: 'Multiple communities are engaging with improving coherence',
   contextChips: [
-    { id: 'c1', label: '3 lenses' },
+    { id: 'c1', label: '3 evidence cards' },
     { id: 'c2', label: '2 primary sources' },
   ],
   branchPreview: [{ id: 'b1', title: 'What changed upstream?' }],

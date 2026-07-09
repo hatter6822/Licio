@@ -390,7 +390,7 @@ The Submit tab is centered and persistent; it is a contribution entry point, not
 
 ## 6.3 Front Page layout
 
-Each feed card contains: story title; source and origin badge; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("3 lenses," "2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, right to open context card, long-press to signal problem / mute source / adjust topic). The front page serves public content only (Section 3.4). No card contains a like count, vote count, heart icon, public score, or reaction bar.
+Each feed card contains: story title; source; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, right to open context card, long-press to signal problem / mute source / adjust topic). The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
 
 ## 6.4 Thread layout
 

@@ -7,7 +7,7 @@ import { Icon } from '../../ui/Icon/index.js';
 import { DisputeBadge } from '../DisputeBadge/index.js';
 import { RatingLabel } from '../RatingLabel/index.js';
 import { StoryMedia } from '../StoryMedia/index.js';
-import type { StoryCardData, StoryOrigin } from '../types.js';
+import type { StoryCardData } from '../types.js';
 
 export interface StoryCardProps extends StoryCardData {
   /** Heading level for the title so the card fits its surrounding hierarchy. */
@@ -21,12 +21,17 @@ export interface StoryCardProps extends StoryCardData {
   className?: string;
 }
 
-const ORIGIN_KEYS: Record<StoryOrigin, { key: string; text: string }> = {
-  independent: { key: 'origin.independent', text: 'Independent' },
-  wire: { key: 'origin.wire', text: 'Wire' },
-  official: { key: 'origin.official', text: 'Official' },
-  aggregator: { key: 'origin.aggregator', text: 'Aggregator' },
-};
+/**
+ * The "N lenses" card chip was removed: a room's lens COUNT still drives
+ * WS-I.2.4b lens balancing, but it is not a per-card affordance. Enforce that
+ * structurally at the render boundary — not by convention in each producer — so
+ * no source (the API feed, the styleguide, a stale cached card, or a future
+ * caller) can reintroduce it. Matches the `lenses` chip id and any "3 lenses" /
+ * "1 lens" count label (chip labels are server-generated English, never i18n'd).
+ */
+function isLensCountChip(chip: { id: string; label: string }): boolean {
+  return chip.id === 'lenses' || /^\s*\d+\s+lens(?:es)?\b/i.test(chip.label);
+}
 
 /** Reject a distribution reason that leaks a raw numeric score (dev-only). */
 function warnIfScoreLike(reason: string): void {
@@ -59,7 +64,10 @@ export function StoryCard({
 
   warnIfScoreLike(distributionReason);
 
-  const origin = ORIGIN_KEYS[story.origin];
+  // Drop any lens-count chip at the boundary (see isLensCountChip) so the
+  // removed "N lenses" affordance can never render, whatever the producer.
+  const visibleChips = contextChips?.filter((chip) => !isLensCountChip(chip));
+
   const readingEstimate = formatReadingEstimate(story.readingMinutes, locale, (m) =>
     t('reading.estimate', '{minutes} min read', { minutes: m }),
   );
@@ -86,13 +94,13 @@ export function StoryCard({
         {story.title}
       </Heading>
 
-      {/* 2. Source + origin badge (+ the WS-Q.5.3b in-room chip on non-public
-          items in a room feed; public items carry no chip) */}
+      {/* 2. Source (+ the WS-Q.5.3b in-room chip on non-public items in a room
+          feed; public items carry no chip). The source-provenance origin badge
+          was removed — `story.origin` is a hardcoded placeholder (never a real
+          derived signal), so a card claiming every source is "Independent" was
+          misleading rather than informative. */}
       <p className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
         <span>{story.source}</span>
-        <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink">
-          {t(origin.key, origin.text)}
-        </span>
         {inRoom ? (
           <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink-muted">
             {t('storycard.inRoom', 'In room')}
@@ -129,9 +137,9 @@ export function StoryCard({
 
       {/* 5. Context chips (lenses, primary sources, coordination-risk band).
           Secondary metadata: hidden in focus mode for a calmer layout. */}
-      {contextChips && contextChips.length > 0 ? (
+      {visibleChips && visibleChips.length > 0 ? (
         <ul className="flex flex-wrap gap-2" data-focus-hide>
-          {contextChips.map((chip) => (
+          {visibleChips.map((chip) => (
             <li
               key={chip.id}
               className="inline-flex items-center gap-1 rounded-md bg-surface px-2 py-1 text-xs text-ink"

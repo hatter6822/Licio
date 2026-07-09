@@ -702,7 +702,7 @@ Implement SPA focus management integrated with TanStack Router. On every client-
 **ID:** WS-B.2.1a
 **Ref:** Section 6.3
 
-Build the `StoryCard` component in `apps/web/src/components/story/StoryCard`. The card displays: story title (as a heading), source and origin badge, rating label (from WS-B.2.3), one-line distribution reason (e.g., "Rising from independent source opens and evidence additions"), context chips ("3 lenses," "2 primary sources," "low coordination risk"), reading estimate, and thread-branch preview. The card supports swipe actions (handled by WS-B.2.2): left to save, right to open context card, long-press for menu.
+Build the `StoryCard` component in `apps/web/src/components/story/StoryCard`. The card displays: story title (as a heading), source, rating label (from WS-B.2.3), one-line distribution reason (e.g., "Rising from independent source opens and evidence additions"), context chips ("2 primary sources," "low coordination risk"), reading estimate, and thread-branch preview. The card carries no source-origin badge (`story.origin` is a hardcoded placeholder, never a real derived signal) and no "N lenses" chip (the lens count drives lens balancing, not a per-card affordance); lens-count chips are filtered out at the render boundary so no producer can reintroduce them. The card supports swipe actions (handled by WS-B.2.2): left to save, right to open context card, long-press for menu.
 
 The card uses `<article>` as the root element with an accessible heading hierarchy. Reading estimate and context chips use semantic markup. The distribution reason is concise and never exposes a raw numeric score.
 
@@ -710,16 +710,16 @@ The card uses `<article>` as the root element with an accessible heading hierarc
 
 | Prop | Type | Notes |
 |---|---|---|
-| `story` | `Story` | Title, source, origin, reading estimate |
+| `story` | `Story` | Title, source, reading estimate (`origin` is retained on the type but no longer rendered — see the paragraph above) |
 | `ratingLabel` | `RatingLabel` | One of the seven WS-B.2.3 labels |
 | `distributionReason` | `string` | Human-readable; validated to contain no digits-as-score pattern |
-| `contextChips` | `ContextChip[]` | lenses, primary sources, coordination-risk band |
+| `contextChips` | `ContextChip[]` | primary sources, coordination-risk band (lens-count chips are filtered out at the card render boundary) |
 | `branchPreview` | `BranchPreview` | Up to N branch titles |
 
 The `Story` and related types deliberately contain no `likeCount`, `voteCount`, `score`, `reactions`, `followerCount`, or `shareCount`. The type system is the first line of the no-applause guarantee (verified in WS-B.2.1b).
 
 **Acceptance criteria:**
-- Card renders all specified fields: title, source badge, rating label, distribution reason, context chips, reading estimate, thread-branch preview.
+- Card renders all specified fields: title, source, rating label, distribution reason, context chips, reading estimate, thread-branch preview (no source-origin badge; no "N lenses" chip).
 - Card uses `<article>` with proper heading hierarchy.
 - Distribution reason is human-readable, not a numeric score.
 - Card is responsive: compact on mobile, expanded on larger viewports.
@@ -774,7 +774,7 @@ Explicit verification that the StoryCard contains zero applause affordances. Thi
 **ID:** WS-B.2.1c
 **Ref:** Sections 6.3, 26.2
 
-Ensure the StoryCard has a logical screen reader reading order that matches the visual layout priority: title first, then source badge, rating label, distribution reason, context chips, reading estimate, and branch preview. The DOM order must match the visual order (no CSS-only reordering that creates a mismatch). Interactive elements (swipe action alternatives, menu trigger) are announced after the content. The card as a whole has a meaningful accessible name derived from the title.
+Ensure the StoryCard has a logical screen reader reading order that matches the visual layout priority: title first, then source, rating label, distribution reason, context chips, reading estimate, and branch preview. The DOM order must match the visual order (no CSS-only reordering that creates a mismatch). Interactive elements (swipe action alternatives, menu trigger) are announced after the content. The card as a whole has a meaningful accessible name derived from the title.
 
 **Acceptance criteria:**
 - DOM order matches visual reading order: title, source, rating, reason, chips, estimate, preview.
