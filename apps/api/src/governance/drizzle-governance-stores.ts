@@ -20,6 +20,7 @@ import {
   roomGovernanceModels,
   roomGovernancePrompts,
   roomLawPacks,
+  roomPendingRemoderations,
   roomStewardSeats,
   stewardElections,
   stewardGovernanceVotes,
@@ -29,6 +30,7 @@ import type {
   CapabilityDescriptor,
   GovernancePolicyBundle,
   LawPack,
+  ModerationContext,
   RatificationResult,
   Verdict,
 } from '@licio/governance';
@@ -46,6 +48,8 @@ import type {
   ModelRecord,
   ModelStatus,
   ModelStore,
+  PendingRemoderationRecord,
+  PendingRemoderationStore,
   PromptRecord,
   PromptStore,
   RatificationBallotRecord,
@@ -215,6 +219,19 @@ function toTreasury(row: typeof agentTreasuryActions.$inferSelect): TreasuryActi
     accepted: row.accepted,
     verdict: row.verdict as Verdict,
     executedAt: row.executedAt.toISOString(),
+  };
+}
+
+function toPendingRemoderation(
+  row: typeof roomPendingRemoderations.$inferSelect,
+): PendingRemoderationRecord {
+  return {
+    roomId: row.roomId,
+    subjectRef: row.subjectRef,
+    context: row.context as ModerationContext,
+    attempts: row.attempts,
+    enqueuedAt: row.enqueuedAt.toISOString(),
+    lastAttemptAt: row.lastAttemptAt ? row.lastAttemptAt.toISOString() : null,
   };
 }
 
@@ -770,6 +787,75 @@ export class DrizzleRatificationBallotStore implements RatificationBallotStore {
   }
 }
 
+export class DrizzlePendingRemoderationStore implements PendingRemoderationStore {
+  readonly #db: Db;
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async enqueue(record: {
+    roomId: string;
+    subjectRef: string;
+    context: ModerationContext;
+    enqueuedAt: string;
+  }): Promise<void> {
+    // Upsert on the composite PK: a re-defer refreshes ONLY the context snapshot,
+    // preserving attempts + enqueuedAt (parity with the in-memory adapter) — an
+    // ongoing outage never duplicates the row nor resets its age/retry history.
+    await this.#db
+      .insert(roomPendingRemoderations)
+      .values({
+        roomId: record.roomId,
+        subjectRef: record.subjectRef,
+        context: record.context,
+        attempts: 0,
+        enqueuedAt: new Date(record.enqueuedAt),
+        lastAttemptAt: null,
+      })
+      .onConflictDoUpdate({
+        target: [roomPendingRemoderations.roomId, roomPendingRemoderations.subjectRef],
+        set: { context: record.context },
+      });
+  }
+
+  async list(limit: number): Promise<PendingRemoderationRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(roomPendingRemoderations)
+      // Oldest-first FIFO drain; the same-instant tiebreak matches the in-memory adapter.
+      .orderBy(asc(roomPendingRemoderations.enqueuedAt), asc(roomPendingRemoderations.subjectRef))
+      .limit(Math.max(0, limit));
+    return rows.map(toPendingRemoderation);
+  }
+
+  async markAttempt(roomId: string, subjectRef: string, at: string): Promise<void> {
+    await this.#db
+      .update(roomPendingRemoderations)
+      .set({ attempts: sql`${roomPendingRemoderations.attempts} + 1`, lastAttemptAt: new Date(at) })
+      .where(
+        and(
+          eq(roomPendingRemoderations.roomId, roomId),
+          eq(roomPendingRemoderations.subjectRef, subjectRef),
+        ),
+      );
+  }
+
+  async remove(roomId: string, subjectRef: string): Promise<void> {
+    await this.#db
+      .delete(roomPendingRemoderations)
+      .where(
+        and(
+          eq(roomPendingRemoderations.roomId, roomId),
+          eq(roomPendingRemoderations.subjectRef, subjectRef),
+        ),
+      );
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(roomPendingRemoderations);
+  }
+}
+
 export function createDrizzleGovernanceStores(db: Db): GovernanceStores {
   return {
     seats: new DrizzleSeatStore(db),
@@ -783,5 +869,6 @@ export function createDrizzleGovernanceStores(db: Db): GovernanceStores {
     bindings: new DrizzleBindingStore(db),
     agentActions: new DrizzleAgentActionStore(db),
     treasuryActions: new DrizzleTreasuryActionStore(db),
+    pendingRemoderation: new DrizzlePendingRemoderationStore(db),
   };
 }

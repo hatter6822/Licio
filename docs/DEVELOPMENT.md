@@ -1234,6 +1234,11 @@ GOVERNANCE_LLM_MODEL=claude-opus-4-8    # optional; this is the default
 GOVERNANCE_LLM_PROVIDER=local
 GOVERNANCE_LLM_LOCAL_URL=http://127.0.0.1:11434/v1   # LOOPBACK-ONLY (enforced)
 GOVERNANCE_LLM_MODEL=llama3.3:70b                    # required: the runtime's model name
+
+# Optional: keep the LLM off in-room MODERATION (still used for the lawmaking
+# summary). Omitted/any-other-value ⇒ the LLM is the moderation model; `off` ⇒
+# the deterministic default proposer serves the moderation seam.
+GOVERNANCE_LLM_MODERATION=off
 ```
 
 The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /
@@ -1248,16 +1253,21 @@ Governance* room: sign in as the steward account and POST
 `lawmaking.summarize` capability, which the seeded binding grants).
 
 Two governed surfaces consume the backend. **(1)** The advisory **lawmaking
-summary** above. **(2)** A **score-blind shadow moderation advisor**: when a
-backend is enabled, a governed LLM classifies each moderated contribution
-ALONGSIDE the authoritative deterministic policy — it never sees the DSL's
-decision and never changes it (the moderation outcome stays deterministic),
-running fire-and-forget off the contribution path purely to measure agreement.
-Set `GOVERNANCE_LLM_SHADOW_MODERATION=off` to disable just that surface (e.g.
-to cap its per-contribution volume). Inspect the divergence log as an AI-team
-member: `GET /v1/ai/admin/governance/shadow-moderation/{roomId}` returns an
-agreement summary (agreed / advisor-more-severe / advisor-less-severe) plus
-recent metadata-only rows.
+summary** above. **(2)** The **in-room moderation MODEL**: when a backend is
+enabled, a governed `toxicity_safety_triage` LLM CLASSIFIES each moderated
+contribution, and the platform's deterministic wrapper
+(`governance/service.ts`) BOUNDS its proposal — an escalate-to-human-review
+ceiling (never above `flag_for_review`; a human confirms before any removal)
+then the community-capability clamp — before it can have any effect. On model
+unavailability the wrapper falls back to the always-on WS-J baseline and
+enqueues the contribution for **deferred re-moderation** (retried by the
+governance scheduler when the model recovers — delayed, never dropped). Set
+`GOVERNANCE_LLM_MODERATION=off` to keep the LLM off moderation (⇒ a
+deterministic default proposer serves the seam) while still using it for the
+lawmaking summary. Inspect the decision log as an AI-team member: `GET
+/v1/ai/admin/governance/moderation/{roomId}` returns a summary (total /
+allowed / warned / flagged-for-review / clamped-by-wrapper) plus recent
+metadata-only rows (raw proposed vs bounded action — no content).
 
 ---
 

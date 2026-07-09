@@ -19,6 +19,7 @@ import {
   roomGovernanceModels,
   roomGovernancePrompts,
   roomLawPacks,
+  roomPendingRemoderations,
   roomStewardSeats,
   stewardElections,
   users,
@@ -38,6 +39,7 @@ import {
   DrizzleElectionStore,
   DrizzleLawPackStore,
   DrizzleModelStore,
+  DrizzlePendingRemoderationStore,
   DrizzlePromptStore,
   DrizzleRatificationBallotStore,
   DrizzleRatificationVoteStore,
@@ -55,14 +57,8 @@ function bundleOf(): GovernancePolicyBundle {
     bundleId: 'civility',
     version: '1',
     name: 'Civility',
-    moderationRules: [
-      {
-        id: 'r1',
-        when: { kind: 'link_count_gte', value: 3 },
-        action: 'flag_for_review',
-        reason: 'links',
-      },
-    ],
+    moderationPrompt:
+      'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
     promptTemplates: { summary: 'Be brief.' },
     config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
     requestedCapabilities: ['moderate.flag'],
@@ -103,6 +99,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
   let treasury: DrizzleTreasuryActionStore;
   let ratifications: DrizzleRatificationVoteStore;
   let ratificationBallots: DrizzleRatificationBallotStore;
+  let pendingRemoderation: DrizzlePendingRemoderationStore;
 
   beforeAll(async () => {
     db = createDbClient(DB_URL as string);
@@ -118,6 +115,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     treasury = new DrizzleTreasuryActionStore(db);
     ratifications = new DrizzleRatificationVoteStore(db);
     ratificationBallots = new DrizzleRatificationBallotStore(db);
+    pendingRemoderation = new DrizzlePendingRemoderationStore(db);
     voterId = await makeUser(db, 'wsu_voter');
     candidateId = await makeUser(db, 'wsu_cand');
     stewardId = await makeUser(db, 'wsu_stew');
@@ -127,6 +125,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     // FK-safe order: bindings (restrict→model) before models; elections cascade votes;
     // ratification ballots cascade from the vote, votes before models.
     await db.delete(agentTreasuryActions).where(eq(agentTreasuryActions.roomId, roomId));
+    await db.delete(roomPendingRemoderations).where(eq(roomPendingRemoderations.roomId, roomId));
     await db.delete(agentActionLogs).where(eq(agentActionLogs.roomId, roomId));
     await db.delete(roomAgentBindings).where(eq(roomAgentBindings.roomId, roomId));
     await db.delete(modelRatifications).where(eq(modelRatifications.roomId, roomId));
@@ -404,6 +403,60 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     const acceptedRows = await treasury.acceptedByRoom(roomId);
     expect(acceptedRows).toHaveLength(1);
     expect(acceptedRows[0]?.amount).toBe(10);
+  });
+
+  it('deferred re-moderation queue: upsert-idempotent enqueue, FIFO list, attempt bump, remove', async () => {
+    const ctx = {
+      contentText: 'see http://a http://b http://c',
+      contentKind: 'comment' as const,
+      contentLength: 30,
+      linkCount: 3,
+      mentionCount: 0,
+      hasMediaUpload: false,
+      authorAccountAgeDays: 3,
+      authorNewToRoom: true,
+      priorRemovalsInRoom: 0,
+    };
+    const older = new Date(Date.now() - 60_000).toISOString();
+    const newer = new Date().toISOString();
+    await pendingRemoderation.enqueue({
+      roomId,
+      subjectRef: 'contrib-A',
+      context: ctx,
+      enqueuedAt: older,
+    });
+    await pendingRemoderation.enqueue({
+      roomId,
+      subjectRef: 'contrib-B',
+      context: ctx,
+      enqueuedAt: newer,
+    });
+    // A re-defer of A UPSERTS (refreshes context, keeps attempts + enqueuedAt) — no duplicate row.
+    await pendingRemoderation.enqueue({
+      roomId,
+      subjectRef: 'contrib-A',
+      context: { ...ctx, linkCount: 9 },
+      enqueuedAt: newer,
+    });
+
+    const listed = await pendingRemoderation.list(10);
+    const mine = listed.filter((r) => r.roomId === roomId);
+    expect(mine.map((r) => r.subjectRef)).toEqual(['contrib-A', 'contrib-B']); // oldest-first FIFO
+    const a = mine.find((r) => r.subjectRef === 'contrib-A');
+    expect(a?.attempts).toBe(0); // preserved across the re-defer
+    expect(a?.context.linkCount).toBe(9); // context refreshed
+    expect(a?.enqueuedAt).toBe(older); // original age preserved
+
+    await pendingRemoderation.markAttempt(roomId, 'contrib-A', newer);
+    const afterAttempt = (await pendingRemoderation.list(10)).find(
+      (r) => r.roomId === roomId && r.subjectRef === 'contrib-A',
+    );
+    expect(afterAttempt?.attempts).toBe(1);
+    expect(afterAttempt?.lastAttemptAt).not.toBeNull();
+
+    await pendingRemoderation.remove(roomId, 'contrib-A');
+    const remaining = (await pendingRemoderation.list(10)).filter((r) => r.roomId === roomId);
+    expect(remaining.map((r) => r.subjectRef)).toEqual(['contrib-B']);
   });
 
   it('opens a ratification vote, enforces one ballot per voter, and patches the settle', async () => {

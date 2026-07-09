@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
 import { resolve } from 'node:path';
@@ -7,9 +8,9 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
-import { createGovernanceModerationShadowAdvisor } from './ai-governance/llm/advisor.js';
 import { resolveGovernanceLlmDecision } from './ai-governance/llm/config.js';
 import { createLocalCompletion } from './ai-governance/llm/local.js';
+import { createGovernanceLlmModerationProposer } from './ai-governance/llm/moderation.js';
 import {
   createAnthropicCompletion,
   createGovernanceLlmNlProvider,
@@ -17,7 +18,7 @@ import {
 } from './ai-governance/llm/provider.js';
 import {
   buildGovernanceLlmIdentity,
-  buildGovernanceModerationAdvisorIdentity,
+  buildGovernanceModerationProposerIdentity,
   ensureGovernanceLlmDeployed,
 } from './ai-governance/llm/registration.js';
 import {
@@ -79,8 +80,12 @@ import {
 import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
-import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
-import type { ModerationShadowAdvisor } from './governance/moderation-shadow.js';
+import {
+  buildAuthorHistoryReader,
+  buildDeferredRemoderationApplier,
+  createRoomAgentModerator,
+} from './governance/forum-agent.js';
+import type { ModerationProposer } from './governance/moderation-proposer.js';
 import type { GovernanceNlProvider } from './governance/nl-provider.js';
 import {
   GOVERNANCE_SCHEDULER_INTERVAL_MS,
@@ -992,16 +997,16 @@ eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
 // operator opt-in (the 2026-07-09 maintainer decision); absent ⇒ the
 // deterministic path, byte-identical to before.
 let governanceNlProvider: GovernanceNlProvider | undefined;
-let governanceModerationAdvisor: ModerationShadowAdvisor | undefined;
+let governanceModerationProposer: ModerationProposer | undefined;
 const governanceLlmDecision = resolveGovernanceLlmDecision({
   provider: env.GOVERNANCE_LLM_PROVIDER,
   apiKey: env.ANTHROPIC_API_KEY,
   modelId: env.GOVERNANCE_LLM_MODEL,
   localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
-  shadowModeration: env.GOVERNANCE_LLM_SHADOW_MODERATION,
+  moderation: env.GOVERNANCE_LLM_MODERATION,
 });
 if (governanceLlmDecision.enabled) {
-  const { backend, settings, shadowModeration } = governanceLlmDecision;
+  const { backend, settings, llmModeration } = governanceLlmDecision;
   // One completion closure, shared by every governed surface: the key/URL live
   // ONLY here — never in the hashed identity config, never in a log line.
   const complete: LlmCompletion =
@@ -1028,24 +1033,25 @@ if (governanceLlmDecision.enabled) {
     );
   }
 
-  // Surface 2 — the score-blind SHADOW moderation advisor (slice 2). Advisory
-  // only: it never affects a moderation decision; it measures agreement.
-  if (shadowModeration) {
-    const advisorIdentity = buildGovernanceModerationAdvisorIdentity(settings, backend);
-    if (await ensureGovernanceLlmDeployed(aiGovernanceServices, advisorIdentity)) {
-      governanceModerationAdvisor = createGovernanceModerationShadowAdvisor({
+  // Surface 2 — the in-room moderation MODEL (the LLM the deterministic wrapper
+  // bounds). Replaces the deterministic default proposer when a backend is
+  // configured (unless GOVERNANCE_LLM_MODERATION=off).
+  if (llmModeration) {
+    const modIdentity = buildGovernanceModerationProposerIdentity(settings, backend);
+    if (await ensureGovernanceLlmDeployed(aiGovernanceServices, modIdentity)) {
+      governanceModerationProposer = createGovernanceLlmModerationProposer({
         services: aiGovernanceServices,
         settings,
-        identity: advisorIdentity,
+        identity: modIdentity,
         complete,
       });
       logger.info(
         { backend: backend.kind, modelId: settings.modelId },
-        'WS-U governance shadow moderation advisor enabled (score-blind, no authority)',
+        'WS-U in-room moderation model = LLM (deterministically wrapped: escalate-to-review ceiling + capability clamp; fail-to-baseline + deferred re-moderation)',
       );
     } else {
       logger.warn(
-        'WS-U governance shadow moderation advisor requested but the WS-K admission/deploy gate refused — running deterministic moderation only',
+        'WS-U governance LLM moderation model requested but the WS-K admission/deploy gate refused — using the deterministic default proposer',
       );
     }
   }
@@ -1073,7 +1079,14 @@ setGovernanceService(
     stores: governanceStores,
     killSwitches: buildGovernanceKillSwitchGuards(knomosisServices),
     ...(governanceNlProvider ? { nlProvider: governanceNlProvider } : {}),
-    ...(governanceModerationAdvisor ? { moderationAdvisor: governanceModerationAdvisor } : {}),
+    ...(governanceModerationProposer ? { moderationProposer: governanceModerationProposer } : {}),
+    // Observability: record every decided in-room moderation (proposed vs the
+    // wrapper-bounded action) to the WS-K moderation decision log.
+    onModerationDecided: (record) => {
+      void aiGovernanceServices.moderationLog
+        .append({ recordId: `moddec:${randomUUID()}`, ...record })
+        .catch(() => {});
+    },
   }),
 );
 // The WS-L law-pack + readiness ports read the SAME governance stores the
@@ -1278,6 +1291,13 @@ startGovernanceScheduler(
       if (subscription?.status === 'active') return true;
       return (await forumServices.rooms.stewardRolesFor(roomId, userId)).length > 0;
     },
+    // WS-U ADR-9 deferred re-moderation: raise an already-published contribution
+    // whose outage-deferred model judgment finally decided a restriction, over the
+    // REAL forum + ingestion stores (floor-dominant; routes to human review).
+    applyDeferredRemoderation: buildDeferredRemoderationApplier({
+      forum: forumServices,
+      ingestion: ingestionServices,
+    }),
     log: (event, meta) => logger.info(meta, event),
     now: () => Date.now(),
   },

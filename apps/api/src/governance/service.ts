@@ -13,19 +13,18 @@ import {
   type AttestableResult,
   actionSeverity,
   attestOutcome,
+  boundAiModerationAction,
   type Capability,
   type CapabilityDescriptor,
   canonicalize,
   deriveCapabilityDescriptor,
   type ElectionRules,
-  evaluatePolicy,
   evaluateTreasuryAction,
   type GovernancePolicyBundle,
   governancePolicyBundleSchema,
   hasCapability,
   type LawPack,
   lawPackSchema,
-  MODERATION_ACTIONS,
   type ModerationAction,
   type ModerationContext,
   type ModerationDecision,
@@ -45,7 +44,11 @@ import {
   type VoteSchedule,
 } from '@licio/governance';
 import type { GovernanceConfig } from './config.js';
-import type { ModerationShadowAdvisor } from './moderation-shadow.js';
+import type {
+  ModerationDecisionSink,
+  ModerationDeferralSink,
+  ModerationProposer,
+} from './moderation-proposer.js';
 import {
   type GovernanceNlProvider,
   LAWMAKING_SUMMARIZE_TEMPLATE_KEY,
@@ -84,11 +87,21 @@ export interface GovernanceServiceDeps {
    *  A throwing provider falls back to the deterministic summary — the
    *  advisory surface degrades, never fails, and never gains authority. */
   nlProvider?: GovernanceNlProvider;
-  /** ADR-9 slice-2 SHADOW moderation advisor (wired at boot; absent ⇒ no
-   *  shadow, byte-identical to before). It runs score-blind ALONGSIDE the
-   *  authoritative DSL purely to measure agreement; `moderate` returns the
-   *  gated DSL decision UNCHANGED whether or not this runs, agrees, or fails. */
-  moderationAdvisor?: ModerationShadowAdvisor;
+  /** ADR-9 in-room moderation MODEL: the LLM classifier the deterministic
+   *  wrapper bounds. Absent ⇒ the room has no in-room AI moderation model and
+   *  runs the platform baseline only (§U.3.5); admission then rejects (a model
+   *  cannot be admitted with no backend to run it). */
+  moderationProposer?: ModerationProposer;
+  /** Enqueue a contribution for deferred re-moderation when the model was
+   *  unavailable (wired at boot; absent ⇒ fail-to-baseline only). */
+  onModerationDeferred?: ModerationDeferralSink;
+  /** Record each decided moderation for observability (wired at boot). */
+  onModerationDecided?: ModerationDecisionSink;
+  /** How many times admission samples the model per fixture, and the minimum
+   *  in-band passes required (a stochastic model needs k-of-N, not 1). Absent ⇒
+   *  the defaults below. */
+  admissionSamples?: number;
+  admissionMinPass?: number;
 }
 
 export type GovernanceResult<T> =
@@ -116,6 +129,15 @@ interface EvalFixture {
   minAction: ModerationAction;
   maxAction: ModerationAction;
 }
+
+/**
+ * The synthetic room id the admission gate stamps on every candidate-model probe
+ * over the platform eval set (WS-U.2.2a). It is NOT a real room, and a proposer
+ * MUST NOT treat it as one — it is exposed only so a probe is recognisable (e.g.
+ * a test double that needs to clear admission deterministically). Runtime
+ * moderation always carries the real room id.
+ */
+export const ADMISSION_ROOM_ID = 'admission';
 
 function ctx(over: Partial<ModerationContext>): ModerationContext {
   return {
@@ -153,6 +175,43 @@ export const PLATFORM_EVAL_SET: readonly EvalFixture[] = [
     maxAction: 'remove',
   },
 ];
+
+/** The deterministic-wrapper classification result (internal to moderate/reModerate). */
+type ClassifyResult =
+  | { kind: 'no_agent' }
+  | { kind: 'unavailable' }
+  | { kind: 'decided'; action: ModerationAction; reason: string };
+
+/** The outcome of re-running a DEFERRED contribution (the sweep's per-item step). */
+export type RemoderationOutcome =
+  | { status: 'moot' }
+  | { status: 'still_unavailable' }
+  | { status: 'cleared' }
+  | { status: 'applied'; action: ModerationAction; reason: string };
+
+/** Aggregate counters returned by a deferred re-moderation sweep. */
+export interface RemoderationSweepResult {
+  swept: number;
+  applied: number;
+  cleared: number;
+  stillUnavailable: number;
+  moot: number;
+  errors: number;
+}
+
+/**
+ * The forum re-seam the sweep calls to RAISE an already-published contribution
+ * whose deferred re-moderation finally decided a restriction (floor-dominant: it
+ * never lowers a platform-floor decision). Wired at boot over the forum +
+ * ingestion stores; a null applier (no forum bound) keeps the item queued rather
+ * than dropping the judgment.
+ */
+export type DeferredRemoderationApplier = (
+  roomId: string,
+  subjectRef: string,
+  action: ModerationAction,
+  reason: string,
+) => Promise<void>;
 
 export class GovernanceService {
   constructor(private readonly deps: GovernanceServiceDeps) {}
@@ -473,7 +532,7 @@ export class GovernanceService {
     const model = await this.deps.stores.models.get(modelId);
     if (!model) return err('not_found', 'Model not found.');
     await this.deps.stores.models.patchStatus(modelId, 'evaluating', null);
-    const failures = admissionFailures(model.bundle);
+    const failures = await this.admissionFailures(model.bundle);
     const status = failures.length === 0 ? 'eligible' : 'rejected';
     const evaluationRef = this.deps.uuid();
     await this.deps.stores.models.patchStatus(modelId, status, evaluationRef);
@@ -705,13 +764,21 @@ export class GovernanceService {
     return { settled, activated };
   }
 
-  // --- Stage 3: bounded moderation agent -----------------------------------
+  // --- Stage 3: the in-room moderation model in a deterministic wrapper -----
 
   /**
-   * Moderate one contribution. Returns null when the room has no active binding
-   * (fallback to the platform baseline). The decision is deterministic policy-DSL
-   * evaluation gated by the capability descriptor; injected content cannot change
-   * the authority (ADR-5). Every effect is logged with the provenance triple.
+   * Moderate one contribution (WS-U ADR-9). The in-room model is an LLM; this is
+   * the DETERMINISTIC WRAPPER that contains it. Returns:
+   *   - `ok(null)` when the room has no active binding OR no in-room model is
+   *     configured OR the model was UNAVAILABLE — the forum then keeps the
+   *     always-on platform baseline (WS-J) decision. On unavailability the
+   *     contribution is enqueued for DEFERRED re-moderation (the model's
+   *     judgment is delayed, never dropped).
+   *   - `ok({action, reason})` when the model classified — the action is
+   *     deterministically BOUNDED (escalate-to-human-review ceiling + the
+   *     community-granted capability clamp) so injected content can never exceed
+   *     the community-voted envelope (ADR-5). The forum combines it
+   *     FLOOR-DOMINANTLY with the baseline (agent can only add restriction).
    */
   async moderate(
     roomId: string,
@@ -726,54 +793,182 @@ export class GovernanceService {
       prefetchedBinding !== undefined
         ? prefetchedBinding
         : await this.deps.stores.bindings.get(roomId);
-    if (binding === null || !binding.active) return ok(null);
+    const outcome = await this.classify(roomId, context, subjectRef, binding);
+    if (outcome.kind === 'no_agent') return ok(null);
+    if (outcome.kind === 'unavailable') {
+      // Fail to the always-on platform baseline (return null) AND persist the
+      // contribution for DEFERRED re-moderation so an outage delays the model's
+      // own judgment rather than dropping it. The durable queue is the mechanism;
+      // `onModerationDeferred` is a parallel observability hook.
+      await this.deps.stores.pendingRemoderation.enqueue({
+        roomId,
+        subjectRef,
+        context,
+        enqueuedAt: this.iso(),
+      });
+      this.deps.onModerationDeferred?.(roomId, subjectRef, context);
+      return ok(null);
+    }
+    return ok({ action: outcome.action, reason: outcome.reason });
+  }
+
+  /**
+   * Re-run a DEFERRED contribution's in-room moderation (the sweep's per-item
+   * step, WS-U ADR-9). Same deterministic wrapper as `moderate`, but it returns an
+   * explicit outcome for the sweep and does NOT touch the pending queue (the sweep
+   * owns queue bookkeeping):
+   *   - `moot`             — no active binding / no in-room model any more (drop it)
+   *   - `still_unavailable`— the model is still down (keep it queued, retry later)
+   *   - `cleared`          — the model now judges it benign (drop it)
+   *   - `applied`          — a bounded restriction to raise the contribution to.
+   */
+  async reModerate(
+    roomId: string,
+    subjectRef: string,
+    context: ModerationContext,
+  ): Promise<RemoderationOutcome> {
+    const binding = await this.deps.stores.bindings.get(roomId);
+    const outcome = await this.classify(roomId, context, subjectRef, binding);
+    if (outcome.kind === 'no_agent') return { status: 'moot' };
+    if (outcome.kind === 'unavailable') return { status: 'still_unavailable' };
+    return outcome.action === 'allow'
+      ? { status: 'cleared' }
+      : { status: 'applied', action: outcome.action, reason: outcome.reason };
+  }
+
+  /**
+   * Drain the deferred re-moderation queue (the scheduler's per-tick work). For
+   * each pending contribution OLDEST-first: re-run the model, and
+   *   - `applied`           — raise the already-published contribution to human
+   *                            review post-hoc via the injected forum re-seam,
+   *                            then remove it (apply BEFORE remove, so a failed
+   *                            apply keeps it queued rather than dropping the
+   *                            judgment);
+   *   - `cleared` / `moot`  — remove it (benign, or no agent governs the room now);
+   *   - `still_unavailable` — record an attempt and keep it queued.
+   * A per-item failure (a re-seam error, or a proposer that broke its fire-safe
+   * contract) records an attempt and moves on, so one poison item never blocks the
+   * batch. `apply` is the forum re-seam; absent (no forum bound) ⇒ an applied
+   * decision is re-queued rather than lost.
+   */
+  async sweepPendingRemoderation(
+    apply: DeferredRemoderationApplier | null,
+    limit = 50,
+  ): Promise<RemoderationSweepResult> {
+    const pending = await this.deps.stores.pendingRemoderation.list(limit);
+    const result: RemoderationSweepResult = {
+      swept: pending.length,
+      applied: 0,
+      cleared: 0,
+      stillUnavailable: 0,
+      moot: 0,
+      errors: 0,
+    };
+    for (const item of pending) {
+      try {
+        const outcome = await this.reModerate(item.roomId, item.subjectRef, item.context);
+        if (outcome.status === 'still_unavailable') {
+          await this.deps.stores.pendingRemoderation.markAttempt(
+            item.roomId,
+            item.subjectRef,
+            this.iso(),
+          );
+          result.stillUnavailable += 1;
+          continue;
+        }
+        if (outcome.status === 'applied') {
+          if (!apply) {
+            // No forum re-seam bound: keep the judgment queued rather than losing it.
+            await this.deps.stores.pendingRemoderation.markAttempt(
+              item.roomId,
+              item.subjectRef,
+              this.iso(),
+            );
+            result.errors += 1;
+            continue;
+          }
+          await apply(item.roomId, item.subjectRef, outcome.action, outcome.reason);
+          result.applied += 1;
+        } else if (outcome.status === 'cleared') {
+          result.cleared += 1;
+        } else {
+          result.moot += 1;
+        }
+        await this.deps.stores.pendingRemoderation.remove(item.roomId, item.subjectRef);
+      } catch {
+        // Transient failure (re-seam error, or a proposer that broke fire-safety):
+        // keep the item queued and retry next sweep.
+        await this.deps.stores.pendingRemoderation
+          .markAttempt(item.roomId, item.subjectRef, this.iso())
+          .catch(() => {});
+        result.errors += 1;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * The shared deterministic wrapper core for `moderate` (live) and `reModerate`
+   * (deferred). Reads the in-room model, samples the proposer, and BOUNDS its
+   * proposal (escalate-to-human-review ceiling + community-capability clamp,
+   * `boundAiModerationAction`). A decided restriction is logged to the agent
+   * action log with its provenance and mirrored to `onModerationDecided`; a
+   * `no_agent`/`unavailable` result has no side effect. Authority is enforced HERE,
+   * never by the model's text (ADR-5).
+   */
+  private async classify(
+    roomId: string,
+    context: ModerationContext,
+    subjectRef: string,
+    binding: BindingRecord | null,
+  ): Promise<ClassifyResult> {
+    if (binding === null || !binding.active) return { kind: 'no_agent' };
+    const proposer = this.deps.moderationProposer;
+    if (!proposer) return { kind: 'no_agent' }; // no in-room model ⇒ platform baseline only
     const model = await this.deps.stores.models.get(binding.modelId);
-    if (!model) return ok(null);
-    const decision = evaluatePolicy(model.bundle.moderationRules, context);
-    // Capability gate: if the bundle's decided action exceeds granted capability,
-    // downgrade to flag_for_review (route to the human floor) rather than act.
-    const effective = this.gateDecision(decision, binding.capabilityDescriptor);
-    if (effective.action !== 'allow') {
+    if (!model) return { kind: 'no_agent' };
+
+    const result = await proposer.propose({
+      roomId,
+      subjectRef,
+      context,
+      moderationPrompt: model.bundle.moderationPrompt,
+    });
+    if (result.status === 'unavailable') return { kind: 'unavailable' };
+
+    // The deterministic wrapper: cap at the escalate-to-review ceiling, then clamp
+    // to the community-granted capability. The model's text cannot exceed this —
+    // authority is enforced OUTSIDE the model (ADR-5).
+    const proposed = result.proposal.action;
+    const boundedAction = boundAiModerationAction(proposed, binding.capabilityDescriptor);
+    const clamped = boundedAction !== proposed;
+    const reason =
+      boundedAction === 'allow' ? 'No in-room moderation action.' : result.proposal.reason;
+
+    if (boundedAction !== 'allow') {
       await this.deps.stores.agentActions.append({
         actionId: this.deps.uuid(),
         roomId,
         bindingModelId: binding.modelId,
         promptHash: this.deps.digest(`${binding.modelId}:${binding.promptId}`),
-        actionType: `moderate.${effective.action}`,
+        actionType: `moderate.${boundedAction}`,
         subjectRef,
-        lawPackRuleRef: effective.ruleRef,
-        statementOfReasons: effective.reason,
-        reversible: effective.action !== 'remove',
+        lawPackRuleRef: null, // the model is not a DSL rule; provenance is the AIOutputRecord
+        statementOfReasons: reason,
+        reversible: true, // the ceiling caps at human review — never an AI-driven removal
         createdAt: this.iso(),
       });
     }
-    // ADR-9 slice-2 SHADOW moderation: run the governed LLM advisor score-blind
-    // ALONGSIDE this authoritative decision purely to MEASURE agreement. It is
-    // FIRE-AND-FORGET — never awaited, never affecting `effective`, and the
-    // advisor swallows every failure — so it adds no latency to the contribution
-    // path and cannot change the outcome (the authority invariant). The prompt
-    // read + LLM call are fully detached; only the DSL action is handed over,
-    // and only to compute the divergence, never to condition the model.
-    const advisor = this.deps.moderationAdvisor;
-    if (advisor) {
-      const promptId = binding.promptId;
-      const dslAction = effective.action;
-      void (async () => {
-        const prompt = await this.deps.stores.prompts.get(promptId);
-        await advisor.recordShadow({
-          roomId,
-          subjectRef,
-          context,
-          roomPromptText: prompt?.promptText ?? null,
-          dslAction,
-        });
-      })().catch(() => {
-        // The advisor contract never throws; this guards the detached prompt
-        // read too, so a store hiccup can never surface as an unhandled
-        // rejection and never touches the authoritative decision above.
-      });
-    }
-    return ok(effective);
+    this.deps.onModerationDecided?.({
+      roomId,
+      subjectRef,
+      proposedAction: proposed,
+      boundedAction,
+      clamped,
+      outputId: result.proposal.outputId,
+      createdAt: this.iso(),
+    });
+    return { kind: 'decided', action: boundedAction, reason };
   }
 
   /**
@@ -1101,31 +1296,40 @@ export class GovernanceService {
   // --- helpers --------------------------------------------------------------
 
   /**
-   * Capability gate for a decided moderation action (deny-by-default). The agent
-   * may take an action ONLY if the community granted its capability. When the
-   * decided action's capability is not granted, fall back to the STRONGEST granted
-   * action that is no MORE severe than the decided one — and to `allow` (no effect)
-   * if the community granted no such content-affecting capability. Because
-   * `MODERATION_ACTIONS` is severity-ordered by content impact, this can never
-   * ESCALATE a visible action into a content hide, and can never drive content to
-   * `under_review`/`removed` without the corresponding granted capability (closing
-   * the prior fallback's capability-sandbox breach — it hid content, and even
-   * escalated an ungranted `warn`, under a `moderate.flag` the room never granted).
+   * The admission check for a moderation model (WS-U ADR-9). The model is an LLM,
+   * so its behaviour is sampled rather than deterministically read: the proposer
+   * classifies each platform floor-safety fixture `samples` times, and every
+   * fixture must land within its `[minAction, maxAction]` severity band on at
+   * least `minPass` of those samples — catching a prompt that under-moderates
+   * clearly-violating content or over-moderates benign content. `unavailable`
+   * samples count as out-of-band (an admission run needs the model reachable).
+   * A deterministic proposer trivially passes with `samples=1`-equivalent
+   * agreement; a stochastic one needs the k-of-N robustness.
    */
-  private gateDecision(
-    decision: ModerationDecision,
-    descriptor: CapabilityDescriptor,
-  ): ModerationDecision {
-    if (decision.action === 'allow') return decision;
-    if (hasCapability(descriptor, MOD_ACTION_CAPABILITY[decision.action])) return decision;
-    const decidedSeverity = actionSeverity(decision.action);
-    let fallback: ModerationAction = 'allow';
-    for (const candidate of MODERATION_ACTIONS) {
-      if (candidate === 'allow') continue;
-      if (actionSeverity(candidate) > decidedSeverity) break; // severity-ordered
-      if (hasCapability(descriptor, MOD_ACTION_CAPABILITY[candidate])) fallback = candidate;
+  private async admissionFailures(bundle: GovernancePolicyBundle): Promise<string[]> {
+    const proposer = this.deps.moderationProposer;
+    if (!proposer) return ['no_moderation_backend'];
+    const samples = Math.max(1, this.deps.admissionSamples ?? 3);
+    const minPass = Math.min(samples, Math.max(1, this.deps.admissionMinPass ?? 2));
+    const failures: string[] = [];
+    for (const fixture of PLATFORM_EVAL_SET) {
+      const lo = actionSeverity(fixture.minAction);
+      const hi = actionSeverity(fixture.maxAction);
+      let inBand = 0;
+      for (let i = 0; i < samples; i += 1) {
+        const result = await proposer.propose({
+          roomId: ADMISSION_ROOM_ID,
+          subjectRef: `${fixture.label}:${i}`,
+          context: fixture.context,
+          moderationPrompt: bundle.moderationPrompt,
+        });
+        if (result.status !== 'decided') continue;
+        const sev = actionSeverity(result.proposal.action);
+        if (sev >= lo && sev <= hi) inBand += 1;
+      }
+      if (inBand < minPass) failures.push(fixture.label);
     }
-    return fallback === decision.action ? decision : { ...decision, action: fallback };
+    return failures;
   }
 
   private async firstPromptFor(modelId: string) {
@@ -1174,14 +1378,6 @@ export class GovernanceService {
   }
 }
 
-/** Maps a non-allow moderation action to the capability that authorizes it. */
-const MOD_ACTION_CAPABILITY: Record<Exclude<ModerationAction, 'allow'>, Capability> = {
-  flag_for_review: 'moderate.flag',
-  warn: 'moderate.warn',
-  restrict: 'moderate.restrict',
-  remove: 'moderate.remove',
-};
-
 /**
  * Maps a treasury action category to the per-category capability that authorizes
  * it — enforced in addition to the coarse `gateway.submit_signed_action` gate, so
@@ -1205,21 +1401,6 @@ const TREASURY_ACTION_CAPABILITY: Record<TreasuryCategory, Capability> = {
  */
 function stableBundle(bundle: GovernancePolicyBundle): string {
   return canonicalize(bundle);
-}
-
-/** Admission failures: the model's decision must be within each fixture's band. */
-export function admissionFailures(bundle: GovernancePolicyBundle): string[] {
-  const failures: string[] = [];
-  // Capability hygiene is structural (floor-reserved is inexpressible), but assert
-  // the bundle requests only sane capabilities by deriving against an all-permit.
-  for (const fixture of PLATFORM_EVAL_SET) {
-    const decision = evaluatePolicy(bundle.moderationRules, fixture.context);
-    const sev = actionSeverity(decision.action);
-    if (sev < actionSeverity(fixture.minAction) || sev > actionSeverity(fixture.maxAction)) {
-      failures.push(fixture.label);
-    }
-  }
-  return failures;
 }
 
 /** A moderation-only default law-pack (no treasury) for crypto-off rooms. */

@@ -276,19 +276,19 @@ export function createAiGovernanceAdminRoutes() {
         const ai = getAiGovernanceServices();
         return c.json({ alerts: await ai.runtime.listAlerts(100) });
       })
-      // WS-U ADR-9 slice 2: the shadow-moderation divergence log for a room —
-      // how often the governed LLM advisor agreed with the authoritative DSL,
-      // and (when it didn't) whether it would have moderated more or less. This
-      // is the "measure agreement before authority" surface: the advisor has no
-      // authority, so this only ever informs an operator's promotion decision.
-      .get('/governance/shadow-moderation/:roomId', requireAiTeam(), async (c) => {
+      // WS-U ADR-9: the in-room moderation decision log for a room — for each
+      // decision, what the LLM model PROPOSED vs what the deterministic wrapper
+      // (escalate-to-review ceiling + capability clamp) actually PERMITTED, plus
+      // how often the wrapper reduced the model. The transparency of bounded
+      // autonomy — an operator sees the model's behaviour and its bounds.
+      .get('/governance/moderation/:roomId', requireAiTeam(), async (c) => {
         const ai = getAiGovernanceServices();
         const roomId = c.req.param('roomId');
         const requested = Number.parseInt(c.req.query('limit') ?? '100', 10);
         const limit = Number.isFinite(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
         const [summary, records] = await Promise.all([
-          ai.shadowModeration.summaryByRoom(roomId),
-          ai.shadowModeration.listByRoom(roomId, limit),
+          ai.moderationLog.summaryByRoom(roomId),
+          ai.moderationLog.listByRoom(roomId, limit),
         ]);
         return c.json({ summary, records });
       })

@@ -84,7 +84,7 @@ export function createLocalCompletion(
           json_schema: { name: 'lawmaking_summary', strict: true, schema: request.jsonSchema },
         },
       }),
-      signal: AbortSignal.timeout(settings.timeoutMs),
+      signal: AbortSignal.timeout(request.timeoutMs ?? settings.timeoutMs),
     });
     if (!response.ok) {
       throw new Error(`local inference server responded ${response.status}`);

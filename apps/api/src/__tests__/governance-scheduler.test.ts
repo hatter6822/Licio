@@ -102,6 +102,36 @@ describe('runGovernanceTick', () => {
     expect(log).toHaveBeenCalledWith('governance.election_lifecycle', { scheduled: 1, settled: 0 });
   });
 
+  it('drains the deferred re-moderation queue each tick, passing the re-seam + a limit', async () => {
+    const apply = vi.fn();
+    const sweep = vi.fn(async () => ({
+      swept: 2,
+      applied: 1,
+      cleared: 0,
+      stillUnavailable: 1,
+      moot: 0,
+      errors: 0,
+    }));
+    const svc = {
+      runElectionLifecycle: async () => ({ scheduled: 0, settled: 0 }),
+      runRatificationLifecycle: async () => ({ settled: 0, activated: 0 }),
+      sweepPendingRemoderation: sweep,
+    } as unknown as GovernanceService;
+    const log = vi.fn();
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 0,
+      applyDeferredRemoderation: apply,
+      log,
+      now: () => 0,
+    });
+    expect(sweep).toHaveBeenCalledWith(apply, expect.any(Number));
+    expect(log).toHaveBeenCalledWith(
+      'governance.remoderation_lifecycle',
+      expect.objectContaining({ swept: 2, applied: 1, stillUnavailable: 1 }),
+    );
+  });
+
   it('routes a lifecycle failure to onError', async () => {
     const failing = {
       runElectionLifecycle: async () => {

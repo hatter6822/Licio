@@ -23,8 +23,8 @@ import { type HarnessRunInput, runEvaluationHarness } from '../harness.js';
 import type { ModelIdentity } from '../models.js';
 import { deployModel, type RegistryDeps, registerModel } from '../registry.js';
 import type { AiGovernanceServices } from '../services.js';
-import { MODERATION_ADVISOR_SYSTEM_PROMPT_VERSION } from './advisor.js';
 import type { GovernanceLlmBackend, GovernanceLlmSettings } from './config.js';
+import { MODERATION_SYSTEM_PROMPT_VERSION } from './moderation.js';
 import { GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION } from './provider.js';
 import { LAWMAKING_SUMMARY_QUALITY_GATE_VERSION } from './quality.js';
 
@@ -61,26 +61,26 @@ export function buildGovernanceLlmIdentity(
   };
 }
 
-/** The governance identity of the LLM-backed SHADOW moderation advisor (WS-U
- *  ADR-9 slice 2) — a `toxicity_safety_triage` classifier that runs alongside,
- *  and score-blind to, the authoritative DSL, purely to measure agreement. One
- *  registry identity per backend (as with the summariser). */
-export function buildGovernanceModerationAdvisorIdentity(
+/** The governance identity of the LLM-backed in-room moderation MODEL (WS-U
+ *  ADR-9) — a `toxicity_safety_triage` classifier whose classification the
+ *  deterministic wrapper bounds (escalate-to-review ceiling + capability clamp).
+ *  One registry identity per backend (as with the summariser). */
+export function buildGovernanceModerationProposerIdentity(
   settings: GovernanceLlmSettings,
   backend: GovernanceLlmBackend,
 ): ModelIdentity {
   return {
-    name: `governance-moderation-advisor-llm-${backend.kind}`,
+    name: `governance-moderation-llm-${backend.kind}`,
     version: '1.0.0',
     useCaseId: 'toxicity_safety_triage',
     modalities: ['classification'],
-    promptTemplateId: 'governance-moderation-advisor-llm/shadow-v1',
+    promptTemplateId: 'governance-moderation-llm/v1',
     config: {
       method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
       provider: backend.kind,
       model_id: settings.modelId,
       max_output_tokens: settings.maxOutputTokens,
-      system_prompt_version: MODERATION_ADVISOR_SYSTEM_PROMPT_VERSION,
+      system_prompt_version: MODERATION_SYSTEM_PROMPT_VERSION,
       ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
     },
   };
@@ -155,10 +155,10 @@ function surfaceText(useCaseId: ModelIdentity['useCaseId']): CardSurfaceText {
   if (useCaseId === 'toxicity_safety_triage') {
     return {
       purpose:
-        'Classify in-room contributions SCORE-BLIND alongside the authoritative deterministic DSL, purely to measure agreement (WS-U ADR-9 shadow moderation; no authority, advisory only).',
+        'The in-room moderation model (WS-U ADR-9): classify a contribution; a deterministic wrapper bounds the classification (escalate-to-human-review ceiling + community-capability clamp) before it can take effect, and the always-on platform baseline + human floor sit above it.',
       inputSchema: 'docs/ai-governance/README.md#toxicity_safety_triage-inputs',
       outputSchema: '@licio/governance moderationActionSchema + a brief reason',
-      role: 'shadow moderation advisor',
+      role: 'in-room moderation model',
     };
   }
   return {

@@ -88,6 +88,9 @@ export interface LlmCompletionRequest {
   user: string;
   maxOutputTokens: number;
   jsonSchema: Record<string, unknown>;
+  /** Per-call transport timeout override (the inline moderation path passes its
+   *  tighter bound); falls back to the backend's configured timeout. */
+  timeoutMs?: number;
 }
 export interface LlmCompletionResult {
   stopReason: string | null;
@@ -330,13 +333,17 @@ export function createAnthropicCompletion(
 ): LlmCompletion {
   const client = new Anthropic({ apiKey, timeout: settings.timeoutMs, maxRetries: 1 });
   return async (request) => {
-    const response = await client.messages.create({
-      model: settings.modelId,
-      max_tokens: request.maxOutputTokens,
-      system: request.system,
-      messages: [{ role: 'user', content: request.user }],
-      output_config: { format: { type: 'json_schema', schema: request.jsonSchema } },
-    });
+    const response = await client.messages.create(
+      {
+        model: settings.modelId,
+        max_tokens: request.maxOutputTokens,
+        system: request.system,
+        messages: [{ role: 'user', content: request.user }],
+        output_config: { format: { type: 'json_schema', schema: request.jsonSchema } },
+      },
+      // Per-call timeout override (the inline moderation path passes a tighter one).
+      request.timeoutMs !== undefined ? { timeout: request.timeoutMs } : undefined,
+    );
     let text: string | null = null;
     for (const block of response.content) {
       if (block.type === 'text') {

@@ -13,7 +13,7 @@ import {
 } from '../ai-governance/llm/config.js';
 import {
   buildGovernanceLlmIdentity,
-  buildGovernanceModerationAdvisorIdentity,
+  buildGovernanceModerationProposerIdentity,
   ensureGovernanceLlmDeployed,
   GOVERNANCE_LLM_LINEAGE_ID,
 } from '../ai-governance/llm/registration.js';
@@ -119,9 +119,9 @@ describe('ensureGovernanceLlmDeployed (the real WS-K gate)', () => {
     expect(registered?.card.limitations).toContain('Stochastic locally hosted backend');
   });
 
-  it('deploys the shadow moderation advisor (slice 2) through the same gate with its own identity + card', async () => {
-    const identity = buildGovernanceModerationAdvisorIdentity(SETTINGS, ANTHROPIC);
-    expect(identity.name).toBe('governance-moderation-advisor-llm-anthropic');
+  it('deploys the in-room moderation model through the same gate with its own identity + card', async () => {
+    const identity = buildGovernanceModerationProposerIdentity(SETTINGS, ANTHROPIC);
+    expect(identity.name).toBe('governance-moderation-llm-anthropic');
     expect(identity.useCaseId).toBe('toxicity_safety_triage');
     expect(identity.modalities).toEqual(['classification']);
     expect(typeof identity.config['system_prompt_version']).toBe('number');
@@ -132,8 +132,8 @@ describe('ensureGovernanceLlmDeployed (the real WS-K gate)', () => {
     const registered = await services.registry.getVersion(identity.name, identity.version);
     expect(registered?.status).toBe('deployed');
     expect(registered?.card.use_case_id).toBe('toxicity_safety_triage');
-    expect(registered?.card.purpose).toContain('SCORE-BLIND');
-    expect(registered?.card.limitations).toContain('carries NO authority');
+    expect(registered?.card.purpose).toContain('in-room moderation model');
+    expect(registered?.card.purpose).toContain('escalate-to-human-review');
 
     // It coexists with the summariser (distinct registry identity).
     const summariser = buildGovernanceLlmIdentity(SETTINGS, ANTHROPIC);

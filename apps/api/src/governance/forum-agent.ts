@@ -9,8 +9,10 @@
 // reduce or reverse a floor decision. The agent's action (with its provenance
 // triple) is logged inside GovernanceService.moderate — not here.
 import type { ModerationAction, ModerationContext } from '@licio/governance';
-import type { ContributionType } from '@licio/shared';
-import type { RoomAgentModerator } from '../forum/services.js';
+import type { ContributionModerationState, ContributionType } from '@licio/shared';
+import type { ForumServices, RoomAgentModerator } from '../forum/services.js';
+import type { IngestionServices } from '../ingestion/services.js';
+import type { DeferredRemoderationApplier } from './service.js';
 import { getGovernanceService } from './services.js';
 
 /**
@@ -169,6 +171,89 @@ const ACTION_TO_STATE: Readonly<
   restrict: 'under_review',
   remove: 'removed',
 };
+
+/**
+ * Floor-dominance severity rank over the full moderation-state lattice (the
+ * §15.4 order: published < under_review < hidden < removed). The applier only
+ * RAISES (a strictly-greater target), so a contribution the platform floor
+ * already hid/removed is never lowered by a deferred agent flag.
+ */
+const DEFERRED_STATE_RANK: Readonly<Record<ContributionModerationState, number>> = {
+  published: 0,
+  under_review: 1,
+  hidden: 2,
+  removed: 3,
+};
+
+/** Narrow store deps the deferred re-moderation applier needs (testable). */
+export interface DeferredRemoderationDeps {
+  forum: Pick<ForumServices, 'contributions' | 'autoModerationSink' | 'metrics' | 'log'>;
+  ingestion: Pick<IngestionServices, 'stories' | 'reviewQueue'>;
+}
+
+/**
+ * The forum re-seam the WS-U scheduler sweep calls when a DEFERRED contribution's
+ * re-moderation finally decides a restriction. The contribution was published
+ * under the WS-J baseline during the model outage; this RAISES it post-hoc:
+ *   - FLOOR-DOMINANT — only RAISES the moderation state (`flag_for_review`/
+ *     `restrict` → `under_review`); it never lowers a platform-floor decision
+ *     (a floor `removed`/`under_review` already ≥ the target is left untouched);
+ *   - routes the raise to the human review queue (source `in_room_agent_deferred`,
+ *     appealable to the floor), and
+ *   - notifies the author with the agent's statement of reasons (no silent
+ *     sanction) — for a `warn` (no state change) too.
+ * The agent's action + provenance triple is already in the knomosis agent action
+ * log (written by `GovernanceService.classify` during the sweep's re-run).
+ */
+export function buildDeferredRemoderationApplier(
+  deps: DeferredRemoderationDeps,
+): DeferredRemoderationApplier {
+  return async (roomId, contributionId, action, reason) => {
+    const target = ACTION_TO_STATE[action];
+    const contribution = await deps.forum.contributions.getById(contributionId);
+    if (contribution === null) return; // deleted/purged since — nothing to raise
+    const raise =
+      target !== 'published' &&
+      DEFERRED_STATE_RANK[target] > DEFERRED_STATE_RANK[contribution.moderationState];
+    if (raise) {
+      await deps.forum.contributions.setModerationState(contributionId, target);
+      const thread = await deps.ingestion.stories.getThreadById(contribution.threadId);
+      deps.forum.metrics.increment('contributions.agent_flagged_deferred');
+      await deps.ingestion.reviewQueue.insert({
+        kind: 'contribution_safety_hold',
+        storyId: thread?.storyId ?? null,
+        context: {
+          contribution_id: contributionId,
+          thread_id: contribution.threadId,
+          reasons: ['in_room_agent'],
+          disposition: 'flag',
+          source: 'in_room_agent_deferred',
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
+    }
+    // No silent sanction: notify the author with the agent's statement of reasons
+    // (whether the content was raised to review or only warned).
+    if (deps.forum.autoModerationSink !== null && contribution.userId !== null) {
+      await deps.forum.autoModerationSink.recordAgentHold({
+        contributionId,
+        authorUserId: contribution.userId,
+        removed: false, // the escalate-to-review ceiling ⇒ never an AI-driven removal
+        reason,
+      });
+    }
+    deps.forum.log('governance.deferred_remoderation_applied', {
+      contribution_id: contributionId,
+      room_id: roomId,
+      action,
+      raised: raise,
+    });
+  };
+}
 
 export function createRoomAgentModerator(
   deps: { readAuthorHistory?: AuthorHistoryReader } = {},

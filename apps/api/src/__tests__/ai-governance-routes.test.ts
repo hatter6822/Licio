@@ -219,30 +219,26 @@ describe('WS-K routes', () => {
     ).toBe(404);
   });
 
-  it('exposes the WS-U shadow-moderation divergence summary to the AI team only', async () => {
+  it('exposes the WS-U moderation decision summary to the AI team only', async () => {
     const regular = await seedUserWithSession(forum.identity);
     const aiTeam = await seedUserWithSession(forum.identity, { admin: true });
     const now = new Date(ai.now()).toISOString();
-    // Seed a divergence log: 2 agreements, 1 advisor-stricter, 1 advisor-lenient.
-    for (const [i, [dsl, adv]] of (
+    // Seed a decision log: allow, warn, and flag_for_review (one wrapper-clamped).
+    for (const [i, [proposed, bounded]] of (
       [
         ['allow', 'allow'],
-        ['remove', 'remove'],
-        ['allow', 'remove'],
-        ['remove', 'allow'],
+        ['warn', 'warn'],
+        ['flag_for_review', 'flag_for_review'],
+        ['remove', 'flag_for_review'], // the wrapper reduced a proposed remove
       ] as const
     ).entries()) {
-      await ai.shadowModeration.append({
-        recordId: `shadowmod:${i}`,
+      await ai.moderationLog.append({
+        recordId: `moddec:${i}`,
         roomId: 'room-42',
         subjectRef: `c${i}`,
-        dslAction: dsl,
-        advisorAction: adv,
-        agreed: dsl === adv,
-        severityDelta: (adv === 'remove' ? 4 : 0) - (dsl === 'remove' ? 4 : 0),
-        advisorReason: 'x',
-        modelName: 'governance-moderation-advisor-llm-local',
-        modelVersion: '1.0.0',
+        proposedAction: proposed,
+        boundedAction: bounded,
+        clamped: proposed !== bounded,
         outputId: `out:${i}`,
         createdAt: now,
       });
@@ -252,19 +248,14 @@ describe('WS-K routes', () => {
     expect(
       (
         await app.request(
-          jsonReq(
-            '/v1/ai/admin/governance/shadow-moderation/room-42',
-            'GET',
-            undefined,
-            regular.cookie,
-          ),
+          jsonReq('/v1/ai/admin/governance/moderation/room-42', 'GET', undefined, regular.cookie),
         )
       ).status,
     ).toBe(403);
 
     const res = await app.request(
       jsonReq(
-        '/v1/ai/admin/governance/shadow-moderation/room-42?limit=10',
+        '/v1/ai/admin/governance/moderation/room-42?limit=10',
         'GET',
         undefined,
         aiTeam.cookie,
@@ -274,23 +265,25 @@ describe('WS-K routes', () => {
     const body = (await res.json()) as {
       summary: {
         total: number;
-        agreed: number;
-        advisorMoreSevere: number;
-        advisorLessSevere: number;
+        allowed: number;
+        warned: number;
+        flaggedForReview: number;
+        clampedByWrapper: number;
       };
       records: Array<{ subjectRef: string }>;
     };
     expect(body.summary).toEqual({
       total: 4,
-      agreed: 2,
-      advisorMoreSevere: 1,
-      advisorLessSevere: 1,
+      allowed: 1,
+      warned: 1,
+      flaggedForReview: 2,
+      clampedByWrapper: 1,
     });
     expect(body.records).toHaveLength(4);
 
     // An unknown room is an empty, valid summary (never a 500).
     const empty = await app.request(
-      jsonReq('/v1/ai/admin/governance/shadow-moderation/nope', 'GET', undefined, aiTeam.cookie),
+      jsonReq('/v1/ai/admin/governance/moderation/nope', 'GET', undefined, aiTeam.cookie),
     );
     expect(empty.status).toBe(200);
     const emptyBody = (await empty.json()) as { summary: { total: number } };

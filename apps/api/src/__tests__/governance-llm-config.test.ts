@@ -119,20 +119,18 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     }
   });
 
-  it('shadow moderation defaults ON and is disabled only by GOVERNANCE_LLM_SHADOW_MODERATION=off', () => {
+  it('the LLM is the moderation model by default, disabled only by GOVERNANCE_LLM_MODERATION=off', () => {
     const base = { provider: 'anthropic', apiKey: KEY } as const;
-    // Default (absent) ⇒ on.
+    // Default (absent) ⇒ the LLM is the moderation model.
     const on = resolveGovernanceLlmDecision(base);
-    expect(on.enabled && on.shadowModeration).toBe(true);
-    // Any non-'off' value ⇒ on; 'off'/'OFF'/' off ' ⇒ off.
+    expect(on.enabled && on.llmModeration).toBe(true);
+    // Any non-'off' value ⇒ on; 'off'/'OFF'/' off ' ⇒ off (deterministic default proposer).
     expect(
-      resolveGovernanceLlmDecision({ ...base, shadowModeration: 'on' }) as {
-        shadowModeration: boolean;
-      },
-    ).toMatchObject({ shadowModeration: true });
+      resolveGovernanceLlmDecision({ ...base, moderation: 'on' }) as { llmModeration: boolean },
+    ).toMatchObject({ llmModeration: true });
     for (const value of ['off', 'OFF', '  off  ']) {
-      const d = resolveGovernanceLlmDecision({ ...base, shadowModeration: value });
-      expect(d.enabled && d.shadowModeration).toBe(false);
+      const d = resolveGovernanceLlmDecision({ ...base, moderation: value });
+      expect(d.enabled && d.llmModeration).toBe(false);
     }
     // The flag is independent of the backend (local honours it too).
     const local = resolveGovernanceLlmDecision({
@@ -140,9 +138,9 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
       apiKey: undefined,
       localBaseUrl: LOCAL_URL,
       modelId: 'llama3.3',
-      shadowModeration: 'off',
+      moderation: 'off',
     });
-    expect(local.enabled && local.shadowModeration).toBe(false);
+    expect(local.enabled && local.llmModeration).toBe(false);
   });
 
   it('never mutates the shared default settings object', () => {

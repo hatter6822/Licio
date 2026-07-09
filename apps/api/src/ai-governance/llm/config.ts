@@ -27,8 +27,12 @@ export interface GovernanceLlmSettings {
   modelId: string;
   /** Hard per-response output-token ceiling. */
   maxOutputTokens: number;
-  /** Per-request transport timeout. */
+  /** Per-request transport timeout (the summary surface). */
   timeoutMs: number;
+  /** Tighter per-request timeout for the INLINE moderation path — it sits on the
+   *  contribution hot path, so a slow model must fail to the platform baseline
+   *  quickly (the deferred re-moderation sweep retries later). */
+  moderationTimeoutMs: number;
   /** ADR-6 per-room invocation budget for the summary leg (fixed hourly window,
    *  identity-free: keyed by room, never by user or address). */
   maxCallsPerRoomPerHour: number;
@@ -47,6 +51,7 @@ export const DEFAULT_GOVERNANCE_LLM_SETTINGS: GovernanceLlmSettings = {
   modelId: 'claude-opus-4-8',
   maxOutputTokens: 1024,
   timeoutMs: 30_000,
+  moderationTimeoutMs: 8_000,
   maxCallsPerRoomPerHour: 30,
   maxModerationCallsPerRoomPerHour: 120,
   breakerFailureThreshold: 3,
@@ -69,10 +74,11 @@ export interface GovernanceLlmEnvInput {
   /** GOVERNANCE_LLM_LOCAL_URL (local backend; loopback-only OpenAI-compatible
    *  base URL, e.g. http://127.0.0.1:11434/v1). */
   localBaseUrl?: string | undefined;
-  /** GOVERNANCE_LLM_SHADOW_MODERATION — 'off' disables the slice-2 shadow
-   *  moderation advisor while keeping the summary surface. Any other value
-   *  (incl. absent) leaves it ON when a backend is enabled. */
-  shadowModeration?: string | undefined;
+  /** GOVERNANCE_LLM_MODERATION — 'off' keeps the deterministic default
+   *  moderation proposer even when a backend is configured (the backend then
+   *  serves only the summary surface). Any other value (incl. absent) uses the
+   *  LLM as the in-room moderation model when a backend is enabled. */
+  moderation?: string | undefined;
 }
 
 export type GovernanceLlmDisabledReason =
@@ -88,9 +94,10 @@ export type GovernanceLlmDecision =
       enabled: true;
       backend: GovernanceLlmBackend;
       settings: GovernanceLlmSettings;
-      /** Whether the slice-2 shadow moderation advisor is also wired (ON unless
-       *  GOVERNANCE_LLM_SHADOW_MODERATION=off). Advisory-only either way. */
-      shadowModeration: boolean;
+      /** Whether the LLM is the in-room moderation model (ON unless
+       *  GOVERNANCE_LLM_MODERATION=off — then the deterministic default proposer
+       *  is used and the backend serves only summaries). */
+      llmModeration: boolean;
     };
 
 /** Resolve the boot-time enablement decision (pure; unit-tested fail-closed). */
@@ -101,13 +108,13 @@ export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): Gove
 
   const settings = { ...DEFAULT_GOVERNANCE_LLM_SETTINGS };
   const modelId = input.modelId?.trim();
-  const shadowModeration = input.shadowModeration?.trim().toLowerCase() !== 'off';
+  const llmModeration = input.moderation?.trim().toLowerCase() !== 'off';
 
   if (input.provider === 'anthropic') {
     const apiKey = input.apiKey?.trim() ?? '';
     if (apiKey.length === 0) return { enabled: false, reason: 'missing_api_key' };
     if (modelId) settings.modelId = modelId;
-    return { enabled: true, backend: { kind: 'anthropic', apiKey }, settings, shadowModeration };
+    return { enabled: true, backend: { kind: 'anthropic', apiKey }, settings, llmModeration };
   }
 
   // 'local': the loopback-only same-host backend.
@@ -116,5 +123,5 @@ export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): Gove
   if (!isLoopbackHttpUrl(baseUrl)) return { enabled: false, reason: 'local_url_not_loopback' };
   if (!modelId) return { enabled: false, reason: 'missing_local_model' };
   settings.modelId = modelId;
-  return { enabled: true, backend: { kind: 'local', baseUrl }, settings, shadowModeration };
+  return { enabled: true, backend: { kind: 'local', baseUrl }, settings, llmModeration };
 }

@@ -289,6 +289,36 @@ export const agentActionLogs = knomosisSchema.table(
 );
 export type AgentActionLogRow = typeof agentActionLogs.$inferSelect;
 
+/**
+ * WS-U ADR-9 deferred re-moderation queue. When the in-room moderation MODEL (an
+ * LLM) was UNAVAILABLE for a contribution (an outage), the platform kept the
+ * always-on WS-J baseline decision AND enqueued the contribution HERE, so the
+ * model's own judgment is RETRIED later rather than dropped ("delayed, never
+ * dropped"). The governance scheduler sweep re-runs the model over the persisted
+ * `context` snapshot and, on a decided restriction, raises the already-published
+ * contribution to human review post-hoc; a benign or moot item is removed. Exactly
+ * one row per (room, contribution) — a re-defer UPSERTs (composite PK), never
+ * duplicating. `subject_ref` is a soft ref to the contribution (no FK: the
+ * knomosis context never hard-joins content).
+ */
+export const roomPendingRemoderations = knomosisSchema.table(
+  'room_pending_remoderation',
+  {
+    roomId: uuid('room_id').notNull(), // soft ref
+    subjectRef: text('subject_ref').notNull(), // soft ref to the moderated contribution
+    context: jsonb('context').notNull(), // the ModerationContext snapshot to re-run
+    attempts: integer('attempts').notNull().default(0),
+    enqueuedAt: tz('enqueued_at').notNull().defaultNow(),
+    lastAttemptAt: tz('last_attempt_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.roomId, t.subjectRef] }),
+    // Oldest-first draining: the sweep orders by enqueue time.
+    index('room_pending_remoderation_enqueued_idx').on(t.enqueuedAt),
+  ],
+);
+export type RoomPendingRemoderationRow = typeof roomPendingRemoderations.$inferSelect;
+
 /** Log of agent-submitted treasury actions and their kernel verdicts (WS-U.5). */
 export const agentTreasuryActions = knomosisSchema.table(
   'agent_treasury_action',
