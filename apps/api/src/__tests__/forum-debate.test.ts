@@ -242,11 +242,12 @@ describe('WS-T debate arena lifecycle', () => {
       expect(overruled.arena.decidedBy).toBe('steward');
     }
 
-    // Finalize now UPHOLDS: the target is not tagged incorrect.
+    // Finalize now UPHOLDS: the target is tagged `validated` — challenged and
+    // proven accurate (never `incorrect`).
     clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
     await finalizeDebate(deps, debateId);
     const target = await contributions.getById(targetId);
-    expect(target?.disputeStatus).toBe('none');
+    expect(target?.disputeStatus).toBe('validated');
 
     // The override window is closed now.
     const tooLate = await overrideDebateVerdict(deps, debateId, STEWARD, 'challenger', 'x');
@@ -381,6 +382,35 @@ describe('WS-T debate arena lifecycle', () => {
     clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
     await finalizeDebate(deps, debateId);
     expect(storyDisputes.get(STORY)).toBe('incorrect');
+  });
+
+  it('tags an UPHELD target `validated` (challenged and proven accurate)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // The judge rules for the INCUMBENT — the challenge does not hold.
+    deps.runJudge = async () => ({
+      verdict: {
+        model_version: '1.0.0',
+        winner: 'incumbent',
+        verdict: 'upheld',
+        confidence: 0.9,
+        probabilities: { incumbent: 0.9, challenger: 0.07, inconclusive: 0.03 },
+        rationale: 'The incumbent account held up against the sources.',
+      },
+      outputId: `out:${randomUUID()}`,
+    });
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    const judged = await judgeDebateArena(deps, debateId);
+    expect(judged?.verdict).toBe('upheld');
+    clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
+    await finalizeDebate(deps, debateId);
+    // Not `incorrect`, not cleared to `none` — proven accurate.
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('validated');
   });
 
   it('broadcasts a live frame on each position edit / verdict / resolution', async () => {

@@ -28,6 +28,7 @@ const STORY: StoryDetail = {
   distribution_reason: 'Read by people who also read primary sources.',
   context_chips: [],
   safety_state: 'ok',
+  dispute_status: 'none',
   body_summary: 'A short, structurally honest summary.',
   thread_id: null,
   topic_ids: [],

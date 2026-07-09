@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { MeriExposureLabelWire } from '@licio/shared';
+import type { ContributionDisputeStatus, MeriExposureLabelWire } from '@licio/shared';
 //
 // Presentation types for the story surface (WS-B.2.1a). These are no-applause-
 // safe BY CONSTRUCTION: there is deliberately no `likeCount`, `voteCount`,
@@ -56,6 +56,9 @@ export interface StoryCardData {
   exposureLabel?: MeriExposureLabelWire;
   story: Story;
   ratingLabel: RatingLabelKind;
+  /** WS-T dispute posture (SPEC §15.4): drives the "Challenged"/"Incorrect"
+   *  badge. Absent ⇒ undisputed. A content-integrity signal, never applause. */
+  disputeStatus?: ContributionDisputeStatus;
   /** Human-readable distribution reason; never a raw numeric score. */
   distributionReason: string;
   contextChips?: ContextChip[];

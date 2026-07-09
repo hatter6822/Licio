@@ -10,7 +10,6 @@
 // TOP-LEVEL comments load in place ("Load more comments") — there is no separate
 // "show more" jump that duplicated the per-thread continuation.
 import { useState } from 'react';
-import { cn } from '../../lib/cn.js';
 import { useCommentStream } from '../../lib/comment-stream.js';
 import {
   useRoomQuery,
@@ -18,7 +17,6 @@ import {
   useStoryDebatesQuery,
   useStoryInterpretationsQuery,
 } from '../../lib/queries.js';
-import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { lensDisplayName } from '../rooms/RoomLensControl/RoomLensSelector.js';
 import { WhereInterpretationsDiffer } from '../story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../ui/Button/index.js';
@@ -63,7 +61,9 @@ export function CommentSection({
   const order: 'newest' | 'oldest' = view === 'newest' ? 'newest' : 'oldest';
 
   const comments = useStoryCommentsQuery(storyId, { depth: INLINE_MAX_DEPTH, order });
-  const stream = useCommentStream(storyId);
+  // Live comments: the stream re-fetches the loaded pages on each new arrival, so
+  // comments appear in real time (no "load new" button). Side-effect only.
+  useCommentStream(storyId);
   const debates = useStoryDebatesQuery(storyId);
   // The home room supplies BOTH the interpretation lenses (for the reading FILTER
   // below) AND the member's chosen POSTING lens (`my_lens_id`) — the two are now
@@ -153,23 +153,6 @@ export function CommentSection({
       ) : null}
       {interpretations.data ? (
         <WhereInterpretationsDiffer data={interpretations.data} storyId={storyId} />
-      ) : null}
-      {stream.newComments.length > 0 ? (
-        <button
-          type="button"
-          className={cn(
-            'flex items-center justify-center gap-2 p-3 text-primary-on-soft',
-            raisedSurface,
-            raisedInteractive,
-          )}
-          onClick={() => {
-            stream.drain();
-            void comments.refetch();
-          }}
-        >
-          <Icon name="refresh" className="size-5" />
-          Show {stream.newComments.length} new comment{stream.newComments.length === 1 ? '' : 's'}
-        </button>
       ) : null}
       {comments.isError ? (
         <ErrorState

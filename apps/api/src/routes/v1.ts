@@ -263,6 +263,9 @@ function realStoryToDetail(
     context_chips: [],
     safety_state: signals.safetyState,
     exposure_label: signals.meriExposure,
+    // WS-T dispute posture — powers the "Challenged"/"Incorrect" badge on the
+    // story detail page (parity with the feed card projection).
+    dispute_status: story.disputeStatus ?? 'none',
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
     // The home room (WS-G.2.2): powers the client's lens composer + conversation

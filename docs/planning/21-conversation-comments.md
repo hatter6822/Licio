@@ -634,10 +634,10 @@ Return a typed list of `{kind, label?, appId?, start, end}` spans (or a typed fa
 
 ---
 
-### WS-T.5.3b Cache merge + "N new" affordance + polling fallback
+### WS-T.5.3b Cache merge + live apply + polling fallback
 **ID:** WS-T.5.3b | **Ref:** Sections 6.4, 11.6, 23.5
 
-**Description:** Merge streamed comments into the TanStack Query cache for the comment list. Comments from OTHERS surface as a non-disruptive **"N new comments"** affordance (no scroll yank); the reader's OWN just-posted comment reconciles optimistically (dedup by `client_draft_id`). When `EventSource` is unavailable or fails repeatedly, fall back to SWR refetch-on-focus + a bounded interval poll. Pause the "new" nudge when the tab is hidden.
+**Description:** Merge streamed comments into the TanStack Query cache for the comment list. **Update (real-time, shipped):** per a later maintainer decision, comments from OTHERS now apply LIVE — `useCommentStream` invalidates the story's comment query (debounced) on each validated `comment` frame, so the section re-fetches and the new comment appears in real time with **no "N new comments" button** (mirrors the debate-arena `useDebateStream` refetch-on-arrival). The reader's OWN just-posted comment reconciles via the create-mutation invalidation and is de-duplicated by `contribution_id` at the server read. When `EventSource` is unavailable or fails repeatedly, fall back to SWR refetch-on-focus + the hook's own backoff-reconnect (resuming from the last event id via `?since=`).
 
 **Acceptance criteria:**
 - Others' comments appear via "N new" without scroll disruption; the reader's own isn't double-rendered (idempotent by `client_draft_id`).
@@ -927,7 +927,7 @@ Return a typed list of `{kind, label?, appId?, start, end}` spans (or a typed fa
 ### WS-T.7.6 Inline reply composer + live wiring
 **ID:** WS-T.7.6 | **Ref:** Sections 6.4, 11.6, 23.5
 
-**Description:** Reply opens an inline `CommentComposer` pre-bound to `parent_contribution_id` (reuse WS-T.7.3a wholesale; focus moves into the textarea on open, returns to the new comment on post). Connect `useCommentStream` (WS-T.5.3) into `CommentSection`: render the "N new comments" affordance, reconcile the reader's own optimistic posts, and surface the in-app reply indicator (WS-T.6.3) contextually for a reply to the reader in the open thread. Pause the stream when the tab is hidden/section offscreen; resume on focus; degrade to poll-only with the existing offline toasts.
+**Description:** Reply opens an inline `CommentComposer` pre-bound to `parent_contribution_id` (reuse WS-T.7.3a wholesale; focus moves into the textarea on open, returns to the new comment on post). Connect `useCommentStream` (WS-T.5.3) into `CommentSection`: **new comments apply LIVE** (the hook debounce-invalidates the comment query on each frame — no "N new comments" button, per the WS-T.5.3b update), and surface the in-app reply indicator (WS-T.6.3) contextually for a reply to the reader in the open thread. Degrade to poll-only / the hook's backoff-reconnect with the existing offline toasts.
 
 **Acceptance criteria:**
 - Replying nests under the parent (depth-capped), appears optimistically, and returns focus correctly.

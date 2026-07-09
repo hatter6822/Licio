@@ -79,6 +79,30 @@ describe('WhereInterpretationsDiffer', () => {
     const { container } = render(<WhereInterpretationsDiffer data={base} storyId="s1" />);
     expect(await checkA11y(container)).toHaveNoViolations();
   });
+
+  it('collapses extra differences behind a disclosure, strongest first', async () => {
+    const data: StoryInterpretationsResponse = {
+      ...base,
+      needs_context: false,
+      interpretations: [
+        { lens_a: 'a', lens_b: 'b', summary: 'weak difference summary', disagreement: 0.1 },
+        { lens_a: 'c', lens_b: 'd', summary: 'strong difference summary', disagreement: 0.95 },
+        { lens_a: 'e', lens_b: 'f', summary: 'mid difference summary', disagreement: 0.5 },
+        { lens_a: 'g', lens_b: 'h', summary: 'fourth difference summary', disagreement: 0.4 },
+        { lens_a: 'i', lens_b: 'j', summary: 'fifth difference summary', disagreement: 0.2 },
+      ],
+    };
+    const { container } = render(<WhereInterpretationsDiffer data={data} storyId="s1" />);
+    // Five pairs → three shown inline, the remaining two behind the disclosure.
+    expect(screen.getByText('Show 2 more')).toBeInTheDocument();
+    // Sorted strongest-first: the 0.95 summary precedes the 0.1 summary in the DOM.
+    const strong = screen.getByText('strong difference summary');
+    const weak = screen.getByText('weak difference summary');
+    expect(strong.compareDocumentPosition(weak) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Still no correctness framing, and the a11y audit passes with the disclosure.
+    expect((container.textContent ?? '').toLowerCase()).not.toMatch(/incorrect|misinformation/);
+    expect(await checkA11y(container)).toHaveNoViolations();
+  });
 });
 
 describe('lens names (WS-H.4.3b)', () => {

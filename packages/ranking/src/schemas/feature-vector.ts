@@ -119,6 +119,10 @@ export const featureVectorSchema = z
     // penalized to the bottom of the feed (a content-quality signal, uniform
     // across authors/topics, never financial — neutrality-safe).
     dispute_penalty: unit.optional(),
+    /** WS-T: 1 when a sourced-correction debate UPHELD the story (`validated`) —
+     *  challenged and PROVEN accurate. Drives a modest additive ranking BOOST
+     *  (`disputeValidationBoost`). Uniform + content-derived, never applause. */
+    dispute_validation: unit.optional(),
 
     // --- Baseline components ------------------------------------------------
     freshness_decay: unit.optional(),

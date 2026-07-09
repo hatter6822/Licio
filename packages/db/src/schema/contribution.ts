@@ -68,6 +68,7 @@ export const contributionDisputeStatusEnum = pgEnum('contribution_dispute_status
   'none',
   'under_debate',
   'incorrect',
+  'validated',
 ]);
 
 export const contributions = pgTable(

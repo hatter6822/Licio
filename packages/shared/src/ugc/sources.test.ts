@@ -4,6 +4,7 @@ import {
   deriveCitationsFromBody,
   extractSourcedStatements,
   resolveCommentSources,
+  resolveLegacyBareCitations,
 } from './sources.js';
 
 describe('extractSourcedStatements', () => {
@@ -92,5 +93,34 @@ describe('resolveCommentSources', () => {
     expect(resolveCommentSources('', [{ url: 'https://example.org/y' }])).toEqual([
       { statement: 'https://example.org/y', url: 'https://example.org/y' },
     ]);
+  });
+});
+
+describe('resolveLegacyBareCitations', () => {
+  it('returns only citations with no matching inline body link', () => {
+    const body = 'The [report](https://example.org/report) is clear.';
+    const citations = [
+      // Present inline — reachable in the body, so NOT surfaced separately.
+      { url: 'https://example.org/report', title: 'report' },
+      // Legacy bare citation — no inline link, so it IS surfaced.
+      { url: 'https://example.net/extra', title: 'Extra source' },
+    ];
+    expect(resolveLegacyBareCitations(body, citations)).toEqual([
+      { statement: 'Extra source', url: 'https://example.net/extra' },
+    ]);
+  });
+
+  it('is empty when every citation is inline (the common new-comment case)', () => {
+    const body = 'A [claim](https://example.org/x) with support.';
+    expect(resolveLegacyBareCitations(body, [{ url: 'https://example.org/x' }])).toEqual([]);
+  });
+
+  it('falls back to the URL as the statement and dedupes by URL', () => {
+    expect(
+      resolveLegacyBareCitations('no links here', [
+        { url: 'https://example.org/y' },
+        { url: 'https://example.org/y', title: 'dup' },
+      ]),
+    ).toEqual([{ statement: 'https://example.org/y', url: 'https://example.org/y' }]);
   });
 });

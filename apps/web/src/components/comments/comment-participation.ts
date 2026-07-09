@@ -13,23 +13,32 @@
 // exactly that component so the sort is honest and doctrine-safe.
 //
 // A comment that lost a debate (`incorrect`) sinks below everything else,
-// mirroring the server's visible-but-sunk ordering (`bySinkThenOrder`).
+// mirroring the server's visible-but-sunk ordering (`bySinkThenOrder`); one that
+// WON its debate (`validated` — challenged and proven accurate) is boosted ABOVE
+// an unchallenged comment.
 import { type CommentItem, resolveCommentSources } from '@licio/shared';
 
 /** WS-E.2.1c `citationBonus`: the extra participation a SOURCED comment earns. */
 export const SOURCED_PARTICIPATION_BONUS = 0.35;
+/** WS-T: the extra participation a VALIDATED comment earns — challenged by a
+ *  sourced correction and PROVEN accurate ranks above an unchallenged comment.
+ *  Larger than the sourced bonus so a validated comment clearly leads. A content-
+ *  integrity signal from an adjudicated debate, never applause. */
+export const VALIDATED_PARTICIPATION_BONUS = 0.5;
 /** Sink weight for a debate-loser — below any live comment (base 1). */
 const SUNK_WEIGHT = -1;
 
 /**
  * The comment's content-participation weight. Higher = more constructive
- * participation (sourced comments rank above unsourced; a debate-loser sinks).
- * Pure and total; identical inputs → identical output.
+ * participation (a debate-loser sinks; sourced comments rank above unsourced; a
+ * debate-winner `validated` comment is boosted above all of them). Pure and
+ * total; identical inputs → identical output.
  */
 export function commentParticipationWeight(comment: CommentItem): number {
   if (comment.dispute_status === 'incorrect') return SUNK_WEIGHT;
   const sourced = resolveCommentSources(comment.body, comment.citations).length > 0;
-  return 1 + (sourced ? SOURCED_PARTICIPATION_BONUS : 0);
+  const base = 1 + (sourced ? SOURCED_PARTICIPATION_BONUS : 0);
+  return comment.dispute_status === 'validated' ? base + VALIDATED_PARTICIPATION_BONUS : base;
 }
 
 /**

@@ -165,11 +165,16 @@ export async function assembleFeatureVector(
   if (typeof redundancy === 'number' && Number.isFinite(redundancy)) {
     vector.redundancy_penalty = clamp01(redundancy);
   }
-  // WS-T dispute penalty: a story adjudicated `incorrect` by a sourced-correction
-  // debate sinks to the bottom of the feed (visible-but-demoted; a content-quality
-  // signal, uniform across authors/topics — never financial, neutrality-safe).
-  if ((story.disputeStatus ?? 'none') === 'incorrect') {
+  // WS-T dispute outcome (a content-quality signal, uniform across authors/topics
+  // — never financial, neutrality-safe): a story adjudicated `incorrect` by a
+  // sourced-correction debate sinks to the bottom of the feed (visible-but-
+  // demoted); one UPHELD (`validated` — challenged and proven accurate) earns a
+  // modest additive boost. A story is never both.
+  const storyDispute = story.disputeStatus ?? 'none';
+  if (storyDispute === 'incorrect') {
     vector.dispute_penalty = 1;
+  } else if (storyDispute === 'validated') {
+    vector.dispute_validation = 1;
   }
 
   // --- SCOI: context coherence + gating level ------------------------------

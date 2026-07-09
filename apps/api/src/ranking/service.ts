@@ -279,6 +279,10 @@ async function buildFeedItems(
         // Never surface the UNCLASSIFIED sentinel as a topic on the wire — it
         // would drive a topic-repeats control for a non-subject "topic".
         topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 8),
+        // WS-T dispute posture: `incorrect` stories are already sunk to the
+        // bottom by the WS-I ordering sink; surfacing the status lets the card
+        // label them "Challenged"/"Incorrect".
+        dispute_status: story.disputeStatus ?? 'none',
       }),
     );
   }

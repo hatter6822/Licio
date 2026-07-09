@@ -55,6 +55,13 @@ export const profilePenaltiesSchema = z
     pR: z.number().nonnegative(),
     /** WS-T dispute penalty (a `corrected` story sinks); optional, defaults strong. */
     pD: z.number().nonnegative().optional(),
+    /** WS-T validation BOOST — the sole ADDITIVE coefficient here: a `validated`
+     *  story (challenged and proven accurate) is nudged UP by `vD`, applied
+     *  OUTSIDE the SCOI multiplier (symmetric with the dispute sink). A soft,
+     *  bounded lift — never a guarantee of the top. Optional, defaults modest.
+     *  A content-integrity signal, uniform across authors/topics — never
+     *  applause/financial. */
+    vD: z.number().nonnegative().optional(),
   })
   .strict();
 
@@ -319,7 +326,7 @@ export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
   profile_id: 'breaking_news',
   profile_version: '1.2.0',
   weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 },
-  penalties: { pM: 1.0, pT: 0.75, pR: 0.5, pD: 1.0 },
+  penalties: { pM: 1.0, pT: 0.75, pR: 0.5, pD: 1.0, vD: 0.25 },
   constraints: DEFAULT_CONSTRAINTS,
   // Timeliness-weighted baseline: freshness carries more of B.
   baseline_weights: { freshness: 60, reliability: 25, relevance: 15 },
@@ -352,7 +359,7 @@ export const EVERGREEN_PROFILE: RankingProfileConfig = {
   profile_id: 'evergreen',
   profile_version: '1.2.0',
   weights: { wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 },
-  penalties: { pM: 1.0, pT: 0.75, pR: 0.75, pD: 1.0 },
+  penalties: { pM: 1.0, pT: 0.75, pR: 0.75, pD: 1.0, vD: 0.25 },
   constraints: DEFAULT_CONSTRAINTS,
   baseline_weights: { freshness: 50, reliability: 30, relevance: 20 },
   decay_curves: {

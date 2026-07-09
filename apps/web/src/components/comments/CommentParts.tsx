@@ -16,6 +16,7 @@ import { cn } from '../../lib/cn.js';
 import { useCreateCommentMutation } from '../../lib/queries.js';
 import { relativeTimeShort } from '../../lib/time.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
+import { DisputeBadge } from '../story/DisputeBadge/index.js';
 import { Button } from '../ui/Button/index.js';
 
 export function authorName(comment: CommentItemType): string {
@@ -61,12 +62,9 @@ export function CommentHeader({ comment }: { comment: CommentItemType }): React.
       {sourced ? (
         <span className={cn(badgeBase, 'border-primary/40 text-primary-on-soft')}>Sourced</span>
       ) : null}
-      {comment.dispute_status === 'under_debate' ? (
-        <span className={cn(badgeBase, 'border-warning/50 text-warning')}>Under debate</span>
-      ) : null}
-      {comment.dispute_status === 'incorrect' ? (
-        <span className={cn(badgeBase, 'border-error/60 text-error')}>Incorrect</span>
-      ) : null}
+      {/* WS-T dispute posture: "Challenged" while a correction's debate is live,
+          "Incorrect" once a correction prevailed (nothing when undisputed). */}
+      <DisputeBadge status={comment.dispute_status} />
     </div>
   );
 }

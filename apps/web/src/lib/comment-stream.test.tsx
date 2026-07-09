@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { ContributionPublic } from '@licio/shared';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCommentStream } from './comment-stream.js';
 
@@ -54,6 +56,12 @@ class FakeEventSource {
   }
 }
 
+function withClient(client: QueryClient) {
+  return function Wrapper({ children }: { children: ReactNode }): React.ReactElement {
+    return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   FakeEventSource.instances = [];
@@ -66,31 +74,47 @@ afterEach(() => {
 });
 
 describe('useCommentStream', () => {
-  it('buffers only schema-valid comment events and drains them', async () => {
-    const { result } = renderHook(() => useCommentStream(storyId));
+  it('opens the story comment stream with credentials', () => {
+    const client = new QueryClient();
+    renderHook(() => useCommentStream(storyId), { wrapper: withClient(client) });
     const source = FakeEventSource.instances[0];
     expect(source?.url).toBe(`/v1/stories/${storyId}/comments/stream`);
     expect(source?.withCredentials).toBe(true);
+  });
 
+  it('invalidates the comment query on a valid frame (debounced) and ignores invalid ones', async () => {
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries').mockResolvedValue(undefined);
+    renderHook(() => useCommentStream(storyId), { wrapper: withClient(client) });
+    const source = FakeEventSource.instances[0];
+
+    // A schema-invalid frame never drives a refetch.
     act(() => {
       source?.emit('comment', '{"not":"a contribution"}', 'bad-event');
     });
-    expect(result.current.newComments).toEqual([]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(invalidate).not.toHaveBeenCalled();
 
+    // A burst of valid frames coalesces into ONE invalidation after the debounce.
     act(() => {
       source?.emit('comment', JSON.stringify(contribution), contribution.contribution_id);
+      source?.emit('comment', JSON.stringify(contribution), contribution.contribution_id);
     });
-    expect(result.current.newComments).toHaveLength(1);
-    let drained: ContributionPublic[] = [];
-    act(() => {
-      drained = result.current.drain();
+    expect(invalidate).not.toHaveBeenCalled(); // still inside the debounce window
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
     });
-    expect(drained).toEqual([contribution]);
-    expect(result.current.newComments).toEqual([]);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ['story', storyId, 'comments', {}],
+    });
   });
 
   it('reconnects with a since cursor after the latest valid SSE event id', async () => {
-    renderHook(() => useCommentStream(storyId));
+    const client = new QueryClient();
+    renderHook(() => useCommentStream(storyId), { wrapper: withClient(client) });
     const first = FakeEventSource.instances[0];
     act(() => {
       first?.emit('comment', JSON.stringify(contribution), contribution.contribution_id);

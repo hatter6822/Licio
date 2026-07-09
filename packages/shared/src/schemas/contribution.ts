@@ -65,9 +65,18 @@ export const contributionModerationStateSchema = z.enum(CONTRIBUTION_MODERATION_
  * ORTHOGONAL to `moderation_state`: an `incorrect` contribution stays fully
  * VISIBLE (it is not hidden/removed) but sinks to the bottom of its comment
  * section and carries an "incorrect" tag — the transparency remedy, never a
- * tombstone.  `under_debate` means an open debate arena is challenging it.
+ * tombstone.  `under_debate` means an open debate arena is challenging it
+ * ("Challenged").  `validated` means a challenge was raised and the debate
+ * UPHELD the content — challenged and proven accurate ("Validated"); it carries
+ * no penalty (a positive signal, never applause) and remains re-challengeable if
+ * new evidence emerges.  An inconclusive verdict clears back to `none`.
  */
-export const CONTRIBUTION_DISPUTE_STATES = ['none', 'under_debate', 'incorrect'] as const;
+export const CONTRIBUTION_DISPUTE_STATES = [
+  'none',
+  'under_debate',
+  'incorrect',
+  'validated',
+] as const;
 export type ContributionDisputeStatus = (typeof CONTRIBUTION_DISPUTE_STATES)[number];
 export const contributionDisputeStatusSchema = z.enum(CONTRIBUTION_DISPUTE_STATES);
 

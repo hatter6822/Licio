@@ -48,6 +48,28 @@
 }
 
 /* ===================================================================== *
+ * UGC body links (WS-G.4.2b/c, WS-T sourced comments). Anchors rendered
+ * inside the sanctioned UgcBody sink carry NO class (DOMPurify strips
+ * everything but href/rel/target), and Tailwind's Preflight resets `a` to
+ * `color: inherit; text-decoration: inherit` — so an inline source would
+ * otherwise read as plain prose. Give it the link affordance (theme-aware
+ * primary tint + underline) so a sourced statement is visibly a clickable
+ * source in place, with no separate "Sources" modal. The rule is UNLAYERED so
+ * it wins over Preflight's layered `a` reset without an !important; the click
+ * itself is still intercepted by UgcBody's safety delegation. `mailto:` links
+ * share the same affordance. Underlines stay on (never removed on hover) for
+ * WCAG 1.4.1 — colour is never the sole link cue.
+ * ===================================================================== */
+.ugc-body a {
+  color: var(--licio-primary-on-soft);
+  text-decoration-line: underline;
+  text-underline-offset: 2px;
+}
+.ugc-body a:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* ===================================================================== *
  * Named z-index utilities — the z-index scale is the ONLY source of
  * stacking values (WS-B.1.1c); components never set an arbitrary z-index.
  * ===================================================================== */

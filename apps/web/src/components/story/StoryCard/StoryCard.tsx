@@ -4,6 +4,7 @@ import { formatReadingEstimate, useI18n } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
+import { DisputeBadge } from '../DisputeBadge/index.js';
 import { ExposureLabel } from '../ExposureLabel/index.js';
 import { RatingLabel } from '../RatingLabel/index.js';
 import { StoryMedia } from '../StoryMedia/index.js';
@@ -42,6 +43,7 @@ export function StoryCard({
   story,
   ratingLabel,
   exposureLabel,
+  disputeStatus = 'none',
   distributionReason,
   contextChips,
   branchPreview,
@@ -130,6 +132,9 @@ export function StoryCard({
       <div className="flex flex-wrap items-center gap-2">
         <RatingLabel kind={ratingLabel} />
         {exposureLabel ? <ExposureLabel label={exposureLabel} /> : null}
+        {/* WS-T — a sourced correction has challenged (or prevailed against)
+            this story. Renders nothing when undisputed. */}
+        <DisputeBadge status={disputeStatus} />
       </div>
 
       {/* 4. One-line distribution reason (human-readable, no raw score) */}

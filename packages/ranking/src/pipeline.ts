@@ -33,6 +33,7 @@ import {
 import {
   computePenalties,
   disputeOrderingSink,
+  disputeValidationBoost,
   type PenaltyEnforcement,
 } from './scoring/penalties.js';
 import { computePositiveScore } from './scoring/pwatt.js';
@@ -147,7 +148,11 @@ export function scoreItem(
     (positive.components.positive - penalties.total_applied) * distributionMultiplier;
   return scoredItemSchema.parse({
     item_id: candidate.item_id,
-    pwatt_score: rawScore - disputeOrderingSink(features, profile),
+    // WS-T — subtract the `corrected` ordering sink (guaranteed bottom) and add
+    // the `validated` boost (a modest lift for content challenged and proven
+    // accurate); both act OUTSIDE the SCOI multiplier. A story is never both.
+    pwatt_score:
+      rawScore - disputeOrderingSink(features, profile) + disputeValidationBoost(features, profile),
     score_components: positive.components,
     penalty_components: penalties,
     baseline,

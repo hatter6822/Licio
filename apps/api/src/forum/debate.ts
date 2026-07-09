@@ -55,7 +55,7 @@ export type StewardReader = (roomId: string, userId: string) => Promise<boolean>
  *  it to penalize a corrected story to the bottom of the feed. */
 export type StoryDisputeSetter = (
   storyId: string,
-  status: 'none' | 'under_debate' | 'incorrect',
+  status: 'none' | 'under_debate' | 'incorrect' | 'validated',
 ) => Promise<void>;
 
 export interface DebateDeps {
@@ -315,25 +315,24 @@ export async function finalizeDebate(
   if (arena === null) return null;
   if (arena.state !== 'judged') return arena;
   const resolvedAt = new Date(deps.now()).toISOString();
-  // Apply the dispute outcome to the CHALLENGED target (comment only; a story's
-  // feed penalty is applied by the ranking layer reading dispute_status).
-  const targetIncorrect = arena.verdict === 'corrected';
+  // Apply the dispute outcome to the CHALLENGED target. `corrected` ⇒ tagged
+  // `incorrect` (and, for a story, demoted to the bottom of the feed by the
+  // ranking layer reading dispute_status); `upheld` ⇒ tagged `validated`
+  // (challenged and proven accurate — no penalty, still re-challengeable);
+  // `inconclusive`/absent ⇒ cleared back to `none`.
+  const resolvedStatus: 'incorrect' | 'validated' | 'none' =
+    arena.verdict === 'corrected' ? 'incorrect' : arena.verdict === 'upheld' ? 'validated' : 'none';
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(
-      arena.targetContributionId,
-      targetIncorrect ? 'incorrect' : 'none',
-    );
+    await deps.contributions.setDisputeStatus(arena.targetContributionId, resolvedStatus);
   } else if (arena.targetType === 'story') {
-    // A corrected story is penalized to the bottom of the feed by ranking; an
-    // upheld/inconclusive one is cleared back to `none`.
-    await deps.setStoryDispute(arena.storyId, targetIncorrect ? 'incorrect' : 'none');
+    await deps.setStoryDispute(arena.storyId, resolvedStatus);
   }
   const updated = await deps.debates.setState(debateId, 'resolved', resolvedAt);
   if (updated === null) return null;
   deps.log('forum.debate_resolved', {
     debate_id: debateId,
     verdict: arena.verdict,
-    target_tagged_incorrect: targetIncorrect && arena.targetType === 'comment',
+    target_dispute_status: resolvedStatus,
   });
   await broadcastArena(deps, updated);
   return updated;

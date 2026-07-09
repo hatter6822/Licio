@@ -76,6 +76,9 @@ describe('WS-I.2.1a feature vector schema', () => {
         'coordination_penalty',
         'created_at',
         'dispute_penalty',
+        // WS-T — reviewed addition: 1 when a sourced-correction debate UPHELD the
+        // story (`validated`), driving the modest `disputeValidationBoost`.
+        'dispute_validation',
         'duplicate_cluster_id',
         'exposure_independence',
         'feature_version',

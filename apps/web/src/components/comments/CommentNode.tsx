@@ -11,12 +11,14 @@
 // Meta is a single line, and actions are inline text links rather than chunky
 // buttons.  When a thread continues past the view's depth budget the node links
 // into the dedicated page re-rooted at that comment instead of nesting further.
-import { type CommentItem as CommentItemType, resolveCommentSources } from '@licio/shared';
+import { type CommentItem as CommentItemType, resolveLegacyBareCitations } from '@licio/shared';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { cn } from '../../lib/cn.js';
+import { formatSourceUrl } from '../../lib/format-source-url.js';
 import { ReportSheet } from '../safety/ReportSheet.js';
+import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { UgcBody } from '../ugc/UgcBody.js';
 import { Dialog } from '../ui/Dialog/index.js';
 import { Icon } from '../ui/Icon/index.js';
@@ -27,7 +29,6 @@ import {
   CorrectionComposer,
   commentActionClass,
 } from './CommentParts.js';
-import { SourcesDialog } from './SourcesDialog.js';
 
 export interface CommentNodeProps {
   storyId: string;
@@ -74,13 +75,19 @@ export function CommentNode({
 }: CommentNodeProps): React.ReactElement {
   const [replying, setReplying] = useState(false);
   const [correcting, setCorrecting] = useState(false);
-  const [showSources, setShowSources] = useState(false);
   const [reporting, setReporting] = useState(false);
   const navigate = useNavigate();
-  const disputed = comment.dispute_status !== 'none';
-  // Sources are the inline links in the body (+ any legacy bare citations); the
-  // count drives the compact "Sources (N)" footnote affordance.
-  const sourceCount = resolveCommentSources(comment.body, comment.citations).length;
+  // "Disputed" for dimming + blocking a new correction means an ACTIVE debate or
+  // a settled-incorrect outcome. A `validated` comment (challenged and proven
+  // accurate) is neither dimmed nor blocked — it stays re-challengeable on new
+  // evidence, matching the server guard (which rejects only under_debate/incorrect).
+  const disputed =
+    comment.dispute_status === 'under_debate' || comment.dispute_status === 'incorrect';
+  // Sources render INLINE as clickable links in the body itself (WS-T; the
+  // `.ugc-body a` affordance). Only legacy "bare" citations — old comments whose
+  // stored citations have no matching inline body link — need a trailing
+  // fallback list so no source is ever dropped when the modal is gone.
+  const legacySources = resolveLegacyBareCitations(comment.body, comment.citations);
 
   // Record the ABSOLUTE reply depth for §5.3 traversal bucketing only once the
   // comment is actually SEEN (visibility-gated; see the hook). The in-view depth
@@ -103,6 +110,26 @@ export function CommentNode({
         </div>
       ) : null}
       <CommentMedia comment={comment} />
+
+      {/* Legacy bare citations only: sources with no inline body link (old
+          comments). New comments carry every source inline as a styled link in
+          the body above, so this is empty for them. */}
+      {legacySources.length > 0 ? (
+        <p className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm text-ink-muted">
+          <span className="font-medium">Sources:</span>
+          {legacySources.map((source) => (
+            <SafeExternalLink
+              key={source.url}
+              href={source.url}
+              className="break-words text-primary-on-soft hover:underline"
+            >
+              {source.statement === source.url
+                ? formatSourceUrl(source.url).host
+                : source.statement}
+            </SafeExternalLink>
+          ))}
+        </p>
+      ) : null}
 
       {/* Compact action row. A leaf (past the view's depth budget) carries its
           "continue" inline here; a materialized node's "show all" sits after the
@@ -133,28 +160,18 @@ export function CommentNode({
             Correct
           </button>
         ) : null}
-        {/* The sourced statements as a numbered footnote list (modal). */}
-        {sourceCount > 0 ? (
-          <button
-            type="button"
-            className={commentActionClass}
-            aria-haspopup="dialog"
-            aria-expanded={showSources}
-            onClick={() => setShowSources(true)}
-          >
-            <Icon name="quote" className="size-3.5" aria-hidden />
-            {sourceCount === 1 ? 'Sources (1)' : `Sources (${sourceCount})`}
-          </button>
-        ) : null}
-        {/* Report this comment (two-tap sheet) — flag is the report affordance. */}
+        {/* Report this comment (two-tap sheet). Icon-only flag — mirrors the
+            story card's report control (StoryFeedLink) — to keep the action row
+            compact; the accessible name carries the full intent. */}
         <button
           type="button"
           className={commentActionClass}
           aria-haspopup="dialog"
+          aria-label="Report this comment"
+          title="Report this comment"
           onClick={() => setReporting(true)}
         >
-          <Icon name="flag" className="size-3.5" aria-hidden />
-          Report
+          <Icon name="flag" className="size-4" aria-hidden />
         </button>
         {/* An open arena is challenging this comment: anyone — especially the
             incumbent author returning to post their 12-hour position — reaches it
@@ -177,8 +194,6 @@ export function CommentNode({
           />
         ) : null}
       </div>
-
-      <SourcesDialog open={showSources} onClose={() => setShowSources(false)} comment={comment} />
 
       {reporting ? (
         <ReportSheet
