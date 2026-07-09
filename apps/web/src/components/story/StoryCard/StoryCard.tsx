@@ -7,7 +7,7 @@ import { Icon } from '../../ui/Icon/index.js';
 import { DisputeBadge } from '../DisputeBadge/index.js';
 import { RatingLabel } from '../RatingLabel/index.js';
 import { StoryMedia } from '../StoryMedia/index.js';
-import type { StoryCardData, StoryOrigin } from '../types.js';
+import type { StoryCardData } from '../types.js';
 
 export interface StoryCardProps extends StoryCardData {
   /** Heading level for the title so the card fits its surrounding hierarchy. */
@@ -20,13 +20,6 @@ export interface StoryCardProps extends StoryCardData {
   onMore?: () => void;
   className?: string;
 }
-
-const ORIGIN_KEYS: Record<StoryOrigin, { key: string; text: string }> = {
-  independent: { key: 'origin.independent', text: 'Independent' },
-  wire: { key: 'origin.wire', text: 'Wire' },
-  official: { key: 'origin.official', text: 'Official' },
-  aggregator: { key: 'origin.aggregator', text: 'Aggregator' },
-};
 
 /** Reject a distribution reason that leaks a raw numeric score (dev-only). */
 function warnIfScoreLike(reason: string): void {
@@ -59,7 +52,6 @@ export function StoryCard({
 
   warnIfScoreLike(distributionReason);
 
-  const origin = ORIGIN_KEYS[story.origin];
   const readingEstimate = formatReadingEstimate(story.readingMinutes, locale, (m) =>
     t('reading.estimate', '{minutes} min read', { minutes: m }),
   );
@@ -86,13 +78,13 @@ export function StoryCard({
         {story.title}
       </Heading>
 
-      {/* 2. Source + origin badge (+ the WS-Q.5.3b in-room chip on non-public
-          items in a room feed; public items carry no chip) */}
+      {/* 2. Source (+ the WS-Q.5.3b in-room chip on non-public items in a room
+          feed; public items carry no chip). The source-provenance origin badge
+          was removed — `story.origin` is a hardcoded placeholder (never a real
+          derived signal), so a card claiming every source is "Independent" was
+          misleading rather than informative. */}
       <p className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
         <span>{story.source}</span>
-        <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink">
-          {t(origin.key, origin.text)}
-        </span>
         {inRoom ? (
           <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink-muted">
             {t('storycard.inRoom', 'In room')}

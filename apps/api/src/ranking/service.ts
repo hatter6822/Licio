@@ -201,15 +201,6 @@ async function buildFeedItems(
     latestMeriGains(services.events),
   ]);
   const evidenceSummaries = await Promise.all(ids.map((id) => evidenceSummaryOf(services, id)));
-  const lensCountByRoom = new Map<string, number>();
-  for (const thread of threads.values()) {
-    if (thread.roomId !== null && !lensCountByRoom.has(thread.roomId)) {
-      lensCountByRoom.set(
-        thread.roomId,
-        (await services.forum.lenses.listByRoom(thread.roomId)).length,
-      );
-    }
-  }
   const items: FeedItem[] = [];
   for (const [index, entry] of entries.entries()) {
     const story = stories.get(entry.itemId);
@@ -224,8 +215,6 @@ async function buildFeedItems(
         label: `${evidence.total} ${evidence.total === 1 ? 'evidence card' : 'evidence cards'}`,
       });
     }
-    const roomLenses = thread?.roomId != null ? (lensCountByRoom.get(thread.roomId) ?? 0) : 0;
-    if (roomLenses >= 2) chips.push({ id: 'lenses', label: `${roomLenses} lenses` });
     if (entry.features?.mfci_risk_state === 'normal') {
       chips.push({ id: 'coordination', label: 'low coordination risk' });
     }

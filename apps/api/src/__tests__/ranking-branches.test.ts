@@ -738,7 +738,7 @@ describe('remaining retrieval branches', () => {
 });
 
 describe('feed mapping variants', () => {
-  it('frozen items surface as under-review; room lenses become chips', async () => {
+  it('frozen items surface as under-review; room lenses no longer become a card chip', async () => {
     const roomId = randomUUID();
     await fixture.forum.rooms.insert({
       roomId,
@@ -782,7 +782,11 @@ describe('feed mapping variants', () => {
     });
     const item = served.items.find((i) => i.story_id === storyId);
     expect(item?.safety_state).toBe('under-review');
-    expect(item?.context_chips.some((c) => c.label === '2 lenses')).toBe(true);
+    // The "N lenses" chip was removed from story cards: a room's lens count is
+    // still used for WS-I.2.4b lens balancing, but it is no longer surfaced as a
+    // per-card chip.
+    expect(item?.context_chips.some((c) => c.id === 'lenses')).toBe(false);
+    expect(item?.context_chips.some((c) => /lenses/.test(c.label))).toBe(false);
   });
 
   it('source-diverse mode halves the source share cap (logged for replay)', async () => {

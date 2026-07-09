@@ -37,10 +37,7 @@ const feedWater: FeedItem = {
   reading_minutes: 6,
   rating_label: 'well-sourced',
   distribution_reason: 'Readers opened the primary dataset and added independent corroboration.',
-  context_chips: [
-    { id: 'c1', label: '3 primary sources', icon: 'document-check' },
-    { id: 'c2', label: '2 lenses', icon: 'layers' },
-  ],
+  context_chips: [{ id: 'c1', label: '3 primary sources', icon: 'document-check' }],
   safety_state: 'ok',
   more_on_this_story: [],
   context_card: null,
