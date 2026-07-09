@@ -1985,8 +1985,19 @@ export async function seedMeriRankingEnforcement(
     invariantType: 'MERI',
     fromStatus: 'shadow',
     toStatus: 'soft_constraint',
+    // The steward promotion history (`PromotionService.history`) reconstructs the
+    // typed evidence shape, so populate ALL of its fields — a `note`-only record
+    // would surface as fabricated zero coverage/confidence + an empty drift ref.
+    // This is a maintainer OVERRIDE, not an evidence-driven promotion: it skipped
+    // shadow (shadowDurationDays 0) and carries no shadow-observed metrics (0);
+    // the drift reference names the decision so the audit trail reads it as an
+    // explicit override rather than a broken evidence-based promotion.
     evidence: {
       note: 'maintainer decision: MERI runs live (soft_constraint) in all environments',
+      shadowDurationDays: 0,
+      driftReportRef: 'maintainer-decision/meri-live-all-envs',
+      observedCoverage: 0,
+      observedConfidence: 0,
     },
     owner: 'platform-boot',
     createdAt: new Date().toISOString(),

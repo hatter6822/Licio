@@ -108,8 +108,14 @@ export interface MeriComputeOptions {
 /**
  * Mean §7.4 combined independence over every unordered pair of selected
  * representatives that carries independence features. Returns `null` when
- * fewer than two such representatives exist (no pairwise evidence). Pure and
- * order-independent (symmetric over the pair set).
+ * fewer than two such representatives exist (no pairwise evidence).
+ *
+ * Two of the six §7.4 scorers are DIRECTIONAL by design — `temporalUpdate`
+ * reads only `a.addsNewFacts` and `semanticFraming` reads only `a.misleading`
+ * — so `independenceDimensions(a, b)` is not symmetric in general. Because the
+ * fold ranges over UNORDERED pairs of a selected SET, each pair is averaged in
+ * both directions so the result (and the confidence it modulates) depends only
+ * on the selected set, never on candidate order. Pure and order-independent.
  */
 export function selectedDimensionalIndependence(
   selectedIds: readonly string[],
@@ -129,7 +135,9 @@ export function selectedDimensionalIndependence(
       const a = feats[i];
       const b = feats[j];
       if (a === undefined || b === undefined) continue;
-      sum += combinedIndependence(independenceDimensions(a, b), weights);
+      const ab = combinedIndependence(independenceDimensions(a, b), weights);
+      const ba = combinedIndependence(independenceDimensions(b, a), weights);
+      sum += (ab + ba) / 2;
       pairs += 1;
     }
   }

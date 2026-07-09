@@ -519,6 +519,28 @@ describe('MERI §7.4 dimensional-independence fold (WS-H.2.2a)', () => {
     expect(forward).toBeCloseTo(reversed ?? Number.NaN, 12);
   });
 
+  it('stays order-independent even with DIRECTIONAL flags (misleading / addsNewFacts)', () => {
+    // temporalUpdate reads only a.addsNewFacts and semanticFraming only a.misleading,
+    // so a single-direction pair mean would depend on candidate order. Only 'a'
+    // carries the flags — reversing the selection must not change the fold.
+    const a = candidate('a', {
+      independence: {
+        publisherLineage: ['owner-a'],
+        claimGroupIds: ['claim-a'],
+        evidenceGroupIds: ['ev-a'],
+        communityId: 'room-a',
+        misleading: true,
+        addsNewFacts: true,
+        publishedAtMs: 10 * 3_600_000,
+      },
+    });
+    const b = fullyIndependent('b', 0);
+    const forward = computeMeri([a, b]).dimensionalIndependence;
+    const reversed = computeMeri([b, a]).dimensionalIndependence;
+    expect(forward).not.toBeNull();
+    expect(forward).toBeCloseTo(reversed ?? Number.NaN, 12);
+  });
+
   it('selectedDimensionalIndependence is null below two featured reps', () => {
     const only = new Map<string, MeriCandidateInput>([['a', fullyIndependent('a', 0)]]);
     expect(selectedDimensionalIndependence(['a'], only)).toBeNull();
