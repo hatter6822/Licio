@@ -28,7 +28,6 @@ export const DEMO_IDS = {
 const { STORY_1, STORY_2, STORY_3, THREAD_1, THREAD_2 } = DEMO_IDS;
 
 const feedWater: FeedItem = {
-  exposure_label: null,
   dispute_status: 'none',
   story_id: STORY_1,
   title: 'Regional water board publishes the full testing dataset',
@@ -49,7 +48,6 @@ const feedWater: FeedItem = {
 };
 
 const feedZoning: FeedItem = {
-  exposure_label: null,
   dispute_status: 'none',
   story_id: STORY_2,
   title: 'Two neighbourhoods read the same zoning proposal very differently',
@@ -67,7 +65,6 @@ const feedZoning: FeedItem = {
 };
 
 const feedTransit: FeedItem = {
-  exposure_label: null,
   dispute_status: 'none',
   story_id: STORY_3,
   title: 'Claim about the new transit timetable is missing a key caveat',

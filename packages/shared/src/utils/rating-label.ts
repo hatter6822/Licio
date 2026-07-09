@@ -47,8 +47,9 @@ export const WELL_SOURCED_MIN_EVIDENCE_CARDS = 2;
  * two classes that mean the story adds non-redundant coverage; the weaker
  * `same_claim_new_evidence` / `duplicate_context` (and the honest `null`, "no
  * MERI run has covered this story yet") do NOT, so WELL-SOURCED stays unset
- * until MERI affirmatively verifies independence — the same honest-absence
- * posture as the `exposure_label` wire field itself.
+ * until MERI affirmatively verifies independence. The MERI exposure label is
+ * no longer a user-facing surface, but its computed value still gates this
+ * label (a server-side derivation) and the /independent-sources drawer.
  */
 export function meriExposureIsIndependent(label: MeriExposureLabelWire | null): boolean {
   return label === 'independent_source' || label === 'new_angle';

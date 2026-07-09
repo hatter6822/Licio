@@ -14,6 +14,7 @@ exports[`score-vector schemas (WS-H.1.1d) > score-vector shapes are pinned by sn
   ],
   "MERI": [
     "approximation",
+    "dimensional_independence",
     "group_ids",
     "marginal_gains",
     "meri",

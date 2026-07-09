@@ -138,11 +138,18 @@ export async function assembleMeriCandidates(
     if (ra !== rb) sourceParent.set(ra, rb);
   };
   const ownerOf = new Map<string, string | null>();
+  // Full publisher-ownership chain per source (outermost owner first) for the
+  // §7.4 sourceLineage dimension — a superset of the single-owner `ownerOf`.
+  const lineageNamesOf = new Map<string, string[]>();
   const sourceIds = [...new Set(stories.map((s) => s.sourceId).filter((v): v is string => !!v))];
   for (const sourceId of sourceIds) {
     sourceParent.set(sourceId, sourceParent.get(sourceId) ?? sourceId);
     const source = await ingestion.sources.getById(sourceId);
     ownerOf.set(sourceId, source?.publisherLineage?.[0]?.name ?? null);
+    lineageNamesOf.set(
+      sourceId,
+      (source?.publisherLineage ?? []).map((entry) => entry.name).filter((n) => n.length > 0),
+    );
     for (const edge of await ingestion.syndications.listForSource(sourceId)) {
       if (edge.status !== 'confirmed') continue;
       sourceParent.set(edge.fromSourceId, sourceParent.get(edge.fromSourceId) ?? edge.fromSourceId);
@@ -170,24 +177,51 @@ export async function assembleMeriCandidates(
     return members.length >= 2 ? `src-${root}` : null;
   };
 
-  // Evidence/claim groups from claim independence grouping.
+  // Evidence/claim groups from claim independence grouping. `claimGroupsOf` /
+  // `evidenceGroupsOf` collect ALL distinct independence groups per story (the
+  // §7.4 dimensional inputs); the scalar `*GroupOf` keep the first for the
+  // matroid partition (unchanged behaviour).
   const claimGroupOf = new Map<string, string | null>();
   const evidenceGroupOf = new Map<string, string | null>();
+  const claimGroupsOf = new Map<string, string[]>();
+  const evidenceGroupsOf = new Map<string, string[]>();
   for (const story of stories) {
     const claims = await ingestion.claims.listByStory(story.storyId);
     const firstClaimGroup = claims.find((c) => c.independenceGroupId)?.independenceGroupId ?? null;
     claimGroupOf.set(story.storyId, firstClaimGroup);
+    const claimGroups = new Set<string>();
+    const evidenceGroups = new Set<string>();
     let evidenceGroup: string | null = null;
     for (const claim of claims) {
+      if (claim.independenceGroupId) claimGroups.add(claim.independenceGroupId);
       const cards = await ingestion.evidence.listByClaim(claim.claimId);
-      evidenceGroup = cards.find((card) => card.independenceGroupId)?.independenceGroupId ?? null;
-      if (evidenceGroup) break;
+      for (const card of cards) {
+        if (card.independenceGroupId) evidenceGroups.add(card.independenceGroupId);
+      }
+      if (evidenceGroup === null) {
+        evidenceGroup = cards.find((card) => card.independenceGroupId)?.independenceGroupId ?? null;
+      }
     }
     evidenceGroupOf.set(story.storyId, evidenceGroup);
+    claimGroupsOf.set(story.storyId, [...claimGroups]);
+    evidenceGroupsOf.set(story.storyId, [...evidenceGroups]);
   }
 
   return stories.map((story) => {
     const claims = claimGroupOf.get(story.storyId) ?? null;
+    // §7.4 sourceLineage input. The matroid's source-lineage class has bound 2,
+    // so two stories sharing lineage can both be selected representatives; the
+    // features must then let `sourceLineageIndependence` see that shared lineage
+    // (no shared owner ⇒ it returns 1, inflating confidence). Append the
+    // source-lineage union-find ROOT — the SAME grouping the matroid class uses
+    // (confirmed syndication edges + shared outermost owner) — as a stable
+    // lineage token, so same-source, syndicated, and common-owner pairs all
+    // share a token even when the publisher owner chain is empty.
+    const ownerNames = story.sourceId ? (lineageNamesOf.get(story.sourceId) ?? []) : [];
+    const publisherLineage = story.sourceId
+      ? [...ownerNames, `lineage:${sourceFind(story.sourceId)}`]
+      : [];
+    const publishedAtMs = Date.parse(story.publishedAt ?? story.createdAt);
     return {
       id: story.storyId,
       urlGroupId: story.canonicalUrl ?? `self:${story.storyId}`,
@@ -203,6 +237,17 @@ export async function assembleMeriCandidates(
         sourceLineage: story.sourceId !== null,
         evidence: (evidenceGroupOf.get(story.storyId) ?? null) !== null,
         embedding: true,
+      },
+      // §7.4 independence features — the continuous per-dimension inputs the
+      // matroid's discrete class membership cannot express (WS-H.2.2a).
+      independence: {
+        publisherLineage,
+        authorId: story.author,
+        claimGroupIds: claimGroupsOf.get(story.storyId) ?? [],
+        evidenceGroupIds: evidenceGroupsOf.get(story.storyId) ?? [],
+        communityId: story.roomId,
+        misleading: false,
+        publishedAtMs: Number.isFinite(publishedAtMs) ? publishedAtMs : 0,
       },
     } satisfies MeriCandidateInput;
   });

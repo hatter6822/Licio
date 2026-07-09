@@ -176,3 +176,62 @@ export function combinedIndependence(
   if (Math.abs(total - 1) > 1e-9) throw new Error(`dimension weights must sum to 1 (got ${total})`);
   return Math.min(1, Math.max(0, sum));
 }
+
+/**
+ * Which dimensions have their inputs AVAILABLE on BOTH sides of a pair. A
+ * dimension whose evidence is absent is UNKNOWN — it must be excluded from the
+ * mean, never scored as "fully independent". Symmetric in (a, b) so the pair
+ * assessment is order-independent. Concretely:
+ *  - sourceLineage / claimContent / evidenceBase need a non-empty group set on
+ *    both items (an empty Jaccard set would otherwise read as distance 1);
+ *  - communityOrigin needs a known community on both;
+ *  - semanticFraming needs an embedding similarity, OR a definitive `misleading`
+ *    verdict (which scores 0 legitimately);
+ *  - temporalUpdate needs the `addsNewFacts` signal known on both (absent ⇒ the
+ *    scorer would floor to 0 regardless of timing).
+ */
+export function availableDimensions(
+  a: IndependenceFeatures,
+  b: IndependenceFeatures,
+): Record<keyof IndependenceDimensions, boolean> {
+  return {
+    sourceLineage: a.publisherLineage.length > 0 && b.publisherLineage.length > 0,
+    claimContent: a.claimGroupIds.length > 0 && b.claimGroupIds.length > 0,
+    evidenceBase: a.evidenceGroupIds.length > 0 && b.evidenceGroupIds.length > 0,
+    communityOrigin: Boolean(a.communityId) && Boolean(b.communityId),
+    semanticFraming:
+      a.framingSimilarity !== undefined ||
+      b.framingSimilarity !== undefined ||
+      a.misleading === true ||
+      b.misleading === true,
+    temporalUpdate: a.addsNewFacts !== undefined && b.addsNewFacts !== undefined,
+  };
+}
+
+/**
+ * Symmetric, availability-aware combined independence for an UNORDERED pair, or
+ * `null` when no dimension's inputs are available. Two §7.4 scorers are
+ * directional (temporalUpdate reads `a.addsNewFacts`, semanticFraming reads
+ * `a.misleading`), so each included dimension is averaged over both orderings;
+ * weights are renormalized over the available dimensions so an absent dimension
+ * neither counts as independent nor drags the mean toward 0.
+ */
+export function pairwiseIndependence(
+  a: IndependenceFeatures,
+  b: IndependenceFeatures,
+  weights: DimensionWeights = DEFAULT_DIMENSION_WEIGHTS,
+): number | null {
+  const available = availableDimensions(a, b);
+  const ab = independenceDimensions(a, b);
+  const ba = independenceDimensions(b, a);
+  let sum = 0;
+  let wsum = 0;
+  for (const key of INDEPENDENCE_DIMENSION_KEYS) {
+    if (!available[key]) continue;
+    const w = weights[key];
+    if (!Number.isFinite(w) || w < 0) throw new Error(`invalid weight for ${key}`);
+    sum += w * ((ab[key] + ba[key]) / 2);
+    wsum += w;
+  }
+  return wsum === 0 ? null : Math.min(1, Math.max(0, sum / wsum));
+}

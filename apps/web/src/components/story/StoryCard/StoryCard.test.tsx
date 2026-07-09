@@ -132,32 +132,19 @@ describe('StoryCard distribution-reason guard (no-applause)', () => {
   });
 });
 
-describe('MERI exposure label (WS-H.2.3a)', () => {
-  it('renders the exposure label beside the rating label when present', () => {
-    render(<StoryCard {...sample} exposureLabel="independent_source" />);
-    expect(screen.getByText('Independent source')).toBeInTheDocument();
+describe('origin badge', () => {
+  it('always renders the source-origin badge (no MERI exposure label surface)', () => {
+    // The MERI exposure label was removed as a user-facing surface, so the
+    // origin badge no longer collides with an "Independent source" echo and
+    // always shows for its origin.
+    render(<StoryCard {...sample} />);
+    expect(screen.getByText('Independent')).toBeInTheDocument();
   });
 
-  it('omits the label honestly before analysis covers the story', () => {
+  it('carries no MERI exposure label anywhere on the card', () => {
     render(<StoryCard {...sample} />);
     expect(screen.queryByText('Independent source')).not.toBeInTheDocument();
+    expect(screen.queryByText('New angle')).not.toBeInTheDocument();
     expect(screen.queryByText('Duplicate context')).not.toBeInTheDocument();
-  });
-
-  it('suppresses the redundant "Independent" origin badge beside "Independent source"', () => {
-    // origin === 'independent' + the MERI independent_source label would print
-    // "Independent" AND "Independent source" — the plain badge is the redundant
-    // echo, so only the richer exposure label survives.
-    render(<StoryCard {...sample} exposureLabel="independent_source" />);
-    expect(screen.getByText('Independent source')).toBeInTheDocument();
-    expect(screen.queryByText('Independent')).not.toBeInTheDocument();
-  });
-
-  it('keeps the origin badge when the exposure label does not echo it', () => {
-    // An independent-origin story with a DIFFERENT exposure label ("New angle")
-    // has no collision, so the origin badge still shows.
-    render(<StoryCard {...sample} exposureLabel="new_angle" />);
-    expect(screen.getByText('Independent')).toBeInTheDocument();
-    expect(screen.getByText('New angle')).toBeInTheDocument();
   });
 });

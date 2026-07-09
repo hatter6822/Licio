@@ -167,9 +167,9 @@ import { LCAP_SCHEDULER_INTERVAL_MS, startLcapScheduler } from './lcap/scheduler
 import { getLcapIngestServer } from './lcap/service.js';
 import { demoStory } from './lib/demo-data.js';
 import {
-  seedDevRankingEnforcement,
   seedForumDemoData,
   seedGovernanceDemo,
+  seedMeriRankingEnforcement,
   seedModerationDemo,
   seedOperationalSignals,
 } from './lib/demo-seed.js';
@@ -416,8 +416,11 @@ setForumServices(forumServices);
 registerForumConsumers(eventServices, ingestionServices, forumServices);
 
 // --- WS-H invariant platform (SPEC §21.4, §30.4) ---------------------------
-// All eleven invariants run SHADOW-ONLY: outputs are stored observational
-// rows; the WS-H.1.2e promotion gate is the single path to any effect.
+// Every invariant EXCEPT MERI runs SHADOW-ONLY: outputs are stored
+// observational rows; the WS-H.1.2e promotion gate is the single path to any
+// effect. MERI is seeded to `soft_constraint` at boot (below) so it runs live
+// in every environment — the maintainer decision to un-shadow-gate the pure
+// §7.1 redundancy penalty; the kill switch still demotes it without a redeploy.
 const invariantServices = createInMemoryInvariantServices(
   eventServices,
   identityServices,
@@ -437,6 +440,14 @@ if (db) {
 }
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);
+// Un-shadow-gate MERI in EVERY environment: append the idempotent
+// `soft_constraint` promotion so the §7.1 redundancy penalty applies to the
+// served feed (the durable promotion store keeps it across restarts). Runs on
+// the unconditional boot path — production included — not the dev-only seed.
+// The shared Postgres job lease serializes concurrent first-boots across
+// replicas so they do not each append a duplicate row (fail-open; enforcement
+// never depends on the lease).
+await seedMeriRankingEnforcement(invariantServices, makeJobLease());
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
 // closures (MERI redundancy, MFCI intake).
 registerInvariantConsumers(eventServices, ingestionServices, identityServices, invariantServices);
@@ -1042,18 +1053,9 @@ if (env.NODE_ENV !== 'production') {
       identityServices,
       ingestionServices,
     );
-    // DEV-only: enable the MERI ranking effect (soft_constraint) so the WS-H
-    // batch outputs the dev boot + the traffic simulator compute actually
-    // reorder the served feed — a near-duplicate repost is demoted below its
-    // original (§7.1), rather than the effect being silently shadow-gated.
-    // LOCAL DEVELOPMENT ONLY: a promotion record has no environment scope, so on
-    // a NON-development durable boot (a staging/preview host with DATABASE_URL
-    // set but NODE_ENV !== 'production') it would leave that shared database
-    // MERI-enforced across restarts and every later boot. Gate on NODE_ENV ===
-    // 'development' — the documented local dev stack (in-memory OR a local
-    // Postgres) still gets the demo repost demotion, while a staging/preview
-    // env re-derives its own promotions through the real gate.
-    if (env.NODE_ENV === 'development') await seedDevRankingEnforcement(invariantServices);
+    // MERI enforcement is seeded unconditionally on the main boot path above
+    // (seedMeriRankingEnforcement) — it runs live in every environment now, so
+    // the demo repost demotion needs no separate dev-only promotion here.
     // WS-J: a small report queue so the dev console shows real data on boot.
     await seedModerationDemo(moderationServices);
     // WS-K: register + DEPLOY the governed models through the real gate, and seed

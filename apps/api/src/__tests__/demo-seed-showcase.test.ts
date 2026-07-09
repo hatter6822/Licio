@@ -136,17 +136,17 @@ describe('demo seed — the feed shows every rating label', () => {
     expect(ids.has(S(13)) || ids.has(S(22))).toBe(true);
   });
 
-  it('carries COMPUTED MERI exposure labels (honest source-independence signal)', async () => {
-    const items = await fullFrontPage();
-    const byId = new Map(items.map((i) => [i.story_id, i]));
-    // The well-sourced stories are MERI-independent on the feed (real batch).
-    expect(byId.get(S(1))?.exposure_label).toBe('independent_source');
-    expect(byId.get(S(22))?.exposure_label).toBe('independent_source');
-    // A verbatim repost (S25 ≡ S21) is a DUPLICATE exposure, not a fresh one —
-    // redundancy never inflates exposure (§7.1). Asserted on the COMPUTED MERI
-    // output (the ranking pipeline folds the duplicate into "more on this story").
+  it('computes MERI source-independence gains (the honest signal; no user-facing label)', async () => {
+    // The MERI exposure LABEL is no longer a user-facing wire field; the COMPUTED
+    // source-independence signal still drives ranking + the §5.6 Well-Sourced gate.
     const meri = await fx.events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
     const gains = meri?.scoreVector['marginal_gains'] as Record<string, number>;
+    // The well-sourced stories are MERI-independent (marginal gain ≥ 1) — the
+    // real batch, asserted on the computed output rather than a removed badge.
+    expect((gains[S(1)] ?? 0) >= 1).toBe(true);
+    expect((gains[S(22)] ?? 0) >= 1).toBe(true);
+    // A verbatim repost (S25 ≡ S21) is a DUPLICATE exposure, not a fresh one —
+    // redundancy never inflates exposure (§7.1).
     // The verbatim pair (S25 ≡ S21) must NOT both count as independent exposure —
     // redundancy never inflates exposure (§7.1).  WHICH of the two MERI designates
     // the first-seen (full-gain) member vs the folded duplicate is not stable

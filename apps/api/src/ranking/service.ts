@@ -273,7 +273,6 @@ async function buildFeedItems(
         distribution_reason: entry.explanation.distributionReason,
         context_chips: chips,
         safety_state: safetyState,
-        exposure_label: exposureLabel,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
         context_card: entry.contextCard,
         // Never surface the UNCLASSIFIED sentinel as a topic on the wire — it

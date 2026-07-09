@@ -9,6 +9,12 @@
 // WS-H.2.4a coverage/confidence envelope.
 
 import {
+  DEFAULT_DIMENSION_WEIGHTS,
+  type DimensionWeights,
+  type IndependenceFeatures,
+  pairwiseIndependence,
+} from './dimensions.js';
+import {
   DEFAULT_MERI_GAIN_CONFIG,
   exposureLabelForCategory,
   type MeriExposureLabel,
@@ -45,6 +51,16 @@ export interface MeriCandidateInput extends MeriGainCandidate {
     evidence: boolean;
     embedding: boolean;
   };
+  /**
+   * The §7.4 multi-dimensional independence features for this candidate
+   * (publisher lineage, claim/evidence groups, community, framing, timing).
+   * When present on ≥2 selected representatives, `computeMeri` folds the
+   * six-dimension pairwise assessment into confidence (WS-H.2.2a): the
+   * matroid rank says HOW MANY classes are independent; the dimensions say
+   * HOW STRONGLY the chosen representatives actually diverge. Optional so the
+   * matroid/gain math stays usable without the richer feature set.
+   */
+  independence?: IndependenceFeatures | undefined;
 }
 
 export interface MeriComputation {
@@ -62,6 +78,13 @@ export interface MeriComputation {
   approximation: boolean;
   coverage: number;
   confidence: number;
+  /**
+   * Mean §7.4 pairwise independence over the selected representatives ∈ [0, 1]
+   * (1 = the chosen basis is fully independent along all six dimensions), or
+   * `null` when fewer than two representatives carry independence features.
+   * A DESCRIPTIVE diagnostic — it modulates confidence, never the rank/label.
+   */
+  dimensionalIndependence: number | null;
   reasonCodes: string[];
   groupIds: string[];
 }
@@ -77,6 +100,48 @@ export interface MeriComputeOptions {
   minAcceptableCoverage?: number;
   /** Near-duplicate groups smaller than this reduce confidence. */
   minGroupSize?: number;
+  /** Weights for the §7.4 dimensional-independence confidence fold. */
+  dimensionWeights?: DimensionWeights;
+}
+
+/**
+ * Mean §7.4 pairwise independence over the selected representatives, or `null`
+ * when no pair contributes assessable evidence. Each pair is scored by the
+ * symmetric, availability-aware `pairwiseIndependence` (order-independent, and
+ * dimensions whose inputs are absent are excluded rather than counted as
+ * independent). `null`-scoring pairs (no available dimension) drop out of the
+ * mean; the whole fold is `null` when fewer than two representatives carry
+ * features or no pair is assessable.
+ *
+ * The caller passes a CANONICAL (id-sorted) basis so the result depends only on
+ * the exposure SET, never on which member of an over-full redundancy class the
+ * order-sensitive greedy selection happened to keep.
+ */
+export function selectedDimensionalIndependence(
+  selectedIds: readonly string[],
+  candidateById: ReadonlyMap<string, MeriCandidateInput>,
+  weights: DimensionWeights = DEFAULT_DIMENSION_WEIGHTS,
+): number | null {
+  const feats: IndependenceFeatures[] = [];
+  for (const id of selectedIds) {
+    const feat = candidateById.get(id)?.independence;
+    if (feat) feats.push(feat);
+  }
+  if (feats.length < 2) return null;
+  let sum = 0;
+  let pairs = 0;
+  for (let i = 0; i < feats.length; i += 1) {
+    for (let j = i + 1; j < feats.length; j += 1) {
+      const a = feats[i];
+      const b = feats[j];
+      if (a === undefined || b === undefined) continue;
+      const value = pairwiseIndependence(a, b, weights);
+      if (value === null) continue;
+      sum += value;
+      pairs += 1;
+    }
+  }
+  return pairs === 0 ? null : sum / pairs;
 }
 
 const REQUIRED_INPUT_KEYS = [
@@ -119,6 +184,7 @@ export function computeMeri(
       approximation: false,
       coverage: 0,
       confidence: 0,
+      dimensionalIndependence: null,
       reasonCodes: ['INSUFFICIENT_COVERAGE'],
       groupIds: [],
     };
@@ -148,6 +214,9 @@ export function computeMeri(
       // Fallback halves confidence (approximation, documented in the card),
       // further scaled by input coverage.
       confidence: 0.5 * coverage,
+      // The dimensional fold requires the matroid's selected representatives;
+      // the similarity fallback has no partition, so it reports no diagnostic.
+      dimensionalIndependence: null,
       reasonCodes,
       groupIds: [],
     };
@@ -186,6 +255,26 @@ export function computeMeri(
     confidence = Math.min(confidence, coverage);
   }
 
+  // §7.4 dimensional fold (WS-H.2.2a): when the selected representatives carry
+  // independence features, DISCOUNT confidence by how weakly they actually
+  // diverge across the available dimensions. The factor is 1 at full
+  // independence and never inflates — a matroid that separated items into
+  // classes still earns full confidence only when the chosen basis is
+  // dimensionally independent. Fold over a CANONICAL (id-sorted) basis so the
+  // value depends on the exposure SET, not on which member of an over-full
+  // redundancy class the order-sensitive greedy pick kept (both bases have the
+  // same rank; the greedy matroid property makes any id order a valid basis).
+  const candidateById = new Map(candidates.map((c) => [c.id, c]));
+  const canonicalBasis = greedyBasis(matroid, candidates.map((c) => c.id).sort());
+  const dimensionalIndependence = selectedDimensionalIndependence(
+    canonicalBasis,
+    candidateById,
+    options.dimensionWeights ?? DEFAULT_DIMENSION_WEIGHTS,
+  );
+  if (dimensionalIndependence !== null) {
+    confidence = Math.max(0, Math.min(1, confidence * (0.75 + 0.25 * dimensionalIndependence)));
+  }
+
   return {
     meri,
     marginalGains,
@@ -200,6 +289,7 @@ export function computeMeri(
     approximation: false,
     coverage,
     confidence,
+    dimensionalIndependence,
     reasonCodes,
     groupIds: matroid.classes.filter((c) => c.family !== 'singleton').map((c) => c.classId),
   };

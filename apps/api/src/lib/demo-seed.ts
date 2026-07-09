@@ -34,6 +34,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
+import { AlwaysGrantJobLeaseStore, type JobLeaseStore } from '../identity/job-lease.js';
 import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -1957,34 +1958,73 @@ export async function seedOperationalSignals(
 }
 
 /**
- * DEVELOPMENT-only: lift the MERI invariant to `soft_constraint` so its ranking
- * effect actually applies on the dev server (NEVER in production — this is
- * called only from the NODE_ENV-guarded dev boot).
+ * Lift the MERI invariant to `soft_constraint` in EVERY environment so its
+ * ranking effect actually applies — the maintainer decision to run MERI live
+ * (not shadow-gated) platform-wide.
  *
- * Every WS-H invariant is persisted SHADOW-only and gated behind the promotion
- * store; with no promotion records (the default) the ranking pipeline computes
- * the invariant values but applies zero effect, so a near-duplicate repost is
- * never demoted below its original. Seeding a single MERI promotion makes the
- * §7.1 duplicate demotion visible in the served feed — the behaviour the demo
- * corpus (the S21↔S25 collision) and the dev traffic simulator's
- * `breaking_news` repost both rely on. Scoped to MERI on purpose: it is a pure
- * redundancy penalty (a demotion), so it carries none of the whole-feed
- * fallback risk of the GWEI deployment gate or the content-exclusion risk of an
- * MFCI severe state. Idempotent (a re-run finds the record already present).
+ * Every OTHER WS-H invariant is persisted SHADOW-only and gated behind the
+ * promotion store; with no promotion records the ranking pipeline computes the
+ * invariant values but applies zero effect, so a near-duplicate repost is never
+ * demoted below its original. Seeding a single MERI promotion makes the §7.1
+ * duplicate demotion visible in the served feed. Scoped to MERI on purpose: it
+ * is a pure redundancy penalty (a demotion), so it carries none of the
+ * whole-feed fallback risk of the GWEI deployment gate or the content-exclusion
+ * risk of an MFCI severe state — the lowest-blast-radius invariant to run live.
+ *
+ * `soft_constraint` (never `hard_constraint`) keeps MERI a soft ranking penalty
+ * rather than a hard feed-shaping exclusion. Idempotent: a re-run (or a later
+ * boot against the same durable promotion store) finds the record present and
+ * returns without appending. The kill switch (a demotion append) still reverts
+ * the effect on the next read without a redeploy.
  */
-export async function seedDevRankingEnforcement(
+export async function seedMeriRankingEnforcement(
   invariants: InvariantPlatformServices,
+  lease: JobLeaseStore = new AlwaysGrantJobLeaseStore(),
 ): Promise<void> {
-  const existing = await invariants.promotions.listForInvariant('MERI');
-  if (existing.some((r) => r.toStatus === 'soft_constraint')) return;
+  const alreadyLive = async (): Promise<boolean> =>
+    (await invariants.promotions.listForInvariant('MERI')).some(
+      (r) => r.toStatus === 'soft_constraint',
+    );
+  // Fast path + the durable idempotency guarantee: a row already present ⇒ done.
+  if (await alreadyLive()) return;
+  // Serialize the one-shot boot promotion across replicas so concurrent
+  // FIRST-boots don't each append a duplicate row (the store has no unique key).
+  // `tryAcquire` grants AT MOST ONE holder per window, so:
+  //   • holder (true) ⇒ this replica writes the row;
+  //   • NON-holder (false) ⇒ another replica holds the LIVE lease and will write
+  //     it, so YIELD without appending — the non-holder must NOT race the
+  //     holder's commit, or the "serialize" guarantee is empty. A holder that
+  //     dies between acquiring and appending self-heals on the next boot, which
+  //     re-runs this seed;
+  //   • lease store UNAVAILABLE (throw) ⇒ FAIL OPEN and write the row ourselves,
+  //     so a broken lease can never leave MERI shadow-gated.
+  let holdsLease = false;
+  let leaseUnavailable = false;
+  try {
+    holdsLease = await lease.tryAcquire('seed:meri-enforcement', 60_000, 'platform-boot');
+  } catch {
+    leaseUnavailable = true;
+  }
+  if (!holdsLease && !leaseUnavailable) return; // another replica holds it → yield
   await invariants.promotions.append({
     invariantType: 'MERI',
     fromStatus: 'shadow',
     toStatus: 'soft_constraint',
+    // The steward promotion history (`PromotionService.history`) reconstructs the
+    // typed evidence shape, so populate ALL of its fields — a `note`-only record
+    // would surface as fabricated zero coverage/confidence + an empty drift ref.
+    // This is a maintainer OVERRIDE, not an evidence-driven promotion: it skipped
+    // shadow (shadowDurationDays 0) and carries no shadow-observed metrics (0);
+    // the drift reference names the decision so the audit trail reads it as an
+    // explicit override rather than a broken evidence-based promotion.
     evidence: {
-      note: 'development-only enforcement so the §7.1 duplicate demotion is visible',
+      note: 'maintainer decision: MERI runs live (soft_constraint) in all environments',
+      shadowDurationDays: 0,
+      driftReportRef: 'maintainer-decision/meri-live-all-envs',
+      observedCoverage: 0,
+      observedConfidence: 0,
     },
-    owner: 'dev-boot',
+    owner: 'platform-boot',
     createdAt: new Date().toISOString(),
   });
 }

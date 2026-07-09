@@ -5,9 +5,12 @@
 // in order, labels, fallback flagging, and coverage/confidence semantics.
 import { describe, expect, it } from 'vitest';
 import {
+  availableDimensions,
   combinedIndependence,
   communityOriginIndependence,
+  type IndependenceFeatures,
   independenceDimensions,
+  pairwiseIndependence,
   semanticFramingIndependence,
   sourceLineageIndependence,
   temporalUpdateIndependence,
@@ -27,6 +30,7 @@ import {
   matroidRank,
   meriScore,
   type PartitionMatroid,
+  selectedDimensionalIndependence,
   validateMeriGainConfig,
 } from '../meri/index.js';
 import { forAll, int, pick } from './prop.js';
@@ -459,5 +463,163 @@ describe('MERI independence dimensions (WS-H.2.2a)', () => {
         temporalUpdate: 0,
       }),
     ).toThrow(/sum to 1/);
+  });
+});
+
+describe('MERI §7.4 dimensional-independence fold (WS-H.2.2a)', () => {
+  // Distinct owner/claim/evidence/room; no framing or new-facts signal, so
+  // semanticFraming + temporalUpdate are UNAVAILABLE and drop out — the four
+  // available dimensions all score 1 ⇒ independence 1.0 (no confidence discount).
+  const fullyIndependent = (id: string): MeriCandidateInput =>
+    candidate(id, {
+      independence: {
+        publisherLineage: [`owner-${id}`],
+        claimGroupIds: [`claim-${id}`],
+        evidenceGroupIds: [`ev-${id}`],
+        communityId: `room-${id}`,
+        misleading: false,
+        publishedAtMs: 0,
+      },
+    });
+
+  // Distinct owner/claim/evidence but the SAME room ⇒ communityOrigin scores 0
+  // (available), pulling independence below 1: (0.3+0.2+0.2+0·0.1)/0.8 = 0.875.
+  const sameRoom = (id: string): MeriCandidateInput =>
+    candidate(id, {
+      independence: {
+        publisherLineage: [`owner-${id}`],
+        claimGroupIds: [`claim-${id}`],
+        evidenceGroupIds: [`ev-${id}`],
+        communityId: 'shared-room',
+        misleading: false,
+        publishedAtMs: 0,
+      },
+    });
+
+  it('reports null dimensionalIndependence when fewer than two reps carry features', () => {
+    const result = computeMeri([fullyIndependent('a'), candidate('b')]);
+    expect(result.dimensionalIndependence).toBeNull();
+  });
+
+  it('reports null when no candidate carries independence features (back-compat)', () => {
+    const result = computeMeri([candidate('a'), candidate('b')]);
+    expect(result.dimensionalIndependence).toBeNull();
+  });
+
+  it('scores fully independent reps at 1 (unavailable dimensions excluded)', () => {
+    const result = computeMeri([
+      fullyIndependent('a'),
+      fullyIndependent('b'),
+      fullyIndependent('c'),
+    ]);
+    // framing + temporal are unavailable ⇒ mean over the four available dims,
+    // all 1 ⇒ 1.0, so a genuinely independent basis earns NO discount.
+    expect(result.dimensionalIndependence).toBeCloseTo(1, 12);
+  });
+
+  it('DISCOUNTS confidence when a shared dimension lowers independence', () => {
+    const cands = [sameRoom('a'), sameRoom('b'), sameRoom('c')];
+    const withDims = computeMeri(cands);
+    const withoutDims = computeMeri(cands.map((c) => candidate(c.id)));
+    expect(withDims.dimensionalIndependence).toBeCloseTo(0.875, 12);
+    const factor = 0.75 + 0.25 * 0.875;
+    expect(withDims.confidence).toBeCloseTo(withoutDims.confidence * factor, 12);
+    expect(withDims.confidence).toBeLessThan(withoutDims.confidence);
+  });
+
+  it('never inflates confidence — a fully independent basis keeps it unchanged', () => {
+    const cands = [fullyIndependent('a'), fullyIndependent('b')];
+    const withDims = computeMeri(cands);
+    const withoutDims = computeMeri(cands.map((c) => candidate(c.id)));
+    expect(withDims.confidence).toBeCloseTo(withoutDims.confidence, 12);
+  });
+
+  it('is order-independent — same exposure set, any candidate order (canonical basis)', () => {
+    const a = sameRoom('a');
+    const b = fullyIndependent('b');
+    const c = sameRoom('c');
+    const forward = computeMeri([a, b, c]).dimensionalIndependence;
+    const reversed = computeMeri([c, b, a]).dimensionalIndependence;
+    expect(forward).not.toBeNull();
+    expect(forward).toBeCloseTo(reversed ?? Number.NaN, 12);
+  });
+
+  it('stays symmetric even with DIRECTIONAL flags (misleading / addsNewFacts)', () => {
+    // temporalUpdate reads a.addsNewFacts and semanticFraming a.misleading, so a
+    // single-direction pair mean would depend on order. Only 'a' sets the flags.
+    const a = candidate('a', {
+      independence: {
+        publisherLineage: ['owner-a'],
+        claimGroupIds: ['claim-a'],
+        evidenceGroupIds: ['ev-a'],
+        communityId: 'room-a',
+        misleading: true,
+        addsNewFacts: true,
+        publishedAtMs: 10 * 3_600_000,
+      },
+    });
+    const b = fullyIndependent('b');
+    const forward = computeMeri([a, b]).dimensionalIndependence;
+    const reversed = computeMeri([b, a]).dimensionalIndependence;
+    expect(forward).not.toBeNull();
+    expect(forward).toBeCloseTo(reversed ?? Number.NaN, 12);
+  });
+
+  it('selectedDimensionalIndependence is null below two featured reps', () => {
+    const only = new Map<string, MeriCandidateInput>([['a', fullyIndependent('a')]]);
+    expect(selectedDimensionalIndependence(['a'], only)).toBeNull();
+  });
+});
+
+describe('availability-aware pairwise independence (§7.4)', () => {
+  const feat = (o: Partial<IndependenceFeatures> = {}): IndependenceFeatures => ({
+    publisherLineage: [],
+    claimGroupIds: [],
+    evidenceGroupIds: [],
+    publishedAtMs: 0,
+    ...o,
+  });
+
+  it('marks a dimension UNAVAILABLE when either side lacks its input', () => {
+    const a = feat({ claimGroupIds: ['c1'], addsNewFacts: true });
+    const b = feat({ addsNewFacts: false });
+    const avail = availableDimensions(a, b);
+    expect(avail.claimContent).toBe(false); // b has no claims
+    expect(avail.evidenceBase).toBe(false);
+    expect(avail.sourceLineage).toBe(false);
+    expect(avail.communityOrigin).toBe(false);
+    expect(avail.temporalUpdate).toBe(true); // both know addsNewFacts
+    expect(avail.semanticFraming).toBe(false); // no similarity, not misleading
+  });
+
+  it('treats a missing group as UNKNOWN, not fully independent', () => {
+    // One side has no claims/evidence: the Jaccard scorer would read distance 1
+    // ("independent"), but the dimension is excluded instead. With only
+    // communityOrigin available (distinct rooms ⇒ 1), the pair scores 1 on THAT
+    // known axis — the empty groups never manufacture independence.
+    const a = feat({ communityId: 'r1' });
+    const b = feat({ communityId: 'r2', claimGroupIds: ['c1'], evidenceGroupIds: ['e1'] });
+    expect(pairwiseIndependence(a, b)).toBeCloseTo(1, 12);
+    // …and same room with no other known axis ⇒ 0, not manufactured independence.
+    expect(pairwiseIndependence(feat({ communityId: 'r1' }), feat({ communityId: 'r1' }))).toBe(0);
+  });
+
+  it('returns null when NO dimension is available', () => {
+    expect(pairwiseIndependence(feat(), feat())).toBeNull();
+  });
+
+  it('is symmetric under argument order', () => {
+    const a = feat({ publisherLineage: ['o1'], communityId: 'r1', misleading: true });
+    const b = feat({ publisherLineage: ['o2'], communityId: 'r2', framingSimilarity: 0.2 });
+    expect(pairwiseIndependence(a, b)).toBeCloseTo(pairwiseIndependence(b, a) ?? Number.NaN, 12);
+  });
+
+  it('recognizes a shared lineage token as NOT independent', () => {
+    // The data layer appends a `lineage:<root>` token; a shared root ⇒ 0.
+    const a = feat({ publisherLineage: ['lineage:root-1'] });
+    const b = feat({ publisherLineage: ['lineage:root-1'] });
+    expect(pairwiseIndependence(a, b)).toBe(0);
+    const c = feat({ publisherLineage: ['lineage:root-2'] });
+    expect(pairwiseIndependence(a, c)).toBeCloseTo(1, 12);
   });
 });

@@ -7,7 +7,6 @@
 import { z } from 'zod';
 import { cursorSchema, httpUrlSchema, paginatedSchema, uuidSchema } from './common.js';
 import { contributionDisputeStatusSchema } from './contribution.js';
-import { MERI_EXPOSURE_LABELS_WIRE } from './invariants-api.js';
 
 /** Feed ranking/personalization modes (SPEC §6.4; WS-B.2.9 switcher). */
 export const FEED_MODES = [
@@ -117,9 +116,6 @@ export const feedItemSchema = z.object({
   distribution_reason: z.string().min(1),
   context_chips: z.array(contextChipSchema).default([]),
   safety_state: safetyStateSchema.default('ok'),
-  /** MERI exposure label (SPEC §7.6, WS-H.2.3a) — null until a MERI shadow
-   * run covers the story (honest absence; never implies truth). */
-  exposure_label: z.enum(MERI_EXPOSURE_LABELS_WIRE).nullable().default(null),
   /** Same-cluster stories demoted by matroid dedup, available for the
    * "more on this story" expansion (WS-I.2.4a). */
   more_on_this_story: z.array(uuidSchema).max(12).default([]),

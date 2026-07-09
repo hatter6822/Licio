@@ -4,7 +4,7 @@
 // for a record's (trust §18.2, liveness §20.1) pair via `honestTrustLabel`, so the UI
 // NEVER collapses distinct states into one "secure"/"trusted"/"delivered"/"final"/
 // "safe" badge.  Icon + text always pair (the text is the accessible name; the icon
-// is decorative), mirroring the ExposureLabel/RatingLabel conventions.  Uncertain
+// is decorative), mirroring the RatingLabel conventions.  Uncertain
 // states read as caution, hard-negative states as danger — visually distinct and
 // explained by their own wording.
 

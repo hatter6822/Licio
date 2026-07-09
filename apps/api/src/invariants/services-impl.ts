@@ -208,6 +208,7 @@ export class MeriService extends BaseInvariantService {
             approximation: result.approximation,
             per_class_bounds: Object.fromEntries(result.classes.map((c) => [c.classId, c.bound])),
             group_ids: result.groupIds,
+            dimensional_independence: result.dimensionalIndependence,
           },
           result.confidence,
           result.coverage,
