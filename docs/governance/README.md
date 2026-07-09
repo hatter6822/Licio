@@ -12,7 +12,7 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Layer | Where | Status |
 |---|---|---|
 | Pure domain (kernel, DSL, capabilities, elections) | `packages/governance` (`@licio/governance`) | **Shipped** |
-| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0038`, `0066` (deferred re-moderation queue) | **Shipped** |
+| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0038`, `0066` (content-free deferred-re-moderation queue), `0067` (admitting-backend pin) | **Shipped** |
 | Production store binding | `apps/api/src/governance/drizzle-governance-stores.ts` (gated; bound at boot when `DATABASE_URL` is set) | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
@@ -82,13 +82,20 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   an un-granted action is clamped down, never escalated. On model **UNAVAILABLE**
   (timeout, breaker, budget, prohibited-use block, transport/schema error) the wrapper
   **fails to the always-on WS-J baseline** (returns no in-room decision) AND enqueues
-  the contribution in the durable **pending-remoderation queue**
+  the contribution REF in the durable **pending-remoderation queue**
   (`knomosis.room_pending_remoderation`); the lease-guarded scheduler's
-  `remoderation_lifecycle` sweep drains it — re-running the model once it recovers and
-  RAISING the already-published contribution to review post-hoc (floor-dominant), so
-  the model's judgment is **delayed, never dropped**. A **deterministic default
-  proposer** serves the same seam when no LLM is configured (dev/test; opt out of the
-  LLM with `GOVERNANCE_LLM_MODERATION=off`). Provenance-triple audit log; the floor's
+  `remoderation_lifecycle` sweep drains it — RECONSTRUCTING the moderation context from
+  the live content stores at retry (the queue holds only soft refs — **no UGC** — so a
+  contribution deletion has nothing to purge there), re-running the model once it
+  recovers, and RAISING the already-published contribution to review post-hoc
+  (floor-dominant), so the model's judgment is **delayed, never dropped**. A model is
+  admitted under a SPECIFIC backend (`ModerationProposer.backendId`, pinned on the
+  model at admission); if the live backend differs — LLM moderation enabled over a
+  deterministic-admitted model, or `GOVERNANCE_LLM_MODEL` changed — moderation **fails
+  closed to the baseline** until the model is re-admitted (never runs under an
+  un-vetted backend). A **deterministic default proposer** serves the same seam when no
+  LLM is configured (dev/test; opt out of the LLM with `GOVERNANCE_LLM_MODERATION=off`).
+  Provenance-triple audit log; the floor's
   room-governance-freeze — a live, platform-steward-gated control (`POST
   …/governance/agent/freeze` + `…/unfreeze`, gated by the WS-J `restrict` capability +
   verified MFA): a platform safety steward, never the room's elected steward, can

@@ -117,19 +117,38 @@ describe('runGovernanceTick', () => {
       runRatificationLifecycle: async () => ({ settled: 0, activated: 0 }),
       sweepPendingRemoderation: sweep,
     } as unknown as GovernanceService;
+    const loadModerationContext = async () => null; // the reconstruction seam (content-free queue)
     const log = vi.fn();
     await runGovernanceTick({
       service: svc,
       eligibleVoterCount: async () => 0,
+      loadModerationContext,
       applyDeferredRemoderation: apply,
       log,
       now: () => 0,
     });
-    expect(sweep).toHaveBeenCalledWith(apply, expect.any(Number));
+    expect(sweep).toHaveBeenCalledWith(loadModerationContext, apply, expect.any(Number));
     expect(log).toHaveBeenCalledWith(
       'governance.remoderation_lifecycle',
       expect.objectContaining({ swept: 2, applied: 1, stillUnavailable: 1 }),
     );
+  });
+
+  it('SKIPS the deferred re-moderation sweep when no context loader is wired', async () => {
+    const sweep = vi.fn();
+    const svc = {
+      runElectionLifecycle: async () => ({ scheduled: 0, settled: 0 }),
+      runRatificationLifecycle: async () => ({ settled: 0, activated: 0 }),
+      sweepPendingRemoderation: sweep,
+    } as unknown as GovernanceService;
+    // No loadModerationContext ⇒ the sweep must not run (items stay queued).
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 0,
+      log: () => {},
+      now: () => 0,
+    });
+    expect(sweep).not.toHaveBeenCalled();
   });
 
   it('routes a lifecycle failure to onError', async () => {

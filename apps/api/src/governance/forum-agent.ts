@@ -12,7 +12,7 @@ import type { ModerationAction, ModerationContext } from '@licio/governance';
 import type { ContributionModerationState, ContributionType } from '@licio/shared';
 import type { ForumServices, RoomAgentModerator } from '../forum/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
-import type { DeferredRemoderationApplier } from './service.js';
+import type { DeferredRemoderationApplier, ModerationContextLoader } from './service.js';
 import { getGovernanceService } from './services.js';
 
 /**
@@ -158,6 +158,62 @@ export function countMentionTokens(text: string): number {
 }
 
 /**
+ * Assemble a `ModerationContext` from a contribution's fields + author history —
+ * the ONE place the room-scoped, PII-free context is built, shared by the live
+ * moderator and the deferred-re-moderation context loader (so the two paths stay
+ * byte-identical). Citations are structured link data; inline links/mentions are
+ * counted canonically (one token per URL; an email is not a mention).
+ */
+function buildModerationContext(input: {
+  type: ContributionType;
+  body: string;
+  citationCount: number;
+  attachmentCount: number;
+  history: AuthorHistory;
+}): ModerationContext {
+  return {
+    contentText: input.body,
+    contentKind: contentKindOf(input.type),
+    contentLength: input.body.length,
+    linkCount: input.citationCount + countLinkTokens(input.body),
+    mentionCount: countMentionTokens(input.body),
+    hasMediaUpload: input.attachmentCount > 0,
+    authorAccountAgeDays: input.history.accountAgeDays,
+    authorNewToRoom: input.history.newToRoom,
+    priorRemovalsInRoom: input.history.priorRemovalsInRoom,
+  };
+}
+
+/**
+ * Build the deferred-re-moderation CONTEXT LOADER over the forum + ingestion
+ * stores (WS-U ADR-9). The pending queue holds NO content — only soft refs — so at
+ * retry the sweep reconstructs the `ModerationContext` HERE from the live
+ * contribution (which also reflects any EDITS since the deferral, and the author's
+ * current history). Returns null when the contribution is gone/tombstoned or its
+ * author is erased ⇒ the queued item is moot and dequeued. `attachment_ids` is read
+ * from the stored metadata exactly as the edit path does.
+ */
+export function buildModerationContextLoader(deps: {
+  forum: Pick<ForumServices, 'contributions'>;
+  readAuthorHistory: AuthorHistoryReader;
+}): ModerationContextLoader {
+  return async (roomId, subjectRef) => {
+    const contribution = await deps.forum.contributions.getById(subjectRef);
+    if (contribution === null || contribution.userId === null) return null; // deleted ⇒ moot
+    const attachmentIds = contribution.metadata['attachment_ids'];
+    const attachmentCount = Array.isArray(attachmentIds) ? attachmentIds.length : 0;
+    const history = await deps.readAuthorHistory(roomId, contribution.userId);
+    return buildModerationContext({
+      type: contribution.type,
+      body: contribution.body,
+      citationCount: contribution.citations.length,
+      attachmentCount,
+      history,
+    });
+  };
+}
+
+/**
  * Closed action → contribution-state map. A `warn` is logged but does not hide
  * content; `restrict`/`flag_for_review` route to human review; `remove` removes
  * (appealable). `allow` is a no-op. Floor-reserved actions are not expressible.
@@ -276,17 +332,13 @@ export function createRoomAgentModerator(
       const history = deps.readAuthorHistory
         ? await deps.readAuthorHistory(roomId, authorUserId)
         : DEFAULT_AUTHOR_HISTORY;
-      const context: ModerationContext = {
-        contentText: body,
-        contentKind: contentKindOf(type),
-        contentLength: body.length,
-        linkCount: citationCount + countLinkTokens(body),
-        mentionCount: countMentionTokens(body),
-        hasMediaUpload: attachmentCount > 0,
-        authorAccountAgeDays: history.accountAgeDays,
-        authorNewToRoom: history.newToRoom,
-        priorRemovalsInRoom: history.priorRemovalsInRoom,
-      };
+      const context = buildModerationContext({
+        type,
+        body,
+        citationCount,
+        attachmentCount,
+        history,
+      });
       // Pass the binding we already read (avoids a second store read, #12).
       const result = await svc.moderate(roomId, context, contributionId, binding);
       if (!result.ok || result.value === null) return null;

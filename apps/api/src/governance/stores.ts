@@ -10,7 +10,6 @@ import type {
   CapabilityDescriptor,
   GovernancePolicyBundle,
   LawPack,
-  ModerationContext,
   RatificationChoice,
   RatificationResult,
   Verdict,
@@ -66,6 +65,11 @@ export interface ModelRecord {
   proposedByUserId: string | null;
   status: ModelStatus;
   evaluationRef: string | null;
+  /** The `ModerationProposer.backendId` that ran this model's admission gate (set
+   *  when it became `eligible`; null until admitted, or for a proposer with no
+   *  backendId). `moderate` refuses a live decision under a different backend
+   *  (WS-U ADR-9 review — an un-vetted backend swap fails closed). */
+  admittedBackendId: string | null;
   createdAt: string;
 }
 export interface PromptRecord {
@@ -148,8 +152,6 @@ export interface PendingRemoderationRecord {
   roomId: string;
   /** Soft ref to the moderated contribution. */
   subjectRef: string;
-  /** The room-scoped, PII-free ModerationContext snapshot to re-run. */
-  context: ModerationContext;
   /** Retry attempts so far (incremented each sweep pass that stays unavailable). */
   attempts: number;
   enqueuedAt: string;
@@ -217,6 +219,8 @@ export interface ModelStore {
     modelId: string,
     status: ModelStatus,
     evaluationRef: string | null,
+    /** When provided, also pins the admitting backend (undefined ⇒ leave unchanged). */
+    admittedBackendId?: string | null,
   ): Promise<ModelRecord | null>;
   clear(): Promise<void>;
 }
@@ -272,21 +276,18 @@ export interface TreasuryActionStore {
 export interface PendingRemoderationStore {
   /**
    * Enqueue a contribution whose in-room moderation was deferred (model outage).
-   * UPSERT by (roomId, subjectRef): a re-defer of the same contribution REFRESHES
-   * the context snapshot but preserves the original `enqueuedAt` + `attempts`, so
-   * an ongoing outage neither duplicates the row nor resets its age/retry history.
+   * UPSERT by (roomId, subjectRef): a re-defer of the same contribution is a no-op
+   * that preserves the original `enqueuedAt` + `attempts`, so an ongoing outage
+   * neither duplicates the row nor resets its age/retry history. Stores ONLY soft
+   * refs + bookkeeping — the moderation context is RECONSTRUCTED from the live
+   * content stores at retry time, never persisted here (no UGC in this table).
    */
-  enqueue(record: {
-    roomId: string;
-    subjectRef: string;
-    context: ModerationContext;
-    enqueuedAt: string;
-  }): Promise<void>;
+  enqueue(record: { roomId: string; subjectRef: string; enqueuedAt: string }): Promise<void>;
   /** Pending items OLDEST-first (enqueue order), bounded — the sweep drains in FIFO. */
   list(limit: number): Promise<PendingRemoderationRecord[]>;
   /** Record a retry attempt (attempts += 1, lastAttemptAt = at); no-op if absent. */
   markAttempt(roomId: string, subjectRef: string, at: string): Promise<void>;
-  /** Remove a resolved item (decision applied, benign, or moot); no-op if absent. */
+  /** Remove a resolved item (decision applied, benign, moot, or deleted); no-op if absent. */
   remove(roomId: string, subjectRef: string): Promise<void>;
   clear(): Promise<void>;
 }
@@ -375,10 +376,20 @@ export class InMemoryModelStore implements ModelStore {
   async listByRoom(roomId: string) {
     return [...this.models.values()].filter((m) => m.roomId === roomId);
   }
-  async patchStatus(modelId: string, status: ModelStatus, evaluationRef: string | null) {
+  async patchStatus(
+    modelId: string,
+    status: ModelStatus,
+    evaluationRef: string | null,
+    admittedBackendId?: string | null,
+  ) {
     const cur = this.models.get(modelId);
     if (!cur) return null;
-    const next = { ...cur, status, evaluationRef };
+    const next: ModelRecord = {
+      ...cur,
+      status,
+      evaluationRef,
+      ...(admittedBackendId !== undefined ? { admittedBackendId } : {}),
+    };
     this.models.set(modelId, next);
     return next;
   }
@@ -536,24 +547,14 @@ export class InMemoryPendingRemoderationStore implements PendingRemoderationStor
   private key(roomId: string, subjectRef: string) {
     return `${roomId} ${subjectRef}`;
   }
-  async enqueue(record: {
-    roomId: string;
-    subjectRef: string;
-    context: ModerationContext;
-    enqueuedAt: string;
-  }) {
+  async enqueue(record: { roomId: string; subjectRef: string; enqueuedAt: string }) {
     const key = this.key(record.roomId, record.subjectRef);
-    const existing = this.pending.get(key);
-    if (existing) {
-      // Refresh only the context snapshot; keep enqueuedAt + attempts (the item's
-      // age and retry history survive an ongoing outage).
-      this.pending.set(key, { ...existing, context: record.context });
-      return;
-    }
+    // Keep enqueuedAt + attempts on a re-defer (survive an ongoing outage); the
+    // context is reconstructed at retry, never stored, so there is nothing to refresh.
+    if (this.pending.has(key)) return;
     this.pending.set(key, {
       roomId: record.roomId,
       subjectRef: record.subjectRef,
-      context: record.context,
       attempts: 0,
       enqueuedAt: record.enqueuedAt,
       lastAttemptAt: null,

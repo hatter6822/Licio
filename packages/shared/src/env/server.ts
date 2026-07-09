@@ -222,10 +222,14 @@ export const serverEnvSchemaRefined = serverEnvSchema
     // half-configured backend that would then silently serve deterministic).
     if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic' || env.GOVERNANCE_LLM_PROVIDER === 'local') {
       if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic') {
-        if (env.ANTHROPIC_API_KEY === undefined) {
+        // Reject a blank (whitespace-only) key too: it passes an undefined-only
+        // check but `resolveGovernanceLlmDecision` trims it to empty and silently
+        // disables the backend — turning an explicit opt-in into a silent
+        // deterministic boot. Fail fast instead (a half-configured backend).
+        if (env.ANTHROPIC_API_KEY === undefined || env.ANTHROPIC_API_KEY.trim() === '') {
           ctx.addIssue({
             code: 'custom',
-            message: 'GOVERNANCE_LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY',
+            message: 'GOVERNANCE_LLM_PROVIDER=anthropic requires a non-empty ANTHROPIC_API_KEY',
             path: ['ANTHROPIC_API_KEY'],
           });
         }
@@ -244,11 +248,12 @@ export const serverEnvSchemaRefined = serverEnvSchema
             path: ['GOVERNANCE_LLM_LOCAL_URL'],
           });
         }
-        if (env.GOVERNANCE_LLM_MODEL === undefined) {
+        // Reject a blank model name too (same silent-disable trap as the key).
+        if (env.GOVERNANCE_LLM_MODEL === undefined || env.GOVERNANCE_LLM_MODEL.trim() === '') {
           ctx.addIssue({
             code: 'custom',
             message:
-              'GOVERNANCE_LLM_PROVIDER=local requires GOVERNANCE_LLM_MODEL (the local runtime model name)',
+              'GOVERNANCE_LLM_PROVIDER=local requires a non-empty GOVERNANCE_LLM_MODEL (the local runtime model name)',
             path: ['GOVERNANCE_LLM_MODEL'],
           });
         }

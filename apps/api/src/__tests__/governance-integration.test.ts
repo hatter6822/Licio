@@ -247,6 +247,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       proposedByUserId: stewardId,
       status: 'proposed',
       evaluationRef: null,
+      admittedBackendId: null,
       createdAt: t,
     });
     expect(m1).not.toBeNull();
@@ -260,6 +261,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       proposedByUserId: stewardId,
       status: 'proposed',
       evaluationRef: null,
+      admittedBackendId: null,
       createdAt: t,
     });
     expect(dup).toBeNull();
@@ -283,6 +285,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       proposedByUserId: stewardId,
       status: 'eligible',
       evaluationRef: null,
+      admittedBackendId: null,
       createdAt: t,
     });
     const promptId = randomUUID();
@@ -321,6 +324,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       proposedByUserId: stewardId,
       status: 'approved',
       evaluationRef: null,
+      admittedBackendId: null,
       createdAt: t,
     });
     const promptId = randomUUID();
@@ -405,47 +409,21 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     expect(acceptedRows[0]?.amount).toBe(10);
   });
 
-  it('deferred re-moderation queue: upsert-idempotent enqueue, FIFO list, attempt bump, remove', async () => {
-    const ctx = {
-      contentText: 'see http://a http://b http://c',
-      contentKind: 'comment' as const,
-      contentLength: 30,
-      linkCount: 3,
-      mentionCount: 0,
-      hasMediaUpload: false,
-      authorAccountAgeDays: 3,
-      authorNewToRoom: true,
-      priorRemovalsInRoom: 0,
-    };
+  it('deferred re-moderation queue: idempotent enqueue (refs only, no content), FIFO list, attempt bump, remove', async () => {
     const older = new Date(Date.now() - 60_000).toISOString();
     const newer = new Date().toISOString();
-    await pendingRemoderation.enqueue({
-      roomId,
-      subjectRef: 'contrib-A',
-      context: ctx,
-      enqueuedAt: older,
-    });
-    await pendingRemoderation.enqueue({
-      roomId,
-      subjectRef: 'contrib-B',
-      context: ctx,
-      enqueuedAt: newer,
-    });
-    // A re-defer of A UPSERTS (refreshes context, keeps attempts + enqueuedAt) — no duplicate row.
-    await pendingRemoderation.enqueue({
-      roomId,
-      subjectRef: 'contrib-A',
-      context: { ...ctx, linkCount: 9 },
-      enqueuedAt: newer,
-    });
+    await pendingRemoderation.enqueue({ roomId, subjectRef: 'contrib-A', enqueuedAt: older });
+    await pendingRemoderation.enqueue({ roomId, subjectRef: 'contrib-B', enqueuedAt: newer });
+    // A re-defer of A is a no-op UPSERT (keeps attempts + enqueuedAt) — no duplicate row,
+    // no content stored (the context is reconstructed from the live stores at retry).
+    await pendingRemoderation.enqueue({ roomId, subjectRef: 'contrib-A', enqueuedAt: newer });
 
     const listed = await pendingRemoderation.list(10);
     const mine = listed.filter((r) => r.roomId === roomId);
     expect(mine.map((r) => r.subjectRef)).toEqual(['contrib-A', 'contrib-B']); // oldest-first FIFO
     const a = mine.find((r) => r.subjectRef === 'contrib-A');
     expect(a?.attempts).toBe(0); // preserved across the re-defer
-    expect(a?.context.linkCount).toBe(9); // context refreshed
-    expect(a?.enqueuedAt).toBe(older); // original age preserved
+    expect(a?.enqueuedAt).toBe(older); // original age preserved (no-op upsert)
 
     await pendingRemoderation.markAttempt(roomId, 'contrib-A', newer);
     const afterAttempt = (await pendingRemoderation.list(10)).find(
@@ -471,6 +449,7 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       proposedByUserId: stewardId,
       status: 'eligible',
       evaluationRef: null,
+      admittedBackendId: null,
       createdAt: t,
     });
     const voteId = randomUUID();

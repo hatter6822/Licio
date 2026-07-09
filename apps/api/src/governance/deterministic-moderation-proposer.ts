@@ -45,6 +45,7 @@ export function classifyDeterministic(context: ModerationContext): ModerationPro
 export function createDeterministicModerationProposer(): ModerationProposer {
   return {
     kind: 'deterministic',
+    backendId: 'deterministic',
     async propose(request) {
       return classifyDeterministic(request.context);
     },

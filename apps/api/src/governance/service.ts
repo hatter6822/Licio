@@ -213,6 +213,20 @@ export type DeferredRemoderationApplier = (
   reason: string,
 ) => Promise<void>;
 
+/**
+ * Reconstructs a contribution's `ModerationContext` from the LIVE forum/content
+ * stores at retry time (WS-U ADR-9). The deferred-re-moderation queue stores NO
+ * content — only soft refs — so the sweep rebuilds the context here (which also
+ * reflects any edits since the deferral). Returns null when the contribution is
+ * gone/tombstoned (⇒ the queued item is moot and dequeued). Wired at boot over the
+ * forum + ingestion stores; absent ⇒ the sweep cannot re-run and leaves items
+ * queued.
+ */
+export type ModerationContextLoader = (
+  roomId: string,
+  subjectRef: string,
+) => Promise<ModerationContext | null>;
+
 export class GovernanceService {
   constructor(private readonly deps: GovernanceServiceDeps) {}
 
@@ -509,6 +523,7 @@ export class GovernanceService {
       proposedByUserId: userId,
       status: 'proposed',
       evaluationRef: null,
+      admittedBackendId: null, // set when admission passes (evaluateModel)
       createdAt: this.iso(),
     });
     if (!inserted) return err('duplicate', 'This exact model is already proposed for the room.');
@@ -535,7 +550,12 @@ export class GovernanceService {
     const failures = await this.admissionFailures(model.bundle);
     const status = failures.length === 0 ? 'eligible' : 'rejected';
     const evaluationRef = this.deps.uuid();
-    await this.deps.stores.models.patchStatus(modelId, status, evaluationRef);
+    // On admission PASS, pin the model to the backend that ran it, so a later
+    // backend/model swap fails closed at moderate time until re-admission (WS-U
+    // ADR-9 review). A rejected model leaves admittedBackendId untouched (null).
+    const admittedBackendId =
+      status === 'eligible' ? (this.deps.moderationProposer?.backendId ?? null) : undefined;
+    await this.deps.stores.models.patchStatus(modelId, status, evaluationRef, admittedBackendId);
     return ok({ status });
   }
 
@@ -797,13 +817,13 @@ export class GovernanceService {
     if (outcome.kind === 'no_agent') return ok(null);
     if (outcome.kind === 'unavailable') {
       // Fail to the always-on platform baseline (return null) AND persist the
-      // contribution for DEFERRED re-moderation so an outage delays the model's
-      // own judgment rather than dropping it. The durable queue is the mechanism;
-      // `onModerationDeferred` is a parallel observability hook.
+      // contribution REF for DEFERRED re-moderation so an outage delays the model's
+      // own judgment rather than dropping it. Only the (room, subject) ref is
+      // stored — no content — and the sweep reconstructs the context at retry. The
+      // durable queue is the mechanism; `onModerationDeferred` is a parallel hook.
       await this.deps.stores.pendingRemoderation.enqueue({
         roomId,
         subjectRef,
-        context,
         enqueuedAt: this.iso(),
       });
       this.deps.onModerationDeferred?.(roomId, subjectRef, context);
@@ -848,10 +868,13 @@ export class GovernanceService {
    *   - `still_unavailable` — record an attempt and keep it queued.
    * A per-item failure (a re-seam error, or a proposer that broke its fire-safe
    * contract) records an attempt and moves on, so one poison item never blocks the
-   * batch. `apply` is the forum re-seam; absent (no forum bound) ⇒ an applied
-   * decision is re-queued rather than lost.
+   * batch. `loadContext` RECONSTRUCTS each contribution's moderation context from
+   * the live stores (the queue holds no content); a null result ⇒ the contribution
+   * is gone ⇒ moot ⇒ dequeue. `apply` is the forum re-seam; absent (no forum bound)
+   * ⇒ an applied decision is re-queued rather than lost.
    */
   async sweepPendingRemoderation(
+    loadContext: ModerationContextLoader,
     apply: DeferredRemoderationApplier | null,
     limit = 50,
   ): Promise<RemoderationSweepResult> {
@@ -866,7 +889,15 @@ export class GovernanceService {
     };
     for (const item of pending) {
       try {
-        const outcome = await this.reModerate(item.roomId, item.subjectRef, item.context);
+        const context = await loadContext(item.roomId, item.subjectRef);
+        if (context === null) {
+          // The contribution is gone/tombstoned since the deferral ⇒ nothing to
+          // re-moderate. Dequeue it (a self-cleaning dangling ref).
+          await this.deps.stores.pendingRemoderation.remove(item.roomId, item.subjectRef);
+          result.moot += 1;
+          continue;
+        }
+        const outcome = await this.reModerate(item.roomId, item.subjectRef, context);
         if (outcome.status === 'still_unavailable') {
           await this.deps.stores.pendingRemoderation.markAttempt(
             item.roomId,
@@ -927,6 +958,21 @@ export class GovernanceService {
     if (!proposer) return { kind: 'no_agent' }; // no in-room model ⇒ platform baseline only
     const model = await this.deps.stores.models.get(binding.modelId);
     if (!model) return { kind: 'no_agent' };
+
+    // The model was admitted under a SPECIFIC moderation backend (evaluateModel
+    // pins it). If the LIVE backend differs — LLM moderation enabled over a
+    // deterministic-admitted model, or GOVERNANCE_LLM_MODEL changed — this prompt
+    // was never vetted for the classifier now executing it. FAIL CLOSED to the
+    // platform baseline until the model is re-admitted under the active backend
+    // (WS-U ADR-9 review); never moderate under an un-admitted backend. A null
+    // admittedBackendId (legacy) or a backendId-less proposer skips the gate.
+    if (
+      model.admittedBackendId !== null &&
+      proposer.backendId !== undefined &&
+      proposer.backendId !== model.admittedBackendId
+    ) {
+      return { kind: 'no_agent' };
+    }
 
     const result = await proposer.propose({
       roomId,

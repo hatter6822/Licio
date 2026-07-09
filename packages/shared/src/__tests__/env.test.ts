@@ -136,7 +136,7 @@ describe('validateServerEnv', () => {
     ).not.toThrow();
     // A half-configured backend still fails fast in production…
     expect(() => validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'anthropic' })).toThrow(
-      /requires ANTHROPIC_API_KEY/,
+      /non-empty ANTHROPIC_API_KEY/,
     );
     // …and 'deterministic' (and absence) stay valid everywhere.
     expect(() =>
@@ -147,7 +147,7 @@ describe('validateServerEnv', () => {
   it('enforces each LLM backend’s requirements (any environment)', () => {
     // anthropic ⇒ key required.
     expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_PROVIDER: 'anthropic' })).toThrow(
-      /requires ANTHROPIC_API_KEY/,
+      /non-empty ANTHROPIC_API_KEY/,
     );
     expect(() =>
       validateServerEnv({
@@ -174,7 +174,7 @@ describe('validateServerEnv', () => {
         GOVERNANCE_LLM_PROVIDER: 'local',
         GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
       }),
-    ).toThrow(/requires GOVERNANCE_LLM_MODEL/);
+    ).toThrow(/non-empty GOVERNANCE_LLM_MODEL/);
     expect(() =>
       validateServerEnv({
         ...validEnv,
@@ -183,6 +183,27 @@ describe('validateServerEnv', () => {
         GOVERNANCE_LLM_MODEL: 'llama3.3',
       }),
     ).not.toThrow();
+  });
+
+  it('rejects a BLANK (whitespace-only) LLM credential — no silent-disable of the opt-in (WS-U ADR-9 review)', () => {
+    // A whitespace-only key passes an undefined-only check but resolveGovernanceLlmDecision
+    // trims it to empty and silently disables the backend. Fail fast instead.
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: '   ',
+      }),
+    ).toThrow(/non-empty ANTHROPIC_API_KEY/);
+    // Same trap for a blank local model name.
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+        GOVERNANCE_LLM_MODEL: '   ',
+      }),
+    ).toThrow(/non-empty GOVERNANCE_LLM_MODEL/);
   });
 });
 

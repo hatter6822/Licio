@@ -14,7 +14,11 @@ import type {
   ModerationProposer,
   ModerationProposerResult,
 } from '../governance/moderation-proposer.js';
-import { ADMISSION_ROOM_ID, type GovernanceService } from '../governance/service.js';
+import {
+  ADMISSION_ROOM_ID,
+  type GovernanceService,
+  type ModerationContextLoader,
+} from '../governance/service.js';
 import { createGovernanceService } from '../governance/services.js';
 import { createInMemoryGovernanceStores, type GovernanceStores } from '../governance/stores.js';
 
@@ -226,18 +230,24 @@ describe('GovernanceService.moderate — the deterministic default proposer (no 
 });
 
 describe('GovernanceService.sweepPendingRemoderation — deferred re-moderation (never dropped)', () => {
+  // The queue holds no content; the sweep RECONSTRUCTS the context via this loader.
+  // The unit tests stand it in with a fixed link-heavy context.
+  const loadCtx: ModerationContextLoader = async () => ctx({ linkCount: 5 });
+  const loadGone: ModerationContextLoader = async () => null; // contribution deleted
+
   it('re-runs a deferred contribution when the model recovers, applies the decision, and dequeues it', async () => {
     // Unavailable on the live call (⇒ enqueued), decided on the sweep retry.
     const h = makeService(flakyProposer(1, decided('flag_for_review', 'many links')));
     await activate(h.svc, ['moderate.flag']);
-    // Live: model down ⇒ baseline (null) + enqueued.
+    // Live: model down ⇒ baseline (null) + enqueued (ref only, no content).
     expect((await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c9')).ok).toBe(true);
     expect(await h.stores.pendingRemoderation.list(10)).toHaveLength(1);
 
-    // Sweep: model recovered ⇒ apply via the forum re-seam + dequeue.
+    // Sweep: reconstruct the context, model recovered ⇒ apply via the re-seam + dequeue.
     const applied: Array<{ roomId: string; subjectRef: string; action: string; reason: string }> =
       [];
     const result = await h.svc.sweepPendingRemoderation(
+      loadCtx,
       async (roomId, subjectRef, action, reason) => {
         applied.push({ roomId, subjectRef, action, reason });
       },
@@ -264,7 +274,7 @@ describe('GovernanceService.sweepPendingRemoderation — deferred re-moderation 
     await activate(h.svc, ['moderate.flag']);
     await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c10');
     const applied: string[] = [];
-    const result = await h.svc.sweepPendingRemoderation(async (_r, s) => {
+    const result = await h.svc.sweepPendingRemoderation(loadCtx, async (_r, s) => {
       applied.push(s);
     });
     expect(result).toMatchObject({ swept: 1, stillUnavailable: 1, applied: 0 });
@@ -278,7 +288,7 @@ describe('GovernanceService.sweepPendingRemoderation — deferred re-moderation 
     await activate(h.svc, ['moderate.flag']);
     await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c11');
     const applied: string[] = [];
-    const result = await h.svc.sweepPendingRemoderation(async (_r, s) => {
+    const result = await h.svc.sweepPendingRemoderation(loadCtx, async (_r, s) => {
       applied.push(s);
     });
     expect(result).toMatchObject({ swept: 1, cleared: 1, applied: 0 });
@@ -292,16 +302,26 @@ describe('GovernanceService.sweepPendingRemoderation — deferred re-moderation 
     await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c12');
     // The platform floor freezes the agent between the defer and the sweep.
     await h.svc.freezeAgent(ROOM);
-    const result = await h.svc.sweepPendingRemoderation(async () => {});
+    const result = await h.svc.sweepPendingRemoderation(loadCtx, async () => {});
     expect(result).toMatchObject({ swept: 1, moot: 1, applied: 0 });
     expect(await h.stores.pendingRemoderation.list(10)).toHaveLength(0); // dequeued (no agent to judge it)
+  });
+
+  it('drops a deferred item as moot when its contribution was deleted (loader returns null)', async () => {
+    const h = makeService(flakyProposer(1, decided('flag_for_review')));
+    await activate(h.svc, ['moderate.flag']);
+    await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c12b');
+    // The contribution was purged before the sweep ⇒ the loader returns null.
+    const result = await h.svc.sweepPendingRemoderation(loadGone, async () => {});
+    expect(result).toMatchObject({ swept: 1, moot: 1, applied: 0 });
+    expect(await h.stores.pendingRemoderation.list(10)).toHaveLength(0); // self-cleaned dangling ref
   });
 
   it('keeps an applied item queued when the re-seam fails (a failed raise never drops the judgment)', async () => {
     const h = makeService(flakyProposer(1, decided('flag_for_review')));
     await activate(h.svc, ['moderate.flag']);
     await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c13');
-    const result = await h.svc.sweepPendingRemoderation(async () => {
+    const result = await h.svc.sweepPendingRemoderation(loadCtx, async () => {
       throw new Error('forum store down');
     });
     expect(result).toMatchObject({ swept: 1, errors: 1, applied: 0 });
@@ -313,8 +333,55 @@ describe('GovernanceService.sweepPendingRemoderation — deferred re-moderation 
     const h = makeService(flakyProposer(1, decided('flag_for_review')));
     await activate(h.svc, ['moderate.flag']);
     await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c14');
-    const result = await h.svc.sweepPendingRemoderation(null);
+    const result = await h.svc.sweepPendingRemoderation(loadCtx, null);
     expect(result).toMatchObject({ swept: 1, errors: 1, applied: 0 });
     expect(await h.stores.pendingRemoderation.list(10)).toHaveLength(1); // stays queued
+  });
+});
+
+describe('GovernanceService.moderate — the admitting-backend gate (WS-U ADR-9 review)', () => {
+  function backendProposer(backendId: string): ModerationProposer {
+    // Always proposes flag_for_review — in-band for BOTH admission fixtures, so the
+    // model is admissible; and a live restriction so the gate's effect is observable.
+    return {
+      kind: 'llm',
+      backendId,
+      async propose() {
+        return decided('flag_for_review', 'x');
+      },
+    };
+  }
+
+  it('refuses to moderate under a DIFFERENT backend than the one that admitted the model', async () => {
+    const stores = createInMemoryGovernanceStores();
+    let n = 0;
+    const mk = (p: ModerationProposer) =>
+      createGovernanceService({
+        stores,
+        config: resolveGovernanceConfig({}),
+        now: () => new Date('2026-07-09T00:00:00.000Z'),
+        uuid: () => `id-${++n}`,
+        moderationProposer: p,
+      });
+    // Admitted under backend-A (evaluateModel pins admittedBackendId='backend-A').
+    const svcA = mk(backendProposer('backend-A'));
+    await activate(svcA, ['moderate.flag']);
+    const same = await svcA.moderate(ROOM, ctx({ linkCount: 5 }), 'ca');
+    expect(same.ok && same.value?.action).toBe('flag_for_review'); // matching backend ⇒ moderates
+
+    // A DIFFERENT backend over the SAME stores ⇒ fail closed to the baseline (the
+    // prompt was never vetted for backend-B; no decision until re-admission).
+    const svcB = mk(backendProposer('backend-B'));
+    const switched = await svcB.moderate(ROOM, ctx({ linkCount: 5 }), 'cb');
+    expect(switched.ok && switched.value).toBeNull();
+  });
+
+  it('a backendId-less proposer (test double / legacy model) skips the gate', async () => {
+    // fakeProposer sets no backendId ⇒ admittedBackendId stays null ⇒ the gate is a
+    // no-op (back-compat: a legacy model or a test double is never fail-closed).
+    const h = makeService(fakeProposer(decided('flag_for_review')));
+    await activate(h.svc, ['moderate.flag']);
+    const res = await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c-nobk');
+    expect(res.ok && res.value?.action).toBe('flag_for_review');
   });
 });

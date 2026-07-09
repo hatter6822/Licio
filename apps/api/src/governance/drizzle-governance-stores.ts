@@ -30,7 +30,6 @@ import type {
   CapabilityDescriptor,
   GovernancePolicyBundle,
   LawPack,
-  ModerationContext,
   RatificationResult,
   Verdict,
 } from '@licio/governance';
@@ -117,6 +116,7 @@ function toModel(row: typeof roomGovernanceModels.$inferSelect): ModelRecord {
     proposedByUserId: row.proposedByUserId,
     status: row.status,
     evaluationRef: row.evaluationRef,
+    admittedBackendId: row.admittedBackendId,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -228,7 +228,6 @@ function toPendingRemoderation(
   return {
     roomId: row.roomId,
     subjectRef: row.subjectRef,
-    context: row.context as ModerationContext,
     attempts: row.attempts,
     enqueuedAt: row.enqueuedAt.toISOString(),
     lastAttemptAt: row.lastAttemptAt ? row.lastAttemptAt.toISOString() : null,
@@ -412,6 +411,7 @@ export class DrizzleModelStore implements ModelStore {
         proposedByUserId: model.proposedByUserId,
         status: model.status,
         evaluationRef: model.evaluationRef,
+        admittedBackendId: model.admittedBackendId,
         createdAt: new Date(model.createdAt),
       })
       .onConflictDoNothing({
@@ -443,10 +443,13 @@ export class DrizzleModelStore implements ModelStore {
     modelId: string,
     status: ModelStatus,
     evaluationRef: string | null,
+    admittedBackendId?: string | null,
   ): Promise<ModelRecord | null> {
+    const set: Partial<typeof roomGovernanceModels.$inferInsert> = { status, evaluationRef };
+    if (admittedBackendId !== undefined) set.admittedBackendId = admittedBackendId;
     const rows = await this.#db
       .update(roomGovernanceModels)
-      .set({ status, evaluationRef })
+      .set(set)
       .where(eq(roomGovernanceModels.modelId, modelId))
       .returning();
     return rows[0] ? toModel(rows[0]) : null;
@@ -793,28 +796,22 @@ export class DrizzlePendingRemoderationStore implements PendingRemoderationStore
     this.#db = db;
   }
 
-  async enqueue(record: {
-    roomId: string;
-    subjectRef: string;
-    context: ModerationContext;
-    enqueuedAt: string;
-  }): Promise<void> {
-    // Upsert on the composite PK: a re-defer refreshes ONLY the context snapshot,
-    // preserving attempts + enqueuedAt (parity with the in-memory adapter) — an
-    // ongoing outage never duplicates the row nor resets its age/retry history.
+  async enqueue(record: { roomId: string; subjectRef: string; enqueuedAt: string }): Promise<void> {
+    // Insert on the composite PK; a re-defer is a no-op (DO NOTHING), preserving
+    // attempts + enqueuedAt (parity with the in-memory adapter) — an ongoing outage
+    // never duplicates the row nor resets its age/retry history. No content is
+    // stored: the moderation context is reconstructed from the live stores at retry.
     await this.#db
       .insert(roomPendingRemoderations)
       .values({
         roomId: record.roomId,
         subjectRef: record.subjectRef,
-        context: record.context,
         attempts: 0,
         enqueuedAt: new Date(record.enqueuedAt),
         lastAttemptAt: null,
       })
-      .onConflictDoUpdate({
+      .onConflictDoNothing({
         target: [roomPendingRemoderations.roomId, roomPendingRemoderations.subjectRef],
-        set: { context: record.context },
       });
   }
 

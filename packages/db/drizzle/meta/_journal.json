@@ -463,6 +463,13 @@
       "when": 1782746000000,
       "tag": "0066_ws_u_pending_remoderation",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1782836000000,
+      "tag": "0067_ws_u_admitted_backend",
+      "breakpoints": true
     }
   ]
 }

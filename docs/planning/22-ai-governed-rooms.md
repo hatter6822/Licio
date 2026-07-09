@@ -210,12 +210,18 @@ envelope. The bounded action is combined **floor-dominantly** with the always-on
 forum (the agent can only ADD caution, never lower a floor decision). On model **UNAVAILABLE** (timeout,
 breaker open, budget exhausted, prohibited-use block, transport or schema error) the wrapper **fails to
 the WS-J baseline** (returns no in-room decision — the forum keeps the platform decision) AND enqueues
-the contribution in the durable **pending-remoderation queue** (`knomosis.room_pending_remoderation`);
-the governance scheduler's `remoderation_lifecycle` sweep re-runs the model once it recovers and RAISES
-the already-published contribution to human review post-hoc (floor-dominant, via the forum re-seam), so
-the model's judgment is **delayed, never dropped**. Model **admission** (WS-U.2.2a) is now a property of
-the *model*: the candidate proposer is sampled k-of-N over the platform floor-safety eval set and must
-land in-band on every fixture (catching both under- and over-moderation). The LLM is the moderation
+the contribution REF in the durable **pending-remoderation queue** (`knomosis.room_pending_remoderation`,
+migration `0066`); the governance scheduler's `remoderation_lifecycle` sweep drains it — RECONSTRUCTING
+the moderation context from the live content stores at retry (the queue stores **no UGC**, only soft refs
+— a contribution deletion has nothing to purge there, WS-D.3.2), re-running the model once it recovers,
+and RAISING the already-published contribution to human review post-hoc (floor-dominant, via the forum
+re-seam), so the model's judgment is **delayed, never dropped**. Model **admission** (WS-U.2.2a) is now a
+property of the *model*: the candidate proposer is sampled k-of-N over the platform floor-safety eval set
+and must land in-band on every fixture (catching both under- and over-moderation), and the admitting
+`ModerationProposer.backendId` is **pinned on the model** (migration `0067`) — if the live backend later
+differs (LLM enabled over a deterministic-admitted model, or `GOVERNANCE_LLM_MODEL` changed), moderation
+**fails closed to the baseline** until re-admission, never running under an un-vetted backend. The LLM is
+the moderation
 model **by default** when a backend is configured (opt out with `GOVERNANCE_LLM_MODERATION=off` ⇒ the
 deterministic default proposer, which also serves dev/test). Every decided moderation (raw proposed vs
 wrapper-bounded action, whether the wrapper clamped — metadata only, no content, no attention values) is

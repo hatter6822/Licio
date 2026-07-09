@@ -51,6 +51,17 @@ export interface ModerationProposer {
   /** Backend kind — surfaced in logs/metrics + the audit provenance, never an
    *  authority bit (the wrapper holds all authority). */
   readonly kind: 'llm' | 'deterministic';
+  /**
+   * A STABLE identity of the backend that will classify — the deterministic
+   * classifier, or a specific LLM backend + model (e.g. `llm:<card>:<model_id>`).
+   * A model's admission (`evaluateModel`) is pinned to the backendId that ran it;
+   * `GovernanceService.moderate` refuses to moderate under a DIFFERENT backendId
+   * than the one that admitted the room's model (an un-vetted backend swap
+   * fails closed to the platform baseline until re-admission — WS-U ADR-9 review).
+   * Optional so a test double may omit it (⇒ the gate is skipped for that double);
+   * the real proposers always set it.
+   */
+  readonly backendId?: string;
   /** Classify one contribution. NEVER throws — any failure is `unavailable`. */
   propose(request: ModerationProposalRequest): Promise<ModerationProposerResult>;
 }

@@ -26,6 +26,7 @@ import type {
   ModerationProposer,
   ModerationProposerResult,
 } from '../../governance/moderation-proposer.js';
+import { ADMISSION_ROOM_ID } from '../../governance/service.js';
 import type { ModelIdentity } from '../models.js';
 import { recordAiOutput } from '../output-records.js';
 import type { AiGovernanceServices } from '../services.js';
@@ -133,12 +134,31 @@ export function createGovernanceLlmModerationProposer(
 
   return {
     kind: 'llm',
+    // Pins the model's admission to THIS backend + model: a later swap (enabling
+    // the LLM over a deterministic-admitted model, or changing GOVERNANCE_LLM_MODEL)
+    // changes this id, so GovernanceService.moderate fails closed until re-admission.
+    backendId: `llm:${identity.name}:${settings.modelId}`,
     async propose(request) {
       const meta = { room_id: request.roomId, subject_ref: request.subjectRef };
       const nowMs = services.now();
 
-      if (!breaker.allowed(nowMs)) return unavailable('breaker_open', meta);
-      if (!budget.tryConsume(request.roomId, nowMs)) return unavailable('budget_exhausted', meta);
+      // The admission gate samples THIS proposer over synthetic fixtures (roomId =
+      // ADMISSION_ROOM_ID). Those probes must NOT touch the live breaker/budget: a
+      // bad candidate prompt failing admission would otherwise trip the shared,
+      // process-wide breaker and degrade live moderation for every room. So for an
+      // admission probe, bypass both the breaker and the budget entirely.
+      const isAdmission = request.roomId === ADMISSION_ROOM_ID;
+      const recordFailure = () => {
+        if (!isAdmission) breaker.recordFailure(services.now());
+      };
+      const recordSuccess = () => {
+        if (!isAdmission) breaker.recordSuccess();
+      };
+
+      if (!isAdmission && !breaker.allowed(nowMs)) return unavailable('breaker_open', meta);
+      if (!isAdmission && !budget.tryConsume(request.roomId, nowMs)) {
+        return unavailable('budget_exhausted', meta);
+      }
 
       // The pre-execution guard. A prohibited invocation is a policy outcome, not
       // an outage — it does NOT trip the breaker AND is NOT retried (deferred
@@ -172,7 +192,7 @@ export function createGovernanceLlmModerationProposer(
           timeoutMs: settings.moderationTimeoutMs,
         });
       } catch (error) {
-        breaker.recordFailure(services.now());
+        recordFailure();
         return unavailable('transport', {
           ...meta,
           error: error instanceof Error ? error.message : 'unknown',
@@ -180,11 +200,11 @@ export function createGovernanceLlmModerationProposer(
       }
 
       if (completion.stopReason === 'refusal') {
-        breaker.recordFailure(services.now());
+        recordFailure();
         return unavailable('refusal', meta);
       }
       if (completion.stopReason === 'max_tokens') {
-        breaker.recordFailure(services.now());
+        recordFailure();
         return unavailable('truncated', meta);
       }
 
@@ -192,14 +212,21 @@ export function createGovernanceLlmModerationProposer(
       try {
         verdict = moderationVerdictSchema.parse(JSON.parse(completion.text ?? ''));
       } catch {
-        breaker.recordFailure(services.now());
+        recordFailure();
         return unavailable('invalid_output', meta);
       }
 
-      breaker.recordSuccess();
-      let outputId: string | null = null;
+      recordSuccess();
+      // Provenance is LOAD-BEARING for a moderation decision (it anchors audit +
+      // correction, and the wrapper can raise a contribution to review on it). If
+      // the immutable AIOutputRecord cannot be written, FAIL CLOSED to `unavailable`
+      // — the wrapper degrades to the WS-J baseline and defers re-moderation — rather
+      // than apply an audit-sensitive decision with no record. (Admission probes,
+      // roomId = ADMISSION_ROOM_ID, still record a probe output; a store fault there
+      // simply defers the candidate's admission, never a live decision.)
+      let output: Awaited<ReturnType<typeof recordAiOutput>>;
       try {
-        const output = await recordAiOutput(services.outputRecords, {
+        output = await recordAiOutput(services.outputRecords, {
           modelName: identity.name,
           modelVersion: identity.version,
           promptTemplateId: identity.promptTemplateId,
@@ -209,17 +236,18 @@ export function createGovernanceLlmModerationProposer(
           useCaseId: identity.useCaseId,
           nowIso: new Date(services.now()).toISOString(),
         });
-        outputId = output.output_id;
       } catch {
-        // A provenance-store fault does not invalidate the classification; record
-        // null provenance (metric only) rather than dropping the decision.
         services.metrics.increment('ai.governance.moderation.record_failed');
+        return unavailable('record_failed', meta);
       }
 
       services.metrics.increment('ai.governance.moderation.decided');
       services.metrics.increment(`ai.governance.moderation.proposed.${verdict.action}`);
       const action: ModerationAction = verdict.action;
-      return { status: 'decided', proposal: { action, reason: verdict.reason, outputId } };
+      return {
+        status: 'decided',
+        proposal: { action, reason: verdict.reason, outputId: output.output_id },
+      };
     },
   };
 }

@@ -83,6 +83,7 @@ import { createDrizzleGovernanceStores } from './governance/drizzle-governance-s
 import {
   buildAuthorHistoryReader,
   buildDeferredRemoderationApplier,
+  buildModerationContextLoader,
   createRoomAgentModerator,
 } from './governance/forum-agent.js';
 import type { ModerationProposer } from './governance/moderation-proposer.js';
@@ -1047,7 +1048,7 @@ if (governanceLlmDecision.enabled) {
       });
       logger.info(
         { backend: backend.kind, modelId: settings.modelId },
-        'WS-U in-room moderation model = LLM (deterministically wrapped: escalate-to-review ceiling + capability clamp; fail-to-baseline + deferred re-moderation)',
+        'WS-U in-room moderation model = LLM (deterministically wrapped: escalate-to-review ceiling + capability clamp; fail-to-baseline + deferred re-moderation). NOTE: a room model is admitted under a specific backend/model — moderation FAILS CLOSED to the platform baseline for any room whose model was admitted under a different backend, until it is re-admitted (re-run the model evaluation) under this one.',
       );
     } else {
       logger.warn(
@@ -1096,18 +1097,19 @@ knomosisServices.readinessChecklist = buildReadinessChecklistPort(forumServices,
 // The forum contribution path consults the in-room agent (subordinate to the
 // platform floor) for any room with an active community-approved binding. The
 // agent's author-history signals are read from the real identity + forum +
-// ingestion stores (only for governed rooms, on this path).
-forumServices.agentModerator = createRoomAgentModerator({
-  readAuthorHistory: buildAuthorHistoryReader({
-    getUser: (id) => identityServices.store.getUser(id),
-    getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
-    stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
-    listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
-    getThreadRoomId: async (threadId) =>
-      (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
-    now: () => Date.now(),
-  }),
+// ingestion stores (only for governed rooms, on this path). The SAME reader backs
+// the deferred-re-moderation context loader below, so the live + retry paths build
+// an identical context.
+const authorHistoryReader = buildAuthorHistoryReader({
+  getUser: (id) => identityServices.store.getUser(id),
+  getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
+  stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
+  listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
+  getThreadRoomId: async (threadId) =>
+    (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
+  now: () => Date.now(),
 });
+forumServices.agentModerator = createRoomAgentModerator({ readAuthorHistory: authorHistoryReader });
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
@@ -1291,9 +1293,15 @@ startGovernanceScheduler(
       if (subscription?.status === 'active') return true;
       return (await forumServices.rooms.stewardRolesFor(roomId, userId)).length > 0;
     },
-    // WS-U ADR-9 deferred re-moderation: raise an already-published contribution
-    // whose outage-deferred model judgment finally decided a restriction, over the
-    // REAL forum + ingestion stores (floor-dominant; routes to human review).
+    // WS-U ADR-9 deferred re-moderation: reconstruct each outage-deferred
+    // contribution's context from the live stores (the queue holds no content),
+    // then raise an already-published contribution whose model judgment finally
+    // decided a restriction, over the REAL forum + ingestion stores (floor-dominant;
+    // routes to human review).
+    loadModerationContext: buildModerationContextLoader({
+      forum: forumServices,
+      readAuthorHistory: authorHistoryReader,
+    }),
     applyDeferredRemoderation: buildDeferredRemoderationApplier({
       forum: forumServices,
       ingestion: ingestionServices,
