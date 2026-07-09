@@ -702,7 +702,7 @@ Implement SPA focus management integrated with TanStack Router. On every client-
 **ID:** WS-B.2.1a
 **Ref:** Section 6.3
 
-Build the `StoryCard` component in `apps/web/src/components/story/StoryCard`. The card displays: story title (as a heading), source and origin badge, rating label (from WS-B.2.3), one-line distribution reason (e.g., "Rising from independent source opens and evidence additions"), context chips ("3 lenses," "2 primary sources," "low coordination risk"), reading estimate, and thread-branch preview. The card supports swipe actions (handled by WS-B.2.2): left to save, right to open context card, long-press for menu.
+Build the `StoryCard` component in `apps/web/src/components/story/StoryCard`. The card displays: story title (as a heading), source, rating label (from WS-B.2.3), one-line distribution reason (e.g., "Rising from independent source opens and evidence additions"), context chips ("2 primary sources," "low coordination risk"), reading estimate, and thread-branch preview. The card carries no source-origin badge (`story.origin` is a hardcoded placeholder, never a real derived signal) and no "N lenses" chip (the lens count drives lens balancing, not a per-card affordance); lens-count chips are filtered out at the render boundary so no producer can reintroduce them. The card supports swipe actions (handled by WS-B.2.2): left to save, right to open context card, long-press for menu.
 
 The card uses `<article>` as the root element with an accessible heading hierarchy. Reading estimate and context chips use semantic markup. The distribution reason is concise and never exposes a raw numeric score.
 

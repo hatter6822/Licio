@@ -21,6 +21,18 @@ export interface StoryCardProps extends StoryCardData {
   className?: string;
 }
 
+/**
+ * The "N lenses" card chip was removed: a room's lens COUNT still drives
+ * WS-I.2.4b lens balancing, but it is not a per-card affordance. Enforce that
+ * structurally at the render boundary — not by convention in each producer — so
+ * no source (the API feed, the styleguide, a stale cached card, or a future
+ * caller) can reintroduce it. Matches the `lenses` chip id and any "3 lenses" /
+ * "1 lens" count label (chip labels are server-generated English, never i18n'd).
+ */
+function isLensCountChip(chip: { id: string; label: string }): boolean {
+  return chip.id === 'lenses' || /^\s*\d+\s+lens(?:es)?\b/i.test(chip.label);
+}
+
 /** Reject a distribution reason that leaks a raw numeric score (dev-only). */
 function warnIfScoreLike(reason: string): void {
   if (!import.meta.env.DEV) return;
@@ -51,6 +63,10 @@ export function StoryCard({
   const Heading = `h${headingLevel}` as 'h2' | 'h3' | 'h4';
 
   warnIfScoreLike(distributionReason);
+
+  // Drop any lens-count chip at the boundary (see isLensCountChip) so the
+  // removed "N lenses" affordance can never render, whatever the producer.
+  const visibleChips = contextChips?.filter((chip) => !isLensCountChip(chip));
 
   const readingEstimate = formatReadingEstimate(story.readingMinutes, locale, (m) =>
     t('reading.estimate', '{minutes} min read', { minutes: m }),
@@ -121,9 +137,9 @@ export function StoryCard({
 
       {/* 5. Context chips (lenses, primary sources, coordination-risk band).
           Secondary metadata: hidden in focus mode for a calmer layout. */}
-      {contextChips && contextChips.length > 0 ? (
+      {visibleChips && visibleChips.length > 0 ? (
         <ul className="flex flex-wrap gap-2" data-focus-hide>
-          {contextChips.map((chip) => (
+          {visibleChips.map((chip) => (
             <li
               key={chip.id}
               className="inline-flex items-center gap-1 rounded-md bg-surface px-2 py-1 text-xs text-ink"

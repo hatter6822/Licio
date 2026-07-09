@@ -148,3 +148,26 @@ describe('origin badge', () => {
     expect(screen.queryByText('Duplicate context')).not.toBeInTheDocument();
   });
 });
+
+describe('lens-count chip removal', () => {
+  it('drops a lens-count chip from ANY producer at the render boundary', () => {
+    // Structural enforcement: whatever passes a lens-count chip (feed, styleguide,
+    // a stale cached card), the "N lenses" affordance never renders. Match both
+    // the `lenses` id and a bare "N lens(es)" label; keep every other chip.
+    render(
+      <StoryCard
+        {...sample}
+        contextChips={[
+          { id: 'lenses', label: '2 lenses' },
+          { id: 'c1', label: '3 lenses' },
+          { id: 'c2', label: '1 lens' },
+          { id: 'c3', label: '2 primary sources' },
+        ]}
+      />,
+    );
+    expect(screen.queryByText('2 lenses')).not.toBeInTheDocument();
+    expect(screen.queryByText('3 lenses')).not.toBeInTheDocument();
+    expect(screen.queryByText('1 lens')).not.toBeInTheDocument();
+    expect(screen.getByText('2 primary sources')).toBeInTheDocument();
+  });
+});
