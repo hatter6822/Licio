@@ -6,6 +6,7 @@
 // being shadow-gated. The maintainer decision to run MERI live platform-wide.
 
 import { describe, expect, it } from 'vitest';
+import type { JobLeaseStore } from '../../identity/job-lease.js';
 import { seedMeriRankingEnforcement } from '../../lib/demo-seed.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
 
@@ -31,6 +32,31 @@ describe('seedMeriRankingEnforcement', () => {
     const graph = await buildSimTestGraph();
     await seedMeriRankingEnforcement(graph.invariants);
     await seedMeriRankingEnforcement(graph.invariants);
+    const rows = await graph.invariants.promotions.listForInvariant('MERI');
+    expect(rows.filter((r) => r.toStatus === 'soft_constraint')).toHaveLength(1);
+  });
+
+  it('still enforces MERI when the lease is denied (fail-open, at-least-once)', async () => {
+    // The lease only DEDUPES concurrent first-boots; correctness must never
+    // depend on it. A replica that never wins the lease (and no row exists yet)
+    // must still append, or a lease outage could leave MERI shadow-gated.
+    const graph = await buildSimTestGraph();
+    const denyLease: JobLeaseStore = { tryAcquire: async () => false };
+    await seedMeriRankingEnforcement(graph.invariants, denyLease);
+    const after = await graph.ranking.enforcement();
+    expect(after.meri).toBe(true);
+  });
+
+  it('a throwing lease fails open (still enforces, no duplicate on re-run)', async () => {
+    const graph = await buildSimTestGraph();
+    const throwLease: JobLeaseStore = {
+      tryAcquire: async () => {
+        throw new Error('lease store unavailable');
+      },
+    };
+    await seedMeriRankingEnforcement(graph.invariants, throwLease);
+    await seedMeriRankingEnforcement(graph.invariants, throwLease);
+    expect((await graph.ranking.enforcement()).meri).toBe(true);
     const rows = await graph.invariants.promotions.listForInvariant('MERI');
     expect(rows.filter((r) => r.toStatus === 'soft_constraint')).toHaveLength(1);
   });

@@ -444,7 +444,10 @@ setInvariantServices(invariantServices);
 // `soft_constraint` promotion so the §7.1 redundancy penalty applies to the
 // served feed (the durable promotion store keeps it across restarts). Runs on
 // the unconditional boot path — production included — not the dev-only seed.
-await seedMeriRankingEnforcement(invariantServices);
+// The shared Postgres job lease serializes concurrent first-boots across
+// replicas so they do not each append a duplicate row (fail-open; enforcement
+// never depends on the lease).
+await seedMeriRankingEnforcement(invariantServices, makeJobLease());
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
 // closures (MERI redundancy, MFCI intake).
 registerInvariantConsumers(eventServices, ingestionServices, identityServices, invariantServices);

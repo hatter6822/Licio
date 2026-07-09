@@ -210,14 +210,17 @@ export async function assembleMeriCandidates(
   return stories.map((story) => {
     const claims = claimGroupOf.get(story.storyId) ?? null;
     // §7.4 sourceLineage input. The matroid's source-lineage class has bound 2,
-    // so two stories from ONE source can both be selected representatives; a
-    // missing publisher owner chain must still mark them as sharing lineage, or
-    // `sourceLineageIndependence` (no shared owner ⇒ 1) would score same-source
-    // coverage as fully independent and inflate confidence. Fall back to the
-    // stable source id so the shared source is always a shared lineage token.
+    // so two stories sharing lineage can both be selected representatives; the
+    // features must then let `sourceLineageIndependence` see that shared lineage
+    // (no shared owner ⇒ it returns 1, inflating confidence). Append the
+    // source-lineage union-find ROOT — the SAME grouping the matroid class uses
+    // (confirmed syndication edges + shared outermost owner) — as a stable
+    // lineage token, so same-source, syndicated, and common-owner pairs all
+    // share a token even when the publisher owner chain is empty.
     const ownerNames = story.sourceId ? (lineageNamesOf.get(story.sourceId) ?? []) : [];
-    const publisherLineage =
-      ownerNames.length > 0 ? ownerNames : story.sourceId ? [`source:${story.sourceId}`] : [];
+    const publisherLineage = story.sourceId
+      ? [...ownerNames, `lineage:${sourceFind(story.sourceId)}`]
+      : [];
     const publishedAtMs = Date.parse(story.publishedAt ?? story.createdAt);
     return {
       id: story.storyId,

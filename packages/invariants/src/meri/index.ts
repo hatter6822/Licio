@@ -9,11 +9,10 @@
 // WS-H.2.4a coverage/confidence envelope.
 
 import {
-  combinedIndependence,
   DEFAULT_DIMENSION_WEIGHTS,
   type DimensionWeights,
   type IndependenceFeatures,
-  independenceDimensions,
+  pairwiseIndependence,
 } from './dimensions.js';
 import {
   DEFAULT_MERI_GAIN_CONFIG,
@@ -106,16 +105,17 @@ export interface MeriComputeOptions {
 }
 
 /**
- * Mean §7.4 combined independence over every unordered pair of selected
- * representatives that carries independence features. Returns `null` when
- * fewer than two such representatives exist (no pairwise evidence).
+ * Mean §7.4 pairwise independence over the selected representatives, or `null`
+ * when no pair contributes assessable evidence. Each pair is scored by the
+ * symmetric, availability-aware `pairwiseIndependence` (order-independent, and
+ * dimensions whose inputs are absent are excluded rather than counted as
+ * independent). `null`-scoring pairs (no available dimension) drop out of the
+ * mean; the whole fold is `null` when fewer than two representatives carry
+ * features or no pair is assessable.
  *
- * Two of the six §7.4 scorers are DIRECTIONAL by design — `temporalUpdate`
- * reads only `a.addsNewFacts` and `semanticFraming` reads only `a.misleading`
- * — so `independenceDimensions(a, b)` is not symmetric in general. Because the
- * fold ranges over UNORDERED pairs of a selected SET, each pair is averaged in
- * both directions so the result (and the confidence it modulates) depends only
- * on the selected set, never on candidate order. Pure and order-independent.
+ * The caller passes a CANONICAL (id-sorted) basis so the result depends only on
+ * the exposure SET, never on which member of an over-full redundancy class the
+ * order-sensitive greedy selection happened to keep.
  */
 export function selectedDimensionalIndependence(
   selectedIds: readonly string[],
@@ -135,9 +135,9 @@ export function selectedDimensionalIndependence(
       const a = feats[i];
       const b = feats[j];
       if (a === undefined || b === undefined) continue;
-      const ab = combinedIndependence(independenceDimensions(a, b), weights);
-      const ba = combinedIndependence(independenceDimensions(b, a), weights);
-      sum += (ab + ba) / 2;
+      const value = pairwiseIndependence(a, b, weights);
+      if (value === null) continue;
+      sum += value;
       pairs += 1;
     }
   }
@@ -257,12 +257,17 @@ export function computeMeri(
 
   // §7.4 dimensional fold (WS-H.2.2a): when the selected representatives carry
   // independence features, DISCOUNT confidence by how weakly they actually
-  // diverge across the six dimensions. The factor is 1 at full independence and
-  // never inflates — a matroid that separated items into classes still earns
-  // full confidence only when the chosen basis is dimensionally independent.
+  // diverge across the available dimensions. The factor is 1 at full
+  // independence and never inflates — a matroid that separated items into
+  // classes still earns full confidence only when the chosen basis is
+  // dimensionally independent. Fold over a CANONICAL (id-sorted) basis so the
+  // value depends on the exposure SET, not on which member of an over-full
+  // redundancy class the order-sensitive greedy pick kept (both bases have the
+  // same rank; the greedy matroid property makes any id order a valid basis).
   const candidateById = new Map(candidates.map((c) => [c.id, c]));
+  const canonicalBasis = greedyBasis(matroid, candidates.map((c) => c.id).sort());
   const dimensionalIndependence = selectedDimensionalIndependence(
-    selectedIds,
+    canonicalBasis,
     candidateById,
     options.dimensionWeights ?? DEFAULT_DIMENSION_WEIGHTS,
   );

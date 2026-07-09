@@ -34,6 +34,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
+import { AlwaysGrantJobLeaseStore, type JobLeaseStore } from '../identity/job-lease.js';
 import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -1978,9 +1979,29 @@ export async function seedOperationalSignals(
  */
 export async function seedMeriRankingEnforcement(
   invariants: InvariantPlatformServices,
+  lease: JobLeaseStore = new AlwaysGrantJobLeaseStore(),
 ): Promise<void> {
-  const existing = await invariants.promotions.listForInvariant('MERI');
-  if (existing.some((r) => r.toStatus === 'soft_constraint')) return;
+  const alreadyLive = async (): Promise<boolean> =>
+    (await invariants.promotions.listForInvariant('MERI')).some(
+      (r) => r.toStatus === 'soft_constraint',
+    );
+  // Fast path + the actual idempotency guarantee: a row already present ⇒ done.
+  if (await alreadyLive()) return;
+  // Serialize the one-shot boot promotion across replicas so concurrent
+  // FIRST-boots don't each append a duplicate row (the store has no unique key).
+  // The lease is best-effort and FAIL-OPEN: winning it just means "write first";
+  // a replica that loses the lease re-checks the shared store and only yields
+  // when the row is now present. Correctness never depends on the lease — a
+  // lease outage (caught) or a lost race can at worst cost a benign duplicate
+  // (both rows are identical `soft_constraint`, and `resolveShadowStatus` reads
+  // the latest), never leave MERI shadow-gated.
+  let holder = true;
+  try {
+    holder = await lease.tryAcquire('seed:meri-enforcement', 60_000, 'platform-boot');
+  } catch {
+    holder = true; // fail open — behave as the holder and ensure the row exists
+  }
+  if (!holder && (await alreadyLive())) return;
   await invariants.promotions.append({
     invariantType: 'MERI',
     fromStatus: 'shadow',
