@@ -124,7 +124,11 @@ export function CommentNode({
               className="break-words text-primary-on-soft hover:underline"
             >
               {source.statement === source.url
-                ? formatSourceUrl(source.url).host
+                ? // Shorten a raw-URL statement to its host for readability, but
+                  // fall back to the full URL when there is no host (e.g. a
+                  // `doi:10…` citation is an opaque URI) so the link never renders
+                  // empty and the source can't disappear.
+                  formatSourceUrl(source.url).host || source.url
                 : source.statement}
             </SafeExternalLink>
           ))}

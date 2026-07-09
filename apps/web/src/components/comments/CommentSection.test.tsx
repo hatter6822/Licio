@@ -232,6 +232,29 @@ describe('CommentSection', () => {
     );
   });
 
+  it('WS-T — surfaces a legacy bare DOI citation with visible link text (no empty link)', () => {
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            contribution_id: '77777777-7777-4777-8777-777777777777',
+            body: 'An older sourced claim.',
+            // A legacy bare citation (no matching inline body link) with a DOI URL
+            // and no title: formatSourceUrl has no host for `doi:`, so the link
+            // text must fall back to the full URL and never render empty.
+            citations: [{ url: 'doi:10.1000/182' }],
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
+      },
+    };
+    renderSection();
+    const link = screen.getByRole('link', { name: 'doi:10.1000/182' });
+    expect(link).toHaveAttribute('href', 'doi:10.1000/182');
+  });
+
   it('WS-T — lists the story’s active debates so a reader can watch one', () => {
     const debateId = '99999999-9999-4999-8999-999999999999';
     debatesState = {
