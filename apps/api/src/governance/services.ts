@@ -7,6 +7,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DEFAULT_GOVERNANCE_CONFIG, type GovernanceConfig } from './config.js';
+import type { ModerationShadowAdvisor } from './moderation-shadow.js';
 import type { GovernanceNlProvider } from './nl-provider.js';
 import { GovernanceService } from './service.js';
 import { createInMemoryGovernanceStores, type GovernanceStores } from './stores.js';
@@ -31,6 +32,9 @@ export interface GovernanceServiceOptions {
   /** ADR-3 governed NL provider (boot wires the fail-closed LLM backend when
    *  enabled; absent ⇒ the pure deterministic facilitation path). */
   nlProvider?: GovernanceNlProvider;
+  /** ADR-9 slice-2 shadow moderation advisor (boot wires it when the LLM
+   *  backend + shadow moderation are enabled; absent ⇒ no shadow). */
+  moderationAdvisor?: ModerationShadowAdvisor;
 }
 
 export function createGovernanceService(opts: GovernanceServiceOptions = {}): GovernanceService {
@@ -43,6 +47,7 @@ export function createGovernanceService(opts: GovernanceServiceOptions = {}): Go
     ...(opts.cryptoFlag ? { cryptoFlag: opts.cryptoFlag } : {}),
     ...(opts.killSwitches ? { killSwitches: opts.killSwitches } : {}),
     ...(opts.nlProvider ? { nlProvider: opts.nlProvider } : {}),
+    ...(opts.moderationAdvisor ? { moderationAdvisor: opts.moderationAdvisor } : {}),
   });
 }
 

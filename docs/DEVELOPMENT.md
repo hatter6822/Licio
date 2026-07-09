@@ -1247,6 +1247,18 @@ Governance* room: sign in as the steward account and POST
 `/v1/rooms/{roomId}/governance/lawmaking/summarize` (the agent must hold the
 `lawmaking.summarize` capability, which the seeded binding grants).
 
+Two governed surfaces consume the backend. **(1)** The advisory **lawmaking
+summary** above. **(2)** A **score-blind shadow moderation advisor**: when a
+backend is enabled, a governed LLM classifies each moderated contribution
+ALONGSIDE the authoritative deterministic policy — it never sees the DSL's
+decision and never changes it (the moderation outcome stays deterministic),
+running fire-and-forget off the contribution path purely to measure agreement.
+Set `GOVERNANCE_LLM_SHADOW_MODERATION=off` to disable just that surface (e.g.
+to cap its per-contribution volume). Inspect the divergence log as an AI-team
+member: `GET /v1/ai/admin/governance/shadow-moderation/{roomId}` returns an
+agreement summary (agreed / advisor-more-severe / advisor-less-severe) plus
+recent metadata-only rows.
+
 ---
 
 ## 17. Troubleshooting

@@ -218,4 +218,82 @@ describe('WS-K routes', () => {
       ).status,
     ).toBe(404);
   });
+
+  it('exposes the WS-U shadow-moderation divergence summary to the AI team only', async () => {
+    const regular = await seedUserWithSession(forum.identity);
+    const aiTeam = await seedUserWithSession(forum.identity, { admin: true });
+    const now = new Date(ai.now()).toISOString();
+    // Seed a divergence log: 2 agreements, 1 advisor-stricter, 1 advisor-lenient.
+    for (const [i, [dsl, adv]] of (
+      [
+        ['allow', 'allow'],
+        ['remove', 'remove'],
+        ['allow', 'remove'],
+        ['remove', 'allow'],
+      ] as const
+    ).entries()) {
+      await ai.shadowModeration.append({
+        recordId: `shadowmod:${i}`,
+        roomId: 'room-42',
+        subjectRef: `c${i}`,
+        dslAction: dsl,
+        advisorAction: adv,
+        agreed: dsl === adv,
+        severityDelta: (adv === 'remove' ? 4 : 0) - (dsl === 'remove' ? 4 : 0),
+        advisorReason: 'x',
+        modelName: 'governance-moderation-advisor-llm-local',
+        modelVersion: '1.0.0',
+        outputId: `out:${i}`,
+        createdAt: now,
+      });
+    }
+
+    // A non-AI-team user is refused.
+    expect(
+      (
+        await app.request(
+          jsonReq(
+            '/v1/ai/admin/governance/shadow-moderation/room-42',
+            'GET',
+            undefined,
+            regular.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(403);
+
+    const res = await app.request(
+      jsonReq(
+        '/v1/ai/admin/governance/shadow-moderation/room-42?limit=10',
+        'GET',
+        undefined,
+        aiTeam.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      summary: {
+        total: number;
+        agreed: number;
+        advisorMoreSevere: number;
+        advisorLessSevere: number;
+      };
+      records: Array<{ subjectRef: string }>;
+    };
+    expect(body.summary).toEqual({
+      total: 4,
+      agreed: 2,
+      advisorMoreSevere: 1,
+      advisorLessSevere: 1,
+    });
+    expect(body.records).toHaveLength(4);
+
+    // An unknown room is an empty, valid summary (never a 500).
+    const empty = await app.request(
+      jsonReq('/v1/ai/admin/governance/shadow-moderation/nope', 'GET', undefined, aiTeam.cookie),
+    );
+    expect(empty.status).toBe(200);
+    const emptyBody = (await empty.json()) as { summary: { total: number } };
+    expect(emptyBody.summary.total).toBe(0);
+  });
 });

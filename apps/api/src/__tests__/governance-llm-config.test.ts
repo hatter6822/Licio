@@ -119,6 +119,32 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     }
   });
 
+  it('shadow moderation defaults ON and is disabled only by GOVERNANCE_LLM_SHADOW_MODERATION=off', () => {
+    const base = { provider: 'anthropic', apiKey: KEY } as const;
+    // Default (absent) ⇒ on.
+    const on = resolveGovernanceLlmDecision(base);
+    expect(on.enabled && on.shadowModeration).toBe(true);
+    // Any non-'off' value ⇒ on; 'off'/'OFF'/' off ' ⇒ off.
+    expect(
+      resolveGovernanceLlmDecision({ ...base, shadowModeration: 'on' }) as {
+        shadowModeration: boolean;
+      },
+    ).toMatchObject({ shadowModeration: true });
+    for (const value of ['off', 'OFF', '  off  ']) {
+      const d = resolveGovernanceLlmDecision({ ...base, shadowModeration: value });
+      expect(d.enabled && d.shadowModeration).toBe(false);
+    }
+    // The flag is independent of the backend (local honours it too).
+    const local = resolveGovernanceLlmDecision({
+      provider: 'local',
+      apiKey: undefined,
+      localBaseUrl: LOCAL_URL,
+      modelId: 'llama3.3',
+      shadowModeration: 'off',
+    });
+    expect(local.enabled && local.shadowModeration).toBe(false);
+  });
+
   it('never mutates the shared default settings object', () => {
     const decision = resolveGovernanceLlmDecision({
       provider: 'local',
@@ -128,5 +154,6 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     });
     expect(decision.enabled).toBe(true);
     expect(DEFAULT_GOVERNANCE_LLM_SETTINGS.modelId).toBe('claude-opus-4-8');
+    expect(DEFAULT_GOVERNANCE_LLM_SETTINGS.maxModerationCallsPerRoomPerHour).toBe(120);
   });
 });

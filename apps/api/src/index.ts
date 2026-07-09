@@ -7,14 +7,17 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
+import { createGovernanceModerationShadowAdvisor } from './ai-governance/llm/advisor.js';
 import { resolveGovernanceLlmDecision } from './ai-governance/llm/config.js';
 import { createLocalCompletion } from './ai-governance/llm/local.js';
 import {
   createAnthropicCompletion,
   createGovernanceLlmNlProvider,
+  type LlmCompletion,
 } from './ai-governance/llm/provider.js';
 import {
   buildGovernanceLlmIdentity,
+  buildGovernanceModerationAdvisorIdentity,
   ensureGovernanceLlmDeployed,
 } from './ai-governance/llm/registration.js';
 import {
@@ -77,6 +80,7 @@ import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
 import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
+import type { ModerationShadowAdvisor } from './governance/moderation-shadow.js';
 import type { GovernanceNlProvider } from './governance/nl-provider.js';
 import {
   GOVERNANCE_SCHEDULER_INTERVAL_MS,
@@ -988,43 +992,71 @@ eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
 // operator opt-in (the 2026-07-09 maintainer decision); absent ⇒ the
 // deterministic path, byte-identical to before.
 let governanceNlProvider: GovernanceNlProvider | undefined;
+let governanceModerationAdvisor: ModerationShadowAdvisor | undefined;
 const governanceLlmDecision = resolveGovernanceLlmDecision({
   provider: env.GOVERNANCE_LLM_PROVIDER,
   apiKey: env.ANTHROPIC_API_KEY,
   modelId: env.GOVERNANCE_LLM_MODEL,
   localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
+  shadowModeration: env.GOVERNANCE_LLM_SHADOW_MODERATION,
 });
 if (governanceLlmDecision.enabled) {
-  const { backend, settings } = governanceLlmDecision;
+  const { backend, settings, shadowModeration } = governanceLlmDecision;
+  // One completion closure, shared by every governed surface: the key/URL live
+  // ONLY here — never in the hashed identity config, never in a log line.
+  const complete: LlmCompletion =
+    backend.kind === 'anthropic'
+      ? createAnthropicCompletion(backend.apiKey, settings)
+      : createLocalCompletion(backend.baseUrl, settings);
+
+  // Surface 1 — the advisory lawmaking summariser (slice 1).
   const llmIdentity = buildGovernanceLlmIdentity(settings, backend);
   if (await ensureGovernanceLlmDeployed(aiGovernanceServices, llmIdentity)) {
     governanceNlProvider = createGovernanceLlmNlProvider({
       services: aiGovernanceServices,
       settings,
       identity: llmIdentity,
-      // The key/URL live only in the completion closure — never in the hashed
-      // identity config, never in a log line.
-      complete:
-        backend.kind === 'anthropic'
-          ? createAnthropicCompletion(backend.apiKey, settings)
-          : createLocalCompletion(backend.baseUrl, settings),
+      complete,
     });
     logger.info(
       { backend: backend.kind, modelId: settings.modelId },
-      'WS-U governance LLM provider enabled (explicit opt-in; fail-closed to deterministic)',
+      'WS-U governance LLM summariser enabled (explicit opt-in; fail-closed to deterministic)',
     );
-    if (backend.kind === 'anthropic') {
-      // Honest operational posture: the hosted backend sends governed-room
-      // proposal text off-host, making the vendor an operator-chosen data
-      // processor. Say so loudly at boot, once.
-      logger.warn(
-        { modelId: settings.modelId },
-        'WS-U governance LLM: hosted backend enabled — governed-room proposal text is sent to the external model API (operator-chosen data processor); use GOVERNANCE_LLM_PROVIDER=local to keep content on-host',
-      );
-    }
   } else {
     logger.warn(
-      'WS-U governance LLM provider requested but the WS-K admission/deploy gate refused — keeping the deterministic provider',
+      'WS-U governance LLM summariser requested but the WS-K admission/deploy gate refused — keeping the deterministic provider',
+    );
+  }
+
+  // Surface 2 — the score-blind SHADOW moderation advisor (slice 2). Advisory
+  // only: it never affects a moderation decision; it measures agreement.
+  if (shadowModeration) {
+    const advisorIdentity = buildGovernanceModerationAdvisorIdentity(settings, backend);
+    if (await ensureGovernanceLlmDeployed(aiGovernanceServices, advisorIdentity)) {
+      governanceModerationAdvisor = createGovernanceModerationShadowAdvisor({
+        services: aiGovernanceServices,
+        settings,
+        identity: advisorIdentity,
+        complete,
+      });
+      logger.info(
+        { backend: backend.kind, modelId: settings.modelId },
+        'WS-U governance shadow moderation advisor enabled (score-blind, no authority)',
+      );
+    } else {
+      logger.warn(
+        'WS-U governance shadow moderation advisor requested but the WS-K admission/deploy gate refused — running deterministic moderation only',
+      );
+    }
+  }
+
+  if (backend.kind === 'anthropic') {
+    // Honest operational posture: the hosted backend sends governed-room content
+    // off-host, making the vendor an operator-chosen data processor. Say so
+    // loudly at boot, once.
+    logger.warn(
+      { modelId: settings.modelId },
+      'WS-U governance LLM: hosted backend enabled — governed-room content is sent to the external model API (operator-chosen data processor); use GOVERNANCE_LLM_PROVIDER=local to keep content on-host',
     );
   }
 }
@@ -1041,6 +1073,7 @@ setGovernanceService(
     stores: governanceStores,
     killSwitches: buildGovernanceKillSwitchGuards(knomosisServices),
     ...(governanceNlProvider ? { nlProvider: governanceNlProvider } : {}),
+    ...(governanceModerationAdvisor ? { moderationAdvisor: governanceModerationAdvisor } : {}),
   }),
 );
 // The WS-L law-pack + readiness ports read the SAME governance stores the

@@ -45,6 +45,7 @@ import {
   type VoteSchedule,
 } from '@licio/governance';
 import type { GovernanceConfig } from './config.js';
+import type { ModerationShadowAdvisor } from './moderation-shadow.js';
 import {
   type GovernanceNlProvider,
   LAWMAKING_SUMMARIZE_TEMPLATE_KEY,
@@ -83,6 +84,11 @@ export interface GovernanceServiceDeps {
    *  A throwing provider falls back to the deterministic summary — the
    *  advisory surface degrades, never fails, and never gains authority. */
   nlProvider?: GovernanceNlProvider;
+  /** ADR-9 slice-2 SHADOW moderation advisor (wired at boot; absent ⇒ no
+   *  shadow, byte-identical to before). It runs score-blind ALONGSIDE the
+   *  authoritative DSL purely to measure agreement; `moderate` returns the
+   *  gated DSL decision UNCHANGED whether or not this runs, agrees, or fails. */
+  moderationAdvisor?: ModerationShadowAdvisor;
 }
 
 export type GovernanceResult<T> =
@@ -739,6 +745,32 @@ export class GovernanceService {
         statementOfReasons: effective.reason,
         reversible: effective.action !== 'remove',
         createdAt: this.iso(),
+      });
+    }
+    // ADR-9 slice-2 SHADOW moderation: run the governed LLM advisor score-blind
+    // ALONGSIDE this authoritative decision purely to MEASURE agreement. It is
+    // FIRE-AND-FORGET — never awaited, never affecting `effective`, and the
+    // advisor swallows every failure — so it adds no latency to the contribution
+    // path and cannot change the outcome (the authority invariant). The prompt
+    // read + LLM call are fully detached; only the DSL action is handed over,
+    // and only to compute the divergence, never to condition the model.
+    const advisor = this.deps.moderationAdvisor;
+    if (advisor) {
+      const promptId = binding.promptId;
+      const dslAction = effective.action;
+      void (async () => {
+        const prompt = await this.deps.stores.prompts.get(promptId);
+        await advisor.recordShadow({
+          roomId,
+          subjectRef,
+          context,
+          roomPromptText: prompt?.promptText ?? null,
+          dslAction,
+        });
+      })().catch(() => {
+        // The advisor contract never throws; this guards the detached prompt
+        // read too, so a store hiccup can never surface as an unhandled
+        // rejection and never touches the authoritative decision above.
       });
     }
     return ok(effective);

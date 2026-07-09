@@ -500,11 +500,13 @@ licio/
 │           │   ├── output-records.ts    --   immutable AIOutputRecord writer + config hash (WS-K.1.1f)
 │           │   ├── lineage.ts           --   data lineage + privacy-review precondition (WS-K.1.1e)
 │           │   ├── models.ts            --   governed deterministic models + classifier + translator
-│           │   ├── llm/                 --   WS-U ADR-9 LLM-backed governance summariser (opt-in,
+│           │   ├── llm/                 --   WS-U ADR-9 LLM-backed governance models (opt-in,
 │           │   │                             fail-closed, off by default): config (decision), provider
-│           │   │                             (guard→completion→zod→quality gate→AIOutputRecord +
-│           │   │                             budget/breaker; Anthropic SDK), local (loopback-only
-│           │   │                             OpenAI-compatible runtime), quality, registration
+│           │   │                             (lawmaking summariser: guard→completion→zod→quality gate→
+│           │   │                             AIOutputRecord + budget/breaker; Anthropic SDK), advisor
+│           │   │                             (slice-2 SCORE-BLIND shadow moderation: measures agreement
+│           │   │                             vs the DSL, no authority), local (loopback-only OpenAI-
+│           │   │                             compatible runtime), quality, registration
 │           │   ├── seed.ts              --   register + DEPLOY models through the gate; inventory
 │           │   ├── pipelines.ts         --   topic classification + claim extraction (WS-K.1.3a/b)
 │           │   ├── summaries.ts         --   AI summary eval: §24.3 quality/grounding gate (WS-K.1.4; eval-only, no thread Overview)

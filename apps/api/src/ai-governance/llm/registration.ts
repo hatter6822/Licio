@@ -23,6 +23,7 @@ import { type HarnessRunInput, runEvaluationHarness } from '../harness.js';
 import type { ModelIdentity } from '../models.js';
 import { deployModel, type RegistryDeps, registerModel } from '../registry.js';
 import type { AiGovernanceServices } from '../services.js';
+import { MODERATION_ADVISOR_SYSTEM_PROMPT_VERSION } from './advisor.js';
 import type { GovernanceLlmBackend, GovernanceLlmSettings } from './config.js';
 import { GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION } from './provider.js';
 import { LAWMAKING_SUMMARY_QUALITY_GATE_VERSION } from './quality.js';
@@ -55,6 +56,31 @@ export function buildGovernanceLlmIdentity(
       max_output_tokens: settings.maxOutputTokens,
       system_prompt_version: GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION,
       quality_gate_version: LAWMAKING_SUMMARY_QUALITY_GATE_VERSION,
+      ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+    },
+  };
+}
+
+/** The governance identity of the LLM-backed SHADOW moderation advisor (WS-U
+ *  ADR-9 slice 2) — a `toxicity_safety_triage` classifier that runs alongside,
+ *  and score-blind to, the authoritative DSL, purely to measure agreement. One
+ *  registry identity per backend (as with the summariser). */
+export function buildGovernanceModerationAdvisorIdentity(
+  settings: GovernanceLlmSettings,
+  backend: GovernanceLlmBackend,
+): ModelIdentity {
+  return {
+    name: `governance-moderation-advisor-llm-${backend.kind}`,
+    version: '1.0.0',
+    useCaseId: 'toxicity_safety_triage',
+    modalities: ['classification'],
+    promptTemplateId: 'governance-moderation-advisor-llm/shadow-v1',
+    config: {
+      method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
+      provider: backend.kind,
+      model_id: settings.modelId,
+      max_output_tokens: settings.maxOutputTokens,
+      system_prompt_version: MODERATION_ADVISOR_SYSTEM_PROMPT_VERSION,
       ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
     },
   };
@@ -115,38 +141,67 @@ function syntheticAdmissionInput(identity: ModelIdentity): HarnessRunInput {
   };
 }
 
+/** Per-surface card text (the two governed LLM roles: the lawmaking summariser
+ *  and the shadow moderation advisor). Backend-nature fields (hosted/local,
+ *  stochastic, synthetic admission) are shared below; only these differ. */
+interface CardSurfaceText {
+  purpose: string;
+  inputSchema: string;
+  outputSchema: string;
+  role: string;
+}
+
+function surfaceText(useCaseId: ModelIdentity['useCaseId']): CardSurfaceText {
+  if (useCaseId === 'toxicity_safety_triage') {
+    return {
+      purpose:
+        'Classify in-room contributions SCORE-BLIND alongside the authoritative deterministic DSL, purely to measure agreement (WS-U ADR-9 shadow moderation; no authority, advisory only).',
+      inputSchema: 'docs/ai-governance/README.md#toxicity_safety_triage-inputs',
+      outputSchema: '@licio/governance moderationActionSchema + a brief reason',
+      role: 'shadow moderation advisor',
+    };
+  }
+  return {
+    purpose:
+      'Draft the neutral in-room lawmaking proposal summary behind the WS-U ADR-3 governed provider port (advisory only; deterministic fallback).',
+    inputSchema: 'docs/ai-governance/README.md#governance_assistance-inputs',
+    outputSchema: '@licio/governance proposalSummarySchema (headline + summary draft)',
+    role: 'governance summariser',
+  };
+}
+
 function buildCard(
   identity: ModelIdentity,
   results: ModelCard['evaluation_results'],
   nowIso: string,
 ): ModelCard {
   const local = identity.config['provider'] === 'local';
+  const surface = surfaceText(identity.useCaseId);
   return modelCardSchema.parse({
     name: identity.name,
     version: identity.version,
     owner: 'ai-governance',
-    purpose:
-      'Draft the neutral in-room lawmaking proposal summary behind the WS-U ADR-3 governed provider port (advisory only; deterministic fallback).',
+    purpose: surface.purpose,
     use_case_id: identity.useCaseId,
     modalities: identity.modalities,
     training_data_summary: local
-      ? 'Locally hosted open-weight model (operator-managed, loopback-only inference server); no Licio data is used for training. Invocation inputs are governed-room proposal fields; outputs are advisory drafts.'
-      : 'Externally hosted foundation model (Anthropic); no Licio data is used for training. Invocation inputs are governed-room proposal fields; outputs are advisory drafts.',
+      ? 'Locally hosted open-weight model (operator-managed, loopback-only inference server); no Licio data is used for training. Invocation inputs are governed-room content/proposal fields; outputs are advisory only.'
+      : 'Externally hosted foundation model (Anthropic); no Licio data is used for training. Invocation inputs are governed-room content/proposal fields; outputs are advisory only.',
     data_lineage_refs: [GOVERNANCE_LLM_LINEAGE_ID],
-    input_schema: 'docs/ai-governance/README.md#governance_assistance-inputs',
-    output_schema: '@licio/governance proposalSummarySchema (headline + summary draft)',
+    input_schema: surface.inputSchema,
+    output_schema: surface.outputSchema,
     prohibited_uses: ['wealth_based_profiling', 'risk_identity_hiding'],
     known_biases: local
       ? 'Inherited from the operator-selected open-weight model; per-cohort measurements land with the WS-U slice-3 recorded-fixture eval corpus.'
       : 'Inherited from the hosted foundation model; per-cohort measurements land with the WS-U slice-3 recorded-fixture eval corpus.',
-    limitations: `Stochastic ${local ? 'locally hosted' : 'hosted'} backend: outputs are not bit-reproducible. Every draft must clear the deterministic §24.5 quality/grounding gate or the deterministic summariser is served instead; admission ran on the synthetic fixture set pending the recorded-fixture corpus (tracked residual). Off by default; enabling either backend is an explicit operator opt-in (ADR-9).`,
+    limitations: `Stochastic ${local ? 'locally hosted' : 'hosted'} backend: outputs are not bit-reproducible. It is advisory only — the shadow moderation advisor carries NO authority (the deterministic DSL decides), and the summariser falls back to the deterministic summary on any failure. Admission ran on the synthetic fixture set pending the recorded-fixture corpus (tracked residual). Off by default; enabling either backend is an explicit operator opt-in (ADR-9).`,
     evaluation_results: results,
     risk_assessment_ref: riskAssessmentRefFor(identity.useCaseId),
     update_history: [
       {
         version: identity.version,
         date: nowIso,
-        description: `initial deployment of the ${local ? 'loopback-local' : 'hosted'} LLM governance summariser behind the ADR-3 provider port`,
+        description: `initial deployment of the ${local ? 'loopback-local' : 'hosted'} LLM ${surface.role} (WS-U ADR-9)`,
         evaluation_summary:
           'bias/hallucination/safety/red-team passed on the synthetic admission fixture set',
       },
@@ -155,9 +210,11 @@ function buildCard(
 }
 
 /**
- * Idempotently register + deploy the LLM-backed summariser through the real
- * gate. Returns true when the version is deployed (already or now); false on
- * any refusal — the caller then keeps the deterministic provider (fail-closed).
+ * Idempotently register + deploy an LLM-backed governance model (the lawmaking
+ * summariser or the shadow moderation advisor — the card text is selected from
+ * the identity's use case) through the real gate. Returns true when the version
+ * is deployed (already or now); false on any refusal — the caller then keeps
+ * the deterministic path (fail-closed).
  */
 export async function ensureGovernanceLlmDeployed(
   services: AiGovernanceServices,

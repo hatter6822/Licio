@@ -165,6 +165,12 @@ export const serverEnvSchema = z.object({
     .string()
     .url({ message: 'GOVERNANCE_LLM_LOCAL_URL must be a valid URL' })
     .optional(),
+  // WS-U ADR-9 slice 2: the shadow moderation advisor runs a governed LLM
+  // SCORE-BLIND alongside the authoritative deterministic DSL purely to measure
+  // agreement — no authority, advisory only. ON whenever an LLM backend is
+  // enabled; set `off` to keep only the summary surface (e.g. to cap the
+  // higher, per-contribution moderation volume). No effect without a backend.
+  GOVERNANCE_LLM_SHADOW_MODERATION: z.enum(['on', 'off']).optional(),
 });
 
 /** True for an http(s) URL whose host is the loopback interface — the rule

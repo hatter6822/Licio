@@ -263,9 +263,21 @@ hypothetical `knomosis → public.rooms` FK is caught.
   included (the 2026-07-09 maintainer decision, ADR-9) — never mandatory,
   never silent: the hosted backend's data-processor egress is boot-logged
   loudly, and the `local` backend is loopback-enforced so content stays
-  on-host (see `docs/DEVELOPMENT.md` for setup). Remaining: the
-  moderation-advisor (shadow) surface and the recorded-fixture eval corpus
-  replacing the synthetic admission input (slice 3).
+  on-host (see `docs/DEVELOPMENT.md` for setup). **Slice 2 — score-blind
+  shadow moderation — shipped**: a governed `toxicity_safety_triage` LLM runs
+  ALONGSIDE the authoritative DSL on each moderated contribution purely to
+  measure agreement. It is score-blind (never sees the DSL decision),
+  authority-free (`GovernanceService.moderate` returns the gated DSL decision
+  unchanged — the ADR-1/ADR-5 authority invariant), and fire-and-forget (off
+  the contribution hot path; every failure swallowed). Each comparison runs
+  the full governed path (guard → schema → immutable `AIOutputRecord`) under
+  its own per-room budget + breaker and appends a metadata-only divergence row
+  (no content, no attention values) surfaced to the AI team at `GET
+  /v1/ai/admin/governance/shadow-moderation/:roomId`. On with the backend; opt
+  out via `GOVERNANCE_LLM_SHADOW_MODERATION=off`. Remaining: the
+  recorded-fixture eval corpus replacing the synthetic admission input (slice
+  3), and — only if a future doctrine decision calls for it — promoting the
+  advisor past shadow.
 
 ## Security & correctness audit (2026-07)
 

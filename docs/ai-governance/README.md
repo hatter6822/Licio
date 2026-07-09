@@ -94,17 +94,23 @@ guard, the governed models, and a module singleton for routes.
 - `lineage.ts` — the data-lineage service (privacy-review precondition).
 - `models.ts` — the governed deterministic models + the topic classifier +
   the translation-provider seam.
-- `llm/` — the first REAL model backend (WS-U ADR-9): the LLM-backed
-  governance summariser behind the WS-U `GovernanceNlProvider` port —
-  `config.ts` (fail-closed enablement: explicit opt-in + per-backend
-  requirements; off by default, honoured in every environment), `provider.ts`
-  (the governed invocation: guard → completion → zod → quality gate →
+- `llm/` — the REAL model backends (WS-U ADR-9), both behind the unchanged
+  registry/guard/output-record surface: `config.ts` (fail-closed enablement:
+  explicit opt-in + per-backend requirements; off by default, honoured in
+  every environment; the shadow-moderation on/off flag), `provider.ts` (the
+  governed lawmaking summariser: guard → completion → zod → quality gate →
   `AIOutputRecord`, under a per-room budget + circuit breaker; the Anthropic
-  SDK completion), `local.ts` (the loopback-only OpenAI-compatible
-  local-runtime completion — llama.cpp server/Ollama/vLLM/LM Studio over plain
-  fetch), `quality.ts` (the deterministic §24.5 acceptance gate),
-  `registration.ts` (register + deploy through the REAL gate, one identity per
-  backend).
+  SDK completion + the reusable budget/breaker/completion plumbing),
+  `advisor.ts` (the slice-2 SCORE-BLIND shadow moderation advisor — a
+  `toxicity_safety_triage` classifier that runs alongside the authoritative
+  DSL to measure agreement, with no authority; guard → completion → zod →
+  `AIOutputRecord` + a divergence row), `local.ts` (the loopback-only
+  OpenAI-compatible local-runtime completion — llama.cpp server/Ollama/vLLM/LM
+  Studio over plain fetch), `quality.ts` (the deterministic §24.5 summary
+  acceptance gate), `registration.ts` (register + deploy both models through
+  the REAL gate, one identity per backend per surface). The shadow divergence
+  log is the in-memory `ShadowModerationStore` (`stores.ts`), read by the AI
+  team at `GET /v1/ai/admin/governance/shadow-moderation/:roomId`.
 - `seed.ts` — registers **and deploys** every governed model through the real
   gate; seeds risk assessments, lineage, and the inventory.
 - `pipelines.ts` — topic classification + claim extraction (WS-K.1.3a/b).
