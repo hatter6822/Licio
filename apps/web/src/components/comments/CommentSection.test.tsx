@@ -19,7 +19,6 @@ import { CommentSection } from './CommentSection.js';
 const mutate = vi.fn();
 const refetch = vi.fn();
 const loadMore = vi.fn();
-const drain = vi.fn();
 const recordReplyDepth = vi.fn();
 
 let queryState: {
@@ -34,7 +33,6 @@ let queryState: {
   hasMore?: boolean;
   isFetchingMore?: boolean;
 };
-let streamState: { newComments: unknown[] };
 let mutationState: { isPending?: boolean; isError?: boolean };
 let debatesState: { debates: DebateArenaSummary[] };
 let interpretationsState: StoryInterpretationsResponse | null = null;
@@ -108,7 +106,10 @@ vi.mock('../../lib/queries.js', () => ({
 }));
 
 vi.mock('../../lib/comment-stream.js', () => ({
-  useCommentStream: vi.fn(() => ({ newComments: streamState.newComments, drain })),
+  // Live comments arrive via query invalidation inside the hook (side-effect
+  // only); the section just re-renders the refetched pages. No return value, no
+  // "load new" button to click.
+  useCommentStream: vi.fn(),
 }));
 
 vi.mock('../../signals/runtime.js', () => ({
@@ -181,7 +182,6 @@ beforeEach(() => {
       overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
     },
   };
-  streamState = { newComments: [] };
   mutationState = {};
   debatesState = { debates: [] };
   interpretationsState = null;
@@ -190,13 +190,12 @@ beforeEach(() => {
   mutate.mockReset();
   refetch.mockReset();
   loadMore.mockReset();
-  drain.mockReset();
   recordReplyDepth.mockReset();
   vi.stubGlobal('crypto', { randomUUID: () => '44444444-4444-4444-8444-444444444444' });
 });
 
 describe('CommentSection', () => {
-  it('WS-T — the Sourced badge + a Sources footnote modal, and the Incorrect tag', async () => {
+  it('WS-T — sources are inline body links (no modal), plus the Incorrect tag', () => {
     queryState = {
       data: {
         comments: [
@@ -219,23 +218,41 @@ describe('CommentSection', () => {
     renderSection();
     expect(screen.getByText('Sourced')).toBeInTheDocument();
     expect(screen.getByText('Incorrect')).toBeInTheDocument();
-    // Sources are NOT shown as an always-visible list; the footnote modal is
-    // closed until the compact "Sources (N)" affordance is used.
-    expect(screen.queryByRole('dialog', { name: 'Sources' })).not.toBeInTheDocument();
-    const sourcesButton = screen.getByRole('button', { name: 'Sources (1)' });
-    await userEvent.click(sourcesButton);
-    const dialog = screen.getByRole('dialog', { name: 'Sources' });
-    expect(within(dialog).getByText('official record')).toBeInTheDocument();
-    expect(within(dialog).getByRole('link')).toHaveAttribute(
-      'href',
-      'https://example.org/evidence',
-    );
-    // The "Correct" action is offered on a plain comment, and disabled on the
-    // already-decided one.
+    // The source is a clickable INLINE link in the body itself — there is no
+    // "Sources (N)" button and no modal.
+    expect(screen.queryByRole('button', { name: /sources/i })).not.toBeInTheDocument();
+    const sourceLink = screen.getByRole('link', { name: 'official record' });
+    expect(sourceLink).toHaveAttribute('href', 'https://example.org/evidence');
+    // The "Correct" action is offered on a plain comment.
     const correctButtons = screen.getAllByRole('button', { name: /correct/i });
     expect(correctButtons.length).toBeGreaterThan(0);
-    // Every comment is reportable (mirrors stories).
-    expect(screen.getAllByRole('button', { name: 'Report' }).length).toBeGreaterThan(0);
+    // Every comment is reportable via an icon-only flag (mirrors story cards).
+    expect(screen.getAllByRole('button', { name: /report this comment/i }).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('WS-T — surfaces a legacy bare DOI citation with visible link text (no empty link)', () => {
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            contribution_id: '77777777-7777-4777-8777-777777777777',
+            body: 'An older sourced claim.',
+            // A legacy bare citation (no matching inline body link) with a DOI URL
+            // and no title: formatSourceUrl has no host for `doi:`, so the link
+            // text must fall back to the full URL and never render empty.
+            citations: [{ url: 'doi:10.1000/182' }],
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
+      },
+    };
+    renderSection();
+    const link = screen.getByRole('link', { name: 'doi:10.1000/182' });
+    expect(link).toHaveAttribute('href', 'doi:10.1000/182');
   });
 
   it('WS-T — lists the story’s active debates so a reader can watch one', () => {
@@ -366,7 +383,6 @@ describe('CommentSection', () => {
         overview: { comment_count: 3, sources_count: 1, corrections_count: 0 },
       },
     };
-    streamState = { newComments: [{ contribution_id: 'new' }, { contribution_id: 'newer' }] };
 
     renderSection();
 
@@ -444,22 +460,6 @@ describe('CommentSection', () => {
     const loadMoreButton = screen.getByRole('button', { name: /load more comments/i });
     await userEvent.click(loadMoreButton);
     expect(loadMore).toHaveBeenCalledTimes(1);
-  });
-
-  it('drains the live-comment buffer and refetches on the new-comments prompt', async () => {
-    queryState = {
-      data: {
-        comments: [comment()],
-        next_cursor: null,
-        anchor: null,
-        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
-      },
-    };
-    streamState = { newComments: [{ contribution_id: 'new' }] };
-    renderSection();
-    await userEvent.click(screen.getByRole('button', { name: 'Show 1 new comment' }));
-    expect(drain).toHaveBeenCalledTimes(1);
-    expect(refetch).toHaveBeenCalledTimes(1);
   });
 
   it('submits top-level comments and replies with the comment write contract', async () => {

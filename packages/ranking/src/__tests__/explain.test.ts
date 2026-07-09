@@ -52,6 +52,7 @@ function scored(partial: {
       dispute: { value: 0, coefficient: 1, applied: 0, enforced: false },
       total_applied: redundancy.enforced ? redundancy.value : 0,
     },
+    validation_boost: { value: 0, coefficient: 0, applied: 0, enforced: false },
     baseline: {
       freshness_decay: 0.5,
       source_reliability: 0.5,

@@ -139,3 +139,26 @@ export function resolveCommentSources(
   }
   return out;
 }
+
+/**
+ * The stored `citations` that have NO matching inline body link — the "legacy
+ * bare citations" from comments authored with the old, separate source-URL list.
+ * New comments derive every citation from an inline link, so they return none;
+ * legacy comments return the sources that would otherwise be reachable only via
+ * the (now removed) "Sources" modal. The read view renders these as trailing
+ * text-links so no source is ever dropped. Deduped by URL, in stored order.
+ */
+export function resolveLegacyBareCitations(
+  body: string | null | undefined,
+  citations: readonly Citation[],
+): SourcedStatement[] {
+  const inline = new Set(extractSourcedStatements(body).map((statement) => statement.url));
+  const out: SourcedStatement[] = [];
+  const seen = new Set<string>();
+  for (const citation of citations) {
+    if (inline.has(citation.url) || seen.has(citation.url)) continue;
+    seen.add(citation.url);
+    out.push({ statement: citation.title ?? citation.url, url: citation.url });
+  }
+  return out;
+}

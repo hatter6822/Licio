@@ -6,6 +6,7 @@
 // reaction/follower field — only descriptive conversation-state signals.
 import { z } from 'zod';
 import { cursorSchema, httpUrlSchema, paginatedSchema, uuidSchema } from './common.js';
+import { contributionDisputeStatusSchema } from './contribution.js';
 import { MERI_EXPOSURE_LABELS_WIRE } from './invariants-api.js';
 
 /** Feed ranking/personalization modes (SPEC §6.4; WS-B.2.9 switcher). */
@@ -129,6 +130,12 @@ export const feedItemSchema = z.object({
    *  client loop tracking. Capped at 8; defaults to empty so producers that
    *  predate topic tagging stay valid on the wire. */
   topic_ids: z.array(z.string().min(1).max(128)).max(8).default([]),
+  /** WS-T dispute posture (SPEC §15.4). `under_debate` ⇒ a sourced correction's
+   *  debate is live ("Challenged"); `incorrect` ⇒ a correction prevailed
+   *  ("Incorrect", and the story is demoted by the WS-I dispute ordering sink).
+   *  Defaults to `none` so producers predating disputes stay valid on the wire.
+   *  A content-integrity signal, never a popularity count. */
+  dispute_status: contributionDisputeStatusSchema.default('none'),
 });
 export type FeedItem = z.infer<typeof feedItemSchema>;
 

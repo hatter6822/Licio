@@ -11,6 +11,7 @@ import { CommentSection, CorrectionComposer } from '../../components/comments/in
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
+import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
 import { StoryMedia } from '../../components/story/StoryMedia/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -161,6 +162,9 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
           <SourceReader url={data.url} title={data.title} onClose={closeReader} />
         ) : (
           <article className="flex flex-col gap-4">
+            {/* WS-T — a prominent banner when a sourced correction has challenged
+                this story ("Challenged") or prevailed against it ("Incorrect"). */}
+            <DisputeBanner status={data.dispute_status} />
             {data.media ? (
               <StoryMedia
                 url={data.media.url}

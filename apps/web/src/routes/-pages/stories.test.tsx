@@ -36,6 +36,7 @@ const STORY: StoryDetail = {
     'Rising because readers opened the source and added 2 independent evidence cards.',
   context_chips: [],
   safety_state: 'ok',
+  dispute_status: 'none',
   body_summary: 'The board released raw and processed results alongside the methodology.',
   thread_id: null,
   topic_ids: ['water-quality'],

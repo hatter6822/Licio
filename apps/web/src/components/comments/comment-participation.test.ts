@@ -5,6 +5,7 @@ import {
   byParticipationDesc,
   commentParticipationWeight,
   SOURCED_PARTICIPATION_BONUS,
+  VALIDATED_PARTICIPATION_BONUS,
 } from './comment-participation.js';
 
 function comment(over: Partial<CommentItem> & { contribution_id: string }): CommentItem {
@@ -55,7 +56,21 @@ describe('comment participation weight (WS-E.2.1c / WS-T)', () => {
     expect(commentParticipationWeight(loser)).toBeLessThan(commentParticipationWeight(live));
   });
 
-  it('orders sourced → unsourced → debate-loser, stable within ties', () => {
+  it('boosts a validated comment above every unchallenged comment', () => {
+    const validated = comment({ contribution_id: 'v', dispute_status: 'validated' });
+    const sourced = comment({
+      contribution_id: 's',
+      citations: [{ url: 'https://example.org/x' }],
+    });
+    const live = comment({ contribution_id: 'd' });
+    expect(commentParticipationWeight(validated)).toBe(1 + VALIDATED_PARTICIPATION_BONUS);
+    expect(commentParticipationWeight(validated)).toBeGreaterThan(
+      commentParticipationWeight(sourced),
+    );
+    expect(commentParticipationWeight(validated)).toBeGreaterThan(commentParticipationWeight(live));
+  });
+
+  it('orders validated → sourced → unsourced → debate-loser, stable within ties', () => {
     const unsourced1 = comment({ contribution_id: 'u1', body: 'u1' });
     const sourced = comment({
       contribution_id: 's',
@@ -63,9 +78,10 @@ describe('comment participation weight (WS-E.2.1c / WS-T)', () => {
       citations: [{ url: 'https://example.org/x' }],
     });
     const unsourced2 = comment({ contribution_id: 'u2', body: 'u2' });
+    const validated = comment({ contribution_id: 'v', body: 'v', dispute_status: 'validated' });
     const loser = comment({ contribution_id: 'l', body: 'l', dispute_status: 'incorrect' });
-    const ordered = byParticipationDesc([unsourced1, sourced, unsourced2, loser]);
-    expect(ordered.map((c) => c.contribution_id)).toEqual(['s', 'u1', 'u2', 'l']);
+    const ordered = byParticipationDesc([unsourced1, sourced, unsourced2, validated, loser]);
+    expect(ordered.map((c) => c.contribution_id)).toEqual(['v', 's', 'u1', 'u2', 'l']);
   });
 
   it('does not mutate the input array', () => {

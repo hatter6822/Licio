@@ -117,6 +117,44 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
     expect(disputedItem?.penalty_components.dispute.value).toBe(1);
   });
 
+  it('WS-T — records the `validated` boost so the audit reconciles with pwatt_score', () => {
+    const item = makeCandidate(1);
+    const validated = featureMap([
+      makeFeatures(1, { active_attention: 0.2, dispute_validation: 1 }),
+    ]);
+    const ranked = rankFeasibleSet(
+      [item],
+      validated,
+      EVERGREEN_PROFILE,
+      FULL_ENFORCEMENT,
+      makeContext(),
+    );
+    const scored = ranked.selected.find((s) => s.item_id === item.item_id);
+    // The boost is RECORDED (drives `signals_used`) and matches the profile coeff.
+    expect(scored?.validation_boost.value).toBe(1);
+    expect(scored?.validation_boost.enforced).toBe(true);
+    expect(scored?.validation_boost.applied).toBeCloseTo(
+      EVERGREEN_PROFILE.penalties.vD ?? 0.25,
+      12,
+    );
+    // …and it is actually reflected in the score: re-scoring the SAME item without
+    // the validation flag yields a pwatt_score lower by EXACTLY `applied` (the
+    // recorded term reconciles with the arithmetic — no unexplained delta).
+    const baseline = rankFeasibleSet(
+      [item],
+      featureMap([makeFeatures(1, { active_attention: 0.2 })]),
+      EVERGREEN_PROFILE,
+      FULL_ENFORCEMENT,
+      makeContext(),
+    );
+    const baseScored = baseline.selected.find((s) => s.item_id === item.item_id);
+    expect((scored?.pwatt_score ?? 0) - (baseScored?.pwatt_score ?? 0)).toBeCloseTo(
+      scored?.validation_boost.applied ?? 0,
+      10,
+    );
+    expect(baseScored?.validation_boost.applied).toBe(0);
+  });
+
   it('input order does not change the result (deterministic merge)', () => {
     const candidates = [1, 2, 3].map((n) => makeCandidate(n));
     const features = featureMap([1, 2, 3].map((n) => makeFeatures(n)));

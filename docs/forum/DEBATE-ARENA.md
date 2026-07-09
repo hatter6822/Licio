@@ -19,7 +19,9 @@ pay-to-rank neutrality firewall holds (`check:neutrality`).
 keeping the 1–5 mandatory-source floor.  The create guard refuses a correction
 against a target already `under_debate` or already adjudicated `incorrect`
 (`target_under_debate` / `target_already_incorrect`), so a direct API caller
-cannot open a second arena or re-litigate a settled outcome.
+cannot open a second arena or re-litigate a settled outcome.  A `validated`
+target (challenged and proven accurate) is deliberately **NOT** refused — it
+remains re-challengeable if new evidence emerges.
 
 **A sourced correction opens a live debate arena** (`debate_arenas`, migration
 `0056`; `apps/api/src/forum/debate.ts` + `debate-store.ts`):
@@ -29,13 +31,19 @@ cannot open a second arena or re-litigate a settled outcome.
 | `open` | 12h | The **incumbent** (target author) and **challenger** (correction author) post + edit a co-visible position (summary + sources). The client polls, so each sees the other's current draft and offers their strongest case. |
 | `awaiting_verdict` → `judged` | — | At the deadline the lease-guarded scheduler (`debate-scheduler.ts`) runs the governed adjudicator; a verdict + the 24h override window are recorded. |
 | `judged` | 24h | The room **steward may fully overrule** the verdict either direction (audited, subordinate to the platform floor). |
-| `resolved` | — | On `corrected`, the loser is tagged `incorrect`. |
+| `resolved` | — | On `corrected` the loser is tagged `incorrect`; on `upheld` the challenged target is tagged `validated`. |
 
-Outcome: `upheld` (incumbent stands), `corrected` (challenger prevails → the
-target is tagged `incorrect`), or `inconclusive` (nothing tagged). An
+Outcome: `upheld` (incumbent stands → the challenged target is tagged
+`validated`: challenged and **proven accurate**, earning a modest ranking
+**boost** and still re-challengeable), `corrected` (challenger prevails → the
+target is tagged `incorrect`), or `inconclusive` (cleared back to `none`). An
 `incorrect` contribution stays **VISIBLE** — an orthogonal `dispute_status`
-column, never a `moderation_state` — but sinks to the bottom of its section.
-Fail-closed: a blocked/unavailable judge resolves `inconclusive`.
+column, never a `moderation_state` — but sinks to the bottom of its section; a
+`validated` one is instead lifted ABOVE unchallenged content (a positive
+content-integrity signal, never applause). A **self-targeted** arena (the
+challenger is the target's own author) can never earn `validated` — an upheld
+self-challenge clears to `none`, so the boost cannot be self-farmed. Fail-closed:
+a blocked/unavailable judge resolves `inconclusive`.
 
 ## The AI judge — a governed probabilistic neural model
 
@@ -73,13 +81,18 @@ governed room route adjudication through its own agent under its law-pack bounds
   judge tick can't mutate a judged arena); `POST /v1/debates/:id/override`
   (steward, 24h window).
 - **Web:** source capture + render + a "Sourced" badge on comments
-  (`CommentParts`/`CommentNode`).  Source/citation links render through
-  `SafeExternalLink` (the WS-G.4.2c drainer-blocklist + interstitial check, the
-  same posture as in-body links).  The "Correct" action → `CorrectionComposer`;
-  a "View debate" link on `under_debate` comments; the
-  `/stories/$storyId/debate/$debateId` arena (`components/debate/DebateArena`)
-  with co-visible positions, countdowns, the verdict banner, and the steward
-  override; "Under debate" / "Incorrect" dispute tags.
+  (`CommentParts`/`CommentNode`).  Sources render **inline as clickable links in
+  the comment body itself** (the `.ugc-body a` affordance — click-intercepted by
+  `UgcBody`, WS-G.4.2c); legacy "bare" citations with no matching inline link fall
+  back to a compact trailing list of `SafeExternalLink`s — there is **no separate
+  "Sources" modal**.  The report control is an **icon-only flag** (mirrors the
+  story card).  The "Correct" action → `CorrectionComposer`; a "View debate" link
+  on `under_debate` comments; the `/stories/$storyId/debate/$debateId` arena
+  (`components/debate/DebateArena`) with co-visible positions, countdowns, the
+  verdict banner, and the steward override.  Dispute tags render through the
+  shared `DisputeBadge`/`DisputeBanner`: **"Challenged"** (`under_debate`),
+  **"Incorrect"** (`incorrect`), **"Validated"** (`validated`) — on comments (the
+  header), story cards (the rating row), and the story detail page (a banner).
 
 ## Doctrine
 
@@ -107,7 +120,10 @@ platform legal floor).
   `(sink, created_at, id)` that holds across pagination, both orderings, and
   recursively among children (in-memory + Drizzle; the `(thread, dispute_status,
   created)` index supports the ORDER BY).  No wire-format change: the cursor is
-  the contribution id and the sink is derived at lookup.
+  the contribution id and the sink is derived at lookup.  Conversely, a
+  `validated` comment is BOOSTED in the "highest participation" view
+  (`commentParticipationWeight` + `VALIDATED_PARTICIPATION_BONUS`) so a comment
+  challenged and proven accurate ranks above unchallenged ones.
 - A `corrected` STORY sinks in the ranking feed.  The `dispute_penalty` is
   RECORDED as an always-enforced decision-log term, but the guaranteed bottom-out
   is an **ordering-level sink** (`disputeOrderingSink`, subtracted OUTSIDE the
@@ -118,6 +134,11 @@ platform legal floor).
   `finalizeDebate` sets the story's `dispute_status` AND refreshes its ranking
   feature vector (`refreshStoryFeaturesBestEffort`) so the penalty applies
   immediately, not only on the next unrelated invariant event / hourly batch.
+  A `validated` STORY gets the symmetric treatment: the assembler sets
+  `dispute_validation`, and `disputeValidationBoost` (the profile's `vD`, default
+  0.25) adds a modest lift OUTSIDE the SCOI multiplier — a soft nudge, never a
+  guaranteed top, so it cannot be gamed into hard promotion (`check:neutrality`
+  green: uniform, content-derived, non-financial).
 - Live co-visibility is push-based: a `DebateBroadcaster` fans out the observer
   arena projection over `GET /v1/debates/:id/stream` (SSE), and the web
   `useDebateStream` nudges an immediate role-scoped refetch on each frame (the 5s

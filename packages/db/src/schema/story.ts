@@ -109,6 +109,7 @@ export const storyDisputeStatusEnum = pgEnum('story_dispute_status', [
   'none',
   'under_debate',
   'incorrect',
+  'validated',
 ]);
 
 export const stories = pgTable(

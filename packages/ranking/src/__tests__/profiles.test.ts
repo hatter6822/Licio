@@ -54,6 +54,18 @@ describe('WS-I.2.3f profile validation (§5.5 guardrails)', () => {
     expect(validateRankingProfileConfig(bad).length).toBeGreaterThan(0);
   });
 
+  it('rejects a validation boost (vD) above the cap that would hard-promote', () => {
+    // A config cannot set vD high enough to dominate the score span — the schema
+    // caps it at 1 so a validated story is always a soft lift, never a guaranteed
+    // top (WS-T; the ranking guarantee is enforced structurally, not by comment).
+    const bad = {
+      ...EVERGREEN_PROFILE,
+      profile_id: 'big_boost',
+      penalties: { ...EVERGREEN_PROFILE.penalties, vD: 10 },
+    };
+    expect(validateRankingProfileConfig(bad).length).toBeGreaterThan(0);
+  });
+
   it('rejects baseline weights not summing to exactly 100', () => {
     const bad = {
       ...EVERGREEN_PROFILE,
@@ -166,8 +178,8 @@ describe('WS-I.2.3f deterministic profile selection', () => {
   });
 
   it('shipped-profile snapshot (unreviewed changes fail here)', () => {
-    expect(BREAKING_NEWS_PROFILE.profile_version).toBe('1.2.0');
-    expect(EVERGREEN_PROFILE.profile_version).toBe('1.2.0');
+    expect(BREAKING_NEWS_PROFILE.profile_version).toBe('1.3.0');
+    expect(EVERGREEN_PROFILE.profile_version).toBe('1.3.0');
     expect(BREAKING_NEWS_PROFILE.weights).toEqual({ wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 });
     expect(EVERGREEN_PROFILE.weights).toEqual({ wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 });
     expect(BREAKING_NEWS_PROFILE.baseline_weights).toEqual({

@@ -107,6 +107,48 @@ export function disputeInput(features: Pick<FeatureVector, 'dispute_penalty'>): 
   return clamp01(features.dispute_penalty ?? 0);
 }
 
+/** WS-T validation input: 1 when a sourced-correction debate UPHELD the story
+ *  (`validated` — challenged and proven accurate), else 0. */
+export function disputeValidationInput(
+  features: Pick<FeatureVector, 'dispute_validation'>,
+): number {
+  return clamp01(features.dispute_validation ?? 0);
+}
+
+/**
+ * WS-T — the validation BOOST: a modest additive nudge for a `validated` story
+ * (challenged by a sourced correction and PROVEN accurate). Applied OUTSIDE the
+ * SCOI distribution multiplier — symmetric with `disputeOrderingSink` — so a
+ * validated story keeps the lift even when its interpretations diverge. Unlike
+ * the sink it is DELIBERATELY bounded (`vD`, default 0.25) and does NOT dominate
+ * the score span: it nudges accurate content up without guaranteeing the top (so
+ * it cannot be gamed into a hard promotion). Uniform across authors/topics and
+ * content-derived — neutrality-safe, never applause or payment.
+ */
+export function disputeValidationBoost(
+  features: Pick<FeatureVector, 'dispute_validation'>,
+  profile: RankingProfileConfig,
+): number {
+  return validationBoostTerm(features, profile).applied;
+}
+
+/**
+ * The validation boost as a RECORDED term (parallels the penalty terms):
+ * `value` = the validated flag ∈ {0, 1}, `coefficient` = the profile's `vD`,
+ * `applied` = the boost ADDED to `pwatt_score` (nonnegative). `enforced` is always
+ * true — a resolved sourced-correction debate is authoritative, with no shadow
+ * gate. The pipeline records this on the ScoredItem so the decision log reconciles
+ * the score and the audit's `signals_used` surfaces the validation signal.
+ */
+export function validationBoostTerm(
+  features: Pick<FeatureVector, 'dispute_validation'>,
+  profile: RankingProfileConfig,
+): PenaltyTerm {
+  const value = disputeValidationInput(features);
+  const coefficient = profile.penalties.vD ?? 0.25;
+  return { value, coefficient, applied: coefficient * value, enforced: true };
+}
+
 function term(value: number, coefficient: number, enforced: boolean): PenaltyTerm {
   const applied = enforced ? coefficient * value : 0;
   return { value, coefficient, applied, enforced };

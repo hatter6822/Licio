@@ -34,6 +34,7 @@ import {
   computePenalties,
   disputeOrderingSink,
   type PenaltyEnforcement,
+  validationBoostTerm,
 } from './scoring/penalties.js';
 import { computePositiveScore } from './scoring/pwatt.js';
 
@@ -145,11 +146,17 @@ export function scoreItem(
   // participation can never rescue it (SPEC §5.4; the comment-section analogue).
   const rawScore =
     (positive.components.positive - penalties.total_applied) * distributionMultiplier;
+  // WS-T — the `validated` boost: a modest lift for content challenged and proven
+  // accurate, recorded as a term so the decision log reconciles the score and the
+  // audit surfaces the signal. Applied OUTSIDE the multiplier (symmetric with the
+  // sink); a story is never both `corrected` and `validated`.
+  const validation = validationBoostTerm(features, profile);
   return scoredItemSchema.parse({
     item_id: candidate.item_id,
-    pwatt_score: rawScore - disputeOrderingSink(features, profile),
+    pwatt_score: rawScore - disputeOrderingSink(features, profile) + validation.applied,
     score_components: positive.components,
     penalty_components: penalties,
+    validation_boost: validation,
     baseline,
     constraint_flags: [...constraintFlags],
   });

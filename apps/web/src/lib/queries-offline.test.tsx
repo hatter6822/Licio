@@ -58,6 +58,7 @@ const SAVED_STORY = {
   distribution_reason: 'reason',
   context_chips: [],
   safety_state: 'ok' as const,
+  dispute_status: 'none' as const,
   body_summary: 'summary',
   thread_id: null,
   topic_ids: [],

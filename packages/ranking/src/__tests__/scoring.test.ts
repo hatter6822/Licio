@@ -23,9 +23,11 @@ import {
   computePenalties,
   coordinationInput,
   disputeOrderingSink,
+  disputeValidationBoost,
   harmfulTensionInput,
   MFCI_RISK_PENALTY,
   SHADOW_ENFORCEMENT,
+  validationBoostTerm,
 } from '../scoring/penalties.js';
 import { computePositiveScore } from '../scoring/pwatt.js';
 import { makeFeatures, PROFILE } from './fixtures.js';
@@ -49,6 +51,53 @@ describe('WS-T disputeOrderingSink', () => {
   it('falls back to pD = 1 when the profile omits the dispute coefficient', () => {
     const noPd = { ...PROFILE, penalties: { pM: 1, pT: 0.75, pR: 0.5 } };
     expect(disputeOrderingSink({ dispute_penalty: 1 }, noPd)).toBe(2 + 1 + 0.75 + 0.5 + 1 + 1);
+  });
+});
+
+describe('WS-T disputeValidationBoost', () => {
+  it('is 0 for a non-validated item (absent or zero signal)', () => {
+    expect(disputeValidationBoost({}, PROFILE)).toBe(0);
+    expect(disputeValidationBoost({ dispute_validation: 0 }, PROFILE)).toBe(0);
+  });
+
+  it('adds the profile boost coefficient (vD) for a validated item', () => {
+    expect(disputeValidationBoost({ dispute_validation: 1 }, PROFILE)).toBeCloseTo(
+      PROFILE.penalties.vD ?? 0.25,
+      12,
+    );
+  });
+
+  it('is a MODEST lift — bounded within the positive span (unlike the hard sink)', () => {
+    const boost = disputeValidationBoost({ dispute_validation: 1 }, PROFILE);
+    // A validated story is nudged up, not guaranteed the top: the boost stays
+    // well within the achievable positive span (≤ 2), so a strong clean story
+    // can still outrank it — it cannot be gamed into a hard promotion.
+    expect(boost).toBeGreaterThan(0);
+    expect(boost).toBeLessThan(2);
+  });
+
+  it('falls back to vD = 0.25 when the profile omits the boost coefficient', () => {
+    const noVd = { ...PROFILE, penalties: { pM: 1, pT: 0.75, pR: 0.5 } };
+    expect(disputeValidationBoost({ dispute_validation: 1 }, noVd)).toBeCloseTo(0.25, 12);
+  });
+
+  it('records the boost as a term for the decision log (value/coefficient/applied/enforced)', () => {
+    const zero = validationBoostTerm({}, PROFILE);
+    expect(zero).toEqual({
+      value: 0,
+      coefficient: PROFILE.penalties.vD ?? 0.25,
+      applied: 0,
+      enforced: true,
+    });
+    const term = validationBoostTerm({ dispute_validation: 1 }, PROFILE);
+    expect(term.value).toBe(1);
+    expect(term.enforced).toBe(true); // authoritative — no shadow gate
+    expect(term.applied).toBeCloseTo(PROFILE.penalties.vD ?? 0.25, 12);
+    // The recorded `applied` is exactly the number added to the score.
+    expect(term.applied).toBeCloseTo(
+      disputeValidationBoost({ dispute_validation: 1 }, PROFILE),
+      12,
+    );
   });
 });
 

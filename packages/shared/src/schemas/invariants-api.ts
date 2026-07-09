@@ -28,6 +28,7 @@ export const storyInterpretationSchema = z.object({
   summary: z.string().min(1).max(500),
   disagreement: z.number().min(0).max(1),
 });
+export type StoryInterpretation = z.infer<typeof storyInterpretationSchema>;
 
 export const storyInterpretationsResponseSchema = z.object({
   story_id: uuidSchema,
