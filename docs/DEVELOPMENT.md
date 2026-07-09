@@ -930,7 +930,7 @@ source of truth; this is the working subset.
 | Command | What it does |
 |---------|--------------|
 | `pnpm dev` | Web (5173) + API (3001) together |
-| `pnpm build` | Full ordered build: `shared` → `db`/`invariants` → `ranking` → `web`/`api` |
+| `pnpm build` | Full ordered build: `shared` → `db`/`invariants` → `ranking`/`governance`/`lcap` → `web`/`api` |
 | `pnpm typecheck` | `tsc -b` strict-mode across every workspace |
 | `pnpm lint` | Biome check (format + lint) |
 | `pnpm lint:fix` | Biome auto-fix |
@@ -1079,8 +1079,8 @@ pnpm exec lefthook install
 
 | Stage | Runs | On |
 |-------|------|----|
-| **pre-commit** (parallel) | Biome check on staged files; a **secret scan** (blocks `.env`/key files and key-like content); `check:deps`; `check:policy` | every commit |
-| **pre-push** (parallel) | `typecheck`; `lint:lockfile`; `check:policy` | every push |
+| **pre-commit** (parallel) | Biome check on staged files; a **secret scan** (blocks `.env`/key files and key-like content); `check:deps` (on `package.json` changes); `check:policy` (on `docs/policy/*.md` changes) | every commit |
+| **pre-push** (parallel) | `typecheck:ci` (forced, cache-independent); full-repo `lint` (Biome); `lint:lockfile`; `check:policy` | every push |
 
 If a hook is a false positive on the secret scan, you can bypass with
 `git commit --no-verify` — but CI re-runs the same checks, so a real
