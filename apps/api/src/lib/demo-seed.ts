@@ -1985,23 +1985,27 @@ export async function seedMeriRankingEnforcement(
     (await invariants.promotions.listForInvariant('MERI')).some(
       (r) => r.toStatus === 'soft_constraint',
     );
-  // Fast path + the actual idempotency guarantee: a row already present ⇒ done.
+  // Fast path + the durable idempotency guarantee: a row already present ⇒ done.
   if (await alreadyLive()) return;
   // Serialize the one-shot boot promotion across replicas so concurrent
   // FIRST-boots don't each append a duplicate row (the store has no unique key).
-  // The lease is best-effort and FAIL-OPEN: winning it just means "write first";
-  // a replica that loses the lease re-checks the shared store and only yields
-  // when the row is now present. Correctness never depends on the lease — a
-  // lease outage (caught) or a lost race can at worst cost a benign duplicate
-  // (both rows are identical `soft_constraint`, and `resolveShadowStatus` reads
-  // the latest), never leave MERI shadow-gated.
-  let holder = true;
+  // `tryAcquire` grants AT MOST ONE holder per window, so:
+  //   • holder (true) ⇒ this replica writes the row;
+  //   • NON-holder (false) ⇒ another replica holds the LIVE lease and will write
+  //     it, so YIELD without appending — the non-holder must NOT race the
+  //     holder's commit, or the "serialize" guarantee is empty. A holder that
+  //     dies between acquiring and appending self-heals on the next boot, which
+  //     re-runs this seed;
+  //   • lease store UNAVAILABLE (throw) ⇒ FAIL OPEN and write the row ourselves,
+  //     so a broken lease can never leave MERI shadow-gated.
+  let holdsLease = false;
+  let leaseUnavailable = false;
   try {
-    holder = await lease.tryAcquire('seed:meri-enforcement', 60_000, 'platform-boot');
+    holdsLease = await lease.tryAcquire('seed:meri-enforcement', 60_000, 'platform-boot');
   } catch {
-    holder = true; // fail open — behave as the holder and ensure the row exists
+    leaseUnavailable = true;
   }
-  if (!holder && (await alreadyLive())) return;
+  if (!holdsLease && !leaseUnavailable) return; // another replica holds it → yield
   await invariants.promotions.append({
     invariantType: 'MERI',
     fromStatus: 'shadow',

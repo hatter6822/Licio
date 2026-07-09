@@ -36,18 +36,29 @@ describe('seedMeriRankingEnforcement', () => {
     expect(rows.filter((r) => r.toStatus === 'soft_constraint')).toHaveLength(1);
   });
 
-  it('still enforces MERI when the lease is denied (fail-open, at-least-once)', async () => {
-    // The lease only DEDUPES concurrent first-boots; correctness must never
-    // depend on it. A replica that never wins the lease (and no row exists yet)
-    // must still append, or a lease outage could leave MERI shadow-gated.
+  it('a NON-holder yields without appending (no duplicate row)', async () => {
+    // tryAcquire === false ⇒ another replica holds the LIVE lease and will write
+    // the row; this replica must NOT append (that would defeat the serialize).
     const graph = await buildSimTestGraph();
     const denyLease: JobLeaseStore = { tryAcquire: async () => false };
     await seedMeriRankingEnforcement(graph.invariants, denyLease);
-    const after = await graph.ranking.enforcement();
-    expect(after.meri).toBe(true);
+    const rows = await graph.invariants.promotions.listForInvariant('MERI');
+    expect(rows).toHaveLength(0); // yielded to the (simulated) holder
+  });
+
+  it('a NON-holder still returns fast when the row already exists', async () => {
+    const graph = await buildSimTestGraph();
+    await seedMeriRankingEnforcement(graph.invariants); // holder writes it
+    const denyLease: JobLeaseStore = { tryAcquire: async () => false };
+    await seedMeriRankingEnforcement(graph.invariants, denyLease); // sees row, returns
+    const rows = await graph.invariants.promotions.listForInvariant('MERI');
+    expect(rows.filter((r) => r.toStatus === 'soft_constraint')).toHaveLength(1);
+    expect((await graph.ranking.enforcement()).meri).toBe(true);
   });
 
   it('a throwing lease fails open (still enforces, no duplicate on re-run)', async () => {
+    // A lease-store OUTAGE must never leave MERI shadow-gated — fail open and
+    // ensure the row; the durable pre-check keeps a re-run from duplicating it.
     const graph = await buildSimTestGraph();
     const throwLease: JobLeaseStore = {
       tryAcquire: async () => {
