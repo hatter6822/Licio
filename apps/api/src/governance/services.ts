@@ -7,6 +7,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DEFAULT_GOVERNANCE_CONFIG, type GovernanceConfig } from './config.js';
+import type { GovernanceNlProvider } from './nl-provider.js';
 import { GovernanceService } from './service.js';
 import { createInMemoryGovernanceStores, type GovernanceStores } from './stores.js';
 
@@ -27,6 +28,9 @@ export interface GovernanceServiceOptions {
     treasuryExecutionBlocked(roomId: string): Promise<boolean>;
     votingBlocked(roomId: string, voterUserId: string | null): Promise<boolean>;
   };
+  /** ADR-3 governed NL provider (boot wires the fail-closed LLM backend when
+   *  enabled; absent ⇒ the pure deterministic facilitation path). */
+  nlProvider?: GovernanceNlProvider;
 }
 
 export function createGovernanceService(opts: GovernanceServiceOptions = {}): GovernanceService {
@@ -38,6 +42,7 @@ export function createGovernanceService(opts: GovernanceServiceOptions = {}): Go
     digest: sha256Hex,
     ...(opts.cryptoFlag ? { cryptoFlag: opts.cryptoFlag } : {}),
     ...(opts.killSwitches ? { killSwitches: opts.killSwitches } : {}),
+    ...(opts.nlProvider ? { nlProvider: opts.nlProvider } : {}),
   });
 }
 

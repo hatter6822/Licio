@@ -30,6 +30,7 @@ import {
   type ModerationContext,
   type ModerationDecision,
   type OutcomeAttestation,
+  type ProposalInput,
   type ProposalSummary,
   proposalInputSchema,
   type RatificationChoice,
@@ -44,6 +45,11 @@ import {
   type VoteSchedule,
 } from '@licio/governance';
 import type { GovernanceConfig } from './config.js';
+import {
+  type GovernanceNlProvider,
+  LAWMAKING_SUMMARIZE_TEMPLATE_KEY,
+  type LawmakingSummaryRequest,
+} from './nl-provider.js';
 import type {
   BindingRecord,
   GovernanceStores,
@@ -72,6 +78,11 @@ export interface GovernanceServiceDeps {
     treasuryExecutionBlocked(roomId: string): Promise<boolean>;
     votingBlocked(roomId: string, voterUserId: string | null): Promise<boolean>;
   };
+  /** ADR-3 governed NL provider for the advisory facilitation surfaces (wired
+   *  at boot; absent ⇒ the pure deterministic path, byte-identical to before).
+   *  A throwing provider falls back to the deterministic summary — the
+   *  advisory surface degrades, never fails, and never gains authority. */
+  nlProvider?: GovernanceNlProvider;
 }
 
 export type GovernanceResult<T> =
@@ -812,7 +823,7 @@ export class GovernanceService {
     if (!gate.ok) return gate;
     const parsed = proposalInputSchema.safeParse(proposalInput);
     if (!parsed.success) return err('invalid_proposal', 'The proposal is invalid.');
-    const summary = summarizeProposal(parsed.data);
+    const summary = await this.draftSummary(roomId, gate.value, parsed.data);
     await this.logFacilitation(
       gate.value,
       'lawmaking.summarize',
@@ -820,6 +831,41 @@ export class GovernanceService {
       summary.summary,
     );
     return ok(summary);
+  }
+
+  /**
+   * Draft the summary text behind the ADR-3 provider port. Without an injected
+   * LLM provider this IS the pure deterministic summariser (no extra store
+   * reads). With one, the room's member-ratified prompt and the bundle's
+   * template/style condition the draft — and ANY provider failure (guard block,
+   * budget, breaker, transport, schema, quality gate) falls back to the
+   * deterministic summary: the advisory surface degrades, it never fails, and
+   * the provider gains no authority either way (ADR-5 — the result is
+   * capability-gated and audit-logged identically by the caller).
+   */
+  private async draftSummary(
+    roomId: string,
+    binding: BindingRecord,
+    proposal: ProposalInput,
+  ): Promise<ProposalSummary> {
+    const provider = this.deps.nlProvider;
+    if (!provider || provider.kind === 'deterministic') return summarizeProposal(proposal);
+    const model = await this.deps.stores.models.get(binding.modelId);
+    const prompt = await this.deps.stores.prompts.get(binding.promptId);
+    const request: LawmakingSummaryRequest = {
+      roomId,
+      proposal,
+      roomPromptText: prompt?.promptText ?? null,
+      promptTemplate: model?.bundle.promptTemplates[LAWMAKING_SUMMARIZE_TEMPLATE_KEY] ?? null,
+      summaryStyle: model?.bundle.config.summaryStyle ?? 'neutral_brief',
+    };
+    try {
+      return await provider.summarizeProposal(request);
+    } catch {
+      // Fail closed to the deterministic summary. The provider logs/counts its
+      // own failures (nl-provider.ts contract); availability > enhancement here.
+      return summarizeProposal(proposal);
+    }
   }
 
   /** Schedule a proposal vote window (requires `lawmaking.schedule`). */

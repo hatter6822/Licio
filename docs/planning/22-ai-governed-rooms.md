@@ -150,6 +150,35 @@ members read, which is a residual **framing** channel; this is **mitigated, not 
 determinism + mandatory citations + member-editability + the bias-audit on summary outputs + the
 `machine-generated` label. We state this honestly rather than overclaiming total neutrality.
 
+**ADR-9 — Real LLM backends serve the ADVISORY surfaces behind the governed port: explicit
+opt-in in every environment, fail-closed, deterministic authority preserved (the ADR-3 upgrade
+path, exercised + ratified for production 2026-07-09).** The ADR-3 seam is now real code: the
+lawmaking `facilitateSummary` surface may be served by an LLM through the `GovernanceNlProvider`
+port — either the **hosted Anthropic API** (official SDK; `GOVERNANCE_LLM_PROVIDER=anthropic` +
+`ANTHROPIC_API_KEY`) or an operator-run, **loopback-only local inference server** speaking the
+OpenAI-compatible `/chat/completions` protocol (llama.cpp server, Ollama, vLLM, LM Studio;
+`GOVERNANCE_LLM_PROVIDER=local` + `GOVERNANCE_LLM_LOCAL_URL` + `GOVERNANCE_LLM_MODEL`), which by
+construction sends no content off-host. Every invocation runs the full WS-K governed path —
+registry admission through the real deployment gate (one registry identity per backend, so a
+backend switch can never leave a stale card), the pre-execution ProhibitedUseGuard
+(`gov_summarize_proposal`, advisory-effect), a strict zod schema on the draft, a **deterministic
+§24.5 quality/grounding gate** (length bounds, a URL-not-in-proposal injection/exfiltration rule,
+token-overlap grounding), and an immutable `AIOutputRecord` whose config hash pins backend, model
+id, output ceiling, system-prompt version, and gate version — bounded by the ADR-6 per-room
+hourly budget and a consecutive-failure circuit breaker. **Any** failure (guard block, budget,
+breaker, transport, schema, quality) serves the deterministic summary: the advisory surface
+degrades, it never fails, and it never gains authority — ADR-1 is untouched (moderation
+*decisions* remain pure policy-DSL) and ADR-5 holds (the draft is data the service
+capability-gates and audit-logs identically to the deterministic output). **The opt-in is
+available in every environment, production included** (the 2026-07-09 maintainer decision,
+amending the §U.3.3 "deterministic facilitation outputs" bullet and SPEC §17.4/§24.6 to
+"deterministic **by default**"): the provider is OFF by default, enabling it is an explicit
+operator decision, the `local` backend keeps content on-host (the loopback rule is enforced at
+env validation AND in the enablement decision), and enabling the hosted backend makes the vendor
+an operator-chosen data processor for governed-room proposal text — never mandatory, never
+silent (boot logs it loudly). The slice-3 recorded-fixture eval corpus that replaces the
+synthetic admission input remains tracked.
+
 ---
 
 ## U.1 The three-layer authority model
@@ -1361,6 +1390,7 @@ WS-U is complete when:
 | 0.1.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Initial cross-cutting charter ratifying the maintainer's four binding decisions: the three-layer authority model (room sovereignty → Knomosis-bounded AI agent → non-overridable platform legal floor), the elected room steward with exactly two powers, the bounded in-room AI agent (moderation, treasury, unbiased lawmaking facilitation), the re-scoped WS-K transparency/evaluation substrate, the preserved pay-to-rank firewall, the adversarial-community threat model, and the six staged implementation PRs. Doctrine-only (Stage 0); no runtime code. |
 | 0.2.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Added Part II — the **atomic task decomposition** (49 cards across WS-U.1–U.6) in the house format (ID/Ref/description/acceptance/testing/dependencies), with authoritative Drizzle/zod shapes for the seven new `knomosis`-bounded-context entities (`room_steward_seat`, `steward_election`, `steward_governance_vote`, `room_governance_model`, `room_governance_prompt`, `room_agent_binding`, `agent_action_log`), the WS-D.3.2 isolation-walk extension, the WS-K registry/harness/guard/monitor reuse points, the §15.4 moderation-port parity, the structural-neutrality gate, the signed-action (no-key) submitter, and the fail-closed crypto/jurisdiction gating. Still doctrine-only; implementation-ready. |
 | 0.3.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Hardened the plan to house-complete: a ten-point **cross-cutting requirements** block (bounded autonomy, floor supremacy, no-key-custody, no-pay-to-rank, fail-closed crypto/jurisdiction, schema isolation, transparency/reproducibility, appealability, auditability, accessibility/no-applause), a **migration-sequencing** note (`0035`+ in the `knomosis` pgSchema, online-safe, isolation-walk-extended), and a **Definition of done** spanning steward/elections, transparent-evaluated models, the bounded moderation agent, unbiased lawmaking, bounded treasury, maturity, the green-CI gate set, and doctrine fidelity. Verified all cited cross-references (WS-K/D/I/L/M/J/C task IDs) resolve. |
+| 0.5.0 (DESIGN) | 2026-07-09 | AI-Governed Rooms redesign | Added **ADR-9**: the ADR-3 governed NL provider seam is exercised with REAL LLM backends for the advisory lawmaking summary — the hosted Anthropic API (official SDK) or a **loopback-only local** OpenAI-compatible runtime (llama.cpp server/Ollama/vLLM/LM Studio) — behind the full WS-K governed path (registry admission with one identity per backend, the pre-execution prohibited-use guard, a strict zod schema, the deterministic §24.5 quality/grounding gate, and the immutable `AIOutputRecord` config-hash pin), bounded by the ADR-6 per-room hourly budget + a consecutive-failure circuit breaker, failing closed to the deterministic summariser on any error. **Available in every environment as an explicit operator opt-in** (the same-day maintainer decision; OFF by default, never mandatory or silent — the hosted backend's data-processor egress is boot-logged loudly, the local backend is loopback-enforced), amending §U.3.3 and SPEC §17.4/§24.6 to "deterministic **by default**". Moderation decisions stay pure policy-DSL (ADR-1/ADR-5 preserved); the slice-3 recorded-fixture eval corpus remains tracked. Runtime: `apps/api/src/governance/nl-provider.ts` (the port) + `apps/api/src/ai-governance/llm/` (config/provider/local/quality/registration). |
 | 0.4.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Added **§U.0.1 Resolved architectural decisions (ADR-1…8)** from the maintainer's second-round decisions, resolving the hard questions left open by the first cut: a "model" is a declarative **`GovernancePolicyBundle`** (DSL + prompt templates + config) interpreted deterministically — not weights/code (ADR-1); the Knomosis foundations ship as a deterministic in-process **`GovernanceKernel`** behind the real-gateway seam (ADR-2); NL work uses a governed provider port, deterministic default (ADR-3); the agent is a **bounded executor role, never a key holder** (ADR-4); prompt injection is defeated by enforcing capabilities **outside** the model (ADR-5); cost/DoS are bounded by event-driven, per-room budgets (ADR-6); elections are quorum-gated and fail-safe (ADR-7); lawmaking neutrality is structural for the tally and honestly only mitigated for summary framing (ADR-8). Begins the runtime build (`@licio/governance` + DB + API + web). |
 
 

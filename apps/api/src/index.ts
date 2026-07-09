@@ -7,6 +7,16 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
+import { resolveGovernanceLlmDecision } from './ai-governance/llm/config.js';
+import { createLocalCompletion } from './ai-governance/llm/local.js';
+import {
+  createAnthropicCompletion,
+  createGovernanceLlmNlProvider,
+} from './ai-governance/llm/provider.js';
+import {
+  buildGovernanceLlmIdentity,
+  ensureGovernanceLlmDeployed,
+} from './ai-governance/llm/registration.js';
 import {
   AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
   startAiGovernanceScheduler,
@@ -67,6 +77,7 @@ import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
 import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
+import type { GovernanceNlProvider } from './governance/nl-provider.js';
 import {
   GOVERNANCE_SCHEDULER_INTERVAL_MS,
   startGovernanceScheduler,
@@ -969,6 +980,55 @@ setKnomosisServices(knomosisServices);
 // The WS-E event pipeline's crypto gate reads the SAME runtime flag (live).
 eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
 
+// WS-U ADR-3/ADR-9: the governed NL provider behind the agent's advisory
+// facilitation surfaces. Fail-closed at every layer — explicit env opt-in +
+// the backend's requirements (key, or loopback URL + model), registration must
+// clear the REAL WS-K admission/deploy gate, and any runtime failure serves
+// the deterministic summary. Available in every environment as an explicit
+// operator opt-in (the 2026-07-09 maintainer decision); absent ⇒ the
+// deterministic path, byte-identical to before.
+let governanceNlProvider: GovernanceNlProvider | undefined;
+const governanceLlmDecision = resolveGovernanceLlmDecision({
+  provider: env.GOVERNANCE_LLM_PROVIDER,
+  apiKey: env.ANTHROPIC_API_KEY,
+  modelId: env.GOVERNANCE_LLM_MODEL,
+  localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
+});
+if (governanceLlmDecision.enabled) {
+  const { backend, settings } = governanceLlmDecision;
+  const llmIdentity = buildGovernanceLlmIdentity(settings, backend);
+  if (await ensureGovernanceLlmDeployed(aiGovernanceServices, llmIdentity)) {
+    governanceNlProvider = createGovernanceLlmNlProvider({
+      services: aiGovernanceServices,
+      settings,
+      identity: llmIdentity,
+      // The key/URL live only in the completion closure — never in the hashed
+      // identity config, never in a log line.
+      complete:
+        backend.kind === 'anthropic'
+          ? createAnthropicCompletion(backend.apiKey, settings)
+          : createLocalCompletion(backend.baseUrl, settings),
+    });
+    logger.info(
+      { backend: backend.kind, modelId: settings.modelId },
+      'WS-U governance LLM provider enabled (explicit opt-in; fail-closed to deterministic)',
+    );
+    if (backend.kind === 'anthropic') {
+      // Honest operational posture: the hosted backend sends governed-room
+      // proposal text off-host, making the vendor an operator-chosen data
+      // processor. Say so loudly at boot, once.
+      logger.warn(
+        { modelId: settings.modelId },
+        'WS-U governance LLM: hosted backend enabled — governed-room proposal text is sent to the external model API (operator-chosen data processor); use GOVERNANCE_LLM_PROVIDER=local to keep content on-host',
+      );
+    }
+  } else {
+    logger.warn(
+      'WS-U governance LLM provider requested but the WS-K admission/deploy gate refused — keeping the deterministic provider',
+    );
+  }
+}
+
 setGovernanceService(
   createGovernanceService({
     // Boot-resolved from the SAME knomosis.* source for the static election/agent
@@ -980,6 +1040,7 @@ setGovernanceService(
     cryptoFlag: () => knomosisServices.config().cryptoEnabled,
     stores: governanceStores,
     killSwitches: buildGovernanceKillSwitchGuards(knomosisServices),
+    ...(governanceNlProvider ? { nlProvider: governanceNlProvider } : {}),
   }),
 );
 // The WS-L law-pack + readiness ports read the SAME governance stores the

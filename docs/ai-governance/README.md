@@ -94,6 +94,17 @@ guard, the governed models, and a module singleton for routes.
 - `lineage.ts` — the data-lineage service (privacy-review precondition).
 - `models.ts` — the governed deterministic models + the topic classifier +
   the translation-provider seam.
+- `llm/` — the first REAL model backend (WS-U ADR-9): the LLM-backed
+  governance summariser behind the WS-U `GovernanceNlProvider` port —
+  `config.ts` (fail-closed enablement: explicit opt-in + per-backend
+  requirements; off by default, honoured in every environment), `provider.ts`
+  (the governed invocation: guard → completion → zod → quality gate →
+  `AIOutputRecord`, under a per-room budget + circuit breaker; the Anthropic
+  SDK completion), `local.ts` (the loopback-only OpenAI-compatible
+  local-runtime completion — llama.cpp server/Ollama/vLLM/LM Studio over plain
+  fetch), `quality.ts` (the deterministic §24.5 acceptance gate),
+  `registration.ts` (register + deploy through the REAL gate, one identity per
+  backend).
 - `seed.ts` — registers **and deploys** every governed model through the real
   gate; seeds risk assessments, lineage, and the inventory.
 - `pipelines.ts` — topic classification + claim extraction (WS-K.1.3a/b).
@@ -281,9 +292,18 @@ the human-revision upgrades), sourcing the vocabulary from
   summaries, advisories) ships against a clean WS-M seam (the caller supplies
   proposal fields).  Wiring it to the real WS-M proposal/charter/law-pack model
   lands with WS-M.
-- **A real model backend.**  The governed providers are deterministic; a
-  production model backend swaps in behind the unchanged registry/evaluation/
-  guard surface.
+- **A real model backend.**  **First one landed** (WS-U ADR-9, 2026-07): the
+  LLM-backed governance summariser (`llm/`) swapped in behind the unchanged
+  registry/evaluation/guard/output-record surface — hosted Anthropic API or a
+  loopback-only local OpenAI-compatible runtime, advisory-only, fail-closed to
+  the deterministic summariser, OFF by default behind an explicit operator
+  opt-in (every environment, production included).  Remaining: the other
+  governed surfaces (classification, thread summarisation, translation, triage)
+  still run the deterministic providers, the admission harness still consumes
+  the synthetic fixture set (the recorded-fixture LLM eval corpus is the WS-U
+  slice-3 follow-up), and the LLM identities are not yet folded into the seed's
+  `buildInventory` use-case map (the registry lists them; the inventory sweep
+  is a mechanical follow-up).
 - **WS-P experiment-log consumer.**  The `AIOutputRecord` substrate is the
   Section 28.2 source; the WS-P experiment-logging consumer reads it when WS-P
   lands.

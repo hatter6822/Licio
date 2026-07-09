@@ -120,6 +120,70 @@ describe('validateServerEnv', () => {
       validateServerEnv({ ...validEnv, KNOMOSIS_GATEWAY_TOKEN_FILE: '/run/secrets/tok' }),
     ).toThrow(/Incomplete KNOMOSIS_GATEWAY configuration/);
   });
+
+  it('accepts the WS-U ADR-9 LLM opt-in in production (explicit operator decision) — requirements still enforced', () => {
+    const prod = { ...validEnv, NODE_ENV: 'production' };
+    expect(() =>
+      validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'k' }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({
+        ...prod,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+        GOVERNANCE_LLM_MODEL: 'llama3.3',
+      }),
+    ).not.toThrow();
+    // A half-configured backend still fails fast in production…
+    expect(() => validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'anthropic' })).toThrow(
+      /requires ANTHROPIC_API_KEY/,
+    );
+    // …and 'deterministic' (and absence) stay valid everywhere.
+    expect(() =>
+      validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'deterministic' }),
+    ).not.toThrow();
+  });
+
+  it('enforces each LLM backend’s requirements (any environment)', () => {
+    // anthropic ⇒ key required.
+    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_PROVIDER: 'anthropic' })).toThrow(
+      /requires ANTHROPIC_API_KEY/,
+    );
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: 'k',
+      }),
+    ).not.toThrow();
+    // local ⇒ loopback URL + model required.
+    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_PROVIDER: 'local' })).toThrow(
+      /requires GOVERNANCE_LLM_LOCAL_URL/,
+    );
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://192.168.1.20:11434/v1',
+        GOVERNANCE_LLM_MODEL: 'llama3.3',
+      }),
+    ).toThrow(/loopback/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+      }),
+    ).toThrow(/requires GOVERNANCE_LLM_MODEL/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+        GOVERNANCE_LLM_MODEL: 'llama3.3',
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe('validateClientEnv', () => {

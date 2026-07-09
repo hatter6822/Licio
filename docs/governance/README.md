@@ -94,7 +94,11 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   (`@licio/governance` `summarizeProposal`/`scheduleProposalVote`/`attestOutcome`),
   exposed as capability-gated `facilitateSummary`/`Schedule`/`Attest`: each requires
   the matching `lawmaking.*` capability on the active binding (else a typed
-  refusal), and every facilitation is logged with the provenance triple. The agent
+  refusal), and every facilitation is logged with the provenance triple. The
+  summary surface additionally accepts an ADR-3 `GovernanceNlProvider` (wired
+  at boot; see the LLM-seam residual below): an LLM-drafted summary is served
+  only after the deterministic quality/grounding gate passes, and any provider
+  failure serves the deterministic summary instead. The agent
   attests a PLATFORM-COMPUTED outcome — it has no vote/tally/weight capability, so
   it can never compute or bias a result (ADR-8). The elected steward can trigger a
   neutral summary (`POST …/governance/lawmaking/summarize`); schedule/attest are
@@ -240,8 +244,28 @@ hypothetical `knomosis → public.rooms` FK is caught.
   moderation/Knomosis surfaces (covered by their existing feature cells, safety +
   Knomosis metrics, and coordination anti-signals); confirming clarifying notes are
   the only residual.
-- **Pluggable LLM provider seam** (ADR-3) — the deterministic default ships;
-  the governed provider port for real-LLM summaries is the upgrade path.
+- **Pluggable LLM provider seam** (ADR-3) — **shipped for the lawmaking-summary
+  surface** (ADR-9, 2026-07). `GovernanceNlProvider`
+  (`apps/api/src/governance/nl-provider.ts`) is the port; `facilitateSummary`
+  consumes it, conditioning the draft on the room's member-ratified prompt +
+  the bundle's `promptTemplates['lawmaking.summarize']` + `config.summaryStyle`,
+  and FALLS BACK to the deterministic summary on any provider failure. Two real
+  backends exist behind the same governed pipeline
+  (`apps/api/src/ai-governance/llm/`): the hosted Anthropic API (official SDK)
+  and a **loopback-only local** OpenAI-compatible runtime (llama.cpp server,
+  Ollama, vLLM, LM Studio). Every invocation is guard-checked
+  (`gov_summarize_proposal`, advisory), zod-validated, gated by the
+  deterministic §24.5 quality/grounding checks, budgeted per room (ADR-6) with
+  a circuit breaker, registered/deployed through the real WS-K gate (one
+  registry identity per backend), and recorded as an immutable `AIOutputRecord`.
+  Fail-closed: OFF by default behind the explicit env opt-in
+  (`GOVERNANCE_LLM_PROVIDER`), and available in EVERY environment — production
+  included (the 2026-07-09 maintainer decision, ADR-9) — never mandatory,
+  never silent: the hosted backend's data-processor egress is boot-logged
+  loudly, and the `local` backend is loopback-enforced so content stays
+  on-host (see `docs/DEVELOPMENT.md` for setup). Remaining: the
+  moderation-advisor (shadow) surface and the recorded-fixture eval corpus
+  replacing the synthetic admission input (slice 3).
 
 ## Security & correctness audit (2026-07)
 

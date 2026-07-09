@@ -500,6 +500,11 @@ licio/
 │           │   ├── output-records.ts    --   immutable AIOutputRecord writer + config hash (WS-K.1.1f)
 │           │   ├── lineage.ts           --   data lineage + privacy-review precondition (WS-K.1.1e)
 │           │   ├── models.ts            --   governed deterministic models + classifier + translator
+│           │   ├── llm/                 --   WS-U ADR-9 LLM-backed governance summariser (opt-in,
+│           │   │                             fail-closed, off by default): config (decision), provider
+│           │   │                             (guard→completion→zod→quality gate→AIOutputRecord +
+│           │   │                             budget/breaker; Anthropic SDK), local (loopback-only
+│           │   │                             OpenAI-compatible runtime), quality, registration
 │           │   ├── seed.ts              --   register + DEPLOY models through the gate; inventory
 │           │   ├── pipelines.ts         --   topic classification + claim extraction (WS-K.1.3a/b)
 │           │   ├── summaries.ts         --   AI summary eval: §24.3 quality/grounding gate (WS-K.1.4; eval-only, no thread Overview)
@@ -1248,6 +1253,7 @@ Biome 2.x does not support:
 | `ioredis` ^5.11 | api | Redis client (CSRF token store, sessions) |
 | `@simplewebauthn/server` ^13.3 | api | WebAuthn attestation/assertion verification (WS-D) |
 | `viem` ^2.52 | api | EIP-4361 / SIWE signature verification (WS-D wallet sign-in) |
+| `@anthropic-ai/sdk` ^0.110 | api | WS-U ADR-9 governance LLM provider, Anthropic backend (off by default, explicit operator opt-in, fail-closed to the deterministic summariser; the loopback-local backend uses plain fetch) |
 
 No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 

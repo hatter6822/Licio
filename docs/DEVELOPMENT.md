@@ -1207,6 +1207,46 @@ RPC map is silently disabled:
 CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 ```
 
+### Governance LLM provider (`GOVERNANCE_LLM_*`)
+
+The WS-U in-room agent's advisory **lawmaking summary** can be drafted by a
+real LLM behind the governed provider port (WS-U ADR-3/ADR-9). Unset → the
+deterministic summariser (the shipped default, zero egress). The opt-in is
+honoured in **every** environment, production included (the 2026-07-09
+maintainer decision): with `anthropic`, governed-room proposal text is sent to
+the hosted API — an operator-chosen data processor, boot-logged loudly; with
+`local`, content never leaves the host (the URL is loopback-enforced).
+
+Two backends:
+
+```sh
+# A) Hosted Anthropic API (sends proposal text to Anthropic —
+#    an explicit operator choice; the boot log calls it out)
+GOVERNANCE_LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...            # server-side only; never VITE_-prefixed
+GOVERNANCE_LLM_MODEL=claude-opus-4-8    # optional; this is the default
+
+# B) Local model on the SAME host (no content leaves the machine).
+#    Any OpenAI-compatible /chat/completions runtime works — e.g.:
+#      ollama serve                      # base URL http://127.0.0.1:11434/v1
+#      llama-server -m model.gguf        # base URL http://127.0.0.1:8080/v1
+#    (vLLM and LM Studio expose the same protocol.)
+GOVERNANCE_LLM_PROVIDER=local
+GOVERNANCE_LLM_LOCAL_URL=http://127.0.0.1:11434/v1   # LOOPBACK-ONLY (enforced)
+GOVERNANCE_LLM_MODEL=llama3.3:70b                    # required: the runtime's model name
+```
+
+The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /
+`[::1]`) — a non-local URL is rejected at startup, so `local` provably means
+no third-party egress. On boot the backend registers + deploys through the
+real WS-K admission gate; every call is guard-checked, schema-validated,
+quality/grounding-gated, per-room budgeted (with a circuit breaker), and
+recorded as an immutable `AIOutputRecord` — and **any** failure falls back to
+the deterministic summary. Exercise it end to end in the seeded *Elections &
+Governance* room: sign in as the steward account and POST
+`/v1/rooms/{roomId}/governance/lawmaking/summarize` (the agent must hold the
+`lawmaking.summarize` capability, which the seeded binding grants).
+
 ---
 
 ## 17. Troubleshooting
