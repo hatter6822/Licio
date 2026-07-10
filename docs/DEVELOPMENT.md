@@ -2,9 +2,11 @@
 
 # Local development setup
 
-This document is the **single step-by-step guide to running Licio on your own
-machine**: prerequisites, backing services, environment configuration,
-the database, daily commands, seeded test accounts, and user-testing fixtures.
+This document is the **single step-by-step guide to running Licio**: on your
+own machine — prerequisites, backing services, environment configuration, the
+database, daily commands, seeded test accounts, and user-testing fixtures —
+and **in production** (Section 17: build, topology, required environment, the
+local governance-LLM runtime, and the operational checklist).
 It is the practical companion to the other root documents:
 
 | Document | Owns |
@@ -13,7 +15,7 @@ It is the practical companion to the other root documents:
 | [`CLAUDE.md`](../CLAUDE.md) | Engineering conventions, the source layout, the security architecture |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | The branch/PR workflow and the CI gate list |
 | [`docs/SPEC.md`](SPEC.md) | The canonical design specification |
-| **`docs/DEVELOPMENT.md`** (this file) | **How to stand up, run, and user-test a local dev environment** |
+| **`docs/DEVELOPMENT.md`** (this file) | **How to stand up, run, and user-test a local dev environment — and how to build, configure, and operate a production deployment** |
 
 Where this file and `docs/SPEC.md` disagree, the specification wins.
 Where it and `package.json` disagree about a command, `package.json`
@@ -39,10 +41,11 @@ wins — it is the source of truth for every script.
 14. [Quality gates and git hooks](#14-quality-gates-and-git-hooks)
 15. [Database and schema workflow](#15-database-and-schema-workflow)
 16. [Optional production-binding env groups](#16-optional-production-binding-env-groups)
-17. [Troubleshooting](#17-troubleshooting)
-18. [Resetting and cleaning up](#18-resetting-and-cleaning-up)
-19. [Editor setup](#19-editor-setup)
-20. [Reference](#20-reference)
+17. [Production deployment](#17-production-deployment)
+18. [Troubleshooting](#18-troubleshooting)
+19. [Resetting and cleaning up](#19-resetting-and-cleaning-up)
+20. [Editor setup](#20-editor-setup)
+21. [Reference](#21-reference)
 
 ---
 
@@ -108,7 +111,7 @@ Licio is a strict-TypeScript **pnpm monorepo**. Two runnable apps
 (`apps/web`, `apps/api`) plus a native courier shell (`apps/courier`) sit on
 top of nine workspace packages, with PostgreSQL and Redis behind typed store
 seams. For local development only `apps/web` and `apps/api` matter; the
-courier is an Android build target (Section 12).
+courier is an Android build target (Section 17.9).
 
 ```text
         Browser (PWA)
@@ -418,8 +421,8 @@ Optional; the default applies when unset:
 |----------|---------|---------|
 | `PORT` | `3001` | API listen port |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` (pino) |
-| `EVENTS_RATE_PER_MINUTE` | `10` | Per-user attention-ingestion rate limit |
-| `EVENTS_RATE_PER_HOUR` | `120` | Per-user attention-ingestion rate limit |
+| `EVENTS_RATE_PER_MINUTE` | `30` | Per-account attention-ingestion rate limit (the client's steady-state cadence is 2 req/min; the budget sits well above it) |
+| `EVENTS_RATE_PER_HOUR` | `600` | Per-account attention-ingestion rate limit |
 
 ### 7.3 Client variables (`VITE_`-prefixed)
 
@@ -479,15 +482,15 @@ node -e "console.log('SESSION_SECRET=' + require('node:crypto').randomBytes(32).
 
 ### 7.6 All-or-none groups fail closed
 
-The `S3_*`, `SES_*`, and `EMBEDDING_*` groups are validated as a unit. If
-you set **some but not all** keys in a group, `validateServerEnv` throws at
-boot:
+The `S3_*`, `SES_*`, `EMBEDDING_*`, and `KNOMOSIS_GATEWAY_*` groups are
+validated as a unit. If you set **some but not all** keys in a group,
+`validateServerEnv` throws at boot:
 
 ```
 Incomplete S3 configuration: missing S3_BUCKET, S3_ACCESS_KEY_ID (set the whole group or none of it)
 ```
 
-For local development you normally leave **all three groups unset** and
+For local development you normally leave **all four groups unset** and
 rely on the dev fallbacks. Only configure them when you specifically want
 to exercise the production bindings (Section 16).
 
@@ -599,8 +602,9 @@ This runs the `web` and `api` dev servers in parallel:
 - **API** (Hono, `tsx watch` — restarts on change): <http://localhost:3001>
 
 On a healthy boot the API logs the startup sequence — service wiring,
-event-pipeline recovery, the lease-guarded hourly schedulers
-(privacy, ingestion, invariants, event-pipeline, ranking) — and finishes
+event-pipeline recovery, the twelve lease-guarded schedulers (privacy,
+ingestion, invariants, event pipeline, ranking, debate, moderation,
+AI-governance, governance elections, Knomosis, LCAP, rendezvous) — and finishes
 with `Server started`. The PWA renders **demo feed fixtures** immediately,
 so you see real end-to-end pages before submitting anything; content you
 create through the UI then flows through the same production read paths.
@@ -1016,6 +1020,8 @@ saves a CI round-trip:
 | `pnpm check:workspace-deps` | a package imports across a forbidden workspace boundary |
 | `pnpm check:policy` | a doctrine/policy document fails validation |
 | `pnpm check:neutrality` | any of the ten ranking-neutrality (pay-to-rank) tests fail |
+| `pnpm check:update-channel` | the WS-S.10 verify-before-activate wiring is lost, or (post-build) `apps/web/dist` lacks a valid signed update manifest — run `pnpm gen:update-manifest` after the web build (Section 17.2) |
+| `pnpm check:knomosis-pins` | a non-`local` Knomosis deployment in `apps/api/src/knomosis/pin.config.json` carries sentinel (all-zero) finality values (Section 17.8) |
 | `pnpm lint:lockfile` | the lockfile's registry/integrity hashes don't validate |
 | `pnpm check:sw` | the **built** service worker contains remote `importScripts`/`eval` (run after `pnpm build`) |
 | `pnpm sbom` | (generates the CycloneDX SBOM + license-compatibility check) |
@@ -1458,12 +1464,331 @@ fail-closed branch on demand:
 
 ---
 
-## 17. Troubleshooting
+## 17. Production deployment
+
+Everything before this section runs Licio on a development machine. This
+section is the operator-facing counterpart: what a production deployment
+consists of, what it requires, and the order to stand it up. It documents the
+**current state of the repo**: Licio ships as a plain Node API service plus a
+static PWA bundle — there is no Dockerfile, Kubernetes manifest, or
+process-manager config in the repository, so process supervision, TLS
+termination, and static hosting are your platform's concern. What the repo
+*does* pin down precisely is the build, the required environment, the
+serving topology, and the fail-closed behavior of everything optional.
+
+The production posture in one sentence: **partial configuration fails closed
+instead of silently falling back.** The API refuses to boot without its
+required environment; every optional binding group either binds its real
+adapter or degrades to a loudly-logged, fail-closed default (17.4).
+
+### 17.1 Topology — one origin behind an edge
+
+Production serves the PWA and the API from **one public origin**. The client
+calls `/v1/*` and `/api/*` same-origin — exactly what the Vite dev proxy
+simulates in development (Section 7.3):
+
+```text
+                 https://your-origin.example
+                            │
+                  ┌─────────▼─────────┐
+                  │  Edge / reverse    │   TLS terminates HERE
+                  │  proxy or CDN      │
+                  └──┬─────────────┬──┘
+   /v1/*  /api/*  /health          everything else
+          │                            │
+┌─────────▼──────────┐      ┌──────────▼──────────┐
+│ apps/api            │      │ static host serving  │
+│ node dist/index.js  │      │ apps/web/dist        │
+│ plain HTTP on :3001 │      │ (SPA + SW + assets)  │
+└──┬──────────┬───────┘      └─────────────────────┘
+   ▼          ▼           loopback-only, same host as the API
+PostgreSQL   Redis 7      ┌──────────────────────────┐
+16 (pgvector)             │ governance-LLM runtime    │
+                          │ (Ollama/llama.cpp/vLLM …) │
+                          │ 127.0.0.1:11434           │
+                          └──────────────────────────┘
+```
+
+- **The API never serves the web build** — `apps/api` has no static-file
+  handler. Route `/v1/*`, `/api/*`, and `/health` to the API; serve everything
+  else from `apps/web/dist` with an SPA fallback to `index.html`. Never let
+  API paths fall back to the shell (the service worker's navigation fallback
+  already denylists `/api` and `/v1` for the same reason).
+- **TLS terminates at the edge; the API speaks plain HTTP behind it.** The
+  in-repo HTTPS path (`DEV_HTTPS`, Section 11) is a dev-only mkcert
+  convenience. HTTPS itself is **not optional** in production: every
+  session/CSRF cookie is `__Host-`-prefixed + `Secure` (browsers drop them
+  over plain http), and the API unconditionally sends HSTS.
+- **`CORS_ORIGIN` is the exact public web origin** (scheme + host + port). In
+  the one-origin topology browsers make same-origin calls and CORS never
+  fires — but the value is still load-bearing: the WebAuthn RP-ID and SIWE
+  bindings derive from it, and it is the only origin the CORS middleware will
+  ever reflect for a credentialed cross-origin request.
+- The governance-LLM runtime is **same-host and loopback-only** by doctrine
+  (17.7); it must never listen on a LAN-reachable address.
+
+### 17.2 Build the release artifacts
+
+On the build machine, from a clean checkout:
+
+```sh
+corepack enable && corepack prepare pnpm@9.15.4 --activate
+pnpm install --frozen-lockfile
+pnpm build                  # ordered monorepo build → apps/web/dist + apps/api/dist
+pnpm gen:update-manifest    # sign the private-mode bundle (WS-S.10 — below)
+pnpm check:sw               # post-build service-worker gate
+pnpm check:update-channel   # verify the manifest binds the built bundle
+pnpm sbom                   # CycloneDX SBOM — the supply-chain record (recommended)
+```
+
+| Artifact | Produced by | Notes |
+|----------|-------------|-------|
+| `apps/web/dist/` | `pnpm --filter web build` | The static PWA. The build script chains design-token generation → `vite build` → SW Trusted-Types injection → build validation → SW security scan → SRI generation → the bundle-size budget gate, and **fails** if any post-step fails |
+| `apps/api/dist/` | `pnpm --filter api build` (`tsc -b`) | The compiled API, started with `node dist/index.js`. It resolves its dependencies (including the `@licio/*` workspace packages) from the installed `node_modules`, so deploy the built **checkout**, not the bare `dist/` |
+
+**The signed update manifest (WS-S.10) is part of every production web
+release.** `pnpm gen:update-manifest` (run after the web build) hashes the
+built private-mode chunk (`apps/web/dist/assets/private-p2p-<hash>.js`),
+appends it to an RFC 9162 transparency log, Ed25519-signs the manifest, and
+emits `apps/web/dist/update-manifest.json` plus the public-keys sidecar
+`update-channel-keys.json`. Clients **verify before activating**: an absent,
+unsigned, log-less, digest-mismatched, or rolled-back manifest **locks the
+private-room surface** (typed lock reasons; room keys stay sealed) instead of
+running untrusted code. Key handling:
+
+- **Production** sets the all-or-none **build-secret** group
+  `LICIO_UPDATE_SIGNING_KEY` / `LICIO_UPDATE_SIGNING_PUBLIC` /
+  `LICIO_UPDATE_LOG_KEY` / `LICIO_UPDATE_LOG_PUBLIC` (base64url Ed25519). The
+  maintainer **release-signer** key and the **transparency-log** key are
+  distinct on purpose and belong in separate custody. These are *build-time*
+  secrets — never `VITE_`-prefixed, never present on the runtime host.
+- **Dev/CI** fall back to an auto-generated fixture keypair persisted in the
+  gitignored `.licio-update-keys/` — which is why the command works locally
+  with zero setup.
+- The repo's local append-only JSON log is the dev/CI substrate; a production
+  deployment runs the transparency log as a standalone **witnessed** service
+  and points the build at it (`scripts/build-update-manifest.ts` documents
+  that boundary). The optional `LICIO_UPDATE_RELEASE_SEQUENCE` pins the
+  monotonic release counter that feeds the client's anti-rollback floor.
+
+### 17.3 Provision the backing services
+
+Production needs **PostgreSQL 16 with pgvector** and **Redis 7** — managed
+services or self-hosted, your choice. The dev `docker-compose.yml` is the
+reference for the expected engine versions and (in its comments) the
+digest-pinning practice for production images. What differs from a stock
+install:
+
+- Postgres **must** have the `pgvector` extension available — the migration
+  chain runs `CREATE EXTENSION vector`.
+- Redis backs sessions, one-time challenges, the rate limiters, and the
+  realtime aggregation layer. The API connects lazily and degrades fail-closed
+  through an outage, but production boot **requires** `REDIS_URL`.
+- Never reuse the development credentials from `docker-compose.yml` or
+  `.env.example` in any deployed environment.
+
+### 17.4 Configure the environment
+
+`NODE_ENV=production` selects the strict posture; nothing is defaulted for
+you. The same zod schema that relaxes in dev (Section 7) **refuses to boot**
+production unless all of these are set:
+
+| Variable | Requirement |
+|----------|-------------|
+| `NODE_ENV` | `production`, explicitly — there is no default, so a forgotten `NODE_ENV` can never silently select the relaxed dev posture |
+| `DATABASE_URL` | the production Postgres |
+| `REDIS_URL` | the production Redis |
+| `SESSION_SECRET` | ≥ 32 chars, generated (Section 7.5), unique to the deployment. It is also the identity master secret — rotating it invalidates sessions and the keyed-hash lineage |
+| `CORS_ORIGIN` | the exact public web origin (`https://…`) |
+
+`PORT` (default `3001`) and `LOG_LEVEL` (default `info`) keep their defaults.
+Everything else is an **optional binding group** (Section 16 has per-group
+setup detail); each has a defined production behavior when unset:
+
+| Group unset in production | Behavior |
+|---------------------------|----------|
+| `SES_*` | **Refuses to boot** — unless `ALLOW_INSECURE_NULL_MAILER=true` (a deliberate passkey/wallet-only deployment; every email flow silently disabled) |
+| `S3_*` | Boots with a warning; DSAR export archives live in memory and do not survive a restart |
+| `EMBEDDING_*` | Boots with a warning; the deterministic **lexical** provider serves — dedup-grade, not semantic, so MERI/SCOI semantic conclusions stay gated |
+| `GOVERNANCE_LLM_*` | Defaults to the loopback-**`local`** backend (17.7); the governed AI surfaces fail closed per call to their deterministic paths until the runtime answers |
+| `KNOMOSIS_GATEWAY_*` | No gateway is bound; every Knomosis consumer degrades **closed** (and the `knomosis.cryptoEnabled`/`governanceEnabled` flags default `false` in production regardless — 17.8) |
+| `VAPID_*` | Web Push disabled; push endpoints report "unconfigured" |
+| `CHAIN_RPC_URLS` | EOA wallet sign-in only (no EIP-1271/6492 contract wallets) |
+
+How the environment reaches the process is your platform's concern — the
+server reads plain `process.env` (nothing auto-loads `.env`, exactly as in
+dev, Section 7.7), so a systemd unit's `Environment=`, a container `env`, or
+a secret manager all work identically.
+
+### 17.5 Migrate, then start the API
+
+The API **does not run migrations at boot** — it expects an
+already-migrated schema and immediately performs config reads and startup
+recovery against it. On every deploy that includes new migrations:
+
+```sh
+DATABASE_URL=postgresql://…  pnpm db:migrate      # ordered drizzle migration chain
+NODE_ENV=production …        pnpm --filter api start   # = node dist/index.js on $PORT
+```
+
+A healthy production boot, in order: env validation → durable adapters bound
+(the Postgres/Redis stores for identity, events, ingestion, forum, invariants,
+ranking, moderation, governance, Knomosis, and LCAP) → the MERI
+ranking-enforcement promotion (the one seed that runs in **every**
+environment, serialized across replicas by the Postgres job lease) →
+event-pipeline recovery (at-least-once replay from durable checkpoints) → the
+twelve lease-guarded schedulers → `Server started`. The demo seeds, the
+traffic simulator, and the simulated LLM runtime are all `NODE_ENV`-gated and
+never construct in production.
+
+- **Multiple API replicas are safe.** Every scheduler claims its window
+  through the Postgres job lease, so ticks never double-fire across replicas.
+  One caveat: the ADR-6 LLM debate budget is tracked per process, so N
+  replicas admit up to N× the hourly budget before the MLP fallback takes
+  over.
+- **Watch the boot log.** Production boot names every degraded binding loudly
+  (lexical embeddings, in-memory DSAR store, null mailer, defaulted LLM
+  backend). A quiet boot is a fully-bound boot.
+- **Health:** `GET /health` → `{"status":"ok",…}`. Point your orchestrator's
+  liveness/readiness probes at it (route it to the API at the edge, per 17.1).
+
+### 17.6 Serve the web build
+
+`apps/web/dist` is a plain static site — any static host or CDN works, with
+three requirements:
+
+1. **SPA fallback:** serve `index.html` for unknown *navigation* paths, but
+   never for `/v1/*`, `/api/*`, or `/health` (those route to the API).
+2. **Security headers on the static responses.** The API stamps its own
+   responses, but the document and assets come from the static host — it must
+   send the same posture. The `preview.headers` block in
+   `apps/web/vite.config.ts` is the canonical list (it exists precisely so
+   `vite preview` behaves header-identically to production): the full CSP,
+   `X-Content-Type-Options: nosniff`, `X-Frame-Options`, Referrer-Policy,
+   COOP/CORP, and the Permissions-Policy. Add `Strict-Transport-Security` at
+   the TLS-terminating edge (the preview list omits it only because preview is
+   plain HTTP). `index.html` also carries the CSP as a `<meta>` tag — that is
+   load-bearing in the native courier WebView (which has no server headers)
+   and harmless-redundant on the web.
+3. **Caching:** immutable-cache the content-hashed `assets/*` files; serve
+   `index.html`, the service worker, and `update-manifest.json` with
+   no-cache/short revalidation so app updates and the WS-S.10
+   verify-before-activate flow propagate promptly.
+
+### 17.7 The governance-LLM runtime in production
+
+Production **defaults** to the `local` backend: an OpenAI-compatible runtime
+on the API host's loopback (`http://127.0.0.1:11434/v1`) serving the reviewed
+default model (`gpt-oss:20b`). This is the *production-complete* posture — the
+three governed AI surfaces (lawmaking summaries, in-room moderation, debate
+adjudication) run the real LLM path by default — and the runtime is a **soft
+dependency**: it never blocks boot; until it answers, every governed call
+fails closed to its deterministic fallback and recovers automatically once
+the runtime responds.
+
+```sh
+pnpm setup:llm --docker   # start the Compose `llm`-profile ollama, pull the
+                          # default model, and verify a REAL governed completion
+# or natively:  ollama serve && ollama pull gpt-oss:20b
+# (any OpenAI-compatible /chat/completions runtime works: llama.cpp server,
+#  vLLM, LM Studio — point GOVERNANCE_LLM_LOCAL_URL at it, loopback only)
+```
+
+Operational rules — Section 16 has the full tuning detail:
+
+- **Loopback-only is enforced, not advisory.** A non-loopback
+  `GOVERNANCE_LLM_LOCAL_URL` fails env validation at boot: under the `local`
+  backend, governed-room content must provably never leave the host. Sending
+  it off-host is the `anthropic` backend decision
+  (`GOVERNANCE_LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`) — an explicit,
+  boot-logged operator opt-in that makes the vendor a data processor.
+- **Match the runtime to the platform's fan-out:** `OLLAMA_NUM_PARALLEL=4`
+  (debate adjudications fan out 4-wide), `OLLAMA_KEEP_ALIVE=-1` (an idle
+  unload costs a multi-second cold start on the next verdict), and
+  `OLLAMA_CONTEXT_LENGTH=8192` (the governed prompts are ≤ ~2.5k tokens;
+  Ollama's 32k default can push a large model into split CPU/GPU placement).
+  The Compose `llm` service sets all three; set the same on a native service,
+  and verify full-GPU placement with `curl -s localhost:11434/api/ps`
+  (`size_vram` should equal `size`).
+- **Choose the model with the real harness** — `pnpm bench:llm` races
+  installed models through the actual governed surfaces (validity means the
+  production path accepts the output) before you commit to one.
+- `GOVERNANCE_LLM_PROVIDER=deterministic` opts out entirely (deterministic
+  paths only, no runtime expected). Pin the Ollama image to a digest in
+  production (the compose file's comments show how).
+
+### 17.8 Knomosis pins (WS-L)
+
+The WS-L crypto/governance surfaces are **off by default in production**: the
+`knomosis.cryptoEnabled` / `knomosis.governanceEnabled` runtime-config keys
+default `false` and fail closed, so a standard production deployment needs no
+Knomosis setup at all. Before an operator *enables* them against a real
+substrate:
+
+- `apps/api/src/knomosis/pin.config.json` is the version-controlled pin file.
+  Any non-`local` deployment (`testnet` / `capped_production` /
+  `mature_production`) must pin **real** finality values — the Knomosis commit
+  hash, the contract + ABI manifest hashes, and bridge/verifier addresses that
+  appear in the contract allowlist. The all-zero sentinel values are valid
+  **only** for `environment: local`; both the boot-time loader and the
+  `pnpm check:knomosis-pins` CI gate reject a sentinel anywhere else, so an
+  unpinned deployment can never reach production. Changing a pinned value
+  requires a reviewed PR.
+- Bind the gateway with the all-or-none `KNOMOSIS_GATEWAY_URL` +
+  `KNOMOSIS_GATEWAY_TOKEN_FILE` (the bearer token is file-loaded — never
+  inline env, never logged). The pin file must declare exactly one **active**
+  deployment for the gateway to route to, or the server refuses to boot.
+
+### 17.9 The native courier APK (WS-R.15.4a)
+
+The Android courier is a Capacitor 8 shell that serves the **unchanged** web
+build — no courier-only web fork, enforced byte-for-byte by the no-fork gate.
+Building it locally needs:
+
+| Requirement | Detail |
+|-------------|--------|
+| **JDK 21** | required by Capacitor 8 / AGP (`JAVA_HOME` → a JDK 21) |
+| **Android SDK** | `platform-tools`, `platforms;android-36`, `build-tools;36.0.0`; set `ANDROID_HOME` and write `sdk.dir=…` into `apps/courier/android/local.properties` |
+| **The web build** | `pnpm --filter web build` must run first — the no-fork gate fails without `apps/web/dist` |
+
+```sh
+pnpm --filter web build
+pnpm --filter courier build
+# no-fork gate → cap sync android → byte-identity gate → gradle assembleDebug
+# → apps/courier/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+`pnpm --filter courier test:unit` runs the Layer-1+2 JVM/Robolectric unit
+suites — no emulator, no radio, no root. CI's **Native Courier APK** job
+builds the same debug APK on every PR, so a local Android toolchain is only
+needed when you work on the courier itself.
+
+### 17.10 Production smoke checklist
+
+After a deploy, verify in order:
+
+1. `curl https://your-origin/health` → `{"status":"ok",…}` through the edge
+   (proves TLS, routing, and a booted API in one request).
+2. The API boot log reaches `Server started` with **no** degraded-binding
+   warnings you didn't deliberately choose (embeddings, S3, mailer, LLM
+   backend, Knomosis).
+3. Re-run `pnpm db:migrate` against the production `DATABASE_URL` — it must
+   report nothing pending.
+4. The PWA loads over HTTPS and sign-in works end-to-end (the `__Host-`
+   session cookie only survives on HTTPS, so a working login proves the
+   cookie posture).
+5. If you provisioned the local LLM runtime: exercise a governed surface and
+   confirm the log shows real completions rather than `unavailable.transport`
+   fallbacks (`pnpm setup:llm` performs the same verification pre-boot).
+
+---
+
+## 18. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | API exits at boot with a zod error naming `DATABASE_URL`/`SESSION_SECRET`/etc. | The env wasn't loaded into the shell (nothing auto-loads `.env`) | Run `set -a && . ./.env && set +a`, then retry (Section 7.7). Check `SESSION_SECRET` is ≥ 32 chars |
-| `Incomplete S3/SES/EMBEDDING configuration: missing …` at boot | A partial all-or-none group is set | Set the whole group or unset all of it (Section 7.6) |
+| `Incomplete S3/SES/EMBEDDING/KNOMOSIS_GATEWAY configuration: missing …` at boot | A partial all-or-none group is set | Set the whole group or unset all of it (Section 7.6) |
 | API boots but errors connecting to the database, or relation/table "… does not exist" | Postgres not running, or migrations not applied | `docker compose up -d`, then `pnpm db:migrate` (Sections 6, 8) |
 | Migration fails at `CREATE EXTENSION "vector"` | Postgres image lacks pgvector | Use `pgvector/pgvector:pg16` (the Compose default); if running native PG, install pgvector |
 | `corepack: command not found` or wrong pnpm version | Corepack not enabled / pnpm not pinned | `corepack enable && corepack prepare pnpm@9.15.4 --activate` (Section 3) |
@@ -1478,10 +1803,12 @@ fail-closed branch on demand:
 | Git hooks don't run | Lefthook not installed in this clone | `pnpm exec lefthook install` (Section 14) |
 | Playwright can't download a browser | Network policy blocks the download | Pre-install browsers, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` (Section 13) |
 | `pnpm test` "skips" the integration suites | `DATABASE_URL`/`REDIS_URL` not set/reachable | Expected — set them (Section 13) to run the gated suites |
+| Production boot exits with `… is required in production` | `NODE_ENV=production` demands the full required set | Set all of `DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`, `CORS_ORIGIN` (Section 17.4); in production the SES group (or `ALLOW_INSECURE_NULL_MAILER=true`) is also required |
+| `pnpm check:update-channel` fails with `no produced manifest` | The web build exists but was never signed | Run `pnpm gen:update-manifest` after `pnpm --filter web build` (Section 17.2) |
 
 ---
 
-## 18. Resetting and cleaning up
+## 19. Resetting and cleaning up
 
 ```sh
 pnpm clean                 # remove dist/build, coverage, test-results, playwright-report, *.tsbuildinfo, caches
@@ -1502,7 +1829,7 @@ git clean -xnd -e .env     # preview, keeping your .env
 
 ---
 
-## 19. Editor setup
+## 20. Editor setup
 
 - **Formatter / linter:** [Biome](https://biomejs.dev) (`biome.json`).
   Install the Biome editor extension and set it as the default formatter so
@@ -1519,7 +1846,7 @@ git clean -xnd -e .env     # preview, keeping your .env
 
 ---
 
-## 20. Reference
+## 21. Reference
 
 - **Build/run commands:** [`package.json`](../package.json) (root + each
   workspace) — the source of truth.
