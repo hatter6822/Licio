@@ -730,3 +730,56 @@ describe('lease-bounded judging (judgeDeadlineMs)', () => {
     expect(next.judged).toBe(2);
   });
 });
+
+describe('claim-before-judge (the last-second-position TOCTOU)', () => {
+  it('a position submitted DURING a slow adjudication is rejected, never silently ignored', async () => {
+    const target = await seedComment(INCUMBENT, 'The figure is 42.');
+    const correction = await seedCorrection(target);
+    const arena = await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+    const id = arena?.debateId ?? '';
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+
+    let judgedSummary = '';
+    let midJudgeAttempt: Awaited<ReturnType<typeof postDebatePosition>> | null = null;
+    const racingDeps: DebateDeps = {
+      ...deps,
+      runJudge: async (debateId, input) => {
+        judgedSummary = input.incumbent.summary;
+        // The incumbent tries to post WHILE the (slow) judge is computing —
+        // the claim already froze the arena, so the write is refused loudly.
+        midJudgeAttempt = await postDebatePosition(deps, debateId, INCUMBENT, {
+          summary: 'a mid-adjudication rebuttal',
+          citations: [citation],
+        });
+        return corrected(debateId, input);
+      },
+    };
+    const judged = await judgeDebateArena(racingDeps, id);
+    expect(judged?.state).toBe('judged');
+    expect(midJudgeAttempt).toEqual({ ok: false, reason: 'window_closed' });
+    // The verdict was computed on the claimed snapshot — which the racer never
+    // mutated (empty incumbent position, exactly what the judge saw).
+    expect(judgedSummary).toBe('');
+    expect((await debates.getById(id))?.positions.incumbent.summary).toBe('');
+  });
+
+  it('a claim whose judge crashed is re-listed and judged on a later pass (never stranded)', async () => {
+    const target = await seedComment(INCUMBENT, 'The figure is 7.');
+    const correction = await seedCorrection(target);
+    const arena = await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+    const id = arena?.debateId ?? '';
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    const crashing: DebateDeps = {
+      ...deps,
+      runJudge: async () => {
+        throw new Error('adjudicator crashed mid-flight');
+      },
+    };
+    await expect(judgeDebateArena(crashing, id)).rejects.toThrow('mid-flight');
+    expect((await debates.getById(id))?.state).toBe('awaiting_verdict');
+    // The stranded claim is still listed as due and judges on the next pass.
+    const { judged } = await runDebateLifecycle(deps);
+    expect(judged).toBe(1);
+    expect((await debates.getById(id))?.state).toBe('judged');
+  });
+});

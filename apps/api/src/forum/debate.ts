@@ -228,9 +228,21 @@ export async function judgeDebateArena(
   deps: DebateDeps,
   debateId: string,
 ): Promise<DebateArenaRecord | null> {
-  const arena = await deps.debates.getById(debateId);
-  if (arena === null) return null;
-  if (arena.state !== 'open' && arena.state !== 'awaiting_verdict') return arena;
+  // ATOMICALLY claim the arena (`open` → `awaiting_verdict`) BEFORE the judge
+  // runs, and score the post-claim snapshot the claim returns. Adjudication
+  // can be slow (a real LLM); without the claim, a position submitted just
+  // inside the edit deadline could land WHILE the judge computes on a stale
+  // read and be silently ignored. From the claim onward the store-level
+  // `state = 'open'` guard on position writes rejects the race loser with an
+  // explicit `window_closed` — a timely write either beats the claim and IS
+  // judged, or the writer is told it wasn't considered; never a silent drop.
+  // (Re-claiming `awaiting_verdict` succeeds: a claim whose judge crashed is
+  // re-judged on a later tick.) A judged/resolved arena refuses the claim —
+  // return it unchanged (the idempotent no-op).
+  const arena = await deps.debates.claimForVerdict(debateId);
+  if (arena === null) return deps.debates.getById(debateId);
+  // Co-viewers see the window flip to "awaiting verdict" immediately.
+  await broadcastArena(deps, arena);
 
   const input = assembleJudgeInput(arena);
   const result = await deps.runJudge(debateId, input);

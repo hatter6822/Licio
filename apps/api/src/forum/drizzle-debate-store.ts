@@ -197,6 +197,23 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async claimForVerdict(debateId: string): Promise<DebateArenaRecord | null> {
+    // Atomic claim: only an open/awaiting arena flips; the RETURNING row is
+    // the post-claim position snapshot the judge scores (position writes are
+    // rejected from this instant by updatePosition's `state = 'open'` guard).
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({ state: 'awaiting_verdict', updatedAt: new Date() })
+      .where(
+        and(
+          eq(debateArenasTable.debateId, debateId),
+          inArray(debateArenasTable.state, ['open', 'awaiting_verdict']),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
   async recordVerdict(
     debateId: string,
     patch: DebateVerdictPatch,
@@ -276,7 +293,9 @@ export class DrizzleDebateStore implements DebateStore {
       .from(debateArenasTable)
       .where(
         and(
-          eq(debateArenasTable.state, 'open'),
+          // `awaiting_verdict` included: a claim whose judge crashed mid-flight
+          // must be re-listed on a later tick, never stranded.
+          inArray(debateArenasTable.state, ['open', 'awaiting_verdict']),
           lte(debateArenasTable.editDeadlineAt, new Date(nowIso)),
         ),
       )

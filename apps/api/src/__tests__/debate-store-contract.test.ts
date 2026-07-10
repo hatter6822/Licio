@@ -135,6 +135,43 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(after?.rationale).not.toBe('stale overwrite attempt');
   });
 
+  it('claimForVerdict atomically freezes the position snapshot the judge scores', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    // The claim flips open → awaiting_verdict and returns the frozen snapshot.
+    const claimed = await store.claimForVerdict(id);
+    expect(claimed?.state).toBe('awaiting_verdict');
+    // A position write AFTER the claim is refused at the store level (the
+    // TOCTOU loser gets an explicit rejection, never a silently ignored write).
+    const late = await store.updatePosition(id, 'incumbent', {
+      summary: 'a last-second rebuttal that must not be silently ignored',
+      citations: [citation],
+      updatedAt: '2026-07-05T11:59:59.000Z',
+    });
+    expect(late).toBeNull();
+    expect((await store.getById(id))?.positions.incumbent.summary).not.toContain('last-second');
+    // Re-claiming succeeds (crash recovery for a judge that never returned) …
+    expect((await store.claimForVerdict(id))?.state).toBe('awaiting_verdict');
+    // … and the awaiting arena stays LISTED as due (never stranded).
+    const due = await store.listPastEditDeadline('2027-01-01T00:00:00.000Z', 10);
+    expect(due.some((row) => row.debateId === id)).toBe(true);
+    // A judged arena refuses the claim.
+    await store.recordVerdict(id, {
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'ai',
+      rationale: 'sources',
+      confidence: 0.8,
+      aiOutputId: null,
+      verdictAt: '2026-07-05T12:00:00.000Z',
+      overrideDeadlineAt: '2026-07-06T12:00:00.000Z',
+      state: 'judged',
+    });
+    expect(await store.claimForVerdict(id)).toBeNull();
+  });
+
   it('updates one side without clobbering the other (co-visible concurrency)', async () => {
     const store = makeStore();
     const ctx = await freshCtx();
