@@ -21,6 +21,7 @@ export * from './lcap.js';
 export * from './moderation.js';
 export * from './privacy.js';
 export * from './private-room.js';
+export * from './push.js';
 export * from './ranking.js';
 export * from './room.js';
 export * from './session.js';

@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { configuredIceServers } from '../../../private-p2p/ice-config.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import type { PrivateSyncSession } from '../../../private-p2p/sync-session.js';
 import { Button } from '../../ui/Button/index.js';
@@ -133,8 +134,12 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
     setSyncStatus('connecting');
     setSyncError('');
     try {
+      // The deployment's STUN/TURN servers (VITE_ICE_SERVERS) — without them
+      // WebRTC gathers host candidates only, so only same-LAN peers connect.
+      const iceServers = configuredIceServers();
       const live = await session.connect({
         timeoutMs: 25_000,
+        ...(iceServers.length > 0 ? { iceServers } : {}),
         onProgress: () => setTick((n) => n + 1),
         onError: (e) => setSyncError(e instanceof Error ? e.message : String(e)),
       });

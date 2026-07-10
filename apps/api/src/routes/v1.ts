@@ -724,7 +724,7 @@ export function createV1Routes() {
       })
       .post('/push/subscriptions', zValidator('json', pushRegisterRequestSchema), async (c) => {
         const { subscription } = c.req.valid('json');
-        registerSubscription(
+        await registerSubscription(
           subscription,
           stateKey(c.req.header('cookie')),
           await resolveOptionalUserId(c.req.header('cookie')),
@@ -734,10 +734,10 @@ export function createV1Routes() {
       .delete(
         '/push/subscriptions',
         zValidator('json', z.object({ endpoint: z.string().url() })),
-        (c) => {
+        async (c) => {
           // Scoped to the requesting session — a session cannot unsubscribe
           // another user's endpoint (authorization, not just existence).
-          removeSubscription(c.req.valid('json').endpoint, stateKey(c.req.header('cookie')));
+          await removeSubscription(c.req.valid('json').endpoint, stateKey(c.req.header('cookie')));
           return c.json(okAckSchema.parse({ ok: true }));
         },
       )
@@ -745,7 +745,7 @@ export function createV1Routes() {
       // --- Notification preferences (WS-C.2.4c) -----------------------------
       .get('/notifications/preferences', async (c) => {
         const userId = await resolveOptionalUserId(c.req.header('cookie'));
-        return c.json(getPreferences(userId ?? stateKey(c.req.header('cookie'))));
+        return c.json(await getPreferences(userId ?? stateKey(c.req.header('cookie'))));
       })
       .patch(
         '/notifications/preferences',
@@ -754,10 +754,10 @@ export function createV1Routes() {
           const userId = await resolveOptionalUserId(c.req.header('cookie'));
           const key = userId ?? stateKey(c.req.header('cookie'));
           const merged = notificationPreferencesSchema.parse({
-            ...getPreferences(key),
+            ...(await getPreferences(key)),
             ...c.req.valid('json'),
           });
-          setPreferences(key, merged);
+          await setPreferences(key, merged);
           return c.json(merged);
         },
       )

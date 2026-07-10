@@ -433,6 +433,7 @@ reach the client bundle (a guard rejects anything else).
 |----------|---------|---------|
 | `VITE_API_URL` | `http://localhost:3001` | API base URL the client calls for `/v1/*`. **Optional in dev** — the dev server proxies `/v1/*` same-origin to the API by default. Set it only to call a **cross-origin** API |
 | `VITE_APP_URL` | `http://localhost:5173` | The app's own public URL |
+| `VITE_ICE_SERVERS` | `[{"urls":"stun:stun.example:3478"},{"urls":"turns:turn.example:5349","username":"u","credential":"c"}]` | **Production WS-S NAT traversal**: a JSON array of RTCIceServer entries for the private-room WebRTC transport. Unset ⇒ host candidates only (same-LAN peers connect; cross-NAT peers generally cannot, and the §26.4 relay-only mode is inoperable — it requires a TURN entry). Malformed input fails closed to none (console warning). NOTE: a TURN credential baked here is client-visible by nature — use a scoped/rotating credential (e.g. coturn's REST shared-secret scheme) |
 
 > In dev, the Vite server proxies **both** same-origin `/api/*` (e.g. the
 > CSRF-token endpoint) and `/v1/*` (every data call) to the API
@@ -1225,6 +1226,13 @@ pnpm --filter api exec tsx scripts/generate-vapid-keys.ts
 Copy the printed `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
 `VAPID_SUBJECT` into `.env`. The **private key stays on the server** and is
 never added to the client bundle. When unset, push is simply disabled.
+
+Subscriptions and notification preferences are **durable** whenever a
+database is configured (production always): they persist in
+`push_subscriptions` / `push_preferences` — a restart/deploy never
+invalidates delivery, every replica can wake any user's endpoints, the
+owning-session handle is stored as a SHA-256 hash (never the raw token),
+and a deleted account's subscriptions cascade away with it.
 
 ### S3-compatible object storage (`S3_*`)
 

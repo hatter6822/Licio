@@ -725,7 +725,7 @@ export function createForumRoutes() {
                       parentCommentId: outcome.contribution.parentContributionId as string,
                       actorHandle: contribution.author_handle ?? 'deleted-user',
                     });
-                    const prefs = getPreferences(recipientUserId);
+                    const prefs = await getPreferences(recipientUserId);
                     const vapid = getVapidConfig();
                     const minuteOfDay = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
                     if (

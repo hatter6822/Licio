@@ -213,10 +213,12 @@ import {
   seedModerationDemo,
   seedOperationalSignals,
 } from './lib/demo-seed.js';
+import { DrizzlePushStateStore } from './lib/drizzle-push-store.js';
 import { createLogger } from './lib/logger.js';
 import {
   getVapidConfig,
   sendBodylessWakeToUser,
+  setPushStateStore,
   subscriptionsForUser,
 } from './lib/push-service.js';
 import { RedisTokenStore, setTokenStore } from './middleware/csrf.js';
@@ -345,6 +347,10 @@ const makeJobLease = () => (db ? new DrizzleJobLeaseStore(db) : new InMemoryJobL
 if (db) {
   identityServices.store = new DrizzleIdentityStore(db);
   identityServices.audit = new DrizzleAuditStore(db);
+  // Web Push state (WS-C.2.4a/c): durable subscriptions + preferences, so a
+  // restart/deploy never invalidates delivery and every replica can wake any
+  // user's endpoints.
+  setPushStateStore(new DrizzlePushStateStore(db));
   // WS-E durable stores (Postgres, WS-E.3.1): the partitioned event log, §22.1
   // aggregates, aggregation windows, invariant outputs (shadow), the owner-only
   // Signal Ledger, safety states, tunable config, dead letters, and checkpoints.
@@ -617,8 +623,8 @@ if (s3Config) {
 // audit-log entry) stays in sendSecurityAlert; delivery is best-effort by
 // construction (a transport failure logs and can never fail the auth flow).
 const alertVapidConfig = getVapidConfig();
-identityServices.hasPushChannel = (userId) =>
-  alertVapidConfig !== null && subscriptionsForUser(userId).length > 0;
+identityServices.hasPushChannel = async (userId) =>
+  alertVapidConfig !== null && (await subscriptionsForUser(userId)).length > 0;
 identityServices.alertTransports = createAlertTransports({
   getUserEmail: async (userId) => (await identityServices.store.getUser(userId))?.email ?? null,
   sendNotice: (to, kind, payload) => identityServices.mailer.sendNotice(to, kind, payload),

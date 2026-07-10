@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { DEFAULT_NOTIFICATION_PREFERENCES, type PushSubscriptionJson } from '@licio/shared';
+import {
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  defaultPersonalizationSettings,
+  defaultPrivacySettings,
+  emptyReputationSummary,
+  type PushSubscriptionJson,
+} from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   getSubscriptions,
@@ -39,17 +45,84 @@ describe('suppressionReason', () => {
 });
 
 describe('removeSubscription authorization (IDOR)', () => {
-  it('lets a session remove only its own subscription', () => {
-    registerSubscription(sub('https://push.example/a'), 'session-a');
+  it('lets a session remove only its own subscription', async () => {
+    await registerSubscription(sub('https://push.example/a'), 'session-a');
     // A different session must not be able to remove session-a's endpoint.
-    expect(removeSubscription('https://push.example/a', 'session-b')).toBe(false);
-    expect(getSubscriptions()).toHaveLength(1);
+    expect(await removeSubscription('https://push.example/a', 'session-b')).toBe(false);
+    expect(await getSubscriptions()).toHaveLength(1);
     // The owning session can.
-    expect(removeSubscription('https://push.example/a', 'session-a')).toBe(true);
-    expect(getSubscriptions()).toHaveLength(0);
+    expect(await removeSubscription('https://push.example/a', 'session-a')).toBe(true);
+    expect(await getSubscriptions()).toHaveLength(0);
   });
 
-  it('returns false for an unknown endpoint', () => {
-    expect(removeSubscription('https://push.example/missing', 'session-a')).toBe(false);
+  it('returns false for an unknown endpoint', async () => {
+    expect(await removeSubscription('https://push.example/missing', 'session-a')).toBe(false);
+  });
+});
+
+// GATED live-Postgres contract for the production adapter: durable
+// subscriptions/preferences, hashed at-rest refs (a raw session token never
+// touches the database), session-scoped removal, and the account-deletion
+// cascade (a purged account leaves no reachable push endpoint, WS-D.2.4).
+const DB_URL = process.env['DATABASE_URL'];
+describe.skipIf(!DB_URL)('DrizzlePushStateStore (live Postgres)', () => {
+  it('round-trips push state durably with privacy-safe at-rest refs', async () => {
+    const { createDbClient, migrationsFolder, pushSubscriptions, users } = await import(
+      '@licio/db'
+    );
+    const { migrate } = await import('drizzle-orm/postgres-js/migrator');
+    const { eq } = await import('drizzle-orm');
+    const { DrizzlePushStateStore } = await import('../lib/drizzle-push-store.js');
+    const db = createDbClient(DB_URL as string);
+    await migrate(db, { migrationsFolder: migrationsFolder() });
+    const store = new DrizzlePushStateStore(db);
+    await store.clear();
+    let userId: string | null = null;
+    try {
+      await store.register(sub('https://push.example/pg-a'), 'session-a', null);
+      await store.register(sub('https://push.example/pg-a'), 'session-a', null); // refresh upsert
+      // The raw session token never sits at rest — the column holds a SHA-256.
+      const rows = await db
+        .select({ ref: pushSubscriptions.sessionRef })
+        .from(pushSubscriptions)
+        .where(eq(pushSubscriptions.endpoint, 'https://push.example/pg-a'));
+      expect(rows[0]?.ref).toMatch(/^[0-9a-f]{64}$/);
+      expect(rows[0]?.ref).not.toContain('session-a');
+      // Session-scoped removal (IDOR): only the owner removes.
+      expect(await store.remove('https://push.example/pg-a', 'session-b')).toBe(false);
+      expect(await store.remove('https://push.example/pg-a', 'session-a')).toBe(true);
+
+      // Preferences round-trip under a hashed state ref.
+      await store.setPreferences('user-key-1', {
+        ...DEFAULT_NOTIFICATION_PREFERENCES,
+        reply_notifications: false,
+      });
+      expect((await store.getPreferences('user-key-1'))?.reply_notifications).toBe(false);
+      expect(await store.getPreferences('unknown-key')).toBeNull();
+
+      // A user-linked subscription lists by user and dies with the account (FK cascade).
+      const inserted = await db
+        .insert(users)
+        .values({
+          handle: `push_${Date.now().toString(36)}`,
+          displayName: 'Push Integration',
+          email: null,
+          ageBandIfKnown: 'adult',
+          privacySettings: defaultPrivacySettings(),
+          personalizationSettings: defaultPersonalizationSettings(),
+          reputationSummaryPrivate: emptyReputationSummary(),
+        })
+        .returning();
+      userId = (inserted[0] as { userId: string }).userId;
+      await store.register(sub('https://push.example/pg-u'), 'session-u', userId);
+      expect(await store.listForUser(userId)).toHaveLength(1);
+      await db.delete(users).where(eq(users.userId, userId));
+      userId = null;
+      expect(await store.listForUser((inserted[0] as { userId: string }).userId)).toHaveLength(0);
+    } finally {
+      await store.clear();
+      if (userId) await db.delete(users).where(eq(users.userId, userId));
+      await (db as unknown as { $client: { end(): Promise<void> } }).$client.end();
+    }
   });
 });
