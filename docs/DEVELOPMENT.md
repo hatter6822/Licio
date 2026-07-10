@@ -1333,6 +1333,20 @@ wider out of the box. Measured on the reviewed default stack:
 `reasoning_effort low` ≈ 1.3s vs 1.7s per moderation-shaped verdict, and four
 parallel completions finish in half the serial wall-clock.
 
+**GPU placement (the silent throughput killer).** Ollama offloads a model to
+the GPU only as far as its weights **plus KV cache** fit, and the KV cache
+scales with the context window — at Ollama's 32k default a dense 32B model
+carries a ~9 GB KV cache, overflows a 24 GB card, splits ~84/16 across
+GPU/CPU, and every token then crawls through the CPU layers (measured: 30 →
+~6.5 tok/s). The governed prompts are ≤ ~2.5k tokens, so the Compose runtime
+sets `OLLAMA_CONTEXT_LENGTH=8192`; set the same on a native service if large
+models bench slower than expected, and check placement with
+`curl -s localhost:11434/api/ps` (`size_vram` should equal `size`). On AMD
+cards use `rocm-smi` (not `nvidia-smi`) to see the GPU at all. Known upstream
+issue on some ROCm stacks: gemma3 emits garbage tokens when GPU-offloaded
+while every other family runs correctly — `pnpm bench:llm` detects this and
+prints the CPU-pin remedy.
+
 **Model families negotiate automatically.** The completion layer adapts the
 wire per runtime — logged and counted, never silent: a runtime/model that
 **400-rejects** `reasoning_effort` (e.g. gemma3, not a reasoning model) gets

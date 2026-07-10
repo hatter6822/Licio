@@ -60,6 +60,12 @@ services:
       # Parallel request slots (the debate lifecycle fans adjudications out
       # 4-wide; match it so a backlog genuinely overlaps).
       OLLAMA_NUM_PARALLEL: "4"
+      # Right-size the context window for the governed surfaces (prompts are
+      # ≤ ~2.5k tokens). Ollama's 32k default inflates the KV cache by
+      # gigabytes and can push a large model into a split CPU/GPU placement
+      # that serializes every token (measured: a dense 32B fell from 30 to
+      # ~6.5 tok/s that way on a 24 GB GPU).
+      OLLAMA_CONTEXT_LENGTH: "8192"
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
