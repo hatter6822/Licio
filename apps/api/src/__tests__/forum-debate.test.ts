@@ -639,3 +639,147 @@ describe('WS-T sourced roots — filter + count include sourced comments', () =>
     expect(await contributions.countSourced(THREAD, ['published'])).toBe(2);
   });
 });
+
+describe('window-policy override (the dev-simulator / test seam)', () => {
+  it('stamps the injected windows; absent ⇒ the §15.4 spec constants', async () => {
+    // Injected windows drive both deadlines.
+    const target = await seedComment(INCUMBENT, 'The figure is 42.');
+    const correction = await seedCorrection(target);
+    const shortened: DebateDeps = {
+      ...deps,
+      windows: { editWindowMs: 1_000, overrideWindowMs: 2_000 },
+    };
+    const arena = await maybeEnterDebate(
+      shortened,
+      correctionInput(correction, target),
+      randomUUID(),
+    );
+    expect(arena).not.toBeNull();
+    expect(Date.parse(arena?.editDeadlineAt ?? '')).toBe(clock.ms + 1_000);
+    clock.ms += 1_000;
+    const judged = await judgeDebateArena(shortened, arena?.debateId ?? '');
+    expect(Date.parse(judged?.overrideDeadlineAt ?? '')).toBe(clock.ms + 2_000);
+    // And the full lifecycle resolves on the shortened cadence.
+    clock.ms += 2_000;
+    const { finalized } = await runDebateLifecycle(shortened);
+    expect(finalized).toBe(1);
+
+    // Without the override, a fresh arena carries the SPEC deadline.
+    const target2 = await seedComment(INCUMBENT, 'A second figure is 7.');
+    const correction2 = await seedCorrection(target2);
+    const arena2 = await maybeEnterDebate(
+      deps,
+      correctionInput(correction2, target2),
+      randomUUID(),
+    );
+    expect(Date.parse(arena2?.editDeadlineAt ?? '')).toBe(clock.ms + DEBATE_EDIT_WINDOW_MS);
+    clock.ms += DEBATE_EDIT_WINDOW_MS;
+    const judged2 = await judgeDebateArena(deps, arena2?.debateId ?? '');
+    expect(Date.parse(judged2?.overrideDeadlineAt ?? '')).toBe(
+      clock.ms + DEBATE_OVERRIDE_WINDOW_MS,
+    );
+  });
+});
+
+describe('lifecycle fan-out — per-arena failure isolation', () => {
+  it('one failing adjudication is logged and the rest of the batch still judges', async () => {
+    // Three due arenas on distinct targets.
+    const arenas: string[] = [];
+    for (const body of ['One is 1.', 'Two is 2.', 'Three is 3.']) {
+      const target = await seedComment(INCUMBENT, body);
+      const correction = await seedCorrection(target);
+      const arena = await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+      if (arena) arenas.push(arena.debateId);
+    }
+    expect(arenas).toHaveLength(3);
+    const poisoned = arenas[1];
+    const logged: string[] = [];
+    const flaky: DebateDeps = {
+      ...deps,
+      runJudge: async (debateId, input) => {
+        if (debateId === poisoned) throw new Error('adjudicator store fault');
+        return corrected(debateId, input);
+      },
+      log: (event) => {
+        logged.push(event);
+      },
+    };
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    const { judged } = await runDebateLifecycle(flaky);
+    expect(judged).toBe(2); // the poisoned arena is isolated, not batch-fatal
+    expect(logged).toContain('forum.debate_judge_failed');
+    // The poisoned arena is untouched and judges on a later pass.
+    const { judged: retried } = await runDebateLifecycle(deps);
+    expect(retried).toBe(1);
+  });
+});
+
+describe('lease-bounded judging (judgeDeadlineMs)', () => {
+  it('skips the remaining due arenas once the deadline passes; they stay open for the next tick', async () => {
+    for (const body of ['A is 1.', 'B is 2.'] as const) {
+      const target = await seedComment(INCUMBENT, body);
+      const correction = await seedCorrection(target);
+      await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+    }
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    // Deadline already elapsed ⇒ nothing judged, nothing lost.
+    const bounded = await runDebateLifecycle(deps, 100, 4, clock.ms - 1);
+    expect(bounded.judged).toBe(0);
+    // The next (unbounded) pass judges both.
+    const next = await runDebateLifecycle(deps);
+    expect(next.judged).toBe(2);
+  });
+});
+
+describe('claim-before-judge (the last-second-position TOCTOU)', () => {
+  it('a position submitted DURING a slow adjudication is rejected, never silently ignored', async () => {
+    const target = await seedComment(INCUMBENT, 'The figure is 42.');
+    const correction = await seedCorrection(target);
+    const arena = await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+    const id = arena?.debateId ?? '';
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+
+    let judgedSummary = '';
+    let midJudgeAttempt: Awaited<ReturnType<typeof postDebatePosition>> | null = null;
+    const racingDeps: DebateDeps = {
+      ...deps,
+      runJudge: async (debateId, input) => {
+        judgedSummary = input.incumbent.summary;
+        // The incumbent tries to post WHILE the (slow) judge is computing —
+        // the claim already froze the arena, so the write is refused loudly.
+        midJudgeAttempt = await postDebatePosition(deps, debateId, INCUMBENT, {
+          summary: 'a mid-adjudication rebuttal',
+          citations: [citation],
+        });
+        return corrected(debateId, input);
+      },
+    };
+    const judged = await judgeDebateArena(racingDeps, id);
+    expect(judged?.state).toBe('judged');
+    expect(midJudgeAttempt).toEqual({ ok: false, reason: 'window_closed' });
+    // The verdict was computed on the claimed snapshot — which the racer never
+    // mutated (empty incumbent position, exactly what the judge saw).
+    expect(judgedSummary).toBe('');
+    expect((await debates.getById(id))?.positions.incumbent.summary).toBe('');
+  });
+
+  it('a claim whose judge crashed is re-listed and judged on a later pass (never stranded)', async () => {
+    const target = await seedComment(INCUMBENT, 'The figure is 7.');
+    const correction = await seedCorrection(target);
+    const arena = await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+    const id = arena?.debateId ?? '';
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    const crashing: DebateDeps = {
+      ...deps,
+      runJudge: async () => {
+        throw new Error('adjudicator crashed mid-flight');
+      },
+    };
+    await expect(judgeDebateArena(crashing, id)).rejects.toThrow('mid-flight');
+    expect((await debates.getById(id))?.state).toBe('awaiting_verdict');
+    // The stranded claim is still listed as due and judges on the next pass.
+    const { judged } = await runDebateLifecycle(deps);
+    expect(judged).toBe(1);
+    expect((await debates.getById(id))?.state).toBe('judged');
+  });
+});

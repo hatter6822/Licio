@@ -42,7 +42,17 @@ const speedSchema = z.number().min(SIMULATOR_MIN_SPEED).max(SIMULATOR_MAX_SPEED)
 export const simulatorActivityEntrySchema = z
   .object({
     at: isoTimestampSchema,
-    kind: z.enum(['story', 'comment', 'attention', 'join', 'report', 'provision', 'signals']),
+    kind: z.enum([
+      'story',
+      'comment',
+      'attention',
+      'join',
+      'report',
+      'provision',
+      'signals',
+      'correction',
+      'debate',
+    ]),
     /** The synthetic actor's handle ('system' for pipeline refreshes). */
     actor: z.string().min(1).max(80),
     summary: z.string().min(1).max(300),
@@ -78,6 +88,14 @@ export const simulatorCountersSchema = z
     room_joins: countSchema,
     reports_filed: countSchema,
     users_provisioned: countSchema,
+    /** WS-T challenge-resolution load: sourced corrections posted, the arenas
+     *  they opened, incumbent rebuttal positions, and the REAL lifecycle's
+     *  judged/finalized progress (the governed adjudicator under load). */
+    corrections_posted: countSchema,
+    debates_opened: countSchema,
+    debate_positions_posted: countSchema,
+    debates_judged: countSchema,
+    debates_finalized: countSchema,
     /** Real pipeline rejections, surfaced (rate limits, dedup, guards). */
     rejected_rate_limited: countSchema,
     rejected_duplicate: countSchema,
@@ -123,6 +141,33 @@ export const simulatorStatusSchema = z
       })
       .strict(),
     last_signal_refresh_at: isoTimestampSchema.nullable(),
+    /** WS-T challenge-resolution throughput: how fast the governed adjudicator
+     *  (the LLM leg when a backend is wired, the deterministic MLP otherwise)
+     *  resolves the simulator's correction debates. Descriptive load/latency
+     *  numbers only — never a score. */
+    debate_pulse: z
+      .object({
+        /** Arenas the simulator opened that are still awaiting a verdict. */
+        open_arenas: countSchema,
+        /** Whether the governed LLM adjudicator leg is wired this boot. */
+        llm_backend_active: z.boolean(),
+        /** LLM-leg verdict split (the MLP fallback's verdicts are not broken
+         *  out — `debates_judged` minus `llm_decided` ran on the fallback). */
+        llm_verdicts: z
+          .object({
+            upheld: countSchema,
+            corrected: countSchema,
+            inconclusive: countSchema,
+          })
+          .strict(),
+        llm_decided: countSchema,
+        /** LLM-leg unavailability (transport/budget/breaker/… → MLP fallback). */
+        llm_unavailable: countSchema,
+        /** Mean wall-clock ms per adjudicated arena (lifecycle-measured). */
+        avg_adjudication_ms: z.number().min(0).nullable(),
+        last_judged_at: isoTimestampSchema.nullable(),
+      })
+      .strict(),
     scenarios: z.array(simulatorScenarioInfoSchema).min(1),
   })
   .strict();

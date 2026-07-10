@@ -121,7 +121,7 @@ describe('validateServerEnv', () => {
     ).toThrow(/Incomplete KNOMOSIS_GATEWAY configuration/);
   });
 
-  it('accepts the WS-U ADR-9 LLM opt-in in production (explicit operator decision) — requirements still enforced', () => {
+  it('accepts the WS-U ADR-9 LLM backends in production — requirements still enforced', () => {
     const prod = { ...validEnv, NODE_ENV: 'production' };
     expect(() =>
       validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'k' }),
@@ -134,14 +134,17 @@ describe('validateServerEnv', () => {
         GOVERNANCE_LLM_MODEL: 'llama3.3',
       }),
     ).not.toThrow();
-    // A half-configured backend still fails fast in production…
+    // A half-configured hosted backend still fails fast in production…
     expect(() => validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'anthropic' })).toThrow(
       /non-empty ANTHROPIC_API_KEY/,
     );
-    // …and 'deterministic' (and absence) stay valid everywhere.
+    // …'deterministic' and ABSENCE stay valid everywhere (an absent provider in
+    // production resolves to the defaulted 'local' backend at boot — the
+    // production-complete posture — with no extra env required).
     expect(() =>
       validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'deterministic' }),
     ).not.toThrow();
+    expect(() => validateServerEnv(prod)).not.toThrow();
   });
 
   it('enforces each LLM backend’s requirements (any environment)', () => {
@@ -156,10 +159,21 @@ describe('validateServerEnv', () => {
         ANTHROPIC_API_KEY: 'k',
       }),
     ).not.toThrow();
-    // local ⇒ loopback URL + model required.
-    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_PROVIDER: 'local' })).toThrow(
-      /requires GOVERNANCE_LLM_LOCAL_URL/,
-    );
+    // local ⇒ URL + model are OPTIONAL (they default to the Ollama loopback
+    // endpoint + the reviewed default local model)…
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_PROVIDER: 'local' }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+      }),
+    ).not.toThrow();
+    // …but an EXPLICIT non-loopback URL is third-party egress wearing a local
+    // flag and fails fast — with OR WITHOUT an explicit provider (production
+    // may default the provider to 'local', so the value is validated on sight).
     expect(() =>
       validateServerEnv({
         ...validEnv,
@@ -171,10 +185,9 @@ describe('validateServerEnv', () => {
     expect(() =>
       validateServerEnv({
         ...validEnv,
-        GOVERNANCE_LLM_PROVIDER: 'local',
-        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://192.168.1.20:11434/v1',
       }),
-    ).toThrow(/non-empty GOVERNANCE_LLM_MODEL/);
+    ).toThrow(/loopback/);
     expect(() =>
       validateServerEnv({
         ...validEnv,
@@ -183,6 +196,24 @@ describe('validateServerEnv', () => {
         GOVERNANCE_LLM_MODEL: 'llama3.3',
       }),
     ).not.toThrow();
+    // The WS-T debate flag parses like the moderation flag.
+    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_DEBATE: 'off' })).not.toThrow();
+    // The throughput budget knob coerces to a positive integer.
+    expect(
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: '5000' })
+        .GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR,
+    ).toBe(5000);
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: '0' }),
+    ).toThrow();
+    // The reasoning-effort lever is a closed enum ('off' disables the field).
+    expect(
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_REASONING_EFFORT: 'off' })
+        .GOVERNANCE_LLM_REASONING_EFFORT,
+    ).toBe('off');
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_REASONING_EFFORT: 'turbo' }),
+    ).toThrow();
   });
 
   it('rejects a BLANK (whitespace-only) LLM credential — no silent-disable of the opt-in (WS-U ADR-9 review)', () => {
@@ -195,7 +226,9 @@ describe('validateServerEnv', () => {
         ANTHROPIC_API_KEY: '   ',
       }),
     ).toThrow(/non-empty ANTHROPIC_API_KEY/);
-    // Same trap for a blank local model name.
+    // A blank explicit model OVERRIDE fails fast for EVERY backend (it would
+    // otherwise trim to empty and silently run the default), while UNSET stays
+    // valid (optional; the backend default applies).
     expect(() =>
       validateServerEnv({
         ...validEnv,
@@ -203,9 +236,7 @@ describe('validateServerEnv', () => {
         GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
         GOVERNANCE_LLM_MODEL: '   ',
       }),
-    ).toThrow(/non-empty GOVERNANCE_LLM_MODEL/);
-    // R4-2: a blank explicit ANTHROPIC model OVERRIDE fails fast (it would otherwise
-    // trim to empty and silently run the default), while UNSET stays valid (optional).
+    ).toThrow(/GOVERNANCE_LLM_MODEL must be non-empty/);
     expect(() =>
       validateServerEnv({
         ...validEnv,

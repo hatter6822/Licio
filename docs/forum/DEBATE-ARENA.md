@@ -29,7 +29,7 @@ remains re-challengeable if new evidence emerges.
 | Phase | Duration | What happens |
 |-------|----------|--------------|
 | `open` | 12h | The **incumbent** (target author) and **challenger** (correction author) post + edit a co-visible position (summary + sources). The client polls, so each sees the other's current draft and offers their strongest case. |
-| `awaiting_verdict` → `judged` | — | At the deadline the lease-guarded scheduler (`debate-scheduler.ts`) runs the governed adjudicator; a verdict + the 24h override window are recorded. |
+| `awaiting_verdict` → `judged` | — | At the deadline the lease-guarded scheduler (`debate-scheduler.ts`) runs the governed adjudicator (due arenas fan out 4-wide per pass — independent verdicts, per-arena failure isolation); a verdict + the 24h override window are recorded. |
 | `judged` | 24h | The room **steward may fully overrule** the verdict either direction (audited, subordinate to the platform floor). |
 | `resolved` | — | On `corrected` the loser is tagged `incorrect`; on `upheld` the challenged target is tagged `validated`. |
 
@@ -66,8 +66,36 @@ deploy gate + the pre-execution `ProhibitedUseGuard` and writes an **immutable
 weights swap into the same artifact behind the same registry/guard machinery —
 the WS-K "real backend is a seam" contract.
 
+**The LLM leg (the production default).** That seam is exercised: when a
+governance LLM backend is enabled (production defaults to the loopback-`local`
+backend; `GOVERNANCE_LLM_DEBATE=off` opts this surface out), the adjudicator is
+a governed **LLM** (`apps/api/src/ai-governance/llm/debate.ts`) that reads both
+positions' substance and sourcing and emits ONLY class probabilities + a
+bounded rationale. Authority stays in the deterministic shell: the outcome
+mapping is `judgeDebate`'s exact argmax/tie rule + the shared verdict
+vocabulary, probabilities are clamped/renormalized, and the rationale is
+length-capped with a no-URLs bound (the arena renders it). Its own registry
+identity clears the WS-K deploy gate, every verdict writes an
+`AIOutputRecord`, and **any** failure — transport, refusal, schema, budget,
+breaker, an unusable assessment, a provenance-write fault — falls back to the
+pinned-weights MLP above, so a verdict is always rendered at at least the
+deterministic quality floor. The steward's 24h overrule remains the human
+remedy over both legs. In development the DEV-ONLY simulated runtime serves
+this surface (`docs/DEVELOPMENT.md` §16).
+
 The WS-U `debate.judge` capability (floor-disjoint, deny-by-default) lets a
 governed room route adjudication through its own agent under its law-pack bounds.
+
+**Window policy.** The 12h edit / 24h override windows are the §15.4 spec
+constants (`DEBATE_EDIT_WINDOW_MS`/`DEBATE_OVERRIDE_WINDOW_MS`), injectable via
+`DebateDeps.windows` ← `ForumServices.debateWindowsOverride` — a **dev/test-only
+seam** nothing in production wiring ever sets. The DEV traffic simulator sets
+short windows (≈20s/10s) while it runs (restored on stop) and advances due
+arenas every tick, so synthetic sourced corrections resolve observably: the
+challenge-resolution **throughput pulse** (arenas opened/awaiting/adjudicated/
+finalized, LLM verdict split + fallbacks, average adjudication wall-clock)
+renders in the dev panel and at `GET /v1/dev/simulator/status` (see
+`docs/DEVELOPMENT.md` §10).
 
 ## Surfaces
 

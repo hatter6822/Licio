@@ -19,6 +19,7 @@ import {
   attentionAggregateEventSchema,
   contributionCreateSchema,
   createReportRequestSchema,
+  debatePositionUpdateSchema,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   emptyReputationSummary,
@@ -34,6 +35,7 @@ import {
   sessionBucket,
   storyCreateRequestSchema,
 } from '@licio/shared';
+import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import {
   type AttentionIngestEvent,
   ingestAttentionEvents,
@@ -42,6 +44,12 @@ import {
 import type { EventPipelineServices } from '../events/services.js';
 import { getEventPipelineServices } from '../events/services.js';
 import { createContribution } from '../forum/contributions.js';
+import {
+  type DebateDeps,
+  type DebateWindowPolicy,
+  postDebatePosition,
+  runDebateLifecycle,
+} from '../forum/debate.js';
 import { joinRoom } from '../forum/rooms.js';
 import type { ForumServices } from '../forum/services.js';
 import { getForumServices } from '../forum/services.js';
@@ -72,6 +80,7 @@ import {
   type SimAction,
   type SimWorld,
   type WorldCommentRef,
+  type WorldOpenDebate,
   type WorldRoom,
   type WorldStory,
 } from './engine.js';
@@ -95,6 +104,17 @@ const DEFAULT_STORY_CAP = 400;
 const ACTIVITY_LOG_LIMIT = 60;
 const RECENT_TITLE_LIMIT = 200;
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Shortened WS-T arena windows while the simulator runs (spec: 12h edit /
+ *  24h override — dev-observable instead: an arena opened by a synthetic
+ *  correction is adjudicated ~4 ticks later and finalized ~2 ticks after
+ *  that). Applied via `ForumServices.debateWindowsOverride` on start() and
+ *  RESTORED to the spec windows on stop(); arenas keep the deadline stamped
+ *  when they opened. */
+const SIM_DEBATE_WINDOWS: DebateWindowPolicy = {
+  editWindowMs: 20_000,
+  overrideWindowMs: 10_000,
+};
 
 export interface SimulatorServiceGraph {
   readonly identity: IdentityServices;
@@ -139,6 +159,11 @@ function emptyCounters(): SimulatorCounters {
     room_joins: 0,
     reports_filed: 0,
     users_provisioned: 0,
+    corrections_posted: 0,
+    debates_opened: 0,
+    debate_positions_posted: 0,
+    debates_judged: 0,
+    debates_finalized: 0,
     rejected_rate_limited: 0,
     rejected_duplicate: 0,
     rejected_other: 0,
@@ -146,6 +171,18 @@ function emptyCounters(): SimulatorCounters {
     signal_refreshes: 0,
   };
 }
+
+/** LLM-leg unavailability codes (ai-governance/llm/debate.ts `unavailable`). */
+const DEBATE_LLM_UNAVAILABLE_CODES = [
+  'transport',
+  'breaker_open',
+  'budget_exhausted',
+  'refusal',
+  'truncated',
+  'invalid_output',
+  'unusable_assessment',
+  'record_failed',
+] as const;
 
 /** Infer a simulator content domain from a room name (best-effort; only used
  *  to bias reading toward affinity — never a correctness dependency). */
@@ -221,6 +258,14 @@ export class DevTrafficSimulator {
    *  the simulator uses, resolved once (create-if-missing) then cached. */
   #roomLensCache = new Map<string, ReadonlyMap<LensType, string>>();
   #counters = emptyCounters();
+  /** WS-T arenas this simulator opened, tracked for incumbent-rebuttal planning
+   *  (pruned once an arena leaves `open`). */
+  #openArenas = new Map<
+    string,
+    { incumbentUserId: string | null; incumbentPosted: boolean; domain: DomainId | null }
+  >();
+  /** Challenge-resolution throughput accumulators (the debate pulse). */
+  #debateStats = { adjudicationMsTotal: 0, adjudicated: 0, lastJudgedAtMs: null as number | null };
   #activity: SimulatorActivityEntry[] = [];
   #feedPulse: { computedAtMs: number | null; fallback: boolean; items: SimulatorFeedPulseItem[] } =
     {
@@ -298,6 +343,10 @@ export class DevTrafficSimulator {
     this.#startedAtMs ??= this.#now();
     this.#scenarioStartedAtMs = this.#now();
     this.#lastSignalRefreshMs = this.#now();
+    // WS-T: shorten the arena windows while the simulator runs so a synthetic
+    // correction resolves in seconds, not 36h (restored on stop()). Arenas the
+    // real spec windows already stamped keep their deadlines.
+    this.#graph.forum.debateWindowsOverride = SIM_DEBATE_WINDOWS;
     // Provision the organic roster up front so the first tick has actors. A
     // provisioning failure (e.g. a durable-store handle collision) must not
     // leave the instance stuck "running" with no timer and no way to restart —
@@ -345,6 +394,10 @@ export class DevTrafficSimulator {
       clearTimeout(this.#timer);
       this.#timer = null;
     }
+    // Restore the §15.4 spec arena windows (new arenas outlive the simulator
+    // at the real 12h/24h cadence; open synthetic arenas keep their short
+    // stamped deadlines and the 5-min debate scheduler resolves them).
+    this.#graph.forum.debateWindowsOverride = null;
     this.#log('dev-sim: stopped');
   }
 
@@ -438,6 +491,12 @@ export class DevTrafficSimulator {
     // so the next world snapshot sees fully-normalized stories.
     await this.#graph.ingestion.settle();
     await this.#graph.forum.settle();
+    // WS-T: advance due arenas through the REAL debate lifecycle on the tick
+    // cadence (idempotent alongside the 5-min debate scheduler) — judged
+    // through the governed adjudicator, finalized after the override window —
+    // and time it for the challenge-resolution throughput pulse.
+    await this.#advanceDebates();
+    if (this.#runGeneration !== generation) return;
     // Periodic real-signal refresh so the feed reacts to accumulated attention —
     // skipped if a stop() landed during this tick.
     if (
@@ -506,6 +565,7 @@ export class DevTrafficSimulator {
         domain: meta?.domain ?? null,
         authorUserId: story.submittedBy,
         claimIds: claims.map((c) => c.claimId),
+        disputeStatus: story.disputeStatus ?? 'none',
       });
       if (recentTitles.size < RECENT_TITLE_LIMIT) {
         recentTitles.add(story.title.toLowerCase().replace(/\s+/g, ' ').trim());
@@ -549,9 +609,22 @@ export class DevTrafficSimulator {
           // treating EVERY comment as a question — otherwise every reply would
           // pick the answer flavor and the follow-up flavor would never surface.
           isQuestion: row.type === 'question' || (row.type === 'comment' && row.body.includes('?')),
+          authorUserId: row.userId,
+          disputeStatus: row.disputeStatus ?? 'none',
         })),
       );
     }
+
+    // WS-T: arenas this simulator opened that are still awaiting the
+    // incumbent's rebuttal (runtime-tracked; pruned by #advanceDebates).
+    const openDebates: WorldOpenDebate[] = [...this.#openArenas.entries()].map(
+      ([debateId, arena]) => ({
+        debateId,
+        incumbentUserId: arena.incumbentUserId,
+        incumbentPosted: arena.incumbentPosted,
+        domain: arena.domain,
+      }),
+    );
 
     return {
       stories,
@@ -560,6 +633,7 @@ export class DevTrafficSimulator {
       recentTitles,
       focusStoryId: this.#focusStoryId,
       storyCapReached: this.#storiesSubmitted >= this.#storyCap,
+      openDebates,
     };
   }
 
@@ -594,6 +668,12 @@ export class DevTrafficSimulator {
         case 'report':
           await this.#executeReport(action);
           return;
+        case 'correction':
+          await this.#executeCorrection(action);
+          return;
+        case 'debate_position':
+          await this.#executeDebatePosition(action);
+          return;
       }
     } catch (err) {
       this.#counters.errors += 1;
@@ -620,6 +700,10 @@ export class DevTrafficSimulator {
         return 'join';
       case 'report':
         return 'report';
+      case 'correction':
+        return 'correction';
+      case 'debate_position':
+        return 'debate';
       default:
         return 'provision';
     }
@@ -907,6 +991,204 @@ export class DevTrafficSimulator {
         outcome.rejection.code,
         outcome.rejection.status,
       );
+    }
+  }
+
+  /**
+   * WS-T: post a sourced correction through the REAL contribution path — the
+   * full guard chain runs, and a published correction opens a debate arena
+   * synchronously (`maybeEnterDebate`), whose id comes back on the metadata.
+   * Opened arenas are tracked for incumbent-rebuttal planning; real rejections
+   * (target already under debate, rate limits, guards) are counted honestly.
+   */
+  async #executeCorrection(action: Extract<SimAction, { kind: 'correction' }>): Promise<void> {
+    const { forum, ingestion, events, identity } = this.#graph;
+    if (!(await this.#accountMayPostContent(action.personaUserId))) {
+      this.#recordRejection(
+        'correction',
+        action.personaUserId,
+        'account barred from posting',
+        'account_restricted',
+        403,
+      );
+      return;
+    }
+    const thread = await ingestion.stories.getThreadByStoryId(action.storyId);
+    if (thread === null) {
+      this.#counters.rejected_other += 1;
+      return;
+    }
+    const candidate = {
+      type: 'correction' as const,
+      thread_id: thread.threadId,
+      client_draft_id: randomUUID(),
+      body: action.body,
+      citations: action.citationUrls.map((url) => ({ url })),
+      ...(action.targetContributionId !== null
+        ? { target_contribution_id: action.targetContributionId }
+        : { target_story_id: action.storyId }),
+    };
+    const parsed = contributionCreateSchema.safeParse(candidate);
+    if (!parsed.success) {
+      this.#counters.rejected_other += 1;
+      return;
+    }
+    const accountRefValue = accountRef(identity.config.masterSecret, action.personaUserId);
+    const outcome = await createContribution(
+      { forum, ingestion, events },
+      action.personaUserId,
+      accountRefValue,
+      parsed.data,
+    );
+    if (!outcome.ok) {
+      this.#recordRejection(
+        'correction',
+        action.personaUserId,
+        'correction rejected',
+        outcome.rejection.code,
+        outcome.rejection.status,
+      );
+      return;
+    }
+    this.#counters.corrections_posted += 1;
+    this.#touchedStories.add(action.storyId);
+    if (!outcome.deduplicated && outcome.contribution.moderationState === 'published') {
+      await this.#broadcastComment(
+        outcome.contribution.contributionId,
+        thread.threadId,
+        action.personaUserId,
+      );
+    }
+    const arenaId = outcome.contribution.metadata.debate_arena_id ?? null;
+    if (arenaId !== null) {
+      this.#counters.debates_opened += 1;
+      this.#openArenas.set(arenaId, {
+        incumbentUserId: action.incumbentUserId,
+        incumbentPosted: false,
+        domain: action.domain,
+      });
+    }
+    this.#record({
+      kind: 'correction',
+      actor: this.#handleFor(action.personaUserId),
+      summary:
+        arenaId !== null
+          ? `filed a sourced correction — debate arena opened (${action.citationUrls.length} source${action.citationUrls.length === 1 ? '' : 's'})`
+          : 'filed a sourced correction (no arena opened)',
+      outcome: 'ok',
+    });
+  }
+
+  /** The incumbent posts a rebuttal position in an open arena — the REAL 12h
+   *  window path (`postDebatePosition`), so a closed window rejects honestly. */
+  async #executeDebatePosition(
+    action: Extract<SimAction, { kind: 'debate_position' }>,
+  ): Promise<void> {
+    if (!(await this.#accountMayPostContent(action.personaUserId))) {
+      this.#recordRejection(
+        'debate',
+        action.personaUserId,
+        'account barred from posting',
+        'account_restricted',
+        403,
+      );
+      return;
+    }
+    // Schema PARITY with the real route: /debates/:id/position validates with
+    // debatePositionUpdateSchema (≥1 citation, bounded summary) before the
+    // service runs — the simulator must never record a position a real client
+    // could not submit.
+    const parsed = debatePositionUpdateSchema.safeParse({
+      summary: action.summary,
+      citations: action.citationUrls.map((url) => ({ url })),
+    });
+    if (!parsed.success) {
+      this.#counters.rejected_other += 1;
+      return;
+    }
+    const outcome = await postDebatePosition(
+      this.#debateDeps(),
+      action.debateId,
+      action.personaUserId,
+      parsed.data,
+    );
+    if (!outcome.ok) {
+      // window_closed / not_found ⇒ the arena moved on; stop planning for it.
+      this.#openArenas.delete(action.debateId);
+      this.#recordRejection(
+        'debate',
+        action.personaUserId,
+        'rebuttal rejected',
+        outcome.reason,
+        null,
+      );
+      return;
+    }
+    const tracked = this.#openArenas.get(action.debateId);
+    if (tracked !== undefined) tracked.incumbentPosted = true;
+    this.#counters.debate_positions_posted += 1;
+    this.#record({
+      kind: 'debate',
+      actor: this.#handleFor(action.personaUserId),
+      summary: `defended the challenged content (${action.citationUrls.length} source${action.citationUrls.length === 1 ? '' : 's'})`,
+      outcome: 'ok',
+    });
+  }
+
+  /** The REAL arena deps (mirrors the debate scheduler's assembly, bound to the
+   *  simulator's service graph; the shortened windows flow from the override). */
+  #debateDeps(): DebateDeps {
+    const { forum, ingestion } = this.#graph;
+    return {
+      debates: forum.debates,
+      contributions: forum.contributions,
+      storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
+      isSteward: async (roomId, uid) => (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
+      setStoryDispute: async (sid, status) => {
+        await ingestion.stories.update(sid, { disputeStatus: status });
+        const ranking = await import('../ranking/services.js');
+        await ranking.refreshStoryFeaturesBestEffort(sid);
+      },
+      runJudge: forum.debateJudge,
+      broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),
+      windows: forum.debateWindowsOverride ?? undefined,
+      now: forum.now,
+      log: forum.log,
+    };
+  }
+
+  /**
+   * Advance every due arena through the REAL lifecycle: judge (the governed
+   * adjudicator — the LLM leg when a backend is wired, the deterministic MLP
+   * fallback otherwise) then finalize (dispute tags + feed demotion). Timed for
+   * the throughput pulse; tracked arenas that left `open` are pruned so
+   * rebuttal planning stops for them.
+   */
+  async #advanceDebates(): Promise<void> {
+    const startedMs = this.#now();
+    const { judged, finalized } = await runDebateLifecycle(this.#debateDeps());
+    const elapsedMs = this.#now() - startedMs;
+    if (judged > 0) {
+      this.#counters.debates_judged += judged;
+      // Attribute the pass's wall clock to adjudication (finalize is a cheap
+      // store patch; the judge pass carries the model latency).
+      this.#debateStats.adjudicationMsTotal += elapsedMs;
+      this.#debateStats.adjudicated += judged;
+      this.#debateStats.lastJudgedAtMs = this.#now();
+    }
+    if (finalized > 0) this.#counters.debates_finalized += finalized;
+    if (judged > 0 || finalized > 0) {
+      this.#record({
+        kind: 'debate',
+        actor: 'system',
+        summary: `adjudicated ${judged} and finalized ${finalized} arena(s) in ${elapsedMs}ms`,
+        outcome: 'ok',
+      });
+      // Prune tracked arenas that are no longer open (judged/resolved).
+      for (const debateId of [...this.#openArenas.keys()]) {
+        const arena = await this.#graph.forum.debates.getById(debateId);
+        if (arena === null || arena.state !== 'open') this.#openArenas.delete(debateId);
+      }
     }
   }
 
@@ -1449,6 +1731,15 @@ export class DevTrafficSimulator {
 
   status(): SimulatorStatus {
     const activePersonas = this.#personas.filter((p) => p.provisioned).length;
+    // WS-T challenge-resolution pulse: the LLM-leg counters come from the REAL
+    // ai-governance metrics (the same numbers the governed path counts); the
+    // wall-clock average comes from the simulator's own lifecycle timing.
+    const aiGov = tryGetAiGovernanceServices();
+    const llmCounter = (name: string): number => aiGov?.metrics.counter(name) ?? 0;
+    const llmUnavailable = DEBATE_LLM_UNAVAILABLE_CODES.reduce(
+      (sum, code) => sum + llmCounter(`ai.governance.debate.llm.unavailable.${code}`),
+      0,
+    );
     return {
       running: this.#running,
       scenario: this.#scenario,
@@ -1472,6 +1763,25 @@ export class DevTrafficSimulator {
       },
       last_signal_refresh_at:
         this.#lastSignalRefreshMs > 0 ? new Date(this.#lastSignalRefreshMs).toISOString() : null,
+      debate_pulse: {
+        open_arenas: this.#openArenas.size,
+        llm_backend_active: aiGov !== null && aiGov.llmDebateJudge !== undefined,
+        llm_verdicts: {
+          upheld: llmCounter('ai.governance.debate.llm.verdict.upheld'),
+          corrected: llmCounter('ai.governance.debate.llm.verdict.corrected'),
+          inconclusive: llmCounter('ai.governance.debate.llm.verdict.inconclusive'),
+        },
+        llm_decided: llmCounter('ai.governance.debate.llm.decided'),
+        llm_unavailable: llmUnavailable,
+        avg_adjudication_ms:
+          this.#debateStats.adjudicated > 0
+            ? Math.round(this.#debateStats.adjudicationMsTotal / this.#debateStats.adjudicated)
+            : null,
+        last_judged_at:
+          this.#debateStats.lastJudgedAtMs !== null
+            ? new Date(this.#debateStats.lastJudgedAtMs).toISOString()
+            : null,
+      },
       scenarios: [...SCENARIO_INFOS],
     };
   }

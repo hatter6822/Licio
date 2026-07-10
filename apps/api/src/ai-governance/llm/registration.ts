@@ -25,6 +25,7 @@ import { configHash } from '../output-records.js';
 import { deployModel, type RegistryDeps, registerModel } from '../registry.js';
 import type { AiGovernanceServices } from '../services.js';
 import type { GovernanceLlmBackend, GovernanceLlmSettings } from './config.js';
+import { DEBATE_SYSTEM_PROMPT_VERSION } from './debate.js';
 import { MODERATION_SYSTEM_PROMPT_VERSION } from './moderation.js';
 import { GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION } from './provider.js';
 import { LAWMAKING_SUMMARY_QUALITY_GATE_VERSION } from './quality.js';
@@ -50,6 +51,9 @@ export function buildGovernanceLlmIdentity(
     system_prompt_version: GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION,
     quality_gate_version: LAWMAKING_SUMMARY_QUALITY_GATE_VERSION,
     ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+    // Part of the decision surface (a different effort ⇒ different behaviour ⇒
+    // a new identity that re-clears the WS-K gate); omitted when never sent.
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
   };
   return {
     // One registry identity per (backend, CONFIG): the config hash is folded into
@@ -82,6 +86,9 @@ export function buildGovernanceModerationProposerIdentity(
     max_output_tokens: settings.maxOutputTokens,
     system_prompt_version: MODERATION_SYSTEM_PROMPT_VERSION,
     ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+    // Part of the decision surface (a different effort ⇒ different behaviour ⇒
+    // a new identity that re-clears the WS-K gate); omitted when never sent.
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
   };
   return {
     // Config-hashed identity (as with the summariser): a changed model/prompt/URL
@@ -92,6 +99,36 @@ export function buildGovernanceModerationProposerIdentity(
     useCaseId: 'toxicity_safety_triage',
     modalities: ['classification'],
     promptTemplateId: 'governance-moderation-llm/v1',
+    config,
+  };
+}
+
+/** The governance identity of the LLM-backed WS-T DEBATE ADJUDICATOR (the
+ *  challenge-resolution model reviewing a story/comment correction debate).
+ *  The deterministic shell in `llm/debate.ts` maps its probabilities to the
+ *  outcome; the pinned-weights MLP stays the per-call fail-closed fallback.
+ *  One config-hashed registry identity per (backend, config), as above. */
+export function buildGovernanceDebateJudgeIdentity(
+  settings: GovernanceLlmSettings,
+  backend: GovernanceLlmBackend,
+): ModelIdentity {
+  const config = {
+    method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
+    provider: backend.kind,
+    model_id: settings.modelId,
+    max_output_tokens: settings.maxOutputTokens,
+    system_prompt_version: DEBATE_SYSTEM_PROMPT_VERSION,
+    ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+    // Part of the decision surface (a different effort ⇒ different behaviour ⇒
+    // a new identity that re-clears the WS-K gate); omitted when never sent.
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
+  };
+  return {
+    name: `governance-debate-llm-${backend.kind}-${configHash(config).slice(0, 12)}`,
+    version: '1.0.0',
+    useCaseId: 'debate_adjudication',
+    modalities: ['classification'],
+    promptTemplateId: 'governance-debate-llm/v1',
     config,
   };
 }
@@ -171,6 +208,15 @@ function surfaceText(useCaseId: ModelIdentity['useCaseId']): CardSurfaceText {
       role: 'in-room moderation model',
     };
   }
+  if (useCaseId === 'debate_adjudication') {
+    return {
+      purpose:
+        'The WS-T debate adjudicator (challenge resolution): weigh both positions of a sourced story/comment correction debate and emit class probabilities; the deterministic shell maps the outcome (argmax + tie rule + vocabulary), the pinned-weights MLP is the per-call fail-closed fallback, and the room steward may fully overrule the verdict for 24h.',
+      inputSchema: '@licio/shared debateJudgeInputSchema',
+      outputSchema: '@licio/ai-governance debateJudgeVerdictSchema (shell-mapped)',
+      role: 'debate adjudicator',
+    };
+  }
   return {
     purpose:
       'Draft the neutral in-room lawmaking proposal summary behind the WS-U ADR-3 governed provider port (advisory only; deterministic fallback).',
@@ -204,7 +250,7 @@ function buildCard(
     known_biases: local
       ? 'Inherited from the operator-selected open-weight model; per-cohort measurements land with the WS-U slice-3 recorded-fixture eval corpus.'
       : 'Inherited from the hosted foundation model; per-cohort measurements land with the WS-U slice-3 recorded-fixture eval corpus.',
-    limitations: `Stochastic ${local ? 'locally hosted' : 'hosted'} backend: outputs are not bit-reproducible. It never holds final authority — the in-room moderation model's classification is bounded by the deterministic wrapper (escalate-to-human-review ceiling + community-capability clamp) with the always-on platform baseline + human floor above it, and the summariser falls back to the deterministic summary on any failure. Admission ran on the synthetic fixture set pending the recorded-fixture corpus (tracked residual). Off by default; enabling either backend is an explicit operator opt-in (ADR-9).`,
+    limitations: `Stochastic ${local ? 'locally hosted' : 'hosted'} backend: outputs are not bit-reproducible. It never holds final authority — the in-room moderation model's classification is bounded by the deterministic wrapper (escalate-to-human-review ceiling + community-capability clamp) with the always-on platform baseline + human floor above it, the summariser falls back to the deterministic summary on any failure, and the debate adjudicator falls back to the pinned-weights deterministic MLP (steward-overrulable either way). Admission ran on the synthetic fixture set pending the recorded-fixture corpus (tracked residual). Production defaults to the loopback-local backend (the production-complete posture); the hosted backend is an explicit operator opt-in (ADR-9).`,
     evaluation_results: results,
     risk_assessment_ref: riskAssessmentRefFor(identity.useCaseId),
     update_history: [

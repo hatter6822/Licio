@@ -82,6 +82,18 @@ export interface DebateStore {
     side: 'incumbent' | 'challenger',
     position: DebateSidePosition,
   ): Promise<DebateArenaRecord | null>;
+  /** ATOMICALLY claim an arena for adjudication (`open`/`awaiting_verdict` →
+   *  `awaiting_verdict`), returning the post-claim row — the EXACT position
+   *  snapshot the judge must score, because from this instant the store-level
+   *  `state = 'open'` guard on `updatePosition` rejects further position
+   *  writes. A judged/resolved arena returns null. Re-claiming an
+   *  `awaiting_verdict` arena succeeds (crash recovery: a claim whose judge
+   *  never returned is re-judgeable on a later tick). */
+  claimForVerdict(debateId: string): Promise<DebateArenaRecord | null>;
+  /** Record the adjudicator's verdict. STATE-CONDITIONAL: applies only while
+   *  the arena is `open`/`awaiting_verdict` — a stale concurrent judge (e.g. a
+   *  scheduler tick that outlived its lease) gets null and never clobbers a
+   *  recorded verdict or a steward override. */
   recordVerdict(debateId: string, patch: DebateVerdictPatch): Promise<DebateArenaRecord | null>;
   /** A steward override re-decides the outcome in place (state stays `judged`). */
   recordOverride(
@@ -98,7 +110,9 @@ export interface DebateStore {
     state: DebateState,
     resolvedAt?: string,
   ): Promise<DebateArenaRecord | null>;
-  /** Open arenas whose edit window has closed (scheduler → judge). */
+  /** Arenas due for judging: past their edit deadline and still `open` OR
+   *  `awaiting_verdict` (a claim whose judge crashed mid-flight must be
+   *  re-listed, never stranded). */
   listPastEditDeadline(nowIso: string, limit: number): Promise<DebateArenaRecord[]>;
   /** Judged arenas whose override window has closed (scheduler → finalize). */
   listPastOverrideDeadline(nowIso: string, limit: number): Promise<DebateArenaRecord[]>;
@@ -216,12 +230,27 @@ export class InMemoryDebateStore implements DebateStore {
     return row;
   }
 
+  async claimForVerdict(debateId: string): Promise<DebateArenaRecord | null> {
+    const row = this.#rows.get(debateId);
+    if (!row) return null;
+    if (row.state !== 'open' && row.state !== 'awaiting_verdict') return null;
+    row.state = 'awaiting_verdict';
+    row.updatedAt = this.#iso();
+    return row;
+  }
+
   async recordVerdict(
     debateId: string,
     patch: DebateVerdictPatch,
   ): Promise<DebateArenaRecord | null> {
     const row = this.#rows.get(debateId);
     if (!row) return null;
+    // STATE-CONDITIONAL (the store-level CAS): a verdict may only land on an
+    // arena still awaiting one. Two lease holders can race past the service's
+    // read-time state check (a scheduler tick that outlives its lease); the
+    // second, stale verdict must NOT clobber the recorded one — nor, worse, a
+    // steward override (state stays `judged`). The loser gets null (no-op).
+    if (row.state !== 'open' && row.state !== 'awaiting_verdict') return null;
     row.verdict = patch.verdict;
     row.winner = patch.winner;
     row.decidedBy = patch.decidedBy;
@@ -270,7 +299,11 @@ export class InMemoryDebateStore implements DebateStore {
 
   async listPastEditDeadline(nowIso: string, limit: number): Promise<DebateArenaRecord[]> {
     return [...this.#rows.values()]
-      .filter((row) => row.state === 'open' && row.editDeadlineAt <= nowIso)
+      .filter(
+        (row) =>
+          (row.state === 'open' || row.state === 'awaiting_verdict') &&
+          row.editDeadlineAt <= nowIso,
+      )
       .sort((a, b) => a.editDeadlineAt.localeCompare(b.editDeadlineAt))
       .slice(0, limit);
   }

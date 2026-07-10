@@ -38,6 +38,47 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  ollama:
+    # The WS-U/WS-T governance-LLM LOCAL runtime (OpenAI-compatible
+    # /v1/chat/completions) — the backend PRODUCTION defaults to when
+    # GOVERNANCE_LLM_PROVIDER is unset. OPT-IN via the `llm` compose profile
+    # (a plain `docker compose up -d` never starts it):
+    #   docker compose --profile llm up -d ollama
+    #   pnpm setup:llm         # pulls + verifies the default model
+    # Published on the LOOPBACK interface ONLY — the `local` backend doctrine
+    # is that governed-room content never leaves the host, so the runtime must
+    # never listen on a LAN-reachable address. For GPU inference add a
+    # `deploy.resources.reservations.devices` block (NVIDIA) per the Compose
+    # GPU docs; CPU works for the default model, just slower.
+    # Pin to digest in production for reproducibility: docker pull ollama/ollama:latest && docker inspect --format='{{index .RepoDigests 0}}' ollama/ollama:latest
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    environment:
+      # Keep the governed model resident: an idle-unloaded model costs a
+      # multi-second cold load on the next verdict/moderation call.
+      OLLAMA_KEEP_ALIVE: "-1"
+      # Parallel request slots (the debate lifecycle fans adjudications out
+      # 4-wide; match it so a backlog genuinely overlaps).
+      OLLAMA_NUM_PARALLEL: "4"
+      # Right-size the context window for the governed surfaces (prompts are
+      # ≤ ~2.5k tokens). Ollama's 32k default inflates the KV cache by
+      # gigabytes and can push a large model into a split CPU/GPU placement
+      # that serializes every token (measured: a dense 32B fell from 30 to
+      # ~6.5 tok/s that way on a 24 GB GPU).
+      OLLAMA_CONTEXT_LENGTH: "8192"
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "ls"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   redis-data:
+  ollama-data:

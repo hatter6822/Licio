@@ -257,8 +257,11 @@ export const debateJudgeVerdictSchema = z
   .strict();
 export type DebateJudgeVerdict = z.infer<typeof debateJudgeVerdictSchema>;
 
-/** Map the winning class to the shared verdict + winner vocabulary. */
-function classToOutcome(cls: 'incumbent' | 'challenger' | 'inconclusive'): {
+/** Map the winning class to the shared verdict + winner vocabulary. Exported
+ *  so every adjudicator backend (the MLP here, the governed LLM leg in
+ *  apps/api) maps a winning class to the SAME outcome vocabulary — outcome
+ *  mapping is deterministic shell logic, never model output. */
+export function debateClassToOutcome(cls: 'incumbent' | 'challenger' | 'inconclusive'): {
   verdict: DebateVerdict;
   winner: DebateWinner;
 } {
@@ -331,7 +334,7 @@ export function judgeDebate(
     best = pChal;
     cls = 'challenger';
   }
-  const { verdict, winner } = classToOutcome(cls);
+  const { verdict, winner } = debateClassToOutcome(cls);
   return debateJudgeVerdictSchema.parse({
     model_version: weights.version,
     winner,

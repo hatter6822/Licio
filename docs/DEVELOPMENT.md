@@ -62,7 +62,10 @@ Open <http://localhost:5173>. The API answers on <http://localhost:3001>
 `REDIS_URL` set, the API boots on its in-memory stores and seeds a rich demo
 corpus (rooms, stories, threads with nested comments) so the PWA renders real
 end-to-end data immediately. The in-memory data is ephemeral — each restart
-re-seeds a fresh corpus.
+re-seeds a fresh corpus. The three governed AI surfaces (lawmaking summaries,
+in-room moderation, debate adjudication) also work out of the box: dev
+auto-starts a deterministic **simulated local LLM runtime** behind the real
+governed pipeline (Section 16).
 
 ### Optional: run against a real Postgres + Redis (durable data)
 
@@ -314,6 +317,13 @@ This starts:
 Both have health checks and `restart: unless-stopped`. Named volumes
 (`postgres-data`, `redis-data`) persist their data across restarts.
 
+A third, **opt-in** service sits behind the `llm` Compose profile (a plain
+`docker compose up -d` never starts it): **ollama** — the governance-LLM
+local runtime production defaults to, published on the **loopback interface
+only** (`127.0.0.1:11434`) with a persistent `ollama-data` model volume.
+Start + provision it in one step with `pnpm setup:llm --docker` (Section 16);
+dev doesn't need it (the simulated runtime serves `pnpm dev`).
+
 > **Why the `pgvector` image and not stock `postgres:16`?** The WS-F
 > migration chain installs the `vector` extension (for embedding search).
 > `pgvector/pgvector:pg16` is the pgvector project's official drop-in build
@@ -453,6 +463,7 @@ covered in detail in Section 16.
 | `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev) |
 | `SES_*` group | A **dev mailer** surfaces the one-time code + recipient to the API log (no email is sent) so the passwordless email flows — sign-in, email-factor verification, deletion-cancel — are testable end-to-end; this is the only way to become a verified account on a `pnpm dev` box. CI / `NODE_ENV=test` use the silent logging mailer (never the code/recipient) |
 | `EMBEDDING_*` group | A deterministic **lexical** embedding provider is used (fine for dedup; not a real semantic model) |
+| `GOVERNANCE_LLM_*` group | **Development:** the DEV-ONLY simulated loopback LLM runtime auto-starts and serves the three governed AI surfaces (lawmaking summary, in-room moderation, debate adjudication) — disable it with `LICIO_LLM_SIM=off`, or pick its port with `LICIO_LLM_SIM_PORT`. **Production:** defaults to the loopback-`local` backend (Ollama URL + `gpt-oss:20b`); every governed surface fails closed per call to its deterministic path until the runtime responds. `GOVERNANCE_LLM_PROVIDER=deterministic` opts out anywhere; `anthropic` (+ `ANTHROPIC_API_KEY`) is an explicit hosted opt-in. Provision + verify a real runtime with `pnpm setup:llm [--docker]`. Details: Section 16 |
 | `KNOMOSIS_GATEWAY_URL` + `KNOMOSIS_GATEWAY_TOKEN_FILE` group | The WS-L Knomosis gateway uses the deterministic in-memory `FakeKnomosisGateway` (fine for dev; no real substrate). Both must be set together to bind the real `HttpKnomosisGateway` (bearer token read from the file); if the pin declares more than one **active** deployment the server refuses to boot, since one gateway URL cannot route multiple deployments. The `knomosis.cryptoEnabled` / `knomosis.governanceEnabled` runtime-config keys gate every WS-L endpoint and both default `false` + fail closed in **production**. For developer convenience a non-production (`pnpm dev`) boot DEFAULTS both keys **`true`** (so the wallet + governance-simulation surface is reachable out of the box) — but only when the key is not already explicitly set, so a durable (Redis-backed) dev config or an admin write still wins and can force fail-closed testing. Production is untouched: the flags stay `false` unless an operator flips them through the admin surface. The dev deployment is scoped to the **Knomosis L2 (chain `8357`)**, settling to its **Sepolia L1 (`11155111`)** — the SIWE wallet-link allowlist is both. The web client binds the link message to the Knomosis chain (`8357`) regardless of the extension's active network — override with `VITE_WALLET_CHAIN_ID` — so a dev wallet never signs a mainnet-scoped message. A non-production box also scopes the WS-D wallet **sign-in** allowlist to `[8357, 11155111]` (never mainnet); production keeps the multi-chain default |
 
 ### 7.5 Generate a real `SESSION_SECRET`
@@ -812,6 +823,10 @@ LICIO_SIM=off pnpm dev          # disable it entirely
 LICIO_SIM_SEED=my-seed pnpm dev # pin the deterministic seed (same seed ⇒ same run)
 ```
 
+A second, independent dev simulator — the **simulated governance-LLM
+runtime** (`LICIO_LLM_SIM=off` disables it) — backs the three governed AI
+surfaces; see Section 16.
+
 **Drive it from the UI.** Sign in, then open **Profile → Developer tools →
 Traffic simulator** (or go to `/dev/simulator`). The panel shows the run state,
 honest activity counters (stories, comments, reads, reports, plus real pipeline
@@ -842,6 +857,50 @@ the coordinated-burst cluster is intentionally fresh so it genuinely trips the
 anti-signal detectors. A per-boot story budget caps how much it creates. The
 whole run is deterministic: the same seed and scenario replay the same traffic,
 which is what makes a tester's session reproducible.
+
+**Challenge-resolution load (WS-T).** The simulator also drives the full
+correction → debate → adjudication loop through the REAL pipelines, so you can
+watch — and measure — the throughput the AI adjudicator handles. Personas file
+**sourced corrections** (1–3 `.example` citations of varying strength) against
+eligible comments and story roots via the real `POST /v1/contributions` guard
+chain; each published correction opens a real **debate arena**; challenged
+incumbents post rebuttals of varying strength (sometimes none — a forfeit)
+through the real position window; and the simulator advances due arenas
+through the real lifecycle every tick. While the simulator runs, the arena
+windows are **shortened** (≈20s edit / 10s override, via the injectable
+`debateWindowsOverride` seam — the §15.4 spec windows of 12h/24h are restored
+on stop), so a synthetic challenge resolves in about half a minute, verdicts
+split across corrected/upheld/inconclusive, and `Incorrect`/`Validated` tags +
+feed demotion appear live.
+
+**Reading the throughput.** The dev panel's **Challenge resolutions** card
+shows corrections filed, arenas opened/awaiting/adjudicated/finalized, the
+LLM-leg verdict split and fallback count, and the **average adjudication
+wall-clock** — or query it directly:
+
+```sh
+curl -s localhost:3001/v1/dev/simulator/status | jq '{counters: .counters, pulse: .debate_pulse}'
+```
+
+By default the adjudications run against the DEV **simulated** runtime
+(deterministic, milliseconds per verdict — measures the pipeline overhead).
+To measure a **real local model**:
+
+```sh
+pnpm setup:llm                                   # runtime + default model ready
+GOVERNANCE_LLM_PROVIDER=local pnpm dev           # real gpt-oss:20b adjudicates
+# Raise the ADR-6 debate budget for a sustained run (default 60/hour;
+# the simulated runtime raises it automatically):
+GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000 GOVERNANCE_LLM_PROVIDER=local pnpm dev
+```
+
+Adjudications fan out **4-wide** within a lifecycle pass (matching the Compose
+runtime's `OLLAMA_NUM_PARALLEL`), so a queued backlog drains at roughly the
+per-verdict latency divided by the runtime's parallel slots; a single-slot
+runtime simply queues server-side, no worse than serial. Crank the scenario
+speed to queue arenas faster than they resolve and watch the backlog
+(`Awaiting verdict`) — where it stabilizes is the honest throughput ceiling of
+your hardware.
 
 **Interpretation lenses (WS-G.2.2).** The simulator provisions a focused lens
 set (`skeptical`, `expert`, `local_resident`, `policy`) in each room it uses and
@@ -1209,37 +1268,113 @@ CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 
 ### Governance LLM provider (`GOVERNANCE_LLM_*`)
 
-The WS-U in-room agent's advisory **lawmaking summary** can be drafted by a
-real LLM behind the governed provider port (WS-U ADR-3/ADR-9). Unset → the
-deterministic summariser (the shipped default, zero egress). The opt-in is
-honoured in **every** environment, production included (the 2026-07-09
-maintainer decision): with `anthropic`, governed-room proposal text is sent to
-the hosted API — an operator-chosen data processor, boot-logged loudly; with
-`local`, content never leaves the host (the URL is loopback-enforced).
+Three governed AI surfaces run behind one LLM backend seam (WS-U ADR-3/ADR-9,
+WS-T): the advisory **lawmaking summary**, the **in-room moderation model**,
+and the **debate adjudicator** (challenge resolution — the AI reviewing a
+sourced story/comment correction debate). The environment defaults implement
+the *production-complete* posture — production always runs the full feature;
+development may fake it, never the reverse:
 
-Two backends:
+- **Production, provider unset** → defaults to the **`local`** backend
+  (Ollama loopback URL + the reviewed default model, both below). Until the
+  runtime responds, every governed surface fails **closed per call** to its
+  deterministic path (deterministic summary; WS-J baseline moderation +
+  deferred re-moderation; the pinned-weights MLP adjudicator) and recovers
+  automatically — the boot log states exactly what runtime is expected where.
+- **Development, provider unset** → the DEV-ONLY *simulated* local runtime
+  auto-starts and serves all three surfaces (see below).
+- **`GOVERNANCE_LLM_PROVIDER=deterministic`** → the explicit opt-out anywhere.
+- **`anthropic`** → always an explicit opt-in: governed-room content is sent
+  to the hosted API (an operator-chosen data processor, boot-logged loudly).
 
 ```sh
-# A) Hosted Anthropic API (sends proposal text to Anthropic —
+# A) Local model on the SAME host (the production DEFAULT; no content leaves
+#    the machine). ONE COMMAND provisions + verifies it end to end:
+#      pnpm setup:llm           # checks the runtime, pulls the default model,
+#                               # verifies a real governed completion
+#      pnpm setup:llm --docker  # ALSO starts the repo's Compose runtime first
+#                               # (docker compose --profile llm up -d ollama;
+#                               #  loopback-published, persistent model volume)
+#    Any OpenAI-compatible /chat/completions runtime works instead:
+#      ollama serve && ollama pull gpt-oss:20b   # the default URL + model
+#      llama-server -m model.gguf                # base URL http://127.0.0.1:8080/v1
+#    (vLLM and LM Studio expose the same protocol.)
+GOVERNANCE_LLM_PROVIDER=local                        # optional in production (the default)
+GOVERNANCE_LLM_LOCAL_URL=http://127.0.0.1:11434/v1   # optional; this is the default (LOOPBACK-ONLY, enforced)
+GOVERNANCE_LLM_MODEL=gpt-oss:20b                     # optional; this is the default local model
+
+# B) Hosted Anthropic API (sends governed content to Anthropic —
 #    an explicit operator choice; the boot log calls it out)
 GOVERNANCE_LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...            # server-side only; never VITE_-prefixed
-GOVERNANCE_LLM_MODEL=claude-opus-4-8    # optional; this is the default
+GOVERNANCE_LLM_MODEL=claude-opus-4-8    # optional; this is the anthropic default
 
-# B) Local model on the SAME host (no content leaves the machine).
-#    Any OpenAI-compatible /chat/completions runtime works — e.g.:
-#      ollama serve                      # base URL http://127.0.0.1:11434/v1
-#      llama-server -m model.gguf        # base URL http://127.0.0.1:8080/v1
-#    (vLLM and LM Studio expose the same protocol.)
-GOVERNANCE_LLM_PROVIDER=local
-GOVERNANCE_LLM_LOCAL_URL=http://127.0.0.1:11434/v1   # LOOPBACK-ONLY (enforced)
-GOVERNANCE_LLM_MODEL=llama3.3:70b                    # required: the runtime's model name
-
-# Optional: keep the LLM off in-room MODERATION (still used for the lawmaking
-# summary). Omitted/any-other-value ⇒ the LLM is the moderation model; `off` ⇒
-# the deterministic default proposer serves the moderation seam.
-GOVERNANCE_LLM_MODERATION=off
+# Optional per-surface off-switches (the deterministic path serves instead;
+# the lawmaking summary has no switch — its deterministic fallback is per-call):
+GOVERNANCE_LLM_MODERATION=off           # deterministic default moderation proposer
+GOVERNANCE_LLM_DEBATE=off               # deterministic MLP debate adjudicator only
+GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000  # raise the ADR-6 debate budget (default 60;
+                                            # exhausted ⇒ MLP fallback, never a dropped verdict)
+GOVERNANCE_LLM_REASONING_EFFORT=low     # local reasoning-model latency lever (default `low`,
+                                        # ~30% faster verdicts on the default gpt-oss stack;
+                                        # `off` never sends the field — set it for a runtime
+                                        # that rejects unknown OpenAI-compat parameters)
 ```
+
+**Throughput levers (local backend).** Governed calls are latency-bound by the
+model, so the platform parallelizes where the work is independent: debate
+adjudications fan out **4-wide** per lifecycle pass, admission samples a
+candidate model's k-of-N probes concurrently, and the deferred re-moderation
+sweep drains a recovered backlog 4 at a time. Match the runtime:
+`OLLAMA_NUM_PARALLEL=4` (the Compose `llm` service sets it) so the fan-out
+genuinely overlaps, and `OLLAMA_KEEP_ALIVE=-1` so an idle model is never
+unloaded (a cold load costs seconds on the next verdict). vLLM batches far
+wider out of the box. Measured on the reviewed default stack:
+`reasoning_effort low` ≈ 1.3s vs 1.7s per moderation-shaped verdict, and four
+parallel completions finish in half the serial wall-clock.
+
+**GPU placement (the silent throughput killer).** Ollama offloads a model to
+the GPU only as far as its weights **plus KV cache** fit, and the KV cache
+scales with the context window — at Ollama's 32k default a dense 32B model
+carries a ~9 GB KV cache, overflows a 24 GB card, splits ~84/16 across
+GPU/CPU, and every token then crawls through the CPU layers (measured: 30 →
+~6.5 tok/s). The governed prompts are ≤ ~2.5k tokens, so the Compose runtime
+sets `OLLAMA_CONTEXT_LENGTH=8192`; set the same on a native service if large
+models bench slower than expected, and check placement with
+`curl -s localhost:11434/api/ps` (`size_vram` should equal `size`). To fix a
+single model without touching the daemon default (no root needed), bake the
+context into a variant and point `GOVERNANCE_LLM_MODEL` at it:
+
+```sh
+printf 'FROM deepseek-r1:32b\nPARAMETER num_ctx 8192\n' > /tmp/Modelfile.r1-8k
+ollama create deepseek-r1-8k:32b -f /tmp/Modelfile.r1-8k
+# measured on a 24 GB card: 69s → 15s per debate verdict (full-GPU placement)
+``` On AMD
+cards use `rocm-smi` (not `nvidia-smi`) to see the GPU at all. Known upstream
+issue on some ROCm stacks: gemma3 emits garbage tokens when GPU-offloaded
+while every other family runs correctly — `pnpm bench:llm` detects this and
+prints the CPU-pin remedy.
+
+**Model families negotiate automatically.** The completion layer adapts the
+wire per runtime — logged and counted, never silent: a runtime/model that
+**400-rejects** `reasoning_effort` (e.g. gemma3, not a reasoning model) gets
+one retry without the field, latched; a reasoning model whose thinking
+**exhausts the output budget** before any content (the qwen3 family at any
+effort above `none`) gets one retry at `none`, latched. An explicit
+`GOVERNANCE_LLM_REASONING_EFFORT=off` is honoured strictly (the field is never
+sent, no auto-retry). `none` is also directly selectable — it is the unlock
+that makes the qwen3 family the fastest measured adjudicators.
+
+**Compare models with the real harness.** `pnpm bench:llm [model …]` races
+models through the REAL governed surfaces — the moderation proposer, the
+debate adjudicator leg, and the summariser with its quality gate — reporting
+cold/warm latency, validity (pass ⇔ the production path accepts the output),
+a 4-parallel debate burst for fast models, and `--runs N` for more samples.
+With no arguments it benches every installed Ollama model (alias tags
+deduped). When a model fails **every** surface, the harness probes the native
+API to distinguish an integration issue from a broken runtime/model pairing —
+e.g. a faulty GPU-offload path emitting garbage tokens — and prints the
+remedy (a CPU-pinned model variant).
 
 The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /
 `[::1]`) — a non-local URL is rejected at startup, and the local fetch sets
@@ -1254,22 +1389,72 @@ Governance* room: sign in as the steward account and POST
 `/v1/rooms/{roomId}/governance/lawmaking/summarize` (the agent must hold the
 `lawmaking.summarize` capability, which the seeded binding grants).
 
-Two governed surfaces consume the backend. **(1)** The advisory **lawmaking
-summary** above. **(2)** The **in-room moderation MODEL**: when a backend is
-enabled, a governed `toxicity_safety_triage` LLM CLASSIFIES each moderated
-contribution, and the platform's deterministic wrapper
-(`governance/service.ts`) BOUNDS its proposal — an escalate-to-human-review
-ceiling (never above `flag_for_review`; a human confirms before any removal)
-then the community-capability clamp — before it can have any effect. On model
-unavailability the wrapper falls back to the always-on WS-J baseline and
-enqueues the contribution for **deferred re-moderation** (retried by the
-governance scheduler when the model recovers — delayed, never dropped). Set
-`GOVERNANCE_LLM_MODERATION=off` to keep the LLM off moderation (⇒ a
-deterministic default proposer serves the seam) while still using it for the
-lawmaking summary. Inspect the decision log as an AI-team member: `GET
+Three governed surfaces consume the backend. **(1)** The advisory **lawmaking
+summary** above. **(2)** The **in-room moderation MODEL**: a governed
+`toxicity_safety_triage` LLM CLASSIFIES each moderated contribution, and the
+platform's deterministic wrapper (`governance/service.ts`) BOUNDS its proposal
+— an escalate-to-human-review ceiling (never above `flag_for_review`; a human
+confirms before any removal) then the community-capability clamp — before it
+can have any effect. On model unavailability the wrapper falls back to the
+always-on WS-J baseline and enqueues the contribution for **deferred
+re-moderation** (retried by the governance scheduler when the model recovers —
+delayed, never dropped). Inspect the decision log as an AI-team member: `GET
 /v1/ai/admin/governance/moderation/{roomId}` returns a summary (total /
 allowed / warned / flagged-for-review / clamped-by-wrapper) plus recent
 metadata-only rows (raw proposed vs bounded action — no content).
+**(3)** The **debate ADJUDICATOR** (WS-T challenge resolution): when a sourced
+correction opens a debate arena and its 12h window closes, the LLM weighs both
+positions and emits ONLY class probabilities + a bounded rationale; the
+deterministic shell (`ai-governance/llm/debate.ts`) maps the outcome — the
+exact `judgeDebate` argmax/tie rule, the shared verdict vocabulary, a no-URLs
+rationale bound — and ANY failure falls back to the pinned-weights
+deterministic MLP, so a verdict is always rendered (the room steward may still
+fully overrule it for 24h). Try it in dev: post a sourced `correction`
+contribution against a comment/story and watch the arena judge on the debate
+scheduler tick.
+
+#### The dev-simulated local runtime (the `pnpm dev` default)
+
+On a **development** boot where `GOVERNANCE_LLM_PROVIDER` is unset, the API
+starts a DEV-ONLY **simulated local LLM runtime**
+(`apps/api/src/simulator/governance-llm.ts`): a deterministic, zero-dependency
+loopback HTTP server speaking the same OpenAI-compatible `/chat/completions`
+protocol as the real local runtimes, wired through the **unchanged** `local`
+backend seam. Nothing is stubbed on the client side — a bare `pnpm dev` box
+therefore runs the FULL governed LLM path (WS-K registration + admission +
+the deploy gate, the pre-execution guard, the strict output schemas, the
+§24.5 summary quality gate, per-room budgets + the circuit breaker, immutable
+`AIOutputRecord`s, the deterministic moderation wrapper, deferred
+re-moderation, and the debate-adjudication shell) with zero setup and provably
+zero egress. The "model" is a fixed template classifier/summariser/adjudicator
+(no weights, no randomness), so runs are reproducible and the k-of-N admission
+sampling passes deterministically. It is never constructed in production (a
+`NODE_ENV` gate at the boot site plus a guard inside the module), and it binds
+`127.0.0.1` only.
+
+```sh
+pnpm dev                                # simulated runtime on http://127.0.0.1:3117/v1
+LICIO_LLM_SIM=off pnpm dev              # boot dev without it (deterministic stand-ins)
+LICIO_LLM_SIM_PORT=4200 pnpm dev        # pick the port (falls back to ephemeral if taken)
+GOVERNANCE_LLM_PROVIDER=deterministic pnpm dev  # explicit deterministic (also disables it)
+# Any real backend (anthropic/local, above) always wins over the simulator.
+```
+
+Deterministic **failure-injection markers** anywhere in the governed text (a
+contribution body, or a proposal title/body) let you exercise every
+fail-closed branch on demand:
+
+| Marker | Simulated behaviour | Governed outcome |
+|--------|--------------------|------------------|
+| `[sim:error]` | HTTP 500 | `transport` failure → baseline + deferred re-moderation / deterministic summary |
+| `[sim:refuse]` | `finish_reason: content_filter` | `refusal` → same fallback |
+| `[sim:truncate]` | `finish_reason: length` | `truncated` → same fallback |
+| `[sim:garbage]` | non-JSON prose | `invalid_output` → same fallback |
+| `[sim:propose=remove]` (any action) | forces the moderation verdict | shows the wrapper clamping to `flag_for_review` |
+| `[sim:ungrounded]` | off-proposal summary | §24.5 `quality` rejection → deterministic summary |
+| `[sim:foreign-url]` | off-proposal URL in the summary | `url_not_in_proposal` rejection → deterministic summary |
+| `[sim:debate=challenger]` (or `incumbent`/`inconclusive`) | forces the debate class | shows the shell mapping probabilities → verdict |
+| `[sim:rationale-url]` | URL in the debate rationale | the shell rejects it → verdict falls back to the deterministic MLP |
 
 ---
 
@@ -1289,6 +1474,7 @@ metadata-only rows (raw proposed vs bounded action — no content).
 | Vite doesn't see your `VITE_*` values | Vite's env dir is `apps/web`, not the repo root | Export the root `.env` into your shell (Section 7.7) so the `VITE_`-prefixed values are in `process.env` |
 | Login/session flows misbehave on `http://localhost` | `__Host-`/`Secure` cookies require HTTPS | Use the local HTTPS workflow (Section 11) |
 | `redis connection error` warnings in the API log | Redis briefly unreachable | The API connects lazily and the ingest limiter fails closed to a stricter in-memory budget; start Redis (`docker compose up -d redis`) to clear it |
+| Boot warns `production defaulted to the loopback-local backend` / the governed AI surfaces log `unavailable.transport` | No local LLM runtime is answering at the configured URL | `pnpm setup:llm --docker` (or start a runtime natively — Section 16). Meanwhile every governed surface fails closed to its deterministic path and recovers automatically once the runtime responds |
 | Git hooks don't run | Lefthook not installed in this clone | `pnpm exec lefthook install` (Section 14) |
 | Playwright can't download a browser | Network policy blocks the download | Pre-install browsers, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` (Section 13) |
 | `pnpm test` "skips" the integration suites | `DATABASE_URL`/`REDIS_URL` not set/reachable | Expected — set them (Section 13) to run the gated suites |

@@ -937,6 +937,7 @@ export async function createContribution(
           },
           runJudge: forum.debateJudge,
           broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),
+          windows: forum.debateWindowsOverride ?? undefined,
           now: forum.now,
           log: forum.log,
         },

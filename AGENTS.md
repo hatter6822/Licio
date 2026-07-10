@@ -41,7 +41,12 @@ corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install
 
 # Daily commands.
-pnpm dev                            # web (5173) + api (3001); in-memory + seeds demo data (no DB/Redis)
+pnpm dev                            # web (5173) + api (3001); in-memory + seeds demo data (no DB/Redis);
+                                    #   the DEV-ONLY simulated governance-LLM runtime auto-starts (LICIO_LLM_SIM=off disables)
+pnpm setup:llm                      # provision + verify the REAL local governance-LLM runtime (pulls the
+                                    #   default model; --docker also starts the Compose `llm` profile ollama)
+pnpm bench:llm                      # race local models through the REAL governed surfaces (latency +
+                                    #   validity per model; native-probe diagnosis for broken pairings)
 pnpm build                          # shared → db/invariants → web/api
 pnpm test                           # Vitest across all workspaces (80% coverage gate)
 pnpm test -- --coverage             # with coverage report
@@ -176,7 +181,8 @@ licio/
 ├── vitest.shared.ts             -- per-project test settings SSOT (root + per-workspace)
 ├── biome.json                   -- Biome linter/formatter (2.5.0)
 ├── lefthook.yml                 -- Git hooks
-├── docker-compose.yml           -- local dev services (pgvector-enabled PostgreSQL, Redis)
+├── docker-compose.yml           -- local dev services (pgvector-enabled PostgreSQL, Redis;
+│                                   opt-in `llm` profile: loopback-only Ollama runtime)
 ├── .nvmrc                       -- Node 22 pin
 ├── CLAUDE.md                    -- this file
 ├── README.md                    -- project entry point
@@ -500,13 +506,22 @@ licio/
 │           │   ├── output-records.ts    --   immutable AIOutputRecord writer + config hash (WS-K.1.1f)
 │           │   ├── lineage.ts           --   data lineage + privacy-review precondition (WS-K.1.1e)
 │           │   ├── models.ts            --   governed deterministic models + classifier + translator
-│           │   ├── llm/                 --   WS-U ADR-9 LLM-backed governance models (opt-in,
-│           │   │                             fail-closed, off by default): config (decision), provider
+│           │   ├── debate.ts            --   the governed WS-T debate-adjudication shell (guard →
+│           │   │                             LLM leg (if wired) → deterministic MLP fallback →
+│           │   │                             AIOutputRecord)
+│           │   ├── llm/                 --   WS-U ADR-9 LLM-backed governance models (fail-closed;
+│           │   │                             production DEFAULTS to the loopback-local backend, dev
+│           │   │                             auto-wires the simulated runtime, `deterministic` opts
+│           │   │                             out, `anthropic` is an explicit opt-in): config
+│           │   │                             (decision + the default local URL/model), provider
 │           │   │                             (lawmaking summariser: guard→completion→zod→quality gate→
-│           │   │                             AIOutputRecord + budget/breaker; Anthropic SDK), advisor
-│           │   │                             (slice-2 SCORE-BLIND shadow moderation: measures agreement
-│           │   │                             vs the DSL, no authority), local (loopback-only OpenAI-
-│           │   │                             compatible runtime), quality, registration
+│           │   │                             AIOutputRecord + budget/breaker; Anthropic SDK), moderation
+│           │   │                             (the in-room moderation MODEL — a toxicity_safety_triage
+│           │   │                             classifier the deterministic wrapper bounds), debate
+│           │   │                             (the WS-T debate adjudicator — probabilities only; the
+│           │   │                             deterministic shell maps the outcome, MLP fallback),
+│           │   │                             local (loopback-only OpenAI-compatible runtime),
+│           │   │                             quality, registration
 │           │   ├── seed.ts              --   register + DEPLOY models through the gate; inventory
 │           │   ├── pipelines.ts         --   topic classification + claim extraction (WS-K.1.3a/b)
 │           │   ├── summaries.ts         --   AI summary eval: §24.3 quality/grounding gate (WS-K.1.4; eval-only, no thread Overview)
@@ -543,12 +558,22 @@ licio/
 │           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
 │           │   │                              (tags root comments with the author's vantage lens)
 │           │   ├── link-fixtures.ts      --   dev fetchDocument for reserved `.example` hosts
-│           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY I/O module — drives the
-│           │   │                              REAL submission/contribution/attention/report paths +
-│           │   │                              on-demand PWAtt/WS-H/feature scoring; tick loop
+│           │   ├── governance-llm.ts     --   DEV-ONLY simulated local governance-LLM runtime: a
+│           │   │                              deterministic loopback OpenAI-compatible server the dev
+│           │   │                              boot wires through the UNCHANGED WS-U `local` backend
+│           │   │                              seam (LICIO_LLM_SIM=off disables; deterministic
+│           │   │                              failure-injection markers; never in production)
+│           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY app-driving I/O module —
+│           │   │                              drives the REAL submission/contribution/attention/
+│           │   │                              report paths + on-demand PWAtt/WS-H/feature scoring +
+│           │   │                              the WS-T correction→debate→adjudication loop at
+│           │   │                              shortened arena windows (throughput pulse); tick loop
 │           │   └── routes.ts             --   dev control routes (mounted in front of createApp,
 │           │                                  never in the production AppType; header-guarded)
 │           ├── lib/
+│           │   ├── concurrency.ts       --   mapBounded: order-preserving bounded fan-out with
+│           │   │                             per-item failure isolation (the LLM fan-outs:
+│           │   │                             debate lifecycle, admission sampling, re-moderation sweep)
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
 │           │   ├── vapid.ts             --   VAPID key management
@@ -759,6 +784,14 @@ licio/
 │   ├── check-private-rendezvous-schema.ts -- WS-S.1.5 §8.1 stub/rendezvous column denylist
 │   ├── check-private-bundle-transparency.ts -- WS-S.1.5 no dynamic remote private code
 │   ├── check-p2p-{endpoint-rejections,ranking-exclusion,search-exclusion}.ts -- WS-S.1.5
+│   ├── setup-local-llm.ts       --   `pnpm setup:llm`: provision + verify the local governance-LLM
+│   │                                  runtime (resolves the REAL boot decision, optional --docker
+│   │                                  Compose start, Ollama model pull, verification through the
+│   │                                  REAL completion seam incl. parameter negotiation)
+│   ├── bench-local-llm.ts       --   `pnpm bench:llm`: race local models through the REAL governed
+│   │                                  surfaces (moderation/debate/summary executors; latency +
+│   │                                  validity + parallel burst; native-probe diagnosis + remedy
+│   │                                  for broken runtime/model pairings)
 │   ├── lint-security.ts         --   supplementary security lint
 │   ├── generate-sri.ts          --   subresource integrity hashes
 │   ├── generate-sbom.ts         --   CycloneDX SBOM generation
@@ -1256,7 +1289,7 @@ Biome 2.x does not support:
 | `ioredis` ^5.11 | api | Redis client (CSRF token store, sessions) |
 | `@simplewebauthn/server` ^13.3 | api | WebAuthn attestation/assertion verification (WS-D) |
 | `viem` ^2.52 | api | EIP-4361 / SIWE signature verification (WS-D wallet sign-in) |
-| `@anthropic-ai/sdk` ^0.110 | api | WS-U ADR-9 governance LLM provider, Anthropic backend (off by default, explicit operator opt-in, fail-closed to the deterministic summariser; the loopback-local backend uses plain fetch) |
+| `@anthropic-ai/sdk` ^0.110 | api | WS-U ADR-9 governance LLM provider, Anthropic backend (explicit operator opt-in; production DEFAULTS to the loopback-local backend instead, which uses plain fetch; every governed surface fails closed per call to its deterministic path) |
 
 No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 

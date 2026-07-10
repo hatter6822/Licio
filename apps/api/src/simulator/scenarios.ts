@@ -17,6 +17,8 @@ export interface ScenarioRateShape {
   readonly attention: number;
   readonly join: number;
   readonly report: number;
+  /** WS-T sourced-correction rate (the challenge-resolution load). */
+  readonly correction: number;
 }
 
 export interface ScenarioDefinition {
@@ -41,7 +43,14 @@ export interface ScenarioDefinition {
   readonly newcomersPerMinute: number;
 }
 
-const FLAT: ScenarioRateShape = { story: 1, comment: 1, attention: 1, join: 1, report: 1 };
+const FLAT: ScenarioRateShape = {
+  story: 1,
+  comment: 1,
+  attention: 1,
+  join: 1,
+  report: 1,
+  correction: 1,
+};
 
 export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>> = {
   steady: {
@@ -61,7 +70,7 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     label: 'Breaking story',
     description:
       'A developing story lands, reading surges and decays, follow-ups and one verbatim repost arrive — watch early scoring and the duplicate fold.',
-    rates: { story: 1.6, comment: 2.5, attention: 3.5, join: 1.2, report: 1 },
+    rates: { story: 1.6, comment: 2.5, attention: 3.5, join: 1.2, report: 1, correction: 1.5 },
     phase: (elapsedMs) => 1 + 3 * Math.exp(-elapsedMs / (8 * 60_000)),
     focusBias: 0.65,
     kickoffStory: true,
@@ -74,7 +83,7 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     label: 'Runaway thread',
     description:
       'One discussion cascades: nested replies pile up and readers keep returning — watch thread depth and participation signals.',
-    rates: { story: 0.4, comment: 4, attention: 2.5, join: 1, report: 1 },
+    rates: { story: 0.4, comment: 4, attention: 2.5, join: 1, report: 1, correction: 2.5 },
     focusBias: 0.8,
     kickoffStory: true,
     repostAfterMs: null,
@@ -101,7 +110,7 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     label: 'New-user influx',
     description:
       'A stream of brand-new accounts joins rooms and starts reading and posting lightly — watch new-account handling across the pipelines.',
-    rates: { story: 0.8, comment: 1.2, attention: 1.3, join: 2, report: 1 },
+    rates: { story: 0.8, comment: 1.2, attention: 1.3, join: 2, report: 1, correction: 0.5 },
     focusBias: 0,
     kickoffStory: false,
     repostAfterMs: null,
@@ -112,7 +121,7 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     id: 'quiet',
     label: 'Quiet night',
     description: 'Near-silence: rare reads and the odd comment — a baseline to compare against.',
-    rates: { story: 0.1, comment: 0.1, attention: 0.15, join: 0.1, report: 0 },
+    rates: { story: 0.1, comment: 0.1, attention: 0.15, join: 0.1, report: 0, correction: 0 },
     focusBias: 0,
     kickoffStory: false,
     repostAfterMs: null,

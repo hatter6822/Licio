@@ -739,3 +739,84 @@ export function generateEvidence(
     citationUrl: `https://${outlet}.example/refs/${domain}-corroboration-${serial}`,
   };
 }
+
+// ---------------------------------------------------------------------------
+// WS-T sourced corrections + debate positions (the challenge-resolution load).
+// ---------------------------------------------------------------------------
+
+const CORRECTION_BODIES: readonly string[] = [
+  'The stated figure does not match the primary series: the linked reports cover the same {object} and land outside the published interval for the {period}, so the claim as written needs correcting.',
+  'This misreads the {object}: the definitions table in the linked sources uses a different denominator, and recomputing with it reverses the stated conclusion.',
+  'The linked records contradict the timeline here — the {object} was revised before the {period} cited, so the version this relies on was already superseded.',
+  'Cross-checking the {object} against the linked independent series: the district-level rows diverge from the quoted aggregate, so the summary overstates the trend.',
+] as const;
+
+const REBUTTAL_BODIES: readonly string[] = [
+  'The original statement stands: the {object} cited uses the certified totals, and the challenge relies on the provisional rows the revision policy excludes.',
+  'The correction conflates two release cycles of the {object}; within a single cycle the stated figure is exactly what the source publishes for the {period}.',
+  'As written, the claim already carries the caveat the challenge says is missing — see the methodology note in the {object} covering the {period}.',
+  'The challenged sentence quotes the {object} verbatim; the linked counter-series measures a different cohort, so it does not contradict the claim.',
+] as const;
+
+/** Pick `count` DISTINCT outlets (independent registrable domains boost the
+ *  adjudicator's independence feature honestly), wrapping the bank if short. */
+function distinctOutlets(bank: DomainBank, count: number, prng: Prng): string[] {
+  const start = prng.int(bank.outlets.length);
+  return Array.from(
+    { length: count },
+    (_, i) => bank.outlets[(start + i) % bank.outlets.length] ?? bank.outlets[0] ?? 'outlet',
+  );
+}
+
+/**
+ * A sourced correction challenging a comment or the story root (WS-T). The
+ * citation count varies (1–3, distinct outlets) so the governed adjudicator
+ * sees challenges of varying strength — under synthetic load every verdict
+ * class (corrected / upheld / inconclusive) occurs.
+ */
+export function generateCorrection(
+  domain: DomainId,
+  serial: number,
+  prng: Prng,
+): { body: string; citationUrls: readonly string[] } {
+  const bank = domainBank(domain);
+  const body = prng
+    .pick(CORRECTION_BODIES)
+    .replaceAll('{object}', prng.pick(bank.objects))
+    .replaceAll('{period}', prng.pick(PERIODS));
+  const count = 1 + prng.int(3); // 1..3 supporting sources
+  const citationUrls = distinctOutlets(bank, count, prng).map(
+    (outlet, i) => `https://${outlet}.example/refs/${domain}-correction-${serial}-${i}`,
+  );
+  return { body, citationUrls };
+}
+
+/**
+ * The incumbent's rebuttal position for an open debate arena. The source count
+ * is weighted across 1–3 — a POSTED position always carries at least one
+ * source, because the real `debatePositionUpdateSchema` requires it (a
+ * zero-source position is an input no user can submit). The empty-handed
+ * incumbent is modelled honestly upstream instead: the engine skips posting a
+ * rebuttal ~30% of the time (a true forfeit), so verdicts still split across
+ * the full outcome space.
+ */
+export function generateRebuttal(
+  domain: DomainId,
+  serial: number,
+  prng: Prng,
+): { body: string; citationUrls: readonly string[] } {
+  const bank = domainBank(domain);
+  const body = prng
+    .pick(REBUTTAL_BODIES)
+    .replaceAll('{object}', prng.pick(bank.objects))
+    .replaceAll('{period}', prng.pick(PERIODS));
+  const count = prng.weighted([
+    { value: 1, weight: 4 },
+    { value: 2, weight: 3 },
+    { value: 3, weight: 3 },
+  ]);
+  const citationUrls = distinctOutlets(bank, count, prng).map(
+    (outlet, i) => `https://${outlet}.example/refs/${domain}-rebuttal-${serial}-${i}`,
+  );
+  return { body, citationUrls };
+}

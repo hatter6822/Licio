@@ -151,13 +151,17 @@ export const serverEnvSchema = z.object({
   //               Enabling it sends governed-room proposal text off-host,
   //               making the vendor an operator-chosen data processor — boot
   //               logs this loudly.
-  //   local     — an operator-run SAME-HOST inference server speaking the
-  //               OpenAI-compatible /chat/completions protocol (llama.cpp
-  //               server, Ollama, vLLM, LM Studio); requires
-  //               GOVERNANCE_LLM_LOCAL_URL (LOOPBACK-ONLY, so "local" provably
-  //               means no third-party egress; e.g. http://127.0.0.1:11434/v1)
-  //               and GOVERNANCE_LLM_MODEL (the runtime's model name).
-  // Absent (or 'deterministic') ⇒ the deterministic provider and zero egress.
+  //   local     — a SAME-HOST inference server speaking the OpenAI-compatible
+  //               /chat/completions protocol (llama.cpp server, Ollama, vLLM,
+  //               LM Studio). GOVERNANCE_LLM_LOCAL_URL (LOOPBACK-ONLY, so
+  //               "local" provably means no third-party egress) defaults to
+  //               the Ollama loopback endpoint http://127.0.0.1:11434/v1 and
+  //               GOVERNANCE_LLM_MODEL to the reviewed default local model
+  //               (apps/api ai-governance/llm/config.ts).
+  // Absent ⇒ PRODUCTION defaults to 'local' (the production-complete posture:
+  // production always runs the full feature, failing closed per call to the
+  // deterministic paths when the runtime is absent); development wires the
+  // DEV-ONLY simulated runtime instead. 'deterministic' opts out explicitly.
   GOVERNANCE_LLM_PROVIDER: z.enum(['deterministic', 'anthropic', 'local']).optional(),
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   GOVERNANCE_LLM_MODEL: z.string().min(1).optional(),
@@ -168,9 +172,25 @@ export const serverEnvSchema = z.object({
   // WS-U ADR-9: when an LLM backend is enabled, the LLM is the in-room
   // moderation MODEL (bounded by the deterministic wrapper). Set `off` to keep
   // the deterministic default moderation proposer even with a backend
-  // configured (the backend then serves only the summary surface). No effect
+  // configured (the backend then serves the other surfaces only). No effect
   // without a backend.
   GOVERNANCE_LLM_MODERATION: z.enum(['on', 'off']).optional(),
+  // WS-T: when an LLM backend is enabled, the LLM is the debate ADJUDICATOR
+  // (the challenge-resolution model reviewing a story/comment correction
+  // debate; the deterministic MLP stays the per-call fail-closed fallback).
+  // Set `off` to keep the deterministic MLP adjudicator only.
+  GOVERNANCE_LLM_DEBATE: z.enum(['on', 'off']).optional(),
+  // The ADR-6 GLOBAL hourly budget for LLM debate adjudications (default 60;
+  // an exhausted budget falls back to the deterministic MLP — never a dropped
+  // verdict). Raise it for challenge-resolution throughput testing against a
+  // local runtime (the dev simulated runtime raises it automatically).
+  GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: z.coerce.number().int().min(1).optional(),
+  // LOCAL backend `reasoning_effort` (the reasoning-model latency lever; the
+  // reviewed default is `low`, and `none` disables thinking entirely — the
+  // qwen3-family unlock). `off` ⇒ the field is never sent. The completion
+  // layer also auto-negotiates per runtime (400-rejection / thinking
+  // exhaustion), logged and counted.
+  GOVERNANCE_LLM_REASONING_EFFORT: z.enum(['none', 'low', 'medium', 'high', 'off']).optional(),
 });
 
 /** True for an http(s) URL whose host is the loopback interface — the rule
@@ -217,57 +237,43 @@ export const serverEnvSchemaRefined = serverEnvSchema
     refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
     refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
     refineGroup(env, ctx, KNOMOSIS_GATEWAY_REQUIRED_KEYS, 'KNOMOSIS_GATEWAY');
-    // WS-U ADR-9: an LLM-backend opt-in enforces that backend's requirements
-    // at startup in every environment (fail-fast, never a silent boot with a
-    // half-configured backend that would then silently serve deterministic).
-    if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic' || env.GOVERNANCE_LLM_PROVIDER === 'local') {
-      if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic') {
-        // Reject a blank (whitespace-only) key too: it passes an undefined-only
-        // check but `resolveGovernanceLlmDecision` trims it to empty and silently
-        // disables the backend — turning an explicit opt-in into a silent
-        // deterministic boot. Fail fast instead (a half-configured backend).
-        if (env.ANTHROPIC_API_KEY === undefined || env.ANTHROPIC_API_KEY.trim() === '') {
-          ctx.addIssue({
-            code: 'custom',
-            message: 'GOVERNANCE_LLM_PROVIDER=anthropic requires a non-empty ANTHROPIC_API_KEY',
-            path: ['ANTHROPIC_API_KEY'],
-          });
-        }
-        // GOVERNANCE_LLM_MODEL is OPTIONAL for anthropic (defaults to the reviewed
-        // model), but a blank explicit override is silently trimmed to empty and
-        // falls back to the default — an explicit-yet-invalid value that must fail
-        // fast, not be ignored. (The `local` branch already requires it non-blank.)
-        if (env.GOVERNANCE_LLM_MODEL !== undefined && env.GOVERNANCE_LLM_MODEL.trim() === '') {
-          ctx.addIssue({
-            code: 'custom',
-            message: 'GOVERNANCE_LLM_MODEL must be non-empty when set',
-            path: ['GOVERNANCE_LLM_MODEL'],
-          });
-        }
-      } else {
-        if (env.GOVERNANCE_LLM_LOCAL_URL === undefined) {
-          ctx.addIssue({
-            code: 'custom',
-            message: 'GOVERNANCE_LLM_PROVIDER=local requires GOVERNANCE_LLM_LOCAL_URL',
-            path: ['GOVERNANCE_LLM_LOCAL_URL'],
-          });
-        } else if (!isLoopbackHttpUrl(env.GOVERNANCE_LLM_LOCAL_URL)) {
-          ctx.addIssue({
-            code: 'custom',
-            message:
-              'GOVERNANCE_LLM_LOCAL_URL must point at the loopback interface (localhost / 127.0.0.1 / [::1]) — a non-local URL is third-party egress and belongs to the anthropic backend decision, not local',
-            path: ['GOVERNANCE_LLM_LOCAL_URL'],
-          });
-        }
-        // Reject a blank model name too (same silent-disable trap as the key).
-        if (env.GOVERNANCE_LLM_MODEL === undefined || env.GOVERNANCE_LLM_MODEL.trim() === '') {
-          ctx.addIssue({
-            code: 'custom',
-            message:
-              'GOVERNANCE_LLM_PROVIDER=local requires a non-empty GOVERNANCE_LLM_MODEL (the local runtime model name)',
-            path: ['GOVERNANCE_LLM_MODEL'],
-          });
-        }
+    // WS-U ADR-9: LLM-backend requirements fail FAST at startup in every
+    // environment — never a silent boot with a half-configured backend that
+    // would then silently serve deterministic. The value-level checks run
+    // whenever the value is SET (not only under an explicit provider):
+    // production defaults an unset provider to 'local', so an explicit URL or
+    // model must be valid even when GOVERNANCE_LLM_PROVIDER is omitted.
+    if (
+      env.GOVERNANCE_LLM_LOCAL_URL !== undefined &&
+      !isLoopbackHttpUrl(env.GOVERNANCE_LLM_LOCAL_URL)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'GOVERNANCE_LLM_LOCAL_URL must point at the loopback interface (localhost / 127.0.0.1 / [::1]) — a non-local URL is third-party egress and belongs to the anthropic backend decision, not local',
+        path: ['GOVERNANCE_LLM_LOCAL_URL'],
+      });
+    }
+    // A blank model override is silently trimmed to empty and replaced by the
+    // backend default — an explicit-yet-ignored value that must fail fast.
+    if (env.GOVERNANCE_LLM_MODEL !== undefined && env.GOVERNANCE_LLM_MODEL.trim() === '') {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'GOVERNANCE_LLM_MODEL must be non-empty when set',
+        path: ['GOVERNANCE_LLM_MODEL'],
+      });
+    }
+    if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic') {
+      // Reject a blank (whitespace-only) key too: it passes an undefined-only
+      // check but `resolveGovernanceLlmDecision` trims it to empty and silently
+      // disables the backend — turning an explicit opt-in into a silent
+      // deterministic boot. Fail fast instead (a half-configured backend).
+      if (env.ANTHROPIC_API_KEY === undefined || env.ANTHROPIC_API_KEY.trim() === '') {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'GOVERNANCE_LLM_PROVIDER=anthropic requires a non-empty ANTHROPIC_API_KEY',
+          path: ['ANTHROPIC_API_KEY'],
+        });
       }
     }
     if (env.NODE_ENV === 'production') {

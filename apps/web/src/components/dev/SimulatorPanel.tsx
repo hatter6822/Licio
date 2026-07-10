@@ -46,10 +46,21 @@ function movementLabel(
   return { text: 'held', tone: 'same' };
 }
 
-function CounterTile({ label, value }: { label: string; value: number }): React.ReactElement {
+function CounterTile({
+  label,
+  value,
+  suffix = '',
+}: {
+  label: string;
+  value: number;
+  suffix?: string;
+}): React.ReactElement {
   return (
     <div className="rounded-md border border-line bg-surface p-3 neu-inset">
-      <div className="text-2xl font-semibold tabular-nums text-ink">{value.toLocaleString()}</div>
+      <div className="text-2xl font-semibold tabular-nums text-ink">
+        {value.toLocaleString()}
+        {suffix}
+      </div>
       <div className="mt-1 text-xs text-ink-muted">{label}</div>
     </div>
   );
@@ -210,6 +221,41 @@ export function SimulatorPanel(): React.ReactElement {
           duplicate, {status.counters.rejected_other} other, {status.counters.errors} errors. Story
           budget {status.world_story_count.toLocaleString()}/{status.story_cap.toLocaleString()}
           {status.story_cap_reached ? ' (reached — authors idle)' : ''}.
+        </p>
+      </Card>
+
+      {/* Challenge-resolution throughput (WS-T corrections → debate arenas) */}
+      <Card>
+        <h2 className="text-sm font-semibold text-ink">Challenge resolutions</h2>
+        <p className="mt-1 text-xs text-ink-muted">
+          Sourced corrections open real debate arenas; the governed AI adjudicator (
+          {status.debate_pulse.llm_backend_active
+            ? 'the LLM backend'
+            : 'the deterministic fallback'}
+          ) resolves them on shortened dev windows.
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <CounterTile label="Corrections filed" value={status.counters.corrections_posted} />
+          <CounterTile label="Arenas opened" value={status.counters.debates_opened} />
+          <CounterTile label="Rebuttals posted" value={status.counters.debate_positions_posted} />
+          <CounterTile label="Awaiting verdict" value={status.debate_pulse.open_arenas} />
+          <CounterTile label="Adjudicated" value={status.counters.debates_judged} />
+          <CounterTile label="Finalized" value={status.counters.debates_finalized} />
+          <CounterTile label="LLM verdicts" value={status.debate_pulse.llm_decided} />
+          <CounterTile
+            label="Avg adjudication"
+            value={status.debate_pulse.avg_adjudication_ms ?? 0}
+            suffix={status.debate_pulse.avg_adjudication_ms !== null ? ' ms' : ''}
+          />
+        </div>
+        <p className="mt-3 text-xs text-ink-muted">
+          LLM verdict split: {status.debate_pulse.llm_verdicts.corrected} corrected,{' '}
+          {status.debate_pulse.llm_verdicts.upheld} upheld,{' '}
+          {status.debate_pulse.llm_verdicts.inconclusive} inconclusive;{' '}
+          {status.debate_pulse.llm_unavailable} fell back to the deterministic adjudicator.
+          {status.debate_pulse.last_judged_at !== null
+            ? ` Last verdict ${new Date(status.debate_pulse.last_judged_at).toLocaleTimeString()}.`
+            : ' No verdicts yet — arenas judge ~20s after they open.'}
         </p>
       </Card>
 

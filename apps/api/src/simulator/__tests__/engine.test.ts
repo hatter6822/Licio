@@ -40,6 +40,7 @@ function story(id: string, roomId: string, opts: Partial<WorldStory> = {}): Worl
     domain: 'health',
     authorUserId: 'author-x',
     claimIds: [],
+    disputeStatus: 'none',
     ...opts,
   };
 }
@@ -53,13 +54,25 @@ function baseWorld(overrides: Partial<SimWorld> = {}): SimWorld {
     stories: [story('s1', 'r1'), story('s2', 'r1'), story('s3', 'r1')],
     rooms: [room('r1'), room('r2')],
     commentsByStory: new Map([
-      ['s1', [{ contributionId: 'c1', depth: 1, isQuestion: true }]],
+      [
+        's1',
+        [
+          {
+            contributionId: 'c1',
+            depth: 1,
+            isQuestion: true,
+            authorUserId: 'author-x',
+            disputeStatus: 'none' as const,
+          },
+        ],
+      ],
       ['s2', []],
       ['s3', []],
     ]),
     recentTitles: new Set<string>(),
     focusStoryId: null,
     storyCapReached: false,
+    openDebates: [],
     ...overrides,
   };
 }
@@ -368,5 +381,122 @@ describe('simulator engine — interpretation lens tagging (WS-G.2.2)', () => {
     const withLenses = stripLens(planTick(lensInput(LENSED)));
     const withoutLenses = stripLens(planTick(lensInput(new Map())));
     expect(withLenses).toEqual(withoutLenses);
+  });
+});
+
+describe('simulator engine — WS-T corrections + debate positions', () => {
+  const OTHER_AUTHOR = 'other-author';
+  const eligibleComment = {
+    contributionId: 'c-ok',
+    depth: 1,
+    isQuestion: false,
+    authorUserId: OTHER_AUTHOR,
+    disputeStatus: 'none' as const,
+  };
+  const underDebateComment = {
+    ...eligibleComment,
+    contributionId: 'c-live',
+    disputeStatus: 'under_debate' as const,
+  };
+  const incorrectComment = {
+    ...eligibleComment,
+    contributionId: 'c-bad',
+    disputeStatus: 'incorrect' as const,
+  };
+
+  function input(world: SimWorld, seed: string) {
+    return {
+      scenario: SCENARIOS.steady,
+      world,
+      personas: personas(BASE_ROSTER),
+      newcomersProvisioned: 0,
+      prng: createPrng(seed),
+      scenarioElapsedMs: 60_000,
+      tickMs: 60_000,
+      speed: 20,
+      storySerial: 1,
+      kickoffDone: true,
+      repostDone: true,
+    };
+  }
+
+  it('plans sourced corrections against ELIGIBLE targets only (1–3 sources each)', () => {
+    const world = baseWorld({
+      commentsByStory: new Map([
+        ['s1', [eligibleComment, underDebateComment, incorrectComment]],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    let planned = 0;
+    for (const seed of ['a', 'b', 'c', 'd', 'e']) {
+      for (const action of planTick(input(world, seed))) {
+        if (action.kind !== 'correction') continue;
+        planned += 1;
+        expect(action.body.length).toBeGreaterThan(40);
+        expect(action.citationUrls.length).toBeGreaterThanOrEqual(1);
+        expect(action.citationUrls.length).toBeLessThanOrEqual(3);
+        if (action.targetContributionId !== null) {
+          // Never the under-debate or incorrect comment; never self-challenge.
+          expect(action.targetContributionId).toBe('c-ok');
+          expect(action.incumbentUserId).toBe(OTHER_AUTHOR);
+          expect(action.personaUserId).not.toBe(OTHER_AUTHOR);
+        } else {
+          // Story-root fallback: the incumbent is the story author.
+          expect(action.incumbentUserId).toBe('author-x');
+          expect(action.personaUserId).not.toBe('author-x');
+        }
+      }
+    }
+    expect(planned).toBeGreaterThan(0);
+  });
+
+  it('plans NO correction when neither the comments nor the story root are challengeable', () => {
+    const world = baseWorld({
+      stories: [story('s1', 'r1', { disputeStatus: 'under_debate' })],
+      commentsByStory: new Map([['s1', [underDebateComment, incorrectComment]]]),
+    });
+    for (const seed of ['a', 'b', 'c', 'd', 'e']) {
+      const corrections = planTick(input(world, seed)).filter((a) => a.kind === 'correction');
+      expect(corrections).toHaveLength(0);
+    }
+  });
+
+  it('plans incumbent rebuttals only for open, unanswered arenas whose incumbent is a present persona', () => {
+    const incumbent = req(BASE_ROSTER[0]).userId;
+    const world = baseWorld({
+      openDebates: [
+        {
+          debateId: 'd-open',
+          incumbentUserId: incumbent,
+          incumbentPosted: false,
+          domain: 'health',
+        },
+        {
+          debateId: 'd-answered',
+          incumbentUserId: incumbent,
+          incumbentPosted: true,
+          domain: 'health',
+        },
+        {
+          debateId: 'd-foreign',
+          incumbentUserId: 'not-a-persona',
+          incumbentPosted: false,
+          domain: 'health',
+        },
+      ],
+    });
+    let planned = 0;
+    for (const seed of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']) {
+      for (const action of planTick(input(world, seed))) {
+        if (action.kind !== 'debate_position') continue;
+        planned += 1;
+        expect(action.debateId).toBe('d-open');
+        expect(action.personaUserId).toBe(incumbent);
+        expect(action.summary.length).toBeGreaterThan(40);
+        expect(action.citationUrls.length).toBeLessThanOrEqual(3);
+      }
+    }
+    expect(planned).toBeGreaterThan(0);
   });
 });

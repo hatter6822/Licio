@@ -26,6 +26,7 @@ import {
   debateArenaPublicSchema,
   debateArenaSummarySchema,
 } from '@licio/shared';
+import { mapBounded } from '../lib/concurrency.js';
 import type { DebateArenaRecord, DebateSidePosition, DebateStore } from './debate-store.js';
 import type { ContributionStore } from './stores.js';
 
@@ -58,6 +59,19 @@ export type StoryDisputeSetter = (
   status: 'none' | 'under_debate' | 'incorrect' | 'validated',
 ) => Promise<void>;
 
+/**
+ * The arena window lengths. Production ALWAYS runs the §15.4 spec windows (the
+ * shared `DEBATE_EDIT_WINDOW_MS`/`DEBATE_OVERRIDE_WINDOW_MS` constants — the
+ * defaults when this is absent); the override exists so the DEV traffic
+ * simulator (and tests) can drive the full correction → adjudication →
+ * finalize lifecycle on an observable cadence instead of 12h + 24h. Nothing in
+ * production wiring ever sets it.
+ */
+export interface DebateWindowPolicy {
+  editWindowMs: number;
+  overrideWindowMs: number;
+}
+
 export interface DebateDeps {
   debates: DebateStore;
   contributions: ContributionStore;
@@ -67,6 +81,9 @@ export interface DebateDeps {
   runJudge: DebateJudgeRunner;
   /** Fan-out a live arena frame (co-visible drafts / verdict / resolution). */
   broadcast?: (debateId: string, arena: DebateArenaPublic) => void;
+  /** Window-length override (dev simulator / tests ONLY; absent ⇒ the §15.4
+   *  spec constants). */
+  windows?: DebateWindowPolicy | undefined;
   now: () => number;
   log: (event: string, meta: Record<string, unknown>) => void;
 }
@@ -113,7 +130,9 @@ export async function maybeEnterDebate(
 
   const nowMs = deps.now();
   const nowIso = new Date(nowMs).toISOString();
-  const editDeadlineAt = new Date(nowMs + DEBATE_EDIT_WINDOW_MS).toISOString();
+  const editDeadlineAt = new Date(
+    nowMs + (deps.windows?.editWindowMs ?? DEBATE_EDIT_WINDOW_MS),
+  ).toISOString();
   const arena = await deps.debates.open({
     debateId,
     storyId: correction.storyId,
@@ -209,15 +228,29 @@ export async function judgeDebateArena(
   deps: DebateDeps,
   debateId: string,
 ): Promise<DebateArenaRecord | null> {
-  const arena = await deps.debates.getById(debateId);
-  if (arena === null) return null;
-  if (arena.state !== 'open' && arena.state !== 'awaiting_verdict') return arena;
+  // ATOMICALLY claim the arena (`open` → `awaiting_verdict`) BEFORE the judge
+  // runs, and score the post-claim snapshot the claim returns. Adjudication
+  // can be slow (a real LLM); without the claim, a position submitted just
+  // inside the edit deadline could land WHILE the judge computes on a stale
+  // read and be silently ignored. From the claim onward the store-level
+  // `state = 'open'` guard on position writes rejects the race loser with an
+  // explicit `window_closed` — a timely write either beats the claim and IS
+  // judged, or the writer is told it wasn't considered; never a silent drop.
+  // (Re-claiming `awaiting_verdict` succeeds: a claim whose judge crashed is
+  // re-judged on a later tick.) A judged/resolved arena refuses the claim —
+  // return it unchanged (the idempotent no-op).
+  const arena = await deps.debates.claimForVerdict(debateId);
+  if (arena === null) return deps.debates.getById(debateId);
+  // Co-viewers see the window flip to "awaiting verdict" immediately.
+  await broadcastArena(deps, arena);
 
   const input = assembleJudgeInput(arena);
   const result = await deps.runJudge(debateId, input);
   const nowMs = deps.now();
   const verdictAt = new Date(nowMs).toISOString();
-  const overrideDeadlineAt = new Date(nowMs + DEBATE_OVERRIDE_WINDOW_MS).toISOString();
+  const overrideDeadlineAt = new Date(
+    nowMs + (deps.windows?.overrideWindowMs ?? DEBATE_OVERRIDE_WINDOW_MS),
+  ).toISOString();
 
   const patch =
     result === null
@@ -353,25 +386,63 @@ export async function finalizeDebate(
 // Scheduler tick (the lease-guarded deadline sweep).
 // ---------------------------------------------------------------------------
 
+/** Concurrent adjudications per lifecycle pass. Arenas are independent, so the
+ *  judge calls fan out: a real local runtime serves parallel slots (Ollama
+ *  defaults to 4; vLLM batches far wider), roughly dividing a backlog's
+ *  wall-clock by this factor — and a single-slot runtime simply queues the
+ *  extra requests server-side, no worse than serial. The budget + breaker are
+ *  synchronous in-process state, safe under this interleaving (the breaker's
+ *  half-open path is explicitly concurrency-hardened). */
+export const DEBATE_JUDGE_CONCURRENCY = 4;
+
 /**
- * One debate-lifecycle sweep: judge every arena whose 12h edit window has closed,
- * then finalize every arena whose 24h override window has closed.  Bounded per
- * tick; idempotent (each stage no-ops on an already-advanced arena).
+ * One debate-lifecycle sweep: judge every arena whose 12h edit window has closed
+ * (fanned out `concurrency`-wide — the adjudicator is the expensive step), then
+ * finalize every arena whose 24h override window has closed.  Bounded per tick;
+ * idempotent (each stage no-ops on an already-advanced arena); per-arena
+ * failures are ISOLATED (logged, the rest of the batch proceeds — one poisoned
+ * arena must not stall every other verdict).
+ *
+ * `judgeDeadlineMs` bounds the judge pass in WALL-CLOCK time: once passed, the
+ * remaining due arenas are SKIPPED (they stay open for the next tick/holder).
+ * The scheduler derives it from its job-lease window so a slow-LLM backlog can
+ * never hold work past the lease — the store-level verdict CAS
+ * (`recordVerdict`) independently guarantees a stale overrun can't clobber
+ * another holder's verdict, so the deadline is a cost bound, not the
+ * correctness mechanism. Absent ⇒ unbounded (the dev simulator's tick).
  */
 export async function runDebateLifecycle(
   deps: DebateDeps,
   limit = 100,
+  concurrency = DEBATE_JUDGE_CONCURRENCY,
+  judgeDeadlineMs?: number,
 ): Promise<{ judged: number; finalized: number }> {
   const nowIso = new Date(deps.now()).toISOString();
   let judged = 0;
   let finalized = 0;
-  for (const arena of await deps.debates.listPastEditDeadline(nowIso, limit)) {
-    const result = await judgeDebateArena(deps, arena.debateId);
-    if (result?.state === 'judged') judged += 1;
+  let skippedForDeadline = 0;
+  const due = await deps.debates.listPastEditDeadline(nowIso, limit);
+  for (const outcome of await mapBounded(due, concurrency, async (arena) => {
+    if (judgeDeadlineMs !== undefined && deps.now() > judgeDeadlineMs) {
+      skippedForDeadline += 1;
+      return null;
+    }
+    return judgeDebateArena(deps, arena.debateId);
+  })) {
+    if (outcome.ok && outcome.value?.state === 'judged') judged += 1;
+    else if (!outcome.ok) deps.log('forum.debate_judge_failed', { error: String(outcome.error) });
   }
-  for (const arena of await deps.debates.listPastOverrideDeadline(nowIso, limit)) {
-    const result = await finalizeDebate(deps, arena.debateId);
-    if (result?.state === 'resolved') finalized += 1;
+  if (skippedForDeadline > 0) {
+    deps.log('forum.debate_judge_deadline', { skipped: skippedForDeadline });
+  }
+  const closable = await deps.debates.listPastOverrideDeadline(nowIso, limit);
+  for (const outcome of await mapBounded(closable, concurrency, (arena) =>
+    finalizeDebate(deps, arena.debateId),
+  )) {
+    if (outcome.ok && outcome.value?.state === 'resolved') finalized += 1;
+    else if (!outcome.ok) {
+      deps.log('forum.debate_finalize_failed', { error: String(outcome.error) });
+    }
   }
   return { judged, finalized };
 }

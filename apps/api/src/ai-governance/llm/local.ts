@@ -59,15 +59,49 @@ export function localChatCompletionsUrl(baseUrl: string): string {
   return `${base}/chat/completions`;
 }
 
-/** Build the local completion over the OpenAI-compatible protocol. */
+/** Metadata-only observability hook for the negotiation latches below. */
+export type LocalCompletionLog = (event: string, meta: Record<string, unknown>) => void;
+
+/**
+ * Build the local completion over the OpenAI-compatible protocol, with
+ * PER-RUNTIME PARAMETER NEGOTIATION for the `reasoning_effort` lever (each
+ * model family behaves differently, all measured on real runtimes):
+ *
+ *   - a runtime/model that REJECTS the field with HTTP 400 (e.g. gemma3 —
+ *     "model does not support reasoning") gets ONE retry without it, and the
+ *     omission is LATCHED for the closure's lifetime;
+ *   - a reasoning model whose thinking EXHAUSTS the output budget before any
+ *     content (finish_reason `length` with an empty message — the qwen3
+ *     family at any effort above `none`) gets ONE retry at `none`, latched.
+ *
+ * Every adaptation is logged (metadata only) — never silent. The DECLARED
+ * effort stays the config-hashed decision surface: it is the most reasoning
+ * the platform requests, and a runtime that cannot honour it serves the
+ * lesser-thinking form with every deterministic gate still judging the output
+ * above this layer. At most one retry per call; a latched closure sends its
+ * adapted form directly on subsequent calls. Retry eligibility keys on what
+ * EACH request actually sent, not on the shared latch — calls fan out
+ * concurrently (admission sampling, the debate judge pass), so every
+ * in-flight request that carried the field gets its own retry even when a
+ * sibling latched first (the latch only steers future sends).
+ */
 export function createLocalCompletion(
   baseUrl: string,
   settings: GovernanceLlmSettings,
   fetchImpl: FetchLike = fetch,
+  log: LocalCompletionLog = () => {},
 ): LlmCompletion {
   const url = localChatCompletionsUrl(baseUrl);
-  return async (request) => {
-    const response = await fetchImpl(url, {
+  /** The negotiated effort actually sent (starts at the declared setting). */
+  let effectiveEffort: GovernanceLlmSettings['reasoningEffort'] = settings.reasoningEffort;
+  /** True once the runtime 400-rejected the field (never send it again). */
+  let effortRejected = false;
+
+  const attempt = async (
+    request: Parameters<LlmCompletion>[0],
+    effort: GovernanceLlmSettings['reasoningEffort'],
+  ) => {
+    return fetchImpl(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       // A loopback server that answers with a 3xx redirect must NOT have this POST
@@ -82,6 +116,9 @@ export function createLocalCompletion(
         // extractive task (the hosted Claude leg intentionally sends none —
         // current Claude models reject sampling parameters).
         temperature: 0,
+        // Reasoning-model latency lever. Config-hashed into the identity, so
+        // changing the DECLARED value re-clears the WS-K gate. Null ⇒ not sent.
+        ...(effort !== null && !effortRejected ? { reasoning_effort: effort } : {}),
         messages: [
           { role: 'system', content: request.system },
           { role: 'user', content: request.user },
@@ -93,9 +130,9 @@ export function createLocalCompletion(
       }),
       signal: AbortSignal.timeout(request.timeoutMs ?? settings.timeoutMs),
     });
-    if (!response.ok) {
-      throw new Error(`local inference server responded ${response.status}`);
-    }
+  };
+
+  const toResult = async (response: Awaited<ReturnType<FetchLike>>) => {
     const data: unknown = await response.json();
     const parsed = localChatCompletionSchema.parse(data);
     const choice = parsed.choices[0];
@@ -104,5 +141,55 @@ export function createLocalCompletion(
       stopReason: mapFinishReason(choice.finish_reason),
       text: choice.message.content,
     };
+  };
+
+  return async (request) => {
+    // What THIS request sends. Retry decisions below key on this — NOT on the
+    // shared latches — because calls fan out concurrently (admission's k-of-N
+    // sampling, the debate lifecycle's 4-wide judge pass): every in-flight
+    // request built before the first negotiated response still carries the
+    // field, and each of them must get its own retry. The latches only steer
+    // what FUTURE calls send (and make the log fire once).
+    const sentEffort = effortRejected ? null : effectiveEffort;
+    let response = await attempt(request, sentEffort);
+
+    // Negotiation 1 — the runtime rejects the reasoning_effort field outright.
+    if (response.status === 400 && sentEffort !== null) {
+      if (!effortRejected) {
+        effortRejected = true;
+        log('ai.llm.local.effort_rejected', { model_id: settings.modelId });
+      }
+      response = await attempt(request, null);
+    }
+    if (!response.ok) {
+      throw new Error(`local inference server responded ${response.status}`);
+    }
+    let result = await toResult(response);
+
+    // Negotiation 2 — thinking exhausted the whole output budget before any
+    // content. Retry once with thinking disabled and latch. Only when THIS
+    // request sent an effort above `none` (an explicit operator `off` sends
+    // nothing and is honoured verbatim; a concurrently-latched `none` retry
+    // target still applies to every straggler that sent the old effort). If a
+    // concurrent 400 latched the field away entirely, thinking cannot be
+    // disabled — return the honest truncated result.
+    if (
+      result.stopReason === 'max_tokens' &&
+      (result.text === null || result.text.length === 0) &&
+      sentEffort !== null &&
+      sentEffort !== 'none' &&
+      !effortRejected
+    ) {
+      if (effectiveEffort !== 'none') {
+        effectiveEffort = 'none';
+        log('ai.llm.local.thinking_exhausted', { model_id: settings.modelId });
+      }
+      const retried = await attempt(request, 'none');
+      if (!retried.ok) {
+        throw new Error(`local inference server responded ${retried.status}`);
+      }
+      result = await toResult(retried);
+    }
+    return result;
   };
 }

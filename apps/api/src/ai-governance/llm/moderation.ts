@@ -217,14 +217,17 @@ export function createGovernanceLlmModerationProposer(
         return unavailable('invalid_output', meta);
       }
 
-      recordSuccess();
       // Provenance is LOAD-BEARING for a moderation decision (it anchors audit +
       // correction, and the wrapper can raise a contribution to review on it). If
       // the immutable AIOutputRecord cannot be written, FAIL CLOSED to `unavailable`
       // — the wrapper degrades to the WS-J baseline and defers re-moderation — rather
       // than apply an audit-sensitive decision with no record. (Admission probes,
       // roomId = ADMISSION_ROOM_ID, still record a probe output; a store fault there
-      // simply defers the candidate's admission, never a live decision.)
+      // simply defers the candidate's admission, never a live decision.) The write
+      // COUNTS toward the breaker — success only after the record persists, a store
+      // fault records a failure — otherwise an output-record outage would spend a
+      // full LLM completion per deferred retry forever with the breaker pinned
+      // closed, while no decision could ever be recorded.
       let output: Awaited<ReturnType<typeof recordAiOutput>>;
       try {
         output = await recordAiOutput(services.outputRecords, {
@@ -238,9 +241,11 @@ export function createGovernanceLlmModerationProposer(
           nowIso: new Date(services.now()).toISOString(),
         });
       } catch {
+        recordFailure();
         services.metrics.increment('ai.governance.moderation.record_failed');
         return unavailable('record_failed', meta);
       }
+      recordSuccess();
 
       services.metrics.increment('ai.governance.moderation.decided');
       services.metrics.increment(`ai.governance.moderation.proposed.${verdict.action}`);
