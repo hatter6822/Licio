@@ -200,6 +200,7 @@ function debateDepsFromBundle(bundle: ReturnType<typeof bundles>): DebateDeps {
     },
     runJudge: bundle.forum.debateJudge,
     broadcast: (id, arena) => bundle.forum.debateBroadcaster.publish(id, arena),
+    windows: bundle.forum.debateWindowsOverride ?? undefined,
     now: bundle.forum.now,
     log: bundle.forum.log,
   };

@@ -86,6 +86,17 @@ this surface (`docs/DEVELOPMENT.md` §16).
 The WS-U `debate.judge` capability (floor-disjoint, deny-by-default) lets a
 governed room route adjudication through its own agent under its law-pack bounds.
 
+**Window policy.** The 12h edit / 24h override windows are the §15.4 spec
+constants (`DEBATE_EDIT_WINDOW_MS`/`DEBATE_OVERRIDE_WINDOW_MS`), injectable via
+`DebateDeps.windows` ← `ForumServices.debateWindowsOverride` — a **dev/test-only
+seam** nothing in production wiring ever sets. The DEV traffic simulator sets
+short windows (≈20s/10s) while it runs (restored on stop) and advances due
+arenas every tick, so synthetic sourced corrections resolve observably: the
+challenge-resolution **throughput pulse** (arenas opened/awaiting/adjudicated/
+finalized, LLM verdict split + fallbacks, average adjudication wall-clock)
+renders in the dev panel and at `GET /v1/dev/simulator/status` (see
+`docs/DEVELOPMENT.md` §10).
+
 ## Surfaces
 
 - **API:** `POST /v1/contributions` (a sourced correction opens the arena

@@ -67,7 +67,11 @@ import {
 } from './events/services.js';
 import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
 import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
-import { DEBATE_SCHEDULER_INTERVAL_MS, startDebateScheduler } from './forum/debate-scheduler.js';
+import {
+  buildDebateJudgeRunner,
+  DEBATE_SCHEDULER_INTERVAL_MS,
+  startDebateScheduler,
+} from './forum/debate-scheduler.js';
 import { DrizzleDebateStore } from './forum/drizzle-debate-store.js';
 import {
   DrizzleContributionStore,
@@ -1011,6 +1015,7 @@ let governanceLlmEnvInput: GovernanceLlmEnvInput = {
   localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
   moderation: env.GOVERNANCE_LLM_MODERATION,
   debate: env.GOVERNANCE_LLM_DEBATE,
+  debateBudgetPerHour: env.GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR,
   // Production defaults an unset provider to the 'local' backend (the
   // production-complete posture); development defaults to the simulator below.
   nodeEnv: env.NODE_ENV,
@@ -1045,6 +1050,9 @@ if (
       provider: 'local',
       localBaseUrl: simulated.baseUrl,
       modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID,
+      // The simulated runtime is cost-free, so the ADR-6 debate budget must
+      // never cap a dev challenge-resolution throughput run (env still wins).
+      debateBudgetPerHour: env.GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR ?? 100_000,
     };
     logger.warn(
       { baseUrl: simulated.baseUrl, modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID },
@@ -1193,6 +1201,13 @@ const authorHistoryReader = buildAuthorHistoryReader({
   now: () => Date.now(),
 });
 forumServices.agentModerator = createRoomAgentModerator({ readAuthorHistory: authorHistoryReader });
+// WS-T: bind the GOVERNED adjudicator runner to the forum container, so EVERY
+// DebateDeps construction site (the live routes, the contribution path, the dev
+// simulator's lifecycle) judges through the real guard → LLM leg → MLP fallback
+// → AIOutputRecord chain — not the fail-closed null default (which resolves
+// every verdict `inconclusive`). The debate scheduler builds the same runner
+// itself; this closes the gap for every non-scheduler path.
+forumServices.debateJudge = buildDebateJudgeRunner(forumServices.now);
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database

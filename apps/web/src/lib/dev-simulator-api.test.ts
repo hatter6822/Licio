@@ -34,6 +34,11 @@ function status(): SimulatorStatus {
       room_joins: 0,
       reports_filed: 0,
       users_provisioned: 0,
+      corrections_posted: 0,
+      debates_opened: 0,
+      debate_positions_posted: 0,
+      debates_judged: 0,
+      debates_finalized: 0,
       rejected_rate_limited: 0,
       rejected_duplicate: 0,
       rejected_other: 0,
@@ -43,6 +48,15 @@ function status(): SimulatorStatus {
     recent_activity: [],
     feed_pulse: { computed_at: null, fallback: false, items: [] },
     last_signal_refresh_at: null,
+    debate_pulse: {
+      open_arenas: 0,
+      llm_backend_active: false,
+      llm_verdicts: { upheld: 0, corrected: 0, inconclusive: 0 },
+      llm_decided: 0,
+      llm_unavailable: 0,
+      avg_adjudication_ms: null,
+      last_judged_at: null,
+    },
     scenarios: [{ id: 'steady', label: 'Steady', description: 'A balanced day.' }],
   };
 }

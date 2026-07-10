@@ -57,6 +57,11 @@ function status(over: Partial<SimulatorStatus> = {}): SimulatorStatus {
       room_joins: 5,
       reports_filed: 1,
       users_provisioned: 27,
+      corrections_posted: 5,
+      debates_opened: 4,
+      debate_positions_posted: 3,
+      debates_judged: 3,
+      debates_finalized: 2,
       rejected_rate_limited: 3,
       rejected_duplicate: 1,
       rejected_other: 0,
@@ -99,6 +104,15 @@ function status(over: Partial<SimulatorStatus> = {}): SimulatorStatus {
       ],
     },
     last_signal_refresh_at: '2026-07-04T00:01:05.000Z',
+    debate_pulse: {
+      open_arenas: 1,
+      llm_backend_active: true,
+      llm_verdicts: { upheld: 1, corrected: 2, inconclusive: 0 },
+      llm_decided: 3,
+      llm_unavailable: 0,
+      avg_adjudication_ms: 850,
+      last_judged_at: '2026-07-04T00:01:00.000Z',
+    },
     scenarios: [
       { id: 'steady', label: 'Steady community', description: 'A balanced day.' },
       { id: 'breaking_news', label: 'Breaking story', description: 'A developing story.' },
@@ -122,6 +136,11 @@ describe('SimulatorPanel', () => {
     expect(screen.getByText('new to page')).toBeInTheDocument();
     // The rejected activity entry surfaces with its code.
     expect(screen.getByText(/comment rejected \(rate_limited\)/)).toBeInTheDocument();
+    // The WS-T challenge-resolution pulse (corrections → arenas → verdicts).
+    expect(screen.getByText('Challenge resolutions')).toBeInTheDocument();
+    expect(screen.getByText('Corrections filed')).toBeInTheDocument();
+    expect(screen.getByText('Avg adjudication')).toBeInTheDocument();
+    expect(screen.getByText(/2 corrected, 1 upheld, 0 inconclusive/)).toBeInTheDocument();
   });
 
   it('shows the unavailable state when the surface is absent', async () => {

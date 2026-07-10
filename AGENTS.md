@@ -563,8 +563,9 @@ licio/
 │           │   │                              failure-injection markers; never in production)
 │           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY app-driving I/O module —
 │           │   │                              drives the REAL submission/contribution/attention/
-│           │   │                              report paths + on-demand PWAtt/WS-H/feature scoring;
-│           │   │                              tick loop
+│           │   │                              report paths + on-demand PWAtt/WS-H/feature scoring +
+│           │   │                              the WS-T correction→debate→adjudication loop at
+│           │   │                              shortened arena windows (throughput pulse); tick loop
 │           │   └── routes.ts             --   dev control routes (mounted in front of createApp,
 │           │                                  never in the production AppType; header-guarded)
 │           ├── lib/

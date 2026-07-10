@@ -100,6 +100,9 @@ export interface PersonaArchetype {
     readonly attention: number;
     readonly join: number;
     readonly report: number;
+    /** WS-T sourced corrections (each opens a debate arena the governed
+     *  adjudicator resolves — the challenge-resolution load generator). */
+    readonly correction: number;
   };
   /** Reading-depth sampling for attention aggregates (coarse buckets only). */
   readonly dwell: WeightedList<DwellBucket>;
@@ -162,7 +165,7 @@ const rv = (
 export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArchetype>> = {
   author: {
     id: 'author',
-    rates: { story: 0.05, comment: 0.08, attention: 0.25, join: 0.01, report: 0 },
+    rates: { story: 0.05, comment: 0.08, attention: 0.25, join: 0.01, report: 0, correction: 0.02 },
     dwell: dw(1, 2, 4, 3, 1),
     replyDepth: rd(4, 3, 2, 1),
     returns: rv(6, 3, 1, 0),
@@ -174,7 +177,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   local_correspondent: {
     id: 'local_correspondent',
-    rates: { story: 0.04, comment: 0.1, attention: 0.25, join: 0.015, report: 0 },
+    rates: { story: 0.04, comment: 0.1, attention: 0.25, join: 0.015, report: 0, correction: 0.02 },
     dwell: dw(1, 2, 4, 3, 1),
     replyDepth: rd(4, 3, 2, 1),
     returns: rv(5, 4, 1, 0),
@@ -186,7 +189,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   expert_author: {
     id: 'expert_author',
-    rates: { story: 0.03, comment: 0.09, attention: 0.2, join: 0.01, report: 0 },
+    rates: { story: 0.03, comment: 0.09, attention: 0.2, join: 0.01, report: 0, correction: 0.05 },
     dwell: dw(0, 1, 3, 4, 3),
     replyDepth: rd(3, 3, 3, 1),
     returns: rv(4, 4, 2, 0),
@@ -199,7 +202,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   commenter: {
     id: 'commenter',
-    rates: { story: 0.004, comment: 0.3, attention: 0.35, join: 0.02, report: 0 },
+    rates: { story: 0.004, comment: 0.3, attention: 0.35, join: 0.02, report: 0, correction: 0.03 },
     dwell: dw(1, 3, 4, 2, 1),
     replyDepth: rd(2, 4, 3, 1),
     returns: rv(5, 4, 1, 0),
@@ -211,7 +214,14 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   evidence_contributor: {
     id: 'evidence_contributor',
-    rates: { story: 0.002, comment: 0.12, attention: 0.25, join: 0.015, report: 0 },
+    rates: {
+      story: 0.002,
+      comment: 0.12,
+      attention: 0.25,
+      join: 0.015,
+      report: 0,
+      correction: 0.08,
+    },
     dwell: dw(0, 1, 3, 4, 3),
     replyDepth: rd(3, 3, 3, 1),
     returns: rv(4, 4, 2, 0),
@@ -223,7 +233,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   lurker: {
     id: 'lurker',
-    rates: { story: 0, comment: 0, attention: 0.5, join: 0.01, report: 0 },
+    rates: { story: 0, comment: 0, attention: 0.5, join: 0.01, report: 0, correction: 0 },
     dwell: dw(2, 4, 4, 2, 1),
     replyDepth: rd(8, 3, 1, 0),
     returns: rv(7, 3, 1, 0),
@@ -235,7 +245,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   skimmer: {
     id: 'skimmer',
-    rates: { story: 0, comment: 0.01, attention: 0.8, join: 0.005, report: 0 },
+    rates: { story: 0, comment: 0.01, attention: 0.8, join: 0.005, report: 0, correction: 0 },
     dwell: dw(6, 4, 2, 0, 0),
     replyDepth: rd(9, 2, 0, 0),
     returns: rv(8, 2, 0, 0),
@@ -247,7 +257,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   deep_reader: {
     id: 'deep_reader',
-    rates: { story: 0, comment: 0.05, attention: 0.35, join: 0.015, report: 0 },
+    rates: { story: 0, comment: 0.05, attention: 0.35, join: 0.015, report: 0, correction: 0.06 },
     dwell: dw(0, 1, 2, 4, 4),
     replyDepth: rd(3, 3, 3, 2),
     returns: rv(3, 4, 3, 1),
@@ -259,7 +269,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   burst_returner: {
     id: 'burst_returner',
-    rates: { story: 0, comment: 0.02, attention: 0.9, join: 0.005, report: 0 },
+    rates: { story: 0, comment: 0.02, attention: 0.9, join: 0.005, report: 0, correction: 0 },
     dwell: dw(3, 4, 3, 1, 0),
     replyDepth: rd(6, 3, 1, 0),
     returns: rv(1, 3, 4, 3),
@@ -271,7 +281,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   reporter: {
     id: 'reporter',
-    rates: { story: 0, comment: 0.02, attention: 0.2, join: 0.01, report: 0.02 },
+    rates: { story: 0, comment: 0.02, attention: 0.2, join: 0.01, report: 0.02, correction: 0.04 },
     dwell: dw(1, 3, 4, 2, 1),
     replyDepth: rd(6, 3, 1, 0),
     returns: rv(6, 3, 1, 0),
@@ -288,7 +298,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
     // story. The report rate is set so that, with the burst multiplier, every
     // member files within the WS-J coordination window (300s) even at the
     // default speed of 1 — so all 12 distinct reporters cross the detector.
-    rates: { story: 0, comment: 0.02, attention: 0.05, join: 0.005, report: 0.02 },
+    rates: { story: 0, comment: 0.02, attention: 0.05, join: 0.005, report: 0.02, correction: 0 },
     dwell: dw(4, 4, 2, 0, 0),
     replyDepth: rd(7, 3, 0, 0),
     returns: rv(2, 4, 3, 1),
@@ -300,7 +310,7 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
   },
   newcomer: {
     id: 'newcomer',
-    rates: { story: 0.002, comment: 0.06, attention: 0.4, join: 0.05, report: 0 },
+    rates: { story: 0.002, comment: 0.06, attention: 0.4, join: 0.05, report: 0, correction: 0 },
     dwell: dw(2, 4, 3, 1, 0),
     replyDepth: rd(6, 3, 1, 0),
     returns: rv(7, 3, 0, 0),

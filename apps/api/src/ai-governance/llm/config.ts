@@ -118,6 +118,11 @@ export interface GovernanceLlmEnvInput {
    *  absent) uses the LLM as the debate adjudicator when a backend is enabled
    *  (the deterministic MLP remains the per-call fail-closed fallback). */
   debate?: string | undefined;
+  /** GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR — overrides the ADR-6 global hourly
+   *  debate-adjudication budget (default 60). The dev boot raises it for the
+   *  cost-free simulated runtime; operators raise it for throughput testing
+   *  against a real local runtime. Non-positive/invalid values are ignored. */
+  debateBudgetPerHour?: number | undefined;
   /** NODE_ENV — drives the production-complete default above. Absent ⇒ treated
    *  as non-production (no silent default backend). */
   nodeEnv?: string | undefined;
@@ -162,6 +167,13 @@ export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): Gove
   }
 
   const settings = { ...DEFAULT_GOVERNANCE_LLM_SETTINGS };
+  if (
+    input.debateBudgetPerHour !== undefined &&
+    Number.isInteger(input.debateBudgetPerHour) &&
+    input.debateBudgetPerHour > 0
+  ) {
+    settings.maxDebateJudgementsPerHour = input.debateBudgetPerHour;
+  }
   const modelId = input.modelId?.trim();
   const llmModeration = input.moderation?.trim().toLowerCase() !== 'off';
   const llmDebate = input.debate?.trim().toLowerCase() !== 'off';

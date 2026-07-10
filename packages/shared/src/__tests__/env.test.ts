@@ -198,6 +198,14 @@ describe('validateServerEnv', () => {
     ).not.toThrow();
     // The WS-T debate flag parses like the moderation flag.
     expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_DEBATE: 'off' })).not.toThrow();
+    // The throughput budget knob coerces to a positive integer.
+    expect(
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: '5000' })
+        .GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR,
+    ).toBe(5000);
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: '0' }),
+    ).toThrow();
   });
 
   it('rejects a BLANK (whitespace-only) LLM credential — no silent-disable of the opt-in (WS-U ADR-9 review)', () => {

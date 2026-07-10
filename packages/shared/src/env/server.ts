@@ -180,6 +180,11 @@ export const serverEnvSchema = z.object({
   // debate; the deterministic MLP stays the per-call fail-closed fallback).
   // Set `off` to keep the deterministic MLP adjudicator only.
   GOVERNANCE_LLM_DEBATE: z.enum(['on', 'off']).optional(),
+  // The ADR-6 GLOBAL hourly budget for LLM debate adjudications (default 60;
+  // an exhausted budget falls back to the deterministic MLP — never a dropped
+  // verdict). Raise it for challenge-resolution throughput testing against a
+  // local runtime (the dev simulated runtime raises it automatically).
+  GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: z.coerce.number().int().min(1).optional(),
 });
 
 /** True for an http(s) URL whose host is the loopback interface — the rule

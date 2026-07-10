@@ -15,7 +15,7 @@ import type { IngestionServices } from '../ingestion/services.js';
 import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-broadcaster.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
-import type { DebateJudgeRunner } from './debate.js';
+import type { DebateJudgeRunner, DebateWindowPolicy } from './debate.js';
 import { type DebateBroadcaster, InMemoryDebateBroadcaster } from './debate-broadcaster.js';
 import { type DebateStore, InMemoryDebateStore } from './debate-store.js';
 import {
@@ -140,6 +140,12 @@ export interface ForumServices {
    *  guard + neural model + AIOutputRecord; the default is fail-closed → a null
    *  verdict resolves inconclusive, so an unwired forum never tags anything). */
   debateJudge: DebateJudgeRunner;
+  /** WS-T arena-window override (DEV traffic simulator / tests ONLY — set while
+   *  the simulator runs so the correction → adjudication → finalize lifecycle
+   *  completes on an observable cadence; null ⇒ the §15.4 spec windows —
+   *  nothing in production wiring ever sets it). Every DebateDeps construction
+   *  site threads it through. */
+  debateWindowsOverride: DebateWindowPolicy | null;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;
@@ -210,6 +216,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     debates: options.debates ?? new InMemoryDebateStore(now),
     debateBroadcaster: new InMemoryDebateBroadcaster(),
     debateJudge: options.debateJudge ?? (async () => null),
+    debateWindowsOverride: null,
     metrics,
     config: () => config,
     reloadConfig: async () => config,

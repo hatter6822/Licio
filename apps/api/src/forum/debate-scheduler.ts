@@ -63,6 +63,7 @@ export function buildDebateSchedulerDeps(): DebateDeps {
     },
     runJudge: buildDebateJudgeRunner(forum.now),
     broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),
+    windows: forum.debateWindowsOverride ?? undefined,
     now: forum.now,
     log: forum.log,
   };

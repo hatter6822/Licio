@@ -858,6 +858,47 @@ anti-signal detectors. A per-boot story budget caps how much it creates. The
 whole run is deterministic: the same seed and scenario replay the same traffic,
 which is what makes a tester's session reproducible.
 
+**Challenge-resolution load (WS-T).** The simulator also drives the full
+correction → debate → adjudication loop through the REAL pipelines, so you can
+watch — and measure — the throughput the AI adjudicator handles. Personas file
+**sourced corrections** (1–3 `.example` citations of varying strength) against
+eligible comments and story roots via the real `POST /v1/contributions` guard
+chain; each published correction opens a real **debate arena**; challenged
+incumbents post rebuttals of varying strength (sometimes none — a forfeit)
+through the real position window; and the simulator advances due arenas
+through the real lifecycle every tick. While the simulator runs, the arena
+windows are **shortened** (≈20s edit / 10s override, via the injectable
+`debateWindowsOverride` seam — the §15.4 spec windows of 12h/24h are restored
+on stop), so a synthetic challenge resolves in about half a minute, verdicts
+split across corrected/upheld/inconclusive, and `Incorrect`/`Validated` tags +
+feed demotion appear live.
+
+**Reading the throughput.** The dev panel's **Challenge resolutions** card
+shows corrections filed, arenas opened/awaiting/adjudicated/finalized, the
+LLM-leg verdict split and fallback count, and the **average adjudication
+wall-clock** — or query it directly:
+
+```sh
+curl -s localhost:3001/v1/dev/simulator/status | jq '{counters: .counters, pulse: .debate_pulse}'
+```
+
+By default the adjudications run against the DEV **simulated** runtime
+(deterministic, milliseconds per verdict — measures the pipeline overhead).
+To measure a **real local model**:
+
+```sh
+pnpm setup:llm                                   # runtime + default model ready
+GOVERNANCE_LLM_PROVIDER=local pnpm dev           # real gpt-oss:20b adjudicates
+# Raise the ADR-6 debate budget for a sustained run (default 60/hour;
+# the simulated runtime raises it automatically):
+GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000 GOVERNANCE_LLM_PROVIDER=local pnpm dev
+```
+
+Adjudications are serial within the lifecycle pass, so with a real model the
+average adjudication time ≈ one model completion; crank the scenario speed to
+queue arenas faster than they resolve and watch the backlog (`Awaiting
+verdict`) grow — that is the honest throughput ceiling of your hardware.
+
 **Interpretation lenses (WS-G.2.2).** The simulator provisions a focused lens
 set (`skeptical`, `expert`, `local_resident`, `policy`) in each room it uses and
 tags ROOT comments with the author persona's reading lens (each archetype maps to
@@ -1269,6 +1310,8 @@ GOVERNANCE_LLM_MODEL=claude-opus-4-8    # optional; this is the anthropic defaul
 # the lawmaking summary has no switch — its deterministic fallback is per-call):
 GOVERNANCE_LLM_MODERATION=off           # deterministic default moderation proposer
 GOVERNANCE_LLM_DEBATE=off               # deterministic MLP debate adjudicator only
+GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000  # raise the ADR-6 debate budget (default 60;
+                                            # exhausted ⇒ MLP fallback, never a dropped verdict)
 ```
 
 The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /

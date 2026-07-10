@@ -9,14 +9,22 @@
 // same seed and the same inputs produce the same plan (unit-tested), which is
 // what makes a tester's session replayable.
 
-import type { DwellBucket, LensType, ReplyDepthBucket, ReturnVisitBucket } from '@licio/shared';
+import type {
+  ContributionDisputeStatus,
+  DwellBucket,
+  LensType,
+  ReplyDepthBucket,
+  ReturnVisitBucket,
+} from '@licio/shared';
 import {
   type CommentFlavor,
   DOMAIN_IDS,
   type DomainId,
   type GeneratedStory,
   generateCommentBody,
+  generateCorrection,
   generateEvidence,
+  generateRebuttal,
   generateRepost,
   generateStory,
   type StoryKind,
@@ -48,6 +56,9 @@ export interface WorldStory {
   readonly domain: DomainId | null;
   readonly authorUserId: string | null;
   readonly claimIds: readonly string[];
+  /** WS-T dispute posture — a story already under debate (or tagged incorrect)
+   *  is not a challengeable correction target. */
+  readonly disputeStatus: ContributionDisputeStatus;
 }
 
 export interface WorldRoom {
@@ -65,6 +76,18 @@ export interface WorldCommentRef {
   readonly contributionId: string;
   readonly depth: number;
   readonly isQuestion: boolean;
+  readonly authorUserId: string | null;
+  /** WS-T dispute posture (targets under debate / tagged incorrect are not
+   *  challengeable). */
+  readonly disputeStatus: ContributionDisputeStatus;
+}
+
+/** An OPEN debate arena awaiting the incumbent's position (runtime-tracked). */
+export interface WorldOpenDebate {
+  readonly debateId: string;
+  readonly incumbentUserId: string | null;
+  readonly incumbentPosted: boolean;
+  readonly domain: DomainId | null;
 }
 
 export interface EnginePersona {
@@ -82,6 +105,8 @@ export interface SimWorld {
   readonly recentTitles: ReadonlySet<string>;
   readonly focusStoryId: string | null;
   readonly storyCapReached: boolean;
+  /** WS-T open arenas the incumbent has not yet answered (position planning). */
+  readonly openDebates: readonly WorldOpenDebate[];
 }
 
 export interface PlanTickInput {
@@ -154,6 +179,29 @@ export type SimAction =
       readonly personaUserId: string;
       readonly storyId: string;
       readonly reasonCode: string;
+    }
+  | {
+      /** WS-T sourced correction — opens a debate arena through the REAL
+       *  contribution path (the challenge-resolution load generator). */
+      readonly kind: 'correction';
+      readonly personaUserId: string;
+      readonly storyId: string;
+      /** The challenged comment, or null ⇒ the story root is the target. */
+      readonly targetContributionId: string | null;
+      /** The challenged content's author (the arena's incumbent) — carried so
+       *  the runtime can track the arena for rebuttal planning. */
+      readonly incumbentUserId: string | null;
+      readonly domain: DomainId;
+      readonly body: string;
+      readonly citationUrls: readonly string[];
+    }
+  | {
+      /** The incumbent's rebuttal position in an open arena (12h-window path). */
+      readonly kind: 'debate_position';
+      readonly personaUserId: string;
+      readonly debateId: string;
+      readonly summary: string;
+      readonly citationUrls: readonly string[];
     };
 
 /** Hard per-tick ceiling — a runaway speed setting degrades to a dense but
@@ -484,6 +532,50 @@ export function planTick(input: PlanTickInput): SimAction[] {
       });
     }
 
+    // WS-T sourced corrections — the challenge-resolution load. Target an
+    // eligible comment (70%) or the story root, never the persona's own
+    // content and never a target already under debate / tagged incorrect
+    // (`validated` stays re-challengeable, mirroring the real gate).
+    const correctionCount = rate(archetype.rates.correction, scenario.rates.correction);
+    for (let i = 0; i < correctionCount; i += 1) {
+      const story = pickStory(world, persona.spec, prng, {
+        focusBias: scenario.focusBias / 2,
+        needThread: true,
+      });
+      if (!story) continue;
+      const domain = story.domain ?? domainForPersona(persona.spec, prng);
+      const eligibleComments = (world.commentsByStory.get(story.storyId) ?? []).filter(
+        (c) =>
+          c.disputeStatus !== 'under_debate' &&
+          c.disputeStatus !== 'incorrect' &&
+          c.authorUserId !== null &&
+          c.authorUserId !== persona.spec.userId,
+      );
+      const targetComment =
+        eligibleComments.length > 0 && prng.chance(0.7) ? prng.pick(eligibleComments) : null;
+      if (targetComment === null) {
+        // Fall back to the story root — only when IT is challengeable.
+        if (
+          story.disputeStatus === 'under_debate' ||
+          story.disputeStatus === 'incorrect' ||
+          story.authorUserId === persona.spec.userId
+        ) {
+          continue;
+        }
+      }
+      const correction = generateCorrection(domain, storySerial * 10 + i, prng);
+      contributions.push({
+        kind: 'correction',
+        personaUserId: persona.spec.userId,
+        storyId: story.storyId,
+        targetContributionId: targetComment?.contributionId ?? null,
+        incumbentUserId: targetComment !== null ? targetComment.authorUserId : story.authorUserId,
+        domain,
+        body: correction.body,
+        citationUrls: correction.citationUrls,
+      });
+    }
+
     // Attention.
     const attentionCount = rate(archetype.rates.attention, scenario.rates.attention);
     for (let i = 0; i < attentionCount; i += 1) {
@@ -538,6 +630,29 @@ export function planTick(input: PlanTickInput): SimAction[] {
         });
       }
     }
+  }
+
+  // --- Incumbent rebuttals in open arenas (WS-T) -------------------------------
+  // A challenged synthetic author usually shows up to defend the content before
+  // the edit window closes — with a rebuttal of VARYING strength (0–3 sources),
+  // so the adjudicator's verdicts split across the full outcome space instead
+  // of every challenge winning by forfeit.
+  let rebuttalSerial = 0;
+  for (const debate of world.openDebates) {
+    if (debate.incumbentPosted || debate.incumbentUserId === null) continue;
+    const incumbent = provisionedOrganic.find((p) => p.spec.userId === debate.incumbentUserId);
+    if (incumbent === undefined) continue;
+    if (!prng.chance(0.7)) continue; // some incumbents never answer (forfeit)
+    const domain = debate.domain ?? domainForPersona(incumbent.spec, prng);
+    rebuttalSerial += 1;
+    const rebuttal = generateRebuttal(domain, storySerial * 10 + rebuttalSerial, prng);
+    contributions.push({
+      kind: 'debate_position',
+      personaUserId: incumbent.spec.userId,
+      debateId: debate.debateId,
+      summary: rebuttal.body,
+      citationUrls: rebuttal.citationUrls,
+    });
   }
 
   // --- The coordinated cluster -------------------------------------------------

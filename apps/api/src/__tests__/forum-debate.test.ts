@@ -639,3 +639,44 @@ describe('WS-T sourced roots — filter + count include sourced comments', () =>
     expect(await contributions.countSourced(THREAD, ['published'])).toBe(2);
   });
 });
+
+describe('window-policy override (the dev-simulator / test seam)', () => {
+  it('stamps the injected windows; absent ⇒ the §15.4 spec constants', async () => {
+    // Injected windows drive both deadlines.
+    const target = await seedComment(INCUMBENT, 'The figure is 42.');
+    const correction = await seedCorrection(target);
+    const shortened: DebateDeps = {
+      ...deps,
+      windows: { editWindowMs: 1_000, overrideWindowMs: 2_000 },
+    };
+    const arena = await maybeEnterDebate(
+      shortened,
+      correctionInput(correction, target),
+      randomUUID(),
+    );
+    expect(arena).not.toBeNull();
+    expect(Date.parse(arena?.editDeadlineAt ?? '')).toBe(clock.ms + 1_000);
+    clock.ms += 1_000;
+    const judged = await judgeDebateArena(shortened, arena?.debateId ?? '');
+    expect(Date.parse(judged?.overrideDeadlineAt ?? '')).toBe(clock.ms + 2_000);
+    // And the full lifecycle resolves on the shortened cadence.
+    clock.ms += 2_000;
+    const { finalized } = await runDebateLifecycle(shortened);
+    expect(finalized).toBe(1);
+
+    // Without the override, a fresh arena carries the SPEC deadline.
+    const target2 = await seedComment(INCUMBENT, 'A second figure is 7.');
+    const correction2 = await seedCorrection(target2);
+    const arena2 = await maybeEnterDebate(
+      deps,
+      correctionInput(correction2, target2),
+      randomUUID(),
+    );
+    expect(Date.parse(arena2?.editDeadlineAt ?? '')).toBe(clock.ms + DEBATE_EDIT_WINDOW_MS);
+    clock.ms += DEBATE_EDIT_WINDOW_MS;
+    const judged2 = await judgeDebateArena(deps, arena2?.debateId ?? '');
+    expect(Date.parse(judged2?.overrideDeadlineAt ?? '')).toBe(
+      clock.ms + DEBATE_OVERRIDE_WINDOW_MS,
+    );
+  });
+});

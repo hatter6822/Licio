@@ -58,6 +58,19 @@ export type StoryDisputeSetter = (
   status: 'none' | 'under_debate' | 'incorrect' | 'validated',
 ) => Promise<void>;
 
+/**
+ * The arena window lengths. Production ALWAYS runs the §15.4 spec windows (the
+ * shared `DEBATE_EDIT_WINDOW_MS`/`DEBATE_OVERRIDE_WINDOW_MS` constants — the
+ * defaults when this is absent); the override exists so the DEV traffic
+ * simulator (and tests) can drive the full correction → adjudication →
+ * finalize lifecycle on an observable cadence instead of 12h + 24h. Nothing in
+ * production wiring ever sets it.
+ */
+export interface DebateWindowPolicy {
+  editWindowMs: number;
+  overrideWindowMs: number;
+}
+
 export interface DebateDeps {
   debates: DebateStore;
   contributions: ContributionStore;
@@ -67,6 +80,9 @@ export interface DebateDeps {
   runJudge: DebateJudgeRunner;
   /** Fan-out a live arena frame (co-visible drafts / verdict / resolution). */
   broadcast?: (debateId: string, arena: DebateArenaPublic) => void;
+  /** Window-length override (dev simulator / tests ONLY; absent ⇒ the §15.4
+   *  spec constants). */
+  windows?: DebateWindowPolicy | undefined;
   now: () => number;
   log: (event: string, meta: Record<string, unknown>) => void;
 }
@@ -113,7 +129,9 @@ export async function maybeEnterDebate(
 
   const nowMs = deps.now();
   const nowIso = new Date(nowMs).toISOString();
-  const editDeadlineAt = new Date(nowMs + DEBATE_EDIT_WINDOW_MS).toISOString();
+  const editDeadlineAt = new Date(
+    nowMs + (deps.windows?.editWindowMs ?? DEBATE_EDIT_WINDOW_MS),
+  ).toISOString();
   const arena = await deps.debates.open({
     debateId,
     storyId: correction.storyId,
@@ -217,7 +235,9 @@ export async function judgeDebateArena(
   const result = await deps.runJudge(debateId, input);
   const nowMs = deps.now();
   const verdictAt = new Date(nowMs).toISOString();
-  const overrideDeadlineAt = new Date(nowMs + DEBATE_OVERRIDE_WINDOW_MS).toISOString();
+  const overrideDeadlineAt = new Date(
+    nowMs + (deps.windows?.overrideWindowMs ?? DEBATE_OVERRIDE_WINDOW_MS),
+  ).toISOString();
 
   const patch =
     result === null

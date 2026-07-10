@@ -214,6 +214,18 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     expect(local.enabled && local.llmDebate).toBe(false);
   });
 
+  it('GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR overrides the ADR-6 debate budget (invalid values ignored)', () => {
+    const base = { provider: 'anthropic', apiKey: KEY } as const;
+    const defaulted = resolveGovernanceLlmDecision(base);
+    expect(defaulted.enabled && defaulted.settings.maxDebateJudgementsPerHour).toBe(60);
+    const raised = resolveGovernanceLlmDecision({ ...base, debateBudgetPerHour: 5_000 });
+    expect(raised.enabled && raised.settings.maxDebateJudgementsPerHour).toBe(5_000);
+    for (const bad of [0, -5, 1.5, Number.NaN]) {
+      const d = resolveGovernanceLlmDecision({ ...base, debateBudgetPerHour: bad });
+      expect(d.enabled && d.settings.maxDebateJudgementsPerHour).toBe(60);
+    }
+  });
+
   it('never mutates the shared default settings object', () => {
     const decision = resolveGovernanceLlmDecision({
       provider: 'local',

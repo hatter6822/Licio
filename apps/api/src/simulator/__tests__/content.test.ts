@@ -6,7 +6,9 @@ import { describe, expect, it } from 'vitest';
 import {
   DOMAIN_IDS,
   generateCommentBody,
+  generateCorrection,
   generateEvidence,
+  generateRebuttal,
   generateRepost,
   generateStory,
   isSimulatedUrl,
@@ -204,5 +206,46 @@ describe('simulator content generation', () => {
     expect(a.body.length).toBeGreaterThan(20);
     expect(a.citationUrl).not.toBe(b.citationUrl);
     expect(isSimulatedUrl(a.citationUrl)).toBe(true);
+  });
+});
+
+describe('WS-T correction + rebuttal generators', () => {
+  it('generateCorrection: schema-conformant body with 1–3 distinct simulated sources', async () => {
+    const { correctionCreateSchema } = await import('@licio/shared');
+    for (let i = 0; i < 30; i += 1) {
+      const prng = createPrng(`corr-${i}`);
+      const correction = generateCorrection('health', i, prng);
+      expect(correction.body.length).toBeGreaterThan(40);
+      expect(correction.body.length).toBeLessThanOrEqual(2_000);
+      expect(correction.citationUrls.length).toBeGreaterThanOrEqual(1);
+      expect(correction.citationUrls.length).toBeLessThanOrEqual(3);
+      expect(new Set(correction.citationUrls).size).toBe(correction.citationUrls.length);
+      for (const url of correction.citationUrls) expect(isSimulatedUrl(url)).toBe(true);
+      // The exact wire shape the runtime submits parses through the REAL schema.
+      const parsed = correctionCreateSchema.safeParse({
+        type: 'correction',
+        thread_id: '5f5ed000-0000-4000-8000-000000000001',
+        client_draft_id: '5f5ed000-0000-4000-8000-000000000002',
+        body: correction.body,
+        citations: correction.citationUrls.map((url) => ({ url })),
+        target_story_id: '5f5ed000-0000-4000-8000-000000000003',
+      });
+      expect(parsed.success).toBe(true);
+    }
+  });
+
+  it('generateRebuttal: 0–3 simulated sources with every count occurring', () => {
+    const seen = new Set<number>();
+    for (let i = 0; i < 60; i += 1) {
+      const prng = createPrng(`reb-${i}`);
+      const rebuttal = generateRebuttal('climate', i, prng);
+      expect(rebuttal.body.length).toBeGreaterThan(40);
+      expect(rebuttal.citationUrls.length).toBeLessThanOrEqual(3);
+      for (const url of rebuttal.citationUrls) expect(isSimulatedUrl(url)).toBe(true);
+      seen.add(rebuttal.citationUrls.length);
+    }
+    // The verdict space stays honest: weak (0) AND strong (3) rebuttals occur.
+    expect(seen.has(0)).toBe(true);
+    expect(seen.has(3)).toBe(true);
   });
 });
