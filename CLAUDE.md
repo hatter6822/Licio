@@ -354,7 +354,7 @@ licio/
 │           │   │                             deploy gate + steward review (WS-K)
 │           │   ├── ai-governance-public.ts -- model-card lookup, translation,
 │           │   │                             summary/translation reports (WS-K)
-│           │   ├── health.ts            --   /health endpoint
+│           │   ├── health.ts            --   /health liveness + /health/ready readiness probes
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
 │           │   ├── security-headers.ts  --   CSP, HSTS, Permissions-Policy
@@ -825,8 +825,9 @@ licio/
 │                                   privacy, crypto, jurisdiction, transparency)
 └── .github/
     └── workflows/
-        ├── ci.yml               -- main CI (8 jobs: lint, typecheck, lockfile,
-        │                           deps, test+coverage, build+size, E2E, security)
+        ├── ci.yml               -- main CI (9 jobs: lint, typecheck, lockfile,
+        │                           deps, test+coverage, build+size, E2E, security,
+        │                           courier APK)
         ├── codeql.yml           -- CodeQL security scanning (JS/TS)
         ├── dependabot-auto-merge.yml -- dependency update automation
         └── dependabot.yml       -- Dependabot configuration
@@ -1534,7 +1535,7 @@ authenticated flows over one same-origin host, using a test-only login
 route that mints a session cookie (gated to the e2e-server, never the
 production app).  Both run in CI's E2E job.
 
-**CI pipeline.**  `.github/workflows/ci.yml` runs 8 jobs on every PR:
+**CI pipeline.**  `.github/workflows/ci.yml` runs 9 jobs on every PR:
 
 1. Lint & format (Biome + security lint + policy + no-raw-egress +
    no-applause + the WS-R.14.3 `check:lcap-schema-egress` LCAP doctrine gate
@@ -1551,6 +1552,8 @@ production app).  Both run in CI's E2E job.
 7. E2E tests (Playwright, requires build)
 8. Security audit (pnpm audit, SBOM, build validation, AGPL headers,
    secret scanning, install-script detection)
+9. Native courier APK (WS-R.15.4a: builds the debug APK from the
+   unchanged web build behind the byte-identity no-fork gate)
 
 CodeQL (`.github/workflows/codeql.yml`) runs `security-extended`
 queries on push to main, PRs, and weekly.

@@ -50,10 +50,37 @@ export interface UpdateChannelConfig {
 }
 
 /**
+ * Whether the §20.6 verify-before-unlock control is ENGAGED: true exactly when
+ * a maintainer release signer set is pinned (build-time `VITE_` env, or the
+ * supplied config for tests/rotation).  An UNCONFIGURED channel (no pinned
+ * signers — dev/test and unpinned deployments) means the control is NOT
+ * engaged: the private-room surface runs without bundle verification rather
+ * than locking on a verification it can never satisfy.  This is safe because
+ * the pinned set is baked into the bundle at build time — an attacker cannot
+ * UNCONFIGURE a pinned release at runtime — and it is the SAME predicate the
+ * room-manager's key-unlock chokepoint applies, so the guard UI and the engine
+ * can never disagree about whether the channel is engaged.  A production
+ * release MUST pin the signer set (docs/DEVELOPMENT.md §17.2) so the control
+ * is engaged where it matters.
+ */
+export function isUpdateChannelConfigured(
+  config?: Pick<UpdateChannelConfig, 'trustedSignerPublicKeys'>,
+): boolean {
+  const signers =
+    config?.trustedSignerPublicKeys ??
+    parseKeyList(
+      (import.meta.env as Record<string, string | undefined>)['VITE_PRIVATE_BUNDLE_SIGNER_KEYS'],
+    );
+  return signers.length > 0;
+}
+
+/**
  * Read the build-pinned signer set + log key from `VITE_` env.  Returns a config
  * with whatever was pinned; an EMPTY signer set or a missing log key is NOT an
- * error here — it is a fail-closed posture the verifier turns into a lock
- * (`signature_invalid` / `not_in_transparency_log`).
+ * error here — when the channel is CONFIGURED (`isUpdateChannelConfigured`) the
+ * verifier turns the gaps into a lock (`signature_invalid` /
+ * `not_in_transparency_log`); when it is unconfigured the control is not
+ * engaged at all.
  */
 export function loadUpdateChannelConfig(): UpdateChannelConfig {
   const env = import.meta.env as Record<string, string | undefined>;
