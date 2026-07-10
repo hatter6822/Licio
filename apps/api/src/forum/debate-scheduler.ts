@@ -20,13 +20,21 @@ export const DEBATE_JOB_LEASE = 'forum_debate_lifecycle';
 /** 5 minutes: responsive enough for the 12h/24h windows without hammering. */
 export const DEBATE_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
 
-/** The governed adjudicator runner over the ai-governance guard + neural model. */
+/** The governed adjudicator runner over the ai-governance guard + neural model.
+ *  When the boot wired an LLM backend, `llmDebateJudge` is the primary leg
+ *  (WS-T challenge resolution — the production default) and the deterministic
+ *  MLP the per-call fail-closed fallback inside `adjudicateDebate`. */
 export function buildDebateJudgeRunner(now: () => number): DebateJudgeRunner {
   return async (debateId, input) => {
     const aiGov = tryGetAiGovernanceServices();
     if (aiGov === null) return null; // fail-closed → inconclusive
     const outcome = await adjudicateDebate(
-      { guard: aiGov.guard, outputRecords: aiGov.outputRecords, now },
+      {
+        guard: aiGov.guard,
+        outputRecords: aiGov.outputRecords,
+        now,
+        llmJudge: aiGov.llmDebateJudge,
+      },
       debateId,
       input,
     );

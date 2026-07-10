@@ -9,16 +9,20 @@
 // never-in-production guard. Nothing stubs the transport — every governed call
 // here crosses the wire exactly as `pnpm dev` does.
 
+import type { DebateJudgeInput } from '@licio/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { adjudicateDebate } from '../ai-governance/debate.js';
 import {
   DEFAULT_GOVERNANCE_LLM_SETTINGS,
   type GovernanceLlmSettings,
   resolveGovernanceLlmDecision,
 } from '../ai-governance/llm/config.js';
+import { createGovernanceLlmDebateJudge } from '../ai-governance/llm/debate.js';
 import { createLocalCompletion } from '../ai-governance/llm/local.js';
 import { createGovernanceLlmModerationProposer } from '../ai-governance/llm/moderation.js';
 import { buildUserPrompt, createGovernanceLlmNlProvider } from '../ai-governance/llm/provider.js';
 import {
+  buildGovernanceDebateJudgeIdentity,
   buildGovernanceLlmIdentity,
   buildGovernanceModerationProposerIdentity,
   ensureGovernanceLlmDeployed,
@@ -343,6 +347,86 @@ describe('lawmaking summariser — the simulated model through the governed prov
     const draft = draftSimulatedSummary(parsed);
     expect(draft.headline.length).toBeLessThanOrEqual(120);
     expect(draft.summary.length).toBeLessThanOrEqual(600);
+  });
+});
+
+describe('debate adjudication — the simulated model through the governed judge + shell', () => {
+  const DEBATE_INPUT: DebateJudgeInput = {
+    incumbent: {
+      summary: 'The original claim stands as written.',
+      sources: [],
+      rebuts_opponent: false,
+    },
+    challenger: {
+      summary:
+        'The correction cites three independent reports contradicting the claimed figure and quotes the original passage directly.',
+      sources: [
+        { url: 'https://a.example/report', domain: 'a.example', link_safe: true, reliability: 0.9 },
+        { url: 'https://b.example/study', domain: 'b.example', link_safe: true, reliability: 0.8 },
+        { url: 'https://c.example/data', domain: 'c.example', link_safe: true, reliability: 0.85 },
+      ],
+      rebuts_opponent: true,
+    },
+  };
+
+  function makeDebateJudge() {
+    const s = settings();
+    const services = makeServices();
+    return {
+      services,
+      judge: createGovernanceLlmDebateJudge({
+        services,
+        settings: s,
+        identity: buildGovernanceDebateJudgeIdentity(s, { kind: 'local', baseUrl: sim.baseUrl }),
+        complete: createLocalCompletion(sim.baseUrl, s),
+      }),
+    };
+  }
+
+  it('the stronger-sourced challenger wins `corrected` over live HTTP, with provenance', async () => {
+    const { judge } = makeDebateJudge();
+    const outcome = await judge('debate-sim-1', DEBATE_INPUT);
+    expect(outcome).not.toBeNull();
+    if (outcome) {
+      expect(outcome.verdict.verdict).toBe('corrected');
+      expect(outcome.verdict.winner).toBe('challenger');
+      expect(outcome.verdict.confidence).toBeGreaterThan(0.5);
+      expect(outcome.outputId).toBeTruthy();
+    }
+  });
+
+  it('[sim:debate=…] forces the class; [sim:rationale-url] makes the shell reject → adjudicateDebate falls back to the MLP', async () => {
+    const { services, judge } = makeDebateJudge();
+    const forced = await judge('debate-sim-2', {
+      ...DEBATE_INPUT,
+      incumbent: {
+        ...DEBATE_INPUT.incumbent,
+        summary: 'Comparable positions. [sim:debate=inconclusive]',
+      },
+    });
+    expect(forced?.verdict.verdict).toBe('inconclusive');
+    expect(forced?.verdict.winner).toBe('none');
+
+    // A URL in the rationale is rejected by the deterministic shell (the
+    // exfiltration bound); the governed adjudicator then renders the verdict
+    // via the pinned-weights MLP instead — a verdict is always rendered.
+    const poisoned = {
+      ...DEBATE_INPUT,
+      incumbent: { ...DEBATE_INPUT.incumbent, summary: 'As written. [sim:rationale-url]' },
+    };
+    expect(await judge('debate-sim-3', poisoned)).toBeNull();
+    const outcome = await adjudicateDebate(
+      {
+        guard: services.guard,
+        outputRecords: services.outputRecords,
+        now: services.now,
+        llmJudge: judge,
+      },
+      'debate-sim-4',
+      poisoned,
+    );
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.verdict.model_version).toBe('1.0.0'); // the MLP leg
   });
 });
 

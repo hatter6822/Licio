@@ -66,6 +66,23 @@ deploy gate + the pre-execution `ProhibitedUseGuard` and writes an **immutable
 weights swap into the same artifact behind the same registry/guard machinery —
 the WS-K "real backend is a seam" contract.
 
+**The LLM leg (the production default).** That seam is exercised: when a
+governance LLM backend is enabled (production defaults to the loopback-`local`
+backend; `GOVERNANCE_LLM_DEBATE=off` opts this surface out), the adjudicator is
+a governed **LLM** (`apps/api/src/ai-governance/llm/debate.ts`) that reads both
+positions' substance and sourcing and emits ONLY class probabilities + a
+bounded rationale. Authority stays in the deterministic shell: the outcome
+mapping is `judgeDebate`'s exact argmax/tie rule + the shared verdict
+vocabulary, probabilities are clamped/renormalized, and the rationale is
+length-capped with a no-URLs bound (the arena renders it). Its own registry
+identity clears the WS-K deploy gate, every verdict writes an
+`AIOutputRecord`, and **any** failure — transport, refusal, schema, budget,
+breaker, an unusable assessment, a provenance-write fault — falls back to the
+pinned-weights MLP above, so a verdict is always rendered at at least the
+deterministic quality floor. The steward's 24h overrule remains the human
+remedy over both legs. In development the DEV-ONLY simulated runtime serves
+this surface (`docs/DEVELOPMENT.md` §16).
+
 The WS-U `debate.judge` capability (floor-disjoint, deny-by-default) lets a
 governed room route adjudication through its own agent under its law-pack bounds.
 

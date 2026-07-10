@@ -5,19 +5,28 @@
 //   - 'anthropic' — the hosted Claude API (official SDK); requires
 //     ANTHROPIC_API_KEY. Sends governed-room proposal text off-host, making
 //     the vendor an operator-chosen data processor — never a silent or
-//     mandatory dependency (boot logs it loudly).
-//   - 'local'     — an operator-run, SAME-HOST inference server speaking the
-//     OpenAI-compatible /chat/completions protocol (llama.cpp server, Ollama,
-//     vLLM, LM Studio); requires GOVERNANCE_LLM_LOCAL_URL (loopback-only, so
-//     "local" provably means no third-party egress) + GOVERNANCE_LLM_MODEL.
-// The provider is constructed ONLY when GOVERNANCE_LLM_PROVIDER names a
-// backend (absent/'deterministic' ⇒ the deterministic default) AND that
-// backend's requirements are met (key, or loopback URL + model). It is
-// available in EVERY environment — production included (the 2026-07-09
-// maintainer decision) — always as an explicit opt-in, and anything else —
-// absent or invalid values included — resolves to the reviewed deterministic
-// default, so a misconfiguration can never silently enable an LLM backend
-// (the house fail-closed config posture).
+//     mandatory dependency (boot logs it loudly). Always an EXPLICIT opt-in.
+//   - 'local'     — a SAME-HOST inference server speaking the OpenAI-compatible
+//     /chat/completions protocol (llama.cpp server, Ollama, vLLM, LM Studio).
+//     GOVERNANCE_LLM_LOCAL_URL (loopback-only, so "local" provably means no
+//     third-party egress) defaults to the Ollama loopback endpoint and
+//     GOVERNANCE_LLM_MODEL to the reviewed default local model below.
+// Environment defaults (the 2026-07-09 maintainer decisions, revised):
+//   - PRODUCTION runs the COMPLETE feature by default: an unset
+//     GOVERNANCE_LLM_PROVIDER resolves to the 'local' backend with the
+//     defaults above — production is never silently LESS capable than
+//     development. If the runtime is absent, every governed surface fails
+//     CLOSED at call time to its reviewed deterministic path (summary
+//     fallback, platform-baseline moderation + deferred re-moderation, the
+//     deterministic debate adjudicator), and recovers when it appears.
+//   - DEVELOPMENT with an unset provider resolves to `not_requested` here;
+//     the dev boot then wires the DEV-ONLY simulated loopback runtime through
+//     this same decision (simulator/governance-llm.ts), so dev fakes the
+//     feature rather than running less of it.
+//   - GOVERNANCE_LLM_PROVIDER=deterministic is the explicit opt-out anywhere.
+// Any INVALID explicit value still resolves to the deterministic default, so
+// a misconfiguration can never silently enable an unintended backend (the
+// house fail-closed config posture).
 
 import { isLoopbackHttpUrl } from '@licio/shared/env';
 
@@ -41,6 +50,12 @@ export interface GovernanceLlmSettings {
    *  steward-triggered summary; excess simply goes un-shadowed (a natural,
    *  honest per-room sampling cap). */
   maxModerationCallsPerRoomPerHour: number;
+  /** ADR-6 GLOBAL hourly budget for the WS-T debate-adjudication leg. Debates
+   *  resolve once each on the 12h scheduler, so the natural rate is low; an
+   *  exhausted budget falls back to the deterministic adjudicator (never a
+   *  dropped verdict). Global, not per-room: the scheduler drains arenas
+   *  process-wide. */
+  maxDebateJudgementsPerHour: number;
   /** Consecutive-failure count that opens the circuit breaker. */
   breakerFailureThreshold: number;
   /** Seconds the breaker stays open before a half-open retry. */
@@ -54,9 +69,24 @@ export const DEFAULT_GOVERNANCE_LLM_SETTINGS: GovernanceLlmSettings = {
   moderationTimeoutMs: 8_000,
   maxCallsPerRoomPerHour: 30,
   maxModerationCallsPerRoomPerHour: 120,
+  maxDebateJudgementsPerHour: 60,
   breakerFailureThreshold: 3,
   breakerCooldownSeconds: 300,
 };
+
+/** The default 'local' base URL: the Ollama loopback endpoint (the most common
+ *  local runtime; llama.cpp/vLLM/LM Studio operators set their own URL). */
+export const DEFAULT_GOVERNANCE_LLM_LOCAL_URL = 'http://127.0.0.1:11434/v1';
+
+/** The reviewed DEFAULT LOCAL MODEL both production and development use when
+ *  GOVERNANCE_LLM_MODEL is unset for the 'local' backend: gpt-oss:20b — an
+ *  Apache-2.0 open-weight reasoning model that Ollama, vLLM, llama.cpp and
+ *  LM Studio all serve, strong at the strict-JSON structured outputs the three
+ *  governed surfaces require, and small enough (MoE, ~16 GB) for a single
+ *  production host. Operators override it per deployment; the model id is
+ *  folded into each registry identity's config hash, so a swap mints a new
+ *  identity that re-clears the WS-K gate. */
+export const DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID = 'gpt-oss:20b';
 
 /** The transport a decision selected (the key/URL live here, NEVER in the
  *  model-identity config that gets hashed into output records). */
@@ -65,28 +95,38 @@ export type GovernanceLlmBackend =
   | { kind: 'local'; baseUrl: string };
 
 export interface GovernanceLlmEnvInput {
-  /** GOVERNANCE_LLM_PROVIDER — 'anthropic' or 'local' opts in. */
+  /** GOVERNANCE_LLM_PROVIDER — 'anthropic' or 'local' opts in explicitly;
+   *  'deterministic' opts out explicitly; UNSET defaults to 'local' in
+   *  production (the production-complete default) and to `not_requested`
+   *  elsewhere (the dev boot then wires the simulated runtime). */
   provider: string | undefined;
   /** ANTHROPIC_API_KEY (anthropic backend). */
   apiKey: string | undefined;
-  /** GOVERNANCE_LLM_MODEL (optional override for anthropic; REQUIRED for local). */
+  /** GOVERNANCE_LLM_MODEL (optional for both backends: anthropic defaults to
+   *  the reviewed Claude model; local to DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID). */
   modelId?: string | undefined;
   /** GOVERNANCE_LLM_LOCAL_URL (local backend; loopback-only OpenAI-compatible
-   *  base URL, e.g. http://127.0.0.1:11434/v1). */
+   *  base URL; defaults to DEFAULT_GOVERNANCE_LLM_LOCAL_URL). */
   localBaseUrl?: string | undefined;
   /** GOVERNANCE_LLM_MODERATION — 'off' keeps the deterministic default
    *  moderation proposer even when a backend is configured (the backend then
-   *  serves only the summary surface). Any other value (incl. absent) uses the
+   *  serves only the other surfaces). Any other value (incl. absent) uses the
    *  LLM as the in-room moderation model when a backend is enabled. */
   moderation?: string | undefined;
+  /** GOVERNANCE_LLM_DEBATE — 'off' keeps the deterministic MLP debate
+   *  adjudicator even when a backend is configured. Any other value (incl.
+   *  absent) uses the LLM as the debate adjudicator when a backend is enabled
+   *  (the deterministic MLP remains the per-call fail-closed fallback). */
+  debate?: string | undefined;
+  /** NODE_ENV — drives the production-complete default above. Absent ⇒ treated
+   *  as non-production (no silent default backend). */
+  nodeEnv?: string | undefined;
 }
 
 export type GovernanceLlmDisabledReason =
   | 'not_requested'
   | 'missing_api_key'
-  | 'missing_local_url'
-  | 'local_url_not_loopback'
-  | 'missing_local_model';
+  | 'local_url_not_loopback';
 
 export type GovernanceLlmDecision =
   | { enabled: false; reason: GovernanceLlmDisabledReason }
@@ -96,32 +136,50 @@ export type GovernanceLlmDecision =
       settings: GovernanceLlmSettings;
       /** Whether the LLM is the in-room moderation model (ON unless
        *  GOVERNANCE_LLM_MODERATION=off — then the deterministic default proposer
-       *  is used and the backend serves only summaries). */
+       *  is used and the backend serves the other surfaces only). */
       llmModeration: boolean;
+      /** Whether the LLM is the WS-T debate adjudicator (ON unless
+       *  GOVERNANCE_LLM_DEBATE=off — the deterministic MLP is the per-call
+       *  fail-closed fallback either way). */
+      llmDebate: boolean;
+      /** True when the backend was the PRODUCTION DEFAULT (no explicit
+       *  GOVERNANCE_LLM_PROVIDER) rather than an operator choice — the boot
+       *  log tells the operator exactly what runtime is expected where. */
+      providerDefaulted: boolean;
     };
 
 /** Resolve the boot-time enablement decision (pure; unit-tested fail-closed). */
 export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): GovernanceLlmDecision {
-  if (input.provider !== 'anthropic' && input.provider !== 'local') {
+  // The production-complete default: an UNSET provider means the operator made
+  // no choice — production then runs the full 'local' feature (deterministic
+  // paths remain the per-call fail-closed fallback); anything explicit — the
+  // 'deterministic' opt-out and every invalid value included — never defaults.
+  const provider =
+    input.provider === undefined && input.nodeEnv === 'production' ? 'local' : input.provider;
+  const providerDefaulted = provider !== input.provider;
+  if (provider !== 'anthropic' && provider !== 'local') {
     return { enabled: false, reason: 'not_requested' };
   }
 
   const settings = { ...DEFAULT_GOVERNANCE_LLM_SETTINGS };
   const modelId = input.modelId?.trim();
   const llmModeration = input.moderation?.trim().toLowerCase() !== 'off';
+  const llmDebate = input.debate?.trim().toLowerCase() !== 'off';
+  const flags = { llmModeration, llmDebate, providerDefaulted };
 
-  if (input.provider === 'anthropic') {
+  if (provider === 'anthropic') {
     const apiKey = input.apiKey?.trim() ?? '';
     if (apiKey.length === 0) return { enabled: false, reason: 'missing_api_key' };
     if (modelId) settings.modelId = modelId;
-    return { enabled: true, backend: { kind: 'anthropic', apiKey }, settings, llmModeration };
+    return { enabled: true, backend: { kind: 'anthropic', apiKey }, settings, ...flags };
   }
 
-  // 'local': the loopback-only same-host backend.
-  const baseUrl = input.localBaseUrl?.trim() ?? '';
-  if (baseUrl.length === 0) return { enabled: false, reason: 'missing_local_url' };
+  // 'local': the loopback-only same-host backend. URL + model both carry
+  // reviewed defaults (the Ollama loopback endpoint + the default local model),
+  // so `GOVERNANCE_LLM_PROVIDER=local` alone — or the production default — is a
+  // complete configuration. A PROVIDED URL is still loopback-enforced.
+  const baseUrl = input.localBaseUrl?.trim() || DEFAULT_GOVERNANCE_LLM_LOCAL_URL;
   if (!isLoopbackHttpUrl(baseUrl)) return { enabled: false, reason: 'local_url_not_loopback' };
-  if (!modelId) return { enabled: false, reason: 'missing_local_model' };
-  settings.modelId = modelId;
-  return { enabled: true, backend: { kind: 'local', baseUrl }, settings, llmModeration };
+  settings.modelId = modelId || DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID;
+  return { enabled: true, backend: { kind: 'local', baseUrl }, settings, ...flags };
 }

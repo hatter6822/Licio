@@ -26,6 +26,10 @@
 //                            the wrapper clamping it to flag_for_review)
 //   [sim:ungrounded]       → off-proposal summary    (⇒ quality-gate rejection)
 //   [sim:foreign-url]      → off-proposal URL        (⇒ url_not_in_proposal)
+//   [sim:debate=<class>]   → forces the debate class (incumbent/challenger/
+//                            inconclusive)
+//   [sim:rationale-url]    → URL in the debate rationale (⇒ the deterministic
+//                            shell rejects it and falls back to the MLP)
 // Room content is classified/summarised, never logged (the house rule; the
 // optional log hook carries metadata only).
 
@@ -293,6 +297,149 @@ export function draftSimulatedSummary(proposal: SimulatedProposal): {
   return { headline, summary };
 }
 
+// --- the debate-adjudication surface ------------------------------------------
+
+/** One parsed side of the `<debate>` block (`ai-governance/llm/debate.ts`
+ *  buildDebateUserPrompt). */
+export interface SimulatedDebateSide {
+  sourceCount: number;
+  safeSourceCount: number;
+  rebuts: boolean;
+  summaryTokens: number;
+}
+
+function countTokens(text: string): number {
+  let count = 0;
+  let inWord = false;
+  for (const ch of text) {
+    const ws =
+      ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v';
+    if (ws) inWord = false;
+    else if (!inWord) {
+      count += 1;
+      inWord = true;
+    }
+  }
+  return count;
+}
+
+export function parseDebate(userPrompt: string): {
+  incumbent: SimulatedDebateSide;
+  challenger: SimulatedDebateSide;
+} {
+  const emptySide = (): SimulatedDebateSide => ({
+    sourceCount: 0,
+    safeSourceCount: 0,
+    rebuts: false,
+    summaryTokens: 0,
+  });
+  const sides = { incumbent: emptySide(), challenger: emptySide() };
+  let current: SimulatedDebateSide | null = null;
+  let inSummary = false;
+  let summaryLines: string[] = [];
+  const closeSide = () => {
+    if (current) current.summaryTokens = countTokens(summaryLines.join('\n'));
+    summaryLines = [];
+    inSummary = false;
+  };
+  for (const line of userPrompt.split('\n')) {
+    if (line === '<position side="incumbent">') {
+      closeSide();
+      current = sides.incumbent;
+      continue;
+    }
+    if (line === '<position side="challenger">') {
+      closeSide();
+      current = sides.challenger;
+      continue;
+    }
+    if (line === '</position>') {
+      closeSide();
+      current = null;
+      continue;
+    }
+    if (!current) continue;
+    if (inSummary) {
+      summaryLines.push(line);
+      continue;
+    }
+    if (line === 'summary:') {
+      inSummary = true;
+      continue;
+    }
+    if (line.startsWith('rebuts_opponent: ')) {
+      current.rebuts = line.endsWith('true');
+      continue;
+    }
+    if (line.startsWith('- url: ')) {
+      current.sourceCount += 1;
+      if (line.includes('link_safe: true')) current.safeSourceCount += 1;
+    }
+  }
+  closeSide();
+  return sides;
+}
+
+/** `[sim:debate=<class>]` forces the winning class; unknown names are ignored. */
+export function forcedDebateClass(
+  text: string,
+): 'incumbent' | 'challenger' | 'inconclusive' | null {
+  const tag = '[sim:debate=';
+  const start = text.indexOf(tag);
+  if (start === -1) return null;
+  const end = text.indexOf(']', start + tag.length);
+  if (end === -1) return null;
+  const candidate = text.slice(start + tag.length, end);
+  return candidate === 'incumbent' || candidate === 'challenger' || candidate === 'inconclusive'
+    ? candidate
+    : null;
+}
+
+/**
+ * The simulated adjudicator: a fixed sourcing-quality rubric per side (source
+ * count, safe-source rate, direct rebuttal, argument substance), a near-tie ⇒
+ * inconclusive rule, and a confidence that grows with the lead. Probabilities
+ * only — the REAL deterministic shell (`ai-governance/llm/debate.ts`) maps
+ * them to the outcome, exactly as with a live model.
+ */
+export function assessSimulatedDebate(sides: {
+  incumbent: SimulatedDebateSide;
+  challenger: SimulatedDebateSide;
+}): {
+  probabilities: { incumbent: number; challenger: number; inconclusive: number };
+  rationale: string;
+} {
+  const score = (s: SimulatedDebateSide): number => {
+    const sourceScore = Math.min(s.sourceCount / 5, 1);
+    const safeRate = s.sourceCount > 0 ? s.safeSourceCount / s.sourceCount : 0;
+    const substance = Math.min(s.summaryTokens / 200, 1);
+    return 0.45 * sourceScore + 0.2 * safeRate + 0.15 * (s.rebuts ? 1 : 0) + 0.2 * substance;
+  };
+  const zI = score(sides.incumbent);
+  const zC = score(sides.challenger);
+  const lead = zC - zI;
+  if (Math.abs(lead) < 0.08) {
+    return {
+      probabilities: { incumbent: 0.15, challenger: 0.15, inconclusive: 0.7 },
+      rationale:
+        'Both positions are comparably sourced and substantiated; neither side clearly prevails.',
+    };
+  }
+  const winnerP = Math.min(0.9, 0.55 + Math.abs(lead));
+  const loserP = Math.max(0, 1 - winnerP - 0.08);
+  const winnerIsChallenger = lead > 0;
+  return {
+    probabilities: {
+      incumbent: winnerIsChallenger ? loserP : winnerP,
+      challenger: winnerIsChallenger ? winnerP : loserP,
+      inconclusive: 0.08,
+    },
+    rationale: winnerIsChallenger
+      ? `The challenger presented the stronger sourced case (${sides.challenger.sourceCount} sources vs ${sides.incumbent.sourceCount}).`
+      : `The incumbent presented the stronger sourced case (${sides.incumbent.sourceCount} sources vs ${sides.challenger.sourceCount}).`,
+  };
+}
+
 // --- the protocol core (pure request → response; the http layer is a shell) --
 
 export interface SimulatedChatResponse {
@@ -372,6 +519,23 @@ export function simulateChatCompletion(payload: unknown): SimulatedChatResponse 
       );
     }
     return completion(request.model, JSON.stringify(draft), 'stop');
+  }
+  if ('probabilities' in keys) {
+    const forced = forcedDebateClass(user);
+    const assessment = forced
+      ? {
+          probabilities: {
+            incumbent: forced === 'incumbent' ? 0.8 : 0.1,
+            challenger: forced === 'challenger' ? 0.8 : 0.1,
+            inconclusive: forced === 'inconclusive' ? 0.8 : 0.1,
+          },
+          rationale: `Simulator-forced ${forced} outcome.`,
+        }
+      : assessSimulatedDebate(parseDebate(user));
+    if (hasMarker(user, 'rationale-url')) {
+      assessment.rationale = `${assessment.rationale} See https://exfil.example/proof`;
+    }
+    return completion(request.model, JSON.stringify(assessment), 'stop');
   }
   return badRequest('unrecognised response_format for the simulated governance runtime');
 }

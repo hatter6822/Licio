@@ -12,6 +12,7 @@ import {
   type GovernanceLlmEnvInput,
   resolveGovernanceLlmDecision,
 } from './ai-governance/llm/config.js';
+import { createGovernanceLlmDebateJudge } from './ai-governance/llm/debate.js';
 import { createLocalCompletion } from './ai-governance/llm/local.js';
 import { createGovernanceLlmModerationProposer } from './ai-governance/llm/moderation.js';
 import {
@@ -20,6 +21,7 @@ import {
   type LlmCompletion,
 } from './ai-governance/llm/provider.js';
 import {
+  buildGovernanceDebateJudgeIdentity,
   buildGovernanceLlmIdentity,
   buildGovernanceModerationProposerIdentity,
   ensureGovernanceLlmDeployed,
@@ -1008,6 +1010,10 @@ let governanceLlmEnvInput: GovernanceLlmEnvInput = {
   modelId: env.GOVERNANCE_LLM_MODEL,
   localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
   moderation: env.GOVERNANCE_LLM_MODERATION,
+  debate: env.GOVERNANCE_LLM_DEBATE,
+  // Production defaults an unset provider to the 'local' backend (the
+  // production-complete posture); development defaults to the simulator below.
+  nodeEnv: env.NODE_ENV,
 };
 // DEV ONLY: the simulated local governance-LLM runtime. When the operator has
 // made NO backend choice on a development box, start the deterministic loopback
@@ -1050,7 +1056,7 @@ if (
 }
 const governanceLlmDecision = resolveGovernanceLlmDecision(governanceLlmEnvInput);
 if (governanceLlmDecision.enabled) {
-  const { backend, settings, llmModeration } = governanceLlmDecision;
+  const { backend, settings, llmModeration, llmDebate, providerDefaulted } = governanceLlmDecision;
   // One completion closure, shared by every governed surface: the key/URL live
   // ONLY here — never in the hashed identity config, never in a log line.
   const complete: LlmCompletion =
@@ -1100,6 +1106,40 @@ if (governanceLlmDecision.enabled) {
     }
   }
 
+  // Surface 3 — the WS-T debate ADJUDICATOR (challenge resolution: the AI
+  // reviewing a sourced story/comment correction debate). The deterministic
+  // shell maps its probabilities to the outcome; the pinned-weights MLP stays
+  // the per-call fail-closed fallback inside adjudicateDebate.
+  if (llmDebate) {
+    const debateIdentity = buildGovernanceDebateJudgeIdentity(settings, backend);
+    if (await ensureGovernanceLlmDeployed(aiGovernanceServices, debateIdentity)) {
+      aiGovernanceServices.llmDebateJudge = createGovernanceLlmDebateJudge({
+        services: aiGovernanceServices,
+        settings,
+        identity: debateIdentity,
+        complete,
+      });
+      logger.info(
+        { backend: backend.kind, modelId: settings.modelId },
+        'WS-T debate adjudicator = LLM (deterministic shell maps the outcome; fail-closed to the pinned-weights MLP; steward may overrule for 24h)',
+      );
+    } else {
+      logger.warn(
+        'WS-T governance LLM debate adjudicator requested but the WS-K admission/deploy gate refused — keeping the deterministic MLP adjudicator',
+      );
+    }
+  }
+
+  if (providerDefaulted) {
+    // The production-complete default: no explicit provider was configured, so
+    // the 'local' backend defaults in. Tell the operator EXACTLY what runtime
+    // is expected where — until it is running, every governed surface fails
+    // closed per call to its deterministic path and recovers automatically.
+    logger.warn(
+      { baseUrl: backend.kind === 'local' ? backend.baseUrl : null, modelId: settings.modelId },
+      'WS-U governance LLM: production defaulted to the loopback-local backend — run an OpenAI-compatible inference server there (e.g. `ollama serve` + `ollama pull <model>`), or set GOVERNANCE_LLM_PROVIDER explicitly (deterministic opts out). Until the runtime responds, the governed surfaces fail closed to their deterministic paths and recover automatically.',
+    );
+  }
   if (backend.kind === 'anthropic') {
     // Honest operational posture: the hosted backend sends governed-room content
     // off-host, making the vendor an operator-chosen data processor. Say so

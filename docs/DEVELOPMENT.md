@@ -1209,38 +1209,45 @@ CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 
 ### Governance LLM provider (`GOVERNANCE_LLM_*`)
 
-The WS-U in-room agent's advisory **lawmaking summary** can be drafted by a
-real LLM behind the governed provider port (WS-U ADR-3/ADR-9). Unset → in
-**development** a DEV-ONLY *simulated* local runtime auto-starts and serves
-both governed surfaces (see below); in every other environment, the
-deterministic summariser (the shipped default, zero egress). The opt-in is
-honoured in **every** environment, production included (the 2026-07-09
-maintainer decision): with `anthropic`, governed-room proposal text is sent to
-the hosted API — an operator-chosen data processor, boot-logged loudly; with
-`local`, content never leaves the host (the URL is loopback-enforced).
+Three governed AI surfaces run behind one LLM backend seam (WS-U ADR-3/ADR-9,
+WS-T): the advisory **lawmaking summary**, the **in-room moderation model**,
+and the **debate adjudicator** (challenge resolution — the AI reviewing a
+sourced story/comment correction debate). The environment defaults implement
+the *production-complete* posture — production always runs the full feature;
+development may fake it, never the reverse:
 
-Two backends:
+- **Production, provider unset** → defaults to the **`local`** backend
+  (Ollama loopback URL + the reviewed default model, both below). Until the
+  runtime responds, every governed surface fails **closed per call** to its
+  deterministic path (deterministic summary; WS-J baseline moderation +
+  deferred re-moderation; the pinned-weights MLP adjudicator) and recovers
+  automatically — the boot log states exactly what runtime is expected where.
+- **Development, provider unset** → the DEV-ONLY *simulated* local runtime
+  auto-starts and serves all three surfaces (see below).
+- **`GOVERNANCE_LLM_PROVIDER=deterministic`** → the explicit opt-out anywhere.
+- **`anthropic`** → always an explicit opt-in: governed-room content is sent
+  to the hosted API (an operator-chosen data processor, boot-logged loudly).
 
 ```sh
-# A) Hosted Anthropic API (sends proposal text to Anthropic —
+# A) Local model on the SAME host (the production DEFAULT; no content leaves
+#    the machine). Any OpenAI-compatible /chat/completions runtime works:
+#      ollama serve && ollama pull gpt-oss:20b   # the default URL + model
+#      llama-server -m model.gguf                # base URL http://127.0.0.1:8080/v1
+#    (vLLM and LM Studio expose the same protocol.)
+GOVERNANCE_LLM_PROVIDER=local                        # optional in production (the default)
+GOVERNANCE_LLM_LOCAL_URL=http://127.0.0.1:11434/v1   # optional; this is the default (LOOPBACK-ONLY, enforced)
+GOVERNANCE_LLM_MODEL=gpt-oss:20b                     # optional; this is the default local model
+
+# B) Hosted Anthropic API (sends governed content to Anthropic —
 #    an explicit operator choice; the boot log calls it out)
 GOVERNANCE_LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...            # server-side only; never VITE_-prefixed
-GOVERNANCE_LLM_MODEL=claude-opus-4-8    # optional; this is the default
+GOVERNANCE_LLM_MODEL=claude-opus-4-8    # optional; this is the anthropic default
 
-# B) Local model on the SAME host (no content leaves the machine).
-#    Any OpenAI-compatible /chat/completions runtime works — e.g.:
-#      ollama serve                      # base URL http://127.0.0.1:11434/v1
-#      llama-server -m model.gguf        # base URL http://127.0.0.1:8080/v1
-#    (vLLM and LM Studio expose the same protocol.)
-GOVERNANCE_LLM_PROVIDER=local
-GOVERNANCE_LLM_LOCAL_URL=http://127.0.0.1:11434/v1   # LOOPBACK-ONLY (enforced)
-GOVERNANCE_LLM_MODEL=llama3.3:70b                    # required: the runtime's model name
-
-# Optional: keep the LLM off in-room MODERATION (still used for the lawmaking
-# summary). Omitted/any-other-value ⇒ the LLM is the moderation model; `off` ⇒
-# the deterministic default proposer serves the moderation seam.
-GOVERNANCE_LLM_MODERATION=off
+# Optional per-surface off-switches (the deterministic path serves instead;
+# the lawmaking summary has no switch — its deterministic fallback is per-call):
+GOVERNANCE_LLM_MODERATION=off           # deterministic default moderation proposer
+GOVERNANCE_LLM_DEBATE=off               # deterministic MLP debate adjudicator only
 ```
 
 The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /
@@ -1256,22 +1263,29 @@ Governance* room: sign in as the steward account and POST
 `/v1/rooms/{roomId}/governance/lawmaking/summarize` (the agent must hold the
 `lawmaking.summarize` capability, which the seeded binding grants).
 
-Two governed surfaces consume the backend. **(1)** The advisory **lawmaking
-summary** above. **(2)** The **in-room moderation MODEL**: when a backend is
-enabled, a governed `toxicity_safety_triage` LLM CLASSIFIES each moderated
-contribution, and the platform's deterministic wrapper
-(`governance/service.ts`) BOUNDS its proposal — an escalate-to-human-review
-ceiling (never above `flag_for_review`; a human confirms before any removal)
-then the community-capability clamp — before it can have any effect. On model
-unavailability the wrapper falls back to the always-on WS-J baseline and
-enqueues the contribution for **deferred re-moderation** (retried by the
-governance scheduler when the model recovers — delayed, never dropped). Set
-`GOVERNANCE_LLM_MODERATION=off` to keep the LLM off moderation (⇒ a
-deterministic default proposer serves the seam) while still using it for the
-lawmaking summary. Inspect the decision log as an AI-team member: `GET
+Three governed surfaces consume the backend. **(1)** The advisory **lawmaking
+summary** above. **(2)** The **in-room moderation MODEL**: a governed
+`toxicity_safety_triage` LLM CLASSIFIES each moderated contribution, and the
+platform's deterministic wrapper (`governance/service.ts`) BOUNDS its proposal
+— an escalate-to-human-review ceiling (never above `flag_for_review`; a human
+confirms before any removal) then the community-capability clamp — before it
+can have any effect. On model unavailability the wrapper falls back to the
+always-on WS-J baseline and enqueues the contribution for **deferred
+re-moderation** (retried by the governance scheduler when the model recovers —
+delayed, never dropped). Inspect the decision log as an AI-team member: `GET
 /v1/ai/admin/governance/moderation/{roomId}` returns a summary (total /
 allowed / warned / flagged-for-review / clamped-by-wrapper) plus recent
 metadata-only rows (raw proposed vs bounded action — no content).
+**(3)** The **debate ADJUDICATOR** (WS-T challenge resolution): when a sourced
+correction opens a debate arena and its 12h window closes, the LLM weighs both
+positions and emits ONLY class probabilities + a bounded rationale; the
+deterministic shell (`ai-governance/llm/debate.ts`) maps the outcome — the
+exact `judgeDebate` argmax/tie rule, the shared verdict vocabulary, a no-URLs
+rationale bound — and ANY failure falls back to the pinned-weights
+deterministic MLP, so a verdict is always rendered (the room steward may still
+fully overrule it for 24h). Try it in dev: post a sourced `correction`
+contribution against a comment/story and watch the arena judge on the debate
+scheduler tick.
 
 #### The dev-simulated local runtime (the `pnpm dev` default)
 
@@ -1284,12 +1298,13 @@ backend seam. Nothing is stubbed on the client side — a bare `pnpm dev` box
 therefore runs the FULL governed LLM path (WS-K registration + admission +
 the deploy gate, the pre-execution guard, the strict output schemas, the
 §24.5 summary quality gate, per-room budgets + the circuit breaker, immutable
-`AIOutputRecord`s, the deterministic moderation wrapper, and deferred
-re-moderation) with zero setup and provably zero egress. The "model" is a
-fixed template classifier/summariser (no weights, no randomness), so runs are
-reproducible and the k-of-N admission sampling passes deterministically. It is
-never constructed in production (a `NODE_ENV` gate at the boot site plus a
-guard inside the module), and it binds `127.0.0.1` only.
+`AIOutputRecord`s, the deterministic moderation wrapper, deferred
+re-moderation, and the debate-adjudication shell) with zero setup and provably
+zero egress. The "model" is a fixed template classifier/summariser/adjudicator
+(no weights, no randomness), so runs are reproducible and the k-of-N admission
+sampling passes deterministically. It is never constructed in production (a
+`NODE_ENV` gate at the boot site plus a guard inside the module), and it binds
+`127.0.0.1` only.
 
 ```sh
 pnpm dev                                # simulated runtime on http://127.0.0.1:3117/v1
@@ -1312,6 +1327,8 @@ fail-closed branch on demand:
 | `[sim:propose=remove]` (any action) | forces the moderation verdict | shows the wrapper clamping to `flag_for_review` |
 | `[sim:ungrounded]` | off-proposal summary | §24.5 `quality` rejection → deterministic summary |
 | `[sim:foreign-url]` | off-proposal URL in the summary | `url_not_in_proposal` rejection → deterministic summary |
+| `[sim:debate=challenger]` (or `incumbent`/`inconclusive`) | forces the debate class | shows the shell mapping probabilities → verdict |
+| `[sim:rationale-url]` | URL in the debate rationale | the shell rejects it → verdict falls back to the deterministic MLP |
 
 ---
 

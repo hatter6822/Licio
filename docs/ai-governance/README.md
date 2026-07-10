@@ -95,9 +95,12 @@ guard, the governed models, and a module singleton for routes.
 - `models.ts` — the governed deterministic models + the topic classifier +
   the translation-provider seam.
 - `llm/` — the REAL model backends (WS-U ADR-9), all behind the unchanged
-  registry/guard/output-record surface: `config.ts` (fail-closed enablement:
-  explicit opt-in + per-backend requirements; off by default, honoured in
-  every environment; the `GOVERNANCE_LLM_MODERATION` on/off flag), `provider.ts`
+  registry/guard/output-record surface: `config.ts` (fail-closed enablement;
+  PRODUCTION defaults an unset provider to the loopback-`local` backend — the
+  production-complete posture, with reviewed defaults for the local URL
+  (Ollama loopback) and model (`gpt-oss:20b`) — while `deterministic` opts out
+  and `anthropic` stays an explicit opt-in; the `GOVERNANCE_LLM_MODERATION` +
+  `GOVERNANCE_LLM_DEBATE` per-surface off-switches), `provider.ts`
   (the governed lawmaking summariser: guard → completion → zod → quality gate →
   `AIOutputRecord`, under a per-room budget + circuit breaker; the Anthropic
   SDK completion + the reusable budget/breaker/completion plumbing),
@@ -106,7 +109,14 @@ guard, the governed models, and a module singleton for routes.
   `AIOutputRecord`, returning a `decided` proposal or `unavailable`; the
   proposal is then bounded by the deterministic wrapper in
   `governance/service.ts`, ADR-9 revised — this replaced the earlier
-  score-blind shadow advisor), `local.ts` (the loopback-only OpenAI-compatible
+  score-blind shadow advisor), `debate.ts` (the WS-T debate ADJUDICATOR —
+  challenge resolution: the LLM weighs both positions of a sourced
+  story/comment correction debate and emits ONLY class probabilities + a
+  bounded rationale; the deterministic shell owns the outcome — `judgeDebate`'s
+  exact argmax/tie rule, the shared verdict vocabulary, a no-URLs rationale
+  bound — and ANY failure returns null so `adjudicateDebate` falls back to the
+  pinned-weights MLP; global hourly budget + breaker + `AIOutputRecord`),
+  `local.ts` (the loopback-only OpenAI-compatible
   local-runtime completion — llama.cpp server/Ollama/vLLM/LM Studio over plain
   fetch), `quality.ts` (the deterministic §24.5 summary acceptance gate),
   `registration.ts` (register + deploy every model through the REAL gate; one
@@ -311,13 +321,16 @@ the human-revision upgrades), sourcing the vocabulary from
   summaries, advisories) ships against a clean WS-M seam (the caller supplies
   proposal fields).  Wiring it to the real WS-M proposal/charter/law-pack model
   lands with WS-M.
-- **A real model backend.**  **First one landed** (WS-U ADR-9, 2026-07): the
-  LLM-backed governance summariser (`llm/`) swapped in behind the unchanged
-  registry/evaluation/guard/output-record surface — hosted Anthropic API or a
-  loopback-only local OpenAI-compatible runtime, advisory-only, fail-closed to
-  the deterministic summariser, OFF by default behind an explicit operator
-  opt-in (every environment, production included).  Remaining: the other
-  governed surfaces (classification, thread summarisation, translation, triage)
+- **A real model backend.**  **Landed** (WS-U ADR-9, 2026-07) for three
+  governed surfaces behind the unchanged registry/evaluation/guard/
+  output-record machinery (`llm/`): the lawmaking summariser, the in-room
+  moderation model, and the WS-T debate adjudicator (challenge resolution) —
+  hosted Anthropic API or a loopback-only local OpenAI-compatible runtime,
+  advisory/bounded-only, each failing closed per call to its deterministic
+  path.  **Production defaults to the loopback-local backend** (the
+  production-complete posture; the hosted backend stays an explicit opt-in),
+  and development auto-wires the DEV-ONLY simulated runtime.  Remaining: the
+  other governed surfaces (classification, thread summarisation, translation)
   still run the deterministic providers, the admission harness still consumes
   the synthetic fixture set (the recorded-fixture LLM eval corpus is the WS-U
   slice-3 follow-up), and the LLM identities are not yet folded into the seed's

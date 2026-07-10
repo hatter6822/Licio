@@ -14,6 +14,16 @@
 //
 // The room STEWARD may overrule the returned verdict for 24h (the human-in-the-
 // loop remedy); that override lives in the forum arena service, not here.
+//
+// TWO adjudicator backends run behind this ONE shell (production defaults to
+// the LLM; the MLP is the per-call fail-closed fallback):
+//   - the governed LLM leg (`llmJudge`, ai-governance/llm/debate.ts) — reads
+//     both positions' substance and emits class probabilities; the
+//     deterministic shell maps them to the outcome;
+//   - the pinned-weights MLP (`judgeDebate`) — content-structural features
+//     only; runs whenever no LLM is configured OR the LLM leg is unavailable
+//     (transport/refusal/schema/budget/breaker/record failure), so a verdict
+//     is always rendered at at least the deterministic quality floor.
 import { type DebateJudgeVerdict, judgeDebate } from '@licio/ai-governance';
 import type { DebateJudgeInput } from '@licio/shared';
 import type { ProhibitedUseGuard } from './guard.js';
@@ -21,10 +31,24 @@ import { DEBATE_ADJUDICATOR } from './models.js';
 import { recordAiOutput } from './output-records.js';
 import type { AiOutputRecordStore } from './stores.js';
 
+/**
+ * The governed LLM debate-adjudicator leg (WS-T; built at boot when an LLM
+ * backend is enabled). Runs AFTER the shell's ProhibitedUseGuard. NEVER throws:
+ * a null result means the LLM was unavailable and the shell falls back to the
+ * deterministic MLP. A non-null result carries its own immutable
+ * AIOutputRecord id (the LLM identity's provenance).
+ */
+export type LlmDebateJudge = (
+  debateId: string,
+  input: DebateJudgeInput,
+) => Promise<{ verdict: DebateJudgeVerdict; outputId: string } | null>;
+
 export interface AdjudicateDebateDeps {
   guard: ProhibitedUseGuard;
   outputRecords: AiOutputRecordStore;
   now: () => number;
+  /** The LLM leg (absent ⇒ the deterministic MLP adjudicates directly). */
+  llmJudge?: LlmDebateJudge | undefined;
 }
 
 export type AdjudicateOutcome =
@@ -53,7 +77,18 @@ export async function adjudicateDebate(
   });
   if (decision.decision === 'block') return { ok: false, reason: 'blocked' };
 
-  // 2. The pure probabilistic neural forward pass.
+  // 2a. The governed LLM leg (production default). Fire-safe by contract: a
+  // null result means unavailable ⇒ fall through to the deterministic MLP, so
+  // an LLM outage degrades the verdict quality, never the verdict itself. A
+  // successful LLM verdict carries its own AIOutputRecord (the LLM identity).
+  if (deps.llmJudge) {
+    const llmOutcome = await deps.llmJudge(debateId, input);
+    if (llmOutcome !== null) {
+      return { ok: true, verdict: llmOutcome.verdict, outputId: llmOutcome.outputId };
+    }
+  }
+
+  // 2b. The pure probabilistic neural forward pass (the fail-closed floor).
   const verdict = judgeDebate(input);
 
   // 3. The immutable, replayable AIOutputRecord (config hash pins the weights).

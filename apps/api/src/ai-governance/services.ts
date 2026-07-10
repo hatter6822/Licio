@@ -14,6 +14,7 @@ import {
   DEFAULT_AI_GOVERNANCE_CONFIG,
   loadAiGovernanceConfig,
 } from './config.js';
+import type { LlmDebateJudge } from './debate.js';
 import { ProhibitedUseGuard } from './guard.js';
 import { AiGovernanceMetrics } from './metrics.js';
 import { PassthroughTranslationProvider, type TranslationProvider } from './models.js';
@@ -69,6 +70,10 @@ export interface AiGovernanceServices {
   guard: ProhibitedUseGuard;
   translationProvider: TranslationProvider;
   metrics: AiGovernanceMetrics;
+  /** The governed LLM debate-adjudicator leg (WS-T challenge resolution; set at
+   *  boot when an LLM backend is enabled). Absent ⇒ `adjudicateDebate` runs the
+   *  deterministic MLP directly (the fail-closed floor either way). */
+  llmDebateJudge?: LlmDebateJudge | undefined;
   // Config (fail-closed, lazily readable).
   config: () => AiGovernanceConfig;
   reloadConfig: () => Promise<AiGovernanceConfig>;
