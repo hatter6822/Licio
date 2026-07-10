@@ -81,6 +81,11 @@ import {
   DrizzleRoomStore,
   DrizzleUploadStore,
 } from './forum/drizzle-forum-stores.js';
+import {
+  RedisCommentBroadcaster,
+  RedisDebateBroadcaster,
+  RefCountedSubscriber,
+} from './forum/redis-broadcasters.js';
 import { storyReadableByUser } from './forum/rooms.js';
 import {
   createInMemoryForumServices,
@@ -165,6 +170,7 @@ import {
   DrizzleRunMetadataStore,
   DrizzleScoiContextActionStore,
 } from './invariants/drizzle-invariant-stores.js';
+import { RedisSessionTopicSequenceStore } from './invariants/redis-session-store.js';
 import {
   INVARIANTS_SCHEDULER_INTERVAL_MS,
   startInvariantsScheduler,
@@ -452,6 +458,26 @@ if (env.REDIS_URL !== undefined) {
   forumServices.contributionLimiter = new ContributionRateLimiter(
     new RedisSlidingWindowStore(redis),
   );
+  // Live fan-out over Redis pub/sub (multi-instance): a comment or debate
+  // frame published on one instance reaches SSE subscribers held by every
+  // other.  A subscriber-mode connection cannot issue other commands, so the
+  // two broadcasters share one dedicated subscriber alongside the publisher.
+  const redisSub = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redisSub.on('error', (err) => logger.warn({ err }, 'Redis connection error (forum fan-out)'));
+  const fanoutSubscriber = new RefCountedSubscriber(redisSub, (err) =>
+    logger.warn({ err }, 'forum live fan-out subscribe/publish failed'),
+  );
+  const onFanoutError = (err: unknown) => logger.warn({ err }, 'forum live fan-out publish failed');
+  forumServices.commentBroadcaster = new RedisCommentBroadcaster(
+    redis,
+    fanoutSubscriber,
+    onFanoutError,
+  );
+  forumServices.debateBroadcaster = new RedisDebateBroadcaster(
+    redis,
+    fanoutSubscriber,
+    onFanoutError,
+  );
 }
 if (db) {
   forumServices.contributions = new DrizzleContributionStore(db);
@@ -489,6 +515,16 @@ if (db) {
   invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
   invariantServices.scoiActions = new DrizzleScoiContextActionStore(db);
   invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
+}
+// The PHI session-topic sequences are SESSION-SCOPED ephemera (WS-H.6.1a) —
+// Redis, never Postgres, is their durable-enough production home: attention
+// events landing on different instances now append to ONE shared sequence,
+// and the batch holonomy tier sees every instance's sessions.
+if (env.REDIS_URL !== undefined) {
+  const IORedis = (await import('ioredis')).default;
+  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (PHI sessions)'));
+  invariantServices.sessions = new RedisSessionTopicSequenceStore(redis);
 }
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);

@@ -202,9 +202,13 @@ export function createInMemoryInvariantServices(
     identity,
     ingestion,
     forum,
-    sessions,
-    // Getters read THROUGH the container so the production boot's Drizzle
-    // swap reaches the services constructed here.
+    // Getters read THROUGH the container so the production boot's adapter
+    // swaps (the Drizzle stores; the Redis session store) reach the services
+    // constructed here.  `sessions` is a PROPERTY getter so its declared type
+    // stays the plain store interface.
+    get sessions() {
+      return services.sessions;
+    },
     mfciMargins: () => services.mfciMargins,
     mfciRiskStates: () => services.mfciRiskStates,
     config: services.config,

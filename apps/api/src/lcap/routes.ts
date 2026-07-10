@@ -1364,7 +1364,7 @@ export function createLcapRoutes(
     async (c) => {
       if (declaredLengthExceeds(c, DEFAULT_SIGNAL_CONFIG.maxBlobBytes))
         return json(413, { error: 'oversized_request' });
-      const result = getSignalMailbox().post(
+      const result = await getSignalMailbox().post(
         c.req.query('to'),
         new Uint8Array(await c.req.arrayBuffer()),
         Date.now(),
@@ -1375,8 +1375,8 @@ export function createLcapRoutes(
   // The drain DELETES the peer's queued blobs (a state-changing POST, never a GET).  ALSO
   // CSRF-EXEMPT + sessionless: the bearer credential is the opaque `peer` key — only a party that
   // already holds it can consume that peer's queue.  (A holder-of-key proof would harden it further.)
-  app.post('/p2p/signal/poll', rateLimit({ limit: 240, windowMs: 60_000 }), (c) => {
-    const blobs = getSignalMailbox().drain(c.req.query('peer'), Date.now());
+  app.post('/p2p/signal/poll', rateLimit({ limit: 240, windowMs: 60_000 }), async (c) => {
+    const blobs = await getSignalMailbox().drain(c.req.query('peer'), Date.now());
     return new Response(new Uint8Array(frameBlobs(blobs)), {
       status: 200,
       headers: { 'content-type': 'application/octet-stream' },

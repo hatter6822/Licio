@@ -7,12 +7,13 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createLcapRoutes } from '../lcap/routes.js';
 import {
   frameBlobs,
   SignalMailbox,
   type SignalMailboxConfig,
+  setSignalMailbox,
   unframeBlobs,
 } from '../lcap/signaling.js';
 
@@ -76,6 +77,11 @@ describe('SignalMailbox — opaque store-and-forward', () => {
 });
 
 describe('signaling routes (§29 /p2p/signal)', () => {
+  // Pin the in-memory mailbox: the singleton would otherwise select the Redis
+  // adapter whenever REDIS_URL is set (CI), making this a non-unit test.
+  beforeEach(() => setSignalMailbox(new SignalMailbox()));
+  afterEach(() => setSignalMailbox(null));
+
   it('round-trips an opaque blob through POST then a POST drain', async () => {
     const app = createLcapRoutes();
     const key = `peer${Math.random().toString(36).slice(2)}`;
@@ -99,17 +105,21 @@ describe('signaling routes (§29 /p2p/signal)', () => {
 
 describe('§19.1 server-blindness — the signaling code parses no SDP/ICE/IP', () => {
   it('contains no SDP/ICE/candidate/IP-address token (outside comments)', () => {
-    const source = readFileSync(resolve(import.meta.dirname, '../lcap/signaling.ts'), 'utf-8');
-    const code = source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1');
-    for (const token of [
-      'sdp',
-      'icecandidate',
-      'candidate',
-      'ip_address',
-      'ipaddress',
-      'remote_addr',
-    ]) {
-      expect(new RegExp(`\\b${token}\\b`, 'i').test(code)).toBe(false);
+    // BOTH mailbox bindings are scanned: the in-memory adapter and the shared
+    // Redis adapter production selects.
+    for (const file of ['../lcap/signaling.ts', '../lcap/redis-signal-mailbox.ts']) {
+      const source = readFileSync(resolve(import.meta.dirname, file), 'utf-8');
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1');
+      for (const token of [
+        'sdp',
+        'icecandidate',
+        'candidate',
+        'ip_address',
+        'ipaddress',
+        'remote_addr',
+      ]) {
+        expect(new RegExp(`\\b${token}\\b`, 'i').test(code)).toBe(false);
+      }
     }
   });
 });
