@@ -283,6 +283,60 @@ export const aiRuntimeAlerts = pgTable(
   (t) => [index('ai_runtime_alerts_model_idx').on(t.modelName, t.modelVersion, t.raisedAt)],
 );
 
+/** The WS-K human-review queue: low-confidence classifications, reported
+ *  summaries/translations, and flagged hallucinations awaiting a steward. */
+export const aiReviewQueue = pgTable(
+  'ai_review_queue',
+  {
+    reviewId: text('review_id').primaryKey(),
+    kind: text('kind').notNull(),
+    /** The subject (story id, summary id, translation id, output id). */
+    subjectRef: text('subject_ref').notNull(),
+    context: jsonb('context').$type<Record<string, unknown>>().notNull(),
+    status: text('status').notNull().default('pending'),
+    resolution: text('resolution'),
+    resolvedBy: text('resolved_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('ai_review_queue_status_idx').on(t.status, t.createdAt),
+    index('ai_review_queue_kind_idx').on(t.kind, t.createdAt),
+    check('ai_review_queue_status', sql`${t.status} in ('pending', 'resolved')`),
+    check(
+      'ai_review_queue_kind',
+      sql`${t.kind} in ('low_confidence_classification', 'reported_summary', 'reported_translation', 'flagged_hallucination')`,
+    ),
+    check(
+      'ai_review_queue_resolved',
+      sql`(${t.status} = 'resolved') = (${t.resolvedAt} is not null)`,
+    ),
+  ],
+);
+
+/** The WS-U in-room moderation decision log (ADR-9): what the model PROPOSED
+ *  vs what the deterministic wrapper PERMITTED — the transparency of bounded
+ *  autonomy.  Append-only; metadata only (no content text, no attention
+ *  values, no user identity beyond the contribution ref the agent-action
+ *  audit log already carries). */
+export const aiModerationDecisions = pgTable(
+  'ai_moderation_decisions',
+  {
+    recordId: text('record_id').primaryKey(),
+    roomId: text('room_id').notNull(),
+    /** The moderated contribution id (matches the agent-action audit log). */
+    subjectRef: text('subject_ref').notNull(),
+    proposedAction: text('proposed_action').notNull(),
+    boundedAction: text('bounded_action').notNull(),
+    /** True when the ceiling and/or capability clamp reduced the proposal. */
+    clamped: boolean('clamped').notNull(),
+    /** The AIOutputRecord id of the invocation (provenance); null if none. */
+    outputId: text('output_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('ai_moderation_decisions_room_idx').on(t.roomId, t.createdAt)],
+);
+
 export type AiModelCardRow = typeof aiModelCards.$inferSelect;
 export type AiRiskAssessmentRow = typeof aiRiskAssessments.$inferSelect;
 export type AiInventoryVersionRow = typeof aiInventoryVersions.$inferSelect;
@@ -298,3 +352,5 @@ export type AiTranslationReportRow = typeof aiTranslationReports.$inferSelect;
 export type AiGovernanceSummaryRow = typeof aiGovernanceSummaries.$inferSelect;
 export type AiRuntimeMetricRow = typeof aiRuntimeMetrics.$inferSelect;
 export type AiRuntimeAlertRow = typeof aiRuntimeAlerts.$inferSelect;
+export type AiReviewQueueRow = typeof aiReviewQueue.$inferSelect;
+export type AiModerationDecisionRow = typeof aiModerationDecisions.$inferSelect;

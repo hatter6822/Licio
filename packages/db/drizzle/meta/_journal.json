@@ -470,6 +470,13 @@
       "when": 1782836000000,
       "tag": "0067_ws_u_admitted_backend",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1783720000000,
+      "tag": "0068_ws_k_durable_stores",
+      "breakpoints": true
     }
   ]
 }

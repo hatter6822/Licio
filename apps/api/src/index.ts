@@ -8,6 +8,8 @@ import { serve } from '@hono/node-server';
 import { createDbClient, pingDatabase } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
+import { createDrizzleAiGovernanceStores } from './ai-governance/drizzle-ai-governance-stores.js';
+import { ProhibitedUseGuard } from './ai-governance/guard.js';
 import {
   type GovernanceLlmEnvInput,
   resolveGovernanceLlmDecision,
@@ -924,12 +926,40 @@ rankingServices.moderation = createDefaultModerationStateProvider({
 // guard, evaluation harness, data lineage, audit-sensitive output records, the
 // content/summary/translation/governance pipelines, and runtime monitoring. The
 // ingestion + forum seams are injected so the durable WS-E consumer can classify/
-// extract during ingestion and the summary pipeline can read threads. (Gated
-// Drizzle adapters for the WS-K stores are a tracked residual; the in-memory
-// stores serve every environment until they land.)
+// extract during ingestion and the summary pipeline can read threads. The gated
+// Drizzle adapters swap in whenever a database is configured (production
+// always), so the registry + deploy gate, the immutable AIOutputRecords,
+// lineage, evaluations, corrections, the review queue, and the WS-U moderation
+// decision log survive restarts and are shared across instances.
 const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
   log: (event, meta) => logger.info(meta, event),
 });
+if (db) {
+  const aiStores = createDrizzleAiGovernanceStores(db);
+  aiGovernanceServices.registry = aiStores.registry;
+  aiGovernanceServices.riskAssessments = aiStores.riskAssessments;
+  aiGovernanceServices.inventory = aiStores.inventory;
+  aiGovernanceServices.lineage = aiStores.lineage;
+  aiGovernanceServices.outputRecords = aiStores.outputRecords;
+  aiGovernanceServices.evaluations = aiStores.evaluations;
+  aiGovernanceServices.corrections = aiStores.corrections;
+  aiGovernanceServices.blocked = aiStores.blocked;
+  aiGovernanceServices.reviewQueue = aiStores.reviewQueue;
+  aiGovernanceServices.summaries = aiStores.summaries;
+  aiGovernanceServices.translations = aiStores.translations;
+  aiGovernanceServices.governanceSummaries = aiStores.governanceSummaries;
+  aiGovernanceServices.runtime = aiStores.runtime;
+  aiGovernanceServices.moderationLog = aiStores.moderationLog;
+  // The prohibited-use guard captured the in-memory blocked store at container
+  // construction — REBUILD it over the durable store, or its audit rows would
+  // keep flowing to the discarded in-memory adapter.
+  aiGovernanceServices.guard = new ProhibitedUseGuard({
+    blocked: aiStores.blocked,
+    metrics: aiGovernanceServices.metrics,
+    log: aiGovernanceServices.log,
+    now: aiGovernanceServices.now,
+  });
+}
 aiGovernanceServices.ingestion = ingestionServices;
 aiGovernanceServices.forum = forumServices;
 await aiGovernanceServices.reloadConfig();
@@ -937,6 +967,28 @@ setAiGovernanceServices(aiGovernanceServices);
 registerAiGovernanceConsumers(eventServices, aiGovernanceServices, (storyId) =>
   refreshStoryFeatures(rankingServices, storyId),
 );
+// WS-K provisioning (EVERY environment, production included — these are the
+// canonical platform governance artifacts, not demo data): risk assessments,
+// base lineage, the governed deterministic models registered + DEPLOYED through
+// the real evaluation-harness/deploy gate, and the AI inventory. Idempotent
+// against the durable registry; the shared Postgres job lease serializes
+// concurrent FIRST-boots across replicas (same posture as the MERI enforcement
+// seed: an unavailable lease store FAILS OPEN — a broken lease must never leave
+// production without its governed models, and a rare double run is harmless
+// because every step is idempotent).
+{
+  let holdsProvisioningLease = true;
+  try {
+    holdsProvisioningLease = await makeJobLease().tryAcquire(
+      'seed:ai-governance',
+      60_000,
+      'platform-boot',
+    );
+  } catch {
+    holdsProvisioningLease = true; // fail open — provisioning is idempotent
+  }
+  if (holdsProvisioningLease) await seedAiGovernance(aiGovernanceServices);
+}
 
 // WS-U AI-governed rooms: bind the GovernanceService process singleton to the
 // production Drizzle stores (the isolated `knomosis` context) when a database is
@@ -1339,10 +1391,8 @@ if (env.NODE_ENV !== 'production') {
     // the demo repost demotion needs no separate dev-only promotion here.
     // WS-J: a small report queue so the dev console shows real data on boot.
     await seedModerationDemo(moderationServices);
-    // WS-K: register + DEPLOY the governed models through the real gate, and seed
-    // the risk assessments / lineage / AI inventory so the governance surfaces
-    // render on first boot. Idempotent (register is a no-op once present).
-    await seedAiGovernance(aiGovernanceServices);
+    // (WS-K provisioning — models/risk assessments/lineage/inventory — runs on
+    // the unconditional boot path above, production included.)
     // WS-U: make one demo room actually governed so the in-room "governed by"
     // panel + the steward manager render real data on first boot (uses the
     // bound GovernanceService; logs a sample agent action without a queue hold).

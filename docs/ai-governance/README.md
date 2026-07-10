@@ -311,15 +311,27 @@ the human-revision upgrades), sourcing the vocabulary from
   recompute).
 - The `ai.model.manage` RBAC capability (the AI team) + the `requireAiTeam`
   guard gate the model-lifecycle routes; the AI review queue is steward-gated.
-- The DB schema + migration `0034` are in place.
+- The DB schema + migrations `0034` and `0068` (`ai_review_queue`,
+  `ai_moderation_decisions`) are in place, and the gated Drizzle adapters
+  (`drizzle-ai-governance-stores.ts`) bind every WS-K store to them at boot
+  whenever a database is configured (production always).
 
 ## Residuals (tracked)
 
-- **Gated Drizzle adapters for the WS-K stores.**  The schema + migration ship;
-  the production Postgres adapters (mirroring the other workstreams'
-  `drizzle-*-stores.ts`) are a mechanical follow-up.  Until they land, the
-  in-memory stores serve every environment (the governance data is off the
-  hot read path).  Closure target: WS-K production-binding pass.
+- **Gated Drizzle adapters for the WS-K stores.**  **Landed** (2026-07): all
+  fourteen stores have production Postgres adapters
+  (`drizzle-ai-governance-stores.ts`, migration `0068` adding
+  `ai_review_queue` + `ai_moderation_decisions`), swapped in at boot whenever
+  a database is configured — the registry + deploy gate, immutable
+  AIOutputRecords, lineage, evaluations, corrections, the review queue, and
+  the WS-U moderation decision log now survive restarts and are shared across
+  instances.  The prohibited-use guard is rebuilt over the durable
+  blocked-invocation store at the swap.  Governed-model provisioning
+  (`seed.ts`) runs on the unconditional boot path — production included —
+  idempotently and under a boot lease, so the production registry always
+  carries the deployed deterministic models.  Covered by the gated
+  `ai-governance-integration.test.ts` (live migration chain + double-boot
+  idempotency).
 - **Deeper client render-path integration.**  The `AiLabel` badge + the
   summary-report / translation request+report routes ship; wiring the badge and
   the report affordance onto the live summary/topic/claim/translation render
