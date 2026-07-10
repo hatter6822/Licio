@@ -117,6 +117,13 @@ guard, the governed models, and a module singleton for routes.
   wrapper-bounded action, metadata only) is logged to the in-memory
   `ModerationDecisionLog` (`stores.ts`), read by the AI team at `GET
   /v1/ai/admin/governance/moderation/:roomId`.
+  In **development** (`pnpm dev`), when no backend is configured, the boot
+  auto-starts the DEV-ONLY **simulated local runtime**
+  (`apps/api/src/simulator/governance-llm.ts`) — a deterministic loopback
+  OpenAI-compatible server wired through this unchanged `local` seam, so the
+  full governed path (admission, gates, budgets, records, wrapper, deferred
+  re-moderation) runs with zero setup; see `docs/DEVELOPMENT.md` §16 for the
+  knobs + failure-injection markers.  Never constructed in production.
 - `seed.ts` — registers **and deploys** every governed model through the real
   gate; seeds risk assessments, lineage, and the inventory.
 - `pipelines.ts` — topic classification + claim extraction (WS-K.1.3a/b).

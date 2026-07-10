@@ -503,10 +503,12 @@ licio/
 │           │   ├── llm/                 --   WS-U ADR-9 LLM-backed governance models (opt-in,
 │           │   │                             fail-closed, off by default): config (decision), provider
 │           │   │                             (lawmaking summariser: guard→completion→zod→quality gate→
-│           │   │                             AIOutputRecord + budget/breaker; Anthropic SDK), advisor
-│           │   │                             (slice-2 SCORE-BLIND shadow moderation: measures agreement
-│           │   │                             vs the DSL, no authority), local (loopback-only OpenAI-
-│           │   │                             compatible runtime), quality, registration
+│           │   │                             AIOutputRecord + budget/breaker; Anthropic SDK), moderation
+│           │   │                             (the in-room moderation MODEL — a toxicity_safety_triage
+│           │   │                             classifier the deterministic wrapper bounds), local
+│           │   │                             (loopback-only OpenAI-compatible runtime; the dev boot
+│           │   │                             auto-wires the simulated runtime through it), quality,
+│           │   │                             registration
 │           │   ├── seed.ts              --   register + DEPLOY models through the gate; inventory
 │           │   ├── pipelines.ts         --   topic classification + claim extraction (WS-K.1.3a/b)
 │           │   ├── summaries.ts         --   AI summary eval: §24.3 quality/grounding gate (WS-K.1.4; eval-only, no thread Overview)
@@ -543,9 +545,15 @@ licio/
 │           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
 │           │   │                              (tags root comments with the author's vantage lens)
 │           │   ├── link-fixtures.ts      --   dev fetchDocument for reserved `.example` hosts
-│           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY I/O module — drives the
-│           │   │                              REAL submission/contribution/attention/report paths +
-│           │   │                              on-demand PWAtt/WS-H/feature scoring; tick loop
+│           │   ├── governance-llm.ts     --   DEV-ONLY simulated local governance-LLM runtime: a
+│           │   │                              deterministic loopback OpenAI-compatible server the dev
+│           │   │                              boot wires through the UNCHANGED WS-U `local` backend
+│           │   │                              seam (LICIO_LLM_SIM=off disables; deterministic
+│           │   │                              failure-injection markers; never in production)
+│           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY app-driving I/O module —
+│           │   │                              drives the REAL submission/contribution/attention/
+│           │   │                              report paths + on-demand PWAtt/WS-H/feature scoring;
+│           │   │                              tick loop
 │           │   └── routes.ts             --   dev control routes (mounted in front of createApp,
 │           │                                  never in the production AppType; header-guarded)
 │           ├── lib/

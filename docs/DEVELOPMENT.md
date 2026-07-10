@@ -1210,7 +1210,9 @@ CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 ### Governance LLM provider (`GOVERNANCE_LLM_*`)
 
 The WS-U in-room agent's advisory **lawmaking summary** can be drafted by a
-real LLM behind the governed provider port (WS-U ADR-3/ADR-9). Unset → the
+real LLM behind the governed provider port (WS-U ADR-3/ADR-9). Unset → in
+**development** a DEV-ONLY *simulated* local runtime auto-starts and serves
+both governed surfaces (see below); in every other environment, the
 deterministic summariser (the shipped default, zero egress). The opt-in is
 honoured in **every** environment, production included (the 2026-07-09
 maintainer decision): with `anthropic`, governed-room proposal text is sent to
@@ -1270,6 +1272,46 @@ lawmaking summary. Inspect the decision log as an AI-team member: `GET
 /v1/ai/admin/governance/moderation/{roomId}` returns a summary (total /
 allowed / warned / flagged-for-review / clamped-by-wrapper) plus recent
 metadata-only rows (raw proposed vs bounded action — no content).
+
+#### The dev-simulated local runtime (the `pnpm dev` default)
+
+On a **development** boot where `GOVERNANCE_LLM_PROVIDER` is unset, the API
+starts a DEV-ONLY **simulated local LLM runtime**
+(`apps/api/src/simulator/governance-llm.ts`): a deterministic, zero-dependency
+loopback HTTP server speaking the same OpenAI-compatible `/chat/completions`
+protocol as the real local runtimes, wired through the **unchanged** `local`
+backend seam. Nothing is stubbed on the client side — a bare `pnpm dev` box
+therefore runs the FULL governed LLM path (WS-K registration + admission +
+the deploy gate, the pre-execution guard, the strict output schemas, the
+§24.5 summary quality gate, per-room budgets + the circuit breaker, immutable
+`AIOutputRecord`s, the deterministic moderation wrapper, and deferred
+re-moderation) with zero setup and provably zero egress. The "model" is a
+fixed template classifier/summariser (no weights, no randomness), so runs are
+reproducible and the k-of-N admission sampling passes deterministically. It is
+never constructed in production (a `NODE_ENV` gate at the boot site plus a
+guard inside the module), and it binds `127.0.0.1` only.
+
+```sh
+pnpm dev                                # simulated runtime on http://127.0.0.1:3117/v1
+LICIO_LLM_SIM=off pnpm dev              # boot dev without it (deterministic stand-ins)
+LICIO_LLM_SIM_PORT=4200 pnpm dev        # pick the port (falls back to ephemeral if taken)
+GOVERNANCE_LLM_PROVIDER=deterministic pnpm dev  # explicit deterministic (also disables it)
+# Any real backend (anthropic/local, above) always wins over the simulator.
+```
+
+Deterministic **failure-injection markers** anywhere in the governed text (a
+contribution body, or a proposal title/body) let you exercise every
+fail-closed branch on demand:
+
+| Marker | Simulated behaviour | Governed outcome |
+|--------|--------------------|------------------|
+| `[sim:error]` | HTTP 500 | `transport` failure → baseline + deferred re-moderation / deterministic summary |
+| `[sim:refuse]` | `finish_reason: content_filter` | `refusal` → same fallback |
+| `[sim:truncate]` | `finish_reason: length` | `truncated` → same fallback |
+| `[sim:garbage]` | non-JSON prose | `invalid_output` → same fallback |
+| `[sim:propose=remove]` (any action) | forces the moderation verdict | shows the wrapper clamping to `flag_for_review` |
+| `[sim:ungrounded]` | off-proposal summary | §24.5 `quality` rejection → deterministic summary |
+| `[sim:foreign-url]` | off-proposal URL in the summary | `url_not_in_proposal` rejection → deterministic summary |
 
 ---
 

@@ -8,7 +8,10 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
-import { resolveGovernanceLlmDecision } from './ai-governance/llm/config.js';
+import {
+  type GovernanceLlmEnvInput,
+  resolveGovernanceLlmDecision,
+} from './ai-governance/llm/config.js';
 import { createLocalCompletion } from './ai-governance/llm/local.js';
 import { createGovernanceLlmModerationProposer } from './ai-governance/llm/moderation.js';
 import {
@@ -999,13 +1002,53 @@ eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
 // deterministic path, byte-identical to before.
 let governanceNlProvider: GovernanceNlProvider | undefined;
 let governanceModerationProposer: ModerationProposer | undefined;
-const governanceLlmDecision = resolveGovernanceLlmDecision({
+let governanceLlmEnvInput: GovernanceLlmEnvInput = {
   provider: env.GOVERNANCE_LLM_PROVIDER,
   apiKey: env.ANTHROPIC_API_KEY,
   modelId: env.GOVERNANCE_LLM_MODEL,
   localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
   moderation: env.GOVERNANCE_LLM_MODERATION,
-});
+};
+// DEV ONLY: the simulated local governance-LLM runtime. When the operator has
+// made NO backend choice on a development box, start the deterministic loopback
+// OpenAI-compatible simulator and route the UNCHANGED `local` backend seam at
+// it — so `pnpm dev` exercises the full governed LLM path (WS-K admission, the
+// strict schemas + quality gate, budgets/breaker, AIOutputRecords, the
+// moderation wrapper + deferred re-moderation) with zero setup and zero
+// egress. Any EXPLICIT GOVERNANCE_LLM_PROVIDER value wins ('deterministic'
+// opts back out entirely), LICIO_LLM_SIM=off (or 0) disables it, and it is
+// NEVER constructed in production (NODE_ENV gate here + a guard in the module)
+// — the same posture as the dev traffic simulator and FakeKnomosisGateway.
+if (
+  env.NODE_ENV === 'development' &&
+  env.GOVERNANCE_LLM_PROVIDER === undefined &&
+  process.env['LICIO_LLM_SIM'] !== 'off' &&
+  process.env['LICIO_LLM_SIM'] !== '0'
+) {
+  try {
+    const { SIMULATED_GOVERNANCE_LLM_MODEL_ID, startSimulatedGovernanceLlm } = await import(
+      './simulator/governance-llm.js'
+    );
+    const requestedPort = Number.parseInt(process.env['LICIO_LLM_SIM_PORT'] ?? '', 10);
+    const simulated = await startSimulatedGovernanceLlm({
+      ...(Number.isInteger(requestedPort) && requestedPort > 0 ? { port: requestedPort } : {}),
+      log: (event, meta) => logger.info(meta, event),
+    });
+    governanceLlmEnvInput = {
+      ...governanceLlmEnvInput,
+      provider: 'local',
+      localBaseUrl: simulated.baseUrl,
+      modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID,
+    };
+    logger.warn(
+      { baseUrl: simulated.baseUrl, modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID },
+      'DEV simulated governance LLM runtime started (development only; never in production). Disable with LICIO_LLM_SIM=off, or choose a real backend via GOVERNANCE_LLM_PROVIDER.',
+    );
+  } catch (err) {
+    logger.warn({ err }, 'dev simulated governance LLM wiring skipped (non-fatal)');
+  }
+}
+const governanceLlmDecision = resolveGovernanceLlmDecision(governanceLlmEnvInput);
 if (governanceLlmDecision.enabled) {
   const { backend, settings, llmModeration } = governanceLlmDecision;
   // One completion closure, shared by every governed surface: the key/URL live

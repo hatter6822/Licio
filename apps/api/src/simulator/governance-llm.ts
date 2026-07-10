@@ -1,0 +1,493 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// DEV-ONLY simulated local governance-LLM runtime (NEVER in production). A
+// zero-dependency node:http server, bound to the loopback interface only, that
+// speaks the same OpenAI-compatible /chat/completions protocol as the real
+// `local` runtimes (llama.cpp server, Ollama, vLLM, LM Studio) — so the boot
+// wiring can point the UNCHANGED WS-U ADR-9 `local` backend seam
+// (`ai-governance/llm/local.ts`) at it and the ENTIRE governed LLM path runs on
+// a bare `pnpm dev` box: WS-K registration + admission + the deploy gate, the
+// pre-execution guard, the strict output schemas, the §24.5 summary quality
+// gate, per-room budgets + the circuit breaker, immutable AIOutputRecords, the
+// deterministic moderation wrapper (escalate-to-review ceiling + capability
+// clamp), and deferred re-moderation. Nothing here shortcuts that machinery:
+// this module only ANSWERS the protocol; every guarantee stays enforced by the
+// real path on the client side.
+//
+// The "model" is a deterministic template classifier/summariser (no weights, no
+// randomness, no clock), so dev behaviour is reproducible and the k-of-N
+// admission sampling passes deterministically. Failure-injection markers in the
+// governed text let a developer exercise every fail-closed branch on demand:
+//   [sim:error]            → HTTP 500                (⇒ transport failure)
+//   [sim:refuse]           → finish_reason=content_filter (⇒ refusal)
+//   [sim:truncate]         → finish_reason=length    (⇒ truncated)
+//   [sim:garbage]          → non-JSON prose          (⇒ invalid_output)
+//   [sim:propose=<action>] → forces a moderation verdict (e.g. remove — shows
+//                            the wrapper clamping it to flag_for_review)
+//   [sim:ungrounded]       → off-proposal summary    (⇒ quality-gate rejection)
+//   [sim:foreign-url]      → off-proposal URL        (⇒ url_not_in_proposal)
+// Room content is classified/summarised, never logged (the house rule; the
+// optional log hook carries metadata only).
+
+import { createServer, type Server } from 'node:http';
+import { MODERATION_ACTIONS, type ModerationAction } from '@licio/governance';
+import { z } from 'zod';
+
+/** The model name the simulated runtime serves (the boot wiring passes it as
+ *  GOVERNANCE_LLM_MODEL, so the registry identity names the simulator openly). */
+export const SIMULATED_GOVERNANCE_LLM_MODEL_ID = 'licio-governance-sim';
+
+/** Fixed default port so the config-hashed registry identity (which folds in
+ *  the loopback base URL) stays STABLE across dev reboots — a persistent dev
+ *  registry then re-uses one deployed identity instead of minting one per boot.
+ *  Falls back to an ephemeral port when taken. */
+export const SIMULATED_GOVERNANCE_LLM_DEFAULT_PORT = 3117;
+
+/** The minimal OpenAI-compatible request surface consumed here (zod at the
+ *  boundary, unknown fields stripped — the same discipline as local.ts). */
+const chatCompletionRequestSchema = z.object({
+  model: z.string(),
+  messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1),
+  response_format: z
+    .object({
+      type: z.string(),
+      json_schema: z.object({ schema: z.record(z.string(), z.unknown()) }),
+    })
+    .optional(),
+});
+
+// --- deterministic text utilities (ReDoS-free: no regex over governed text) --
+
+function collapseWhitespace(text: string): string {
+  const parts: string[] = [];
+  let cur = '';
+  for (const ch of text) {
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') {
+      if (cur.length > 0) {
+        parts.push(cur);
+        cur = '';
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.length > 0) parts.push(cur);
+  return parts.join(' ');
+}
+
+/** Truncate at a word boundary WITHOUT adding an ellipsis, so every token in
+ *  the output still appears verbatim in the input (the summary stays fully
+ *  grounded under the §24.5 gate's token check). */
+function truncateAtWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
+}
+
+// --- failure-injection markers ----------------------------------------------
+
+function hasMarker(text: string, name: string): boolean {
+  return text.includes(`[sim:${name}]`);
+}
+
+/** `[sim:propose=<action>]` forces the moderation verdict (dev testing of the
+ *  wrapper's ceiling/clamp); an unknown action name is ignored. */
+export function forcedModerationAction(text: string): ModerationAction | null {
+  const tag = '[sim:propose=';
+  const start = text.indexOf(tag);
+  if (start === -1) return null;
+  const end = text.indexOf(']', start + tag.length);
+  if (end === -1) return null;
+  const candidate = text.slice(start + tag.length, end);
+  return (MODERATION_ACTIONS as readonly string[]).includes(candidate)
+    ? (candidate as ModerationAction)
+    : null;
+}
+
+// --- the moderation surface ---------------------------------------------------
+
+/** The parsed `<contribution>` block of the moderation user prompt
+ *  (`ai-governance/llm/moderation.ts` buildUserPrompt). Missing fields default
+ *  benign — a malformed prompt degrades toward `allow`, never a restriction. */
+export interface SimulatedContribution {
+  linkCount: number;
+  authorAccountAgeDays: number;
+  authorNewToRoom: boolean;
+  priorRemovalsInRoom: number;
+  text: string;
+}
+
+export function parseContribution(userPrompt: string): SimulatedContribution {
+  const parsed: SimulatedContribution = {
+    linkCount: 0,
+    authorAccountAgeDays: 365,
+    authorNewToRoom: false,
+    priorRemovalsInRoom: 0,
+    text: '',
+  };
+  let inBlock = false;
+  let inText = false;
+  const textLines: string[] = [];
+  for (const line of userPrompt.split('\n')) {
+    if (line === '<contribution>') {
+      inBlock = true;
+      continue;
+    }
+    if (line === '</contribution>') break;
+    if (!inBlock) continue;
+    if (inText) {
+      textLines.push(line);
+      continue;
+    }
+    if (line === 'text:') {
+      inText = true;
+      continue;
+    }
+    const sep = line.indexOf(': ');
+    if (sep === -1) continue;
+    const key = line.slice(0, sep);
+    const value = line.slice(sep + 2);
+    if (key === 'links') parsed.linkCount = Number.parseInt(value, 10) || 0;
+    else if (key === 'author_account_age_days') {
+      parsed.authorAccountAgeDays = Number.parseInt(value, 10) || 0;
+    } else if (key === 'author_new_to_room') parsed.authorNewToRoom = value === 'true';
+    else if (key === 'prior_removals_in_room') {
+      parsed.priorRemovalsInRoom = Number.parseInt(value, 10) || 0;
+    }
+  }
+  parsed.text = textLines.join('\n');
+  return parsed;
+}
+
+/** Distinct-hit spam vocabulary (two or more distinct terms reads as spam). */
+const SPAM_TERMS = [
+  'buy',
+  'cheap',
+  'pills',
+  'casino',
+  'giveaway',
+  'promo code',
+  'discount',
+  'free money',
+  'click',
+] as const;
+
+/** Hostile-wording vocabulary (routes to human review, never auto-removes). */
+const HOSTILE_TERMS = ['idiot', 'stupid', 'moron', 'worthless', 'shut up', 'hate you'] as const;
+
+/**
+ * The simulated model's fixed classification ladder. It deliberately spans the
+ * FULL action vocabulary — including `remove`, which the deterministic wrapper
+ * then clamps to `flag_for_review` (the escalate-to-human-review ceiling), so a
+ * dev box demonstrates the bounding, not just benign flows. It also clears the
+ * platform admission eval set (`PLATFORM_EVAL_SET`) deterministically: benign
+ * text → `allow`; link-spam → `remove`/`flag_for_review` (both in band).
+ */
+export function classifySimulatedModeration(contribution: SimulatedContribution): {
+  action: ModerationAction;
+  reason: string;
+} {
+  const lower = contribution.text.toLowerCase();
+  const spamHits = SPAM_TERMS.filter((term) => lower.includes(term)).length;
+  if (spamHits >= 2 && contribution.linkCount >= 1) {
+    return {
+      action: 'remove',
+      reason: 'Commercial spam with links — proposed for removal (a human confirms first).',
+    };
+  }
+  if (spamHits >= 2) {
+    return { action: 'flag_for_review', reason: 'Spam-like wording — routed to human review.' };
+  }
+  if (HOSTILE_TERMS.some((term) => lower.includes(term))) {
+    return { action: 'flag_for_review', reason: 'Hostile wording — routed to human review.' };
+  }
+  if (contribution.linkCount >= 3) {
+    return { action: 'flag_for_review', reason: 'High link density — routed to human review.' };
+  }
+  if (contribution.priorRemovalsInRoom >= 2) {
+    return {
+      action: 'flag_for_review',
+      reason: 'Author has prior removals in this room — routed to human review.',
+    };
+  }
+  if (contribution.authorNewToRoom && contribution.linkCount >= 1) {
+    return {
+      action: 'flag_for_review',
+      reason: 'New author posting a link — routed to human review.',
+    };
+  }
+  if (contribution.authorAccountAgeDays < 7 && contribution.linkCount >= 1) {
+    return { action: 'warn', reason: 'Young account posting a link.' };
+  }
+  return { action: 'allow', reason: 'Civil, on-topic contribution — no action.' };
+}
+
+// --- the lawmaking-summary surface -------------------------------------------
+
+/** The parsed `<proposal>` block of the summary user prompt
+ *  (`ai-governance/llm/provider.ts` buildUserPrompt). */
+export interface SimulatedProposal {
+  title: string;
+  body: string;
+  options: string[];
+}
+
+export function parseProposal(userPrompt: string): SimulatedProposal {
+  const parsed: SimulatedProposal = { title: '', body: '', options: [] };
+  let inBlock = false;
+  let mode: 'fields' | 'body' | 'options' = 'fields';
+  const bodyLines: string[] = [];
+  for (const line of userPrompt.split('\n')) {
+    if (line === '<proposal>') {
+      inBlock = true;
+      continue;
+    }
+    if (line === '</proposal>') break;
+    if (!inBlock) continue;
+    if (line.startsWith('Options (') && line.endsWith('):')) {
+      mode = 'options';
+      continue;
+    }
+    if (mode === 'options') {
+      if (line === '(none)') continue;
+      // "1. Adopt" → "Adopt" (tolerate any numbering width; no regex).
+      const dot = line.indexOf('. ');
+      parsed.options.push(dot > 0 ? line.slice(dot + 2) : line);
+      continue;
+    }
+    if (mode === 'fields' && line.startsWith('Title: ')) {
+      parsed.title = line.slice('Title: '.length);
+      continue;
+    }
+    if (mode === 'fields' && line === 'Body:') {
+      mode = 'body';
+      continue;
+    }
+    if (mode === 'body') bodyLines.push(line);
+  }
+  parsed.body = bodyLines.join('\n');
+  return parsed;
+}
+
+/**
+ * The simulated model's extractive summary: every content token comes verbatim
+ * from the proposal (word-boundary truncation, no ellipsis), so a compliant
+ * draft clears the §24.5 grounding + URL gates by construction — exactly the
+ * behaviour the real system prompt instructs of a compliant model.
+ */
+export function draftSimulatedSummary(proposal: SimulatedProposal): {
+  headline: string;
+  summary: string;
+} {
+  const title = collapseWhitespace(proposal.title);
+  const body = collapseWhitespace(proposal.body);
+  const headline = truncateAtWord(title.length > 0 ? title : body, 120) || 'Proposal';
+  const optionsPart =
+    proposal.options.length > 0
+      ? `Options: ${proposal.options.map(collapseWhitespace).join('; ')}`
+      : '';
+  const summary =
+    truncateAtWord([truncateAtWord(body, 400), optionsPart].filter(Boolean).join(' '), 590) ||
+    headline;
+  return { headline, summary };
+}
+
+// --- the protocol core (pure request → response; the http layer is a shell) --
+
+export interface SimulatedChatResponse {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+function completion(
+  model: string,
+  content: string | null,
+  finishReason: string,
+): SimulatedChatResponse {
+  return {
+    status: 200,
+    body: {
+      id: 'sim-cmpl',
+      object: 'chat.completion',
+      model,
+      choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: finishReason }],
+    },
+  };
+}
+
+function badRequest(message: string): SimulatedChatResponse {
+  return { status: 400, body: { error: { message } } };
+}
+
+/** Answer one chat-completion request deterministically (no clock, no RNG). */
+export function simulateChatCompletion(payload: unknown): SimulatedChatResponse {
+  const parsed = chatCompletionRequestSchema.safeParse(payload);
+  if (!parsed.success) return badRequest('malformed chat.completions request');
+  const request = parsed.data;
+  const user = [...request.messages].reverse().find((m) => m.role === 'user')?.content ?? '';
+
+  // Failure injection (markers live in the governed text itself).
+  if (hasMarker(user, 'error')) {
+    return { status: 500, body: { error: { message: 'simulated inference failure' } } };
+  }
+  if (hasMarker(user, 'refuse')) return completion(request.model, null, 'content_filter');
+  if (hasMarker(user, 'truncate')) return completion(request.model, '{"acti', 'length');
+  if (hasMarker(user, 'garbage')) {
+    return completion(request.model, 'This contribution seems fine to me.', 'stop');
+  }
+
+  // Surface detection: the response_format schema names the governed surface
+  // (the moderation verdict has `action`; the lawmaking summary has `headline`).
+  const properties = request.response_format?.json_schema.schema['properties'];
+  const keys = properties !== null && typeof properties === 'object' ? properties : {};
+  if ('action' in keys) {
+    const forced = forcedModerationAction(user);
+    const verdict = forced
+      ? { action: forced, reason: `Simulator-forced ${forced}.` }
+      : classifySimulatedModeration(parseContribution(user));
+    return completion(request.model, JSON.stringify(verdict), 'stop');
+  }
+  if ('headline' in keys) {
+    if (hasMarker(user, 'ungrounded')) {
+      return completion(
+        request.model,
+        JSON.stringify({
+          headline: 'Quantum llamas reconsidered',
+          summary:
+            'Deliberately ungrounded simulator prose about orbital mechanics, sourdough hydration and quantum llamas.',
+        }),
+        'stop',
+      );
+    }
+    const draft = draftSimulatedSummary(parseProposal(user));
+    if (hasMarker(user, 'foreign-url')) {
+      return completion(
+        request.model,
+        JSON.stringify({
+          ...draft,
+          summary: `${draft.summary} See https://not-in-the-proposal.example/details`,
+        }),
+        'stop',
+      );
+    }
+    return completion(request.model, JSON.stringify(draft), 'stop');
+  }
+  return badRequest('unrecognised response_format for the simulated governance runtime');
+}
+
+// --- the loopback http shell --------------------------------------------------
+
+const MAX_BODY_BYTES = 1_048_576; // far above any governed prompt; bounds a runaway client
+
+export interface SimulatedGovernanceLlmOptions {
+  /** Preferred port (default SIMULATED_GOVERNANCE_LLM_DEFAULT_PORT); falls back
+   *  to an ephemeral port when taken. */
+  port?: number;
+  /** Metadata-only observability hook (never receives governed content). */
+  log?: (event: string, meta: Record<string, unknown>) => void;
+}
+
+export interface SimulatedGovernanceLlmHandle {
+  /** The loopback base URL for GOVERNANCE_LLM_LOCAL_URL (…/v1). */
+  baseUrl: string;
+  port: number;
+  close(): Promise<void>;
+}
+
+function listenOn(server: Server, port: number): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const onError = (err: Error) => {
+      server.removeListener('listening', onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.removeListener('error', onError);
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        reject(new Error('simulated governance LLM runtime bound no TCP address'));
+        return;
+      }
+      resolvePort(address.port);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+/**
+ * Start the simulated runtime on the loopback interface. DEV ONLY: refuses to
+ * start in production (defense-in-depth on top of the boot wiring's NODE_ENV
+ * gate), and binds 127.0.0.1 explicitly so it is never reachable off-host.
+ */
+export async function startSimulatedGovernanceLlm(
+  options: SimulatedGovernanceLlmOptions = {},
+): Promise<SimulatedGovernanceLlmHandle> {
+  if (process.env['NODE_ENV'] === 'production') {
+    throw new Error('the simulated governance LLM runtime must never start in production');
+  }
+  const log = options.log ?? (() => {});
+  const server = createServer((req, res) => {
+    const respond = (status: number, body: Record<string, unknown>) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method !== 'POST') {
+      respond(405, { error: { message: 'method not allowed' } });
+      return;
+    }
+    if (!(req.url ?? '').endsWith('/chat/completions')) {
+      respond(404, { error: { message: 'not found' } });
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let aborted = false;
+    req.on('data', (chunk: Buffer) => {
+      received += chunk.length;
+      if (received > MAX_BODY_BYTES) {
+        aborted = true;
+        respond(413, { error: { message: 'request body too large' } });
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (aborted) return;
+      let payload: unknown;
+      try {
+        payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        respond(400, { error: { message: 'request body is not JSON' } });
+        return;
+      }
+      const result = simulateChatCompletion(payload);
+      log('sim.llm.completion', { status: result.status });
+      respond(result.status, result.body);
+    });
+    req.on('error', () => {
+      /* client went away; nothing to answer */
+    });
+  });
+
+  const desired = options.port ?? SIMULATED_GOVERNANCE_LLM_DEFAULT_PORT;
+  let port: number;
+  try {
+    port = await listenOn(server, desired);
+  } catch {
+    // The fixed default is taken (a second dev process, or an unrelated
+    // service): fall back to an ephemeral port — the boot log states the URL.
+    port = await listenOn(server, 0);
+  }
+  log('sim.llm.started', { port });
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    port,
+    close: () =>
+      new Promise<void>((resolveClose, reject) => {
+        server.close((err) => (err ? reject(err) : resolveClose()));
+      }),
+  };
+}
