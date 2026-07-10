@@ -82,6 +82,12 @@ export function createLocalCompletion(
         // extractive task (the hosted Claude leg intentionally sends none —
         // current Claude models reject sampling parameters).
         temperature: 0,
+        // Reasoning-model latency lever (gpt-oss family; Ollama/vLLM honour it,
+        // others ignore an unknown field). Config-hashed into the identity, so
+        // changing it re-clears the WS-K gate. Null ⇒ never sent.
+        ...(settings.reasoningEffort !== null
+          ? { reasoning_effort: settings.reasoningEffort }
+          : {}),
         messages: [
           { role: 'system', content: request.system },
           { role: 'user', content: request.user },

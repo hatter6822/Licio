@@ -60,6 +60,15 @@ export interface GovernanceLlmSettings {
   breakerFailureThreshold: number;
   /** Seconds the breaker stays open before a half-open retry. */
   breakerCooldownSeconds: number;
+  /** LOCAL backend only: the OpenAI-compatible `reasoning_effort` sent with
+   *  every completion. The default local model (gpt-oss) is a REASONING model
+   *  whose latency is dominated by thinking tokens; `low` cuts a verdict's
+   *  wall-clock ~30% on the reviewed default stack (measured on Ollama) with
+   *  the deterministic gates unchanged above it. Runtimes that ignore the
+   *  field lose nothing; a runtime that rejects it fails closed per call to
+   *  the deterministic path (set GOVERNANCE_LLM_REASONING_EFFORT=off there).
+   *  Null ⇒ the field is never sent (always null for the hosted backend). */
+  reasoningEffort: 'low' | 'medium' | 'high' | null;
 }
 
 export const DEFAULT_GOVERNANCE_LLM_SETTINGS: GovernanceLlmSettings = {
@@ -72,7 +81,14 @@ export const DEFAULT_GOVERNANCE_LLM_SETTINGS: GovernanceLlmSettings = {
   maxDebateJudgementsPerHour: 60,
   breakerFailureThreshold: 3,
   breakerCooldownSeconds: 300,
+  reasoningEffort: null,
 };
+
+/** The reviewed default `reasoning_effort` for the LOCAL backend (paired with
+ *  the default gpt-oss model; measured ~30% latency cut per verdict at
+ *  unchanged gate outcomes). GOVERNANCE_LLM_REASONING_EFFORT overrides
+ *  ('off' ⇒ never send the field). */
+export const DEFAULT_GOVERNANCE_LLM_LOCAL_REASONING_EFFORT = 'low' as const;
 
 /** The default 'local' base URL: the Ollama loopback endpoint (the most common
  *  local runtime; llama.cpp/vLLM/LM Studio operators set their own URL). */
@@ -123,6 +139,11 @@ export interface GovernanceLlmEnvInput {
    *  cost-free simulated runtime; operators raise it for throughput testing
    *  against a real local runtime. Non-positive/invalid values are ignored. */
   debateBudgetPerHour?: number | undefined;
+  /** GOVERNANCE_LLM_REASONING_EFFORT — the local backend's `reasoning_effort`
+   *  ('low'|'medium'|'high'; 'off' ⇒ never send the field). Unset ⇒ the
+   *  reviewed default ('low', paired with the default gpt-oss model). Ignored
+   *  for the hosted backend. */
+  reasoningEffort?: string | undefined;
   /** NODE_ENV — drives the production-complete default above. Absent ⇒ treated
    *  as non-production (no silent default backend). */
   nodeEnv?: string | undefined;
@@ -193,5 +214,12 @@ export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): Gove
   const baseUrl = input.localBaseUrl?.trim() || DEFAULT_GOVERNANCE_LLM_LOCAL_URL;
   if (!isLoopbackHttpUrl(baseUrl)) return { enabled: false, reason: 'local_url_not_loopback' };
   settings.modelId = modelId || DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID;
+  const effort = input.reasoningEffort?.trim().toLowerCase();
+  settings.reasoningEffort =
+    effort === 'off'
+      ? null
+      : effort === 'low' || effort === 'medium' || effort === 'high'
+        ? effort
+        : DEFAULT_GOVERNANCE_LLM_LOCAL_REASONING_EFFORT;
   return { enabled: true, backend: { kind: 'local', baseUrl }, settings, ...flags };
 }

@@ -680,3 +680,36 @@ describe('window-policy override (the dev-simulator / test seam)', () => {
     );
   });
 });
+
+describe('lifecycle fan-out — per-arena failure isolation', () => {
+  it('one failing adjudication is logged and the rest of the batch still judges', async () => {
+    // Three due arenas on distinct targets.
+    const arenas: string[] = [];
+    for (const body of ['One is 1.', 'Two is 2.', 'Three is 3.']) {
+      const target = await seedComment(INCUMBENT, body);
+      const correction = await seedCorrection(target);
+      const arena = await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+      if (arena) arenas.push(arena.debateId);
+    }
+    expect(arenas).toHaveLength(3);
+    const poisoned = arenas[1];
+    const logged: string[] = [];
+    const flaky: DebateDeps = {
+      ...deps,
+      runJudge: async (debateId, input) => {
+        if (debateId === poisoned) throw new Error('adjudicator store fault');
+        return corrected(debateId, input);
+      },
+      log: (event) => {
+        logged.push(event);
+      },
+    };
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    const { judged } = await runDebateLifecycle(flaky);
+    expect(judged).toBe(2); // the poisoned arena is isolated, not batch-fatal
+    expect(logged).toContain('forum.debate_judge_failed');
+    // The poisoned arena is untouched and judges on a later pass.
+    const { judged: retried } = await runDebateLifecycle(deps);
+    expect(retried).toBe(1);
+  });
+});

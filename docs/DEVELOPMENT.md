@@ -894,10 +894,13 @@ GOVERNANCE_LLM_PROVIDER=local pnpm dev           # real gpt-oss:20b adjudicates
 GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000 GOVERNANCE_LLM_PROVIDER=local pnpm dev
 ```
 
-Adjudications are serial within the lifecycle pass, so with a real model the
-average adjudication time ≈ one model completion; crank the scenario speed to
-queue arenas faster than they resolve and watch the backlog (`Awaiting
-verdict`) grow — that is the honest throughput ceiling of your hardware.
+Adjudications fan out **4-wide** within a lifecycle pass (matching the Compose
+runtime's `OLLAMA_NUM_PARALLEL`), so a queued backlog drains at roughly the
+per-verdict latency divided by the runtime's parallel slots; a single-slot
+runtime simply queues server-side, no worse than serial. Crank the scenario
+speed to queue arenas faster than they resolve and watch the backlog
+(`Awaiting verdict`) — where it stabilizes is the honest throughput ceiling of
+your hardware.
 
 **Interpretation lenses (WS-G.2.2).** The simulator provisions a focused lens
 set (`skeptical`, `expert`, `local_resident`, `policy`) in each room it uses and
@@ -1312,7 +1315,23 @@ GOVERNANCE_LLM_MODERATION=off           # deterministic default moderation propo
 GOVERNANCE_LLM_DEBATE=off               # deterministic MLP debate adjudicator only
 GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000  # raise the ADR-6 debate budget (default 60;
                                             # exhausted ⇒ MLP fallback, never a dropped verdict)
+GOVERNANCE_LLM_REASONING_EFFORT=low     # local reasoning-model latency lever (default `low`,
+                                        # ~30% faster verdicts on the default gpt-oss stack;
+                                        # `off` never sends the field — set it for a runtime
+                                        # that rejects unknown OpenAI-compat parameters)
 ```
+
+**Throughput levers (local backend).** Governed calls are latency-bound by the
+model, so the platform parallelizes where the work is independent: debate
+adjudications fan out **4-wide** per lifecycle pass, admission samples a
+candidate model's k-of-N probes concurrently, and the deferred re-moderation
+sweep drains a recovered backlog 4 at a time. Match the runtime:
+`OLLAMA_NUM_PARALLEL=4` (the Compose `llm` service sets it) so the fan-out
+genuinely overlaps, and `OLLAMA_KEEP_ALIVE=-1` so an idle model is never
+unloaded (a cold load costs seconds on the next verdict). vLLM batches far
+wider out of the box. Measured on the reviewed default stack:
+`reasoning_effort low` ≈ 1.3s vs 1.7s per moderation-shaped verdict, and four
+parallel completions finish in half the serial wall-clock.
 
 The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /
 `[::1]`) — a non-local URL is rejected at startup, and the local fetch sets

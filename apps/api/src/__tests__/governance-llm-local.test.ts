@@ -173,3 +173,44 @@ describe('local backend through the governed provider (end to end, no network)',
     expect(identity.name).toMatch(/^governance-summarizer-llm-local-[0-9a-f]{12}$/);
   });
 });
+
+describe('reasoning_effort (the gpt-oss latency lever)', () => {
+  const OK_BODY = {
+    choices: [{ message: { content: '{"headline":"h","summary":"s"}' }, finish_reason: 'stop' }],
+  };
+
+  it('is sent when the settings carry it and omitted when null', async () => {
+    const withEffort = fakeFetch(200, OK_BODY);
+    await createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: 'low' },
+      withEffort.fetch,
+    )(REQUEST);
+    const effortCall = withEffort.calls[0];
+    if (!effortCall) throw new Error('no call recorded');
+    const sent = JSON.parse(effortCall.init.body) as Record<string, unknown>;
+    expect(sent['reasoning_effort']).toBe('low');
+
+    const without = fakeFetch(200, OK_BODY);
+    await createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: null },
+      without.fetch,
+    )(REQUEST);
+    const bareCall = without.calls[0];
+    if (!bareCall) throw new Error('no call recorded');
+    const bare = JSON.parse(bareCall.init.body) as Record<string, unknown>;
+    expect('reasoning_effort' in bare).toBe(false);
+  });
+
+  it('is folded into the registry identity config (a changed effort re-clears the gate)', () => {
+    const backend = { kind: 'local', baseUrl: BASE_URL } as const;
+    const low = buildGovernanceLlmIdentity({ ...SETTINGS, reasoningEffort: 'low' }, backend);
+    const high = buildGovernanceLlmIdentity({ ...SETTINGS, reasoningEffort: 'high' }, backend);
+    const none = buildGovernanceLlmIdentity({ ...SETTINGS, reasoningEffort: null }, backend);
+    expect(low.config['reasoning_effort']).toBe('low');
+    expect('reasoning_effort' in none.config).toBe(false);
+    const names = new Set([low.name, high.name, none.name]);
+    expect(names.size).toBe(3); // three distinct decision surfaces, three identities
+  });
+});

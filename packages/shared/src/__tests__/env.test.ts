@@ -206,6 +206,14 @@ describe('validateServerEnv', () => {
     expect(() =>
       validateServerEnv({ ...validEnv, GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: '0' }),
     ).toThrow();
+    // The reasoning-effort lever is a closed enum ('off' disables the field).
+    expect(
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_REASONING_EFFORT: 'off' })
+        .GOVERNANCE_LLM_REASONING_EFFORT,
+    ).toBe('off');
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_REASONING_EFFORT: 'turbo' }),
+    ).toThrow();
   });
 
   it('rejects a BLANK (whitespace-only) LLM credential — no silent-disable of the opt-in (WS-U ADR-9 review)', () => {

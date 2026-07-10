@@ -569,6 +569,9 @@ licio/
 │           │   └── routes.ts             --   dev control routes (mounted in front of createApp,
 │           │                                  never in the production AppType; header-guarded)
 │           ├── lib/
+│           │   ├── concurrency.ts       --   mapBounded: order-preserving bounded fan-out with
+│           │   │                             per-item failure isolation (the LLM fan-outs:
+│           │   │                             debate lifecycle, admission sampling, re-moderation sweep)
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
 │           │   ├── vapid.ts             --   VAPID key management

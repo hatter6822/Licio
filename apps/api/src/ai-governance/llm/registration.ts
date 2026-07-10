@@ -51,6 +51,9 @@ export function buildGovernanceLlmIdentity(
     system_prompt_version: GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION,
     quality_gate_version: LAWMAKING_SUMMARY_QUALITY_GATE_VERSION,
     ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+    // Part of the decision surface (a different effort ⇒ different behaviour ⇒
+    // a new identity that re-clears the WS-K gate); omitted when never sent.
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
   };
   return {
     // One registry identity per (backend, CONFIG): the config hash is folded into
@@ -83,6 +86,9 @@ export function buildGovernanceModerationProposerIdentity(
     max_output_tokens: settings.maxOutputTokens,
     system_prompt_version: MODERATION_SYSTEM_PROMPT_VERSION,
     ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+    // Part of the decision surface (a different effort ⇒ different behaviour ⇒
+    // a new identity that re-clears the WS-K gate); omitted when never sent.
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
   };
   return {
     // Config-hashed identity (as with the summariser): a changed model/prompt/URL
@@ -113,6 +119,9 @@ export function buildGovernanceDebateJudgeIdentity(
     max_output_tokens: settings.maxOutputTokens,
     system_prompt_version: DEBATE_SYSTEM_PROMPT_VERSION,
     ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+    // Part of the decision surface (a different effort ⇒ different behaviour ⇒
+    // a new identity that re-clears the WS-K gate); omitted when never sent.
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
   };
   return {
     name: `governance-debate-llm-${backend.kind}-${configHash(config).slice(0, 12)}`,

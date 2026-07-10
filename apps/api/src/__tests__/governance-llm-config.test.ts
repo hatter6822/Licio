@@ -226,6 +226,34 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     }
   });
 
+  it('reasoning effort: local defaults to the reviewed `low`, honours overrides, and `off` disables; hosted never sends it', () => {
+    const local = (reasoningEffort?: string) =>
+      resolveGovernanceLlmDecision({
+        provider: 'local',
+        apiKey: undefined,
+        localBaseUrl: LOCAL_URL,
+        modelId: 'llama3.3',
+        reasoningEffort,
+      });
+    const expectEffort = (value: string | undefined, effort: 'low' | 'medium' | 'high' | null) => {
+      const decision = local(value);
+      expect(decision.enabled && decision.settings.reasoningEffort).toBe(effort);
+    };
+    expectEffort(undefined, 'low'); // the reviewed default for the local backend
+    expectEffort('medium', 'medium');
+    expectEffort(' HIGH ', 'high');
+    expectEffort('off', null);
+    // Garbage behaves like unset — the reviewed default, never a raw pass-through.
+    expectEffort('turbo', 'low');
+    // The hosted backend never carries the field (Claude rejects unknown params).
+    const hosted = resolveGovernanceLlmDecision({
+      provider: 'anthropic',
+      apiKey: KEY,
+      reasoningEffort: 'high',
+    });
+    expect(hosted.enabled && hosted.settings.reasoningEffort).toBe(null);
+  });
+
   it('never mutates the shared default settings object', () => {
     const decision = resolveGovernanceLlmDecision({
       provider: 'local',

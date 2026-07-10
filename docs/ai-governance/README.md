@@ -100,7 +100,9 @@ guard, the governed models, and a module singleton for routes.
   production-complete posture, with reviewed defaults for the local URL
   (Ollama loopback) and model (`gpt-oss:20b`) — while `deterministic` opts out
   and `anthropic` stays an explicit opt-in; the `GOVERNANCE_LLM_MODERATION` +
-  `GOVERNANCE_LLM_DEBATE` per-surface off-switches), `provider.ts`
+  `GOVERNANCE_LLM_DEBATE` per-surface off-switches; the config-hashed local
+  `reasoning_effort` latency lever, reviewed default `low`, env-overridable
+  incl. `off`), `provider.ts`
   (the governed lawmaking summariser: guard → completion → zod → quality gate →
   `AIOutputRecord`, under a per-room budget + circuit breaker; the Anthropic
   SDK completion + the reusable budget/breaker/completion plumbing),

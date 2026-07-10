@@ -43,6 +43,7 @@ import {
   type Verdict,
   type VoteSchedule,
 } from '@licio/governance';
+import { mapBounded } from '../lib/concurrency.js';
 import type { GovernanceConfig } from './config.js';
 import type {
   ModerationDecisionSink,
@@ -138,6 +139,11 @@ interface EvalFixture {
  * moderation always carries the real room id.
  */
 export const ADMISSION_ROOM_ID = 'admission';
+
+/** Concurrent model re-runs per deferred re-moderation sweep (items are
+ *  independent rows; a recovered backlog drains at the backend's parallel-slot
+ *  rate instead of one serial model call per item). */
+const REMODERATION_SWEEP_CONCURRENCY = 4;
 
 /**
  * `unavailable` codes that make an admission run RETRYABLE (a transient backend /
@@ -936,7 +942,12 @@ export class GovernanceService {
       moot: 0,
       errors: 0,
     };
-    for (const item of pending) {
+    // Items are independent (distinct (room, subject) rows), so the model
+    // re-runs fan out a few at a time — a recovered backlog drains at the
+    // backend's parallel-slot rate instead of one model call per item serially.
+    // Counter increments are synchronous; the per-item try/catch below is the
+    // existing poison-item isolation.
+    await mapBounded(pending, REMODERATION_SWEEP_CONCURRENCY, async (item) => {
       try {
         const context = await loadContext(item.roomId, item.subjectRef);
         if (context === null) {
@@ -944,7 +955,7 @@ export class GovernanceService {
           // re-moderate. Dequeue it (a self-cleaning dangling ref).
           await this.deps.stores.pendingRemoderation.remove(item.roomId, item.subjectRef);
           result.moot += 1;
-          continue;
+          return;
         }
         const outcome = await this.reModerate(item.roomId, item.subjectRef, context);
         if (outcome.status === 'still_unavailable') {
@@ -954,7 +965,7 @@ export class GovernanceService {
             this.iso(),
           );
           result.stillUnavailable += 1;
-          continue;
+          return;
         }
         if (outcome.status === 'applied') {
           if (!apply) {
@@ -965,7 +976,7 @@ export class GovernanceService {
               this.iso(),
             );
             result.errors += 1;
-            continue;
+            return;
           }
           await apply(item.roomId, item.subjectRef, outcome.action, outcome.reason);
           result.applied += 1;
@@ -983,7 +994,7 @@ export class GovernanceService {
           .catch(() => {});
         result.errors += 1;
       }
-    }
+    });
     return result;
   }
 
@@ -1421,13 +1432,21 @@ export class GovernanceService {
       const lo = actionSeverity(fixture.minAction);
       const hi = actionSeverity(fixture.maxAction);
       let inBand = 0;
-      for (let i = 0; i < samples; i += 1) {
-        const result = await proposer.propose({
-          roomId: ADMISSION_ROOM_ID,
-          subjectRef: `${fixture.label}:${i}`,
-          context: fixture.context,
-          moderationPrompt: bundle.moderationPrompt,
-        });
+      // The k samples are independent probes of the same fixture, so they fan
+      // out CONCURRENTLY (a real LLM backend serves parallel slots; admission
+      // probes bypass the live breaker/budget by contract, so the fan-out can
+      // never degrade live moderation). Counting is order-independent.
+      const results = await Promise.all(
+        Array.from({ length: samples }, (_, i) =>
+          proposer.propose({
+            roomId: ADMISSION_ROOM_ID,
+            subjectRef: `${fixture.label}:${i}`,
+            context: fixture.context,
+            moderationPrompt: bundle.moderationPrompt,
+          }),
+        ),
+      );
+      for (const result of results) {
         if (result.status !== 'decided') {
           if (TRANSIENT_ADMISSION_CODES.has(result.code)) sawTransient = true;
           else sawDefinitive = true; // unclassifiable prompt (invalid_output/refusal/…) ⇒ reject

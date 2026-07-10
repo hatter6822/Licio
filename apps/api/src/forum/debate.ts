@@ -26,6 +26,7 @@ import {
   debateArenaPublicSchema,
   debateArenaSummarySchema,
 } from '@licio/shared';
+import { mapBounded } from '../lib/concurrency.js';
 import type { DebateArenaRecord, DebateSidePosition, DebateStore } from './debate-store.js';
 import type { ContributionStore } from './stores.js';
 
@@ -373,25 +374,46 @@ export async function finalizeDebate(
 // Scheduler tick (the lease-guarded deadline sweep).
 // ---------------------------------------------------------------------------
 
+/** Concurrent adjudications per lifecycle pass. Arenas are independent, so the
+ *  judge calls fan out: a real local runtime serves parallel slots (Ollama
+ *  defaults to 4; vLLM batches far wider), roughly dividing a backlog's
+ *  wall-clock by this factor — and a single-slot runtime simply queues the
+ *  extra requests server-side, no worse than serial. The budget + breaker are
+ *  synchronous in-process state, safe under this interleaving (the breaker's
+ *  half-open path is explicitly concurrency-hardened). */
+export const DEBATE_JUDGE_CONCURRENCY = 4;
+
 /**
- * One debate-lifecycle sweep: judge every arena whose 12h edit window has closed,
- * then finalize every arena whose 24h override window has closed.  Bounded per
- * tick; idempotent (each stage no-ops on an already-advanced arena).
+ * One debate-lifecycle sweep: judge every arena whose 12h edit window has closed
+ * (fanned out `concurrency`-wide — the adjudicator is the expensive step), then
+ * finalize every arena whose 24h override window has closed.  Bounded per tick;
+ * idempotent (each stage no-ops on an already-advanced arena); per-arena
+ * failures are ISOLATED (logged, the rest of the batch proceeds — one poisoned
+ * arena must not stall every other verdict).
  */
 export async function runDebateLifecycle(
   deps: DebateDeps,
   limit = 100,
+  concurrency = DEBATE_JUDGE_CONCURRENCY,
 ): Promise<{ judged: number; finalized: number }> {
   const nowIso = new Date(deps.now()).toISOString();
   let judged = 0;
   let finalized = 0;
-  for (const arena of await deps.debates.listPastEditDeadline(nowIso, limit)) {
-    const result = await judgeDebateArena(deps, arena.debateId);
-    if (result?.state === 'judged') judged += 1;
+  const due = await deps.debates.listPastEditDeadline(nowIso, limit);
+  for (const outcome of await mapBounded(due, concurrency, (arena) =>
+    judgeDebateArena(deps, arena.debateId),
+  )) {
+    if (outcome.ok && outcome.value?.state === 'judged') judged += 1;
+    else if (!outcome.ok) deps.log('forum.debate_judge_failed', { error: String(outcome.error) });
   }
-  for (const arena of await deps.debates.listPastOverrideDeadline(nowIso, limit)) {
-    const result = await finalizeDebate(deps, arena.debateId);
-    if (result?.state === 'resolved') finalized += 1;
+  const closable = await deps.debates.listPastOverrideDeadline(nowIso, limit);
+  for (const outcome of await mapBounded(closable, concurrency, (arena) =>
+    finalizeDebate(deps, arena.debateId),
+  )) {
+    if (outcome.ok && outcome.value?.state === 'resolved') finalized += 1;
+    else if (!outcome.ok) {
+      deps.log('forum.debate_finalize_failed', { error: String(outcome.error) });
+    }
   }
   return { judged, finalized };
 }

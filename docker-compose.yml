@@ -53,6 +53,13 @@ services:
     # Pin to digest in production for reproducibility: docker pull ollama/ollama:latest && docker inspect --format='{{index .RepoDigests 0}}' ollama/ollama:latest
     image: ollama/ollama:latest
     profiles: ["llm"]
+    environment:
+      # Keep the governed model resident: an idle-unloaded model costs a
+      # multi-second cold load on the next verdict/moderation call.
+      OLLAMA_KEEP_ALIVE: "-1"
+      # Parallel request slots (the debate lifecycle fans adjudications out
+      # 4-wide; match it so a backlog genuinely overlaps).
+      OLLAMA_NUM_PARALLEL: "4"
     ports:
       - "127.0.0.1:11434:11434"
     volumes:

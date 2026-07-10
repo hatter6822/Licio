@@ -1016,6 +1016,7 @@ let governanceLlmEnvInput: GovernanceLlmEnvInput = {
   moderation: env.GOVERNANCE_LLM_MODERATION,
   debate: env.GOVERNANCE_LLM_DEBATE,
   debateBudgetPerHour: env.GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR,
+  reasoningEffort: env.GOVERNANCE_LLM_REASONING_EFFORT,
   // Production defaults an unset provider to the 'local' backend (the
   // production-complete posture); development defaults to the simulator below.
   nodeEnv: env.NODE_ENV,
