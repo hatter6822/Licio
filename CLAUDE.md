@@ -41,7 +41,10 @@ corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install
 
 # Daily commands.
-pnpm dev                            # web (5173) + api (3001); in-memory + seeds demo data (no DB/Redis)
+pnpm dev                            # web (5173) + api (3001); in-memory + seeds demo data (no DB/Redis);
+                                    #   the DEV-ONLY simulated governance-LLM runtime auto-starts (LICIO_LLM_SIM=off disables)
+pnpm setup:llm                      # provision + verify the REAL local governance-LLM runtime (pulls the
+                                    #   default model; --docker also starts the Compose `llm` profile ollama)
 pnpm build                          # shared → db/invariants → web/api
 pnpm test                           # Vitest across all workspaces (80% coverage gate)
 pnpm test -- --coverage             # with coverage report
@@ -176,7 +179,8 @@ licio/
 ├── vitest.shared.ts             -- per-project test settings SSOT (root + per-workspace)
 ├── biome.json                   -- Biome linter/formatter (2.5.0)
 ├── lefthook.yml                 -- Git hooks
-├── docker-compose.yml           -- local dev services (pgvector-enabled PostgreSQL, Redis)
+├── docker-compose.yml           -- local dev services (pgvector-enabled PostgreSQL, Redis;
+│                                   opt-in `llm` profile: loopback-only Ollama runtime)
 ├── .nvmrc                       -- Node 22 pin
 ├── CLAUDE.md                    -- this file
 ├── README.md                    -- project entry point
@@ -774,6 +778,10 @@ licio/
 │   ├── check-private-rendezvous-schema.ts -- WS-S.1.5 §8.1 stub/rendezvous column denylist
 │   ├── check-private-bundle-transparency.ts -- WS-S.1.5 no dynamic remote private code
 │   ├── check-p2p-{endpoint-rejections,ranking-exclusion,search-exclusion}.ts -- WS-S.1.5
+│   ├── setup-local-llm.ts       --   `pnpm setup:llm`: provision + verify the local governance-LLM
+│   │                                  runtime (resolves the REAL boot decision, optional --docker
+│   │                                  Compose start, Ollama model pull, a real governed-shape
+│   │                                  completion as the readiness check)
 │   ├── lint-security.ts         --   supplementary security lint
 │   ├── generate-sri.ts          --   subresource integrity hashes
 │   ├── generate-sbom.ts         --   CycloneDX SBOM generation

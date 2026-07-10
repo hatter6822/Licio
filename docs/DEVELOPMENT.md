@@ -62,7 +62,10 @@ Open <http://localhost:5173>. The API answers on <http://localhost:3001>
 `REDIS_URL` set, the API boots on its in-memory stores and seeds a rich demo
 corpus (rooms, stories, threads with nested comments) so the PWA renders real
 end-to-end data immediately. The in-memory data is ephemeral — each restart
-re-seeds a fresh corpus.
+re-seeds a fresh corpus. The three governed AI surfaces (lawmaking summaries,
+in-room moderation, debate adjudication) also work out of the box: dev
+auto-starts a deterministic **simulated local LLM runtime** behind the real
+governed pipeline (Section 16).
 
 ### Optional: run against a real Postgres + Redis (durable data)
 
@@ -314,6 +317,13 @@ This starts:
 Both have health checks and `restart: unless-stopped`. Named volumes
 (`postgres-data`, `redis-data`) persist their data across restarts.
 
+A third, **opt-in** service sits behind the `llm` Compose profile (a plain
+`docker compose up -d` never starts it): **ollama** — the governance-LLM
+local runtime production defaults to, published on the **loopback interface
+only** (`127.0.0.1:11434`) with a persistent `ollama-data` model volume.
+Start + provision it in one step with `pnpm setup:llm --docker` (Section 16);
+dev doesn't need it (the simulated runtime serves `pnpm dev`).
+
 > **Why the `pgvector` image and not stock `postgres:16`?** The WS-F
 > migration chain installs the `vector` extension (for embedding search).
 > `pgvector/pgvector:pg16` is the pgvector project's official drop-in build
@@ -453,6 +463,7 @@ covered in detail in Section 16.
 | `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev) |
 | `SES_*` group | A **dev mailer** surfaces the one-time code + recipient to the API log (no email is sent) so the passwordless email flows — sign-in, email-factor verification, deletion-cancel — are testable end-to-end; this is the only way to become a verified account on a `pnpm dev` box. CI / `NODE_ENV=test` use the silent logging mailer (never the code/recipient) |
 | `EMBEDDING_*` group | A deterministic **lexical** embedding provider is used (fine for dedup; not a real semantic model) |
+| `GOVERNANCE_LLM_*` group | **Development:** the DEV-ONLY simulated loopback LLM runtime auto-starts and serves the three governed AI surfaces (lawmaking summary, in-room moderation, debate adjudication) — disable it with `LICIO_LLM_SIM=off`, or pick its port with `LICIO_LLM_SIM_PORT`. **Production:** defaults to the loopback-`local` backend (Ollama URL + `gpt-oss:20b`); every governed surface fails closed per call to its deterministic path until the runtime responds. `GOVERNANCE_LLM_PROVIDER=deterministic` opts out anywhere; `anthropic` (+ `ANTHROPIC_API_KEY`) is an explicit hosted opt-in. Provision + verify a real runtime with `pnpm setup:llm [--docker]`. Details: Section 16 |
 | `KNOMOSIS_GATEWAY_URL` + `KNOMOSIS_GATEWAY_TOKEN_FILE` group | The WS-L Knomosis gateway uses the deterministic in-memory `FakeKnomosisGateway` (fine for dev; no real substrate). Both must be set together to bind the real `HttpKnomosisGateway` (bearer token read from the file); if the pin declares more than one **active** deployment the server refuses to boot, since one gateway URL cannot route multiple deployments. The `knomosis.cryptoEnabled` / `knomosis.governanceEnabled` runtime-config keys gate every WS-L endpoint and both default `false` + fail closed in **production**. For developer convenience a non-production (`pnpm dev`) boot DEFAULTS both keys **`true`** (so the wallet + governance-simulation surface is reachable out of the box) — but only when the key is not already explicitly set, so a durable (Redis-backed) dev config or an admin write still wins and can force fail-closed testing. Production is untouched: the flags stay `false` unless an operator flips them through the admin surface. The dev deployment is scoped to the **Knomosis L2 (chain `8357`)**, settling to its **Sepolia L1 (`11155111`)** — the SIWE wallet-link allowlist is both. The web client binds the link message to the Knomosis chain (`8357`) regardless of the extension's active network — override with `VITE_WALLET_CHAIN_ID` — so a dev wallet never signs a mainnet-scoped message. A non-production box also scopes the WS-D wallet **sign-in** allowlist to `[8357, 11155111]` (never mainnet); production keeps the multi-chain default |
 
 ### 7.5 Generate a real `SESSION_SECRET`
@@ -811,6 +822,10 @@ LICIO_SIM=idle pnpm dev         # boot it stopped (start it from the panel)
 LICIO_SIM=off pnpm dev          # disable it entirely
 LICIO_SIM_SEED=my-seed pnpm dev # pin the deterministic seed (same seed ⇒ same run)
 ```
+
+A second, independent dev simulator — the **simulated governance-LLM
+runtime** (`LICIO_LLM_SIM=off` disables it) — backs the three governed AI
+surfaces; see Section 16.
 
 **Drive it from the UI.** Sign in, then open **Profile → Developer tools →
 Traffic simulator** (or go to `/dev/simulator`). The panel shows the run state,
@@ -1230,7 +1245,13 @@ development may fake it, never the reverse:
 
 ```sh
 # A) Local model on the SAME host (the production DEFAULT; no content leaves
-#    the machine). Any OpenAI-compatible /chat/completions runtime works:
+#    the machine). ONE COMMAND provisions + verifies it end to end:
+#      pnpm setup:llm           # checks the runtime, pulls the default model,
+#                               # verifies a real governed completion
+#      pnpm setup:llm --docker  # ALSO starts the repo's Compose runtime first
+#                               # (docker compose --profile llm up -d ollama;
+#                               #  loopback-published, persistent model volume)
+#    Any OpenAI-compatible /chat/completions runtime works instead:
 #      ollama serve && ollama pull gpt-oss:20b   # the default URL + model
 #      llama-server -m model.gguf                # base URL http://127.0.0.1:8080/v1
 #    (vLLM and LM Studio expose the same protocol.)
@@ -1348,6 +1369,7 @@ fail-closed branch on demand:
 | Vite doesn't see your `VITE_*` values | Vite's env dir is `apps/web`, not the repo root | Export the root `.env` into your shell (Section 7.7) so the `VITE_`-prefixed values are in `process.env` |
 | Login/session flows misbehave on `http://localhost` | `__Host-`/`Secure` cookies require HTTPS | Use the local HTTPS workflow (Section 11) |
 | `redis connection error` warnings in the API log | Redis briefly unreachable | The API connects lazily and the ingest limiter fails closed to a stricter in-memory budget; start Redis (`docker compose up -d redis`) to clear it |
+| Boot warns `production defaulted to the loopback-local backend` / the governed AI surfaces log `unavailable.transport` | No local LLM runtime is answering at the configured URL | `pnpm setup:llm --docker` (or start a runtime natively — Section 16). Meanwhile every governed surface fails closed to its deterministic path and recovers automatically once the runtime responds |
 | Git hooks don't run | Lefthook not installed in this clone | `pnpm exec lefthook install` (Section 14) |
 | Playwright can't download a browser | Network policy blocks the download | Pre-install browsers, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` (Section 13) |
 | `pnpm test` "skips" the integration suites | `DATABASE_URL`/`REDIS_URL` not set/reachable | Expected — set them (Section 13) to run the gated suites |
