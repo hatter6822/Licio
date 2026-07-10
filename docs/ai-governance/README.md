@@ -344,6 +344,15 @@ the human-revision upgrades), sourcing the vocabulary from
   slice-3 follow-up), and the LLM identities are not yet folded into the seed's
   `buildInventory` use-case map (the registry lists them; the inventory sweep
   is a mechanical follow-up).
+- **Cluster-global ADR-6 budgets.**  Every LLM budget (per-room summary/
+  moderation, the debate-adjudication window) is a PER-PROCESS in-memory
+  fixed window.  For the debate surface the scheduler's job lease scopes
+  draining to one process per tick, so the cap is approximately deployment-
+  wide, but a lease migrating across replicas mid-hour multiplies the
+  effective budget by the number of distinct holders.  An exactly-global
+  window needs the shared (Redis-backed) sliding-window store the forum
+  limiter already uses; closing this lands with the multi-replica hardening
+  pass.
 - **WS-P experiment-log consumer.**  The `AIOutputRecord` substrate is the
   Section 28.2 source; the WS-P experiment-logging consumer reads it when WS-P
   lands.

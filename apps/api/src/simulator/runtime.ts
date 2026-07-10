@@ -19,6 +19,7 @@ import {
   attentionAggregateEventSchema,
   contributionCreateSchema,
   createReportRequestSchema,
+  debatePositionUpdateSchema,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   emptyReputationSummary,
@@ -1093,14 +1094,23 @@ export class DevTrafficSimulator {
       );
       return;
     }
+    // Schema PARITY with the real route: /debates/:id/position validates with
+    // debatePositionUpdateSchema (≥1 citation, bounded summary) before the
+    // service runs — the simulator must never record a position a real client
+    // could not submit.
+    const parsed = debatePositionUpdateSchema.safeParse({
+      summary: action.summary,
+      citations: action.citationUrls.map((url) => ({ url })),
+    });
+    if (!parsed.success) {
+      this.#counters.rejected_other += 1;
+      return;
+    }
     const outcome = await postDebatePosition(
       this.#debateDeps(),
       action.debateId,
       action.personaUserId,
-      {
-        summary: action.summary,
-        citations: action.citationUrls.map((url) => ({ url })),
-      },
+      parsed.data,
     );
     if (!outcome.ok) {
       // window_closed / not_found ⇒ the arena moved on; stop planning for it.

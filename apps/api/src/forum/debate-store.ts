@@ -82,6 +82,10 @@ export interface DebateStore {
     side: 'incumbent' | 'challenger',
     position: DebateSidePosition,
   ): Promise<DebateArenaRecord | null>;
+  /** Record the adjudicator's verdict. STATE-CONDITIONAL: applies only while
+   *  the arena is `open`/`awaiting_verdict` — a stale concurrent judge (e.g. a
+   *  scheduler tick that outlived its lease) gets null and never clobbers a
+   *  recorded verdict or a steward override. */
   recordVerdict(debateId: string, patch: DebateVerdictPatch): Promise<DebateArenaRecord | null>;
   /** A steward override re-decides the outcome in place (state stays `judged`). */
   recordOverride(
@@ -222,6 +226,12 @@ export class InMemoryDebateStore implements DebateStore {
   ): Promise<DebateArenaRecord | null> {
     const row = this.#rows.get(debateId);
     if (!row) return null;
+    // STATE-CONDITIONAL (the store-level CAS): a verdict may only land on an
+    // arena still awaiting one. Two lease holders can race past the service's
+    // read-time state check (a scheduler tick that outlives its lease); the
+    // second, stale verdict must NOT clobber the recorded one — nor, worse, a
+    // steward override (state stays `judged`). The loser gets null (no-op).
+    if (row.state !== 'open' && row.state !== 'awaiting_verdict') return null;
     row.verdict = patch.verdict;
     row.winner = patch.winner;
     row.decidedBy = patch.decidedBy;

@@ -91,6 +91,50 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect((await store.getActiveForComment(ctx.targetId))?.debateId).toBe(arena?.debateId);
   });
 
+  it('recordVerdict is STATE-CONDITIONAL: a stale second verdict never clobbers the first or an override', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const first = await store.recordVerdict(id, {
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'ai',
+      rationale: 'more independent sources',
+      confidence: 0.9,
+      aiOutputId: 'out-1',
+      verdictAt: '2026-07-05T12:00:00.000Z',
+      overrideDeadlineAt: '2026-07-06T12:00:00.000Z',
+      state: 'judged',
+    });
+    expect(first?.state).toBe('judged');
+    // A steward overrules (state stays `judged`).
+    await store.recordOverride(id, {
+      verdict: 'upheld',
+      winner: 'incumbent',
+      overriddenByUserId: ctx.incumbentUser ?? 'steward',
+      overrideReason: 'primary source vindicates the original',
+    });
+    // A STALE concurrent judge (a lease-overrun tick on another instance)
+    // tries to write again: the CAS refuses — null, nothing changes.
+    const stale = await store.recordVerdict(id, {
+      verdict: 'inconclusive',
+      winner: 'none',
+      decidedBy: 'ai',
+      rationale: 'stale overwrite attempt',
+      confidence: null,
+      aiOutputId: null,
+      verdictAt: '2026-07-05T12:05:00.000Z',
+      overrideDeadlineAt: '2026-07-06T12:05:00.000Z',
+      state: 'judged',
+    });
+    expect(stale).toBeNull();
+    const after = await store.getById(id);
+    expect(after?.verdict).toBe('upheld'); // the override survives
+    expect(after?.winner).toBe('incumbent');
+    expect(after?.rationale).not.toBe('stale overwrite attempt');
+  });
+
   it('updates one side without clobbering the other (co-visible concurrency)', async () => {
     const store = makeStore();
     const ctx = await freshCtx();

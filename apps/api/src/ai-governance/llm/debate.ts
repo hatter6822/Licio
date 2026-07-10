@@ -211,8 +211,11 @@ export interface GovernanceLlmDebateJudgeDeps {
 /** Build the governed LLM debate-adjudicator leg over an injected completion. */
 export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDeps): LlmDebateJudge {
   const { services, settings, identity } = deps;
-  // A GLOBAL fixed-window budget (one scheduler drains arenas process-wide;
-  // RoomHourlyBudget keyed by a constant IS a global budget — identity-free).
+  // A PER-PROCESS fixed-window budget (RoomHourlyBudget keyed by a constant;
+  // identity-free). The debate scheduler's job lease scopes draining to one
+  // process per tick, so this approximates a deployment-wide cap; an
+  // exactly-global shared-store window is a tracked residual
+  // (docs/ai-governance/README.md).
   const budget = new RoomHourlyBudget(settings.maxDebateJudgementsPerHour);
   const breaker = new ConsecutiveFailureBreaker(
     settings.breakerFailureThreshold,
@@ -272,11 +275,15 @@ export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDep
       return unavailable('unusable_assessment', meta);
     }
 
-    breaker.recordSuccess();
     // Provenance is LOAD-BEARING for a verdict that can tag content incorrect:
     // if the immutable AIOutputRecord cannot be written, FAIL CLOSED to the
     // deterministic leg (which writes its own record) — never an unrecorded
-    // LLM verdict (the F3 posture, as in the moderation proposer).
+    // LLM verdict (the F3 posture, as in the moderation proposer). The write
+    // COUNTS toward the breaker: success is only recorded after the record
+    // persists, and a store fault records a failure — otherwise an
+    // output-record outage would spend a full LLM completion on every retry
+    // of every arena, with a permanently closed breaker, while no verdict can
+    // ever persist (the fallback record write fails on the same store).
     let output: Awaited<ReturnType<typeof recordAiOutput>>;
     try {
       output = await recordAiOutput(services.outputRecords, {
@@ -290,9 +297,11 @@ export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDep
         nowIso: new Date(services.now()).toISOString(),
       });
     } catch {
+      breaker.recordFailure(services.now());
       services.metrics.increment('ai.governance.debate.llm.record_failed');
       return unavailable('record_failed', meta);
     }
+    breaker.recordSuccess();
 
     services.metrics.increment('ai.governance.debate.llm.decided');
     services.metrics.increment(`ai.governance.debate.llm.verdict.${verdict.verdict}`);

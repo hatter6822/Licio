@@ -793,9 +793,12 @@ export function generateCorrection(
 
 /**
  * The incumbent's rebuttal position for an open debate arena. The source count
- * is weighted across 0–3 (sometimes the incumbent shows up empty-handed,
- * sometimes better-sourced than the challenger), so verdicts split across the
- * full outcome space rather than always favouring the challenger.
+ * is weighted across 1–3 — a POSTED position always carries at least one
+ * source, because the real `debatePositionUpdateSchema` requires it (a
+ * zero-source position is an input no user can submit). The empty-handed
+ * incumbent is modelled honestly upstream instead: the engine skips posting a
+ * rebuttal ~30% of the time (a true forfeit), so verdicts still split across
+ * the full outcome space.
  */
 export function generateRebuttal(
   domain: DomainId,
@@ -808,10 +811,9 @@ export function generateRebuttal(
     .replaceAll('{object}', prng.pick(bank.objects))
     .replaceAll('{period}', prng.pick(PERIODS));
   const count = prng.weighted([
-    { value: 0, weight: 2 },
-    { value: 1, weight: 3 },
+    { value: 1, weight: 4 },
     { value: 2, weight: 3 },
-    { value: 3, weight: 2 },
+    { value: 3, weight: 3 },
   ]);
   const citationUrls = distinctOutlets(bank, count, prng).map(
     (outlet, i) => `https://${outlet}.example/refs/${domain}-rebuttal-${serial}-${i}`,

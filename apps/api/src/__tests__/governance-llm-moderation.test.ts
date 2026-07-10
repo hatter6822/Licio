@@ -149,3 +149,26 @@ describe('F1 — admission probes are isolated from the live breaker + budget', 
     expect(h.requests.length).toBe(callsBefore); // the model was NOT consulted
   });
 });
+
+describe('provenance-write failures count toward the breaker (parity with the debate leg)', () => {
+  it('repeated record_failed opens the breaker instead of re-spending completions forever', async () => {
+    // Threshold 2 via the shared SETTINGS (breakerFailureThreshold: 2).
+    h.services.outputRecords.put = async () => {
+      throw new Error('output-record store down');
+    };
+    expect(await h.proposer.propose(req('room-1', 'c1'))).toEqual({
+      status: 'unavailable',
+      code: 'record_failed',
+    });
+    expect(await h.proposer.propose(req('room-1', 'c2'))).toEqual({
+      status: 'unavailable',
+      code: 'record_failed',
+    });
+    // Breaker open: the third call never reaches the completion.
+    expect(await h.proposer.propose(req('room-1', 'c3'))).toEqual({
+      status: 'unavailable',
+      code: 'breaker_open',
+    });
+    expect(h.requests).toHaveLength(2);
+  });
+});

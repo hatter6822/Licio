@@ -215,7 +215,16 @@ export class DrizzleDebateStore implements DebateStore {
         state: patch.state,
         updatedAt: new Date(),
       })
-      .where(eq(debateArenasTable.debateId, debateId))
+      // STATE-CONDITIONAL (the store-level CAS, mirroring the in-memory
+      // adapter): a stale lease holder's verdict must never clobber an
+      // already-judged arena or a steward override. The loser matches no row
+      // and gets null (no-op).
+      .where(
+        and(
+          eq(debateArenasTable.debateId, debateId),
+          inArray(debateArenasTable.state, ['open', 'awaiting_verdict']),
+        ),
+      )
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }

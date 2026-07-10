@@ -69,13 +69,26 @@ export function buildDebateSchedulerDeps(): DebateDeps {
   };
 }
 
-/** One scheduler tick; exported for tests and manual recovery. */
+/** The judge pass may spend at most this fraction of the scheduler interval —
+ *  comfortably inside the 0.9×interval job lease, so a slow-LLM backlog can
+ *  never judge past the lease another instance may then hold (arenas left over
+ *  simply wait for the next tick; the verdict CAS covers any residual race). */
+export const DEBATE_JUDGE_LEASE_FRACTION = 0.75;
+
+/** One scheduler tick; exported for tests and manual recovery. `judgeBudgetMs`
+ *  bounds the judge pass's wall clock (default: the lease-derived fraction). */
 export async function runDebateSchedulerTick(
   onError: (err: unknown) => void = () => {},
+  judgeBudgetMs: number = Math.ceil(DEBATE_SCHEDULER_INTERVAL_MS * DEBATE_JUDGE_LEASE_FRACTION),
 ): Promise<void> {
   try {
     const deps = buildDebateSchedulerDeps();
-    const { judged, finalized } = await runDebateLifecycle(deps);
+    const { judged, finalized } = await runDebateLifecycle(
+      deps,
+      undefined,
+      undefined,
+      deps.now() + judgeBudgetMs,
+    );
     if (judged > 0 || finalized > 0) {
       deps.log('forum.debate_lifecycle', { judged, finalized });
     }

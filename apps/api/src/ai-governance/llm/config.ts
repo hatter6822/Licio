@@ -50,11 +50,15 @@ export interface GovernanceLlmSettings {
    *  steward-triggered summary; excess simply goes un-shadowed (a natural,
    *  honest per-room sampling cap). */
   maxModerationCallsPerRoomPerHour: number;
-  /** ADR-6 GLOBAL hourly budget for the WS-T debate-adjudication leg. Debates
-   *  resolve once each on the 12h scheduler, so the natural rate is low; an
-   *  exhausted budget falls back to the deterministic adjudicator (never a
-   *  dropped verdict). Global, not per-room: the scheduler drains arenas
-   *  process-wide. */
+  /** ADR-6 hourly budget for the WS-T debate-adjudication leg. Debates resolve
+   *  once each on the 12h scheduler, so the natural rate is low; an exhausted
+   *  budget falls back to the deterministic adjudicator (never a dropped
+   *  verdict). PER-PROCESS window (like every ADR-6 budget): the debate
+   *  scheduler's job lease scopes draining to one process per tick, so this
+   *  approximates a deployment-wide cap, but a lease that migrates across
+   *  replicas mid-hour multiplies the effective budget by the number of
+   *  distinct holders. An exactly-global, shared-store window is a tracked
+   *  residual (docs/ai-governance/README.md). */
   maxDebateJudgementsPerHour: number;
   /** Consecutive-failure count that opens the circuit breaker. */
   breakerFailureThreshold: number;

@@ -634,9 +634,10 @@ export function planTick(input: PlanTickInput): SimAction[] {
 
   // --- Incumbent rebuttals in open arenas (WS-T) -------------------------------
   // A challenged synthetic author usually shows up to defend the content before
-  // the edit window closes — with a rebuttal of VARYING strength (0–3 sources),
-  // so the adjudicator's verdicts split across the full outcome space instead
-  // of every challenge winning by forfeit.
+  // the edit window closes — with a rebuttal of VARYING strength (1–3 sources;
+  // the real position schema requires at least one) — and ~30% of the time
+  // never answers at all (a true forfeit, the skip below), so the
+  // adjudicator's verdicts split across the full outcome space.
   let rebuttalSerial = 0;
   for (const debate of world.openDebates) {
     if (debate.incumbentPosted || debate.incumbentUserId === null) continue;

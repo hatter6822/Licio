@@ -713,3 +713,20 @@ describe('lifecycle fan-out — per-arena failure isolation', () => {
     expect(retried).toBe(1);
   });
 });
+
+describe('lease-bounded judging (judgeDeadlineMs)', () => {
+  it('skips the remaining due arenas once the deadline passes; they stay open for the next tick', async () => {
+    for (const body of ['A is 1.', 'B is 2.'] as const) {
+      const target = await seedComment(INCUMBENT, body);
+      const correction = await seedCorrection(target);
+      await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
+    }
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    // Deadline already elapsed ⇒ nothing judged, nothing lost.
+    const bounded = await runDebateLifecycle(deps, 100, 4, clock.ms - 1);
+    expect(bounded.judged).toBe(0);
+    // The next (unbounded) pass judges both.
+    const next = await runDebateLifecycle(deps);
+    expect(next.judged).toBe(2);
+  });
+});

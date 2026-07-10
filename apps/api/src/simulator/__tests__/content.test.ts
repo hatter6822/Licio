@@ -234,18 +234,22 @@ describe('WS-T correction + rebuttal generators', () => {
     }
   });
 
-  it('generateRebuttal: 0–3 simulated sources with every count occurring', () => {
+  it('generateRebuttal: 1–3 simulated sources (a POSTED position always meets the schema minimum)', () => {
     const seen = new Set<number>();
     for (let i = 0; i < 60; i += 1) {
       const prng = createPrng(`reb-${i}`);
       const rebuttal = generateRebuttal('climate', i, prng);
       expect(rebuttal.body.length).toBeGreaterThan(40);
+      // The real debatePositionUpdateSchema requires ≥1 citation — a
+      // zero-source position is an input no user can submit; the empty-handed
+      // incumbent is modelled by the engine SKIPPING the post (a forfeit).
+      expect(rebuttal.citationUrls.length).toBeGreaterThanOrEqual(1);
       expect(rebuttal.citationUrls.length).toBeLessThanOrEqual(3);
       for (const url of rebuttal.citationUrls) expect(isSimulatedUrl(url)).toBe(true);
       seen.add(rebuttal.citationUrls.length);
     }
-    // The verdict space stays honest: weak (0) AND strong (3) rebuttals occur.
-    expect(seen.has(0)).toBe(true);
+    // The verdict space stays honest: weak (1) AND strong (3) rebuttals occur.
+    expect(seen.has(1)).toBe(true);
     expect(seen.has(3)).toBe(true);
   });
 });

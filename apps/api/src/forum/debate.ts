@@ -390,21 +390,38 @@ export const DEBATE_JUDGE_CONCURRENCY = 4;
  * idempotent (each stage no-ops on an already-advanced arena); per-arena
  * failures are ISOLATED (logged, the rest of the batch proceeds — one poisoned
  * arena must not stall every other verdict).
+ *
+ * `judgeDeadlineMs` bounds the judge pass in WALL-CLOCK time: once passed, the
+ * remaining due arenas are SKIPPED (they stay open for the next tick/holder).
+ * The scheduler derives it from its job-lease window so a slow-LLM backlog can
+ * never hold work past the lease — the store-level verdict CAS
+ * (`recordVerdict`) independently guarantees a stale overrun can't clobber
+ * another holder's verdict, so the deadline is a cost bound, not the
+ * correctness mechanism. Absent ⇒ unbounded (the dev simulator's tick).
  */
 export async function runDebateLifecycle(
   deps: DebateDeps,
   limit = 100,
   concurrency = DEBATE_JUDGE_CONCURRENCY,
+  judgeDeadlineMs?: number,
 ): Promise<{ judged: number; finalized: number }> {
   const nowIso = new Date(deps.now()).toISOString();
   let judged = 0;
   let finalized = 0;
+  let skippedForDeadline = 0;
   const due = await deps.debates.listPastEditDeadline(nowIso, limit);
-  for (const outcome of await mapBounded(due, concurrency, (arena) =>
-    judgeDebateArena(deps, arena.debateId),
-  )) {
+  for (const outcome of await mapBounded(due, concurrency, async (arena) => {
+    if (judgeDeadlineMs !== undefined && deps.now() > judgeDeadlineMs) {
+      skippedForDeadline += 1;
+      return null;
+    }
+    return judgeDebateArena(deps, arena.debateId);
+  })) {
     if (outcome.ok && outcome.value?.state === 'judged') judged += 1;
     else if (!outcome.ok) deps.log('forum.debate_judge_failed', { error: String(outcome.error) });
+  }
+  if (skippedForDeadline > 0) {
+    deps.log('forum.debate_judge_deadline', { skipped: skippedForDeadline });
   }
   const closable = await deps.debates.listPastOverrideDeadline(nowIso, limit);
   for (const outcome of await mapBounded(closable, concurrency, (arena) =>

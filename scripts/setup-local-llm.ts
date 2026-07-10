@@ -33,7 +33,10 @@ import {
   resolveGovernanceLlmDecision,
 } from '../apps/api/src/ai-governance/llm/config.js';
 import { createLocalCompletion } from '../apps/api/src/ai-governance/llm/local.js';
-import { MODERATION_JSON_SCHEMA } from '../apps/api/src/ai-governance/llm/moderation.js';
+import {
+  MODERATION_JSON_SCHEMA,
+  moderationVerdictSchema,
+} from '../apps/api/src/ai-governance/llm/moderation.js';
 
 const DOCKER_FLAG = '--docker';
 /** How long to wait for a just-started container to begin listening. */
@@ -187,16 +190,23 @@ async function verifyChatCompletion(
   if (typeof content !== 'string' || content.length === 0) {
     fail('the runtime returned no completion content');
   }
-  let verdict: { action?: unknown };
+  let parsedJson: unknown;
   try {
-    verdict = JSON.parse(content) as typeof verdict;
+    parsedJson = JSON.parse(content);
   } catch {
     fail('the runtime did not return the strict-JSON verdict the governed surfaces require');
   }
-  if (typeof verdict.action !== 'string') {
-    fail('the runtime returned JSON without the required `action` field');
+  // Validate with the SAME schema the moderation proposer enforces (the closed
+  // action enum + a bounded reason) — a runtime that emits `{"action":
+  // "allowed"}` or omits `reason` would fail closed in production, so it must
+  // fail HERE, not after deployment.
+  const verdict = moderationVerdictSchema.safeParse(parsedJson);
+  if (!verdict.success) {
+    fail(
+      `the runtime's verdict does not satisfy the governed moderation schema (${verdict.error.issues[0]?.message ?? 'invalid'}) — the moderation surface would fail closed on this runtime`,
+    );
   }
-  info(`verification completion OK (probe verdict: ${verdict.action})`);
+  info(`verification completion OK (probe verdict: ${verdict.data.action})`);
 }
 
 async function main(): Promise<void> {
@@ -206,6 +216,10 @@ async function main(): Promise<void> {
     apiKey: undefined,
     modelId: process.env['GOVERNANCE_LLM_MODEL'],
     localBaseUrl: process.env['GOVERNANCE_LLM_LOCAL_URL'],
+    // The probe must resolve the SAME settings the API boot will — including
+    // the reasoning-effort lever — or setup could bless a runtime the real
+    // wire shape then fails against.
+    reasoningEffort: process.env['GOVERNANCE_LLM_REASONING_EFFORT'],
   });
   if (!decision.enabled) {
     fail(

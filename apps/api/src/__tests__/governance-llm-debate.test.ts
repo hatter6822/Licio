@@ -254,3 +254,17 @@ describe('adjudicateDebate — LLM primary, deterministic MLP fail-closed fallba
     );
   });
 });
+
+describe('provenance-write failures count toward the breaker', () => {
+  it('record_failed opens the breaker instead of pinning it closed while spending completions', async () => {
+    const h = makeHarness({ breakerFailureThreshold: 2 });
+    h.services.outputRecords.put = async () => {
+      throw new Error('output-record store down');
+    };
+    expect(await h.judge('d1', INPUT)).toBeNull(); // record_failed (breaker 1)
+    expect(await h.judge('d2', INPUT)).toBeNull(); // record_failed (breaker 2 → open)
+    expect(await h.judge('d3', INPUT)).toBeNull(); // breaker_open — no completion spent
+    expect(h.requests).toHaveLength(2);
+    expect(h.services.metrics.counter('ai.governance.debate.llm.unavailable.breaker_open')).toBe(1);
+  });
+});
