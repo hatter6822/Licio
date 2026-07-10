@@ -65,6 +65,11 @@ export interface ModelRecord {
   proposedByUserId: string | null;
   status: ModelStatus;
   evaluationRef: string | null;
+  /** The `ModerationProposer.backendId` that ran this model's admission gate (set
+   *  when it became `eligible`; null until admitted, or for a proposer with no
+   *  backendId). `moderate` refuses a live decision under a different backend
+   *  (WS-U ADR-9 review — an un-vetted backend swap fails closed). */
+  admittedBackendId: string | null;
   createdAt: string;
 }
 export interface PromptRecord {
@@ -143,6 +148,15 @@ export interface AgentActionRecord {
   reversible: boolean;
   createdAt: string;
 }
+export interface PendingRemoderationRecord {
+  roomId: string;
+  /** Soft ref to the moderated contribution. */
+  subjectRef: string;
+  /** Retry attempts so far (incremented each sweep pass that stays unavailable). */
+  attempts: number;
+  enqueuedAt: string;
+  lastAttemptAt: string | null;
+}
 export interface TreasuryActionRecord {
   actionId: string;
   roomId: string;
@@ -201,10 +215,15 @@ export interface ModelStore {
   insert(model: ModelRecord): Promise<ModelRecord | null>; // null ⇒ digest already present
   get(modelId: string): Promise<ModelRecord | null>;
   listByRoom(roomId: string): Promise<ModelRecord[]>;
+  /** Models in a given lifecycle status, oldest-first, bounded — the admission
+   *  retry sweep drains `evaluating` models (WS-U ADR-9 review). */
+  listByStatus(status: ModelStatus, limit: number): Promise<ModelRecord[]>;
   patchStatus(
     modelId: string,
     status: ModelStatus,
     evaluationRef: string | null,
+    /** When provided, also pins the admitting backend (undefined ⇒ leave unchanged). */
+    admittedBackendId?: string | null,
   ): Promise<ModelRecord | null>;
   clear(): Promise<void>;
 }
@@ -255,6 +274,24 @@ export interface TreasuryActionStore {
   append(action: TreasuryActionRecord): Promise<TreasuryActionRecord>;
   /** Executed (accepted) actions in a category, for kernel window/interval history. */
   acceptedByRoom(roomId: string): Promise<TreasuryActionRecord[]>;
+  clear(): Promise<void>;
+}
+export interface PendingRemoderationStore {
+  /**
+   * Enqueue a contribution whose in-room moderation was deferred (model outage).
+   * UPSERT by (roomId, subjectRef): a re-defer of the same contribution is a no-op
+   * that preserves the original `enqueuedAt` + `attempts`, so an ongoing outage
+   * neither duplicates the row nor resets its age/retry history. Stores ONLY soft
+   * refs + bookkeeping — the moderation context is RECONSTRUCTED from the live
+   * content stores at retry time, never persisted here (no UGC in this table).
+   */
+  enqueue(record: { roomId: string; subjectRef: string; enqueuedAt: string }): Promise<void>;
+  /** Pending items OLDEST-first (enqueue order), bounded — the sweep drains in FIFO. */
+  list(limit: number): Promise<PendingRemoderationRecord[]>;
+  /** Record a retry attempt (attempts += 1, lastAttemptAt = at); no-op if absent. */
+  markAttempt(roomId: string, subjectRef: string, at: string): Promise<void>;
+  /** Remove a resolved item (decision applied, benign, moot, or deleted); no-op if absent. */
+  remove(roomId: string, subjectRef: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -342,10 +379,26 @@ export class InMemoryModelStore implements ModelStore {
   async listByRoom(roomId: string) {
     return [...this.models.values()].filter((m) => m.roomId === roomId);
   }
-  async patchStatus(modelId: string, status: ModelStatus, evaluationRef: string | null) {
+  async listByStatus(status: ModelStatus, limit: number) {
+    return [...this.models.values()]
+      .filter((m) => m.status === status)
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
+      .slice(0, Math.max(0, limit));
+  }
+  async patchStatus(
+    modelId: string,
+    status: ModelStatus,
+    evaluationRef: string | null,
+    admittedBackendId?: string | null,
+  ) {
     const cur = this.models.get(modelId);
     if (!cur) return null;
-    const next = { ...cur, status, evaluationRef };
+    const next: ModelRecord = {
+      ...cur,
+      status,
+      evaluationRef,
+      ...(admittedBackendId !== undefined ? { admittedBackendId } : {}),
+    };
     this.models.set(modelId, next);
     return next;
   }
@@ -498,6 +551,47 @@ export class InMemoryTreasuryActionStore implements TreasuryActionStore {
   }
 }
 
+export class InMemoryPendingRemoderationStore implements PendingRemoderationStore {
+  private readonly pending = new Map<string, PendingRemoderationRecord>();
+  private key(roomId: string, subjectRef: string) {
+    return `${roomId} ${subjectRef}`;
+  }
+  async enqueue(record: { roomId: string; subjectRef: string; enqueuedAt: string }) {
+    const key = this.key(record.roomId, record.subjectRef);
+    // Keep enqueuedAt + attempts on a re-defer (survive an ongoing outage); the
+    // context is reconstructed at retry, never stored, so there is nothing to refresh.
+    if (this.pending.has(key)) return;
+    this.pending.set(key, {
+      roomId: record.roomId,
+      subjectRef: record.subjectRef,
+      attempts: 0,
+      enqueuedAt: record.enqueuedAt,
+      lastAttemptAt: null,
+    });
+  }
+  async list(limit: number) {
+    return [...this.pending.values()]
+      .sort((a, b) => {
+        if (a.enqueuedAt !== b.enqueuedAt) return a.enqueuedAt < b.enqueuedAt ? -1 : 1;
+        // Deterministic tiebreak on the same-instant enqueue.
+        return a.subjectRef < b.subjectRef ? -1 : a.subjectRef > b.subjectRef ? 1 : 0;
+      })
+      .slice(0, Math.max(0, limit));
+  }
+  async markAttempt(roomId: string, subjectRef: string, at: string) {
+    const key = this.key(roomId, subjectRef);
+    const cur = this.pending.get(key);
+    if (!cur) return;
+    this.pending.set(key, { ...cur, attempts: cur.attempts + 1, lastAttemptAt: at });
+  }
+  async remove(roomId: string, subjectRef: string) {
+    this.pending.delete(this.key(roomId, subjectRef));
+  }
+  async clear() {
+    this.pending.clear();
+  }
+}
+
 export interface GovernanceStores {
   seats: SeatStore;
   elections: ElectionStore;
@@ -510,6 +604,7 @@ export interface GovernanceStores {
   bindings: BindingStore;
   agentActions: AgentActionStore;
   treasuryActions: TreasuryActionStore;
+  pendingRemoderation: PendingRemoderationStore;
 }
 
 export function createInMemoryGovernanceStores(): GovernanceStores {
@@ -525,5 +620,6 @@ export function createInMemoryGovernanceStores(): GovernanceStores {
     bindings: new InMemoryBindingStore(),
     agentActions: new InMemoryAgentActionStore(),
     treasuryActions: new InMemoryTreasuryActionStore(),
+    pendingRemoderation: new InMemoryPendingRemoderationStore(),
   };
 }

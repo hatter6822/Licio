@@ -276,6 +276,22 @@ export function createAiGovernanceAdminRoutes() {
         const ai = getAiGovernanceServices();
         return c.json({ alerts: await ai.runtime.listAlerts(100) });
       })
+      // WS-U ADR-9: the in-room moderation decision log for a room — for each
+      // decision, what the LLM model PROPOSED vs what the deterministic wrapper
+      // (escalate-to-review ceiling + capability clamp) actually PERMITTED, plus
+      // how often the wrapper reduced the model. The transparency of bounded
+      // autonomy — an operator sees the model's behaviour and its bounds.
+      .get('/governance/moderation/:roomId', requireAiTeam(), async (c) => {
+        const ai = getAiGovernanceServices();
+        const roomId = c.req.param('roomId');
+        const requested = Number.parseInt(c.req.query('limit') ?? '100', 10);
+        const limit = Number.isFinite(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+        const [summary, records] = await Promise.all([
+          ai.moderationLog.summaryByRoom(roomId),
+          ai.moderationLog.listByRoom(roomId, limit),
+        ]);
+        return c.json({ summary, records });
+      })
       .put('/config', requireAiTeam(), zValidator('json', configBodySchema), async (c) => {
         const ai = getAiGovernanceServices();
         const { key, value } = c.req.valid('json');

@@ -11,12 +11,22 @@
 
 import { hostname } from 'node:os';
 import type { JobLeaseStore } from '../identity/job-lease.js';
-import type { GovernanceService } from './service.js';
+import type {
+  DeferredRemoderationApplier,
+  GovernanceService,
+  ModerationContextLoader,
+} from './service.js';
 
 export const GOVERNANCE_JOB_LEASE = 'governance_hourly';
 export const GOVERNANCE_SCHEDULER_INTERVAL_MS = 60 * 60 * 1000;
+/** Default cap on deferred re-moderation items drained per tick. */
+export const REMODERATION_SWEEP_LIMIT = 100;
 
-export type GovernanceSchedulerTask = 'election_lifecycle' | 'ratification_lifecycle';
+export type GovernanceSchedulerTask =
+  | 'election_lifecycle'
+  | 'ratification_lifecycle'
+  | 'remoderation_lifecycle'
+  | 'admission_retry';
 
 export interface GovernanceSchedulerDeps {
   service: GovernanceService;
@@ -25,6 +35,18 @@ export interface GovernanceSchedulerDeps {
   /** Whether a user is currently a member of a room (soft cross-context read) — used
    *  to re-validate an election winner is still a member before seating them. */
   isRoomMember?: (roomId: string, userId: string) => Promise<boolean>;
+  /** WS-U ADR-9 deferred re-moderation CONTEXT LOADER: reconstruct a contribution's
+   *  moderation context from the live stores at retry (the queue holds no content).
+   *  Absent ⇒ the deferred-re-moderation sweep is skipped entirely (items stay
+   *  queued until a node with the loader ticks). */
+  loadModerationContext?: ModerationContextLoader;
+  /** WS-U ADR-9 deferred re-moderation re-seam: RAISE a contribution whose deferred
+   *  judgment finally decided a restriction (floor-dominant). Absent/null ⇒ the
+   *  sweep still runs but keeps an `applied` item queued (no forum bound to raise
+   *  it), so the judgment is never silently dropped. */
+  applyDeferredRemoderation?: DeferredRemoderationApplier | null;
+  /** Max deferred re-moderation items drained per tick (default REMODERATION_SWEEP_LIMIT). */
+  remoderationSweepLimit?: number;
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
 }
@@ -54,6 +76,34 @@ export async function runGovernanceTick(
     }
   } catch (err) {
     onError(err, 'ratification_lifecycle');
+  }
+  if (deps.loadModerationContext) {
+    try {
+      // WS-U ADR-9: drain the deferred re-moderation queue — reconstruct each
+      // outage-deferred contribution's context from the live stores, re-run the
+      // model, and on a decided restriction raise it to human review post-hoc (the
+      // model's judgment is delayed, never dropped).
+      const swept = await deps.service.sweepPendingRemoderation(
+        deps.loadModerationContext,
+        deps.applyDeferredRemoderation ?? null,
+        deps.remoderationSweepLimit ?? REMODERATION_SWEEP_LIMIT,
+      );
+      if (swept.swept > 0) {
+        deps.log('governance.remoderation_lifecycle', { ...swept });
+      }
+    } catch (err) {
+      onError(err, 'remoderation_lifecycle');
+    }
+  }
+  try {
+    // WS-U ADR-9 review: retry admission for models left `evaluating` by a transient
+    // in-room-proposer outage, so a flaky backend never permanently rejects a bundle.
+    const { retried, resolved } = await deps.service.reEvaluateStuckAdmissions();
+    if (retried > 0) {
+      deps.log('governance.admission_retry', { retried, resolved });
+    }
+  } catch (err) {
+    onError(err, 'admission_retry');
   }
 }
 

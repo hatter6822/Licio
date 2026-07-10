@@ -141,7 +141,52 @@ export const serverEnvSchema = z.object({
   EMBEDDING_MODEL: z.string().min(1).optional(),
   EMBEDDING_MODEL_VERSION: z.string().min(1).optional(),
   EMBEDDING_DIMENSION: z.coerce.number().int().min(8).max(4096).optional(),
+  // WS-U ADR-9 LLM-backed governance NL provider (the ADR-3 seam behind the
+  // in-room agent's advisory lawmaking summary). EXPLICIT OPT-IN, available in
+  // every environment including production (the 2026-07-09 maintainer
+  // decision) — never mandatory, never silent, always fail-closed to the
+  // deterministic summariser. Backends:
+  //   anthropic — hosted Claude API; requires ANTHROPIC_API_KEY (server-side
+  //               only, never VITE_-prefixed, never in any client bundle).
+  //               Enabling it sends governed-room proposal text off-host,
+  //               making the vendor an operator-chosen data processor — boot
+  //               logs this loudly.
+  //   local     — an operator-run SAME-HOST inference server speaking the
+  //               OpenAI-compatible /chat/completions protocol (llama.cpp
+  //               server, Ollama, vLLM, LM Studio); requires
+  //               GOVERNANCE_LLM_LOCAL_URL (LOOPBACK-ONLY, so "local" provably
+  //               means no third-party egress; e.g. http://127.0.0.1:11434/v1)
+  //               and GOVERNANCE_LLM_MODEL (the runtime's model name).
+  // Absent (or 'deterministic') ⇒ the deterministic provider and zero egress.
+  GOVERNANCE_LLM_PROVIDER: z.enum(['deterministic', 'anthropic', 'local']).optional(),
+  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  GOVERNANCE_LLM_MODEL: z.string().min(1).optional(),
+  GOVERNANCE_LLM_LOCAL_URL: z
+    .string()
+    .url({ message: 'GOVERNANCE_LLM_LOCAL_URL must be a valid URL' })
+    .optional(),
+  // WS-U ADR-9: when an LLM backend is enabled, the LLM is the in-room
+  // moderation MODEL (bounded by the deterministic wrapper). Set `off` to keep
+  // the deterministic default moderation proposer even with a backend
+  // configured (the backend then serves only the summary surface). No effect
+  // without a backend.
+  GOVERNANCE_LLM_MODERATION: z.enum(['on', 'off']).optional(),
 });
+
+/** True for an http(s) URL whose host is the loopback interface — the rule
+ *  that makes the 'local' LLM backend provably same-host (no third-party
+ *  egress). Exported for the boot-time decision (apps/api) so the env
+ *  refinement and the runtime enforce the SAME predicate. */
+export function isLoopbackHttpUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+}
 
 /** Infrastructure + secrets that MUST be configured in production but may be
  *  omitted in development/test (where the in-memory stores + dev defaults take
@@ -172,6 +217,59 @@ export const serverEnvSchemaRefined = serverEnvSchema
     refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
     refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
     refineGroup(env, ctx, KNOMOSIS_GATEWAY_REQUIRED_KEYS, 'KNOMOSIS_GATEWAY');
+    // WS-U ADR-9: an LLM-backend opt-in enforces that backend's requirements
+    // at startup in every environment (fail-fast, never a silent boot with a
+    // half-configured backend that would then silently serve deterministic).
+    if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic' || env.GOVERNANCE_LLM_PROVIDER === 'local') {
+      if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic') {
+        // Reject a blank (whitespace-only) key too: it passes an undefined-only
+        // check but `resolveGovernanceLlmDecision` trims it to empty and silently
+        // disables the backend — turning an explicit opt-in into a silent
+        // deterministic boot. Fail fast instead (a half-configured backend).
+        if (env.ANTHROPIC_API_KEY === undefined || env.ANTHROPIC_API_KEY.trim() === '') {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'GOVERNANCE_LLM_PROVIDER=anthropic requires a non-empty ANTHROPIC_API_KEY',
+            path: ['ANTHROPIC_API_KEY'],
+          });
+        }
+        // GOVERNANCE_LLM_MODEL is OPTIONAL for anthropic (defaults to the reviewed
+        // model), but a blank explicit override is silently trimmed to empty and
+        // falls back to the default — an explicit-yet-invalid value that must fail
+        // fast, not be ignored. (The `local` branch already requires it non-blank.)
+        if (env.GOVERNANCE_LLM_MODEL !== undefined && env.GOVERNANCE_LLM_MODEL.trim() === '') {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'GOVERNANCE_LLM_MODEL must be non-empty when set',
+            path: ['GOVERNANCE_LLM_MODEL'],
+          });
+        }
+      } else {
+        if (env.GOVERNANCE_LLM_LOCAL_URL === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'GOVERNANCE_LLM_PROVIDER=local requires GOVERNANCE_LLM_LOCAL_URL',
+            path: ['GOVERNANCE_LLM_LOCAL_URL'],
+          });
+        } else if (!isLoopbackHttpUrl(env.GOVERNANCE_LLM_LOCAL_URL)) {
+          ctx.addIssue({
+            code: 'custom',
+            message:
+              'GOVERNANCE_LLM_LOCAL_URL must point at the loopback interface (localhost / 127.0.0.1 / [::1]) — a non-local URL is third-party egress and belongs to the anthropic backend decision, not local',
+            path: ['GOVERNANCE_LLM_LOCAL_URL'],
+          });
+        }
+        // Reject a blank model name too (same silent-disable trap as the key).
+        if (env.GOVERNANCE_LLM_MODEL === undefined || env.GOVERNANCE_LLM_MODEL.trim() === '') {
+          ctx.addIssue({
+            code: 'custom',
+            message:
+              'GOVERNANCE_LLM_PROVIDER=local requires a non-empty GOVERNANCE_LLM_MODEL (the local runtime model name)',
+            path: ['GOVERNANCE_LLM_MODEL'],
+          });
+        }
+      }
+    }
     if (env.NODE_ENV === 'production') {
       for (const key of PRODUCTION_REQUIRED_KEYS) {
         if (env[key] === undefined) {

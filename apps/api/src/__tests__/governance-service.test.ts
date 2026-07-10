@@ -5,6 +5,7 @@
 // deterministic in-memory stores with an injected clock + uuid counter.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { resolveGovernanceConfig } from '../governance/config.js';
+import type { ModerationProposer } from '../governance/moderation-proposer.js';
 import type { GovernanceService } from '../governance/service.js';
 import { createGovernanceService } from '../governance/services.js';
 import { createInMemoryGovernanceStores, type GovernanceStores } from '../governance/stores.js';
@@ -18,7 +19,7 @@ interface Harness {
   advance: (ms: number) => void;
 }
 
-function makeService(cryptoEnabled = false): Harness {
+function makeService(cryptoEnabled = false, proposer?: ModerationProposer): Harness {
   let t = START;
   let n = 0;
   const stores = createInMemoryGovernanceStores();
@@ -27,6 +28,8 @@ function makeService(cryptoEnabled = false): Harness {
     config: resolveGovernanceConfig({ cryptoEnabled }),
     now: () => new Date(t),
     uuid: () => `id-${++n}`,
+    // Omitted ⇒ createGovernanceService's deterministic default proposer.
+    ...(proposer ? { moderationProposer: proposer } : {}),
   });
   return {
     svc,
@@ -37,18 +40,26 @@ function makeService(cryptoEnabled = false): Harness {
   };
 }
 
+/** A fake in-room model that proposes one FIXED action on every contribution —
+ *  for exercising the admission gate's over/under-moderation rejection. */
+function fixedProposer(action: string): ModerationProposer {
+  return {
+    kind: 'llm',
+    async propose() {
+      return {
+        status: 'decided',
+        proposal: { action: action as never, reason: 'x', outputId: null },
+      };
+    },
+  };
+}
+
 const goodBundle = (over: Record<string, unknown> = {}) => ({
   bundleId: 'b',
   version: '1',
   name: 'Civility',
-  moderationRules: [
-    {
-      id: 'spam',
-      when: { kind: 'link_count_gte', value: 3 },
-      action: 'remove',
-      reason: 'too many links',
-    },
-  ],
+  moderationPrompt:
+    'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
   promptTemplates: {},
   config: {},
   requestedCapabilities: ['moderate.remove', 'moderate.flag'],
@@ -271,14 +282,8 @@ describe('GovernanceService — Stage 2 model admission', () => {
         requestedCapabilities: ['moderate.remove', 'moderate.flag'],
         config: {},
         promptTemplates: {},
-        moderationRules: [
-          {
-            id: 'spam',
-            when: { kind: 'link_count_gte', value: 3 },
-            action: 'remove',
-            reason: 'too many links',
-          },
-        ],
+        moderationPrompt:
+          'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
         name: 'Civility',
         version: '1',
         bundleId: 'b',
@@ -292,38 +297,33 @@ describe('GovernanceService — Stage 2 model admission', () => {
     }
   });
 
-  it('admits a well-behaved policy and rejects over/under-moderation', async () => {
+  it('admits a well-behaved model and rejects over/under-moderation (a proposer property)', async () => {
+    // Admission is now a property of the in-room MODEL (the proposer), not the
+    // bundle text: a model is sampled over the platform floor-safety eval set and
+    // must land in-band on every fixture (WS-U.2.2a / ADR-9). The bundle only
+    // carries the community's moderationPrompt.
+
+    // Well-behaved (the deterministic default proposer) ⇒ eligible.
     const good = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p');
     const goodId = good.ok ? good.value.modelId : '';
     expect((await h.svc.evaluateModel(goodId)).ok).toBe(true);
-    const model = await h.stores.models.get(goodId);
-    expect(model?.status).toBe('eligible');
+    expect((await h.stores.models.get(goodId))?.status).toBe('eligible');
 
-    // Over-moderation: removes everything ⇒ rejected.
-    const nuke = await h.svc.proposeModel(
-      'r',
-      'steward',
-      goodBundle({
-        moderationRules: [
-          { id: 'all', when: { kind: 'always' }, action: 'remove', reason: 'nuke' },
-        ],
-      }),
-      'p2',
-    );
+    // Over-moderation: a model that REMOVES even the benign fixture ⇒ rejected.
+    const over = makeService(false, fixedProposer('remove'));
+    await over.svc.bootstrapSeat('r', 'steward');
+    const nuke = await over.svc.proposeModel('r', 'steward', goodBundle(), 'p');
     const nukeId = nuke.ok ? nuke.value.modelId : '';
-    await h.svc.evaluateModel(nukeId);
-    expect((await h.stores.models.get(nukeId))?.status).toBe('rejected');
+    await over.svc.evaluateModel(nukeId);
+    expect((await over.stores.models.get(nukeId))?.status).toBe('rejected');
 
-    // Under-moderation: empty rules wave spam through ⇒ rejected.
-    const empty = await h.svc.proposeModel(
-      'r',
-      'steward',
-      goodBundle({ moderationRules: [] }),
-      'p3',
-    );
+    // Under-moderation: a model that ALLOWS even clearly-violating spam ⇒ rejected.
+    const under = makeService(false, fixedProposer('allow'));
+    await under.svc.bootstrapSeat('r', 'steward');
+    const empty = await under.svc.proposeModel('r', 'steward', goodBundle(), 'p');
     const emptyId = empty.ok ? empty.value.modelId : '';
-    await h.svc.evaluateModel(emptyId);
-    expect((await h.stores.models.get(emptyId))?.status).toBe('rejected');
+    await under.svc.evaluateModel(emptyId);
+    expect((await under.stores.models.get(emptyId))?.status).toBe('rejected');
   });
 });
 
@@ -341,7 +341,9 @@ describe('GovernanceService — Stage 3 bounded moderation agent', () => {
   it('moderates within the law-pack and logs the action; benign is untouched', async () => {
     expect((await h.svc.approveModel('r', modelId, null, null)).ok).toBe(true);
     const dec = await h.svc.moderate('r', spamCtx, 'contrib-1');
-    expect(dec.ok && dec.value?.action).toBe('remove');
+    // The escalate-to-human-review ceiling caps the model at flag_for_review even
+    // though the room granted moderate.remove — a human confirms before removal.
+    expect(dec.ok && dec.value?.action).toBe('flag_for_review');
     expect((await h.stores.agentActions.listByRoom('r', 10)).length).toBe(1);
     const benign = await h.svc.moderate('r', ctx(), 'contrib-2');
     expect(benign.ok && benign.value?.action).toBe('allow');
@@ -349,18 +351,19 @@ describe('GovernanceService — Stage 3 bounded moderation agent', () => {
   });
 
   it('downgrades an action the capability descriptor does not grant', async () => {
-    // A bundle requesting only flag, with a remove rule ⇒ remove is downgraded.
+    // A room granting only moderate.WARN ⇒ a flag proposal is clamped down to warn
+    // (below the ceiling, so this exercises the capability clamp, not the ceiling).
     const p = await h.svc.proposeModel(
       'r',
       'steward',
-      goodBundle({ requestedCapabilities: ['moderate.flag'] }),
+      goodBundle({ requestedCapabilities: ['moderate.warn'] }),
       'p2',
     );
     const id = p.ok ? p.value.modelId : '';
     await h.svc.evaluateModel(id);
     await h.svc.approveModel('r', id, null, null);
     const dec = await h.svc.moderate('r', spamCtx, 'c');
-    expect(dec.ok && dec.value?.action).toBe('flag_for_review');
+    expect(dec.ok && dec.value?.action).toBe('warn');
   });
 
   it('returns null (platform fallback) with no binding, and after a floor freeze', async () => {

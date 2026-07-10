@@ -37,9 +37,8 @@ const bundle = (over: Record<string, unknown> = {}) => ({
   bundleId: 'b',
   version: '1',
   name: 'n',
-  moderationRules: [
-    { id: 'spam', when: { kind: 'link_count_gte', value: 3 }, action: 'remove', reason: 'links' },
-  ],
+  moderationPrompt:
+    'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
   promptTemplates: {},
   config: {},
   requestedCapabilities: ['moderate.remove', 'moderate.flag'],
@@ -137,14 +136,8 @@ describe('GovernanceService residual branches', () => {
       'r',
       's',
       bundle({
-        moderationRules: [
-          {
-            id: 'flag',
-            when: { kind: 'link_count_gte', value: 3 },
-            action: 'flag_for_review',
-            reason: 'x',
-          },
-        ],
+        moderationPrompt:
+          'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
         requestedCapabilities: [],
       }),
       'p',
@@ -168,14 +161,8 @@ describe('GovernanceService residual branches', () => {
       'r',
       's',
       bundle({
-        moderationRules: [
-          {
-            id: 'remove',
-            when: { kind: 'link_count_gte', value: 3 },
-            action: 'remove',
-            reason: 'x',
-          },
-        ],
+        moderationPrompt:
+          'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
         requestedCapabilities: ['moderate.flag'],
       }),
       'p',
@@ -190,13 +177,14 @@ describe('GovernanceService residual branches', () => {
   it('keeps a floor-frozen agent paused across a member re-ratification (durable floor)', async () => {
     const { svc } = make();
     await svc.bootstrapSeat('r', 's');
-    // Adopt an initial model → active agent that removes the spam contribution.
+    // Adopt an initial model → active agent that flags the spam contribution for
+    // human review (the escalate-to-review ceiling caps it below removal).
     const p1 = await svc.proposeModel('r', 's', bundle(), 'p');
     const m1 = p1.ok ? p1.value.modelId : '';
     await svc.evaluateModel(m1);
     await svc.approveModel('r', m1, null, null);
     const first = await svc.moderate('r', spamCtx, 'c');
-    expect(first.ok && first.value?.action).toBe('remove');
+    expect(first.ok && first.value?.action).toBe('flag_for_review');
     expect((await svc.getBinding('r'))?.active).toBe(true);
 
     // The platform floor freezes the agent (durable) — it stops moderating.
@@ -227,7 +215,7 @@ describe('GovernanceService residual branches', () => {
     expect(binding?.active).toBe(true);
     expect(binding?.floorFrozen).toBe(false);
     const restored = await svc.moderate('r', spamCtx, 'c4');
-    expect(restored.ok && restored.value?.action).toBe('remove');
+    expect(restored.ok && restored.value?.action).toBe('flag_for_review');
 
     // Both floor interventions are recorded in the append-only agent audit log.
     const actions = await svc.recentAgentActions('r', 50);
@@ -468,14 +456,8 @@ describe('GovernanceService residual branches', () => {
       'r',
       's',
       bundle({
-        moderationRules: [
-          {
-            id: 'flag',
-            when: { kind: 'link_count_gte', value: 3 },
-            action: 'flag_for_review',
-            reason: 'x',
-          },
-        ],
+        moderationPrompt:
+          'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
         requestedCapabilities: ['moderate.flag', 'moderate.remove'],
       }),
       'p',

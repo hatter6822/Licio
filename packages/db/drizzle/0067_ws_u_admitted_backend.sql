@@ -1,0 +1,15 @@
+-- WS-U ADR-9 (review) — pin a governance model's admission to the moderation
+-- backend that ran it.
+--
+-- A room model's admission gate (evaluateModel) is sampled against whatever
+-- ModerationProposer is configured (the deterministic classifier, or a specific
+-- LLM backend + model). If the backend later changes (LLM moderation is enabled
+-- over a deterministic-admitted model, or GOVERNANCE_LLM_MODEL is changed), the
+-- previously-approved prompt would otherwise run under a classifier it was never
+-- vetted against. Recording the admitting `backendId` here lets
+-- GovernanceService.moderate FAIL CLOSED to the platform baseline until the model
+-- is re-admitted under the active backend.
+--
+-- Additive + online-safe: the column is nullable (existing rows read NULL ⇒ no
+-- gate, back-compat). NO content/financial column — a backend id string only.
+ALTER TABLE "knomosis"."room_governance_model" ADD COLUMN "admitted_backend_id" text;

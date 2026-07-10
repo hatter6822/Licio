@@ -35,22 +35,19 @@ import { TextArea } from '../ui/TextArea/index.js';
 type OpenVote = NonNullable<RatificationViewResponse['vote']>;
 
 /**
- * A valid starter policy bundle that passes the platform admission gate (it
- * flags clearly link-spammy content for human review without over-moderating a
- * benign comment). The steward edits this to express the community's policy.
+ * A valid starter policy bundle that passes the platform admission gate. The
+ * `moderationPrompt` conditions the in-room moderation MODEL (an LLM); the
+ * platform's deterministic wrapper bounds whatever it proposes (an
+ * escalate-to-human-review ceiling + the community-granted capability), so a
+ * benign comment is never over-moderated and the model can never exceed the
+ * community-voted powers. The steward edits this to express the community's
+ * policy.
  */
 const STARTER_BUNDLE = `{
   "bundleId": "starter-civility",
   "version": "1",
   "name": "Starter civility policy",
-  "moderationRules": [
-    {
-      "id": "link-spam",
-      "when": { "kind": "link_count_gte", "value": 3 },
-      "action": "flag_for_review",
-      "reason": "Posts with several links are sent for human review."
-    }
-  ],
+  "moderationPrompt": "Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil, on-topic content.",
   "promptTemplates": { "summary": "Summarize the discussion neutrally and briefly." },
   "config": { "summaryStyle": "neutral_brief", "explanationVerbosity": "standard" },
   "requestedCapabilities": ["moderate.flag"]
@@ -303,7 +300,7 @@ function ModelRow({
         <span className="font-mono text-ink-muted text-xs">
           {model.artifact_digest.slice(0, 12)}
         </span>
-        {/* Any member can pull + verify the content-addressed bundle (ADR-1). */}
+        {/* Any member can pull + verify the content-addressed bundle. */}
         <Button variant="ghost" onClick={() => void download()}>
           {t('room.governance.model.download', 'Download')}
         </Button>
@@ -386,7 +383,7 @@ function ProposeForm({ roomId }: { roomId: string }): React.ReactElement {
         textareaClassName="font-mono text-xs"
         helperText={t(
           'room.governance.propose.bundleHelp',
-          'A declarative, downloadable rule-set — no code runs. Members verify the digest.',
+          'A declarative, downloadable model bundle — no code runs. The moderation prompt guides the in-room model; the platform bounds every action it can take. Members verify the digest.',
         )}
       />
       <TextArea

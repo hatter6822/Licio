@@ -102,6 +102,68 @@ describe('runGovernanceTick', () => {
     expect(log).toHaveBeenCalledWith('governance.election_lifecycle', { scheduled: 1, settled: 0 });
   });
 
+  it('drains the deferred re-moderation queue each tick, passing the re-seam + a limit', async () => {
+    const apply = vi.fn();
+    const sweep = vi.fn(async () => ({
+      swept: 2,
+      applied: 1,
+      cleared: 0,
+      stillUnavailable: 1,
+      moot: 0,
+      errors: 0,
+    }));
+    const svc = {
+      runElectionLifecycle: async () => ({ scheduled: 0, settled: 0 }),
+      runRatificationLifecycle: async () => ({ settled: 0, activated: 0 }),
+      sweepPendingRemoderation: sweep,
+    } as unknown as GovernanceService;
+    const loadModerationContext = async () => null; // the reconstruction seam (content-free queue)
+    const log = vi.fn();
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 0,
+      loadModerationContext,
+      applyDeferredRemoderation: apply,
+      log,
+      now: () => 0,
+    });
+    expect(sweep).toHaveBeenCalledWith(loadModerationContext, apply, expect.any(Number));
+    expect(log).toHaveBeenCalledWith(
+      'governance.remoderation_lifecycle',
+      expect.objectContaining({ swept: 2, applied: 1, stillUnavailable: 1 }),
+    );
+  });
+
+  it('SKIPS the deferred re-moderation sweep when no context loader is wired', async () => {
+    const sweep = vi.fn();
+    const svc = {
+      runElectionLifecycle: async () => ({ scheduled: 0, settled: 0 }),
+      runRatificationLifecycle: async () => ({ settled: 0, activated: 0 }),
+      sweepPendingRemoderation: sweep,
+    } as unknown as GovernanceService;
+    // No loadModerationContext ⇒ the sweep must not run (items stay queued).
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 0,
+      log: () => {},
+      now: () => 0,
+    });
+    expect(sweep).not.toHaveBeenCalled();
+  });
+
+  it('retries stuck (transient) admissions each tick (R3-4)', async () => {
+    const reEval = vi.fn(async () => ({ retried: 2, resolved: 1 }));
+    const svc = {
+      runElectionLifecycle: async () => ({ scheduled: 0, settled: 0 }),
+      runRatificationLifecycle: async () => ({ settled: 0, activated: 0 }),
+      reEvaluateStuckAdmissions: reEval,
+    } as unknown as GovernanceService;
+    const log = vi.fn();
+    await runGovernanceTick({ service: svc, eligibleVoterCount: async () => 0, log, now: () => 0 });
+    expect(reEval).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('governance.admission_retry', { retried: 2, resolved: 1 });
+  });
+
   it('routes a lifecycle failure to onError', async () => {
     const failing = {
       runElectionLifecycle: async () => {

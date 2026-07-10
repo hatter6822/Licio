@@ -12,7 +12,12 @@ import { type ContributionCreate, contributionCreateSchema } from '@licio/shared
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createContribution, editContribution } from '../forum/contributions.js';
 import { type RoomAgentModerator, resetForumServicesForTests } from '../forum/services.js';
-import { createRoomAgentModerator } from '../governance/forum-agent.js';
+import {
+  buildDeferredRemoderationApplier,
+  buildModerationContextLoader,
+  createRoomAgentModerator,
+} from '../governance/forum-agent.js';
+import type { ModerationProposer } from '../governance/moderation-proposer.js';
 import {
   createGovernanceService,
   resetGovernanceService,
@@ -149,14 +154,8 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
       bundleId: 'flag-links',
       version: '1',
       name: 'Flag links',
-      moderationRules: [
-        {
-          id: 'links',
-          when: { kind: 'link_count_gte', value: 3 },
-          action: 'flag_for_review',
-          reason: 'Many links pending review.',
-        },
-      ],
+      moderationPrompt:
+        'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
       promptTemplates: {},
       config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
       requestedCapabilities: ['moderate.flag'],
@@ -240,30 +239,36 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
   });
 
   it('does not miscount an email address as a mention', async () => {
-    // A model that flags on >=1 mention; an email must NOT trigger it.
-    const svc = createGovernanceService({ stores: createInMemoryGovernanceStores() });
+    // A model that flags on >=1 mention (or link spam, so it clears the platform
+    // admission eval set); an email address must NOT trip the mention rule. The
+    // proposer keys on the ModerationContext the adapter builds, so this asserts
+    // the adapter's canonical mention count, not the model's prose.
+    const mentionProposer: ModerationProposer = {
+      kind: 'llm',
+      async propose({ context }) {
+        const flag = context.mentionCount >= 1 || context.linkCount >= 3;
+        return {
+          status: 'decided',
+          proposal: {
+            action: flag ? 'flag_for_review' : 'allow',
+            reason: flag ? 'flagged' : 'benign',
+            outputId: null,
+          },
+        };
+      },
+    };
+    const svc = createGovernanceService({
+      stores: createInMemoryGovernanceStores(),
+      moderationProposer: mentionProposer,
+    });
     setGovernanceService(svc);
     await svc.bootstrapSeat(ROOM, STEWARD);
     const mentionBundle = {
       bundleId: 'flag-mentions',
       version: '1',
       name: 'Flag mentions',
-      moderationRules: [
-        {
-          id: 'mentions',
-          when: { kind: 'mention_count_gte', value: 1 },
-          action: 'flag_for_review',
-          reason: 'Mentions pending review.',
-        },
-        // A link rule too, so the bundle clears the admission gate (which checks
-        // a link-spam fixture is not waved through).
-        {
-          id: 'links',
-          when: { kind: 'link_count_gte', value: 3 },
-          action: 'flag_for_review',
-          reason: 'Many links pending review.',
-        },
-      ],
+      moderationPrompt:
+        'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
       promptTemplates: {},
       config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
       requestedCapabilities: ['moderate.flag'],
@@ -298,5 +303,152 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
         })
       )?.state,
     ).toBe('under_review');
+  });
+});
+
+describe('WS-U buildDeferredRemoderationApplier (deferred re-seam, floor-dominant)', () => {
+  const ROOM = '00000000-0000-4000-8000-0000000000d1';
+  type Hold = { contributionId: string; removed: boolean; reason: string | null };
+
+  function spySink(holds: Hold[]): void {
+    fixture.forum.autoModerationSink = {
+      recordContentAutoBlock: async () => {},
+      recordAgentHold: async (i) => {
+        holds.push({ contributionId: i.contributionId, removed: i.removed, reason: i.reason });
+      },
+    };
+  }
+  function applier() {
+    return buildDeferredRemoderationApplier({
+      forum: fixture.forum,
+      ingestion: fixture.ingestion,
+    });
+  }
+  async function publishedContribution(): Promise<string> {
+    const { threadId } = await seedThread(fixture);
+    const created = await post(
+      contributionCreateSchema.parse(contributionBody('question', threadId)),
+    );
+    if (!created.ok) throw new Error('create failed');
+    expect(created.contribution.moderationState).toBe('published');
+    return created.contribution.contributionId;
+  }
+
+  it('raises a published contribution to under_review + review queue + author notice', async () => {
+    const holds: Hold[] = [];
+    spySink(holds);
+    const id = await publishedContribution();
+    await applier()(ROOM, id, 'flag_for_review', 'several links');
+
+    expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('under_review');
+    const queued = await fixture.ingestion.reviewQueue.list(
+      { kind: 'contribution_safety_hold' },
+      10,
+    );
+    expect(queued.some((q) => q.context['source'] === 'in_room_agent_deferred')).toBe(true);
+    // No silent sanction: the author gets the agent's statement of reasons.
+    expect(holds).toEqual([{ contributionId: id, removed: false, reason: 'several links' }]);
+    expect(metric('contributions.agent_flagged_deferred')).toBeGreaterThanOrEqual(1);
+  });
+
+  it('is FLOOR-DOMINANT: never LOWERS a platform-floor removal (no state change, no queue item)', async () => {
+    const id = await publishedContribution();
+    await fixture.forum.contributions.setModerationState(id, 'removed'); // the floor removed it
+    await applier()(ROOM, id, 'flag_for_review', 'late flag');
+
+    expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('removed'); // unchanged
+    const queued = await fixture.ingestion.reviewQueue.list(
+      { kind: 'contribution_safety_hold' },
+      10,
+    );
+    expect(queued.some((q) => q.context['source'] === 'in_room_agent_deferred')).toBe(false);
+  });
+
+  it('a warn records the author notice WITHOUT hiding the content (no state change)', async () => {
+    const holds: Hold[] = [];
+    spySink(holds);
+    const id = await publishedContribution();
+    await applier()(ROOM, id, 'warn', 'please stay on topic');
+
+    expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('published'); // still visible
+    expect(holds).toEqual([{ contributionId: id, removed: false, reason: 'please stay on topic' }]);
+    const queued = await fixture.ingestion.reviewQueue.list(
+      { kind: 'contribution_safety_hold' },
+      10,
+    );
+    expect(queued).toHaveLength(0); // a warn does not route to review
+  });
+
+  it('is a no-op for a contribution that was deleted since the deferral', async () => {
+    // An unknown id (never created / purged) ⇒ nothing to raise, no throw.
+    await expect(
+      applier()(ROOM, 'ghost-contribution', 'flag_for_review', 'x'),
+    ).resolves.toBeUndefined();
+    const queued = await fixture.ingestion.reviewQueue.list(
+      { kind: 'contribution_safety_hold' },
+      10,
+    );
+    expect(queued).toHaveLength(0);
+  });
+
+  it('R2-4: compensates (restores published) when the review-queue intake fails — no orphaned hidden content', async () => {
+    const id = await publishedContribution();
+    // The review-queue intake throws AFTER the state was raised to under_review.
+    fixture.ingestion.reviewQueue.insert = async () => {
+      throw new Error('queue down');
+    };
+    await expect(applier()(ROOM, id, 'flag_for_review', 'links')).rejects.toThrow('queue down');
+    // Atomicity: the contribution is NOT left hidden without a reviewer case — it was
+    // restored to published, so the sweep can retry BOTH steps cleanly next pass.
+    expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('published');
+  });
+
+  it('R3-3: compensates (restores published) when the AUTHOR NOTICE fails — no silent deferred sanction', async () => {
+    const id = await publishedContribution();
+    // The state + review case are written, but the author-notice sink then throws.
+    fixture.forum.autoModerationSink = {
+      recordContentAutoBlock: async () => {},
+      recordAgentHold: async () => {
+        throw new Error('notice store down');
+      },
+    };
+    await expect(applier()(ROOM, id, 'flag_for_review', 'links')).rejects.toThrow(
+      'notice store down',
+    );
+    // The notice is inside the atomic unit: a hidden contribution is never left
+    // without its statement-of-reasons, so it was restored to published for retry.
+    expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('published');
+  });
+});
+
+describe('WS-U buildModerationContextLoader (content-free reconstruction + moot rules)', () => {
+  const history = async () => ({ accountAgeDays: 100, newToRoom: false, priorRemovalsInRoom: 0 });
+  function loader() {
+    return buildModerationContextLoader({ forum: fixture.forum, readAuthorHistory: history });
+  }
+  async function published(): Promise<string> {
+    const { threadId } = await seedThread(fixture);
+    const created = await post(
+      contributionCreateSchema.parse(contributionBody('question', threadId)),
+    );
+    if (!created.ok) throw new Error('create failed');
+    return created.contribution.contributionId;
+  }
+
+  it('reconstructs a context from the live contribution (published)', async () => {
+    const ctx = await loader()('room-x', await published());
+    expect(ctx).not.toBeNull();
+    expect(ctx?.contentKind).toBe('comment');
+    expect(ctx?.authorAccountAgeDays).toBe(100);
+  });
+
+  it('R2-2: returns null (moot) for a non-published (floor-removed) contribution', async () => {
+    const id = await published();
+    await fixture.forum.contributions.setModerationState(id, 'removed');
+    expect(await loader()('room-x', id)).toBeNull();
+  });
+
+  it('returns null (moot) for a deleted / unknown contribution', async () => {
+    expect(await loader()('room-x', 'ghost')).toBeNull();
   });
 });

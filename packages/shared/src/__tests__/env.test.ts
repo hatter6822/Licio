@@ -120,6 +120,108 @@ describe('validateServerEnv', () => {
       validateServerEnv({ ...validEnv, KNOMOSIS_GATEWAY_TOKEN_FILE: '/run/secrets/tok' }),
     ).toThrow(/Incomplete KNOMOSIS_GATEWAY configuration/);
   });
+
+  it('accepts the WS-U ADR-9 LLM opt-in in production (explicit operator decision) — requirements still enforced', () => {
+    const prod = { ...validEnv, NODE_ENV: 'production' };
+    expect(() =>
+      validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'k' }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({
+        ...prod,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+        GOVERNANCE_LLM_MODEL: 'llama3.3',
+      }),
+    ).not.toThrow();
+    // A half-configured backend still fails fast in production…
+    expect(() => validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'anthropic' })).toThrow(
+      /non-empty ANTHROPIC_API_KEY/,
+    );
+    // …and 'deterministic' (and absence) stay valid everywhere.
+    expect(() =>
+      validateServerEnv({ ...prod, GOVERNANCE_LLM_PROVIDER: 'deterministic' }),
+    ).not.toThrow();
+  });
+
+  it('enforces each LLM backend’s requirements (any environment)', () => {
+    // anthropic ⇒ key required.
+    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_PROVIDER: 'anthropic' })).toThrow(
+      /non-empty ANTHROPIC_API_KEY/,
+    );
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: 'k',
+      }),
+    ).not.toThrow();
+    // local ⇒ loopback URL + model required.
+    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_LLM_PROVIDER: 'local' })).toThrow(
+      /requires GOVERNANCE_LLM_LOCAL_URL/,
+    );
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://192.168.1.20:11434/v1',
+        GOVERNANCE_LLM_MODEL: 'llama3.3',
+      }),
+    ).toThrow(/loopback/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+      }),
+    ).toThrow(/non-empty GOVERNANCE_LLM_MODEL/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+        GOVERNANCE_LLM_MODEL: 'llama3.3',
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects a BLANK (whitespace-only) LLM credential — no silent-disable of the opt-in (WS-U ADR-9 review)', () => {
+    // A whitespace-only key passes an undefined-only check but resolveGovernanceLlmDecision
+    // trims it to empty and silently disables the backend. Fail fast instead.
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: '   ',
+      }),
+    ).toThrow(/non-empty ANTHROPIC_API_KEY/);
+    // Same trap for a blank local model name.
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'local',
+        GOVERNANCE_LLM_LOCAL_URL: 'http://127.0.0.1:11434/v1',
+        GOVERNANCE_LLM_MODEL: '   ',
+      }),
+    ).toThrow(/non-empty GOVERNANCE_LLM_MODEL/);
+    // R4-2: a blank explicit ANTHROPIC model OVERRIDE fails fast (it would otherwise
+    // trim to empty and silently run the default), while UNSET stays valid (optional).
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: 'k',
+        GOVERNANCE_LLM_MODEL: '   ',
+      }),
+    ).toThrow(/GOVERNANCE_LLM_MODEL must be non-empty/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: 'k',
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe('validateClientEnv', () => {

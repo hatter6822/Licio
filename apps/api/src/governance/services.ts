@@ -7,6 +7,13 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DEFAULT_GOVERNANCE_CONFIG, type GovernanceConfig } from './config.js';
+import { createDeterministicModerationProposer } from './deterministic-moderation-proposer.js';
+import type {
+  ModerationDecisionSink,
+  ModerationDeferralSink,
+  ModerationProposer,
+} from './moderation-proposer.js';
+import type { GovernanceNlProvider } from './nl-provider.js';
 import { GovernanceService } from './service.js';
 import { createInMemoryGovernanceStores, type GovernanceStores } from './stores.js';
 
@@ -27,6 +34,17 @@ export interface GovernanceServiceOptions {
     treasuryExecutionBlocked(roomId: string): Promise<boolean>;
     votingBlocked(roomId: string, voterUserId: string | null): Promise<boolean>;
   };
+  /** ADR-3 governed NL provider (boot wires the fail-closed LLM backend when
+   *  enabled; absent ⇒ the pure deterministic facilitation path). */
+  nlProvider?: GovernanceNlProvider;
+  /** ADR-9 in-room moderation model. Boot wires the LLM proposer when a backend
+   *  is configured; otherwise this DEFAULTS to the deterministic proposer (the
+   *  ADR-3 default), so the feature is operable + testable without an LLM. */
+  moderationProposer?: ModerationProposer;
+  /** Deferred-remoderation enqueue sink (boot wires the durable queue). */
+  onModerationDeferred?: ModerationDeferralSink;
+  /** Moderation observability sink (boot wires the decision log). */
+  onModerationDecided?: ModerationDecisionSink;
 }
 
 export function createGovernanceService(opts: GovernanceServiceOptions = {}): GovernanceService {
@@ -36,8 +54,14 @@ export function createGovernanceService(opts: GovernanceServiceOptions = {}): Go
     now: opts.now ?? (() => new Date()),
     uuid: opts.uuid ?? randomUUID,
     digest: sha256Hex,
+    // The deterministic proposer is the ADR-3 default; boot overrides it with the
+    // LLM proposer when a backend is configured.
+    moderationProposer: opts.moderationProposer ?? createDeterministicModerationProposer(),
     ...(opts.cryptoFlag ? { cryptoFlag: opts.cryptoFlag } : {}),
     ...(opts.killSwitches ? { killSwitches: opts.killSwitches } : {}),
+    ...(opts.nlProvider ? { nlProvider: opts.nlProvider } : {}),
+    ...(opts.onModerationDeferred ? { onModerationDeferred: opts.onModerationDeferred } : {}),
+    ...(opts.onModerationDecided ? { onModerationDecided: opts.onModerationDecided } : {}),
   });
 }
 

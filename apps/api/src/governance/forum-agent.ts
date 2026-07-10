@@ -9,8 +9,10 @@
 // reduce or reverse a floor decision. The agent's action (with its provenance
 // triple) is logged inside GovernanceService.moderate — not here.
 import type { ModerationAction, ModerationContext } from '@licio/governance';
-import type { ContributionType } from '@licio/shared';
-import type { RoomAgentModerator } from '../forum/services.js';
+import type { ContributionModerationState, ContributionType } from '@licio/shared';
+import type { ForumServices, RoomAgentModerator } from '../forum/services.js';
+import type { IngestionServices } from '../ingestion/services.js';
+import type { DeferredRemoderationApplier, ModerationContextLoader } from './service.js';
 import { getGovernanceService } from './services.js';
 
 /**
@@ -156,6 +158,67 @@ export function countMentionTokens(text: string): number {
 }
 
 /**
+ * Assemble a `ModerationContext` from a contribution's fields + author history —
+ * the ONE place the room-scoped, PII-free context is built, shared by the live
+ * moderator and the deferred-re-moderation context loader (so the two paths stay
+ * byte-identical). Citations are structured link data; inline links/mentions are
+ * counted canonically (one token per URL; an email is not a mention).
+ */
+function buildModerationContext(input: {
+  type: ContributionType;
+  body: string;
+  citationCount: number;
+  attachmentCount: number;
+  history: AuthorHistory;
+}): ModerationContext {
+  return {
+    contentText: input.body,
+    contentKind: contentKindOf(input.type),
+    contentLength: input.body.length,
+    linkCount: input.citationCount + countLinkTokens(input.body),
+    mentionCount: countMentionTokens(input.body),
+    hasMediaUpload: input.attachmentCount > 0,
+    authorAccountAgeDays: input.history.accountAgeDays,
+    authorNewToRoom: input.history.newToRoom,
+    priorRemovalsInRoom: input.history.priorRemovalsInRoom,
+  };
+}
+
+/**
+ * Build the deferred-re-moderation CONTEXT LOADER over the forum + ingestion
+ * stores (WS-U ADR-9). The pending queue holds NO content — only soft refs — so at
+ * retry the sweep reconstructs the `ModerationContext` HERE from the live
+ * contribution (which also reflects any EDITS since the deferral, and the author's
+ * current history). Returns null when the contribution is gone/tombstoned or its
+ * author is erased ⇒ the queued item is moot and dequeued. `attachment_ids` is read
+ * from the stored metadata exactly as the edit path does.
+ */
+export function buildModerationContextLoader(deps: {
+  forum: Pick<ForumServices, 'contributions'>;
+  readAuthorHistory: AuthorHistoryReader;
+}): ModerationContextLoader {
+  return async (roomId, subjectRef) => {
+    const contribution = await deps.forum.contributions.getById(subjectRef);
+    if (contribution === null || contribution.userId === null) return null; // deleted ⇒ moot
+    // Only re-moderate content that is still PUBLISHED. A non-published state means
+    // the platform floor (or a prior agent hold) already actioned it — removed,
+    // hidden, or under_review — so there is nothing left for the deferred model to
+    // add (the re-seam is floor-dominant anyway): treat it as moot and dequeue.
+    if (contribution.moderationState !== 'published') return null;
+    const attachmentIds = contribution.metadata['attachment_ids'];
+    const attachmentCount = Array.isArray(attachmentIds) ? attachmentIds.length : 0;
+    const history = await deps.readAuthorHistory(roomId, contribution.userId);
+    return buildModerationContext({
+      type: contribution.type,
+      body: contribution.body,
+      citationCount: contribution.citations.length,
+      attachmentCount,
+      history,
+    });
+  };
+}
+
+/**
  * Closed action → contribution-state map. A `warn` is logged but does not hide
  * content; `restrict`/`flag_for_review` route to human review; `remove` removes
  * (appealable). `allow` is a no-op. Floor-reserved actions are not expressible.
@@ -169,6 +232,118 @@ const ACTION_TO_STATE: Readonly<
   restrict: 'under_review',
   remove: 'removed',
 };
+
+/**
+ * Floor-dominance severity rank over the full moderation-state lattice (the
+ * §15.4 order: published < under_review < hidden < removed). The applier only
+ * RAISES (a strictly-greater target), so a contribution the platform floor
+ * already hid/removed is never lowered by a deferred agent flag.
+ */
+const DEFERRED_STATE_RANK: Readonly<Record<ContributionModerationState, number>> = {
+  published: 0,
+  under_review: 1,
+  hidden: 2,
+  removed: 3,
+};
+
+/** Narrow store deps the deferred re-moderation applier needs (testable). */
+export interface DeferredRemoderationDeps {
+  forum: Pick<ForumServices, 'contributions' | 'autoModerationSink' | 'metrics' | 'log'>;
+  ingestion: Pick<IngestionServices, 'stories' | 'reviewQueue'>;
+}
+
+/**
+ * The forum re-seam the WS-U scheduler sweep calls when a DEFERRED contribution's
+ * re-moderation finally decides a restriction. The contribution was published
+ * under the WS-J baseline during the model outage; this RAISES it post-hoc:
+ *   - FLOOR-DOMINANT — only RAISES the moderation state (`flag_for_review`/
+ *     `restrict` → `under_review`); it never lowers a platform-floor decision
+ *     (a floor `removed`/`under_review` already ≥ the target is left untouched);
+ *   - routes the raise to the human review queue (source `in_room_agent_deferred`,
+ *     appealable to the floor), and
+ *   - notifies the author with the agent's statement of reasons (no silent
+ *     sanction) — for a `warn` (no state change) too.
+ * The agent's action + provenance triple is already in the knomosis agent action
+ * log (written by `GovernanceService.classify` during the sweep's re-run).
+ */
+export function buildDeferredRemoderationApplier(
+  deps: DeferredRemoderationDeps,
+): DeferredRemoderationApplier {
+  return async (roomId, contributionId, action, reason) => {
+    const target = ACTION_TO_STATE[action];
+    const contribution = await deps.forum.contributions.getById(contributionId);
+    if (contribution === null) return; // deleted/purged since — nothing to raise
+    const raise =
+      target !== 'published' &&
+      DEFERRED_STATE_RANK[target] > DEFERRED_STATE_RANK[contribution.moderationState];
+    if (raise) {
+      await deps.forum.contributions.setModerationState(contributionId, target);
+      try {
+        const thread = await deps.ingestion.stories.getThreadById(contribution.threadId);
+        deps.forum.metrics.increment('contributions.agent_flagged_deferred');
+        await deps.ingestion.reviewQueue.insert({
+          kind: 'contribution_safety_hold',
+          storyId: thread?.storyId ?? null,
+          context: {
+            contribution_id: contributionId,
+            thread_id: contribution.threadId,
+            reasons: ['in_room_agent'],
+            disposition: 'flag',
+            source: 'in_room_agent_deferred',
+          },
+          status: 'pending',
+          resolution: null,
+          resolvedBy: null,
+          resolvedAt: null,
+          notBefore: null,
+        });
+        // The author notice is part of the SAME atomic unit as the hide + review
+        // case (WS-U ADR-9 review): a hidden contribution must never be left without
+        // its statement-of-reasons notice, or the next sweep would treat the
+        // now-under_review row as moot and dequeue it — a SILENT deferred sanction.
+        // So a notice failure trips the same compensation below.
+        if (deps.forum.autoModerationSink !== null && contribution.userId !== null) {
+          await deps.forum.autoModerationSink.recordAgentHold({
+            contributionId,
+            authorUserId: contribution.userId,
+            removed: false, // the escalate-to-review ceiling ⇒ never an AI-driven removal
+            reason,
+          });
+        }
+      } catch (error) {
+        // ATOMICITY (mirrors the live contribution path's compensating rollback): a
+        // hidden contribution must never be left WITHOUT its reviewer case AND author
+        // notice. If either the review-queue intake or the notice fails after the
+        // state change, COMPENSATE by restoring the published state — but only if it
+        // is still the value we just set, so a concurrent platform-floor decision is
+        // never lowered — then rethrow so the sweep keeps the item queued and retries
+        // the WHOLE unit together next pass.
+        const latest = await deps.forum.contributions.getById(contributionId);
+        if (latest?.moderationState === target) {
+          await deps.forum.contributions
+            .setModerationState(contributionId, 'published')
+            .catch(() => {});
+        }
+        throw error;
+      }
+    } else if (deps.forum.autoModerationSink !== null && contribution.userId !== null) {
+      // A `warn` (no state change): notify the author, but nothing is hidden, so a
+      // notice failure just retries — there is no silent SANCTION to guard against.
+      await deps.forum.autoModerationSink.recordAgentHold({
+        contributionId,
+        authorUserId: contribution.userId,
+        removed: false,
+        reason,
+      });
+    }
+    deps.forum.log('governance.deferred_remoderation_applied', {
+      contribution_id: contributionId,
+      room_id: roomId,
+      action,
+      raised: raise,
+    });
+  };
+}
 
 export function createRoomAgentModerator(
   deps: { readAuthorHistory?: AuthorHistoryReader } = {},
@@ -191,17 +366,13 @@ export function createRoomAgentModerator(
       const history = deps.readAuthorHistory
         ? await deps.readAuthorHistory(roomId, authorUserId)
         : DEFAULT_AUTHOR_HISTORY;
-      const context: ModerationContext = {
-        contentText: body,
-        contentKind: contentKindOf(type),
-        contentLength: body.length,
-        linkCount: citationCount + countLinkTokens(body),
-        mentionCount: countMentionTokens(body),
-        hasMediaUpload: attachmentCount > 0,
-        authorAccountAgeDays: history.accountAgeDays,
-        authorNewToRoom: history.newToRoom,
-        priorRemovalsInRoom: history.priorRemovalsInRoom,
-      };
+      const context = buildModerationContext({
+        type,
+        body,
+        citationCount,
+        attachmentCount,
+        history,
+      });
       // Pass the binding we already read (avoids a second store read, #12).
       const result = await svc.moderate(roomId, context, contributionId, binding);
       if (!result.ok || result.value === null) return null;

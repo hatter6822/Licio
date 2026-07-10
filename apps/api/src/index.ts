@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
 import { resolve } from 'node:path';
@@ -7,6 +8,19 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
+import { resolveGovernanceLlmDecision } from './ai-governance/llm/config.js';
+import { createLocalCompletion } from './ai-governance/llm/local.js';
+import { createGovernanceLlmModerationProposer } from './ai-governance/llm/moderation.js';
+import {
+  createAnthropicCompletion,
+  createGovernanceLlmNlProvider,
+  type LlmCompletion,
+} from './ai-governance/llm/provider.js';
+import {
+  buildGovernanceLlmIdentity,
+  buildGovernanceModerationProposerIdentity,
+  ensureGovernanceLlmDeployed,
+} from './ai-governance/llm/registration.js';
 import {
   AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
   startAiGovernanceScheduler,
@@ -66,7 +80,14 @@ import {
 import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
-import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
+import {
+  buildAuthorHistoryReader,
+  buildDeferredRemoderationApplier,
+  buildModerationContextLoader,
+  createRoomAgentModerator,
+} from './governance/forum-agent.js';
+import type { ModerationProposer } from './governance/moderation-proposer.js';
+import type { GovernanceNlProvider } from './governance/nl-provider.js';
 import {
   GOVERNANCE_SCHEDULER_INTERVAL_MS,
   startGovernanceScheduler,
@@ -969,6 +990,84 @@ setKnomosisServices(knomosisServices);
 // The WS-E event pipeline's crypto gate reads the SAME runtime flag (live).
 eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
 
+// WS-U ADR-3/ADR-9: the governed NL provider behind the agent's advisory
+// facilitation surfaces. Fail-closed at every layer — explicit env opt-in +
+// the backend's requirements (key, or loopback URL + model), registration must
+// clear the REAL WS-K admission/deploy gate, and any runtime failure serves
+// the deterministic summary. Available in every environment as an explicit
+// operator opt-in (the 2026-07-09 maintainer decision); absent ⇒ the
+// deterministic path, byte-identical to before.
+let governanceNlProvider: GovernanceNlProvider | undefined;
+let governanceModerationProposer: ModerationProposer | undefined;
+const governanceLlmDecision = resolveGovernanceLlmDecision({
+  provider: env.GOVERNANCE_LLM_PROVIDER,
+  apiKey: env.ANTHROPIC_API_KEY,
+  modelId: env.GOVERNANCE_LLM_MODEL,
+  localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
+  moderation: env.GOVERNANCE_LLM_MODERATION,
+});
+if (governanceLlmDecision.enabled) {
+  const { backend, settings, llmModeration } = governanceLlmDecision;
+  // One completion closure, shared by every governed surface: the key/URL live
+  // ONLY here — never in the hashed identity config, never in a log line.
+  const complete: LlmCompletion =
+    backend.kind === 'anthropic'
+      ? createAnthropicCompletion(backend.apiKey, settings)
+      : createLocalCompletion(backend.baseUrl, settings);
+
+  // Surface 1 — the advisory lawmaking summariser (slice 1).
+  const llmIdentity = buildGovernanceLlmIdentity(settings, backend);
+  if (await ensureGovernanceLlmDeployed(aiGovernanceServices, llmIdentity)) {
+    governanceNlProvider = createGovernanceLlmNlProvider({
+      services: aiGovernanceServices,
+      settings,
+      identity: llmIdentity,
+      complete,
+    });
+    logger.info(
+      { backend: backend.kind, modelId: settings.modelId },
+      'WS-U governance LLM summariser enabled (explicit opt-in; fail-closed to deterministic)',
+    );
+  } else {
+    logger.warn(
+      'WS-U governance LLM summariser requested but the WS-K admission/deploy gate refused — keeping the deterministic provider',
+    );
+  }
+
+  // Surface 2 — the in-room moderation MODEL (the LLM the deterministic wrapper
+  // bounds). Replaces the deterministic default proposer when a backend is
+  // configured (unless GOVERNANCE_LLM_MODERATION=off).
+  if (llmModeration) {
+    const modIdentity = buildGovernanceModerationProposerIdentity(settings, backend);
+    if (await ensureGovernanceLlmDeployed(aiGovernanceServices, modIdentity)) {
+      governanceModerationProposer = createGovernanceLlmModerationProposer({
+        services: aiGovernanceServices,
+        settings,
+        identity: modIdentity,
+        complete,
+      });
+      logger.info(
+        { backend: backend.kind, modelId: settings.modelId },
+        'WS-U in-room moderation model = LLM (deterministically wrapped: escalate-to-review ceiling + capability clamp; fail-to-baseline + deferred re-moderation). NOTE: a room model is admitted under a specific backend/model — moderation FAILS CLOSED to the platform baseline for any room whose model was admitted under a different backend, until it is re-admitted (re-run the model evaluation) under this one.',
+      );
+    } else {
+      logger.warn(
+        'WS-U governance LLM moderation model requested but the WS-K admission/deploy gate refused — using the deterministic default proposer',
+      );
+    }
+  }
+
+  if (backend.kind === 'anthropic') {
+    // Honest operational posture: the hosted backend sends governed-room content
+    // off-host, making the vendor an operator-chosen data processor. Say so
+    // loudly at boot, once.
+    logger.warn(
+      { modelId: settings.modelId },
+      'WS-U governance LLM: hosted backend enabled — governed-room content is sent to the external model API (operator-chosen data processor); use GOVERNANCE_LLM_PROVIDER=local to keep content on-host',
+    );
+  }
+}
+
 setGovernanceService(
   createGovernanceService({
     // Boot-resolved from the SAME knomosis.* source for the static election/agent
@@ -980,6 +1079,15 @@ setGovernanceService(
     cryptoFlag: () => knomosisServices.config().cryptoEnabled,
     stores: governanceStores,
     killSwitches: buildGovernanceKillSwitchGuards(knomosisServices),
+    ...(governanceNlProvider ? { nlProvider: governanceNlProvider } : {}),
+    ...(governanceModerationProposer ? { moderationProposer: governanceModerationProposer } : {}),
+    // Observability: record every decided in-room moderation (proposed vs the
+    // wrapper-bounded action) to the WS-K moderation decision log.
+    onModerationDecided: (record) => {
+      void aiGovernanceServices.moderationLog
+        .append({ recordId: `moddec:${randomUUID()}`, ...record })
+        .catch(() => {});
+    },
   }),
 );
 // The WS-L law-pack + readiness ports read the SAME governance stores the
@@ -989,18 +1097,19 @@ knomosisServices.readinessChecklist = buildReadinessChecklistPort(forumServices,
 // The forum contribution path consults the in-room agent (subordinate to the
 // platform floor) for any room with an active community-approved binding. The
 // agent's author-history signals are read from the real identity + forum +
-// ingestion stores (only for governed rooms, on this path).
-forumServices.agentModerator = createRoomAgentModerator({
-  readAuthorHistory: buildAuthorHistoryReader({
-    getUser: (id) => identityServices.store.getUser(id),
-    getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
-    stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
-    listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
-    getThreadRoomId: async (threadId) =>
-      (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
-    now: () => Date.now(),
-  }),
+// ingestion stores (only for governed rooms, on this path). The SAME reader backs
+// the deferred-re-moderation context loader below, so the live + retry paths build
+// an identical context.
+const authorHistoryReader = buildAuthorHistoryReader({
+  getUser: (id) => identityServices.store.getUser(id),
+  getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
+  stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
+  listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
+  getThreadRoomId: async (threadId) =>
+    (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
+  now: () => Date.now(),
 });
+forumServices.agentModerator = createRoomAgentModerator({ readAuthorHistory: authorHistoryReader });
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
@@ -1184,6 +1293,19 @@ startGovernanceScheduler(
       if (subscription?.status === 'active') return true;
       return (await forumServices.rooms.stewardRolesFor(roomId, userId)).length > 0;
     },
+    // WS-U ADR-9 deferred re-moderation: reconstruct each outage-deferred
+    // contribution's context from the live stores (the queue holds no content),
+    // then raise an already-published contribution whose model judgment finally
+    // decided a restriction, over the REAL forum + ingestion stores (floor-dominant;
+    // routes to human review).
+    loadModerationContext: buildModerationContextLoader({
+      forum: forumServices,
+      readAuthorHistory: authorHistoryReader,
+    }),
+    applyDeferredRemoderation: buildDeferredRemoderationApplier({
+      forum: forumServices,
+      ingestion: ingestionServices,
+    }),
     log: (event, meta) => logger.info(meta, event),
     now: () => Date.now(),
   },

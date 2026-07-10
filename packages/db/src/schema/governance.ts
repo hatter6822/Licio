@@ -130,6 +130,10 @@ export const roomGovernanceModels = knomosisSchema.table(
     }),
     status: roomModelStatusEnum('status').notNull().default('proposed'),
     evaluationRef: uuid('evaluation_ref'), // soft ref to the WS-K evaluation decision
+    // The ModerationProposer.backendId that ran this model's admission gate (WS-U
+    // ADR-9 review): moderation refuses to run under a different backend than the
+    // one that admitted the model. Null until admitted / for a backendId-less proposer.
+    admittedBackendId: text('admitted_backend_id'),
     createdAt: tz('created_at').notNull().defaultNow(),
   },
   (t) => [
@@ -288,6 +292,41 @@ export const agentActionLogs = knomosisSchema.table(
   (t) => [index('agent_action_log_room_idx').on(t.roomId)],
 );
 export type AgentActionLogRow = typeof agentActionLogs.$inferSelect;
+
+/**
+ * WS-U ADR-9 deferred re-moderation queue. When the in-room moderation MODEL (an
+ * LLM) was UNAVAILABLE for a contribution (an outage), the platform kept the
+ * always-on WS-J baseline decision AND enqueued the contribution HERE, so the
+ * model's own judgment is RETRIED later rather than dropped ("delayed, never
+ * dropped"). The governance scheduler sweep RECONSTRUCTS the moderation context
+ * from the live forum/content stores at retry time (never persisted here), re-runs
+ * the model, and on a decided restriction raises the already-published
+ * contribution to human review post-hoc; a benign, moot, or already-deleted item
+ * is removed. Exactly one row per (room, contribution) — a re-defer UPSERTs
+ * (composite PK), never duplicating.
+ *
+ * PRIVACY (WS-D.3.2): this table holds ONLY soft refs + retry bookkeeping — NO
+ * contribution text or any content field. The knomosis context never copies UGC,
+ * so a contribution deletion/anonymization has nothing to purge here (a bare,
+ * dangling `subject_ref` is self-cleaned on the next sweep, whose context loader
+ * returns null ⇒ moot ⇒ dequeue). `subject_ref` is a soft ref (no FK).
+ */
+export const roomPendingRemoderations = knomosisSchema.table(
+  'room_pending_remoderation',
+  {
+    roomId: uuid('room_id').notNull(), // soft ref
+    subjectRef: text('subject_ref').notNull(), // soft ref to the moderated contribution
+    attempts: integer('attempts').notNull().default(0),
+    enqueuedAt: tz('enqueued_at').notNull().defaultNow(),
+    lastAttemptAt: tz('last_attempt_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.roomId, t.subjectRef] }),
+    // Oldest-first draining: the sweep orders by enqueue time.
+    index('room_pending_remoderation_enqueued_idx').on(t.enqueuedAt),
+  ],
+);
+export type RoomPendingRemoderationRow = typeof roomPendingRemoderations.$inferSelect;
 
 /** Log of agent-submitted treasury actions and their kernel verdicts (WS-U.5). */
 export const agentTreasuryActions = knomosisSchema.table(

@@ -12,7 +12,7 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Layer | Where | Status |
 |---|---|---|
 | Pure domain (kernel, DSL, capabilities, elections) | `packages/governance` (`@licio/governance`) | **Shipped** |
-| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0038` | **Shipped** |
+| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0038`, `0066` (content-free deferred-re-moderation queue), `0067` (admitting-backend pin) | **Shipped** |
 | Production store binding | `apps/api/src/governance/drizzle-governance-stores.ts` (gated; bound at boot when `DATABASE_URL` is set) | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
@@ -20,10 +20,13 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 
 ### `@licio/governance` (pure domain, I/O-free, never depends on `@licio/db`)
 
-- **`GovernancePolicyBundle`** (ADR-1) — the declarative "model": a moderation
-  **policy DSL** (total, side-effect-free, **no regex/ReDoS, no arbitrary code**),
-  prompt templates, config, and requested capabilities. Content-addressed via
-  `canonicalize()` → caller's sha-256.
+- **`GovernancePolicyBundle`** (ADR-1, revised) — the content-addressed "model":
+  a member-ratified **moderation prompt** (prose that conditions the in-room LLM
+  moderation model), prompt templates, config, and requested capabilities.
+  Content-addressed via `canonicalize()` → caller's sha-256. *(The original cut
+  carried a deterministic moderation **policy DSL** here; the
+  LLM-in-a-deterministic-wrapper redesign replaced it — see
+  `boundAiModerationAction` below.)*
 - **Capability model** — a closed grantable-capability enum **disjoint** from the
   floor-reserved action set, so floor-reserved actions are *structurally
   inexpressible* (the WS-U.3.6a guarantee at the type level).
@@ -34,8 +37,11 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   machine-checkable evidence it satisfies the law-pack, else a typed rejection;
   fail-closed when crypto is off; the agent holds no keys. This is the
   `KnomosisGateway` seam the real Lean/Solidity/Rust kernel plugs into later.
-- **`evaluatePolicy`** — deterministic moderation decisioning (most-severe match,
-  ties by declared order); prompt-injection-inert (ADR-5).
+- **`boundAiModerationAction`** (ADR-9, `moderation-bound.ts`) — the DETERMINISTIC
+  WRAPPER around the in-room LLM's proposal: clamp to the escalate-to-human-review
+  ceiling (never above `flag_for_review`), then to the community-granted capability.
+  Pure, total, prompt-injection-inert (ADR-5) — authority is enforced OUTSIDE the
+  model, so the *effect* is fixed regardless of what the model proposes.
 - **`tallyElection`** (ADR-7/8) — deterministic, quorum/turnout-gated, fail-safe;
   the agent has no vote/tally/weight capability.
 
@@ -57,9 +63,14 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   law-pack** (`election` bounds: quorum, turnout, per-account cap, term), defaulting
   to the platform baseline — never a hardcoded constant.
 - **Stage 2** — community model/prompt registry, content-addressing, and the
-  **platform admission gate**: the model's deterministic decisions must fall within
-  the platform `[min,max]` severity band on every fixture (catching under- and
-  over-moderation), beneath — never replacing — the platform legal floor. A model
+  **platform admission gate**: the candidate in-room model (an LLM proposer) is
+  **sampled k-of-N** over the platform floor-safety eval set and must land in the
+  platform `[min,max]` severity band on every fixture (catching under- and
+  over-moderation), beneath — never replacing — the platform legal floor. A
+  TRANSIENT proposer outage during admission is **retryable, never a permanent
+  reject**: the model stays `evaluating` (so the `(room,digest)` dedup can't lock
+  the bundle out) and the scheduler's `admission_retry` sweep re-runs it when the
+  backend recovers. A model
   becomes the active agent ONLY by passing a **member ratification vote** (`@licio/
   governance` `tallyRatification`): the seat-holder opens a vote on an eligible
   model (optionally binding a law-pack), members cast one yes/no ballot each
@@ -67,20 +78,40 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   settles it at the window close — adopting the model only on a quorum-meeting
   approving majority (FAIL-SAFE otherwise). There is NO direct-activate route;
   adopting a new model **supersedes** the prior one.
-- **Stage 3** — the bounded moderation agent: capability-gated decisioning (an
-  un-granted action is **downgraded to a human-floor referral**, never escalated),
-  the provenance-triple audit log, and the floor's room-governance-freeze — now a
-  live, platform-steward-gated control (`POST …/governance/agent/freeze` +
-  `…/unfreeze`, gated by the WS-J `restrict` capability + verified MFA): a platform
-  safety steward, never the room's elected steward, can pause or restore a room's
-  community-approved agent at any time, and the "governed by" view reports the
-  paused (`frozen`) state. The agent is **wired into the live contribution path**:
-  BOTH `createContribution` AND `editContribution` (an edit-to-violate is caught
-  too) consult the `RoomAgentModerator` seam (`governance/forum-agent.ts`) for any
-  room with an active binding and combine its recommendation **floor-dominantly**
-  — the agent can raise a contribution's moderation state (flag → `under_review`,
-  remove → `removed`) but can never lower or reverse a platform-floor decision.
-  The agent decides over a `ModerationContext` carrying **real author-history
+- **Stage 3** — the in-room moderation MODEL is an **LLM inside a deterministic
+  wrapper** (`GovernanceService.moderate`, ADR-9): the model CLASSIFIES a
+  contribution and the wrapper bounds its proposal by the **escalate-to-human-review
+  ceiling** (never above `flag_for_review` — an AI-driven removal is impossible; a
+  human confirms) then the **community-capability clamp** (`boundAiModerationAction`);
+  an un-granted action is clamped down, never escalated. On model **UNAVAILABLE**
+  (timeout, breaker, budget, prohibited-use block, transport/schema error) the wrapper
+  **fails to the always-on WS-J baseline** (returns no in-room decision) AND enqueues
+  the contribution REF in the durable **pending-remoderation queue**
+  (`knomosis.room_pending_remoderation`); the lease-guarded scheduler's
+  `remoderation_lifecycle` sweep drains it — RECONSTRUCTING the moderation context from
+  the live content stores at retry (the queue holds only soft refs — **no UGC** — so a
+  contribution deletion has nothing to purge there), re-running the model once it
+  recovers, and RAISING the already-published contribution to review post-hoc
+  (floor-dominant), so the model's judgment is **delayed, never dropped**. A model is
+  admitted under a SPECIFIC backend (`ModerationProposer.backendId`, pinned on the
+  model at admission); if the live backend differs — LLM moderation enabled over a
+  deterministic-admitted model, or `GOVERNANCE_LLM_MODEL` changed — moderation **fails
+  closed to the baseline** until the model is re-admitted (never runs under an
+  un-vetted backend). A **deterministic default proposer** serves the same seam when no
+  LLM is configured (dev/test; opt out of the LLM with `GOVERNANCE_LLM_MODERATION=off`).
+  Provenance-triple audit log; the floor's
+  room-governance-freeze — a live, platform-steward-gated control (`POST
+  …/governance/agent/freeze` + `…/unfreeze`, gated by the WS-J `restrict` capability +
+  verified MFA): a platform safety steward, never the room's elected steward, can
+  pause or restore a room's community-approved agent at any time, and the "governed
+  by" view reports the paused (`frozen`) state. The model is **wired into the live
+  contribution path**: BOTH `createContribution` AND `editContribution` (an
+  edit-to-violate is caught too) consult the `RoomAgentModerator` seam
+  (`governance/forum-agent.ts`) for any room with an active binding and combine its
+  recommendation **floor-dominantly** — the agent can raise a contribution's
+  moderation state (flag → `under_review`) but can never lower or reverse a
+  platform-floor decision, and the ceiling means it never reaches `removed`.
+  The model decides over a `ModerationContext` carrying **real author-history
   signals** (account age from the identity articulation node, room familiarity from
   the subscription/steward state, prior in-room removals) and **canonical**
   link/mention counts (one token per URL; an email is not a mention), so a room
@@ -94,7 +125,11 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   (`@licio/governance` `summarizeProposal`/`scheduleProposalVote`/`attestOutcome`),
   exposed as capability-gated `facilitateSummary`/`Schedule`/`Attest`: each requires
   the matching `lawmaking.*` capability on the active binding (else a typed
-  refusal), and every facilitation is logged with the provenance triple. The agent
+  refusal), and every facilitation is logged with the provenance triple. The
+  summary surface additionally accepts an ADR-3 `GovernanceNlProvider` (wired
+  at boot; see the LLM-seam residual below): an LLM-drafted summary is served
+  only after the deterministic quality/grounding gate passes, and any provider
+  failure serves the deterministic summary instead. The agent
   attests a PLATFORM-COMPUTED outcome — it has no vote/tally/weight capability, so
   it can never compute or bias a result (ADR-8). The elected steward can trigger a
   neutral summary (`POST …/governance/lawmaking/summarize`); schedule/attest are
@@ -240,8 +275,43 @@ hypothetical `knomosis → public.rooms` FK is caught.
   moderation/Knomosis surfaces (covered by their existing feature cells, safety +
   Knomosis metrics, and coordination anti-signals); confirming clarifying notes are
   the only residual.
-- **Pluggable LLM provider seam** (ADR-3) — the deterministic default ships;
-  the governed provider port for real-LLM summaries is the upgrade path.
+- **Pluggable LLM provider seam** (ADR-3) — **shipped for the lawmaking-summary
+  surface** (ADR-9, 2026-07). `GovernanceNlProvider`
+  (`apps/api/src/governance/nl-provider.ts`) is the port; `facilitateSummary`
+  consumes it, conditioning the draft on the room's member-ratified prompt +
+  the bundle's `promptTemplates['lawmaking.summarize']` + `config.summaryStyle`,
+  and FALLS BACK to the deterministic summary on any provider failure. Two real
+  backends exist behind the same governed pipeline
+  (`apps/api/src/ai-governance/llm/`): the hosted Anthropic API (official SDK)
+  and a **loopback-only local** OpenAI-compatible runtime (llama.cpp server,
+  Ollama, vLLM, LM Studio). Every invocation is guard-checked
+  (`gov_summarize_proposal`, advisory), zod-validated, gated by the
+  deterministic §24.5 quality/grounding checks, budgeted per room (ADR-6) with
+  a circuit breaker, registered/deployed through the real WS-K gate (one
+  registry identity per backend), and recorded as an immutable `AIOutputRecord`.
+  Fail-closed: OFF by default behind the explicit env opt-in
+  (`GOVERNANCE_LLM_PROVIDER`), and available in EVERY environment — production
+  included (the 2026-07-09 maintainer decision, ADR-9) — never mandatory,
+  never silent: the hosted backend's data-processor egress is boot-logged
+  loudly, and the `local` backend is loopback-enforced so content stays
+  on-host (see `docs/DEVELOPMENT.md` for setup). **The in-room moderation MODEL
+  is the wrapped LLM** (ADR-9, revised — the deterministic policy-DSL and the
+  earlier score-blind shadow advisor were both removed): a governed
+  `toxicity_safety_triage` LLM CLASSIFIES each moderated contribution, and
+  `GovernanceService.moderate` is the DETERMINISTIC WRAPPER that bounds the
+  proposal (the escalate-to-human-review ceiling + the community-capability
+  clamp; the ADR-1/ADR-5 authority invariant). It runs the full governed path
+  (guard → completion → strict schema → immutable `AIOutputRecord`) under a
+  per-room budget + breaker; on model unavailability it **fails to the WS-J
+  baseline** and enqueues the contribution for **deferred re-moderation** (the
+  durable `room_pending_remoderation` queue drained by the scheduler sweep —
+  delayed, never dropped). Every decided moderation (raw proposed vs
+  wrapper-bounded action, whether clamped — metadata only, no content, no
+  attention values) is surfaced to the AI team at `GET
+  /v1/ai/admin/governance/moderation/:roomId`. LLM by default when a backend is
+  configured; opt out via `GOVERNANCE_LLM_MODERATION=off` (⇒ the deterministic
+  default proposer). Remaining: the recorded-fixture eval corpus replacing the
+  synthetic admission input (slice 3).
 
 ## Security & correctness audit (2026-07)
 

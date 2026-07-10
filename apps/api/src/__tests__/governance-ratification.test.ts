@@ -36,14 +36,8 @@ const bundle = (over: Record<string, unknown> = {}) => ({
   bundleId: 'b',
   version: '1',
   name: 'n',
-  moderationRules: [
-    {
-      id: 'flag',
-      when: { kind: 'link_count_gte', value: 3 },
-      action: 'flag_for_review',
-      reason: 'x',
-    },
-  ],
+  moderationPrompt:
+    'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
   promptTemplates: {},
   config: {},
   requestedCapabilities: ['moderate.flag'],

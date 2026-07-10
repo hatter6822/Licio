@@ -24,9 +24,8 @@ const bundle = (over: Record<string, unknown> = {}) => ({
   bundleId: 'b',
   version: '1',
   name: 'n',
-  moderationRules: [
-    { id: 'spam', when: { kind: 'link_count_gte', value: 3 }, action: 'remove', reason: 'links' },
-  ],
+  moderationPrompt:
+    'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil on-topic content.',
   promptTemplates: {},
   config: {},
   requestedCapabilities: ['moderate.remove', 'moderate.flag'],

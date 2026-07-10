@@ -2095,14 +2095,12 @@ export async function seedGovernanceDemo(
     bundleId: 'demo-civility',
     version: '1',
     name: 'Community civility policy',
-    moderationRules: [
-      {
-        id: 'link-spam',
-        when: { kind: 'link_count_gte', value: 3 },
-        action: 'flag_for_review',
-        reason: 'Posts with several links are sent for human review.',
-      },
-    ],
+    // The community-ratified in-room MODEL is an LLM conditioned by this prompt
+    // (WS-U ADR-9); the platform's deterministic wrapper bounds whatever it
+    // proposes (escalate-to-human-review ceiling + capability clamp). The prompt
+    // is prose, not a DSL — the removed policy-DSL is gone.
+    moderationPrompt:
+      'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil, on-topic content.',
     promptTemplates: { summary: 'Summarize the discussion neutrally and briefly.' },
     config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
     // moderation + the Stage 4 lawmaking summary (both permitted by the default

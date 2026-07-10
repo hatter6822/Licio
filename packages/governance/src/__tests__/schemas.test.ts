@@ -2,7 +2,6 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalize } from '../canonical-json.js';
 import { lawPackSchema } from '../schemas/law-pack.js';
-import { moderationConditionSchema } from '../schemas/moderation.js';
 import { governancePolicyBundleSchema } from '../schemas/policy-bundle.js';
 import { treasuryActionSchema, verdictSchema } from '../schemas/treasury.js';
 
@@ -22,8 +21,8 @@ describe('schemas', () => {
     const bundle = governancePolicyBundleSchema.parse({
       bundleId: 'b1',
       version: '1.0.0',
-      name: 'Civility ruleset',
-      moderationRules: [{ id: 'r1', when: { kind: 'always' }, action: 'allow', reason: 'ok' }],
+      name: 'Civility model',
+      moderationPrompt: 'Flag uncivil or off-topic contributions for human review.',
       promptTemplates: { summary: 'Summarize: {{proposal}}' },
       config: {},
       requestedCapabilities: ['moderate.remove'],
@@ -32,19 +31,29 @@ describe('schemas', () => {
     expect(bundle.requestedCapabilities).toEqual(['moderate.remove']);
   });
 
-  it('rejects an unknown capability and an unknown condition kind', () => {
+  it('rejects an unknown capability and a missing moderation prompt', () => {
     expect(
       governancePolicyBundleSchema.safeParse({
         bundleId: 'b',
         version: '1',
         name: 'x',
-        moderationRules: [],
+        moderationPrompt: 'be civil',
         promptTemplates: {},
         config: {},
         requestedCapabilities: ['floor.override_platform_safety'],
       }).success,
     ).toBe(false);
-    expect(moderationConditionSchema.safeParse({ kind: 'eval_js' }).success).toBe(false);
+    // The moderation prompt is required (it IS the model the community ratifies).
+    expect(
+      governancePolicyBundleSchema.safeParse({
+        bundleId: 'b',
+        version: '1',
+        name: 'x',
+        promptTemplates: {},
+        config: {},
+        requestedCapabilities: ['moderate.flag'],
+      }).success,
+    ).toBe(false);
   });
 
   it('parses a law-pack and validates verdict + treasury action shapes', () => {

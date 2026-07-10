@@ -14,7 +14,7 @@ export * from './decimal.js';
 export * from './election.js';
 export * from './kernel.js';
 export * from './lawmaking.js';
-export * from './policy-dsl.js';
+export * from './moderation-bound.js';
 export * from './ratification.js';
 export * from './schemas/capability.js';
 export * from './schemas/election.js';

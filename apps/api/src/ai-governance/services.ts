@@ -34,12 +34,14 @@ import {
   InMemoryGovernanceSummaryStore,
   InMemoryInventoryStore,
   InMemoryModelRegistryStore,
+  InMemoryModerationDecisionLog,
   InMemoryRiskAssessmentStore,
   InMemoryRuntimeMonitorStore,
   InMemorySummaryStore,
   InMemoryTranslationStore,
   type InventoryStore,
   type ModelRegistryStore,
+  type ModerationDecisionLogStore,
   type RiskAssessmentStore,
   type RuntimeMonitorStore,
   type SummaryStore,
@@ -61,6 +63,8 @@ export interface AiGovernanceServices {
   translations: TranslationStore;
   governanceSummaries: GovernanceSummaryStore;
   runtime: RuntimeMonitorStore;
+  /** WS-U in-room moderation decision log (ADR-9; observability). */
+  moderationLog: ModerationDecisionLogStore;
   // Services.
   guard: ProhibitedUseGuard;
   translationProvider: TranslationProvider;
@@ -107,6 +111,7 @@ export function createInMemoryAiGovernanceServices(
     translations: new InMemoryTranslationStore(),
     governanceSummaries: new InMemoryGovernanceSummaryStore(),
     runtime: new InMemoryRuntimeMonitorStore(),
+    moderationLog: new InMemoryModerationDecisionLog(),
     guard: new ProhibitedUseGuard({ blocked, metrics, log, now }),
     translationProvider: options.translationProvider ?? new PassthroughTranslationProvider(),
     metrics,
