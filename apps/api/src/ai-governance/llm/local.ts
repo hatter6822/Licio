@@ -79,7 +79,11 @@ export type LocalCompletionLog = (event: string, meta: Record<string, unknown>) 
  * the platform requests, and a runtime that cannot honour it serves the
  * lesser-thinking form with every deterministic gate still judging the output
  * above this layer. At most one retry per call; a latched closure sends its
- * adapted form directly on subsequent calls.
+ * adapted form directly on subsequent calls. Retry eligibility keys on what
+ * EACH request actually sent, not on the shared latch — calls fan out
+ * concurrently (admission sampling, the debate judge pass), so every
+ * in-flight request that carried the field gets its own retry even when a
+ * sibling latched first (the latch only steers future sends).
  */
 export function createLocalCompletion(
   baseUrl: string,
@@ -140,12 +144,21 @@ export function createLocalCompletion(
   };
 
   return async (request) => {
-    let response = await attempt(request, effectiveEffort);
+    // What THIS request sends. Retry decisions below key on this — NOT on the
+    // shared latches — because calls fan out concurrently (admission's k-of-N
+    // sampling, the debate lifecycle's 4-wide judge pass): every in-flight
+    // request built before the first negotiated response still carries the
+    // field, and each of them must get its own retry. The latches only steer
+    // what FUTURE calls send (and make the log fire once).
+    const sentEffort = effortRejected ? null : effectiveEffort;
+    let response = await attempt(request, sentEffort);
 
     // Negotiation 1 — the runtime rejects the reasoning_effort field outright.
-    if (response.status === 400 && effectiveEffort !== null && !effortRejected) {
-      effortRejected = true;
-      log('ai.llm.local.effort_rejected', { model_id: settings.modelId });
+    if (response.status === 400 && sentEffort !== null) {
+      if (!effortRejected) {
+        effortRejected = true;
+        log('ai.llm.local.effort_rejected', { model_id: settings.modelId });
+      }
       response = await attempt(request, null);
     }
     if (!response.ok) {
@@ -154,19 +167,24 @@ export function createLocalCompletion(
     let result = await toResult(response);
 
     // Negotiation 2 — thinking exhausted the whole output budget before any
-    // content. Retry once with thinking disabled and latch. Only when the
-    // operator DECLARED an effort at all: an explicit `off` (null) is a strict
-    // never-send-the-field instruction and is honoured verbatim.
+    // content. Retry once with thinking disabled and latch. Only when THIS
+    // request sent an effort above `none` (an explicit operator `off` sends
+    // nothing and is honoured verbatim; a concurrently-latched `none` retry
+    // target still applies to every straggler that sent the old effort). If a
+    // concurrent 400 latched the field away entirely, thinking cannot be
+    // disabled — return the honest truncated result.
     if (
       result.stopReason === 'max_tokens' &&
       (result.text === null || result.text.length === 0) &&
-      settings.reasoningEffort !== null &&
-      effectiveEffort !== 'none' &&
+      sentEffort !== null &&
+      sentEffort !== 'none' &&
       !effortRejected
     ) {
-      effectiveEffort = 'none';
-      log('ai.llm.local.thinking_exhausted', { model_id: settings.modelId });
-      const retried = await attempt(request, effectiveEffort);
+      if (effectiveEffort !== 'none') {
+        effectiveEffort = 'none';
+        log('ai.llm.local.thinking_exhausted', { model_id: settings.modelId });
+      }
+      const retried = await attempt(request, 'none');
       if (!retried.ok) {
         throw new Error(`local inference server responded ${retried.status}`);
       }

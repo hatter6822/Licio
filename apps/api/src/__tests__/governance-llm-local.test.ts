@@ -297,3 +297,84 @@ describe('per-runtime parameter negotiation (the effort latches)', () => {
     expect(calls).toHaveLength(2);
   });
 });
+
+describe('negotiation under CONCURRENT fan-out (the latch must not starve siblings)', () => {
+  /** A content-sensitive fake runtime: responds per the REQUEST body rather
+   *  than a queue, so concurrent calls negotiate realistically. */
+  function runtimeFetch(behaviour: 'reject-effort' | 'exhaust-above-none') {
+    const calls: FetchCall[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      calls.push({ url, init });
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      const effort = body['reasoning_effort'];
+      if (behaviour === 'reject-effort' && effort !== undefined) {
+        return { ok: false, status: 400, json: async () => ({}) };
+      }
+      if (behaviour === 'exhaust-above-none' && effort !== undefined && effort !== 'none') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [{ message: { content: '' }, finish_reason: 'length' }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            { message: { content: '{"headline":"h","summary":"s"}' }, finish_reason: 'stop' },
+          ],
+        }),
+      };
+    };
+    return { calls, fetchImpl };
+  }
+
+  it('every concurrent in-flight call that sent a 400-rejected field gets its own retry', async () => {
+    const { calls, fetchImpl } = runtimeFetch('reject-effort');
+    const complete = createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: 'low' },
+      fetchImpl,
+    );
+    // Three calls in flight BEFORE any response can latch (admission k-of-3).
+    const results = await Promise.all([complete(REQUEST), complete(REQUEST), complete(REQUEST)]);
+    for (const result of results) {
+      expect(result.text).toBe('{"headline":"h","summary":"s"}');
+    }
+    // Each of the three sent-with-field requests retried once without it.
+    expect(calls).toHaveLength(6);
+    // The latch steers subsequent calls: no field, no retry.
+    await complete(REQUEST);
+    expect(calls).toHaveLength(7);
+    const last = calls[6];
+    if (!last) throw new Error('no call recorded');
+    expect('reasoning_effort' in (JSON.parse(last.init.body) as Record<string, unknown>)).toBe(
+      false,
+    );
+  });
+
+  it('every concurrent thinking-exhausted call retries at `none` even when a sibling latched first', async () => {
+    const { calls, fetchImpl } = runtimeFetch('exhaust-above-none');
+    const complete = createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: 'low' },
+      fetchImpl,
+    );
+    const results = await Promise.all([complete(REQUEST), complete(REQUEST), complete(REQUEST)]);
+    for (const result of results) {
+      expect(result.stopReason).toBe('end_turn');
+      expect(result.text).toBe('{"headline":"h","summary":"s"}');
+    }
+    expect(calls).toHaveLength(6); // three exhausted firsts + three `none` retries
+    await complete(REQUEST);
+    const last = calls[6];
+    if (!last) throw new Error('no call recorded');
+    expect((JSON.parse(last.init.body) as Record<string, unknown>)['reasoning_effort']).toBe(
+      'none', // latched for future calls — no retry needed
+    );
+    expect(calls).toHaveLength(7);
+  });
+});
