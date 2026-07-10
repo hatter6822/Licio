@@ -413,3 +413,51 @@ describe('GovernanceService.moderate — the admitting-backend gate (WS-U ADR-9 
     expect(res.ok && res.value).toBeNull();
   });
 });
+
+describe('GovernanceService admission — a transient outage is retryable, never a permanent reject (R3-4)', () => {
+  it('leaves the model EVALUATING during an outage, then the sweep resolves it to eligible on recovery', async () => {
+    // A proposer that is UNAVAILABLE for the admission probes until `up` flips.
+    let up = false;
+    const flakyAdmission: ModerationProposer = {
+      kind: 'llm',
+      async propose() {
+        return up
+          ? decided('flag_for_review')
+          : ({ status: 'unavailable', code: 'down' } as ModerationProposerResult);
+      },
+    };
+    const h = makeService(flakyAdmission);
+    await h.svc.bootstrapSeat(ROOM, STEWARD);
+    const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(['moderate.flag']), 'be civil');
+    if (!proposed.ok) throw new Error('propose');
+
+    // Admission during the outage ⇒ retryable `evaluating`, NOT a permanent `rejected`
+    // (so the (room,digest) dedup doesn't lock the steward out of the same bundle).
+    const first = await h.svc.evaluateModel(proposed.value.modelId);
+    expect(first.ok && first.value.status).toBe('evaluating');
+    expect((await h.svc.getModel(proposed.value.modelId))?.status).toBe('evaluating');
+
+    // Backend recovers ⇒ the scheduler's re-evaluation sweep resolves it to eligible.
+    up = true;
+    const sweep = await h.svc.reEvaluateStuckAdmissions();
+    expect(sweep).toMatchObject({ retried: 1, resolved: 1 });
+    expect((await h.svc.getModel(proposed.value.modelId))?.status).toBe('eligible');
+  });
+
+  it('a genuine over-moderation (decided, out of band — not unavailable) is still REJECTED', async () => {
+    // Always decides `remove` ⇒ over-moderates the benign fixture; no unavailable
+    // samples ⇒ a real rejection, not a transient one.
+    const overMod: ModerationProposer = {
+      kind: 'llm',
+      async propose() {
+        return decided('remove');
+      },
+    };
+    const h = makeService(overMod);
+    await h.svc.bootstrapSeat(ROOM, STEWARD);
+    const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(['moderate.flag']), 'be civil');
+    if (!proposed.ok) throw new Error('propose');
+    const res = await h.svc.evaluateModel(proposed.value.modelId);
+    expect(res.ok && res.value.status).toBe('rejected');
+  });
+});

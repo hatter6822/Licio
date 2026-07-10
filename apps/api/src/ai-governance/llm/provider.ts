@@ -131,7 +131,17 @@ export class ConsecutiveFailureBreaker {
   }
   allowed(nowMs: number): boolean {
     if (this.#openedAtMs === null) return true;
-    return nowMs - this.#openedAtMs >= this.#cooldownMs;
+    if (nowMs - this.#openedAtMs < this.#cooldownMs) return false;
+    // Half-open: admit exactly ONE probe and RE-ARM the cooldown, so a burst of
+    // concurrent callers in the recovery window does NOT all pass before the first
+    // records its result (that would fan out many external LLM calls at once,
+    // defeating the breaker — WS-U ADR-9 review). Later callers see "not yet
+    // elapsed" and stay `breaker_open` until this probe resolves (recordSuccess
+    // closes; recordFailure re-opens). Re-arming also self-heals a leaked probe (a
+    // caller that bails after `allowed` without recording): the next probe is simply
+    // admitted after another cooldown, never a stuck-open breaker.
+    this.#openedAtMs = nowMs;
+    return true;
   }
   recordFailure(nowMs: number): void {
     this.#failures += 1;

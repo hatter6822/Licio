@@ -82,6 +82,8 @@ describe('createLocalCompletion (OpenAI-compatible wire shape)', () => {
     expect(call.init.method).toBe('POST');
     expect(call.init.headers['content-type']).toBe('application/json');
     expect(call.init.signal).toBeInstanceOf(AbortSignal);
+    // Loopback egress guarantee (R3-1): a redirect must fail, never be followed.
+    expect(call.init.redirect).toBe('error');
 
     const payload = JSON.parse(call.init.body) as Record<string, unknown>;
     expect(payload['model']).toBe('llama3.3:70b');

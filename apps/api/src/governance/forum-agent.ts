@@ -297,13 +297,27 @@ export function buildDeferredRemoderationApplier(
           resolvedAt: null,
           notBefore: null,
         });
+        // The author notice is part of the SAME atomic unit as the hide + review
+        // case (WS-U ADR-9 review): a hidden contribution must never be left without
+        // its statement-of-reasons notice, or the next sweep would treat the
+        // now-under_review row as moot and dequeue it — a SILENT deferred sanction.
+        // So a notice failure trips the same compensation below.
+        if (deps.forum.autoModerationSink !== null && contribution.userId !== null) {
+          await deps.forum.autoModerationSink.recordAgentHold({
+            contributionId,
+            authorUserId: contribution.userId,
+            removed: false, // the escalate-to-review ceiling ⇒ never an AI-driven removal
+            reason,
+          });
+        }
       } catch (error) {
         // ATOMICITY (mirrors the live contribution path's compensating rollback): a
-        // hidden contribution must never be left WITHOUT a reviewer case. If the
-        // review-queue intake fails after the state change, COMPENSATE by restoring
-        // the published state — but only if it is still the value we just set, so a
-        // concurrent platform-floor decision is never lowered — then rethrow so the
-        // sweep keeps the item queued and retries BOTH steps together next pass.
+        // hidden contribution must never be left WITHOUT its reviewer case AND author
+        // notice. If either the review-queue intake or the notice fails after the
+        // state change, COMPENSATE by restoring the published state — but only if it
+        // is still the value we just set, so a concurrent platform-floor decision is
+        // never lowered — then rethrow so the sweep keeps the item queued and retries
+        // the WHOLE unit together next pass.
         const latest = await deps.forum.contributions.getById(contributionId);
         if (latest?.moderationState === target) {
           await deps.forum.contributions
@@ -312,14 +326,13 @@ export function buildDeferredRemoderationApplier(
         }
         throw error;
       }
-    }
-    // No silent sanction: notify the author with the agent's statement of reasons
-    // (whether the content was raised to review or only warned).
-    if (deps.forum.autoModerationSink !== null && contribution.userId !== null) {
+    } else if (deps.forum.autoModerationSink !== null && contribution.userId !== null) {
+      // A `warn` (no state change): notify the author, but nothing is hidden, so a
+      // notice failure just retries — there is no silent SANCTION to guard against.
       await deps.forum.autoModerationSink.recordAgentHold({
         contributionId,
         authorUserId: contribution.userId,
-        removed: false, // the escalate-to-review ceiling ⇒ never an AI-driven removal
+        removed: false,
         reason,
       });
     }

@@ -1242,8 +1242,10 @@ GOVERNANCE_LLM_MODERATION=off
 ```
 
 The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /
-`[::1]`) — a non-local URL is rejected at startup, so `local` provably means
-no third-party egress. On boot the backend registers + deploys through the
+`[::1]`) — a non-local URL is rejected at startup, and the local fetch sets
+`redirect: 'error'` so a loopback server's 3xx cannot replay the request off-host —
+so `local` provably means no third-party egress. On boot the backend registers +
+deploys through the
 real WS-K admission gate; every call is guard-checked, schema-validated,
 quality/grounding-gated, per-room budgeted (with a circuit breaker), and
 recorded as an immutable `AIOutputRecord` — and **any** failure falls back to

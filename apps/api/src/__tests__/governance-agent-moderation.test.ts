@@ -402,6 +402,23 @@ describe('WS-U buildDeferredRemoderationApplier (deferred re-seam, floor-dominan
     // restored to published, so the sweep can retry BOTH steps cleanly next pass.
     expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('published');
   });
+
+  it('R3-3: compensates (restores published) when the AUTHOR NOTICE fails — no silent deferred sanction', async () => {
+    const id = await publishedContribution();
+    // The state + review case are written, but the author-notice sink then throws.
+    fixture.forum.autoModerationSink = {
+      recordContentAutoBlock: async () => {},
+      recordAgentHold: async () => {
+        throw new Error('notice store down');
+      },
+    };
+    await expect(applier()(ROOM, id, 'flag_for_review', 'links')).rejects.toThrow(
+      'notice store down',
+    );
+    // The notice is inside the atomic unit: a hidden contribution is never left
+    // without its statement-of-reasons, so it was restored to published for retry.
+    expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('published');
+  });
 });
 
 describe('WS-U buildModerationContextLoader (content-free reconstruction + moot rules)', () => {

@@ -259,6 +259,27 @@ describe('governance LLM provider — breaker + budget bounds (ADR-6)', () => {
     expect(h.requests.length).toBe(after + 1);
   });
 
+  it('serializes the half-open probe: only ONE call passes per cooldown window (R3-2, no fan-out)', async () => {
+    h.queue.push(new Error('down'), new Error('still down'));
+    await expectFailure(h, 'transport');
+    await expectFailure(h, 'transport'); // second consecutive failure → opens
+    h.advance(61_000); // past the cooldown → half-open
+    const callsBefore = h.requests.length;
+    // Two calls WITHOUT awaiting the first: the first admits the probe and re-arms
+    // the cooldown; the second, at the same instant, must be breaker_open — NOT a
+    // second concurrent external call (the recovery-window fan-out the fix prevents).
+    const first = h.provider.summarizeProposal(request({ roomId: 'room-2' }));
+    let secondCode: string | null = null;
+    try {
+      await h.provider.summarizeProposal(request({ roomId: 'room-3' }));
+    } catch (error) {
+      secondCode = (error as GovernanceLlmError).code;
+    }
+    await first;
+    expect(secondCode).toBe('breaker_open');
+    expect(h.requests.length).toBe(callsBefore + 1); // exactly ONE probe hit the model
+  });
+
   it('enforces the per-room hourly budget (identity-free, per-room key, window expiry)', async () => {
     await h.provider.summarizeProposal(request());
     await h.provider.summarizeProposal(request());

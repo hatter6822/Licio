@@ -540,23 +540,51 @@ export class GovernanceService {
     return ok({ modelId, promptId, artifactDigest });
   }
 
-  /** Run the admission gate; a passing model becomes `eligible`, else `rejected`. */
+  /**
+   * Run the admission gate; a passing model becomes `eligible`, a genuinely
+   * over/under-moderating one `rejected`. A model whose admission could NOT be
+   * completed because the in-room proposer was UNAVAILABLE (a transient LLM outage)
+   * is left `evaluating` — NEVER permanently rejected for a transient outage (WS-U
+   * ADR-9 review), so the same bundle isn't locked out by the (room,digest) dedup;
+   * the scheduler's `reEvaluateStuckAdmissions` sweep retries it when the backend
+   * recovers (and any caller may re-invoke `evaluateModel` directly).
+   */
   async evaluateModel(
     modelId: string,
   ): Promise<GovernanceResult<{ status: ModelRecord['status'] }>> {
     const model = await this.deps.stores.models.get(modelId);
     if (!model) return err('not_found', 'Model not found.');
     await this.deps.stores.models.patchStatus(modelId, 'evaluating', null);
-    const failures = await this.admissionFailures(model.bundle);
-    const status = failures.length === 0 ? 'eligible' : 'rejected';
-    const evaluationRef = this.deps.uuid();
+    const { failures, sawUnavailable } = await this.admissionFailures(model.bundle);
+    // Transient: admission failed AND at least one sample was unavailable — the run
+    // is inconclusive, so stay `evaluating` (retryable) rather than `rejected`.
+    const status: ModelRecord['status'] =
+      failures.length === 0 ? 'eligible' : sawUnavailable ? 'evaluating' : 'rejected';
+    const evaluationRef = status === 'evaluating' ? null : this.deps.uuid();
     // On admission PASS, pin the model to the backend that ran it, so a later
     // backend/model swap fails closed at moderate time until re-admission (WS-U
-    // ADR-9 review). A rejected model leaves admittedBackendId untouched (null).
+    // ADR-9 review). A rejected/retryable model leaves admittedBackendId untouched.
     const admittedBackendId =
       status === 'eligible' ? (this.deps.moderationProposer?.backendId ?? null) : undefined;
     await this.deps.stores.models.patchStatus(modelId, status, evaluationRef, admittedBackendId);
     return ok({ status });
+  }
+
+  /**
+   * Retry admission for models stuck `evaluating` (a transient in-room-proposer
+   * outage left them retryable, WS-U ADR-9 review). The scheduler calls this each
+   * tick; when the backend recovers a stuck model resolves to `eligible`/`rejected`,
+   * and while it stays down the model simply stays retryable rather than being
+   * permanently rejected + dedup-locked. Bounded per tick.
+   */
+  async reEvaluateStuckAdmissions(limit = 50): Promise<{ retried: number; resolved: number }> {
+    const stuck = await this.deps.stores.models.listByStatus('evaluating', limit);
+    let resolved = 0;
+    for (const model of stuck) {
+      const result = await this.evaluateModel(model.modelId);
+      if (result.ok && result.value.status !== 'evaluating') resolved += 1;
+    }
+    return { retried: stuck.length, resolved };
   }
 
   /**
@@ -1350,12 +1378,18 @@ export class GovernanceService {
    * A deterministic proposer trivially passes with `samples=1`-equivalent
    * agreement; a stochastic one needs the k-of-N robustness.
    */
-  private async admissionFailures(bundle: GovernancePolicyBundle): Promise<string[]> {
+  private async admissionFailures(
+    bundle: GovernancePolicyBundle,
+  ): Promise<{ failures: string[]; sawUnavailable: boolean }> {
     const proposer = this.deps.moderationProposer;
-    if (!proposer) return ['no_moderation_backend'];
+    if (!proposer) return { failures: ['no_moderation_backend'], sawUnavailable: false };
     const samples = Math.max(1, this.deps.admissionSamples ?? 3);
     const minPass = Math.min(samples, Math.max(1, this.deps.admissionMinPass ?? 2));
     const failures: string[] = [];
+    // Track whether ANY probe came back `unavailable` (a transient outage). If the
+    // model then fails admission, the run is treated as inconclusive (retryable)
+    // rather than a permanent rejection — a flaky backend must not lock out a bundle.
+    let sawUnavailable = false;
     for (const fixture of PLATFORM_EVAL_SET) {
       const lo = actionSeverity(fixture.minAction);
       const hi = actionSeverity(fixture.maxAction);
@@ -1367,13 +1401,16 @@ export class GovernanceService {
           context: fixture.context,
           moderationPrompt: bundle.moderationPrompt,
         });
-        if (result.status !== 'decided') continue;
+        if (result.status !== 'decided') {
+          sawUnavailable = true;
+          continue;
+        }
         const sev = actionSeverity(result.proposal.action);
         if (sev >= lo && sev <= hi) inBand += 1;
       }
       if (inBand < minPass) failures.push(fixture.label);
     }
-    return failures;
+    return { failures, sawUnavailable };
   }
 
   private async firstPromptFor(modelId: string) {

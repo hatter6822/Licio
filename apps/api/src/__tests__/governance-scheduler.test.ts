@@ -151,6 +151,19 @@ describe('runGovernanceTick', () => {
     expect(sweep).not.toHaveBeenCalled();
   });
 
+  it('retries stuck (transient) admissions each tick (R3-4)', async () => {
+    const reEval = vi.fn(async () => ({ retried: 2, resolved: 1 }));
+    const svc = {
+      runElectionLifecycle: async () => ({ scheduled: 0, settled: 0 }),
+      runRatificationLifecycle: async () => ({ settled: 0, activated: 0 }),
+      reEvaluateStuckAdmissions: reEval,
+    } as unknown as GovernanceService;
+    const log = vi.fn();
+    await runGovernanceTick({ service: svc, eligibleVoterCount: async () => 0, log, now: () => 0 });
+    expect(reEval).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('governance.admission_retry', { retried: 2, resolved: 1 });
+  });
+
   it('routes a lifecycle failure to onError', async () => {
     const failing = {
       runElectionLifecycle: async () => {

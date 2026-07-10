@@ -46,6 +46,8 @@ export type FetchLike = (
     headers: Record<string, string>;
     body: string;
     signal: AbortSignal;
+    /** Loopback egress guarantee: a redirect must FAIL, never be followed off-host. */
+    redirect: 'error';
   },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
@@ -68,6 +70,11 @@ export function createLocalCompletion(
     const response = await fetchImpl(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
+      // A loopback server that answers with a 3xx redirect must NOT have this POST
+      // body (governed proposal/contribution text) replayed to the Location — that
+      // would send content off-host despite the loopback-only guarantee. Fail closed
+      // (WS-U ADR-9 review); the provider then degrades to the deterministic path.
+      redirect: 'error',
       body: JSON.stringify({
         model: settings.modelId,
         max_tokens: request.maxOutputTokens,

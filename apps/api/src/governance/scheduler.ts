@@ -25,7 +25,8 @@ export const REMODERATION_SWEEP_LIMIT = 100;
 export type GovernanceSchedulerTask =
   | 'election_lifecycle'
   | 'ratification_lifecycle'
-  | 'remoderation_lifecycle';
+  | 'remoderation_lifecycle'
+  | 'admission_retry';
 
 export interface GovernanceSchedulerDeps {
   service: GovernanceService;
@@ -93,6 +94,16 @@ export async function runGovernanceTick(
     } catch (err) {
       onError(err, 'remoderation_lifecycle');
     }
+  }
+  try {
+    // WS-U ADR-9 review: retry admission for models left `evaluating` by a transient
+    // in-room-proposer outage, so a flaky backend never permanently rejects a bundle.
+    const { retried, resolved } = await deps.service.reEvaluateStuckAdmissions();
+    if (retried > 0) {
+      deps.log('governance.admission_retry', { retried, resolved });
+    }
+  } catch (err) {
+    onError(err, 'admission_retry');
   }
 }
 

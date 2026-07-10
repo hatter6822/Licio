@@ -270,6 +270,13 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     expect(patched?.status).toBe('eligible');
     expect(patched?.evaluationRef).toBe(evalRef);
     expect((await models.listByRoom(roomId)).some((m) => m.modelId === modelId)).toBe(true);
+    // R3-4: listByStatus drives the transient-admission retry sweep.
+    expect((await models.listByStatus('eligible', 50)).some((m) => m.modelId === modelId)).toBe(
+      true,
+    );
+    expect((await models.listByStatus('rejected', 50)).some((m) => m.modelId === modelId)).toBe(
+      false,
+    );
     expect((await models.get(modelId))?.bundle.name).toBe('Civility');
   });
 

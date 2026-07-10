@@ -66,7 +66,11 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   **platform admission gate**: the candidate in-room model (an LLM proposer) is
   **sampled k-of-N** over the platform floor-safety eval set and must land in the
   platform `[min,max]` severity band on every fixture (catching under- and
-  over-moderation), beneath — never replacing — the platform legal floor. A model
+  over-moderation), beneath — never replacing — the platform legal floor. A
+  TRANSIENT proposer outage during admission is **retryable, never a permanent
+  reject**: the model stays `evaluating` (so the `(room,digest)` dedup can't lock
+  the bundle out) and the scheduler's `admission_retry` sweep re-runs it when the
+  backend recovers. A model
   becomes the active agent ONLY by passing a **member ratification vote** (`@licio/
   governance` `tallyRatification`): the seat-holder opens a vote on an eligible
   model (optionally binding a law-pack), members cast one yes/no ballot each

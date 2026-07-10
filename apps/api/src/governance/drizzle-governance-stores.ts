@@ -439,6 +439,16 @@ export class DrizzleModelStore implements ModelStore {
     return rows.map(toModel);
   }
 
+  async listByStatus(status: ModelStatus, limit: number): Promise<ModelRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(roomGovernanceModels)
+      .where(eq(roomGovernanceModels.status, status))
+      .orderBy(asc(roomGovernanceModels.createdAt))
+      .limit(Math.max(0, limit));
+    return rows.map(toModel);
+  }
+
   async patchStatus(
     modelId: string,
     status: ModelStatus,

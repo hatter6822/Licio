@@ -215,6 +215,9 @@ export interface ModelStore {
   insert(model: ModelRecord): Promise<ModelRecord | null>; // null ⇒ digest already present
   get(modelId: string): Promise<ModelRecord | null>;
   listByRoom(roomId: string): Promise<ModelRecord[]>;
+  /** Models in a given lifecycle status, oldest-first, bounded — the admission
+   *  retry sweep drains `evaluating` models (WS-U ADR-9 review). */
+  listByStatus(status: ModelStatus, limit: number): Promise<ModelRecord[]>;
   patchStatus(
     modelId: string,
     status: ModelStatus,
@@ -375,6 +378,12 @@ export class InMemoryModelStore implements ModelStore {
   }
   async listByRoom(roomId: string) {
     return [...this.models.values()].filter((m) => m.roomId === roomId);
+  }
+  async listByStatus(status: ModelStatus, limit: number) {
+    return [...this.models.values()]
+      .filter((m) => m.status === status)
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
+      .slice(0, Math.max(0, limit));
   }
   async patchStatus(
     modelId: string,
