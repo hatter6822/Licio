@@ -1341,7 +1341,15 @@ GPU/CPU, and every token then crawls through the CPU layers (measured: 30 →
 ~6.5 tok/s). The governed prompts are ≤ ~2.5k tokens, so the Compose runtime
 sets `OLLAMA_CONTEXT_LENGTH=8192`; set the same on a native service if large
 models bench slower than expected, and check placement with
-`curl -s localhost:11434/api/ps` (`size_vram` should equal `size`). On AMD
+`curl -s localhost:11434/api/ps` (`size_vram` should equal `size`). To fix a
+single model without touching the daemon default (no root needed), bake the
+context into a variant and point `GOVERNANCE_LLM_MODEL` at it:
+
+```sh
+printf 'FROM deepseek-r1:32b\nPARAMETER num_ctx 8192\n' > /tmp/Modelfile.r1-8k
+ollama create deepseek-r1-8k:32b -f /tmp/Modelfile.r1-8k
+# measured on a 24 GB card: 69s → 15s per debate verdict (full-GPU placement)
+``` On AMD
 cards use `rocm-smi` (not `nvidia-smi`) to see the GPU at all. Known upstream
 issue on some ROCm stacks: gemma3 emits garbage tokens when GPU-offloaded
 while every other family runs correctly — `pnpm bench:llm` detects this and
