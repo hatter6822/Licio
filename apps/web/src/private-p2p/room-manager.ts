@@ -148,7 +148,7 @@ export function parseJoinGrant(json: string): JoinGrant | null {
   }
 }
 
-import { loadUpdateChannelConfig } from '../update/config.js';
+import { isUpdateChannelConfigured } from '../update/config.js';
 import { requirePrivateBundleTrusted } from '../update/gate.js';
 import {
   connectPrivatePeer,
@@ -224,7 +224,7 @@ export class PrivateBundleLockedError extends Error {
  * unconfigured by an attacker (it is baked into the bundle, not runtime state).
  */
 async function ensurePrivateBundleTrusted(): Promise<void> {
-  if (loadUpdateChannelConfig().trustedSignerPublicKeys.length === 0) return;
+  if (!isUpdateChannelConfigured()) return;
   const verdict = await requirePrivateBundleTrusted();
   if (!verdict.trusted) {
     throw new PrivateBundleLockedError(verdict.reason ?? 'not_in_transparency_log');

@@ -1534,6 +1534,13 @@ On the build machine, from a clean checkout:
 ```sh
 corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install --frozen-lockfile
+
+# Pin the client trust anchors BEFORE the web build (WS-S.10 — below): the
+# PUBLIC halves of the release-signer + transparency-log keys, baked into the
+# bundle at build time. Without them the update channel is NOT ENGAGED.
+export VITE_PRIVATE_BUNDLE_SIGNER_KEYS='<base64url signer public key>[,<rotated key> …]'
+export VITE_PRIVATE_BUNDLE_LOG_KEY='<base64url transparency-log public key>'
+
 pnpm build                  # ordered monorepo build → apps/web/dist + apps/api/dist
 pnpm gen:update-manifest    # sign the private-mode bundle (WS-S.10 — below)
 pnpm check:sw               # post-build service-worker gate
@@ -1544,24 +1551,37 @@ pnpm sbom                   # CycloneDX SBOM — the supply-chain record (recomm
 | Artifact | Produced by | Notes |
 |----------|-------------|-------|
 | `apps/web/dist/` | `pnpm --filter web build` | The static PWA. The build script chains design-token generation → `vite build` → SW Trusted-Types injection → build validation → SW security scan → SRI generation → the bundle-size budget gate, and **fails** if any post-step fails |
-| `apps/api/dist/` | `pnpm --filter api build` (`tsc -b`) | The compiled API, started with `node dist/index.js`. It resolves its dependencies (including the `@licio/*` workspace packages) from the installed `node_modules`, so deploy the built **checkout**, not the bare `dist/` |
+| `apps/api/dist/` | `pnpm --filter api build` (`tsc -b`) | The compiled API, started with `pnpm --filter api start` (= `node --conditions=licio-dist dist/index.js`: the `licio-dist` export condition resolves the `@licio/*` workspace packages to their compiled `dist/` output, while every dev tool — tsx, Vite, Vitest — keeps the default `src` resolution). It resolves its dependencies from the installed `node_modules`, so deploy the built **checkout**, not the bare `dist/` |
 
 **The signed update manifest (WS-S.10) is part of every production web
-release.** `pnpm gen:update-manifest` (run after the web build) hashes the
-built private-mode chunk (`apps/web/dist/assets/private-p2p-<hash>.js`),
+release — and so are the build-time trust-anchor pins.** The client verifier
+trusts only the signer/log **public** keys pinned into the bundle at build
+time (`VITE_PRIVATE_BUNDLE_SIGNER_KEYS`, a comma-separated signer set, and
+`VITE_PRIVATE_BUNDLE_LOG_KEY` — the public halves of the signing keys below);
+the `update-channel-keys.json` sidecar is a CI-verification aid, **not** a
+client trust source. Pinning is what **engages** the §20.6
+verify-before-unlock control: a build with no pinned signer set runs with the
+update channel **not engaged** (the dev/test posture — private rooms work,
+unverified), so a production release must set both `VITE_` pins **before**
+`pnpm build`. `pnpm gen:update-manifest` (run after the web build) then hashes
+the built private-mode chunk (`apps/web/dist/assets/private-p2p-<hash>.js`),
 appends it to an RFC 9162 transparency log, Ed25519-signs the manifest, and
-emits `apps/web/dist/update-manifest.json` plus the public-keys sidecar
-`update-channel-keys.json`. Clients **verify before activating**: an absent,
-unsigned, log-less, digest-mismatched, or rolled-back manifest **locks the
-private-room surface** (typed lock reasons; room keys stay sealed) instead of
-running untrusted code. Key handling:
+emits `apps/web/dist/update-manifest.json` plus the sidecar. A **pinned**
+client **verifies before activating**: an absent, unsigned, log-less,
+digest-mismatched, or rolled-back manifest **locks the private-room surface**
+(typed lock reasons; room keys stay sealed) instead of running untrusted code.
+Key handling:
 
 - **Production** sets the all-or-none **build-secret** group
   `LICIO_UPDATE_SIGNING_KEY` / `LICIO_UPDATE_SIGNING_PUBLIC` /
   `LICIO_UPDATE_LOG_KEY` / `LICIO_UPDATE_LOG_PUBLIC` (base64url Ed25519). The
   maintainer **release-signer** key and the **transparency-log** key are
-  distinct on purpose and belong in separate custody. These are *build-time*
-  secrets — never `VITE_`-prefixed, never present on the runtime host.
+  distinct on purpose and belong in separate custody. The **private** keys are
+  *build-time* secrets — never `VITE_`-prefixed, never present on the runtime
+  host. The **public** halves (`*_PUBLIC`) are exactly what the client pins:
+  `VITE_PRIVATE_BUNDLE_SIGNER_KEYS` = the signing public key(s),
+  `VITE_PRIVATE_BUNDLE_LOG_KEY` = the log public key (public keys only — safe
+  in the bundle by design).
 - **Dev/CI** fall back to an auto-generated fixture keypair persisted in the
   gitignored `.licio-update-keys/` — which is why the command works locally
   with zero setup.
@@ -1649,8 +1669,15 @@ never construct in production.
 - **Watch the boot log.** Production boot names every degraded binding loudly
   (lexical embeddings, in-memory DSAR store, null mailer, defaulted LLM
   backend). A quiet boot is a fully-bound boot.
-- **Health:** `GET /health` → `{"status":"ok",…}`. Point your orchestrator's
-  liveness/readiness probes at it (route it to the API at the edge, per 17.1).
+- **Health:** two distinct probes (route both to the API at the edge, per
+  17.1). `GET /health` is **liveness** — it answers 200 whenever the process
+  is up, checking nothing else, so a dependency outage never triggers a
+  restart loop. `GET /health/ready` is **readiness** — it pings the configured
+  durable backends (Postgres `select 1`, Redis `PING`, each on a 2 s budget)
+  and answers 503 with per-check verdicts until every one passes, so a load
+  balancer never routes traffic to a replica whose stores cannot answer yet.
+  (An in-memory dev boot has no external dependencies and is immediately
+  ready.)
 
 ### 17.6 Serve the web build
 
@@ -1768,7 +1795,9 @@ needed when you work on the courier itself.
 After a deploy, verify in order:
 
 1. `curl https://your-origin/health` → `{"status":"ok",…}` through the edge
-   (proves TLS, routing, and a booted API in one request).
+   (proves TLS, routing, and a booted API in one request), then
+   `curl https://your-origin/health/ready` → `{"status":"ready",…}` (proves
+   Postgres and Redis answer from this replica).
 2. The API boot log reaches `Server started` with **no** degraded-binding
    warnings you didn't deliberately choose (embeddings, S3, mailer, LLM
    backend, Knomosis).

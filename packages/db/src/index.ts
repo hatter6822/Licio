@@ -6,6 +6,7 @@ export {
   type DbExecutor,
   type DbTransaction,
   migrationsFolder,
+  pingDatabase,
 } from './client.js';
 export * from './content-schema-check.js';
 export * from './isolation.js';

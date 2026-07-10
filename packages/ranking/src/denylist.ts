@@ -21,7 +21,7 @@ import {
   fieldNameSegments,
   isFinancialFieldName,
 } from '@licio/shared';
-import denylistConfig from './denylist.config.json';
+import denylistConfig from './denylist.config.json' with { type: 'json' };
 
 /**
  * The versioned denylist ARTIFACT (WS-I.2.1b: "a versioned configuration

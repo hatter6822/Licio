@@ -354,7 +354,7 @@ licio/
 │           │   │                             deploy gate + steward review (WS-K)
 │           │   ├── ai-governance-public.ts -- model-card lookup, translation,
 │           │   │                             summary/translation reports (WS-K)
-│           │   ├── health.ts            --   /health endpoint
+│           │   ├── health.ts            --   /health liveness + /health/ready readiness probes
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
 │           │   ├── security-headers.ts  --   CSP, HSTS, Permissions-Policy

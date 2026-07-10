@@ -13,6 +13,7 @@ export {
   discoverPrivateBundleUrl,
 } from './bundle-digest.js';
 export {
+  isUpdateChannelConfigured,
   loadUpdateChannelConfig,
   PRIVATE_BUNDLE_ARTIFACT_ID,
   UPDATE_MANIFEST_PATH,

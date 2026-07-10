@@ -105,11 +105,17 @@ describe('PrivateBundleGuard', () => {
 
   it('LOCKS with the verbatim §20.6 copy on an untrusted verdict and hides children', async () => {
     resetPrivateBundleGate();
-    // An empty signer set ⇒ every manifest is signature_invalid ⇒ lock.
+    // A CONFIGURED channel whose pinned signer set does not include the
+    // manifest's signer ⇒ signature_invalid ⇒ lock (the channel is engaged —
+    // an unconfigured channel is the separate not-engaged case below).
+    const valid = await trustedDeps();
+    const rogueSigner = await genKeyPair();
     const deps: AssertTrustedDeps = {
-      config: { trustedSignerPublicKeys: [], logPublicKey: '' },
-      fetchImpl: (async () => new Response('{}', { status: 200 })) as typeof fetch,
-      resolveBundleUrl: () => BUNDLE_URL,
+      ...valid,
+      config: {
+        trustedSignerPublicKeys: [rogueSigner.b64],
+        logPublicKey: valid.config?.logPublicKey ?? '',
+      },
     };
     const { container } = render(
       <PrivateBundleGuard deps={deps}>
@@ -119,6 +125,29 @@ describe('PrivateBundleGuard', () => {
     await waitFor(() => expect(screen.getByText(PRIVATE_BUNDLE_LOCK_MESSAGE)).toBeInTheDocument());
     expect(screen.queryByText('secret room content')).not.toBeInTheDocument();
     expect(await checkA11y(container)).toHaveNoViolations();
+  });
+
+  it('renders children WITHOUT engaging the gate when the channel is unconfigured (no pinned signer set)', () => {
+    resetPrivateBundleGate();
+    // No pinned maintainer signers ⇒ the §20.6 control is NOT ENGAGED (the
+    // dev/test posture; the room-manager key-unlock chokepoint applies the
+    // same predicate) — the children render and no verification I/O runs.
+    let fetchCalls = 0;
+    const deps: AssertTrustedDeps = {
+      config: { trustedSignerPublicKeys: [], logPublicKey: '' },
+      fetchImpl: (async () => {
+        fetchCalls += 1;
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch,
+      resolveBundleUrl: () => BUNDLE_URL,
+    };
+    render(
+      <PrivateBundleGuard deps={deps}>
+        <p>secret room content</p>
+      </PrivateBundleGuard>,
+    );
+    expect(screen.getByText('secret room content')).toBeInTheDocument();
+    expect(fetchCalls).toBe(0);
   });
 
   it('renders children unguarded when disabled (public surface)', () => {

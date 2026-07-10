@@ -17,7 +17,11 @@
       "@licio/ai-governance": ["../../packages/ai-governance/src"],
       "@licio/ai-governance/*": ["../../packages/ai-governance/src/*"],
       "@licio/governance": ["../../packages/governance/src"],
-      "@licio/governance/*": ["../../packages/governance/src/*"]
+      "@licio/governance/*": ["../../packages/governance/src/*"],
+      "@licio/lcap": ["../../packages/lcap/src"],
+      "@licio/lcap/*": ["../../packages/lcap/src/*"],
+      "@licio/lcap-p2p": ["../../packages/lcap-p2p/src"],
+      "@licio/lcap-p2p/*": ["../../packages/lcap-p2p/src/*"]
     }
   },
   "include": ["src/**/*", "src/**/*.json"],
@@ -27,6 +31,8 @@
     { "path": "../../packages/invariants" },
     { "path": "../../packages/ranking" },
     { "path": "../../packages/ai-governance" },
-    { "path": "../../packages/governance" }
+    { "path": "../../packages/governance" },
+    { "path": "../../packages/lcap" },
+    { "path": "../../packages/lcap-p2p" }
   ]
 }

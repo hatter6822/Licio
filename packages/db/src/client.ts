@@ -1,12 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { fileURLToPath } from 'node:url';
+import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema/index.js';
 
 export function createDbClient(connectionString: string) {
-  const sql = postgres(connectionString);
-  return drizzle(sql, { schema });
+  const client = postgres(connectionString);
+  return drizzle(client, { schema });
+}
+
+/**
+ * Round-trip liveness check against the database (`select 1`) — the readiness
+ * probe consumers point at.  Lives here so callers never hand-build SQL against
+ * the client (the parameterized-queries-only rule).
+ */
+export async function pingDatabase(db: DbClient): Promise<void> {
+  await db.execute(sql`select 1`);
 }
 
 /** The drizzle client returned by {@link createDbClient}. */

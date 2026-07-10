@@ -7,10 +7,12 @@
   "exports": {
     ".": {
       "types": "./src/index.ts",
+      "licio-dist": "./dist/index.js",
       "default": "./src/index.ts"
     },
     "./env": {
       "types": "./src/env/index.ts",
+      "licio-dist": "./dist/env/index.js",
       "default": "./src/env/index.ts"
     }
   },

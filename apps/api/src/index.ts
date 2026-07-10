@@ -5,7 +5,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
-import { createDbClient } from '@licio/db';
+import { createDbClient, pingDatabase } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
 import {
@@ -243,6 +243,7 @@ import {
   registerRankingConsumers,
   setRankingServices,
 } from './ranking/services.js';
+import type { ReadinessProbe } from './routes/health.js';
 
 const env = validateServerEnv(process.env);
 const logger = createLogger(env.LOG_LEVEL);
@@ -287,10 +288,15 @@ if (!env.DATABASE_URL || !env.REDIS_URL) {
     'running with in-memory stores (no DATABASE_URL/REDIS_URL) — data is ephemeral; development only',
   );
 }
+// GET /health/ready dependency probes: one per configured durable backend, so
+// readiness reflects exactly what THIS boot depends on (an in-memory boot has
+// no external dependencies and is trivially ready).
+const readinessProbes: ReadinessProbe[] = [];
 if (env.REDIS_URL !== undefined) {
   const IORedis = (await import('ioredis')).default;
   const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
   redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (identity stores)'));
+  readinessProbes.push({ name: 'redis', check: () => redis.ping() });
   identityServices.sessions = new RedisSessionStore(redis);
   identityServices.challenges = new RedisEphemeralStore(redis, 'wachal:');
   identityServices.otp = new RedisEphemeralStore(redis, 'otp:');
@@ -310,6 +316,7 @@ if (env.REDIS_URL !== undefined) {
 // IdentityStore/AuditStore interfaces the in-memory adapters satisfy.  The
 // schema must be migrated (`pnpm db:migrate`) before serving traffic.
 const db = env.DATABASE_URL !== undefined ? createDbClient(env.DATABASE_URL) : null;
+if (db) readinessProbes.push({ name: 'postgres', check: () => pingDatabase(db) });
 // The distributed scheduler lease is Postgres-backed in production; without a
 // database (dev/test) it falls back to the in-memory lease so the hourly
 // maintenance ticks still run on a single instance.
@@ -1456,7 +1463,7 @@ startRendezvousScheduler(
 // route, and are never part of the production AppType. Set LICIO_SIM=off (or 0)
 // to boot dev without it; LICIO_SIM=<scenario> selects the opening scenario
 // (default 'steady'); LICIO_SIM=idle boots it stopped for manual control.
-const baseApp = createApp();
+const baseApp = createApp({ readinessProbes });
 // `serve` needs only the fetch handler; capturing it (rather than the app
 // object) sidesteps typing the two differently-shaped Hono instances.
 let appFetch: typeof baseApp.fetch = baseApp.fetch;

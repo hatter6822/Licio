@@ -22,7 +22,11 @@
 import { PRIVATE_BUNDLE_LOCK_LABEL, PRIVATE_BUNDLE_LOCK_MESSAGE } from '@licio/shared';
 import type { ReactNode } from 'react';
 import { useT } from '../../i18n/index.js';
-import { type AssertTrustedDeps, useUpdateGate } from '../../update/index.js';
+import {
+  type AssertTrustedDeps,
+  isUpdateChannelConfigured,
+  useUpdateGate,
+} from '../../update/index.js';
 import { LoadingState } from '../ui/LoadingState/index.js';
 import { RestrictedState } from '../ui/RestrictedState/index.js';
 
@@ -42,6 +46,16 @@ export interface PrivateBundleGuardProps {
  * verbatim §20.6 lock copy on an untrusted verdict and a loading placeholder
  * while the verification is in flight; renders `children` only on a `trusted`
  * verdict (fail-closed default).
+ *
+ * The gate ENGAGES only when the update channel is CONFIGURED — a maintainer
+ * signer set pinned into this build (`isUpdateChannelConfigured`, the same
+ * predicate the room-manager's key-unlock chokepoint applies, so the guard UI
+ * and the engine can never disagree).  An UNCONFIGURED build (dev/test, an
+ * unpinned deployment) renders the children with the control not engaged: dev
+ * serves no hashed chunk and no signed manifest, so verification there can
+ * never succeed, and a pinned set cannot be unconfigured by an attacker at
+ * runtime (it is baked into the bundle).  A production release MUST pin the
+ * signer set to engage the control (docs/DEVELOPMENT.md §17.2).
  */
 export function PrivateBundleGuard({
   children,
@@ -50,10 +64,12 @@ export function PrivateBundleGuard({
   headingLevel = 2,
 }: PrivateBundleGuardProps): React.ReactElement {
   const t = useT();
-  const gate = useUpdateGate({ enabled, ...(deps ? { deps } : {}) });
+  const configured = isUpdateChannelConfigured(deps?.config);
+  const gate = useUpdateGate({ enabled: enabled && configured, ...(deps ? { deps } : {}) });
 
-  // A disabled gate (no private rooms / public surface) renders children as-is.
-  if (!enabled) return <>{children}</>;
+  // A disabled gate (no private rooms / public surface) renders children as-is;
+  // so does an UNCONFIGURED channel (control not engaged — see the doc above).
+  if (!enabled || !configured) return <>{children}</>;
 
   if (gate.status === 'checking') {
     return (
