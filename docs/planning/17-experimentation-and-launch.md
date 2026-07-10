@@ -168,6 +168,17 @@ Implement collection and monitoring of Core Web Vitals at the 75th percentile: L
 
 **Security/privacy:** RUM readings are anonymous performance samples with no user identifier and no attention/behavioral content. Device class is a coarse bucket; precise device or network fingerprinting is prohibited.
 
+**Tracked debt — the `/v1/telemetry` ingest sink (2026-07 production-parity audit).**
+The client RUM pipeline (`apps/web/src/lib/telemetry.ts`, `sendBeacon`) and the
+schema-validated `POST /v1/telemetry` route ship today, but the route
+acknowledges and then **discards** the batch — no consumer or store exists yet
+in ANY environment (the route comment says "The analytics pipeline (WS-P)
+consumes these").  This is not a dev/prod asymmetry (both drop identically);
+it is the unimplemented server half of THIS task.  Closure target: the
+WS-P.1.1d implementation pass MUST land the ingest consumer (aggregation to
+p75 buckets + 90-day trend storage + the regression alert) and remove the
+discard, so the route's claim becomes true.
+
 ---
 
 ### WS-P.1.1e Metrics dashboard

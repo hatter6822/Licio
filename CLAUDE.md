@@ -420,6 +420,7 @@ licio/
 │           │   ├── services-impl.ts     --   the eleven InvariantService implementations
 │           │   ├── services.ts          --   container + consumers + WS-E hook closures
 │           │   ├── scheduler.ts         --   lease-guarded batch tier + nightly drift
+│           │   ├── redis-session-store.ts -- Redis PHI session sequences (multi-instance; gated)
 │           │   └── drizzle-invariant-stores.ts -- production Postgres adapters (gated)
 │           ├── ranking/                 -- WS-I ranking and distribution
 │           │   ├── stores.ts            --   feature store + decision logs (in-memory)
@@ -462,6 +463,8 @@ licio/
 │           │   ├── contributions.ts     --   create/edit/remove guard chain + live fan-out
 │           │   ├── comments.ts          --   story comment pages, reply previews, media projection
 │           │   ├── comment-broadcaster.ts -- same-origin live comment broadcaster port
+│           │   ├── redis-broadcasters.ts --   Redis pub/sub comment + debate fan-out (multi-instance;
+│           │   │                             zod-validated on BOTH sides of the wire)
 │           │   ├── threads.ts           --   overview/anchor/subtree compatibility reads
 │           │   ├── tree.ts              --   materialized-path math + depth-first ordering
 │           │   ├── rooms.ts             --   rooms/lenses/stewards/joins + the binary
@@ -500,6 +503,9 @@ licio/
 │           ├── ai-governance/            -- WS-K AI and model governance
 │           │   ├── stores.ts            --   store interfaces + in-memory adapters (registry,
 │           │   │                             lineage, output records, review queue, …)
+│           │   ├── drizzle-ai-governance-stores.ts -- production Postgres adapters for all
+│           │   │                             fourteen WS-K stores (gated; the guard is rebuilt
+│           │   │                             over the durable blocked-invocation store at boot)
 │           │   ├── registry.ts          --   model registry + the deployment GATE (WS-K.1.1b)
 │           │   ├── guard.ts             --   the pre-execution ProhibitedUseGuard + audit (WS-K.1.1d)
 │           │   ├── harness.ts           --   evaluation-harness orchestrator + decision (WS-K.1.2e)
@@ -523,6 +529,8 @@ licio/
 │           │   │                             local (loopback-only OpenAI-compatible runtime),
 │           │   │                             quality, registration
 │           │   ├── seed.ts              --   register + DEPLOY models through the gate; inventory
+│           │   │                             (runs on EVERY boot, production included — idempotent,
+│           │   │                             lease-serialized across replicas)
 │           │   ├── pipelines.ts         --   topic classification + claim extraction (WS-K.1.3a/b)
 │           │   ├── summaries.ts         --   AI summary eval: §24.3 quality/grounding gate (WS-K.1.4; eval-only, no thread Overview)
 │           │   ├── translation.ts       --   translation + consistency check (WS-K.2.1a)
@@ -575,7 +583,9 @@ licio/
 │           │   │                             per-item failure isolation (the LLM fan-outs:
 │           │   │                             debate lifecycle, admission sampling, re-moderation sweep)
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
-│           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
+│           │   ├── push-service.ts      --   VAPID push behind the PushStateStore boundary
+│           │   │                             (session-scoped delete; hashed at-rest refs)
+│           │   ├── drizzle-push-store.ts --   production Postgres push subscriptions/preferences (gated)
 │           │   ├── vapid.ts             --   VAPID key management
 │           │   ├── logger.ts            --   pino logger setup
 │           │   ├── story-media.ts       --   WS-Q.5.2c story→feed media projection
@@ -672,7 +682,8 @@ licio/
 │   │       │   │                               depth/parent CHECKs, client-draft dedup,
 │   │       │   │                               edit history, tombstones)
 │   │       │   ├── room.ts              --     WS-G rooms, stewards, subscriptions, lenses
-│   │       │   ├── upload.ts            --     WS-G uploads (EXIF-stripped, scan-gated)
+│   │       │   ├── upload.ts            --     WS-G uploads (EXIF-stripped, scan-gated; bytes in
+│   │       │   │                               S3 or the durable upload_blobs Postgres fallback)
 │   │       │   ├── ranking.ts           --     WS-I feature-vector revisions + decision
 │   │       │   │                               logs (privacy-bucket CHECK, §22.4 retention)
 │   │       │   ├── moderation.ts        --     WS-J cases, reports, actions, append-only
