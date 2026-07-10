@@ -29,6 +29,7 @@ import {
   roomStewards as roomStewardsTable,
   roomSubscriptions as roomSubscriptionsTable,
   rooms as roomsTable,
+  uploadBlobs as uploadBlobsTable,
   uploads as uploadsTable,
 } from '@licio/db';
 import type {
@@ -1089,8 +1090,6 @@ export class DrizzleUploadStore implements UploadStore {
   readonly #s3: S3ObjectStoreConfig | null;
   readonly #creds: SigV4Credentials | null;
   readonly #fetch: typeof fetch;
-  /** Restart-volatile fallback when S3 is not configured. */
-  readonly #memoryBytes = new Map<string, Uint8Array>();
 
   constructor(db: Db, s3: S3ObjectStoreConfig | null, fetchFn: typeof fetch = fetch) {
     this.#db = db;
@@ -1150,8 +1149,6 @@ export class DrizzleUploadStore implements UploadStore {
     if (this.#s3) {
       const res = await this.#s3Request('PUT', this.#objectUrl(record.storageRef), bytes);
       if (!res.ok) throw new Error(`S3 upload put failed: ${res.status}`);
-    } else {
-      this.#memoryBytes.set(record.uploadId, new Uint8Array(bytes));
     }
     const rows = await this.#db
       .insert(uploadsTable)
@@ -1169,6 +1166,22 @@ export class DrizzleUploadStore implements UploadStore {
       .returning();
     const row = rows[0];
     if (!row) throw new Error('upload insert returned no row');
+    if (!this.#s3) {
+      // No S3: the bytes land in the durable Postgres blob table (the FK
+      // requires the metadata row first). A metadata row must never exist
+      // whose bytes are unreadable, so a failed blob write rolls the metadata
+      // back before rethrowing.
+      try {
+        const blob = Buffer.from(bytes);
+        await this.#db
+          .insert(uploadBlobsTable)
+          .values({ uploadId: record.uploadId, bytes: blob })
+          .onConflictDoUpdate({ target: uploadBlobsTable.uploadId, set: { bytes: blob } });
+      } catch (error) {
+        await this.#db.delete(uploadsTable).where(eq(uploadsTable.uploadId, record.uploadId));
+        throw error;
+      }
+    }
     return this.#toRecord(row);
   }
 
@@ -1190,7 +1203,13 @@ export class DrizzleUploadStore implements UploadStore {
       if (!res.ok) throw new Error(`S3 upload get failed: ${res.status}`);
       return new Uint8Array(await res.arrayBuffer());
     }
-    return this.#memoryBytes.get(uploadId) ?? null;
+    const rows = await this.#db
+      .select({ bytes: uploadBlobsTable.bytes })
+      .from(uploadBlobsTable)
+      .where(eq(uploadBlobsTable.uploadId, uploadId))
+      .limit(1);
+    const blob = rows[0]?.bytes;
+    return blob ? new Uint8Array(blob) : null;
   }
 
   async setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void> {
@@ -1240,23 +1259,22 @@ export class DrizzleUploadStore implements UploadStore {
 
   async purgeByStories(storyIds: readonly string[]): Promise<number> {
     if (storyIds.length === 0) return 0;
-    // Read the doomed upload rows first so the BYTES (S3 object or the
-    // restart-volatile in-memory fallback) are destroyed alongside the metadata.
+    // Read the doomed upload rows first so S3-held BYTES are destroyed
+    // alongside the metadata (Postgres-held bytes go with the row itself —
+    // the upload_blobs FK cascades on delete).
     const rows = await this.#db
       .select()
       .from(uploadsTable)
       .where(inArray(uploadsTable.ownerStoryId, [...storyIds]));
     if (rows.length === 0) return 0;
-    for (const row of rows) {
-      if (this.#s3) {
+    if (this.#s3) {
+      for (const row of rows) {
         // A failed/absent object delete must not abort the purge; S3 DELETE is
         // idempotent and a 404 is success-equivalent for our intent (bytes gone).
         const res = await this.#s3Request('DELETE', this.#objectUrl(row.storageRef));
         if (!res.ok && res.status !== 404) {
           throw new Error(`S3 upload delete failed: ${res.status}`);
         }
-      } else {
-        this.#memoryBytes.delete(row.uploadId);
       }
     }
     const deleted = await this.#db
@@ -1267,7 +1285,7 @@ export class DrizzleUploadStore implements UploadStore {
   }
 
   async clear(): Promise<void> {
+    // upload_blobs rows cascade with their metadata rows.
     await this.#db.delete(uploadsTable);
-    this.#memoryBytes.clear();
   }
 }

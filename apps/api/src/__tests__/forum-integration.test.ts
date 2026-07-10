@@ -658,6 +658,10 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     );
     expect(record.scanState).toBe('pending');
     expect(await uploads.getBytes(uploadId)).toEqual(bytes);
+    // Without S3 the bytes live in the durable upload_blobs table: a FRESH
+    // store instance (a "restarted"/sibling replica — no shared process
+    // memory) reads the same blob back.
+    expect(await new DrizzleUploadStore(db, null).getBytes(uploadId)).toEqual(bytes);
     await uploads.setScanState(uploadId, 'clear');
     expect((await uploads.getRecord(uploadId))?.scanState).toBe('clear');
     // The content-type allow-list CHECK rejects non-image/PDF types.

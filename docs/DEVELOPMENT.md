@@ -463,7 +463,7 @@ covered in detail in Section 16.
 | `ALLOW_INSECURE_NULL_MAILER=true` | In `production`, lets the API boot without SES (and stays silent). In development it is an explicit opt-out that silences the dev mailer — codes are no longer surfaced to the log. Read directly from `process.env` |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Web Push disabled; push endpoints report "unconfigured" |
 | `CHAIN_RPC_URLS` | Only EOA wallet sign-in is available (no contract-wallet EIP-1271/6492 verification) |
-| `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev) |
+| `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev; production warns). Upload/story-media bytes fall back to the durable Postgres `upload_blobs` table (durable + instance-shared with or without S3) |
 | `SES_*` group | A **dev mailer** surfaces the one-time code + recipient to the API log (no email is sent) so the passwordless email flows — sign-in, email-factor verification, deletion-cancel — are testable end-to-end; this is the only way to become a verified account on a `pnpm dev` box. CI / `NODE_ENV=test` use the silent logging mailer (never the code/recipient) |
 | `EMBEDDING_*` group | A deterministic **lexical** embedding provider is used (fine for dedup; not a real semantic model) |
 | `GOVERNANCE_LLM_*` group | **Development:** the DEV-ONLY simulated loopback LLM runtime auto-starts and serves the three governed AI surfaces (lawmaking summary, in-room moderation, debate adjudication) — disable it with `LICIO_LLM_SIM=off`, or pick its port with `LICIO_LLM_SIM_PORT`. **Production:** defaults to the loopback-`local` backend (Ollama URL + `gpt-oss:20b`); every governed surface fails closed per call to its deterministic path until the runtime responds. `GOVERNANCE_LLM_PROVIDER=deterministic` opts out anywhere; `anthropic` (+ `ANTHROPIC_API_KEY`) is an explicit hosted opt-in. Provision + verify a real runtime with `pnpm setup:llm [--docker]`. Details: Section 16 |
@@ -1226,16 +1226,23 @@ Copy the printed `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
 `VAPID_SUBJECT` into `.env`. The **private key stays on the server** and is
 never added to the client bundle. When unset, push is simply disabled.
 
-### S3-compatible export storage (`S3_*`)
+### S3-compatible object storage (`S3_*`)
 
 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`,
-`S3_SECRET_ACCESS_KEY` (and optional `S3_PREFIX`). Stores DSAR export
-archives (AWS S3 / Cloudflare R2 / MinIO). The API seals each archive with
-SecretBox (AES-256-GCM) **before** writing it to the bucket, so object
-storage only ever holds ciphertext — this is application-side encryption
-before upload (done by the API, which sees the plaintext while assembling
-the export), **not** browser/end-to-end encryption. Unset → in-memory store
-(dev/CI; archives don't survive a restart, which production warns about).
+`S3_SECRET_ACCESS_KEY` (and optional `S3_PREFIX`). Two consumers:
+
+- **DSAR export archives** (AWS S3 / Cloudflare R2 / MinIO). The API seals
+  each archive with SecretBox (AES-256-GCM) **before** writing it to the
+  bucket, so object storage only ever holds ciphertext — this is
+  application-side encryption before upload (done by the API, which sees the
+  plaintext while assembling the export), **not** browser/end-to-end
+  encryption. Unset → in-memory store (dev/CI; archives don't survive a
+  restart, which production warns about — the user simply re-requests the
+  export).
+- **Upload/story-media bytes** (WS-G attachments, WS-Q story media). With
+  `S3_*` set, blob bytes go to the bucket; unset, they go to the durable
+  Postgres `upload_blobs` table — production is durable and instance-shared
+  in **both** configurations (metadata lives in `uploads` either way).
 
 ### Email delivery (`SES_*`)
 

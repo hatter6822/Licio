@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Contribution attachments (WS-G.3.7b, SPEC §15.5).  Upload BYTES live in the
-// object store (in-memory in development, S3-compatible in production); this
-// table is the metadata record.  Privacy: image metadata (EXIF/GPS/XMP) is
+// object store (S3-compatible when the S3_* group is configured, else the
+// durable `upload_blobs` Postgres fallback below — production is durable and
+// instance-shared in BOTH configurations); this table is the metadata record.  Privacy: image metadata (EXIF/GPS/XMP) is
 // stripped BEFORE storage — `metadata_stripped` records that the strip ran —
 // and `scan_state` gates serving (the WS-J.2.6b seam: local checks now, the
 // shared malware intelligence later).  Alt text is REQUIRED for images at the
@@ -19,6 +20,7 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { bytea } from './_custom.js';
 import { users } from './user.js';
 
 export const uploadScanStateEnum = pgEnum('upload_scan_state', ['pending', 'clear', 'flagged']);
@@ -70,5 +72,18 @@ export const uploads = pgTable(
   ],
 );
 
+/** The durable Postgres binding for upload BYTES when S3 is not configured.
+ *  Separate from `uploads` so metadata reads never drag the blob across the
+ *  wire; the CASCADE keeps blob lifetime ≤ metadata lifetime (a purged
+ *  metadata row can never strand orphaned bytes).  Size is bounded by the
+ *  `uploads` byte-size CHECK (≤ 200 MB) enforced at the API layer per type. */
+export const uploadBlobs = pgTable('upload_blobs', {
+  uploadId: uuid('upload_id')
+    .primaryKey()
+    .references(() => uploads.uploadId, { onDelete: 'cascade' }),
+  bytes: bytea('bytes').notNull(),
+});
+
 export type UploadRow = typeof uploads.$inferSelect;
 export type UploadInsert = typeof uploads.$inferInsert;
+export type UploadBlobRow = typeof uploadBlobs.$inferSelect;
