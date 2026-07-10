@@ -68,6 +68,33 @@ describe('checkLawmakingSummaryQuality', () => {
     if (!result.ok) expect(result.failures).toContain('url_not_in_proposal');
   });
 
+  it('R4-1: rejects a WRAPPED off-proposal URL (markdown / angle-bracket / prefixed forms bypass startsWith)', () => {
+    for (const wrapped of [
+      '[docs](https://evil.example/steal)',
+      '<https://evil.example/steal>',
+      'see:https://evil.example/steal',
+    ]) {
+      const result = checkLawmakingSummaryQuality({
+        proposalText: PROPOSAL_TEXT,
+        draft: { headline: GOOD_DRAFT.headline, summary: `${GOOD_DRAFT.summary} ${wrapped}` },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failures).toContain('url_not_in_proposal');
+    }
+  });
+
+  it('R4-1: accepts a WRAPPED in-proposal URL (extraction normalizes the wrapper)', () => {
+    const result = checkLawmakingSummaryQuality({
+      proposalText: PROPOSAL_TEXT,
+      draft: {
+        headline: GOOD_DRAFT.headline,
+        summary:
+          'Create an opt-in weekly digest email that collects the room highlights every Friday, details [plan](https://example.org/digest-plan).',
+      },
+    });
+    expect(result.ok).toBe(true);
+  });
+
   it('…but accepts a URL the proposal itself carries (trailing punctuation tolerated)', () => {
     const result = checkLawmakingSummaryQuality({
       proposalText: PROPOSAL_TEXT,

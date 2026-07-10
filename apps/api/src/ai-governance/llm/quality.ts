@@ -100,6 +100,38 @@ function stripTrailingPunctuation(token: string): string {
   return token.slice(0, end);
 }
 
+/** Characters that terminate a URL embedded in prose/markdown (wrappers like
+ *  `[]`, `()`, `<>`, `{}`, quotes); whitespace already split the token. */
+const URL_BOUNDARY = new Set(['<', '>', '[', ']', '(', ')', '{', '}', '"', "'", '`']);
+
+/**
+ * Extract EVERY http(s) URL embedded in a whitespace token, tolerating leading
+ * wrappers (`[docs](https://x)`, `<https://x>`, `see:https://x`) and trailing
+ * prose punctuation. A `startsWith('http')` check misses a wrapped URL, letting an
+ * off-proposal link slip past the `url_not_in_proposal` guard (WS-U ADR-9 review);
+ * scanning for the scheme anywhere in the token closes that.
+ */
+function extractUrls(token: string): string[] {
+  const lower = token.toLowerCase();
+  const out: string[] = [];
+  for (let i = 0; i < lower.length; ) {
+    const h = lower.indexOf('http://', i);
+    const s = lower.indexOf('https://', i);
+    const start = h === -1 ? s : s === -1 ? h : Math.min(h, s);
+    if (start === -1) break;
+    let end = start;
+    while (end < lower.length) {
+      const ch = lower[end];
+      if (ch === undefined || URL_BOUNDARY.has(ch)) break;
+      end += 1;
+    }
+    const url = stripTrailingPunctuation(lower.slice(start, end));
+    if (url.length > 0) out.push(url);
+    i = Math.max(end, start + 1);
+  }
+  return out;
+}
+
 /**
  * Check an LLM draft against the deterministic §24.5 acceptance constraints.
  * Returns the whitespace-collapsed headline/summary on success so the accepted
@@ -118,17 +150,20 @@ export function checkLawmakingSummaryQuality(
   if (summary.length > LLM_SUMMARY_BODY_MAX) failures.push('summary_too_long');
 
   // Every URL in the draft must literally appear in the proposal (case-folded).
+  // URLs are extracted from ANYWHERE in a token (not just a `startsWith`), so a
+  // markdown/angle-bracket-wrapped off-proposal link cannot exfiltrate past this.
   const proposalLower = input.proposalText.toLowerCase();
+  let urlNotInProposal = false;
   for (const token of splitWhitespace(`${headline} ${summary}`)) {
-    const lower = stripTrailingPunctuation(token.toLowerCase());
-    if (
-      (lower.startsWith('http://') || lower.startsWith('https://')) &&
-      !proposalLower.includes(lower)
-    ) {
-      failures.push('url_not_in_proposal');
-      break;
+    for (const url of extractUrls(token)) {
+      if (!proposalLower.includes(url)) {
+        urlNotInProposal = true;
+        break;
+      }
     }
+    if (urlNotInProposal) break;
   }
+  if (urlNotInProposal) failures.push('url_not_in_proposal');
 
   // Grounding: the draft's content tokens must overwhelmingly come from the
   // proposal. Both sides are stopword-filtered, so filler words neither help

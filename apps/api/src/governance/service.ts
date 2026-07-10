@@ -139,6 +139,20 @@ interface EvalFixture {
  */
 export const ADMISSION_ROOM_ID = 'admission';
 
+/**
+ * `unavailable` codes that make an admission run RETRYABLE (a transient backend /
+ * store outage, WS-U ADR-9 review). Any OTHER `unavailable` code (an
+ * unclassifiable prompt — `invalid_output`, `refusal`, `truncated`) is a
+ * DEFINITIVE failure and rejects the model, so a broken prompt is never retried
+ * forever. Kept in sync with the codes `ai-governance/llm/moderation.ts` emits.
+ */
+const TRANSIENT_ADMISSION_CODES: ReadonlySet<string> = new Set([
+  'transport',
+  'breaker_open',
+  'budget_exhausted',
+  'record_failed',
+]);
+
 function ctx(over: Partial<ModerationContext>): ModerationContext {
   return {
     contentText: '',
@@ -555,11 +569,18 @@ export class GovernanceService {
     const model = await this.deps.stores.models.get(modelId);
     if (!model) return err('not_found', 'Model not found.');
     await this.deps.stores.models.patchStatus(modelId, 'evaluating', null);
-    const { failures, sawUnavailable } = await this.admissionFailures(model.bundle);
-    // Transient: admission failed AND at least one sample was unavailable — the run
-    // is inconclusive, so stay `evaluating` (retryable) rather than `rejected`.
+    const { failures, sawTransient, sawDefinitive } = await this.admissionFailures(model.bundle);
+    // Retryable (`evaluating`) ONLY when the failure was purely a transient outage
+    // and NOTHING definitive failed; a definitive failure (out-of-band decision, or
+    // an unclassifiable-prompt code) is a real `rejected`.
     const status: ModelRecord['status'] =
-      failures.length === 0 ? 'eligible' : sawUnavailable ? 'evaluating' : 'rejected';
+      failures.length === 0
+        ? 'eligible'
+        : sawDefinitive
+          ? 'rejected'
+          : sawTransient
+            ? 'evaluating'
+            : 'rejected';
     const evaluationRef = status === 'evaluating' ? null : this.deps.uuid();
     // On admission PASS, pin the model to the backend that ran it, so a later
     // backend/model swap fails closed at moderate time until re-admission (WS-U
@@ -1380,16 +1401,22 @@ export class GovernanceService {
    */
   private async admissionFailures(
     bundle: GovernancePolicyBundle,
-  ): Promise<{ failures: string[]; sawUnavailable: boolean }> {
+  ): Promise<{ failures: string[]; sawTransient: boolean; sawDefinitive: boolean }> {
     const proposer = this.deps.moderationProposer;
-    if (!proposer) return { failures: ['no_moderation_backend'], sawUnavailable: false };
+    if (!proposer) {
+      return { failures: ['no_moderation_backend'], sawTransient: false, sawDefinitive: true };
+    }
     const samples = Math.max(1, this.deps.admissionSamples ?? 3);
     const minPass = Math.min(samples, Math.max(1, this.deps.admissionMinPass ?? 2));
     const failures: string[] = [];
-    // Track whether ANY probe came back `unavailable` (a transient outage). If the
-    // model then fails admission, the run is treated as inconclusive (retryable)
-    // rather than a permanent rejection — a flaky backend must not lock out a bundle.
-    let sawUnavailable = false;
+    // A failure is RETRYABLE only when it was caused purely by a TRANSIENT outage
+    // (`sawTransient` with no `sawDefinitive`). A DEFINITIVE failure — an out-of-band
+    // decided action (real over/under-moderation), OR an `unavailable` with a
+    // non-transient code (a prompt the model can't classify: invalid_output /
+    // refusal / truncated) — is a real rejection, never retried forever (WS-U ADR-9
+    // review).
+    let sawTransient = false;
+    let sawDefinitive = false;
     for (const fixture of PLATFORM_EVAL_SET) {
       const lo = actionSeverity(fixture.minAction);
       const hi = actionSeverity(fixture.maxAction);
@@ -1402,15 +1429,17 @@ export class GovernanceService {
           moderationPrompt: bundle.moderationPrompt,
         });
         if (result.status !== 'decided') {
-          sawUnavailable = true;
+          if (TRANSIENT_ADMISSION_CODES.has(result.code)) sawTransient = true;
+          else sawDefinitive = true; // unclassifiable prompt (invalid_output/refusal/…) ⇒ reject
           continue;
         }
         const sev = actionSeverity(result.proposal.action);
         if (sev >= lo && sev <= hi) inBand += 1;
+        else sawDefinitive = true; // decided but out-of-band ⇒ real over/under-moderation
       }
       if (inBand < minPass) failures.push(fixture.label);
     }
-    return { failures, sawUnavailable };
+    return { failures, sawTransient, sawDefinitive };
   }
 
   private async firstPromptFor(modelId: string) {

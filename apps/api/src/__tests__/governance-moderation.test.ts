@@ -416,14 +416,15 @@ describe('GovernanceService.moderate — the admitting-backend gate (WS-U ADR-9 
 
 describe('GovernanceService admission — a transient outage is retryable, never a permanent reject (R3-4)', () => {
   it('leaves the model EVALUATING during an outage, then the sweep resolves it to eligible on recovery', async () => {
-    // A proposer that is UNAVAILABLE for the admission probes until `up` flips.
+    // A proposer that is TRANSIENTLY unavailable (transport) for the admission
+    // probes until `up` flips.
     let up = false;
     const flakyAdmission: ModerationProposer = {
       kind: 'llm',
       async propose() {
         return up
           ? decided('flag_for_review')
-          : ({ status: 'unavailable', code: 'down' } as ModerationProposerResult);
+          : ({ status: 'unavailable', code: 'transport' } as ModerationProposerResult);
       },
     };
     const h = makeService(flakyAdmission);
@@ -459,5 +460,21 @@ describe('GovernanceService admission — a transient outage is retryable, never
     if (!proposed.ok) throw new Error('propose');
     const res = await h.svc.evaluateModel(proposed.value.modelId);
     expect(res.ok && res.value.status).toBe('rejected');
+  });
+
+  it('R4-3: a NON-transient unavailable (unclassifiable prompt: invalid_output) is REJECTED, not retried forever', async () => {
+    // The prompt consistently yields invalid_output — a bad prompt, not an outage.
+    const unclassifiable: ModerationProposer = {
+      kind: 'llm',
+      async propose() {
+        return { status: 'unavailable', code: 'invalid_output' } as ModerationProposerResult;
+      },
+    };
+    const h = makeService(unclassifiable);
+    await h.svc.bootstrapSeat(ROOM, STEWARD);
+    const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(['moderate.flag']), 'be civil');
+    if (!proposed.ok) throw new Error('propose');
+    const res = await h.svc.evaluateModel(proposed.value.modelId);
+    expect(res.ok && res.value.status).toBe('rejected'); // definitive, not `evaluating`
   });
 });

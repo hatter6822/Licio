@@ -233,6 +233,17 @@ export const serverEnvSchemaRefined = serverEnvSchema
             path: ['ANTHROPIC_API_KEY'],
           });
         }
+        // GOVERNANCE_LLM_MODEL is OPTIONAL for anthropic (defaults to the reviewed
+        // model), but a blank explicit override is silently trimmed to empty and
+        // falls back to the default — an explicit-yet-invalid value that must fail
+        // fast, not be ignored. (The `local` branch already requires it non-blank.)
+        if (env.GOVERNANCE_LLM_MODEL !== undefined && env.GOVERNANCE_LLM_MODEL.trim() === '') {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'GOVERNANCE_LLM_MODEL must be non-empty when set',
+            path: ['GOVERNANCE_LLM_MODEL'],
+          });
+        }
       } else {
         if (env.GOVERNANCE_LLM_LOCAL_URL === undefined) {
           ctx.addIssue({

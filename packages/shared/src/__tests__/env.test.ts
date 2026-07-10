@@ -204,6 +204,23 @@ describe('validateServerEnv', () => {
         GOVERNANCE_LLM_MODEL: '   ',
       }),
     ).toThrow(/non-empty GOVERNANCE_LLM_MODEL/);
+    // R4-2: a blank explicit ANTHROPIC model OVERRIDE fails fast (it would otherwise
+    // trim to empty and silently run the default), while UNSET stays valid (optional).
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: 'k',
+        GOVERNANCE_LLM_MODEL: '   ',
+      }),
+    ).toThrow(/GOVERNANCE_LLM_MODEL must be non-empty/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_PROVIDER: 'anthropic',
+        ANTHROPIC_API_KEY: 'k',
+      }),
+    ).not.toThrow();
   });
 });
 
