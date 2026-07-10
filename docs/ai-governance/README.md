@@ -109,8 +109,11 @@ guard, the governed models, and a module singleton for routes.
   score-blind shadow advisor), `local.ts` (the loopback-only OpenAI-compatible
   local-runtime completion — llama.cpp server/Ollama/vLLM/LM Studio over plain
   fetch), `quality.ts` (the deterministic §24.5 summary acceptance gate),
-  `registration.ts` (register + deploy every model through the REAL gate, one
-  identity per backend per surface). Every DECIDED moderation (raw proposed vs
+  `registration.ts` (register + deploy every model through the REAL gate; one
+  identity per surface **and config** — the identity name folds in a config hash,
+  so changing the model/prompt/URL/ceiling mints a new identity that must re-clear
+  the gate and forces moderation re-admission, never reusing a stale card).
+  Every DECIDED moderation (raw proposed vs
   wrapper-bounded action, metadata only) is logged to the in-memory
   `ModerationDecisionLog` (`stores.ts`), read by the AI team at `GET
   /v1/ai/admin/governance/moderation/:roomId`.

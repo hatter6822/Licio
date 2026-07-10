@@ -200,6 +200,11 @@ export function buildModerationContextLoader(deps: {
   return async (roomId, subjectRef) => {
     const contribution = await deps.forum.contributions.getById(subjectRef);
     if (contribution === null || contribution.userId === null) return null; // deleted ⇒ moot
+    // Only re-moderate content that is still PUBLISHED. A non-published state means
+    // the platform floor (or a prior agent hold) already actioned it — removed,
+    // hidden, or under_review — so there is nothing left for the deferred model to
+    // add (the re-seam is floor-dominant anyway): treat it as moot and dequeue.
+    if (contribution.moderationState !== 'published') return null;
     const attachmentIds = contribution.metadata['attachment_ids'];
     const attachmentCount = Array.isArray(attachmentIds) ? attachmentIds.length : 0;
     const history = await deps.readAuthorHistory(roomId, contribution.userId);
@@ -273,24 +278,40 @@ export function buildDeferredRemoderationApplier(
       DEFERRED_STATE_RANK[target] > DEFERRED_STATE_RANK[contribution.moderationState];
     if (raise) {
       await deps.forum.contributions.setModerationState(contributionId, target);
-      const thread = await deps.ingestion.stories.getThreadById(contribution.threadId);
-      deps.forum.metrics.increment('contributions.agent_flagged_deferred');
-      await deps.ingestion.reviewQueue.insert({
-        kind: 'contribution_safety_hold',
-        storyId: thread?.storyId ?? null,
-        context: {
-          contribution_id: contributionId,
-          thread_id: contribution.threadId,
-          reasons: ['in_room_agent'],
-          disposition: 'flag',
-          source: 'in_room_agent_deferred',
-        },
-        status: 'pending',
-        resolution: null,
-        resolvedBy: null,
-        resolvedAt: null,
-        notBefore: null,
-      });
+      try {
+        const thread = await deps.ingestion.stories.getThreadById(contribution.threadId);
+        deps.forum.metrics.increment('contributions.agent_flagged_deferred');
+        await deps.ingestion.reviewQueue.insert({
+          kind: 'contribution_safety_hold',
+          storyId: thread?.storyId ?? null,
+          context: {
+            contribution_id: contributionId,
+            thread_id: contribution.threadId,
+            reasons: ['in_room_agent'],
+            disposition: 'flag',
+            source: 'in_room_agent_deferred',
+          },
+          status: 'pending',
+          resolution: null,
+          resolvedBy: null,
+          resolvedAt: null,
+          notBefore: null,
+        });
+      } catch (error) {
+        // ATOMICITY (mirrors the live contribution path's compensating rollback): a
+        // hidden contribution must never be left WITHOUT a reviewer case. If the
+        // review-queue intake fails after the state change, COMPENSATE by restoring
+        // the published state — but only if it is still the value we just set, so a
+        // concurrent platform-floor decision is never lowered — then rethrow so the
+        // sweep keeps the item queued and retries BOTH steps together next pass.
+        const latest = await deps.forum.contributions.getById(contributionId);
+        if (latest?.moderationState === target) {
+          await deps.forum.contributions
+            .setModerationState(contributionId, 'published')
+            .catch(() => {});
+        }
+        throw error;
+      }
     }
     // No silent sanction: notify the author with the agent's statement of reasons
     // (whether the content was raised to review or only warned).

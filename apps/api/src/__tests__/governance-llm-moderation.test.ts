@@ -96,10 +96,9 @@ describe('governance LLM moderation proposer — governed decision + backendId',
       expect(result.proposal.action).toBe('flag_for_review');
       expect(result.proposal.outputId).not.toBeNull();
     }
-    // backendId pins the admission to this backend + model (F4).
-    expect(h.proposer.backendId).toBe(
-      `llm:governance-moderation-llm-anthropic:${SETTINGS.modelId}`,
-    );
+    // backendId pins the admission to this backend + config (F4); the identity name
+    // folds in a config hash, so it changes whenever the model/prompt/URL changes.
+    expect(h.proposer.backendId).toMatch(/^llm:governance-moderation-llm-anthropic-[0-9a-f]{12}$/);
   });
 });
 

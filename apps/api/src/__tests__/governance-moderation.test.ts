@@ -376,12 +376,40 @@ describe('GovernanceService.moderate — the admitting-backend gate (WS-U ADR-9 
     expect(switched.ok && switched.value).toBeNull();
   });
 
-  it('a backendId-less proposer (test double / legacy model) skips the gate', async () => {
-    // fakeProposer sets no backendId ⇒ admittedBackendId stays null ⇒ the gate is a
-    // no-op (back-compat: a legacy model or a test double is never fail-closed).
+  it('a backendId-less proposer (a test double) skips the gate', async () => {
+    // fakeProposer sets no backendId ⇒ `proposer.backendId === undefined` ⇒ the gate
+    // is a no-op (only a real backend triggers it).
     const h = makeService(fakeProposer(decided('flag_for_review')));
     await activate(h.svc, ['moderate.flag']);
     const res = await h.svc.moderate(ROOM, ctx({ linkCount: 5 }), 'c-nobk');
     expect(res.ok && res.value?.action).toBe('flag_for_review');
+  });
+
+  it('R2-3: fails closed for a LEGACY unpinned model (admittedBackendId null) once a real backend is live', async () => {
+    const stores = createInMemoryGovernanceStores();
+    let n = 0;
+    const mk = (p: ModerationProposer) =>
+      createGovernanceService({
+        stores,
+        config: resolveGovernanceConfig({}),
+        now: () => new Date('2026-07-09T00:00:00.000Z'),
+        uuid: () => `id-${++n}`,
+        moderationProposer: p,
+      });
+    // Admit under a backendId-LESS proposer ⇒ the model's admittedBackendId stays
+    // null (a pre-0067 "legacy" admission).
+    const legacy: ModerationProposer = {
+      kind: 'llm',
+      async propose() {
+        return decided('flag_for_review', 'x');
+      },
+    };
+    const svcLegacy = mk(legacy);
+    await activate(svcLegacy, ['moderate.flag']);
+    // A real backend then goes live ⇒ the legacy null-pinned model must NOT run under
+    // it (it was never vetted for this backend); moderation fails closed to baseline.
+    const svcReal = mk(backendProposer('backend-live'));
+    const res = await svcReal.moderate(ROOM, ctx({ linkCount: 5 }), 'c-legacy');
+    expect(res.ok && res.value).toBeNull();
   });
 });

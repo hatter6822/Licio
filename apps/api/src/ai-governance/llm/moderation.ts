@@ -134,10 +134,11 @@ export function createGovernanceLlmModerationProposer(
 
   return {
     kind: 'llm',
-    // Pins the model's admission to THIS backend + model: a later swap (enabling
-    // the LLM over a deterministic-admitted model, or changing GOVERNANCE_LLM_MODEL)
-    // changes this id, so GovernanceService.moderate fails closed until re-admission.
-    backendId: `llm:${identity.name}:${settings.modelId}`,
+    // Pins the model's admission to THIS backend + config: the identity name folds
+    // in a config hash (backend, model id, prompts, URL), so a later swap — enabling
+    // the LLM over a deterministic-admitted model, or changing GOVERNANCE_LLM_MODEL —
+    // changes this id and GovernanceService.moderate fails closed until re-admission.
+    backendId: `llm:${identity.name}`,
     async propose(request) {
       const meta = { room_id: request.roomId, subject_ref: request.subjectRef };
       const nowMs = services.now();

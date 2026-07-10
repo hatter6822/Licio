@@ -961,16 +961,14 @@ export class GovernanceService {
 
     // The model was admitted under a SPECIFIC moderation backend (evaluateModel
     // pins it). If the LIVE backend differs — LLM moderation enabled over a
-    // deterministic-admitted model, or GOVERNANCE_LLM_MODEL changed — this prompt
-    // was never vetted for the classifier now executing it. FAIL CLOSED to the
-    // platform baseline until the model is re-admitted under the active backend
-    // (WS-U ADR-9 review); never moderate under an un-admitted backend. A null
-    // admittedBackendId (legacy) or a backendId-less proposer skips the gate.
-    if (
-      model.admittedBackendId !== null &&
-      proposer.backendId !== undefined &&
-      proposer.backendId !== model.admittedBackendId
-    ) {
+    // deterministic-admitted model, GOVERNANCE_LLM_MODEL changed, or a LEGACY model
+    // approved before backend-pinning (admittedBackendId = null) — this prompt was
+    // never vetted for the classifier now executing it. FAIL CLOSED to the platform
+    // baseline until re-admission under the active backend (WS-U ADR-9 review);
+    // never moderate under an un-admitted backend. A null pin is treated as
+    // UNADMITTED for any real backend; only a backendId-less proposer (a test
+    // double) skips the gate.
+    if (proposer.backendId !== undefined && proposer.backendId !== model.admittedBackendId) {
       return { kind: 'no_agent' };
     }
 

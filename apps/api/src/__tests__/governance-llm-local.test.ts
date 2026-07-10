@@ -165,11 +165,9 @@ describe('local backend through the governed provider (end to end, no network)',
     });
 
     expect(summary.headline).toBe(draft.headline);
-    const records = await services.outputRecords.listByModel(
-      'governance-summarizer-llm-local',
-      '1.0.0',
-    );
+    const records = await services.outputRecords.listByModel(identity.name, identity.version);
     expect(records).toHaveLength(1);
-    expect(records[0]?.model_name).toBe('governance-summarizer-llm-local');
+    expect(records[0]?.model_name).toBe(identity.name);
+    expect(identity.name).toMatch(/^governance-summarizer-llm-local-[0-9a-f]{12}$/);
   });
 });

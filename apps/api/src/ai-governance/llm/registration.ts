@@ -21,6 +21,7 @@ import {
 } from '@licio/ai-governance';
 import { type HarnessRunInput, runEvaluationHarness } from '../harness.js';
 import type { ModelIdentity } from '../models.js';
+import { configHash } from '../output-records.js';
 import { deployModel, type RegistryDeps, registerModel } from '../registry.js';
 import type { AiGovernanceServices } from '../services.js';
 import type { GovernanceLlmBackend, GovernanceLlmSettings } from './config.js';
@@ -41,23 +42,28 @@ export function buildGovernanceLlmIdentity(
   settings: GovernanceLlmSettings,
   backend: GovernanceLlmBackend,
 ): ModelIdentity {
+  const config = {
+    method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
+    provider: backend.kind,
+    model_id: settings.modelId,
+    max_output_tokens: settings.maxOutputTokens,
+    system_prompt_version: GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION,
+    quality_gate_version: LAWMAKING_SUMMARY_QUALITY_GATE_VERSION,
+    ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+  };
   return {
-    // One registry identity PER backend, so a backend switch can never leave a
-    // durable registry holding a card that describes the other transport.
-    name: `governance-summarizer-llm-${backend.kind}`,
+    // One registry identity per (backend, CONFIG): the config hash is folded into
+    // the name, so changing the model id / prompt / gate version / base url / output
+    // ceiling mints a NEW identity that must clear the WS-K admission gate afresh
+    // (WS-U ADR-9 review). `ensureGovernanceLlmDeployed` keys on this name, so a
+    // changed config is never treated as already-deployed and can never run under
+    // the prior model card + evaluation. An unchanged config → same name → idempotent.
+    name: `governance-summarizer-llm-${backend.kind}-${configHash(config).slice(0, 12)}`,
     version: '1.0.0',
     useCaseId: 'governance_assistance',
     modalities: ['generation'],
     promptTemplateId: 'governance-summarizer-llm/lawmaking-v1',
-    config: {
-      method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
-      provider: backend.kind,
-      model_id: settings.modelId,
-      max_output_tokens: settings.maxOutputTokens,
-      system_prompt_version: GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION,
-      quality_gate_version: LAWMAKING_SUMMARY_QUALITY_GATE_VERSION,
-      ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
-    },
+    config,
   };
 }
 
@@ -69,20 +75,24 @@ export function buildGovernanceModerationProposerIdentity(
   settings: GovernanceLlmSettings,
   backend: GovernanceLlmBackend,
 ): ModelIdentity {
+  const config = {
+    method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
+    provider: backend.kind,
+    model_id: settings.modelId,
+    max_output_tokens: settings.maxOutputTokens,
+    system_prompt_version: MODERATION_SYSTEM_PROMPT_VERSION,
+    ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
+  };
   return {
-    name: `governance-moderation-llm-${backend.kind}`,
+    // Config-hashed identity (as with the summariser): a changed model/prompt/URL
+    // re-clears the WS-K gate, and the moderation wrapper's admitting `backendId`
+    // (derived from this name) then forces re-admission before it can moderate.
+    name: `governance-moderation-llm-${backend.kind}-${configHash(config).slice(0, 12)}`,
     version: '1.0.0',
     useCaseId: 'toxicity_safety_triage',
     modalities: ['classification'],
     promptTemplateId: 'governance-moderation-llm/v1',
-    config: {
-      method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
-      provider: backend.kind,
-      model_id: settings.modelId,
-      max_output_tokens: settings.maxOutputTokens,
-      system_prompt_version: MODERATION_SYSTEM_PROMPT_VERSION,
-      ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
-    },
+    config,
   };
 }
 
@@ -194,7 +204,7 @@ function buildCard(
     known_biases: local
       ? 'Inherited from the operator-selected open-weight model; per-cohort measurements land with the WS-U slice-3 recorded-fixture eval corpus.'
       : 'Inherited from the hosted foundation model; per-cohort measurements land with the WS-U slice-3 recorded-fixture eval corpus.',
-    limitations: `Stochastic ${local ? 'locally hosted' : 'hosted'} backend: outputs are not bit-reproducible. It is advisory only — the shadow moderation advisor carries NO authority (the deterministic DSL decides), and the summariser falls back to the deterministic summary on any failure. Admission ran on the synthetic fixture set pending the recorded-fixture corpus (tracked residual). Off by default; enabling either backend is an explicit operator opt-in (ADR-9).`,
+    limitations: `Stochastic ${local ? 'locally hosted' : 'hosted'} backend: outputs are not bit-reproducible. It never holds final authority — the in-room moderation model's classification is bounded by the deterministic wrapper (escalate-to-human-review ceiling + community-capability clamp) with the always-on platform baseline + human floor above it, and the summariser falls back to the deterministic summary on any failure. Admission ran on the synthetic fixture set pending the recorded-fixture corpus (tracked residual). Off by default; enabling either backend is an explicit operator opt-in (ADR-9).`,
     evaluation_results: results,
     risk_assessment_ref: riskAssessmentRefFor(identity.useCaseId),
     update_history: [

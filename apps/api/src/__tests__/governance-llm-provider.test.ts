@@ -120,12 +120,10 @@ describe('governance LLM provider — governed happy path', () => {
     });
 
     const identity = buildGovernanceLlmIdentity(SETTINGS, BACKEND);
-    const records = await h.services.outputRecords.listByModel(
-      'governance-summarizer-llm-anthropic',
-      '1.0.0',
-    );
+    const records = await h.services.outputRecords.listByModel(identity.name, identity.version);
     expect(records).toHaveLength(1);
-    expect(records[0]?.model_name).toBe('governance-summarizer-llm-anthropic');
+    expect(records[0]?.model_name).toBe(identity.name);
+    expect(identity.name).toMatch(/^governance-summarizer-llm-anthropic-[0-9a-f]{12}$/);
     expect(records[0]?.use_case_id).toBe('governance_assistance');
     expect(records[0]?.config_hash).toBe(configHash(identity.config));
     expect(records[0]?.input_refs).toEqual(['room:room-1', 'proposal:prop-1']);
@@ -234,8 +232,9 @@ describe('governance LLM provider — failure taxonomy (throws; NO output record
     await expectFailure(h, 'transport');
     h.advance(61_000); // past the breaker cooldown so the probe is allowed
     await expectFailure(h, 'refusal');
+    const identity = buildGovernanceLlmIdentity(SETTINGS, BACKEND);
     expect(
-      await h.services.outputRecords.listByModel('governance-summarizer-llm-anthropic', '1.0.0'),
+      await h.services.outputRecords.listByModel(identity.name, identity.version),
     ).toHaveLength(0);
   });
 });

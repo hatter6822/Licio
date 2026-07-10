@@ -14,6 +14,7 @@ import { createContribution, editContribution } from '../forum/contributions.js'
 import { type RoomAgentModerator, resetForumServicesForTests } from '../forum/services.js';
 import {
   buildDeferredRemoderationApplier,
+  buildModerationContextLoader,
   createRoomAgentModerator,
 } from '../governance/forum-agent.js';
 import type { ModerationProposer } from '../governance/moderation-proposer.js';
@@ -388,5 +389,49 @@ describe('WS-U buildDeferredRemoderationApplier (deferred re-seam, floor-dominan
       10,
     );
     expect(queued).toHaveLength(0);
+  });
+
+  it('R2-4: compensates (restores published) when the review-queue intake fails — no orphaned hidden content', async () => {
+    const id = await publishedContribution();
+    // The review-queue intake throws AFTER the state was raised to under_review.
+    fixture.ingestion.reviewQueue.insert = async () => {
+      throw new Error('queue down');
+    };
+    await expect(applier()(ROOM, id, 'flag_for_review', 'links')).rejects.toThrow('queue down');
+    // Atomicity: the contribution is NOT left hidden without a reviewer case — it was
+    // restored to published, so the sweep can retry BOTH steps cleanly next pass.
+    expect((await fixture.forum.contributions.getById(id))?.moderationState).toBe('published');
+  });
+});
+
+describe('WS-U buildModerationContextLoader (content-free reconstruction + moot rules)', () => {
+  const history = async () => ({ accountAgeDays: 100, newToRoom: false, priorRemovalsInRoom: 0 });
+  function loader() {
+    return buildModerationContextLoader({ forum: fixture.forum, readAuthorHistory: history });
+  }
+  async function published(): Promise<string> {
+    const { threadId } = await seedThread(fixture);
+    const created = await post(
+      contributionCreateSchema.parse(contributionBody('question', threadId)),
+    );
+    if (!created.ok) throw new Error('create failed');
+    return created.contribution.contributionId;
+  }
+
+  it('reconstructs a context from the live contribution (published)', async () => {
+    const ctx = await loader()('room-x', await published());
+    expect(ctx).not.toBeNull();
+    expect(ctx?.contentKind).toBe('comment');
+    expect(ctx?.authorAccountAgeDays).toBe(100);
+  });
+
+  it('R2-2: returns null (moot) for a non-published (floor-removed) contribution', async () => {
+    const id = await published();
+    await fixture.forum.contributions.setModerationState(id, 'removed');
+    expect(await loader()('room-x', id)).toBeNull();
+  });
+
+  it('returns null (moot) for a deleted / unknown contribution', async () => {
+    expect(await loader()('room-x', 'ghost')).toBeNull();
   });
 });

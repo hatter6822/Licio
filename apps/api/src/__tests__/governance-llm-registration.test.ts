@@ -69,20 +69,39 @@ describe('ensureGovernanceLlmDeployed (the real WS-K gate)', () => {
     expect(await ensureGovernanceLlmDeployed(services, identity)).toBe(true);
     // The deterministic governance summariser stays deployed alongside it.
     expect((await services.registry.getDeployed('governance-summarizer'))?.status).toBe('deployed');
-    expect(
-      (await services.registry.getDeployed('governance-summarizer-llm-anthropic'))?.status,
-    ).toBe('deployed');
+    expect((await services.registry.getDeployed(identity.name))?.status).toBe('deployed');
   });
 
-  it('each backend carries its own registry identity, so a switch never leaves a stale card', async () => {
+  it('each backend + config carries its own registry identity, so a switch never leaves a stale card', async () => {
     const anthropic = buildGovernanceLlmIdentity(SETTINGS, ANTHROPIC);
     const local = buildGovernanceLlmIdentity({ ...SETTINGS, modelId: 'llama3.3:70b' }, LOCAL);
-    expect(anthropic.name).toBe('governance-summarizer-llm-anthropic');
-    expect(local.name).toBe('governance-summarizer-llm-local');
+    // The name folds in a config hash: distinct backend (and config) ⇒ distinct name.
+    expect(anthropic.name).toMatch(/^governance-summarizer-llm-anthropic-[0-9a-f]{12}$/);
+    expect(local.name).toMatch(/^governance-summarizer-llm-local-[0-9a-f]{12}$/);
+    expect(anthropic.name).not.toBe(local.name);
     expect(await ensureGovernanceLlmDeployed(services, anthropic)).toBe(true);
     expect(await ensureGovernanceLlmDeployed(services, local)).toBe(true);
     expect((await services.registry.getDeployed(anthropic.name))?.status).toBe('deployed');
     expect((await services.registry.getDeployed(local.name))?.status).toBe('deployed');
+  });
+
+  it('a CHANGED config mints a new identity that re-clears the WS-K gate (R2-1)', async () => {
+    const before = buildGovernanceLlmIdentity(SETTINGS, ANTHROPIC);
+    const after = buildGovernanceLlmIdentity(
+      { ...SETTINGS, modelId: 'claude-haiku-4-5' },
+      ANTHROPIC,
+    );
+    // Same backend, different model ⇒ different config hash ⇒ different name, so
+    // ensureGovernanceLlmDeployed cannot early-return the old (stale) card.
+    expect(after.name).not.toBe(before.name);
+    expect(await ensureGovernanceLlmDeployed(services, before)).toBe(true);
+    expect(await ensureGovernanceLlmDeployed(services, after)).toBe(true);
+    const beforeCard = await services.registry.getVersion(before.name, before.version);
+    const afterCard = await services.registry.getVersion(after.name, after.version);
+    expect(beforeCard?.card.name).toBe(before.name);
+    expect(afterCard?.card.name).toBe(after.name);
+    // Each ran its own admission (a distinct evaluation record per identity).
+    expect((await services.evaluations.latest(after.name, after.version))?.decision).toBe('deploy');
   });
 
   it('anthropic: honest card; the API key NEVER enters the hashed identity config', async () => {
@@ -121,7 +140,7 @@ describe('ensureGovernanceLlmDeployed (the real WS-K gate)', () => {
 
   it('deploys the in-room moderation model through the same gate with its own identity + card', async () => {
     const identity = buildGovernanceModerationProposerIdentity(SETTINGS, ANTHROPIC);
-    expect(identity.name).toBe('governance-moderation-llm-anthropic');
+    expect(identity.name).toMatch(/^governance-moderation-llm-anthropic-[0-9a-f]{12}$/);
     expect(identity.useCaseId).toBe('toxicity_safety_triage');
     expect(identity.modalities).toEqual(['classification']);
     expect(typeof identity.config['system_prompt_version']).toBe('number');
