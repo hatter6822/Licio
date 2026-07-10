@@ -122,6 +122,7 @@ import {
   RedisEphemeralStore,
   RedisSessionStore,
 } from './identity/redis-stores.js';
+import { createAlertTransports } from './identity/security-alerts.js';
 import {
   buildIdentityServicesFromEnv,
   selectMailer,
@@ -144,6 +145,7 @@ import {
 } from './ingestion/drizzle-ingestion-stores.js';
 import { HttpEmbeddingProvider } from './ingestion/embeddings.js';
 import { SubmissionRateLimiter } from './ingestion/prechecks.js';
+import { safeFetch } from './ingestion/safe-fetch.js';
 import { INGESTION_SCHEDULER_INTERVAL_MS, startIngestionScheduler } from './ingestion/scheduler.js';
 import {
   createInMemoryIngestionServices,
@@ -204,12 +206,19 @@ import {
   seedOperationalSignals,
 } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import {
+  getVapidConfig,
+  sendBodylessWakeToUser,
+  subscriptionsForUser,
+} from './lib/push-service.js';
+import { RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
   createAutoModerationSink,
   createWsJContributionSafety,
 } from './moderation/forum-integration.js';
+import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
 import { noticeToView } from './moderation/notices.js';
 import {
   createProductionContentPort,
@@ -301,6 +310,10 @@ if (env.REDIS_URL !== undefined) {
   identityServices.challenges = new RedisEphemeralStore(redis, 'wachal:');
   identityServices.otp = new RedisEphemeralStore(redis, 'otp:');
   identityServices.rateLimit = new AuthRateLimiter(new RedisAuthRateLimitStore(redis));
+  // The WS-C double-submit CSRF tokens live in Redis too, so a token minted on
+  // one instance verifies on every other and survives a restart (the in-memory
+  // default store is the dev/test posture only).
+  setTokenStore(new RedisTokenStore(redis));
   // WS-E Redis bindings: single-use replay nonces, per-user sliding-window
   // rate limiting (fail-closed in-memory fallback at 50% limits inside the
   // limiter), and the short-lived real-time aggregation counters (WS-E.3.2).
@@ -559,6 +572,27 @@ if (s3Config) {
     'S3 is not configured (S3_* env group): DSAR export archives are in-memory and will NOT survive a restart.',
   );
 }
+// WS-D.1.4d out-of-band security alerts: deliver on the REAL channels — email
+// through the selected mailer (SES in production; the dev mailer surfaces the
+// notice locally) and push as a bodyless wake through the Web Push service
+// when VAPID is configured.  Channel selection (email → else push → always the
+// audit-log entry) stays in sendSecurityAlert; delivery is best-effort by
+// construction (a transport failure logs and can never fail the auth flow).
+const alertVapidConfig = getVapidConfig();
+identityServices.hasPushChannel = (userId) =>
+  alertVapidConfig !== null && subscriptionsForUser(userId).length > 0;
+identityServices.alertTransports = createAlertTransports({
+  getUserEmail: async (userId) => (await identityServices.store.getUser(userId))?.email ?? null,
+  sendNotice: (to, kind, payload) => identityServices.mailer.sendNotice(to, kind, payload),
+  ...(alertVapidConfig !== null
+    ? {
+        sendPushWake: async (userId: string) => {
+          await sendBodylessWakeToUser(userId, alertVapidConfig);
+        },
+      }
+    : {}),
+  onError: (channel, err) => logger.warn({ channel, err }, 'security-alert delivery failed'),
+});
 setIdentityServices(identityServices);
 
 // --- WS-J trust, safety, and abuse operations -------------------------------
@@ -845,6 +879,34 @@ forumServices.relationshipReader = createRelationshipReader(moderationServices);
 // risk flag-to-review (the WS-F denylist is consulted as the malware fallback).
 forumServices.safety = createWsJContributionSafety(moderationServices, ingestionServices.urlSafety);
 forumServices.autoModerationSink = createAutoModerationSink(moderationServices);
+// WS-J.2.6b — the reviewer link-OPENING malware check: redirect-chain analysis
+// over the WS-F SSRF-hardened fetcher against the LIVE moderation + ingestion
+// blocklists.  Submitted URLs are never fetched at submission time (§18.3);
+// the console resolves this verdict on demand before a reviewer navigates to
+// reported/evidence links.  A fetch failure fails toward flagging.
+moderationServices.urlVerdict = (url) =>
+  malwareVerdictForUrl(url, {
+    fetch: async (target) => {
+      const res = await safeFetch(target, {
+        timeoutMs: 10_000,
+        maxBytes: 2_097_152,
+        maxRedirects: moderationServices.config().malwareRedirectMaxHops,
+        userAgent: 'licio-link-safety-check',
+      });
+      return res.ok
+        ? { ok: true, finalUrl: res.finalUrl }
+        : {
+            ok: false,
+            reason: res.reason,
+            ...(res.detail !== undefined ? { detail: res.detail } : {}),
+          };
+    },
+    blocklist: () => {
+      const merged = new Set<string>(moderationServices.config().malwareDomains);
+      for (const domain of ingestionServices.config().malwareDomains) merged.add(domain);
+      return merged;
+    },
+  });
 
 // WS-J.2.3 shadow enforcement: late-bind the ranking safety filter's
 // `shadowedSubjects` to the (now finalized, Drizzle-swapped) moderation action

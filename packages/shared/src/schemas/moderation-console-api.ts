@@ -554,3 +554,23 @@ export const incidentResolveResponseSchema = z
   })
   .strict();
 export type IncidentResolveResponse = z.infer<typeof incidentResolveResponseSchema>;
+
+/** WS-J.2.6b — the reviewer link-OPENING malware check.  Evidence URLs are
+ *  stored, never fetched at submission time (SSRF avoidance); a reviewer
+ *  resolves the redirect-chain verdict through this contract BEFORE navigating
+ *  (the fetch runs server-side over the SSRF-hardened WS-F fetcher). */
+export const urlVerdictRequestSchema = z
+  .object({
+    url: z.string().url().max(2048),
+  })
+  .strict();
+export type UrlVerdictRequest = z.infer<typeof urlVerdictRequestSchema>;
+
+export const urlVerdictResponseSchema = z
+  .object({
+    /** `malicious` blocks navigation; `unavailable` warns (fail toward
+     *  flagging, never trusting); `clear` opens. */
+    verdict: z.enum(['clear', 'malicious', 'unavailable']),
+  })
+  .strict();
+export type UrlVerdictResponse = z.infer<typeof urlVerdictResponseSchema>;

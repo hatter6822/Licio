@@ -99,6 +99,31 @@ describe('SesMailer', () => {
     expect(sent).toHaveLength(0);
   });
 
+  it('renders the security_alert notice with per-type copy and the §19.1-minimized context', async () => {
+    const { fetch, sent } = stubFetch();
+    const mailer = new SesMailer(CONFIG, fetch);
+    await mailer.sendNotice('a@example.com', 'security_alert', {
+      alert: 'new_signin',
+      device: 'macOS/Chrome',
+      auth_method: 'webauthn',
+    });
+    await mailer.sendNotice('a@example.com', 'security_alert', { alert: 'account_lockout' });
+    // An unknown alert type falls back to the generic copy — best-effort
+    // alerting must never drop over copy drift.
+    await mailer.sendNotice('a@example.com', 'security_alert', { alert: 'future_alert_kind' });
+
+    expect(sent[0]?.body.Content.Simple.Subject.Data).toContain('New sign-in');
+    const body = sent[0]?.body.Content.Simple.Body.Text.Data ?? '';
+    expect(body).toContain('Device: macOS/Chrome');
+    expect(body).toContain('Sign-in method: webauthn');
+    expect(body).toContain('https://licio.app/profile/security');
+    // No IP/location ever appears in the payload (§19.1).
+    expect(body).not.toMatch(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
+
+    expect(sent[1]?.body.Content.Simple.Subject.Data).toContain('temporarily locked');
+    expect(sent[2]?.body.Content.Simple.Subject.Data).toBe('Security alert for your Licio account');
+  });
+
   it('throws on a provider failure with a PII-free message', async () => {
     const { fetch } = stubFetch(403);
     await expect(

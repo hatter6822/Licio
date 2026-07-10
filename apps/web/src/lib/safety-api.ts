@@ -55,6 +55,8 @@ import {
   revertActionResponseSchema,
   type SupportContactResponse,
   supportContactResponseSchema,
+  type UrlVerdictResponse,
+  urlVerdictResponseSchema,
 } from '@licio/shared';
 import { client, parseResponse } from './api.js';
 
@@ -147,6 +149,14 @@ export async function fetchReportQueue(query: QueueQuery = {}): Promise<ReportQu
 export async function fetchCase(caseId: string): Promise<CaseReviewResponse> {
   const response = await client.v1.moderation.cases[':caseId'].$get({ param: { caseId } });
   return parseResponse(response, caseReviewResponseSchema);
+}
+
+/** WS-J.2.6b: resolve the server-side redirect-chain malware verdict for a
+ *  reported/evidence URL BEFORE the reviewer navigates to it (the fetch runs
+ *  over the SSRF-hardened server fetcher — never from the reviewer's browser). */
+export async function checkEvidenceUrl(url: string): Promise<UrlVerdictResponse> {
+  const response = await client.v1.moderation['url-verdict'].$post({ json: { url } });
+  return parseResponse(response, urlVerdictResponseSchema);
 }
 
 export async function assignCase(caseId: string, reviewerId: string): Promise<OkResponse> {

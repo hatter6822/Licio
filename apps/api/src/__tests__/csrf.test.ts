@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import {
   getTokenStore,
+  RedisTokenStore,
   setSessionCookie,
   setTokenStore,
   type TokenStore,
@@ -264,6 +265,70 @@ describe('CSRF protection', () => {
       },
     });
     expect(deleteRes.status).toBe(403);
+  });
+});
+
+// The PRODUCTION token store (wired at boot alongside the other Redis-backed
+// identity stores) — a token minted on one instance must verify on every other.
+describe('RedisTokenStore', () => {
+  function fakeRedis() {
+    const map = new Map<string, string>();
+    return {
+      map,
+      async get(key: string): Promise<string | null> {
+        return map.get(key) ?? null;
+      },
+      async set(key: string, value: string, _ex: 'EX', _ttl: number): Promise<'OK'> {
+        map.set(key, value);
+        return 'OK';
+      },
+      async del(...keys: string[]): Promise<number> {
+        let removed = 0;
+        for (const key of keys) if (map.delete(key)) removed += 1;
+        return removed;
+      },
+      async keys(pattern: string): Promise<string[]> {
+        const prefix = pattern.replace(/\*$/, '');
+        return [...map.keys()].filter((key) => key.startsWith(prefix));
+      },
+    };
+  }
+  const asClient = (r: ReturnType<typeof fakeRedis>) => r as unknown as import('ioredis').default;
+
+  it('round-trips a token under the csrf: prefix and deletes it', async () => {
+    const redis = fakeRedis();
+    const store = new RedisTokenStore(asClient(redis));
+    await store.set('sess-1', { token: 'a'.repeat(64), expiresAt: Date.now() + 60_000 });
+    expect(redis.map.has('csrf:sess-1')).toBe(true);
+    expect((await store.get('sess-1'))?.token).toBe('a'.repeat(64));
+    await store.delete('sess-1');
+    expect(await store.get('sess-1')).toBeUndefined();
+  });
+
+  it('never writes an already-expired token', async () => {
+    const redis = fakeRedis();
+    const store = new RedisTokenStore(asClient(redis));
+    await store.set('sess-2', { token: 'b'.repeat(64), expiresAt: Date.now() - 1 });
+    expect(redis.map.size).toBe(0);
+  });
+
+  it('treats a corrupted stored value as "no token" (fail closed), never a crash', async () => {
+    const redis = fakeRedis();
+    const store = new RedisTokenStore(asClient(redis));
+    redis.map.set('csrf:sess-3', 'not-json');
+    expect(await store.get('sess-3')).toBeUndefined();
+    redis.map.set('csrf:sess-3', JSON.stringify({ token: 42, expiresAt: 'soon' }));
+    expect(await store.get('sess-3')).toBeUndefined();
+  });
+
+  it('clear() removes only csrf-prefixed keys', async () => {
+    const redis = fakeRedis();
+    const store = new RedisTokenStore(asClient(redis));
+    await store.set('sess-4', { token: 'c'.repeat(64), expiresAt: Date.now() + 60_000 });
+    redis.map.set('other:key', 'untouched');
+    await store.clear();
+    expect(redis.map.has('csrf:sess-4')).toBe(false);
+    expect(redis.map.get('other:key')).toBe('untouched');
   });
 });
 

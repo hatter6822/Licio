@@ -92,8 +92,9 @@ export async function recordAuthFailure(
     await sendSecurityAlert({
       userId: opts.alertUserId,
       hasEmail: !!user?.email,
-      hasPush: false,
+      hasPush: (await services.hasPushChannel?.(opts.alertUserId)) ?? false,
       audit: services.audit,
+      ...(services.alertTransports ? { transports: services.alertTransports } : {}),
       event: {
         type: 'account_lockout',
         ...(opts.authMethod ? { authMethod: opts.authMethod } : {}),
@@ -185,8 +186,9 @@ export async function finalizeLogin(
     await sendSecurityAlert({
       userId: params.userId,
       hasEmail: !!user?.email,
-      hasPush: false,
+      hasPush: (await services.hasPushChannel?.(params.userId)) ?? false,
       audit: services.audit,
+      ...(services.alertTransports ? { transports: services.alertTransports } : {}),
       event: { type: 'new_signin', device: profile, authMethod: params.authMethod },
     });
   }

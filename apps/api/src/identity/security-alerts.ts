@@ -101,6 +101,57 @@ export interface AlertTransports {
 }
 
 /**
+ * Build the REAL out-of-band transports over the selected mailer + the Web Push
+ * service (WS-D.1.4d).  Delivery is BEST-EFFORT by construction: a transport
+ * failure reports through `onError` and never throws, so an SES outage can
+ * never fail the login/lockout flow the alert decorates — the in-app
+ * security-activity log entry (always written by {@link sendSecurityAlert}) is
+ * the guaranteed channel.  The payload carries the minimized §19.1 context
+ * only: alert type + coarse device descriptor + auth method — never an IP or
+ * location.
+ */
+export function createAlertTransports(deps: {
+  /** Resolve the user's email at DELIVERY time (a just-removed address is never mailed). */
+  getUserEmail: (userId: string) => Promise<string | null>;
+  /** The mailer notice channel (SES in production; the dev mailer surfaces it locally). */
+  sendNotice: (
+    to: string,
+    kind: 'security_alert',
+    payload: Record<string, string>,
+  ) => Promise<void>;
+  /** Bodyless Web Push wake — provide only when Web Push (VAPID) is configured. */
+  sendPushWake?: (userId: string) => Promise<void>;
+  onError: (channel: 'email' | 'push', err: unknown) => void;
+}): AlertTransports {
+  const transports: AlertTransports = {
+    sendEmail: async (userId, event) => {
+      try {
+        const email = await deps.getUserEmail(userId);
+        if (email === null) return;
+        await deps.sendNotice(email, 'security_alert', {
+          alert: event.type,
+          ...(event.device ? { device: event.device } : {}),
+          ...(event.authMethod ? { auth_method: event.authMethod } : {}),
+        });
+      } catch (err) {
+        deps.onError('email', err);
+      }
+    },
+  };
+  const wake = deps.sendPushWake;
+  if (wake) {
+    transports.sendPush = async (userId) => {
+      try {
+        await wake(userId);
+      } catch (err) {
+        deps.onError('push', err);
+      }
+    };
+  }
+  return transports;
+}
+
+/**
  * Deliver a security alert across the selected channels and always write the
  * audit-log entry.  The audit redactor strips any IP/secret from the context, so
  * the persisted record (and, by construction here, the email/push payloads) carry

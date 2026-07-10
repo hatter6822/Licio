@@ -18,9 +18,11 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
+import { openExternal } from '../../lib/open-external.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyModerationAction,
+  checkEvidenceUrl,
   decideAppeal,
   fetchAppeal,
   fetchAppealQueue,
@@ -61,6 +63,88 @@ const slaTone: Record<string, string> = {
 
 function isForbidden(error: unknown): boolean {
   return error instanceof ApiClientError && error.status === 403;
+}
+
+/**
+ * WS-J.2.6b: a reporter-supplied evidence link resolves the SERVER-side
+ * redirect-chain malware verdict before the reviewer navigates (evidence URLs
+ * are stored, never fetched at submission time).  `malicious` replaces the
+ * anchor with a blocked notice; `unavailable` warns but leaves the reviewer in
+ * control ("open anyway" — the reviewer IS the human-review path); `clear`
+ * opens with the opener severed.  The verdict is a real network round-trip, so
+ * a popup-blocked clean open surfaces a fresh-gesture anchor instead of
+ * failing silently.
+ */
+function EvidenceLink({ url }: { url: string }): React.ReactElement {
+  const t = useT();
+  const [state, setState] = useState<
+    'idle' | 'checking' | 'clear-blocked' | 'malicious' | 'unavailable'
+  >('idle');
+
+  const activate = (event: { preventDefault: () => void }): void => {
+    event.preventDefault();
+    if (state === 'checking') return;
+    setState('checking');
+    void checkEvidenceUrl(url)
+      .then(({ verdict }) => {
+        if (verdict === 'clear') {
+          setState('idle');
+          openExternal(url, () => setState('clear-blocked'));
+        } else {
+          setState(verdict);
+        }
+      })
+      .catch(() => {
+        // Fail toward flagging: an unreachable check warns, never silently opens.
+        setState('unavailable');
+      });
+  };
+
+  if (state === 'malicious') {
+    return (
+      <span role="status" className="font-semibold text-error">
+        {t('console.evidenceMalicious', 'Blocked: this link resolves to a known malicious site.')}{' '}
+        <span className="font-normal text-ink-muted line-through">{url}</span>
+      </span>
+    );
+  }
+  return (
+    <>
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer noopener"
+        className="text-primary underline"
+        onClick={activate}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') activate(event);
+        }}
+      >
+        {url}
+      </a>
+      {state === 'checking' ? (
+        <span role="status" className="ml-1 text-ink-muted">
+          {t('console.evidenceChecking', 'checking link…')}
+        </span>
+      ) : null}
+      {state === 'unavailable' ? (
+        <span role="status" className="ml-1 text-warning">
+          {t('console.evidenceUnverified', 'Could not verify this link.')}{' '}
+          <a href={url} target="_blank" rel="noreferrer noopener" className="underline">
+            {t('console.evidenceOpenAnyway', 'Open anyway')}
+          </a>
+        </span>
+      ) : null}
+      {state === 'clear-blocked' ? (
+        <span role="status" className="ml-1 text-ink-muted">
+          {t('console.evidenceVerified', 'Verified.')}{' '}
+          <a href={url} target="_blank" rel="noreferrer noopener" className="underline">
+            {t('console.evidenceOpen', 'Open link')}
+          </a>
+        </span>
+      ) : null}
+    </>
+  );
 }
 
 export function ModerationConsole(): React.ReactElement {
@@ -241,16 +325,10 @@ function CaseReviewDialog({
                           <span className="text-ink-muted">
                             {t('console.evidence', 'Evidence')}:{' '}
                           </span>
-                          {/* Reporter-supplied links; the steward opens them in a
-                              new context with no referrer/opener leakage. */}
-                          <a
-                            href={url}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="text-primary underline"
-                          >
-                            {url}
-                          </a>
+                          {/* Reporter-supplied links resolve the WS-J.2.6b
+                              server-side malware verdict before navigation and
+                              open with no referrer/opener leakage. */}
+                          <EvidenceLink url={url} />
                         </li>
                       ))}
                     </ul>

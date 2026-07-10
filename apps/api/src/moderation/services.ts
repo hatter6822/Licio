@@ -13,6 +13,7 @@ import {
   loadModerationConfig,
   type ModerationRuntimeConfig,
 } from './config.js';
+import type { UrlVerdict } from './malware-fetch.js';
 import {
   defaultAlertPort,
   defaultContentPort,
@@ -95,6 +96,11 @@ export interface ModerationServices {
    *  reviewer is eligible, the test/default posture); wired at boot to the WS-D
    *  steward roles. */
   reviewerQueues?: (userId: string) => Promise<readonly ModerationQueue[]>;
+  /** WS-J.2.6b redirect-chain malware verdict for the reviewer link-OPENING
+   *  path (never the submission path — §18.3 SSRF posture).  Wired at boot over
+   *  the WS-F SSRF-hardened fetcher + the live blocklists; absent ⇒ the console
+   *  route reports `unavailable` (fail toward flagging, never trusting). */
+  urlVerdict?: (url: string) => Promise<UrlVerdict>;
   config: () => ModerationRuntimeConfig;
   reloadConfig: () => Promise<ModerationRuntimeConfig>;
   metrics: ModerationMetrics;

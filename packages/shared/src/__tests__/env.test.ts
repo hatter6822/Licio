@@ -121,6 +121,28 @@ describe('validateServerEnv', () => {
     ).toThrow(/Incomplete KNOMOSIS_GATEWAY configuration/);
   });
 
+  it('accepts a COMPLETE LCAP→IPFS bridge pair and rejects a PARTIAL one (Gate-19)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      LCAP_NETWORK_ID: 'licio-test',
+      LCAP_IPFS_GATEWAY_URL: 'https://ipfs.example',
+      LCAP_IPFS_PINNING_URL: 'https://pin.example/api/v0/add',
+    });
+    expect(result.LCAP_NETWORK_ID).toBe('licio-test');
+    expect(result.LCAP_IPFS_GATEWAY_URL).toBe('https://ipfs.example');
+
+    // A gateway with no pinning endpoint (or vice versa) would silently leave
+    // the publisher unconfigured (every publish 503s) — reject it at startup.
+    expect(() =>
+      validateServerEnv({ ...validEnv, LCAP_IPFS_GATEWAY_URL: 'https://ipfs.example' }),
+    ).toThrow(/Incomplete LCAP_IPFS configuration/);
+    expect(() =>
+      validateServerEnv({ ...validEnv, LCAP_IPFS_PINNING_URL: 'https://pin.example' }),
+    ).toThrow(/Incomplete LCAP_IPFS configuration/);
+    // The network id stands alone (it only scopes domain separation).
+    expect(() => validateServerEnv({ ...validEnv, LCAP_NETWORK_ID: 'solo' })).not.toThrow();
+  });
+
   it('accepts the WS-U ADR-9 LLM backends in production — requirements still enforced', () => {
     const prod = { ...validEnv, NODE_ENV: 'production' };
     expect(() =>

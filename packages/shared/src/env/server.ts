@@ -35,6 +35,12 @@ const KNOMOSIS_GATEWAY_REQUIRED_KEYS = [
   'KNOMOSIS_GATEWAY_TOKEN_FILE',
 ] as const;
 
+/** The Gate-19 LCAP→IPFS public-block bridge is all-or-none: a gateway URL with
+ *  no pinning endpoint (or vice versa) is a deployment typo that would silently
+ *  leave the publisher unconfigured (every publish 503s), so reject it at
+ *  startup.  Both unset ⇒ the bridge is simply OFF (the opt-in default). */
+const LCAP_IPFS_REQUIRED_KEYS = ['LCAP_IPFS_GATEWAY_URL', 'LCAP_IPFS_PINNING_URL'] as const;
+
 /** Report a partial all-or-none env group as a validation issue. */
 function refineGroup(
   env: Record<string, unknown>,
@@ -191,6 +197,22 @@ export const serverEnvSchema = z.object({
   // layer also auto-negotiates per runtime (400-rejection / thinking
   // exhaustion), logged and counted.
   GOVERNANCE_LLM_REASONING_EFFORT: z.enum(['none', 'low', 'medium', 'high', 'off']).optional(),
+  // WS-R LCAP network id: scopes COSE domain separation + the acceptance log.
+  // Defaults to `licio` — set it only to run a distinct LCAP network.
+  LCAP_NETWORK_ID: z.string().min(1).optional(),
+  // Gate-19 (WS-R.15.7): the OPT-IN LCAP public-block → IPFS bridge.
+  // ALL-OR-NONE (refined below): when the pair is unset the platform runs no
+  // public bridge — the publisher is absent and the steward publish routes
+  // return 503 (fail-closed).  Requires DATABASE_URL (production always has
+  // it) for the live takedown-oracle + §22.7 review-gate reads.
+  LCAP_IPFS_GATEWAY_URL: z
+    .string()
+    .url({ message: 'LCAP_IPFS_GATEWAY_URL must be a valid URL' })
+    .optional(),
+  LCAP_IPFS_PINNING_URL: z
+    .string()
+    .url({ message: 'LCAP_IPFS_PINNING_URL must be a valid URL' })
+    .optional(),
 });
 
 /** True for an http(s) URL whose host is the loopback interface — the rule
@@ -237,6 +259,7 @@ export const serverEnvSchemaRefined = serverEnvSchema
     refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
     refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
     refineGroup(env, ctx, KNOMOSIS_GATEWAY_REQUIRED_KEYS, 'KNOMOSIS_GATEWAY');
+    refineGroup(env, ctx, LCAP_IPFS_REQUIRED_KEYS, 'LCAP_IPFS');
     // WS-U ADR-9: LLM-backend requirements fail FAST at startup in every
     // environment — never a silent boot with a half-configured backend that
     // would then silently serve deterministic. The value-level checks run
