@@ -18,8 +18,16 @@
 import { contentTokens } from '@licio/ai-governance';
 
 /** Bumped whenever the acceptance constraints below change (pinned via the
- *  identity config into every AIOutputRecord's config hash). */
-export const LAWMAKING_SUMMARY_QUALITY_GATE_VERSION = 1;
+ *  identity config into every AIOutputRecord's config hash).
+ *  v2: grounding matches lexical STEMS — a full-prefix inflection
+ *  (`adopting`/`adopt`, `subscribers`/`subscriber`) or a shared ≥6-char stem
+ *  (`proposal`/`propose`, `summarizes`/`summarising` — derivations and
+ *  regional spellings diverge after a long common stem) counts as grounded.
+ *  The v1 exact-token rule rejected compliant, accurately-grounded drafts
+ *  from models that inflect or use regional spelling while paraphrasing
+ *  (measured on gemma3 and qwen3-coder) — a morphology test, not a grounding
+ *  test. Genuinely foreign words share no stem and still fail. */
+export const LAWMAKING_SUMMARY_QUALITY_GATE_VERSION = 2;
 
 export const LLM_SUMMARY_HEADLINE_MAX = 120;
 export const LLM_SUMMARY_BODY_MAX = 700;
@@ -167,14 +175,39 @@ export function checkLawmakingSummaryQuality(
 
   // Grounding: the draft's content tokens must overwhelmingly come from the
   // proposal. Both sides are stopword-filtered, so filler words neither help
-  // nor hurt the fraction.
+  // nor hurt the fraction. A token is grounded on an EXACT match or a shared
+  // lexical stem (one token is a prefix of the other, ≥ 5 shared characters) —
+  // inflection (`adopting`/`adopt`, `subscribers`/`subscriber`) is not
+  // hallucination, while genuinely foreign words share no stem and still count
+  // against the draft (gate v2).
   const proposalContent = contentTokens(input.proposalText);
+  const proposalList = [...proposalContent];
+  /** Shared-leading-character count (deterministic, no regex). */
+  const commonPrefixLength = (a: string, b: string): number => {
+    const max = Math.min(a.length, b.length);
+    let i = 0;
+    while (i < max && a[i] === b[i]) i += 1;
+    return i;
+  };
+  const grounded = (token: string): boolean => {
+    if (proposalContent.has(token)) return true;
+    if (token.length < 5) return false;
+    for (const candidate of proposalList) {
+      if (candidate.length < 5) continue;
+      // One token is a full prefix of the other (adopt/adopting), or the two
+      // share a long stem (propose/proposal, summarising/summarizes — regional
+      // spellings and derivations diverge after a shared ≥6-char stem).
+      if (token.startsWith(candidate) || candidate.startsWith(token)) return true;
+      if (commonPrefixLength(token, candidate) >= 6) return true;
+    }
+    return false;
+  };
   const draftContent = contentTokens(`${headline} ${summary}`);
   if (draftContent.size === 0) {
     failures.push('no_substantive_content');
   } else {
     let present = 0;
-    for (const token of draftContent) if (proposalContent.has(token)) present += 1;
+    for (const token of draftContent) if (grounded(token)) present += 1;
     if (present / draftContent.size < GROUNDING_MIN_FRACTION) {
       failures.push('insufficient_grounding');
     }

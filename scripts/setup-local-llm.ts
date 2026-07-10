@@ -28,7 +28,11 @@
 
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
-import { resolveGovernanceLlmDecision } from '../apps/api/src/ai-governance/llm/config.js';
+import {
+  type GovernanceLlmSettings,
+  resolveGovernanceLlmDecision,
+} from '../apps/api/src/ai-governance/llm/config.js';
+import { createLocalCompletion } from '../apps/api/src/ai-governance/llm/local.js';
 import { MODERATION_JSON_SCHEMA } from '../apps/api/src/ai-governance/llm/moderation.js';
 
 const DOCKER_FLAG = '--docker';
@@ -136,59 +140,50 @@ async function ollamaPull(origin: string, modelId: string): Promise<void> {
 }
 
 /**
- * The authoritative check: a REAL governed request — the exact wire shape the
- * in-room moderation surface sends (`local.ts` + `moderation.ts`, including
- * the strict json_schema response_format), with a benign synthetic
- * contribution. A runtime that answers this correctly provably serves the
- * governed surfaces.
+ * The authoritative check, at FULL FIDELITY: the verification runs through the
+ * REAL `createLocalCompletion` seam with the RESOLVED settings — including
+ * `reasoning_effort` and the per-runtime parameter negotiation — so exit 0
+ * means exactly "the boot's completion path serves this runtime". (An earlier
+ * hand-rolled probe here omitted `reasoning_effort` and would have passed a
+ * runtime that then rejected the real wire shape.)
  */
-async function verifyChatCompletion(baseUrl: string, modelId: string): Promise<void> {
-  info(`verifying a /chat/completions round-trip with ${modelId} (a cold model load can be slow)…`);
-  const response = await tryFetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model: modelId,
-      max_tokens: 256,
-      temperature: 0,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a content-moderation classifier. Respond with a single JSON object: {"action": one of allow/warn/flag_for_review/restrict/remove, "reason": string}.',
-        },
-        {
-          role: 'user',
-          content: [
-            'Classify the contribution below.',
-            '<contribution>',
-            'kind: comment',
-            'links: 0',
-            'text:',
-            'Thanks, this is a helpful and civil comment.',
-            '</contribution>',
-          ].join('\n'),
-        },
-      ],
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: 'setup_probe', strict: true, schema: MODERATION_JSON_SCHEMA },
-      },
-    }),
-    timeoutMs: VERIFY_TIMEOUT_MS,
-  });
-  if (response === null) {
-    fail('the runtime stopped answering during the verification completion');
-  }
-  if (!response.ok) {
+async function verifyChatCompletion(
+  baseUrl: string,
+  settings: GovernanceLlmSettings,
+): Promise<void> {
+  info(
+    `verifying a /chat/completions round-trip with ${settings.modelId} (a cold model load can be slow)…`,
+  );
+  const complete = createLocalCompletion(baseUrl, settings, fetch, (event, meta) =>
+    info(`negotiated: ${event} ${JSON.stringify(meta)}`),
+  );
+  let result: Awaited<ReturnType<typeof complete>>;
+  try {
+    result = await complete({
+      system:
+        'You are a content-moderation classifier. Respond with a single JSON object: {"action": one of allow/warn/flag_for_review/restrict/remove, "reason": string}.',
+      user: [
+        'Classify the contribution below.',
+        '<contribution>',
+        'kind: comment',
+        'links: 0',
+        'text:',
+        'Thanks, this is a helpful and civil comment.',
+        '</contribution>',
+      ].join('\n'),
+      maxOutputTokens: settings.maxOutputTokens,
+      jsonSchema: MODERATION_JSON_SCHEMA,
+      timeoutMs: VERIFY_TIMEOUT_MS,
+    });
+  } catch (error) {
     fail(
-      `the runtime answered HTTP ${response.status} to /chat/completions — is the model name correct for this runtime? (GOVERNANCE_LLM_MODEL)`,
+      `the real completion path failed: ${error instanceof Error ? error.message : String(error)} — is the model name correct for this runtime? (GOVERNANCE_LLM_MODEL)`,
     );
   }
-  const data = (await response.json()) as {
-    choices?: { message?: { content?: string | null } }[];
-  };
-  const content = data.choices?.[0]?.message?.content;
+  if (result.stopReason === 'refusal' || result.stopReason === 'max_tokens') {
+    fail(`the runtime stopped with ${result.stopReason} instead of a verdict`);
+  }
+  const content = result.text;
   if (typeof content !== 'string' || content.length === 0) {
     fail('the runtime returned no completion content');
   }
@@ -262,7 +257,7 @@ async function main(): Promise<void> {
   }
 
   // Step 4 — the authoritative end-to-end check.
-  await verifyChatCompletion(baseUrl, modelId);
+  await verifyChatCompletion(baseUrl, decision.settings);
   info(
     `READY — the API boot will use this runtime (production defaults to it; ` +
       `dev: set GOVERNANCE_LLM_PROVIDER=local to prefer it over the simulator).`,

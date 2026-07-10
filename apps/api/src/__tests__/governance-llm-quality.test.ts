@@ -143,3 +143,49 @@ describe('checkLawmakingSummaryQuality', () => {
     if (!result.ok) expect(result.failures).toContain('no_substantive_content');
   });
 });
+
+describe('gate v2 — stem-prefix grounding (inflection is not hallucination)', () => {
+  const proposalText =
+    'Adopt a weekly community digest\nMembers propose an opt-in weekly digest summarising the most-discussed threads of the week for every subscriber.\nAdopt\nReject';
+
+  it('accepts an accurately-grounded draft whose words inflect the proposal vocabulary', () => {
+    // The measured gemma3 draft the v1 exact-token rule wrongly rejected:
+    // adopting/adopt, summarise/summarising, subscribers/subscriber.
+    const result = checkLawmakingSummaryQuality({
+      proposalText,
+      draft: {
+        headline: 'Proposal: Weekly Community Digest',
+        summary:
+          'This proposal concerns adopting a weekly community digest, which would summarise the most-discussed threads each week. The digest would be opt-in for subscribers. Members can choose to adopt or reject this proposal.',
+      },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts a draft using derivations and regional spellings of proposal vocabulary', () => {
+    // The measured qwen3-coder draft: proposal/propose, summarizes/summarising,
+    // implementing — shared stems, not hallucination.
+    const result = checkLawmakingSummaryQuality({
+      proposalText,
+      draft: {
+        headline: 'Proposal to Adopt Weekly Community Digest',
+        summary:
+          'Members propose implementing an opt-in weekly digest that summarizes the most-discussed threads from the week for all subscribers. The proposal presents two options: adopt or reject.',
+      },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('still rejects a genuinely off-proposal draft (foreign words share no stem)', () => {
+    const result = checkLawmakingSummaryQuality({
+      proposalText,
+      draft: {
+        headline: 'Quantum llamas reconsidered',
+        summary:
+          'Deliberately ungrounded prose about orbital mechanics, sourdough hydration, quantum llamas, and interplanetary logistics networks spanning several unrelated topics entirely.',
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failures).toContain('insufficient_grounding');
+  });
+});

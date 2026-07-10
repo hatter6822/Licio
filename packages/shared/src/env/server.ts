@@ -185,10 +185,12 @@ export const serverEnvSchema = z.object({
   // verdict). Raise it for challenge-resolution throughput testing against a
   // local runtime (the dev simulated runtime raises it automatically).
   GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR: z.coerce.number().int().min(1).optional(),
-  // LOCAL backend `reasoning_effort` (the gpt-oss-family latency lever; the
-  // reviewed default is `low`). `off` ⇒ the field is never sent — set it for a
-  // runtime that rejects unknown OpenAI-compat parameters.
-  GOVERNANCE_LLM_REASONING_EFFORT: z.enum(['low', 'medium', 'high', 'off']).optional(),
+  // LOCAL backend `reasoning_effort` (the reasoning-model latency lever; the
+  // reviewed default is `low`, and `none` disables thinking entirely — the
+  // qwen3-family unlock). `off` ⇒ the field is never sent. The completion
+  // layer also auto-negotiates per runtime (400-rejection / thinking
+  // exhaustion), logged and counted.
+  GOVERNANCE_LLM_REASONING_EFFORT: z.enum(['none', 'low', 'medium', 'high', 'off']).optional(),
 });
 
 /** True for an http(s) URL whose host is the loopback interface — the rule

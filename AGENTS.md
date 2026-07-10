@@ -45,6 +45,8 @@ pnpm dev                            # web (5173) + api (3001); in-memory + seeds
                                     #   the DEV-ONLY simulated governance-LLM runtime auto-starts (LICIO_LLM_SIM=off disables)
 pnpm setup:llm                      # provision + verify the REAL local governance-LLM runtime (pulls the
                                     #   default model; --docker also starts the Compose `llm` profile ollama)
+pnpm bench:llm                      # race local models through the REAL governed surfaces (latency +
+                                    #   validity per model; native-probe diagnosis for broken pairings)
 pnpm build                          # shared → db/invariants → web/api
 pnpm test                           # Vitest across all workspaces (80% coverage gate)
 pnpm test -- --coverage             # with coverage report
@@ -784,8 +786,12 @@ licio/
 │   ├── check-p2p-{endpoint-rejections,ranking-exclusion,search-exclusion}.ts -- WS-S.1.5
 │   ├── setup-local-llm.ts       --   `pnpm setup:llm`: provision + verify the local governance-LLM
 │   │                                  runtime (resolves the REAL boot decision, optional --docker
-│   │                                  Compose start, Ollama model pull, a real governed-shape
-│   │                                  completion as the readiness check)
+│   │                                  Compose start, Ollama model pull, verification through the
+│   │                                  REAL completion seam incl. parameter negotiation)
+│   ├── bench-local-llm.ts       --   `pnpm bench:llm`: race local models through the REAL governed
+│   │                                  surfaces (moderation/debate/summary executors; latency +
+│   │                                  validity + parallel burst; native-probe diagnosis + remedy
+│   │                                  for broken runtime/model pairings)
 │   ├── lint-security.ts         --   supplementary security lint
 │   ├── generate-sri.ts          --   subresource integrity hashes
 │   ├── generate-sbom.ts         --   CycloneDX SBOM generation

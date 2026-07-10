@@ -214,3 +214,86 @@ describe('reasoning_effort (the gpt-oss latency lever)', () => {
     expect(names.size).toBe(3); // three distinct decision surfaces, three identities
   });
 });
+
+describe('per-runtime parameter negotiation (the effort latches)', () => {
+  const OK = {
+    choices: [{ message: { content: '{"headline":"h","summary":"s"}' }, finish_reason: 'stop' }],
+  };
+  const EXHAUSTED = {
+    choices: [{ message: { content: '' }, finish_reason: 'length' }],
+  };
+
+  function scriptedFetch(script: Array<{ status: number; body: unknown }>) {
+    const calls: FetchCall[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      calls.push({ url, init });
+      const step = script.shift() ?? { status: 200, body: OK };
+      return { ok: step.status < 400, status: step.status, json: async () => step.body };
+    };
+    return { calls, fetchImpl };
+  }
+
+  function effortOf(call: FetchCall | undefined): unknown {
+    if (!call) return 'NO CALL';
+    return (JSON.parse(call.init.body) as Record<string, unknown>)['reasoning_effort'];
+  }
+
+  it('a 400-rejected reasoning_effort is retried without the field and LATCHED', async () => {
+    const { calls, fetchImpl } = scriptedFetch([{ status: 400, body: {} }]);
+    const complete = createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: 'low' },
+      fetchImpl,
+    );
+    const result = await complete(REQUEST);
+    expect(result.text).toBe('{"headline":"h","summary":"s"}');
+    expect(calls).toHaveLength(2);
+    expect(effortOf(calls[0])).toBe('low');
+    expect(effortOf(calls[1])).toBeUndefined(); // dropped on the retry…
+    await complete(REQUEST);
+    expect(effortOf(calls[2])).toBeUndefined(); // …and latched for later calls
+  });
+
+  it('a thinking-exhausted response (length + empty) retries once at `none` and LATCHES', async () => {
+    const { calls, fetchImpl } = scriptedFetch([{ status: 200, body: EXHAUSTED }]);
+    const complete = createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: 'low' },
+      fetchImpl,
+    );
+    const result = await complete(REQUEST);
+    expect(result.stopReason).toBe('end_turn');
+    expect(calls).toHaveLength(2);
+    expect(effortOf(calls[0])).toBe('low');
+    expect(effortOf(calls[1])).toBe('none'); // thinking disabled on the retry…
+    await complete(REQUEST);
+    expect(effortOf(calls[2])).toBe('none'); // …and latched
+  });
+
+  it('an explicit operator `off` (null) is honoured strictly — no auto-`none` retry', async () => {
+    const { calls, fetchImpl } = scriptedFetch([{ status: 200, body: EXHAUSTED }]);
+    const complete = createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: null },
+      fetchImpl,
+    );
+    const result = await complete(REQUEST);
+    expect(result.stopReason).toBe('max_tokens'); // the honest truncated failure
+    expect(calls).toHaveLength(1);
+    expect(effortOf(calls[0])).toBeUndefined();
+  });
+
+  it('a second 400 after the drop is a real transport failure (no retry loop)', async () => {
+    const { calls, fetchImpl } = scriptedFetch([
+      { status: 400, body: {} },
+      { status: 400, body: {} },
+    ]);
+    const complete = createLocalCompletion(
+      BASE_URL,
+      { ...SETTINGS, reasoningEffort: 'low' },
+      fetchImpl,
+    );
+    await expect(complete(REQUEST)).rejects.toThrow(/responded 400/);
+    expect(calls).toHaveLength(2);
+  });
+});

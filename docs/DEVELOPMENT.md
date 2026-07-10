@@ -1333,6 +1333,27 @@ wider out of the box. Measured on the reviewed default stack:
 `reasoning_effort low` ≈ 1.3s vs 1.7s per moderation-shaped verdict, and four
 parallel completions finish in half the serial wall-clock.
 
+**Model families negotiate automatically.** The completion layer adapts the
+wire per runtime — logged and counted, never silent: a runtime/model that
+**400-rejects** `reasoning_effort` (e.g. gemma3, not a reasoning model) gets
+one retry without the field, latched; a reasoning model whose thinking
+**exhausts the output budget** before any content (the qwen3 family at any
+effort above `none`) gets one retry at `none`, latched. An explicit
+`GOVERNANCE_LLM_REASONING_EFFORT=off` is honoured strictly (the field is never
+sent, no auto-retry). `none` is also directly selectable — it is the unlock
+that makes the qwen3 family the fastest measured adjudicators.
+
+**Compare models with the real harness.** `pnpm bench:llm [model …]` races
+models through the REAL governed surfaces — the moderation proposer, the
+debate adjudicator leg, and the summariser with its quality gate — reporting
+cold/warm latency, validity (pass ⇔ the production path accepts the output),
+a 4-parallel debate burst for fast models, and `--runs N` for more samples.
+With no arguments it benches every installed Ollama model (alias tags
+deduped). When a model fails **every** surface, the harness probes the native
+API to distinguish an integration issue from a broken runtime/model pairing —
+e.g. a faulty GPU-offload path emitting garbage tokens — and prints the
+remedy (a CPU-pinned model variant).
+
 The base URL must point at the loopback interface (`localhost` / `127.0.0.1` /
 `[::1]`) — a non-local URL is rejected at startup, and the local fetch sets
 `redirect: 'error'` so a loopback server's 3xx cannot replay the request off-host —

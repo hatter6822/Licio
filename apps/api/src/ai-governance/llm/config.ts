@@ -63,12 +63,16 @@ export interface GovernanceLlmSettings {
   /** LOCAL backend only: the OpenAI-compatible `reasoning_effort` sent with
    *  every completion. The default local model (gpt-oss) is a REASONING model
    *  whose latency is dominated by thinking tokens; `low` cuts a verdict's
-   *  wall-clock ~30% on the reviewed default stack (measured on Ollama) with
-   *  the deterministic gates unchanged above it. Runtimes that ignore the
-   *  field lose nothing; a runtime that rejects it fails closed per call to
-   *  the deterministic path (set GOVERNANCE_LLM_REASONING_EFFORT=off there).
-   *  Null ⇒ the field is never sent (always null for the hosted backend). */
-  reasoningEffort: 'low' | 'medium' | 'high' | null;
+   *  wall-clock ~30% on the reviewed default stack (measured on Ollama), and
+   *  `none` disables thinking entirely — the unlock for the qwen3 family,
+   *  whose thinking otherwise exhausts the output budget (measured: a valid
+   *  1.4s verdict at `none` vs an empty-content failure at `low`). The
+   *  deterministic gates judge every output regardless. The completion layer
+   *  NEGOTIATES per runtime: a 400-rejected field is retried without and
+   *  latched; a thinking-exhausted response retries once at `none` and
+   *  latches (both logged + counted — never silent). Null ⇒ the field is
+   *  never sent (always null for the hosted backend; the explicit `off`). */
+  reasoningEffort: 'none' | 'low' | 'medium' | 'high' | null;
 }
 
 export const DEFAULT_GOVERNANCE_LLM_SETTINGS: GovernanceLlmSettings = {
@@ -140,9 +144,10 @@ export interface GovernanceLlmEnvInput {
    *  against a real local runtime. Non-positive/invalid values are ignored. */
   debateBudgetPerHour?: number | undefined;
   /** GOVERNANCE_LLM_REASONING_EFFORT — the local backend's `reasoning_effort`
-   *  ('low'|'medium'|'high'; 'off' ⇒ never send the field). Unset ⇒ the
-   *  reviewed default ('low', paired with the default gpt-oss model). Ignored
-   *  for the hosted backend. */
+   *  ('none'|'low'|'medium'|'high'; 'off' ⇒ never send the field). Unset ⇒
+   *  the reviewed default ('low', paired with the default gpt-oss model; the
+   *  completion layer auto-negotiates `none` for thinking-exhausting models).
+   *  Ignored for the hosted backend. */
   reasoningEffort?: string | undefined;
   /** NODE_ENV — drives the production-complete default above. Absent ⇒ treated
    *  as non-production (no silent default backend). */
@@ -218,7 +223,7 @@ export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): Gove
   settings.reasoningEffort =
     effort === 'off'
       ? null
-      : effort === 'low' || effort === 'medium' || effort === 'high'
+      : effort === 'none' || effort === 'low' || effort === 'medium' || effort === 'high'
         ? effort
         : DEFAULT_GOVERNANCE_LLM_LOCAL_REASONING_EFFORT;
   return { enabled: true, backend: { kind: 'local', baseUrl }, settings, ...flags };

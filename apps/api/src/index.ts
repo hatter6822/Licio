@@ -1071,7 +1071,11 @@ if (governanceLlmDecision.enabled) {
   const complete: LlmCompletion =
     backend.kind === 'anthropic'
       ? createAnthropicCompletion(backend.apiKey, settings)
-      : createLocalCompletion(backend.baseUrl, settings);
+      : createLocalCompletion(backend.baseUrl, settings, fetch, (event, meta) =>
+          // The per-runtime negotiation latches (effort rejected / thinking
+          // exhausted) are operational signals — surface them in the boot log.
+          logger.warn(meta, event),
+        );
 
   // Surface 1 — the advisory lawmaking summariser (slice 1).
   const llmIdentity = buildGovernanceLlmIdentity(settings, backend);

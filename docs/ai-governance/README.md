@@ -120,7 +120,13 @@ guard, the governed models, and a module singleton for routes.
   pinned-weights MLP; global hourly budget + breaker + `AIOutputRecord`),
   `local.ts` (the loopback-only OpenAI-compatible
   local-runtime completion — llama.cpp server/Ollama/vLLM/LM Studio over plain
-  fetch), `quality.ts` (the deterministic §24.5 summary acceptance gate),
+  fetch, with per-runtime PARAMETER NEGOTIATION: a 400-rejected
+  `reasoning_effort` is retried without the field and latched, a
+  thinking-exhausted response retries once at `none` and latches — both
+  logged, never silent; an explicit `off` is honoured strictly),
+  `quality.ts` (the deterministic §24.5 summary acceptance gate; v2 grounds on
+  lexical stems — shared ≥5-char prefixes — so inflection variants of proposal
+  vocabulary are not counted as hallucination while foreign words still fail),
   `registration.ts` (register + deploy every model through the REAL gate; one
   identity per surface **and config** — the identity name folds in a config hash,
   so changing the model/prompt/URL/ceiling mints a new identity that must re-clear
