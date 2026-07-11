@@ -505,11 +505,15 @@ export async function assembleCohorts(
     let discussionDepth = 0;
     // Comment-centric sourcing: the "evidence access" dimension reads the
     // thread's SOURCED contributions (comments carrying ≥1 citation).
+    // PUBLISHED rows only — a held/removed contribution must not satisfy the
+    // GWEI dimension (or deepen/lens-tag it) any more than it earns
+    // participation weight: invariants never count content readers cannot see.
     let hasPrimaryEvidence = false;
     const lensKeys = new Set<string>();
     const thread = await ingestion.stories.getThreadByStoryId(storyId);
     if (thread) {
       const contributions = await forum.contributions.listByThread(thread.threadId, {
+        states: ['published'],
         limit: 500,
       });
       for (const contribution of contributions) {

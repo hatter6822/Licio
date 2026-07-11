@@ -26,12 +26,30 @@ ALTER TABLE "contributions" ALTER COLUMN "type" TYPE "contribution_type"
 DROP TYPE "contribution_type_old";--> statement-breakpoint
 
 -- stories.submission_type: retire 'evidence_card' (map the shell to the
--- closest surviving type; the payload keeps its citation + note fields).
+-- closest surviving type).  The JSONB metadata is rewritten IN STEP with the
+-- column so the surviving strict schema keeps parsing the row and
+-- `submissionBodyText()` (which switches on the metadata's own type) keeps
+-- returning the note text.
+UPDATE "stories" SET "submission_metadata" = jsonb_build_object(
+    'submission_type', 'original_brief',
+    'body', concat_ws(E'\n\n',
+      nullif("submission_metadata"->>'relevance_note', ''),
+      nullif("submission_metadata"->>'citation_url_or_ref', '')))
+  WHERE "submission_metadata"->>'submission_type' = 'evidence_card';--> statement-breakpoint
 ALTER TYPE "story_submission_type" RENAME TO "story_submission_type_old";--> statement-breakpoint
 CREATE TYPE "story_submission_type" AS ENUM('link', 'original_brief', 'question', 'local_update', 'live_thread', 'image_post', 'video_post');--> statement-breakpoint
 ALTER TABLE "stories" ALTER COLUMN "submission_type" TYPE "story_submission_type"
   USING (case when "submission_type"::text = 'evidence_card' then 'original_brief' else "submission_type"::text end)::"story_submission_type";--> statement-breakpoint
 DROP TYPE "story_submission_type_old";--> statement-breakpoint
+
+-- Durable event log: legacy rows carrying the retired shapes must keep
+-- replaying (checkpoint recovery / DLQ redrive only replays rows that parse).
+-- content.submitted / content.normalized payloads are remapped in step with
+-- the stories column above; evidence.added rows are dropped with their topic.
+UPDATE "events" SET "payload" = jsonb_set("payload", '{submission_type}', '"original_brief"')
+  WHERE "topic" IN ('content.submitted', 'content.normalized')
+    AND "payload"->>'submission_type' = 'evidence_card';--> statement-breakpoint
+DELETE FROM "events" WHERE "topic" = 'evidence.added';--> statement-breakpoint
 
 -- takedown_requests.target_type (+ the three WS-R LCAP tables that reuse the
 -- enum): retire 'evidence' (a takedown / provenance link against a dropped
