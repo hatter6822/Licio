@@ -566,7 +566,7 @@ licio/
 │           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster +
 │           │   │                              per-archetype lens vantage (WS-G.2.2)
 │           │   ├── content.ts            --   deterministic story/comment/evidence generators
-│           │   ├── scenarios.ts          --   the six scenario presets (steady…coordinated_burst)
+│           │   ├── scenarios.ts          --   the seven scenario presets (steady…challenge_wave)
 │           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
 │           │   │                              (tags root comments with the author's vantage lens)
 │           │   ├── link-fixtures.ts      --   dev fetchDocument for reserved `.example` hosts
@@ -831,7 +831,7 @@ licio/
 │   ├── OFFLINE_SPEC.md          -- LCAP v0.2 delay-tolerant sync (WS-R extension spec)
 │   ├── PRIVATE_SPEC.md          -- E2EE private P2P rooms (WS-S extension spec)
 │   ├── planning/                -- per-workstream planning documents
-│   │   ├── 00-index.md          --   master index (~858 atomic tasks)
+│   │   ├── 00-index.md          --   master index (~992 atomic tasks)
 │   │   ├── 01-repository-foundation.md  -- WS-0
 │   │   ├── 02-doctrine-and-policy.md    -- WS-A
 │   │   ├── 03-design-system.md          -- WS-B
@@ -997,7 +997,7 @@ tree-wide.  Remove this override once `jsdom` ships a release pinning
 
 ## Reading large files
 
-`docs/SPEC.md` and `docs/planning/00-index.md` (~858 tasks) are large.
+`docs/SPEC.md` and `docs/planning/00-index.md` (~992 tasks) are large.
 Read in chunks with `Read(file_path, offset=…, limit=500)` rather than
 the whole file.
 
@@ -1352,11 +1352,13 @@ community-approved, member-downloadable AI **model** and its **prompt**
 (both ratified by a Knomosis member vote), and the approved **in-room AI
 agent** may then moderate, manage the room treasury, and facilitate
 lawmaking **within community-voted, kernel-enforced bounds, holding no
-keys, subordinate to a non-overridable platform legal floor**.  It is
-**doctrine-first** (Stage 0: SPEC + policy + plan landed; no runtime code
-yet), re-scopes WS-K into the platform evaluation/transparency substrate,
-amends WS-J/L/M, and preserves the pay-to-rank firewall and fail-closed
-crypto in full.
+keys, subordinate to a non-overridable platform legal floor**.  The
+bounded-autonomy runtime is SHIPPED (elections, model proposal/ratification,
+the LLM moderation model in its deterministic wrapper, lawmaking
+facilitation, the kernel-backed treasury core behind the fail-closed crypto
+flags); WS-U re-scopes WS-K into the platform evaluation/transparency
+substrate, amends WS-J/L/M, and preserves the pay-to-rank firewall and
+fail-closed crypto in full.
 Status:
 
 | Workstream | Title | Status |
@@ -1379,14 +1381,14 @@ Status:
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
 | WS-Q | Content–room ownership and visibility | Complete |
-| WS-R | Offline content availability (LCAP v0.2) |
-| WS-S | Private P2P rooms (E2EE) |
-| WS-T | Conversation as comments | 
-| WS-U | AI-governed rooms (redesign) |
+| WS-R | Offline content availability (LCAP v0.2) | Core + transports shipped; physical-device field confirmation remains |
+| WS-S | Private P2P rooms (E2EE) | Shipped through the live WebRTC carrier + update channel; residuals tracked (`docs/private-p2p/README.md`) |
+| WS-T | Conversation as comments | Complete (incl. challenge resolution — the governed debate adjudicator) |
+| WS-U | AI-governed rooms (redesign) | Runtime shipped (see `docs/governance/README.md`) |
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~971 atomic tasks.
+`docs/planning/00-index.md` lists all ~992 atomic tasks.
 
 ## Documentation rules
 
