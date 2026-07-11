@@ -144,7 +144,13 @@ describe('MinHash signature + estimator', () => {
     expect(estimateJaccard(minhashSignature(a), minhashSignature(b))).toBeLessThanOrEqual(0.1);
   });
 
-  it('approximates the exact Jaccard within 4.5σ on every pair and 0.06 on average', () => {
+  it('approximates the exact Jaccard within 4.5σ on every pair and 0.06 on average', {
+    // Deterministic but HEAVY (120 pairs × 128-hash signatures): typically
+    // ~1s, yet a loaded CI runner under V8 coverage instrumentation has blown
+    // the 5s default (observed 5.9s → timeout). Own budget, same treatment as
+    // the live-tree parity self-test.
+    timeout: 30_000,
+  }, () => {
     // σ = √(J(1−J)/128) ≤ 0.0442. Seeded corpus ⇒ fully reproducible. 120
     // pairs (the modmul is now exact double arithmetic — no BigInt — so the
     // full corpus runs fast even under V8 coverage instrumentation).
