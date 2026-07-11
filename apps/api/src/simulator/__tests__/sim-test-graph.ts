@@ -101,7 +101,7 @@ export async function buildSimTestGraph(): Promise<SimulatorServiceGraph> {
     moderation,
     // No governed rooms in the default test graph (a test that wants the
     // governed-room placement bias swaps in its own reader).
-    governance: { getBinding: async () => null },
+    governance: { agentOperative: async () => false },
   };
 }
 

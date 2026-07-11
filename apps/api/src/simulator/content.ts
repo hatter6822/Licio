@@ -897,12 +897,17 @@ export function pickDebateMarker(prng: Prng): string {
 
 export type ProblemCommentKind = 'spam' | 'hostile';
 
-/** Spam bodies carry ≥2 distinct commercial-spam terms so both the WS-J floor
- *  heuristics and the in-room moderation model read them as actionable. */
+/** Spam bodies carry ≥2 distinct commercial-spam terms AND one real link
+ *  token (the `{url}` placeholder). The moderation context counts links from
+ *  structured citations + whitespace-delimited `http(s)` tokens in the body
+ *  (`countLinkTokens`), and the spam-with-links classification is what makes
+ *  the model propose `remove` — which the deterministic wrapper then clamps
+ *  to flag-for-review, the advertised bound the pulse must exercise. A
+ *  link-less spam body could only ever drive `flag_for_review`. */
 const SPAM_COMMENT_BODIES: readonly string[] = [
-  'Huge discount on verified supplements — use promo code SAVE20 at checkout, free money back if the {object} disappoints you.',
-  'Why read the {object} when you can click through for a giveaway? Cheap rates this {period} only, discount applied automatically.',
-  'Stop wasting time on the {object} — click here for the promo code and a giveaway worth more than this whole thread.',
+  'Huge discount on verified supplements — use promo code SAVE20 at {url} today, free money back if the {object} disappoints you.',
+  'Why read the {object} when the giveaway at {url} pays better? Cheap rates this {period} only, discount applied automatically.',
+  'Stop wasting time on the {object} — click {url} for the promo code and a giveaway worth more than this whole thread.',
 ] as const;
 
 /** Hostile bodies carry a hostile term at civil length — the wrapper routes
@@ -919,7 +924,10 @@ const HOSTILE_COMMENT_BODIES: readonly string[] = [
  * the moderation automation something real to act on: the WS-J floor
  * pre-screen may flag/block it, and in a governed room the in-room moderation
  * MODEL proposes warn/flag/remove — which the deterministic wrapper then
- * bounds. Still deterministic (PRNG + banks), never a slur — the goal is
+ * bounds. Spam bodies embed one reserved-`.example` promo link so the
+ * spam-with-links `remove` proposal (and the wrapper's clamp of it) genuinely
+ * occurs; hostile bodies stay link-free (their path is review routing, not
+ * removal). Still deterministic (PRNG + banks), never a slur — the goal is
  * classifiable signal, not shock content.
  */
 export function generateProblemComment(
@@ -930,6 +938,7 @@ export function generateProblemComment(
   const bank = domainBank(domain);
   const template = prng.pick(kind === 'spam' ? SPAM_COMMENT_BODIES : HOSTILE_COMMENT_BODIES);
   return template
+    .replaceAll('{url}', `https://${prng.pick(bank.outlets)}.example/promo/${1 + prng.int(90)}`)
     .replaceAll('{object}', prng.pick(bank.objects))
     .replaceAll('{period}', prng.pick(PERIODS));
 }

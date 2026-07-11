@@ -121,11 +121,13 @@ const SIM_DEBATE_WINDOWS: DebateWindowPolicy = {
   overrideWindowMs: 15_000,
 };
 
-/** The narrow WS-U read the simulator needs: whether a room carries an ACTIVE
- *  community-approved model binding (the bounded in-room agent). Structural —
- *  the real GovernanceService satisfies it via `getBinding`. */
+/** The narrow WS-U read the simulator needs: whether a room's in-room agent
+ *  is OPERATIVE — an active binding whose model is admitted under the LIVE
+ *  moderation backend (`GovernanceService.agentOperative`). Keying on
+ *  `binding.active` alone would bias traffic toward a room whose agent fails
+ *  closed to the baseline after a backend swap on a durable dev DB. */
 export interface SimulatorGovernanceReader {
-  getBinding(roomId: string): Promise<{ active: boolean } | null>;
+  agentOperative(roomId: string): Promise<boolean>;
 }
 
 export interface SimulatorServiceGraph {
@@ -220,6 +222,26 @@ const MODERATION_PROPOSED_ACTIONS = [
   'restrict',
   'remove',
 ] as const;
+
+/** Every process-wide metric the two pulses read. The simulator snapshots
+ *  these at CONSTRUCTION (the dev boot constructs it after the demo seed) and
+ *  reports DELTAS, so boot-time noise — the WS-K admission-gate probes and the
+ *  seeded sample agent action, which increment the same counters — never shows
+ *  up as simulator activity, and an idle simulator reads zero. */
+const PULSE_METRIC_NAMES: readonly string[] = [
+  'ai.governance.debate.llm.decided',
+  'ai.governance.debate.llm.verdict.upheld',
+  'ai.governance.debate.llm.verdict.corrected',
+  'ai.governance.debate.llm.verdict.inconclusive',
+  ...DEBATE_LLM_UNAVAILABLE_CODES.map((code) => `ai.governance.debate.llm.unavailable.${code}`),
+  'ai.governance.moderation.decided',
+  'ai.governance.moderation.guard_block',
+  ...MODERATION_PROPOSED_ACTIONS.map((action) => `ai.governance.moderation.proposed.${action}`),
+  ...MODERATION_LLM_UNAVAILABLE_CODES.map((code) => `ai.governance.moderation.unavailable.${code}`),
+];
+
+/** The forum counter the moderation pulse reads (same baseline treatment). */
+const FORUM_AGENT_METRIC = 'contributions.agent_moderated';
 
 /** Infer a simulator content domain from a room name (best-effort; only used
  *  to bias reading toward affinity — never a correctness dependency). */
@@ -373,6 +395,11 @@ export class DevTrafficSimulator {
   /** roomId → the steward persona is registered as a community_steward
    *  (idempotent, ensured once per room — the WS-T overrule authority). */
   #roomStewardEnsured = new Set<string>();
+  /** Construction-time snapshot of the process-wide pulse metrics: the pulses
+   *  report DELTAS against this, so boot/seed/admission noise reads zero on an
+   *  idle simulator and scenario runs measure synthetic traffic (plus any
+   *  genuinely live post-boot agent activity), never the boot's. */
+  #metricBaseline = new Map<string, number>();
   #activity: SimulatorActivityEntry[] = [];
   #feedPulse: { computedAtMs: number | null; fallback: boolean; items: SimulatorFeedPulseItem[] } =
     {
@@ -413,6 +440,17 @@ export class DevTrafficSimulator {
       provisioned: false,
       joinedRoomIds: new Set<string>(),
     }));
+    // Baseline the pulse metrics NOW (the dev boot constructs the simulator
+    // after the demo seed + WS-K admission probes ran), so status() deltas
+    // exclude every counter increment that predates this instance.
+    const aiGov = tryGetAiGovernanceServices();
+    for (const name of PULSE_METRIC_NAMES) {
+      this.#metricBaseline.set(name, aiGov?.metrics.counter(name) ?? 0);
+    }
+    this.#metricBaseline.set(
+      FORUM_AGENT_METRIC,
+      this.#graph.forum.metrics.counter(FORUM_AGENT_METRIC),
+    );
   }
 
   isRunning(): boolean {
@@ -786,13 +824,17 @@ export class DevTrafficSimulator {
     }
   }
 
-  /** Whether the room carries an ACTIVE WS-U model binding (cached). */
+  /** Whether the room's in-room agent is OPERATIVE (cached): an active
+   *  binding admitted under the LIVE backend — the same preconditions
+   *  `classify` enforces — so the traffic bias never targets a room whose
+   *  agent is failing closed to the baseline (e.g. after a backend swap on a
+   *  durable dev DB, until re-admission). */
   async #isRoomGoverned(roomId: string): Promise<boolean> {
     const cached = this.#roomGovernedCache.get(roomId);
     if (cached !== undefined) return cached;
     let governed = false;
     try {
-      governed = (await this.#graph.governance.getBinding(roomId))?.active === true;
+      governed = await this.#graph.governance.agentOperative(roomId);
     } catch {
       // A governance read failure only loses the placement bias — never a tick.
     }
@@ -2022,10 +2064,15 @@ export class DevTrafficSimulator {
     const activePersonas = this.#personas.filter((p) => p.provisioned).length;
     // WS-T challenge-resolution pulse + WS-U moderation pulse: the LLM-leg
     // counters come from the REAL ai-governance metrics (the same numbers the
-    // governed paths count); the wall-clock average and the lifecycle outcome
-    // split come from the simulator's own arena tracking.
+    // governed paths count), reported as DELTAS against the construction-time
+    // baseline — boot-time admission probes and the seeded sample agent
+    // action never read as simulator activity. Clamped at zero so an external
+    // metrics reset can never underflow the wire schema. The wall-clock
+    // average and the lifecycle outcome split come from the simulator's own
+    // arena tracking.
     const aiGov = tryGetAiGovernanceServices();
-    const llmCounter = (name: string): number => aiGov?.metrics.counter(name) ?? 0;
+    const llmCounter = (name: string): number =>
+      Math.max(0, (aiGov?.metrics.counter(name) ?? 0) - (this.#metricBaseline.get(name) ?? 0));
     const llmUnavailable = DEBATE_LLM_UNAVAILABLE_CODES.reduce(
       (sum, code) => sum + llmCounter(`ai.governance.debate.llm.unavailable.${code}`),
       0,
@@ -2099,7 +2146,11 @@ export class DevTrafficSimulator {
         proposed: moderationProposed,
         unavailable: moderationUnavailable,
         guard_blocked: llmCounter('ai.governance.moderation.guard_block'),
-        agent_escalations: this.#graph.forum.metrics.counter('contributions.agent_moderated'),
+        agent_escalations: Math.max(
+          0,
+          this.#graph.forum.metrics.counter(FORUM_AGENT_METRIC) -
+            (this.#metricBaseline.get(FORUM_AGENT_METRIC) ?? 0),
+        ),
       },
       scenarios: [...SCENARIO_INFOS],
     };

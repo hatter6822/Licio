@@ -75,10 +75,13 @@ export interface WorldRoom {
   /** The room's provisioned interpretation lenses, by type (WS-G.2.2). A root
    *  comment is tagged with its author's vantage lens when the room carries it. */
   readonly lensesByType: ReadonlyMap<LensType, string>;
-  /** WS-U: the room has an ACTIVE community-approved model binding, so the
-   *  bounded in-room agent (the LLM moderation model in dev) classifies every
-   *  contribution there. Story placement weights governed rooms up so the
-   *  moderation automation sees steady synthetic traffic. */
+  /** WS-U: the room's in-room agent is OPERATIVE — an active community
+   *  binding whose model is admitted under the LIVE moderation backend — so
+   *  the bounded agent (the LLM moderation model in dev) actually classifies
+   *  every contribution there. Story placement + contribution targeting
+   *  weight governed rooms up so the moderation automation sees steady
+   *  synthetic traffic; a fail-closed room (backend swap awaiting
+   *  re-admission) is NOT flagged and draws no bias. */
   readonly governed: boolean;
 }
 

@@ -7,6 +7,10 @@
 // honestly, and that stop() halts the loop.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from '../../ai-governance/services.js';
 import type { CommentFrame } from '../../forum/comment-broadcaster.js';
 import { serveFeed } from '../../ranking/service.js';
 import { MAX_ACTIONS_PER_TICK, type SimAction, type SimWorld } from '../engine.js';
@@ -784,5 +788,45 @@ describe('consumedDebateChances (cap-aware one-shot accounting)', () => {
     const w = world({ openDebates: [openArena('d-quiet', false)] });
     const consumed = consumedDebateChances(w, [filler()]);
     expect(consumed.reinforce.size).toBe(0);
+  });
+});
+
+describe('pulse metric baselining (boot noise never reads as simulator activity)', () => {
+  // Deliberately LAST in this file: it binds the process ai-governance
+  // singleton, which stays bound for the rest of the worker.
+  it('construction snapshots the process-wide counters; the pulses report deltas', async () => {
+    const graph = await buildSimTestGraph();
+    const aiGov = createInMemoryAiGovernanceServices(graph.events);
+    setAiGovernanceServices(aiGov);
+    // Boot-time noise BEFORE the simulator exists: the WS-K admission-gate
+    // probes and the seeded sample agent action increment the very counters
+    // the pulses read (observed live: 13 proposals at boot).
+    aiGov.metrics.increment('ai.governance.moderation.decided', 13);
+    aiGov.metrics.increment('ai.governance.moderation.proposed.remove', 6);
+    aiGov.metrics.increment('ai.governance.debate.llm.decided', 2);
+    graph.forum.metrics.increment('contributions.agent_moderated', 3);
+
+    const sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'steady',
+      seed: 'baseline',
+      autoLoop: false,
+    });
+    // An IDLE simulator reads zero — never the boot's counters.
+    let status = sim.status();
+    expect(status.moderation_pulse.proposals).toBe(0);
+    expect(status.moderation_pulse.proposed.remove).toBe(0);
+    expect(status.moderation_pulse.agent_escalations).toBe(0);
+    expect(status.debate_pulse.llm_decided).toBe(0);
+
+    // Activity AFTER construction is reported as the delta.
+    aiGov.metrics.increment('ai.governance.moderation.decided', 2);
+    aiGov.metrics.increment('ai.governance.moderation.proposed.remove', 1);
+    graph.forum.metrics.increment('contributions.agent_moderated', 1);
+    status = sim.status();
+    expect(status.moderation_pulse.proposals).toBe(2);
+    expect(status.moderation_pulse.proposed.remove).toBe(1);
+    expect(status.moderation_pulse.agent_escalations).toBe(1);
+    expect(status.debate_pulse.llm_decided).toBe(0);
   });
 });

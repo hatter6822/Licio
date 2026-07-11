@@ -350,6 +350,30 @@ describe('WS-U problem-comment generator', () => {
     }
   });
 
+  it('spam bodies carry ONE real link token; hostile bodies stay link-free', () => {
+    // The moderation context counts whitespace-delimited http(s) tokens
+    // (governance/forum-agent.ts countLinkTokens) — spam-with-links is what
+    // makes the model propose `remove`, exercising the wrapper's
+    // escalate-to-review clamp; a link-less spam body could only ever drive
+    // flag_for_review.
+    const linkTokens = (body: string): string[] =>
+      body.split(/\s+/).filter((t) => t.startsWith('https://') || t.startsWith('http://'));
+    for (const domain of DOMAIN_IDS) {
+      for (let i = 0; i < 10; i += 1) {
+        const spam = generateProblemComment('spam', domain, createPrng(`slink-${domain}-${i}`));
+        const tokens = linkTokens(spam);
+        expect(tokens.length).toBe(1);
+        expect(isSimulatedUrl(req(tokens[0]))).toBe(true); // stays on reserved .example hosts
+        const hostile = generateProblemComment(
+          'hostile',
+          domain,
+          createPrng(`hlink-${domain}-${i}`),
+        );
+        expect(linkTokens(hostile)).toHaveLength(0);
+      }
+    }
+  });
+
   it('problem bodies stay within the comment wire bound and are deterministic per seed', () => {
     for (const kind of ['spam', 'hostile'] as const) {
       const a = generateProblemComment(kind, 'local', createPrng('det'));

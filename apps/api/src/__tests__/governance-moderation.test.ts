@@ -412,6 +412,46 @@ describe('GovernanceService.moderate — the admitting-backend gate (WS-U ADR-9 
     const res = await svcReal.moderate(ROOM, ctx({ linkCount: 5 }), 'c-legacy');
     expect(res.ok && res.value).toBeNull();
   });
+
+  it('agentOperative mirrors the classify preconditions (the dev simulator keys its traffic bias on it)', async () => {
+    // No binding at all ⇒ not operative.
+    const fresh = makeService(fakeProposer(decided('flag_for_review')));
+    expect(await fresh.svc.agentOperative(ROOM)).toBe(false);
+
+    // Active binding + backendId-less proposer (test double) ⇒ operative (the
+    // pin gate is a no-op without a real backend, exactly as in classify).
+    const h = makeService(fakeProposer(decided('flag_for_review')));
+    await activate(h.svc, ['moderate.flag']);
+    expect(await h.svc.agentOperative(ROOM)).toBe(true);
+
+    // Admit under backend-A, then read under backend-A ⇒ operative…
+    const stores = createInMemoryGovernanceStores();
+    let n = 0;
+    const mk = (p: ModerationProposer) =>
+      createGovernanceService({
+        stores,
+        config: resolveGovernanceConfig({}),
+        now: () => new Date('2026-07-09T00:00:00.000Z'),
+        uuid: () => `id-${++n}`,
+        moderationProposer: p,
+      });
+    const svcA = mk(backendProposer('backend-A'));
+    await activate(svcA, ['moderate.flag']);
+    expect(await svcA.agentOperative(ROOM)).toBe(true);
+    // …but under backend-B over the SAME stores the agent fails closed at
+    // classify time, so it must NOT read as operative (a durable dev DB after
+    // a backend swap would otherwise bias traffic toward a dead agent).
+    const svcB = mk(backendProposer('backend-B'));
+    expect(await svcB.agentOperative(ROOM)).toBe(false);
+  });
+
+  it('agentOperative is false for a floor-frozen (inactive) binding', async () => {
+    const h = makeService(fakeProposer(decided('flag_for_review')));
+    await activate(h.svc, ['moderate.flag']);
+    const frozen = await h.svc.freezeAgent(ROOM);
+    expect(frozen.ok).toBe(true);
+    expect(await h.svc.agentOperative(ROOM)).toBe(false);
+  });
 });
 
 describe('GovernanceService admission — a transient outage is retryable, never a permanent reject (R3-4)', () => {
