@@ -11,8 +11,10 @@
 
 import { judgeDebate } from '@licio/ai-governance';
 import { afterEach, describe, expect, it } from 'vitest';
+import { BASE_ROSTER } from '../personas.js';
 import { DevTrafficSimulator } from '../runtime.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
+import { req } from './sim-test-util.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -131,5 +133,51 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
     // At least one resolved arena was decided by the steward, not the AI.
     expect(debate_pulse.overridden).toBeGreaterThan(0);
     expect(debate_pulse.overridden).toBeLessThanOrEqual(resolvedTotal);
+  });
+
+  it('a RESTRICTED steward cannot record synthetic overrules (mirrors requireUnrestricted)', {
+    timeout: 120_000,
+  }, async () => {
+    const graph = await buildSimTestGraph();
+    graph.forum.debateJudge = async (_debateId, input) => ({
+      verdict: judgeDebate(input),
+      outputId: null,
+    });
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'challenge_wave',
+      seed: 'restricted-steward',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    graph.forum.debateWindowsOverride = { editWindowMs: 1_200, overrideWindowMs: 8_000 };
+    // A moderation experiment restricts the steward AFTER provisioning. The
+    // real route chain (authMiddleware + requireVerifiedAccount +
+    // requireUnrestricted) would deny the overrule; the simulator calls
+    // overrideDebateVerdict directly, so its own gate must bite instead.
+    const steward = req(BASE_ROSTER.find((p) => p.archetype === 'room_steward'));
+    await graph.identity.store.updateUser(steward.userId, { accountState: 'restricted' });
+
+    let guardFired = false;
+    for (let i = 0; i < 600 && !guardFired; i += 1) {
+      await sim.tick();
+      guardFired = sim
+        .status()
+        .recent_activity.some(
+          (e) =>
+            e.kind === 'debate' &&
+            e.detail === 'account_restricted' &&
+            e.summary === 'account barred from overruling',
+        );
+      await sleep(25);
+    }
+
+    const status = req(sim).status();
+    // The engine PLANNED an overrule and the account-state gate rejected it…
+    expect(guardFired).toBe(true);
+    // …so no overrule was ever recorded from the restricted account.
+    expect(status.counters.debate_overrides).toBe(0);
+    expect(status.debate_pulse.overridden).toBe(0);
   });
 });

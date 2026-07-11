@@ -88,7 +88,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Medical reviewers note the outbreak indicators now separate confirmed from suspected counts.',
       'The health office says hospital-level detail will follow once validation completes.',
     ],
-    outlets: ['daily-ledger', 'metro-monitor', 'civic-wire'],
+    outlets: ['daily-ledger', 'metro-monitor', 'civic-wire', 'ward-bulletin'],
   },
   local: {
     topicSlug: 'local-community',
@@ -128,7 +128,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Community groups asked the council to publish the transit overlays used in the plan.',
       'The county schedule shows which neighborhood meetings cover each docket item.',
     ],
-    outlets: ['harbor-signal', 'riverside-post', 'district-notes'],
+    outlets: ['harbor-signal', 'riverside-post', 'district-notes', 'city-gazette'],
     localValue: 'Riverside',
   },
   climate: {
@@ -170,7 +170,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Energy analysts say the grid data now separates solar and wind capacity by county.',
       'The drought bulletin ties reservoir levels to the power demand outlook for summer.',
     ],
-    outlets: ['field-notes', 'north-desk', 'civic-wire'],
+    outlets: ['field-notes', 'north-desk', 'civic-wire', 'grid-observer'],
   },
   elections: {
     topicSlug: 'elections-democracy',
@@ -210,7 +210,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Candidate filings and campaign spending now appear in one machine-readable election dataset.',
       'The clerk says every ballot batch in the election audit carries a scanner reference.',
     ],
-    outlets: ['daily-ledger', 'canvass-desk', 'civic-wire'],
+    outlets: ['daily-ledger', 'canvass-desk', 'civic-wire', 'ballot-brief'],
   },
   science: {
     topicSlug: 'science-research',
@@ -250,7 +250,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Independent research teams can rerun the experiment from the archived pipeline alone.',
       'The consortium argues open research data made this discovery checkable in days rather than months.',
     ],
-    outlets: ['method-review', 'field-notes', 'north-desk'],
+    outlets: ['method-review', 'field-notes', 'north-desk', 'replication-watch'],
   },
 };
 

@@ -9,10 +9,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CommentFrame } from '../../forum/comment-broadcaster.js';
 import { serveFeed } from '../../ranking/service.js';
+import { MAX_ACTIONS_PER_TICK, type SimAction, type SimWorld } from '../engine.js';
 import { BASE_ROSTER, CLUSTER_ROSTER, newcomerSpec } from '../personas.js';
 import {
   __resetSimStoryMetaForTest,
   __simStoryMetaSizeForTest,
+  consumedDebateChances,
   DevTrafficSimulator,
 } from '../runtime.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
@@ -685,5 +687,102 @@ describe('DevTrafficSimulator runtime', () => {
     await sim.tick();
     const { simulatorStatusSchema } = await import('@licio/shared');
     expect(() => simulatorStatusSchema.parse(req(sim).status())).not.toThrow();
+  });
+});
+
+describe('consumedDebateChances (cap-aware one-shot accounting)', () => {
+  const world = (over: Partial<Pick<SimWorld, 'openDebates' | 'judgedDebates'>>): SimWorld => ({
+    stories: [],
+    rooms: [],
+    commentsByStory: new Map(),
+    recentTitles: new Set(),
+    focusStoryId: null,
+    storyCapReached: false,
+    openDebates: [],
+    judgedDebates: [],
+    ...over,
+  });
+  const openArena = (
+    debateId: string,
+    reinforceEligible = true,
+  ): SimWorld['openDebates'][number] => ({
+    debateId,
+    incumbentUserId: 'u-inc',
+    incumbentPosted: true,
+    incumbentWillRebut: true,
+    domain: 'health',
+    challengerUserId: 'u-chal',
+    challengerSummary: 'The stated figure does not match the primary series.',
+    challengerCitationUrls: ['https://daily-ledger.example/refs/x-0'],
+    reinforceEligible,
+  });
+  const overrideAction = (debateId: string): SimAction => ({
+    kind: 'debate_override',
+    personaUserId: 'u-steward',
+    debateId,
+    winner: 'incumbent',
+    reason: 'The adjudicator under-weighted the primary registry both sides cite.',
+  });
+  const positionAction = (debateId: string, side: 'incumbent' | 'challenger'): SimAction => ({
+    kind: 'debate_position',
+    personaUserId: 'u',
+    debateId,
+    side,
+    summary: 'A substantive position summary for the arena in question.',
+    citationUrls: ['https://civic-wire.example/refs/x-0'],
+  });
+  const filler = (): SimAction => ({ kind: 'join_room', personaUserId: 'u', roomId: 'r' });
+  const saturate = (actions: SimAction[]): SimAction[] => {
+    while (actions.length < MAX_ACTIONS_PER_TICK) actions.push(filler());
+    return actions;
+  };
+
+  it('an UNSATURATED plan consumes every offered chance (absence proves a declined roll)', () => {
+    const w = world({
+      openDebates: [openArena('d-r')],
+      judgedDebates: [{ debateId: 'd-o', roomId: 'r1', winner: 'challenger' }],
+    });
+    const consumed = consumedDebateChances(w, [filler()]);
+    expect(consumed.reinforce.has('d-r')).toBe(true);
+    expect(consumed.override.has('d-o')).toBe(true);
+  });
+
+  it('a SATURATED plan does NOT consume a chance whose action is absent (may have been truncated)', () => {
+    const w = world({
+      openDebates: [openArena('d-r')],
+      judgedDebates: [{ debateId: 'd-o', roomId: 'r1', winner: 'challenger' }],
+    });
+    const consumed = consumedDebateChances(w, saturate([]));
+    expect(consumed.reinforce.has('d-r')).toBe(false);
+    expect(consumed.override.has('d-o')).toBe(false);
+  });
+
+  it('a SATURATED plan still consumes the chances whose actions survived into it', () => {
+    const w = world({
+      openDebates: [openArena('d-r')],
+      judgedDebates: [
+        { debateId: 'd-o', roomId: 'r1', winner: 'challenger' },
+        { debateId: 'd-cut', roomId: 'r1', winner: 'incumbent' },
+      ],
+    });
+    const consumed = consumedDebateChances(
+      w,
+      saturate([positionAction('d-r', 'challenger'), overrideAction('d-o')]),
+    );
+    expect(consumed.reinforce.has('d-r')).toBe(true);
+    expect(consumed.override.has('d-o')).toBe(true);
+    expect(consumed.override.has('d-cut')).toBe(false); // re-offers next tick
+  });
+
+  it('an incumbent rebuttal never consumes the challenger reinforcement chance', () => {
+    const w = world({ openDebates: [openArena('d-r')] });
+    const consumed = consumedDebateChances(w, saturate([positionAction('d-r', 'incumbent')]));
+    expect(consumed.reinforce.has('d-r')).toBe(false);
+  });
+
+  it('a non-eligible open arena is never listed as consumed', () => {
+    const w = world({ openDebates: [openArena('d-quiet', false)] });
+    const consumed = consumedDebateChances(w, [filler()]);
+    expect(consumed.reinforce.size).toBe(0);
   });
 });

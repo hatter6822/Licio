@@ -255,6 +255,45 @@ interface SimStoryMeta {
 }
 const SIM_STORY_META = new Map<string, SimStoryMeta>();
 
+/**
+ * Which of this snapshot's one-shot WS-T chances the (possibly cap-truncated)
+ * plan actually CONSUMED. `planTick` slices the combined plan to
+ * MAX_ACTIONS_PER_TICK, and the override/reinforcement actions sit behind the
+ * bulk contribution lists — so under a saturated high-speed tick an emitted
+ * action can be truncated away. A chance is consumed when its action SURVIVED
+ * into the plan (it will execute this tick), or when the plan is UNSATURATED
+ * (absence then proves the engine's roll declined). On a saturated plan an
+ * absent action is ambiguous (declined vs truncated), so the chance is
+ * conservatively left unconsumed and re-offers next tick — a bounded extra
+ * roll in the rare saturated case, never a silently lost steward-overrule or
+ * reinforcement chance. Pure; exported for direct unit testing.
+ */
+export function consumedDebateChances(
+  world: SimWorld,
+  plan: readonly SimAction[],
+): { reinforce: ReadonlySet<string>; override: ReadonlySet<string> } {
+  const saturated = plan.length >= MAX_ACTIONS_PER_TICK;
+  const plannedReinforce = new Set<string>();
+  const plannedOverride = new Set<string>();
+  for (const action of plan) {
+    if (action.kind === 'debate_position' && action.side === 'challenger') {
+      plannedReinforce.add(action.debateId);
+    } else if (action.kind === 'debate_override') {
+      plannedOverride.add(action.debateId);
+    }
+  }
+  const reinforce = new Set<string>();
+  for (const debate of world.openDebates) {
+    if (!debate.reinforceEligible) continue;
+    if (plannedReinforce.has(debate.debateId) || !saturated) reinforce.add(debate.debateId);
+  }
+  const override = new Set<string>();
+  for (const judged of world.judgedDebates) {
+    if (plannedOverride.has(judged.debateId) || !saturated) override.add(judged.debateId);
+  }
+  return { reinforce, override };
+}
+
 /** Test-only: SIM_STORY_META is a module-level map (it survives a
  *  DevTrafficSimulator instance the way a durable DB survives a process). These
  *  let a test simulate a FRESH PROCESS — an empty map over an existing store —
@@ -547,8 +586,9 @@ export class DevTrafficSimulator {
       repostDone: this.#repostDone,
     });
     // The engine just rolled this snapshot's one-shot WS-T decisions
-    // (reinforcement, override) — mark them consumed before execution.
-    this.#markDebatePlanningConsidered(world);
+    // (reinforcement, override) — mark the SURVIVING ones consumed before
+    // execution (a chance truncated off a cap-saturated plan re-offers).
+    this.#markDebatePlanningConsidered(world, plan);
     for (const action of plan.slice(0, MAX_ACTIONS_PER_TICK)) {
       // A stop() (or a stop→restart that superseded this tick) takes effect
       // immediately: abandon the rest of the plan rather than keep writing
@@ -729,17 +769,19 @@ export class DevTrafficSimulator {
 
   /** Mark the one-shot WS-T planning decisions this world snapshot exposed as
    *  CONSIDERED (reinforcement roll, override roll) — called right after
-   *  planTick, before execution, so each arena gets each chance exactly once
-   *  regardless of whether the roll produced an action. */
-  #markDebatePlanningConsidered(world: SimWorld): void {
-    for (const debate of world.openDebates) {
-      if (debate.reinforceEligible) {
-        const tracked = this.#trackedArenas.get(debate.debateId);
-        if (tracked !== undefined) tracked.reinforceConsidered = true;
-      }
+   *  planTick, before execution. Cap-aware via `consumedDebateChances`: a
+   *  chance whose action was truncated off a saturated plan is NOT consumed
+   *  (it re-offers next tick), so a judged arena cannot silently lose its one
+   *  steward-overrule chance under exactly the load the challenge_wave
+   *  scenario generates. */
+  #markDebatePlanningConsidered(world: SimWorld, plan: readonly SimAction[]): void {
+    const consumed = consumedDebateChances(world, plan);
+    for (const debateId of consumed.reinforce) {
+      const tracked = this.#trackedArenas.get(debateId);
+      if (tracked !== undefined) tracked.reinforceConsidered = true;
     }
-    for (const judged of world.judgedDebates) {
-      const tracked = this.#trackedArenas.get(judged.debateId);
+    for (const debateId of consumed.override) {
+      const tracked = this.#trackedArenas.get(debateId);
       if (tracked !== undefined) tracked.overrideConsidered = true;
     }
   }
@@ -1310,16 +1352,20 @@ export class DevTrafficSimulator {
 
   /** The steward persona overrules a judged arena — the REAL 24h override path
    *  (`overrideDebateVerdict`), so the window, judged-state, and stewardship
-   *  checks all bite honestly. */
+   *  checks all bite honestly. The route chain is authMiddleware +
+   *  requireVerifiedAccount + requireUnrestricted (routes/forum.ts), so mirror
+   *  the ACTIVE-only gate — a steward restricted during a moderation
+   *  experiment must not still record overrules no real client could perform.
+   *  (Verification is satisfied by the provisioning-time platform passkey.) */
   async #executeDebateOverride(
     action: Extract<SimAction, { kind: 'debate_override' }>,
   ): Promise<void> {
-    if (!(await this.#accountMayAuthenticate(action.personaUserId))) {
+    if (!(await this.#accountMayPostContent(action.personaUserId))) {
       this.#recordRejection(
         'debate',
         action.personaUserId,
-        'account not authenticable',
-        'account_suspended',
+        'account barred from overruling',
+        'account_restricted',
         403,
       );
       return;

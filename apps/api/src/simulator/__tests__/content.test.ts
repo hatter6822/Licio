@@ -226,6 +226,12 @@ describe('WS-T correction + rebuttal generators', () => {
       expect(correction.citationUrls.length).toBeGreaterThanOrEqual(1);
       expect(correction.citationUrls.length).toBeLessThanOrEqual(4);
       expect(new Set(correction.citationUrls).size).toBe(correction.citationUrls.length);
+      // Distinct REGISTRABLE DOMAINS, not just distinct URLs — the adjudicator's
+      // independence feature counts domains, so an advertised N-source challenge
+      // must actually provide N independent sources (every bank carries ≥4
+      // outlets so even the heaviest pick never wraps).
+      const hosts = correction.citationUrls.map((url) => new URL(url).hostname);
+      expect(new Set(hosts).size).toBe(hosts.length);
       for (const url of correction.citationUrls) expect(isSimulatedUrl(url)).toBe(true);
       // The exact wire shape the runtime submits parses through the REAL schema.
       const parsed = correctionCreateSchema.safeParse({
@@ -241,6 +247,22 @@ describe('WS-T correction + rebuttal generators', () => {
     // Weak (1-source) and strong (≥3-source) challenges both occur.
     expect(counts.has(1)).toBe(true);
     expect([...counts].some((n) => n >= 3)).toBe(true);
+  });
+
+  it('a FOUR-source correction carries four independent registrable domains (no outlet wrap)', () => {
+    // Deterministic seeds: sweep until the weighted pick lands on 4, across
+    // every domain bank, and assert the hosts are genuinely distinct.
+    for (const domain of DOMAIN_IDS) {
+      let found = false;
+      for (let i = 0; i < 200 && !found; i += 1) {
+        const correction = generateCorrection(domain, i, createPrng(`four-${domain}-${i}`));
+        if (correction.citationUrls.length !== 4) continue;
+        found = true;
+        const hosts = correction.citationUrls.map((url) => new URL(url).hostname);
+        expect(new Set(hosts).size).toBe(4);
+      }
+      expect(found).toBe(true);
+    }
   });
 
   it('generateRebuttal: 1–3 simulated sources (a POSTED position always meets the schema minimum)', () => {
