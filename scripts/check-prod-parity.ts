@@ -147,9 +147,32 @@ export function collectAdapters(files: Map<string, string>, pattern: RegExp): Ad
   return out;
 }
 
-/** BFS the PRODUCTION boot's static relative-import closure from `entry`.
- *  Dynamic `import(...)` calls are intentionally NOT followed — on this boot
- *  path they are the dev-only branches (simulator, dev LLM). */
+/**
+ * BFS the PRODUCTION boot's STATIC relative-import closure from `entry`.
+ *
+ * Dynamic `import(...)` edges are deliberately NOT followed.  The closure is
+ * used in exactly one way — as POSITIVE EVIDENCE that a production adapter is
+ * wired (leg 1); legs 2 and 3 scan every file regardless.  Under-approximating
+ * the closure can therefore only make the gate STRICTER (a false alarm, loud
+ * and cheap to resolve); over-approximating it creates the silent false PASS
+ * this gate exists to prevent.  A dynamic import is the one syntactic marker
+ * of CONDITIONAL execution static analysis can see without evaluating guards
+ * — and "referenced but never executed in production" is precisely the CSRF
+ * failure shape (the RedisTokenStore existed, was reachable, and never ran).
+ *
+ * On the current tree the rule is correct-or-redundant by construction: every
+ * relative dynamic import in server code is either (a) a dev-only branch
+ * (`index.ts` → simulator/link-fixtures, NODE_ENV-gated) where following
+ * would be UNSOUND, or (b) a lazy cycle-breaker (forum→ranking,
+ * middleware→identity, auth→security-alerts) whose target is ALSO statically
+ * imported by the boot, so following adds nothing.  If a future module is
+ * ever reachable ONLY via a production dynamic import and carries the sole
+ * wiring of an adapter, the gate false-alarms: make the wiring static, or
+ * allowlist it with a written reason.  The runtime parity guard
+ * (apps/api/src/lib/parity-guard.ts) remains the EXACT check either way — it
+ * inspects the real container objects after every boot condition has
+ * evaluated.
+ */
 export function buildBootClosure(files: Map<string, string>, entry: string): Set<string> {
   const closure = new Set<string>();
   const queue = [entry];
