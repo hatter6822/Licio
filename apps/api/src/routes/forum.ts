@@ -745,6 +745,7 @@ export function createForumRoutes() {
                       threadId: thread.threadId,
                       commentId: outcome.contribution.contributionId,
                       parentCommentId: outcome.contribution.parentContributionId as string,
+                      actorUserId: auth.userId,
                       actorHandle: contribution.author_handle ?? 'deleted-user',
                     });
                     const prefs = await getPreferences(recipientUserId);

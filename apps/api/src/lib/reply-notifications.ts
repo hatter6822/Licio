@@ -15,16 +15,24 @@ export interface ReplyNotificationCreate {
   threadId: string;
   commentId: string;
   parentCommentId: string;
+  /** The replying account — kept so its deletion can anonymize rows it left
+   *  in OTHER users' inboxes (null when the author is already erased). */
+  actorUserId: string | null;
   actorHandle: string;
 }
 
 export interface StoredReplyNotification extends ReplyNotification {
   recipient_user_id: string;
+  actor_user_id: string | null;
 }
 
 /** Per-recipient inbox bound: enqueue prunes rows beyond the newest N, so the
  *  inbox stays bounded without a dedicated sweep job. */
 export const REPLY_NOTIFICATIONS_PER_USER_CAP = 200;
+
+/** The house convention for an erased author (matches the comment-projection
+ *  fallback when a contribution's author has been anonymized). */
+export const DELETED_ACTOR_HANDLE = 'deleted-user';
 
 export interface ReplyNotificationStore {
   /** Idempotent per comment: a re-enqueue returns the existing notification. */
@@ -33,6 +41,12 @@ export interface ReplyNotificationStore {
   unreadCount(userId: string): Promise<number>;
   /** Mark read (owner-scoped); true when the notification belongs to the user. */
   markRead(notificationId: string, userId: string): Promise<boolean>;
+  /** Hard-deletion purge (WS-D.2.4).  Production TOMBSTONES the users row, so
+   *  the FK actions never fire — this is the explicit path: DELETE the user's
+   *  own inbox rows, and ANONYMIZE rows in other inboxes where the user was
+   *  the actor (actor id nulled, handle replaced) so the erased handle stops
+   *  appearing anywhere. */
+  purgeForUser(userId: string): Promise<void>;
   reset(): Promise<void>;
 }
 
@@ -73,6 +87,7 @@ export class InMemoryReplyNotificationStore implements ReplyNotificationStore {
       thread_id: input.threadId,
       comment_id: input.commentId,
       parent_comment_id: input.parentCommentId,
+      actor_user_id: input.actorUserId,
       actor_handle: input.actorHandle,
       created_at: new Date(this.#now()).toISOString(),
       read_at: null,
@@ -112,6 +127,18 @@ export class InMemoryReplyNotificationStore implements ReplyNotificationStore {
     return true;
   }
 
+  async purgeForUser(userId: string): Promise<void> {
+    for (const item of [...this.#items.values()]) {
+      if (item.recipient_user_id === userId) {
+        this.#items.delete(item.notification_id);
+        this.#byComment.delete(item.comment_id);
+      } else if (item.actor_user_id === userId) {
+        item.actor_user_id = null;
+        item.actor_handle = DELETED_ACTOR_HANDLE;
+      }
+    }
+  }
+
   async reset(): Promise<void> {
     this.#items.clear();
     this.#byComment.clear();
@@ -131,5 +158,6 @@ export const replyNotifications: ReplyNotificationStore = {
   listForUser: (userId, limit) => store.listForUser(userId, limit),
   unreadCount: (userId) => store.unreadCount(userId),
   markRead: (notificationId, userId) => store.markRead(notificationId, userId),
+  purgeForUser: (userId) => store.purgeForUser(userId),
   reset: () => store.reset(),
 };

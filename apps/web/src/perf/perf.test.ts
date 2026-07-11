@@ -122,6 +122,7 @@ describe('initWebVitals', () => {
     vi.stubGlobal('PerformanceObserver', MockPO);
     const report = vi.fn();
     const teardown = initWebVitals(report);
+    report.mockClear(); // drop the CLS = 0 seed — this test is about INP only
 
     // A continuous event (no interactionId) must NOT register as INP…
     handlers['event']?.({ getEntries: () => [{ duration: 300, interactionId: 0 }] });
@@ -169,5 +170,34 @@ describe('initWebVitals', () => {
     });
 
     teardown();
+  });
+
+  it('seeds a CLS = 0 sample only when layout-shift observation attaches', () => {
+    type Listener = (list: { getEntries: () => unknown[] }) => void;
+    // A browser WITHOUT layout-shift support (e.g. WebKit) must not fabricate
+    // zeros it cannot measure…
+    class PartialPO {
+      constructor(_cb: Listener) {}
+      observe(opts: { type: string }): void {
+        if (opts.type === 'layout-shift') throw new Error('unsupported entry type');
+      }
+      disconnect(): void {}
+    }
+    vi.stubGlobal('PerformanceObserver', PartialPO);
+    const blind = vi.fn();
+    initWebVitals(blind)();
+    expect(blind).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'CLS' }));
+
+    // …while a supporting browser reports the quiet pageview's real CLS = 0
+    // up front, so zero-shift pageviews reach the p75 aggregate.
+    class FullPO {
+      constructor(_cb: Listener) {}
+      observe(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('PerformanceObserver', FullPO);
+    const report = vi.fn();
+    initWebVitals(report)();
+    expect(report).toHaveBeenCalledWith({ name: 'CLS', value: 0, rating: 'good' });
   });
 });

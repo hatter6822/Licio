@@ -11,6 +11,7 @@ import { type createDbClient, replyNotifications as replyNotificationsTable } fr
 import type { ReplyNotification } from '@licio/shared';
 import { and, desc, eq, isNull, notInArray, sql } from 'drizzle-orm';
 import {
+  DELETED_ACTOR_HANDLE,
   REPLY_NOTIFICATIONS_PER_USER_CAP,
   type ReplyNotificationCreate,
   type ReplyNotificationStore,
@@ -37,6 +38,7 @@ export class DrizzleReplyNotificationStore implements ReplyNotificationStore {
       thread_id: row.threadId,
       comment_id: row.commentId,
       parent_comment_id: row.parentCommentId,
+      actor_user_id: row.actorUserId,
       actor_handle: row.actorHandle,
       created_at: iso(row.createdAt),
       read_at: row.readAt ? iso(row.readAt) : null,
@@ -53,6 +55,7 @@ export class DrizzleReplyNotificationStore implements ReplyNotificationStore {
         threadId: input.threadId,
         commentId: input.commentId,
         parentCommentId: input.parentCommentId,
+        actorUserId: input.actorUserId,
         actorHandle: input.actorHandle,
         createdAt: new Date(),
       })
@@ -130,6 +133,18 @@ export class DrizzleReplyNotificationStore implements ReplyNotificationStore {
       )
       .returning({ id: replyNotificationsTable.notificationId });
     return rows.length > 0;
+  }
+
+  async purgeForUser(userId: string): Promise<void> {
+    // Production hard deletion TOMBSTONES the users row, so the schema's FK
+    // actions never fire — this explicit path is the real WS-D.2.4 purge.
+    await this.#db
+      .delete(replyNotificationsTable)
+      .where(eq(replyNotificationsTable.recipientUserId, userId));
+    await this.#db
+      .update(replyNotificationsTable)
+      .set({ actorUserId: null, actorHandle: DELETED_ACTOR_HANDLE })
+      .where(eq(replyNotificationsTable.actorUserId, userId));
   }
 
   async reset(): Promise<void> {

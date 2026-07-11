@@ -13,6 +13,7 @@ import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildSessionCookie, createSession } from '../identity/sessions.js';
 import {
+  DELETED_ACTOR_HANDLE,
   InMemoryReplyNotificationStore,
   REPLY_NOTIFICATIONS_PER_USER_CAP,
   replyNotifications,
@@ -32,6 +33,9 @@ const enqueueInput = (over: Record<string, string> = {}) => ({
   threadId: '33333333-3333-4333-8333-333333333333',
   commentId: randomUUID(),
   parentCommentId: '44444444-4444-4444-8444-444444444444',
+  // Null by default so the live-Postgres leg never violates the users FK;
+  // the actor-anonymize tests pass a REAL actor id explicitly.
+  actorUserId: null as string | null,
   actorHandle: 'alice',
   ...over,
 });
@@ -66,6 +70,23 @@ describe('InMemoryReplyNotificationStore contract', () => {
       REPLY_NOTIFICATIONS_PER_USER_CAP + 10,
     );
     expect(listed).toHaveLength(REPLY_NOTIFICATIONS_PER_USER_CAP);
+  });
+
+  it('purges on account deletion: recipient rows deleted, actor rows anonymized', async () => {
+    const deleted = randomUUID();
+    const other = randomUUID();
+    await replyNotifications.enqueue(enqueueInput({ recipientUserId: deleted }));
+    const acted = await replyNotifications.enqueue(
+      enqueueInput({ recipientUserId: other, actorUserId: deleted, actorHandle: 'blake' }),
+    );
+    await replyNotifications.purgeForUser(deleted);
+    // The deleted account's own inbox is gone…
+    expect(await replyNotifications.listForUser(deleted)).toHaveLength(0);
+    // …and the row it left in ANOTHER inbox survives, with the handle erased.
+    const remaining = await replyNotifications.listForUser(other);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.notification_id).toBe(acted.notification_id);
+    expect(remaining[0]?.actor_handle).toBe(DELETED_ACTOR_HANDLE);
   });
 });
 
@@ -144,6 +165,7 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
     const store = new DrizzleReplyNotificationStore(db);
     const settings = new DrizzleUserSettingsStore(db);
     let userId: string | null = null;
+    let actorId: string | null = null;
     try {
       const inserted = await db
         .insert(users)
@@ -170,6 +192,40 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
       expect(await store.markRead(first.notification_id, userId)).toBe(true);
       expect(await store.unreadCount(userId)).toBe(1);
 
+      // Explicit deletion-path purge (WS-D.2.4): production TOMBSTONES the
+      // users row, so the FK actions on this table never fire there —
+      // purgeForUser is the real path.  Actor side first: rows the deleted
+      // account left in OTHER inboxes are anonymized, not deleted.
+      const actorInserted = await db
+        .insert(users)
+        .values({
+          handle: `actor_${Date.now().toString(36)}`,
+          displayName: 'Actor Integration',
+          email: null,
+          ageBandIfKnown: 'adult',
+          privacySettings: defaultPrivacySettings(),
+          personalizationSettings: defaultPersonalizationSettings(),
+          reputationSummaryPrivate: emptyReputationSummary(),
+        })
+        .returning();
+      actorId = (actorInserted[0] as { userId: string }).userId;
+      const acted = await store.enqueue(
+        enqueueInput({ recipientUserId: userId, actorUserId: actorId, actorHandle: 'blake' }),
+      );
+      await store.purgeForUser(actorId);
+      const anonymized = (await store.listForUser(userId)).find(
+        (n) => n.notification_id === acted.notification_id,
+      );
+      expect(anonymized?.actor_handle).toBe(DELETED_ACTOR_HANDLE);
+      expect(
+        await db.select().from(replyTable).where(eq(replyTable.actorUserId, actorId)),
+      ).toHaveLength(0);
+      // Recipient side: the deleted account's own inbox is removed.
+      await store.purgeForUser(userId);
+      expect(await store.listForUser(userId)).toHaveLength(0);
+      // Re-seed one row so the dev/test FK-cascade backstop below still bites.
+      await store.enqueue(enqueueInput({ recipientUserId: userId }));
+
       // Settings: durable round-trip under a hashed at-rest ref.
       await settings.set(userId, { ...DEFAULT_USER_SETTINGS, feed_mode: 'chronological' });
       expect((await settings.get(userId))?.feed_mode).toBe('chronological');
@@ -192,6 +248,7 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
       userId = null;
     } finally {
       if (userId) await db.delete(users).where(eq(users.userId, userId));
+      if (actorId) await db.delete(users).where(eq(users.userId, actorId));
       await settings.clear();
       await (db as unknown as { $client: { end(): Promise<void> } }).$client.end();
     }

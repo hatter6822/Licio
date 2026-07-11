@@ -225,7 +225,7 @@ import {
   setPushStateStore,
   subscriptionsForUser,
 } from './lib/push-service.js';
-import { setReplyNotificationStore } from './lib/reply-notifications.js';
+import { replyNotifications, setReplyNotificationStore } from './lib/reply-notifications.js';
 import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
@@ -664,11 +664,15 @@ identityServices.alertTransports = createAlertTransports({
     : {}),
   onError: (channel, err) => logger.warn({ channel, err }, 'security-alert delivery failed'),
 });
-// WS-C client-state purge on hard deletion (WS-D.2.4): push subscriptions +
-// notification preferences + settings-sync rows die with the account.
+// WS-C/WS-T client-state purge on hard deletion (WS-D.2.4): push
+// subscriptions + notification preferences + settings-sync rows + the
+// reply-notification inbox die with the account, and rows the account left
+// as the ACTOR in other users' inboxes are anonymized (production tombstones
+// the users row, so no FK action ever does this implicitly).
 identityServices.purgeClientState = async (userId) => {
   await purgePushStateForUser(userId);
   await getUserSettingsStore().purge(userId);
+  await replyNotifications.purgeForUser(userId);
 };
 setIdentityServices(identityServices);
 

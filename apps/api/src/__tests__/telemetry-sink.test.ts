@@ -7,14 +7,20 @@
 // → retention sweeps), and a GATED live-Postgres contract leg for the Drizzle
 // adapters.
 import type { TelemetryEvent } from '@licio/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { JobLeaseStore } from '../identity/job-lease.js';
 import {
   aggregateWindow,
   computeVitalAlerts,
   p75,
   WEB_VITAL_TARGETS,
 } from '../telemetry/aggregate.js';
-import { runTelemetryTick, SAMPLE_RETENTION_MS, VITALS_WINDOW_MS } from '../telemetry/scheduler.js';
+import {
+  runTelemetryTick,
+  SAMPLE_RETENTION_MS,
+  startTelemetryScheduler,
+  VITALS_WINDOW_MS,
+} from '../telemetry/scheduler.js';
 import {
   createInMemoryTelemetryServices,
   SAMPLE_MAX_FUTURE_SKEW_MS,
@@ -178,6 +184,32 @@ describe('runTelemetryTick', () => {
     expect(alerts[0]?.['worst_route']).toBe('/');
     // The ancient sample was swept; the in-window samples remain.
     expect(await services.samples.listSince(iso(0))).toHaveLength(12);
+  });
+});
+
+describe('startTelemetryScheduler', () => {
+  it('a lease-store failure is reported and skips the tick (fail closed)', async () => {
+    const services = createInMemoryTelemetryServices({ now: () => NOW });
+    const tickReads = vi.spyOn(services.samples, 'listSince');
+    const failures: string[] = [];
+    const lease: JobLeaseStore = {
+      tryAcquire: async () => {
+        throw new Error('lease store down');
+      },
+    };
+    const stop = startTelemetryScheduler(services, (_err, task) => failures.push(task), 5, {
+      lease,
+      holder: 'test-holder',
+    });
+    const deadline = Date.now() + 5_000;
+    while (failures.length < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    stop();
+    // The failure surfaced through onError as the 'lease' task (never an
+    // unhandled rejection), and the tick body never ran.
+    expect(failures[0]).toBe('lease');
+    expect(tickReads).not.toHaveBeenCalled();
   });
 });
 

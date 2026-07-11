@@ -126,6 +126,14 @@ export function initWebVitals(report: (vital: WebVital) => void): () => void {
     }
     report({ name: 'CLS', value: clsValue, rating: rateMetric('CLS', clsValue) });
   });
+  if (cls) {
+    // A pageview with NO layout shifts is a real CLS = 0 sample — the common
+    // good case.  Seed it so quiet pageviews reach the p75 aggregate instead of
+    // biasing per-route CLS toward only the pages that shifted.  Seeded only
+    // when layout-shift observation actually attached: a browser that cannot
+    // measure (e.g. WebKit) must not fabricate zeros.
+    report({ name: 'CLS', value: 0, rating: rateMetric('CLS', 0) });
+  }
 
   let inpValue = 0;
   const inp = observe(

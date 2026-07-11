@@ -56,13 +56,25 @@ export class RefCountedSubscriber {
       this.#wired = true;
     }
     let set = this.#handlers.get(channel);
-    if (!set) {
-      set = new Set();
-      this.#handlers.set(channel, set);
-      this.#ready.set(
-        channel,
-        this.#sub.subscribe(channel).catch((err) => this.#onError(err)),
-      );
+    let ready = this.#ready.get(channel);
+    if (!set || !ready) {
+      const created = new Set<(message: string) => void>();
+      set = created;
+      this.#handlers.set(channel, created);
+      ready = this.#sub.subscribe(channel).catch((err) => {
+        // A failed SUBSCRIBE must not masquerade as a live channel: tear down
+        // the cached state so the NEXT subscriber retries the SUBSCRIBE, and
+        // rethrow so every awaiting caller fails closed instead of holding a
+        // stream that will never receive cross-replica frames.  The identity
+        // check keeps a later retry's fresh state out of this teardown.
+        if (this.#handlers.get(channel) === created) {
+          this.#handlers.delete(channel);
+          this.#ready.delete(channel);
+        }
+        this.#onError(err);
+        throw err;
+      });
+      this.#ready.set(channel, ready);
     }
     set.add(handler);
     const unsubscribe = (): void => {
@@ -75,7 +87,9 @@ export class RefCountedSubscriber {
         void this.#sub.unsubscribe(channel).catch(this.#onError);
       }
     };
-    await this.#ready.get(channel);
+    // Awaits the promise captured ABOVE (never re-read from the map): if the
+    // SUBSCRIBE rejects, the teardown may already have dropped the map entry.
+    await ready;
     return unsubscribe;
   }
 }
