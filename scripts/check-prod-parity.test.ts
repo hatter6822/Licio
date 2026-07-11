@@ -241,7 +241,11 @@ describe('stripComments (tokenizer)', () => {
 });
 
 describe('the live tree', () => {
-  it('passes the full gate with the current allowlists (no rot, no regressions)', () => {
+  // Walks + parses all of apps/api/src (~600 files): ~2s locally, but slow
+  // enough under CI coverage instrumentation to need its own budget.
+  it('passes the full gate with the current allowlists (no rot, no regressions)', {
+    timeout: 60_000,
+  }, () => {
     expect(runProdParityGate(collectApiSourceFiles())).toEqual([]);
   });
 });
