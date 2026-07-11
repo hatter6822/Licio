@@ -37,15 +37,8 @@ function actor(overrides: Partial<ActorItemSummary> = {}): ActorItemSummary {
 }
 
 describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
-  it('the hierarchy affects output: evidence > correction > … > explanation', () => {
-    const order = [
-      'evidence',
-      'correction',
-      'synthesis',
-      'question',
-      'counterexample',
-      'explanation',
-    ] as const;
+  it('the hierarchy affects output: correction > … > explanation', () => {
+    const order = ['correction', 'synthesis', 'question', 'counterexample', 'explanation'] as const;
     const values = order.map(
       (type) => actorV1Contribution(actor({ contributions: { [type]: 1 } })).value,
     );
@@ -71,7 +64,7 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
 
   it('per-user saturation: the Nth same-type contribution adds less than the (N-1)th', () => {
     const value = (n: number) =>
-      actorV1Contribution(actor({ contributions: { evidence: n } })).value;
+      actorV1Contribution(actor({ contributions: { correction: n } })).value;
     const m1 = value(1) - value(0);
     const m2 = value(2) - value(1);
     const m3 = value(3) - value(2);
@@ -112,7 +105,7 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
   });
 
   it('property: adding any contribution never lowers the pre-dampening score', () => {
-    const types = ['evidence', 'correction', 'synthesis', 'question'] as const;
+    const types = ['correction', 'synthesis', 'question'] as const;
     forAll(
       1101,
       300,
@@ -146,7 +139,7 @@ describe('computePwattV1Components (item-level dominance cap)', () => {
         sourceOpened: true,
         contextOpened: true,
         returnVisitBucket: 'few',
-        contributions: { evidence: 2 },
+        contributions: { correction: 2 },
       }),
       actor({ actor: 'user-2', dwellBucket: 'short' }),
     ]);
@@ -188,7 +181,7 @@ describe('computePwattV1Components (item-level dominance cap)', () => {
             sourceOpened: bool(rng),
             contextOpened: bool(rng),
             returnVisitBucket: pick(rng, ['none', 'few', 'several', 'many'] as const),
-            contributions: { evidence: int(rng, 0, 50), low_info_reply: int(rng, 0, 50) },
+            contributions: { correction: int(rng, 0, 50), low_info_reply: int(rng, 0, 50) },
           }),
         ),
       (actors) => {
@@ -277,7 +270,7 @@ describe('anti-signal attenuation of the served components (WS-E.2.2 → WS-I)',
       dwellBucket: 'extended',
       sourceOpened: true,
       contextOpened: true,
-      contributions: { evidence: 2 },
+      contributions: { correction: 2 },
       ...overrides,
     });
 

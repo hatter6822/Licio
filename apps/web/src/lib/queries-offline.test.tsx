@@ -51,7 +51,7 @@ const SAVED_STORY = {
   origin: 'independent' as const,
   url: 'https://example.org/a',
   reading_minutes: 3,
-  rating_label: 'well-sourced' as const,
+  rating_label: 'deepening' as const,
   more_on_this_story: [],
   context_card: null,
   distribution_reason: 'reason',

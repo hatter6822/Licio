@@ -4,8 +4,9 @@
 // scanner seam + DSAR upload listing:
 //
 //   • structural `active → deepening` (maybeDeepenConversation via the
-//     contribution-create hook): fires only when volume, evidence, AND a
-//     live multi-level exchange all hold, and never from a non-active state;
+//     contribution-create hook): fires only when volume, sourcing (citation-
+//     bearing contributions), AND a live multi-level exchange all hold, and
+//     never from a non-active state;
 //   • WS-E harassment-cascade escalation (the `forum-thread-posture` router
 //     consumer): safety `normal → elevated` + conversation `active → tense`,
 //     idempotent under at-least-once redelivery, burst signals ignored,
@@ -29,7 +30,6 @@ import {
   contributionBody,
   type ForumServicesFixture,
   freshForumServices,
-  seedClaim,
   seedThread,
   seedUserWithSession,
 } from './forum-test-helpers.js';
@@ -106,10 +106,9 @@ function cascadeSignal(targetId: string, eventId = randomUUID()): IntegritySigna
 }
 
 describe('structural deepening (WS-G.1.1 system trigger)', () => {
-  it('moves active → deepening when volume, evidence, and depth all hold', async () => {
+  it('moves active → deepening when volume, sourcing, and depth all hold', async () => {
     const { answerId } = await seedExchange();
-    const claimId = await seedClaim(fixture);
-    await createOk(contributionBody('evidence', threadId, { claimId })); // 3 published
+    await createOk(contributionBody('comment', threadId, { sourced: true })); // 3 published
     expect(await conversationState()).toBe('active'); // below volume threshold
     // The 4th contribution is a depth-2 reply — every condition now holds.
     await createOk({
@@ -121,8 +120,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
   });
 
   it('never fires from shallow volume alone (depth condition)', async () => {
-    const claimId = await seedClaim(fixture);
-    await createOk(contributionBody('evidence', threadId, { claimId }));
+    await createOk(contributionBody('comment', threadId, { sourced: true }));
     for (let i = 0; i < 5; i += 1) {
       await createOk(contributionBody('question', threadId));
     }
@@ -130,7 +128,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
     expect(await conversationState()).toBe('active');
   });
 
-  it('never fires without accumulated evidence (evidence condition)', async () => {
+  it('never fires without accumulated sourcing (citation condition)', async () => {
     const { answerId } = await seedExchange();
     await createOk(contributionBody('question', threadId));
     await createOk({
@@ -143,8 +141,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
 
   it('never auto-deepens a non-active thread (state gate)', async () => {
     const { answerId } = await seedExchange();
-    const claimId = await seedClaim(fixture);
-    await createOk(contributionBody('evidence', threadId, { claimId }));
+    await createOk(contributionBody('comment', threadId, { sourced: true }));
     const deps = {
       stories: fixture.ingestion.stories,
       events: fixture.events,
@@ -164,8 +161,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
 
   it('emits the audited thread.state.changed event for the transition', async () => {
     const { answerId } = await seedExchange();
-    const claimId = await seedClaim(fixture);
-    await createOk(contributionBody('evidence', threadId, { claimId }));
+    await createOk(contributionBody('comment', threadId, { sourced: true }));
     await createOk({
       ...contributionBody('explanation', threadId),
       parent_contribution_id: answerId,
@@ -211,7 +207,7 @@ describe('integrity escalation (the forum-thread-posture consumer)', () => {
   });
 
   it('resolves THREAD-id targets too (forum-driven cascades aggregate by thread)', async () => {
-    // pwatt/aggregation folds contribution/evidence events by
+    // pwatt/aggregation folds contribution events by
     // payload.thread_id, so cascades detected on forum activity carry
     // THREAD ids in target_ids — the consumer must not silently skip them.
     await fixture.events.router.publish(cascadeSignal(threadId));

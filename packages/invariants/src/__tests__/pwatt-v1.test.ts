@@ -145,10 +145,9 @@ describe('saturation curves (WS-E.2.3a)', () => {
 });
 
 describe('contribution-type hierarchy (WS-E.2.3b)', () => {
-  it('orders evidence > correction > synthesis > question > counterexample > explanation > low_info_reply', () => {
+  it('orders correction > synthesis > question > counterexample > explanation > low_info_reply', () => {
     expect(() => assertV1HierarchyOrder()).not.toThrow();
     const w = V1_CONTRIBUTION_WEIGHTS;
-    expect(w.evidence).toBeGreaterThan(w.correction);
     expect(w.correction).toBeGreaterThan(w.synthesis);
     expect(w.synthesis).toBeGreaterThan(w.question);
     expect(w.question).toBeGreaterThan(w.counterexample);
@@ -163,8 +162,8 @@ describe('contribution-type hierarchy (WS-E.2.3b)', () => {
   });
 
   it('rejects a broken hierarchy', () => {
-    expect(() => assertV1HierarchyOrder({ ...V1_CONTRIBUTION_WEIGHTS, correction: 1.5 })).toThrow(
-      /evidence must outweigh correction/,
+    expect(() => assertV1HierarchyOrder({ ...V1_CONTRIBUTION_WEIGHTS, synthesis: 1.5 })).toThrow(
+      /correction must outweigh synthesis/,
     );
     expect(() =>
       assertV1HierarchyOrder({ ...V1_CONTRIBUTION_WEIGHTS, low_info_reply: 0.1 }),

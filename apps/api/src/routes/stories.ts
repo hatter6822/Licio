@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-F public ingestion surface: POST /v1/stories (WS-F.1.4a), the
-// claim/evidence read paths (WS-F.1.2a/2.5a navigability), the public source
+// claim read path (WS-F.1.2a navigability), the public source
 // profile (§14.3 context-and-history — no truth score exists to expose),
 // GET /v1/search (WS-F.3.1b), and the public takedown intake (WS-F.1.4f).
 // Every response is re-validated against its shared schema on egress (the
@@ -11,8 +11,6 @@ import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
   type ClaimPublic,
-  claimEvidenceResponseSchema,
-  type EvidenceCardPublic,
   isSentinelTopicId,
   type SourcePublic,
   type StoryPublic,
@@ -37,12 +35,7 @@ import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
-import type {
-  ClaimRecord,
-  EvidenceCardRecord,
-  SourceRecord,
-  StoryRecord,
-} from '../ingestion/stores.js';
+import type { ClaimRecord, SourceRecord, StoryRecord } from '../ingestion/stores.js';
 import { submitStory } from '../ingestion/submission.js';
 import { changeStoryVisibility } from '../ingestion/visibility.js';
 import { rateLimit } from '../lib/rate-limit.js';
@@ -65,7 +58,7 @@ async function softUserId(cookieHeader: string | undefined): Promise<string | nu
 /**
  * WS-Q.3.2 — the item read bar for a story-scoped read: 404 unless the story is
  * readable (not hidden AND the reader passes the room content bar). A story-less
- * (cross-story) claim/evidence row is public. Returns true when the read may
+ * (cross-story) claim row is public. Returns true when the read may
  * proceed.
  */
 async function storyReadGate(
@@ -130,23 +123,6 @@ function toClaimPublic(claim: ClaimRecord): ClaimPublic {
   };
 }
 
-function toEvidencePublic(card: EvidenceCardRecord): EvidenceCardPublic {
-  return {
-    evidence_id: card.evidenceId,
-    claim_id: card.claimId,
-    source_id: card.sourceId,
-    contribution_id: card.contributionId,
-    submitted_by: card.submittedBy,
-    evidence_type: card.evidenceType,
-    relationship_type: card.relationshipType,
-    citation_url_or_ref: card.citationUrlOrRef,
-    relevance_note: card.relevanceNote,
-    verification_state: card.verificationState,
-    independence_group_id: card.independenceGroupId,
-    created_at: card.createdAt,
-  };
-}
-
 function toSourcePublic(source: SourceRecord): SourcePublic {
   return sourcePublicSchema.parse({
     source_id: source.sourceId,
@@ -155,7 +131,6 @@ function toSourcePublic(source: SourceRecord): SourcePublic {
     publisher_lineage: source.publisherLineage,
     typical_topics: source.typicalTopics,
     correction_history: source.correctionHistory,
-    evidence_type_frequency: source.evidenceTypeFrequency,
     community_notes: source.communityNotes,
     display_restrictions: source.displayRestrictions,
     created_at: source.createdAt,
@@ -262,7 +237,7 @@ export function createStoriesRoutes() {
         },
       )
 
-      // --- Claim/evidence navigability (WS-F.1.2a / WS-F.2.5a) -----------
+      // --- Claim navigability (WS-F.1.2a) ---------------------------------
       .get(
         '/stories/:storyId/claims',
         zValidator('param', z.object({ storyId: uuidSchema })),
@@ -280,35 +255,6 @@ export function createStoriesRoutes() {
           );
         },
       )
-      .get(
-        '/claims/:claimId/evidence',
-        zValidator('param', z.object({ claimId: uuidSchema })),
-        async (c) => {
-          const ingestion = getIngestionServices();
-          const claim = await ingestion.claims.getById(c.req.valid('param').claimId);
-          if (!claim) return c.json(deny('not_found', 'Resource not found'), 404);
-          // WS-Q.3.2 — a claim that belongs to a story inherits its read bar
-          // (a room_only story's evidence is 404 to outsiders). A story-less
-          // (cross-story / user-experience) claim is public.
-          if (claim.storyId !== null) {
-            const story = await ingestion.stories.getById(claim.storyId);
-            if (story === null || !(await storyReadGate(story, c.req.header('cookie')))) {
-              return c.json(deny('not_found', 'Resource not found'), 404);
-            }
-          }
-          const cards = await ingestion.evidence.listByClaim(claim.claimId);
-          return c.json(
-            claimEvidenceResponseSchema.parse({
-              claim: toClaimPublic(claim),
-              items: cards
-                .filter((card) => card.verificationState !== 'retracted')
-                .slice(0, 200)
-                .map(toEvidencePublic),
-            }),
-          );
-        },
-      )
-
       // --- Public source profile (§14.3: context + history) ---------------
       .get(
         '/sources/:sourceId',

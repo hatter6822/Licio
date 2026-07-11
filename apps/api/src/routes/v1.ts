@@ -90,11 +90,7 @@ import { createForumRoutes } from './forum.js';
 import { createGovernanceRoutes } from './governance.js';
 import { createIngestionAdminRoutes } from './ingestion-admin.js';
 import { createInvariantsAdminRoutes } from './invariants-admin.js';
-import {
-  createInvariantsPublicRoutes,
-  exposureLabelForGain,
-  latestMeriGains,
-} from './invariants-public.js';
+import { createInvariantsPublicRoutes } from './invariants-public.js';
 import { createKnomosisRoutes } from './knomosis.js';
 import { createModerationConsoleRoutes } from './moderation-console.js';
 import { createPrivacyRoutes } from './privacy.js';
@@ -152,9 +148,6 @@ const notFound = { error: { code: 'not_found', message: 'Resource not found' } }
 interface StoryReadSignals {
   safetyState: ReturnType<typeof deriveStorySafetyState>;
   interpretationsDiverge: boolean;
-  /** Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate). */
-  evidenceCount: number;
-  meriExposure: ReturnType<typeof exposureLabelForGain>;
   /** Served ActiveAttention component (§5.4), or undefined when uncovered —
    *  keeps the §5.6 default label truthful (Getting Attention vs New). */
   activeAttention: number | undefined;
@@ -163,10 +156,9 @@ interface StoryReadSignals {
 /**
  * Assemble the live rating signals for ONE story from STORED shadow outputs (a
  * detail read never triggers invariant computation): the item safety state +
- * MFCI risk + thread posture, the latest SCOI energy (interpretation
+ * MFCI risk + thread posture, and the latest SCOI energy (interpretation
  * divergence — SCOI energy ≥ the needs-context threshold, matching the
- * story-page "Where interpretations differ" drawer), the thread's independent
- * evidence-card count, and the latest MERI exposure. Fed through the SAME shared
+ * story-page "Where interpretations differ" drawer). Fed through the SAME shared
  * `deriveRatingLabel`/`deriveStorySafetyState` the feed uses, so the surfaces
  * agree on every dimension except the SCOI margin (the feed uses its
  * profile-aware context card there instead).
@@ -176,15 +168,13 @@ async function assembleStoryReadSignals(
   thread: ThreadShellRecord | null,
 ): Promise<StoryReadSignals> {
   const events = getEventPipelineServices();
-  const ingestion = getIngestionServices();
   // Invariants are a SOFT dependency: when the platform is not wired, MFCI risk
   // and the SCOI threshold are simply absent (the read still serves).
   const invariants = tryGetInvariantServices();
-  const [safeties, mfciRisk, scoiLatest, gains, pwattV1, pwattV0] = await Promise.all([
+  const [safeties, mfciRisk, scoiLatest, pwattV1, pwattV0] = await Promise.all([
     events.safetyStore.getMany([story.storyId]),
     invariants ? invariants.mfciRiskStates.get(story.storyId) : Promise.resolve(null),
     events.invariantStore.latest('SCOI', story.storyId),
-    latestMeriGains(events),
     events.invariantStore.latest('PWAtt_v1', story.storyId),
     events.invariantStore.latest('PWAtt_v0', story.storyId),
   ]);
@@ -216,26 +206,7 @@ async function assembleStoryReadSignals(
     scoiLatest !== null &&
     !scoiLatest.reasonCodes.includes('INSUFFICIENT_COVERAGE') &&
     scoi >= scoiThreshold;
-  // Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate,
-  // identical to the feed's `evidenceSummaryOf`): verified cards sharing a
-  // non-null MERI independence group (§13.6) count once; an un-grouped verified
-  // card is its own unit; unverified/disputed/retracted cards never count.
-  const verifiedGroups = new Set<string>();
-  let ungroupedVerified = 0;
-  for (const claim of await ingestion.claims.listByStory(story.storyId)) {
-    for (const card of await ingestion.evidence.listByClaim(claim.claimId)) {
-      if (card.verificationState !== 'verified') continue;
-      if (card.independenceGroupId === null) ungroupedVerified += 1;
-      else verifiedGroups.add(card.independenceGroupId);
-    }
-  }
-  return {
-    safetyState,
-    interpretationsDiverge,
-    evidenceCount: verifiedGroups.size + ungroupedVerified,
-    meriExposure: exposureLabelForGain(gains[story.storyId] ?? null),
-    activeAttention,
-  };
+  return { safetyState, interpretationsDiverge, activeAttention };
 }
 
 /** Map a REAL ingested story onto the established WS-C story-detail wire
@@ -264,8 +235,6 @@ function realStoryToDetail(
       lifecycleState: story.lifecycleState,
       safetyState: signals.safetyState,
       interpretationsDiverge: signals.interpretationsDiverge,
-      evidenceCount: signals.evidenceCount,
-      meriExposure: signals.meriExposure,
       ...(signals.activeAttention !== undefined
         ? { activeAttention: signals.activeAttention }
         : {}),

@@ -21,7 +21,7 @@ const STORY: StoryDetail = {
   origin: 'independent',
   url: 'https://example.org/a',
   reading_minutes: 4,
-  rating_label: 'well-sourced',
+  rating_label: 'deepening',
   more_on_this_story: [],
   context_card: null,
   distribution_reason: 'Read by people who also read primary sources.',
@@ -59,7 +59,7 @@ const THREAD: ThreadDetail = {
   contribution_count: 2,
   created_at: '2026-06-09T12:00:00.000Z',
   updated_at: '2026-06-09T12:00:00.000Z',
-  sections: { overview: 1, questions: 0, evidence: 1, challenges: 0, lenses: 0, chronology: 2 },
+  sections: { overview: 1, questions: 0, sources: 1, challenges: 0, lenses: 0, chronology: 2 },
 };
 
 beforeEach(async () => {

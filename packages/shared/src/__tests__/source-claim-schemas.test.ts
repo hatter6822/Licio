@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-F.1.2a / WS-F.2.1a / WS-F.2.4 / WS-F.2.5a / WS-F.3.1b / WS-F.1.4f —
-// claim, evidence, source, syndication, search, and takedown contracts. The
+// WS-F.1.2a / WS-F.2.1a / WS-F.2.4 / WS-F.3.1b / WS-F.1.4f —
+// claim, source, syndication, search, and takedown contracts. The
 // source suite includes the §14.3 doctrine assertion: NO truth/credibility/
 // reliability scalar exists anywhere in the source shape.
 import { describe, expect, it } from 'vitest';
 import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '../constants/topics.js';
-import { claimPublicSchema, evidenceCardPublicSchema } from '../schemas/claim.js';
+import { claimPublicSchema } from '../schemas/claim.js';
 import { searchRequestSchema, searchResultSchema } from '../schemas/search.js';
 import {
   sourceEditRequestSchema,
@@ -27,7 +27,7 @@ const randomUUID = (): string => {
 
 const now = () => new Date().toISOString();
 
-describe('claim + evidence schemas (WS-F.1.2a / WS-F.2.5a)', () => {
+describe('claim schemas (WS-F.1.2a)', () => {
   const claim = {
     claim_id: randomUUID(),
     story_id: randomUUID(),
@@ -53,55 +53,6 @@ describe('claim + evidence schemas (WS-F.1.2a / WS-F.2.5a)', () => {
   it('omits created_by from the public projection (minimization)', () => {
     expect(claimPublicSchema.safeParse({ ...claim, created_by: randomUUID() }).success).toBe(false);
   });
-
-  it('accepts each evidence material/relationship type and rejects invalid values', () => {
-    // WS-G.1.3 canon: `evidence_type` is the MATERIAL taxonomy (what the
-    // evidence IS); `relationship_type` is how it bears on the claim.
-    const card = {
-      evidence_id: randomUUID(),
-      claim_id: claim.claim_id,
-      source_id: null,
-      contribution_id: null,
-      submitted_by: randomUUID(),
-      evidence_type: 'report' as const,
-      relationship_type: 'supports' as const,
-      citation_url_or_ref: 'https://example.com/study',
-      relevance_note: 'Direct replication',
-      verification_state: 'unverified' as const,
-      independence_group_id: randomUUID(),
-      created_at: now(),
-    };
-    for (const type of [
-      'primary_source',
-      'dataset',
-      'transcript',
-      'legal_text',
-      'report',
-      'expert_reference',
-      'fact_check',
-    ]) {
-      expect(evidenceCardPublicSchema.safeParse({ ...card, evidence_type: type }).success).toBe(
-        true,
-      );
-    }
-    for (const rel of ['supports', 'contradicts', 'contextualizes', 'corrects', 'counterexample']) {
-      expect(evidenceCardPublicSchema.safeParse({ ...card, relationship_type: rel }).success).toBe(
-        true,
-      );
-    }
-    // The relationship vocabulary is NOT valid as a material type (and vice versa).
-    expect(evidenceCardPublicSchema.safeParse({ ...card, evidence_type: 'supports' }).success).toBe(
-      false,
-    );
-    expect(
-      evidenceCardPublicSchema.safeParse({ ...card, relationship_type: 'report' }).success,
-    ).toBe(false);
-    expect(
-      evidenceCardPublicSchema.safeParse({ ...card, verification_state: 'gospel' }).success,
-    ).toBe(false);
-    // Tombstoned submitter (account deleted) stays parseable (WS-G.1.3).
-    expect(evidenceCardPublicSchema.safeParse({ ...card, submitted_by: null }).success).toBe(true);
-  });
 });
 
 describe('source schemas (WS-F.2.1a / WS-F.2.3a)', () => {
@@ -120,7 +71,6 @@ describe('source schemas (WS-F.2.1a / WS-F.2.3a)', () => {
         recorded_at: now(),
       },
     ],
-    evidence_type_frequency: { supports: 10, contradicts: 2 },
     community_notes: [],
     display_restrictions: { noindex: false, noarchive: false, excerpt_max_chars: null },
     created_at: now(),

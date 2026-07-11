@@ -42,7 +42,7 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
           origin: 'official',
           url: 'https://example.org/water-testing-dataset',
           reading_minutes: 6,
-          rating_label: 'well-sourced',
+          rating_label: 'deepening',
           more_on_this_story: [],
           context_card: null,
           distribution_reason: 'Readers opened the source and added context.',

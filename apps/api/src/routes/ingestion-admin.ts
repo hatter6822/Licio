@@ -316,8 +316,6 @@ export function createIngestionAdminRoutes() {
                   }
                 }
               }
-            } else if (record.targetType === 'evidence') {
-              await ingestion.evidence.updateVerification(record.targetId, 'retracted');
             } else {
               await ingestion.sources.update(record.targetId, {
                 displayRestrictions: { noindex: true, noarchive: true, excerpt_max_chars: 0 },

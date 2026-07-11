@@ -120,7 +120,7 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
   'public.event_dead_letters',
   'public.consumer_checkpoints',
   // WS-F content/ingestion/search tables (WS-F.2.5b): everything stories,
-  // claims, sources, evidence, search, and embeddings touch feeds ranking, so
+  // claims, sources, search, and embeddings touch feeds ranking, so
   // each is a BFS target of the pay-to-rank isolation proof — no FK/view join
   // path may connect them to the wallet context.
   'public.stories',
@@ -132,7 +132,6 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
   'public.sources',
   'public.source_syndications',
   'public.claims',
-  'public.evidence_cards',
   'public.threads',
   'public.takedown_requests',
   'public.ingestion_review_items',

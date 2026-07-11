@@ -182,32 +182,3 @@ export async function findSimilarInterpretations(
     similarity: Number(row.similarity),
   }));
 }
-
-/** The evidence cards semantically nearest to a claim (no threshold). */
-export async function findNearestEvidenceCards(
-  db: Db,
-  claimId: string,
-  options: { limit: number; modelVersion: string; efSearch?: number | undefined },
-): Promise<SimilarityHit[]> {
-  const limit = clampLimit(options.limit);
-  return withEfSearch(db, options.efSearch, async (tx) => {
-    const rows = (await tx.execute(sql`
-      with query_vec as (
-        select embedding from embeddings
-        where target_type = 'claim' and target_id = ${claimId}
-          and model_version = ${options.modelVersion}
-      )
-      select e.target_id as target_id,
-             1 - (e.embedding <=> q.embedding) as similarity
-      from embeddings e
-      join evidence_cards ec on ec.evidence_id = e.target_id
-      cross join query_vec q
-      where e.target_type = 'evidence_card'
-        and e.model_version = ${options.modelVersion}
-        and ec.verification_state <> 'retracted'
-      order by e.embedding <=> q.embedding
-      limit ${limit}
-    `)) as unknown as Array<{ target_id: string; similarity: number }>;
-    return rows.map((row) => ({ targetId: row.target_id, similarity: Number(row.similarity) }));
-  });
-}

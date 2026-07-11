@@ -408,8 +408,8 @@ REDIS_URL=redis://localhost:6379 pnpm test
   by the real story-submission pipeline (`apps/api/src/ingestion/`,
   `docs/ingestion/README.md`), and ledger story titles resolve from the real
   story store (write-through cache; demo fixtures as fallback).
-- **WS-G (CLOSED)** — forum contributions emit `contribution.created` and
-  `evidence.added` with real correlation ids (`docs/forum/README.md`), so
+- **WS-G (CLOSED)** — forum contributions emit `contribution.created`
+  with real correlation ids (`docs/forum/README.md`), so
   the accusation downweight and the lifecycle activity triggers run on real
   conversation data; user-filed `moderation_concern` contributions carry
   ratified WS-A reason codes into the review queue.
@@ -459,7 +459,7 @@ REDIS_URL=redis://localhost:6379 pnpm test
   trailing windows; time-of-day/topic/community covariates consume the
   WS-F/WS-G metadata (now present) and land with WS-H's MFCI.
 - **§5.3 "Save for later" signal (CLOSED).** The `content.saved` core topic
-  (16 core topics) is a discrete, deduped, privacy-leveled save signal that
+  (15 core topics) is a discrete, deduped, privacy-leveled save signal that
   rides the SAME attention-ingestion pipeline (`POST /v1/events/attention`):
   ownership, replay nonce, the privacy gate (a personalization-off user's save
   is DISCARDED), and minimum-privacy pseudonymization. The client emits it

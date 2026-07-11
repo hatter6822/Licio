@@ -434,7 +434,6 @@ export function mergeNotificationPreferences(
 ): RoomNotificationPreferences {
   return {
     threads: patch.threads ?? current.threads,
-    new_evidence: patch.new_evidence ?? current.new_evidence,
     bridge_requests: patch.bridge_requests ?? current.bridge_requests,
     steward_announcements: patch.steward_announcements ?? current.steward_announcements,
   };

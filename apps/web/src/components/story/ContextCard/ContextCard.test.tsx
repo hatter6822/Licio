@@ -16,8 +16,8 @@ function makeData(overrides: Partial<ContextCardData> = {}): ContextCardData {
       { perspective: 'Local residents', summary: 'Warnings still arrived unevenly.' },
     ],
     evidenceStatus: 'Two primary gauge datasets; one awaiting confirmation.',
-    conversationState: { ratingLabel: 'well-sourced', detail: 'Most claims are sourced.' },
-    distributionReason: 'Surfaced because independent sources opened and added evidence.',
+    conversationState: { ratingLabel: 'deepening', detail: 'Most claims are sourced.' },
+    distributionReason: 'Surfaced because independent sources opened and added sourced comments.',
     onSeeLess: vi.fn(),
     onSeeMore: vi.fn(),
     onMuteTopic: vi.fn(),
@@ -68,7 +68,7 @@ describe('ContextCard layout (WS-B.2.4a)', () => {
   it('surfaces the conversation state as a RatingLabel (state, not a score)', () => {
     render(<ContextCard open onClose={() => undefined} data={makeData()} />);
     const region = screen.getByRole('region', { name: 'Conversation state' });
-    expect(within(region).getByText('Well-Sourced')).toBeInTheDocument();
+    expect(within(region).getByText('Deepening')).toBeInTheDocument();
   });
 
   it('shows the human-readable distribution reason verbatim', () => {

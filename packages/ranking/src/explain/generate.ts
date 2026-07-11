@@ -18,7 +18,6 @@ import {
   TPL_BRIDGE_ACTIVE,
   TPL_CASCADE_SLOWED,
   TPL_CHRONOLOGICAL,
-  TPL_EVIDENCE_RISING,
   TPL_FRESH_DIVERSITY,
   TPL_INDEPENDENT_SOURCE,
   TPL_INTERPRETATIONS_DIFFER,
@@ -28,14 +27,15 @@ import {
   TPL_RECENT_SUBMISSION,
   TPL_REPEATED_CLAIM,
   TPL_SOURCE_OPENS,
+  TPL_SOURCES_RISING,
   TPL_UNDER_REVIEW,
 } from './templates.js';
 
 export interface ExplanationSignals {
   /** Distinct rooms with recent activity on the item (for room counts). */
   roomCount: number;
-  /** Evidence cards attached to the item's claims. */
-  evidenceCount: number;
+  /** SOURCED contributions on the item's thread (comments carrying ≥1 citation). */
+  sourcedCount: number;
   /** True when this item was admitted under a diversity quota. */
   fromDiversityQuota: boolean;
   /** True when the requesting user has previously seen this story. */
@@ -94,12 +94,12 @@ export function explainItem(
   const components = scored.score_components;
   if (
     (components.constructive_participation ?? 0) > 0.3 &&
-    signals.evidenceCount > 0 &&
+    signals.sourcedCount > 0 &&
     signals.roomCount > 0
   ) {
     candidates.push({
-      template: TPL_EVIDENCE_RISING as never,
-      params: { roomCount: signals.roomCount, evidenceCount: signals.evidenceCount },
+      template: TPL_SOURCES_RISING as never,
+      params: { roomCount: signals.roomCount, sourcedCount: signals.sourcedCount },
     });
   }
   if ((components.exposure_independence ?? 0) > 0.6 && signals.previouslySeen) {

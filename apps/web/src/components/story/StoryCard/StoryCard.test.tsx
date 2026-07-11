@@ -14,16 +14,16 @@ const sample: StoryCardData = {
     url: 'https://example.org/story',
     readingMinutes: 4,
   },
-  ratingLabel: 'well-sourced',
-  distributionReason: 'Rising from independent source opens and evidence additions',
+  ratingLabel: 'deepening',
+  distributionReason: 'Rising from independent source opens and sourced comments',
   contextChips: [
-    { id: 'c1', label: '3 evidence cards' },
+    { id: 'c1', label: '3 sourced comments' },
     { id: 'c2', label: '2 primary sources' },
     { id: 'c3', label: 'low coordination risk' },
   ],
   branchPreview: [
     { id: 'b1', title: 'What changed upstream?' },
-    { id: 'b2', title: 'Evidence: gauge readings' },
+    { id: 'b2', title: 'Sources: gauge readings' },
   ],
 };
 
@@ -39,9 +39,9 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
     expect(within(heading).queryByRole('link')).toBeNull();
 
     expect(screen.getByText('Delta Observer')).toBeInTheDocument();
-    expect(screen.getByText('Well-Sourced')).toBeInTheDocument();
+    expect(screen.getByText('Deepening')).toBeInTheDocument();
     expect(screen.getByText(sample.distributionReason)).toBeInTheDocument();
-    expect(screen.getByText('3 evidence cards')).toBeInTheDocument();
+    expect(screen.getByText('3 sourced comments')).toBeInTheDocument();
     expect(screen.getByText('4 min read')).toBeInTheDocument();
     expect(screen.getByText('What changed upstream?')).toBeInTheDocument();
   });
@@ -83,9 +83,9 @@ describe('StoryCard screen-reader order (WS-B.2.1c / WCAG 1.3.2)', () => {
     const ordered = [
       screen.getByText(sample.story.title),
       screen.getByText('Delta Observer'),
-      screen.getByText('Well-Sourced'),
+      screen.getByText('Deepening'),
       screen.getByText(sample.distributionReason),
-      screen.getByText('3 evidence cards'),
+      screen.getByText('3 sourced comments'),
       screen.getByText('4 min read'),
       screen.getByText('What changed upstream?'),
     ];
@@ -98,7 +98,7 @@ describe('StoryCard screen-reader order (WS-B.2.1c / WCAG 1.3.2)', () => {
 
   it('interactive actions come after the content in the DOM', () => {
     render(<StoryCard {...sample} onSave={() => undefined} />);
-    const preview = screen.getByText('Evidence: gauge readings');
+    const preview = screen.getByText('Sources: gauge readings');
     const saveButton = screen.getByRole('button', { name: /Save/ });
     expect(
       preview.compareDocumentPosition(saveButton) & Node.DOCUMENT_POSITION_FOLLOWING,

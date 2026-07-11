@@ -495,7 +495,6 @@ export type RoomLensSelection = z.infer<typeof roomLensSelectionSchema>;
 export const roomNotificationPreferencesSchema = z
   .object({
     threads: z.enum(['all', 'mentions', 'none']),
-    new_evidence: z.boolean(),
     bridge_requests: z.boolean(),
     steward_announcements: z.boolean(),
   })
@@ -504,7 +503,6 @@ export type RoomNotificationPreferences = z.infer<typeof roomNotificationPrefere
 
 export const DEFAULT_ROOM_NOTIFICATION_PREFERENCES: RoomNotificationPreferences = {
   threads: 'mentions',
-  new_evidence: false,
   bridge_requests: false,
   steward_announcements: true,
 };

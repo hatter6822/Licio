@@ -14,7 +14,7 @@ import {
   storeForumConfigValue,
   validateForumConfigValue,
 } from '../forum/config.js';
-import { FORUM_TO_EVENT_TYPE, mapCardTypeToEventType } from '../forum/contributions.js';
+import { FORUM_TO_EVENT_TYPE } from '../forum/contributions.js';
 import { InMemoryDebateBroadcaster, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import {
   matchesMagic,
@@ -721,11 +721,10 @@ describe('WS-G forum runtime config (fail-closed)', () => {
 });
 
 describe('WS-G → WS-E scoring-taxonomy mappings (pinned)', () => {
-  it('maps all 12 forum types onto the WS-E enum with zero-weight safety types', () => {
+  it('maps all 11 forum types onto the WS-E enum with zero-weight safety types', () => {
     expect(FORUM_TO_EVENT_TYPE).toEqual({
       question: 'question',
       answer: 'explanation',
-      evidence: 'evidence',
       correction: 'correction',
       synthesis: 'synthesis',
       counterexample: 'counterexample',
@@ -736,16 +735,6 @@ describe('WS-G → WS-E scoring-taxonomy mappings (pinned)', () => {
       meta_discussion: 'low_info_reply', // weight 0: volume, never negative
       comment: 'explanation',
     });
-  });
-
-  it('maps the 7 card material types onto the evidence.added wire enum', () => {
-    expect(mapCardTypeToEventType('primary_source')).toBe('primary_source');
-    expect(mapCardTypeToEventType('dataset')).toBe('dataset');
-    expect(mapCardTypeToEventType('transcript')).toBe('transcript');
-    expect(mapCardTypeToEventType('legal_text')).toBe('legal_text');
-    expect(mapCardTypeToEventType('report')).toBe('report');
-    expect(mapCardTypeToEventType('expert_reference')).toBe('other');
-    expect(mapCardTypeToEventType('fact_check')).toBe('article');
   });
 });
 
@@ -789,7 +778,6 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       lensId: null,
       notificationPreferences: {
         threads: 'all',
-        new_evidence: true,
         bridge_requests: false,
         steward_announcements: true,
       },

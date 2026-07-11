@@ -16,6 +16,7 @@ import {
   assembleMeriCandidates,
   assemblePhiTopicData,
   assembleTopicCascade,
+  citationDomainToken,
 } from '../invariants/data.js';
 import {
   HealthRecorder,
@@ -246,7 +247,7 @@ describe('MERI assembly through real MinHash signatures', () => {
     await sign(a.storyId, text);
     await sign(b.storyId, nearCopy);
     await sign(c.storyId, distinct);
-    const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7, 0.85);
+    const candidates = await assembleMeriCandidates(fixture.ingestion, null, null, 100, 0.7, 0.85);
     const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
     expect(byId.get(a.storyId)?.nearDuplicateGroupId).not.toBeNull();
     expect(byId.get(a.storyId)?.nearDuplicateGroupId).toBe(
@@ -255,8 +256,70 @@ describe('MERI assembly through real MinHash signatures', () => {
     expect(byId.get(c.storyId)?.nearDuplicateGroupId).toBeNull();
     // Topic filtering branch: no candidates for an unknown topic.
     expect(
-      await assembleMeriCandidates(fixture.ingestion, 'no-such-topic', 100, 0.7, 0.85),
+      await assembleMeriCandidates(fixture.ingestion, null, 'no-such-topic', 100, 0.7, 0.85),
     ).toEqual([]);
+  });
+
+  it('derives evidence lineage from the CITATION DOMAINS of each story thread', async () => {
+    const fixture = freshInvariantServices();
+    const a = await seedStory(fixture, { canonicalUrl: 'https://a.example/cite-1' });
+    const b = await seedStory(fixture, { canonicalUrl: 'https://b.example/cite-2' });
+    const c = await seedStory(fixture, { canonicalUrl: 'https://c.example/cite-3' });
+    const cite = async (threadId: string, url: string): Promise<void> => {
+      const inserted = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId,
+        userId: randomUUID(),
+        type: 'comment',
+        body: 'A sourced comment carrying the citation.',
+        citations: [{ url }],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: randomUUID(),
+        path: [],
+        moderationState: 'published',
+      });
+      expect(inserted.ok).toBe(true);
+    };
+    // a + b cite the SAME registrable host (case-insensitive, www.-stripped);
+    // c cites a DOI, which maps to the DOI-prefix token instead.
+    await cite(a.threadId, 'https://www.Journal.example/study-1');
+    await cite(b.threadId, 'https://journal.example/study-2');
+    await cite(c.threadId, 'doi:10.5555/replication.7');
+    const candidates = await assembleMeriCandidates(
+      fixture.ingestion,
+      fixture.forum,
+      null,
+      100,
+      0.7,
+      0.85,
+    );
+    const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+    expect(byId.get(a.storyId)?.evidenceGroupId).toBe('cit:journal.example');
+    expect(byId.get(b.storyId)?.evidenceGroupId).toBe('cit:journal.example');
+    expect(byId.get(c.storyId)?.evidenceGroupId).toBe('cit:doi:10.5555');
+    expect(byId.get(a.storyId)?.inputsAvailable.evidence).toBe(true);
+    expect(byId.get(a.storyId)?.independence?.evidenceGroupIds).toEqual(['cit:journal.example']);
+    // Without a forum bundle there is no citation source ⇒ no evidence lineage.
+    const withoutForum = await assembleMeriCandidates(
+      fixture.ingestion,
+      null,
+      null,
+      100,
+      0.7,
+      0.85,
+    );
+    expect(withoutForum.every((candidate) => candidate.evidenceGroupId === null)).toBe(true);
+    expect(withoutForum.every((candidate) => candidate.inputsAvailable.evidence === false)).toBe(
+      true,
+    );
+  });
+
+  it('citationDomainToken: host lowercasing/www-stripping, DOI prefixes, junk → null', () => {
+    expect(citationDomainToken('https://WWW.Example.COM/path?x=1')).toBe('cit:example.com');
+    expect(citationDomainToken('doi:10.1234/abc.def')).toBe('cit:doi:10.1234');
+    expect(citationDomainToken('not a url')).toBeNull();
   });
 
   it('assembleTopicCascade returns no cascade for the UNCLASSIFIED sentinel', async () => {

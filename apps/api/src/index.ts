@@ -139,7 +139,6 @@ import { createContractVerifier } from './identity/siwe.js';
 import {
   DrizzleClaimStore,
   DrizzleEmbeddingStore,
-  DrizzleEvidenceCardStore,
   DrizzleFreshnessStore,
   DrizzleLifecycleAuditStore,
   DrizzleReviewQueueStore,
@@ -460,7 +459,6 @@ if (db) {
   ingestionServices.sources = new DrizzleSourceStore(db);
   ingestionServices.syndications = new DrizzleSyndicationStore(db);
   ingestionServices.claims = new DrizzleClaimStore(db);
-  ingestionServices.evidence = new DrizzleEvidenceCardStore(db);
   ingestionServices.signatures = new DrizzleSignatureStore(db);
   ingestionServices.lifecycleAudits = new DrizzleLifecycleAuditStore(db);
   ingestionServices.freshness = new DrizzleFreshnessStore(db);
@@ -612,14 +610,13 @@ setRankingServices(rankingServices);
 identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
 identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
 // The CONTENT half of the data-rights hooks (WS-F stories + WS-G forum/
-// evidence/rooms/uploads, WS-Q.3.5 tier tagging) is composed in the testable
+// rooms/uploads, WS-Q.3.5 tier tagging) is composed in the testable
 // forum/data-rights module. Export is COMPLETE (§19.3 / GDPR Art. 15) and
 // covers BOTH visibility tiers; anonymize tombstones the author across tiers
 // and removes (private-room) memberships + steward rows.
 identityServices.exportContributions = (userId) =>
   exportUserContent(ingestionServices, forumServices, userId);
-identityServices.anonymizeContributions = (userId) =>
-  anonymizeUserContent(ingestionServices, forumServices, userId);
+identityServices.anonymizeContributions = (userId) => anonymizeUserContent(forumServices, userId);
 identityServices.onPrivacyChange = (change) => {
   void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>
     logger.error({ err }, 'retention preference propagation failed'),
@@ -1475,7 +1472,6 @@ if (env.NODE_ENV !== 'production') {
           ...ingestionServices,
           stories: new DrizzleStoryStore(tx),
           claims: new DrizzleClaimStore(tx),
-          evidence: new DrizzleEvidenceCardStore(tx),
           signatures: new DrizzleSignatureStore(tx),
           reviewQueue: new DrizzleReviewQueueStore(tx),
         };

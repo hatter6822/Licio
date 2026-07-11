@@ -264,7 +264,7 @@ describe('WS-I.1.1a retrievers', () => {
     await fixture.events.windowStore.upsert({
       ...windowBase,
       itemId: constructive.storyId,
-      contributionCounts: { evidence: 2, correction: 1 },
+      contributionCounts: { synthesis: 2, correction: 1 },
       eventCount: 10,
     });
     await fixture.events.windowStore.upsert({
@@ -277,37 +277,25 @@ describe('WS-I.1.1a retrievers', () => {
     expect(candidates.map((c) => c.item_id)).toEqual([constructive.storyId]);
   });
 
-  it('independent additions surface previously-seen stories that gained evidence', async () => {
+  it('independent additions surface previously-seen stories that gained sourced comments', async () => {
     const { userId } = await seedUserWithSession(fixture.identity);
     const seen = await seedStory(fixture.ingestion);
     await markSeen(userId, seen.storyId);
-    // Evidence lands AFTER the user saw it.
-    const claim = await fixture.ingestion.claims.insert({
-      claimId: randomUUID(),
-      storyId: seen.storyId,
-      canonicalText: 'The dataset is public.',
-      normalizedTextHash: `h-${randomUUID()}`,
-      claimStatus: 'candidate',
-      firstSeenStoryId: seen.storyId,
-      independenceGroupId: null,
-      createdBy: null,
-      extractionSource: 'system',
-      extractionConfidence: 0.9,
-      modelVersion: null,
-    });
-    await fixture.ingestion.evidence.insert({
-      evidenceId: randomUUID(),
-      claimId: claim.claimId,
-      sourceId: null,
-      submittedBy: null,
-      evidenceType: 'primary_source',
-      relationshipType: 'supports',
-      citationUrlOrRef: 'https://example.org/data',
-      relevanceNote: 'primary dataset',
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      contributionId: null,
-      storyId: seen.storyId,
+    // A published SOURCED comment (comment-centric sourcing) lands AFTER the
+    // user saw the story.
+    await fixture.forum.contributions.insert({
+      contributionId: randomUUID(),
+      threadId: seen.threadId,
+      userId,
+      type: 'comment',
+      body: 'The primary dataset is public.',
+      citations: [{ url: 'https://example.org/data' }],
+      metadata: {},
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: `seed-${seen.storyId}`,
+      path: [],
+      moderationState: 'published',
     });
     await fixture.ingestion.stories.update(seen.storyId, {
       lastMaterialUpdateAt: new Date(Date.now() + 1000).toISOString(),

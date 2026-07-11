@@ -72,7 +72,6 @@ import { roomContentVisibleToUser } from '../forum/rooms.js';
 import type { ThreadShellRecord } from '../ingestion/stores.js';
 import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import { feedMediaOf } from '../lib/story-media.js';
-import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-public.js';
 import { killSwitchDecision } from './killswitch.js';
 import { assembleCandidatePool } from './orchestrator.js';
 import { applySafetyFilter } from './safety-filter.js';
@@ -185,7 +184,7 @@ interface SelectedEntry {
 /**
  * Map selected entries onto §23.3 FeedItems with BATCHED reads: one bulk
  * story read, one bulk thread read, one bulk safety read, one lens listing
- * per distinct room, and parallel evidence counts — never per-item serial
+ * per distinct room, and parallel sourced-comment counts — never per-item serial
  * round trips on the serving path.
  */
 async function buildFeedItems(
@@ -194,25 +193,24 @@ async function buildFeedItems(
 ): Promise<FeedItem[]> {
   if (entries.length === 0) return [];
   const ids = entries.map((entry) => entry.itemId);
-  const [stories, threads, safeties, meriGains] = await Promise.all([
+  const [stories, threads, safeties] = await Promise.all([
     services.ingestion.stories.getByIds(ids),
     services.ingestion.stories.getThreadsByStoryIds(ids),
     services.events.safetyStore.getMany(ids),
-    latestMeriGains(services.events),
   ]);
-  const evidenceSummaries = await Promise.all(ids.map((id) => evidenceSummaryOf(services, id)));
+  const sourcedCounts = await Promise.all(ids.map((id) => sourcedCountOf(services, id)));
   const items: FeedItem[] = [];
   for (const [index, entry] of entries.entries()) {
     const story = stories.get(entry.itemId);
     if (story === undefined) continue;
     const thread = threads.get(entry.itemId);
-    const evidence = evidenceSummaries[index] ?? { total: 0, independentVerified: 0 };
+    const sourced = sourcedCounts[index] ?? 0;
     const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
     const chips: Array<{ id: string; label: string }> = [];
-    if (evidence.total > 0) {
+    if (sourced > 0) {
       chips.push({
-        id: 'evidence',
-        label: `${evidence.total} ${evidence.total === 1 ? 'evidence card' : 'evidence cards'}`,
+        id: 'sources',
+        label: `${sourced} sourced ${sourced === 1 ? 'comment' : 'comments'}`,
       });
     }
     if (entry.features?.mfci_risk_state === 'normal') {
@@ -229,19 +227,15 @@ async function buildFeedItems(
       thread,
       safeties.get(entry.itemId)?.safetyState === 'frozen',
     );
-    const exposureLabel = exposureLabelForGain(meriGains[entry.itemId] ?? null);
     // SPEC §5.6 — the SINGLE rating-label derivation (shared with the
     // story-detail read). Live invariant signals — safety review, SCOI
-    // interpretation divergence, and MERI source independence — outrank the
-    // slow lifecycle state (the §10.5 principle generalised to all seven
-    // labels), so e.g. a thread under coordination review reads "Under Review"
-    // and a fresh thread with independent evidence reads "Well-Sourced".
+    // interpretation divergence — outrank the slow lifecycle state (the §10.5
+    // principle generalised to every label), so e.g. a thread under
+    // coordination review reads "Under Review".
     const ratingLabel = deriveRatingLabel({
       lifecycleState: story.lifecycleState,
       safetyState,
       interpretationsDiverge: entry.contextCard !== null,
-      evidenceCount: evidence.independentVerified,
-      meriExposure: exposureLabel,
       // The served ActiveAttention component keeps the default label truthful:
       // "Getting Attention" only when there is a real signal, else "New".
       ...(entry.features?.active_attention !== undefined
@@ -817,8 +811,8 @@ export async function serveFeed(
     request.userId === null
       ? new Map<string, string>()
       : await collectSeen(services, request.userId);
-  const evidenceSummaries = await Promise.all(
-    ranked.selected.map((scored) => evidenceSummaryOf(services, scored.item_id)),
+  const sourcedCounts = await Promise.all(
+    ranked.selected.map((scored) => sourcedCountOf(services, scored.item_id)),
   );
   const contextCards = await contextCardsFor(services, ranked.selected, featuresById);
   // "More on this story" (WS-I.2.4a): the selected cluster representative
@@ -837,10 +831,9 @@ export async function serveFeed(
   const entries: SelectedEntry[] = [];
   for (const [index, scored] of ranked.selected.entries()) {
     const features = featuresById.get(scored.item_id);
-    // The "{n} independent evidence cards" template — fed the distinct verified
-    // independence count so the wording is literally true (never the raw total).
-    const evidenceCount = (evidenceSummaries[index] ?? { independentVerified: 0 })
-      .independentVerified;
+    // The "{n} sourced comments" template — fed the thread's published
+    // sourced-contribution count so the wording is literally true.
+    const sourcedCount = sourcedCounts[index] ?? 0;
     const explanation = explainItem(
       scored,
       {
@@ -851,7 +844,7 @@ export async function serveFeed(
       },
       {
         roomCount: 1,
-        evidenceCount,
+        sourcedCount,
         fromDiversityQuota:
           relevanceByItem !== null &&
           user.topicPreferences.length > 0 &&
@@ -948,37 +941,13 @@ async function collectSeen(
   return seen;
 }
 
-/** Story-level evidence tallies used by both the §5.6 label and the chip/explanation. */
-interface EvidenceSummary {
-  /** ALL evidence cards on the story — the descriptive "N evidence cards" chip. */
-  total: number;
-  /**
-   * Distinct INDEPENDENT, VERIFIED evidence units — the §5.6 "Well-Sourced" gate
-   * and the "N independent evidence cards" explanation. Verified cards sharing a
-   * non-null independence group (MERI §13.6) count once; an un-grouped (null)
-   * verified card is its own independent unit. Unverified/disputed/retracted
-   * cards never count toward independence, so a thread is "Well-Sourced" only on
-   * genuinely independent, verified evidence — not on repeated or unchecked cards.
-   */
-  independentVerified: number;
-}
-
-async function evidenceSummaryOf(
-  services: RankingServices,
-  storyId: string,
-): Promise<EvidenceSummary> {
-  let total = 0;
-  const verifiedGroups = new Set<string>();
-  let ungroupedVerified = 0;
-  for (const claim of await services.ingestion.claims.listByStory(storyId)) {
-    for (const card of await services.ingestion.evidence.listByClaim(claim.claimId)) {
-      total += 1;
-      if (card.verificationState !== 'verified') continue;
-      if (card.independenceGroupId === null) ungroupedVerified += 1;
-      else verifiedGroups.add(card.independenceGroupId);
-    }
-  }
-  return { total, independentVerified: verifiedGroups.size + ungroupedVerified };
+/** The story thread's SOURCED contribution count (published comments carrying
+ *  ≥1 citation) — the comment-centric input behind the "N sourced comments"
+ *  chip and the sources-rising explanation. */
+async function sourcedCountOf(services: RankingServices, storyId: string): Promise<number> {
+  const thread = await services.ingestion.stories.getThreadByStoryId(storyId);
+  if (thread === null) return 0;
+  return services.forum.contributions.countSourced(thread.threadId, ['published']);
 }
 
 interface FallbackArgs {

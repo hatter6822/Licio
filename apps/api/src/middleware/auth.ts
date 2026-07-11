@@ -158,7 +158,7 @@ export function requireVerifiedAccount(): MiddlewareHandler<AuthEnv> {
  *  sanction): a restricted user may authenticate, read, and self-serve (profile,
  *  data-rights, appeals, block/mute, notices), but not publicly contribute.
  *  Apply to every public-content-creating route (contributions, stories,
- *  summaries, evidence).  Non-restricted accounts pass through. */
+ *  summaries, sourced comments).  Non-restricted accounts pass through. */
 export function requireUnrestricted(): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {
     const auth = c.get('auth');

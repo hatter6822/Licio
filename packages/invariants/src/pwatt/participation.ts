@@ -70,7 +70,6 @@ export const RETURN_BUCKET_WEIGHTS: Readonly<Record<ReturnVisitBucket, number>> 
  */
 export const V0_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, number>> = {
   question: 1,
-  evidence: 1,
   correction: 1,
   synthesis: 1,
   counterexample: 1,

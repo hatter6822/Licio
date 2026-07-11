@@ -91,22 +91,9 @@ describe('WS-J.2.6 contribution auto-block', () => {
 
   it('auto-blocks a malware-domain citation (moderation blocklist)', async () => {
     const { threadId } = await seedThread(fixture);
-    const seededClaim = await fixture.ingestion.claims.insert({
-      claimId: '00000000-0000-4000-8000-0000000000cc',
-      storyId: null,
-      canonicalText: 'A claim.',
-      normalizedTextHash: 'h'.repeat(40),
-      claimStatus: 'candidate',
-      firstSeenStoryId: null,
-      independenceGroupId: null,
-      createdBy: null,
-      extractionSource: 'system',
-      extractionConfidence: null,
-      modelVersion: null,
-    });
     const res = await post(
       contributionCreateSchema.parse({
-        ...contributionBody('evidence', threadId, { claimId: seededClaim.claimId }),
+        ...contributionBody('comment', threadId),
         citations: [{ url: 'https://drainer.test/payload' }],
       }),
     );

@@ -31,12 +31,11 @@ describe('WS-F.2.5b content-schema financial denylist', () => {
     expect(violations).toEqual([]);
   });
 
-  it('enumerates all twenty-three WS-F/WS-G/WS-I content tables (fail-closed coverage)', () => {
+  it('enumerates all twenty-two WS-F/WS-G/WS-I content tables (fail-closed coverage)', () => {
     expect(Object.keys(WS_F_CONTENT_TABLES).sort()).toEqual(
       [
         'claims',
         'embeddings',
-        'evidence_cards',
         'ingestion_review_items',
         'source_syndications',
         'sources',
@@ -78,7 +77,7 @@ describe('WS-F.2.5b content-schema financial denylist', () => {
     };
     // Sanity: the walker actually extracted the nested shapes.
     expect(jsonbFields.stories).toContain('url');
-    expect(jsonbFields.stories).toContain('claim_id');
+    expect(jsonbFields.stories).toContain('question');
     expect(jsonbFields.sources).toContain('noindex');
     expect(checkContentFinancialDenylist(WS_F_CONTENT_TABLES, jsonbFields)).toEqual([]);
   });

@@ -202,10 +202,11 @@ export type SimAction =
       readonly lensId: string | null;
     }
   | {
-      readonly kind: 'evidence';
+      /** A SOURCED root comment (comment-centric sourcing): the evidence
+       *  contributor posts a relevance note with an inline citation. */
+      readonly kind: 'sourced_comment';
       readonly personaUserId: string;
       readonly storyId: string;
-      readonly claimId: string;
       readonly body: string;
       readonly citationUrl: string;
     }
@@ -575,7 +576,7 @@ export function planTick(input: PlanTickInput): SimAction[] {
       }
     }
 
-    // Comments (and evidence, for the evidence contributor).
+    // Comments (sourced ones, for the evidence contributor).
     const commentCount = rate(archetype.rates.comment, scenario.rates.comment);
     for (let i = 0; i < commentCount; i += 1) {
       const story = pickStory(world, persona.spec, prng, {
@@ -592,10 +593,9 @@ export function planTick(input: PlanTickInput): SimAction[] {
       ) {
         const evidence = generateEvidence(domain, storySerial * 10 + i, prng);
         contributions.push({
-          kind: 'evidence',
+          kind: 'sourced_comment',
           personaUserId: persona.spec.userId,
           storyId: story.storyId,
-          claimId: prng.pick(story.claimIds),
           body: evidence.body,
           citationUrl: evidence.citationUrl,
         });

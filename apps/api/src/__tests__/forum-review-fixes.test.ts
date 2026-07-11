@@ -6,7 +6,6 @@
 //     applicant sees the room exists but reads no threads/lenses;
 //   • a safety-relevant EDIT re-runs the classifier and holds for review;
 //   • a held contribution emits NO events and bumps no room activity;
-//   • the standalone /v1/evidence path emits the durable `evidence.added`;
 //   • room thread counts exclude hidden stories (no hidden oracle);
 //   • branch pagination walks arbitrarily large sections exactly once;
 //   • the rooms directory pages beyond any single scan batch, and `joined`
@@ -20,7 +19,6 @@ import {
   type ForumServicesFixture,
   freshForumServices,
   jsonRequest,
-  seedClaim,
   seedThread,
   seedUserWithSession,
 } from './forum-test-helpers.js';
@@ -210,7 +208,6 @@ describe('held contributions are invisible to every downstream system', () => {
       await app().request(jsonRequest('/v1/rooms', 'POST', ROOM, steward.cookie))
     ).json()) as { room_id: string };
     const seeded = await seedThread(flagged, { roomId: roomRes.room_id });
-    const seededClaim = await seedClaim(flagged);
     const session = await seedUserWithSession(flagged.identity);
     const res = await app().request(
       jsonRequest(
@@ -219,11 +216,9 @@ describe('held contributions are invisible to every downstream system', () => {
         {
           thread_id: seeded.threadId,
           client_draft_id: 'draft-held',
-          type: 'evidence',
+          type: 'comment',
           body: 'See this source.',
           citations: [{ url: 'https://evil.example/payload' }],
-          target_claim_id: seededClaim,
-          evidence_type: 'report',
         },
         session.cookie,
       ),
@@ -231,43 +226,13 @@ describe('held contributions are invisible to every downstream system', () => {
     expect(res.status).toBe(201);
     await flagged.settleAll();
     const emitted = await flagged.events.eventStore.listByTopicsBetween(
-      ['contribution.created', 'evidence.added'],
+      ['contribution.created'],
       new Date(0).toISOString(),
       new Date(Date.now() + 60_000).toISOString(),
     );
     expect(emitted).toEqual([]);
     const room = await flagged.forum.rooms.getById(roomRes.room_id);
     expect(room?.latestActivityAt).toBeNull();
-  });
-});
-
-describe('the standalone evidence event', () => {
-  it('standalone /v1/evidence emits evidence.added scoped to the thread', async () => {
-    const seeded = await seedThread(fixture);
-    const seededClaim = await seedClaim(fixture, seeded.storyId);
-    const evidenceRes = await app().request(
-      jsonRequest(
-        '/v1/evidence',
-        'POST',
-        {
-          claim_id: seededClaim,
-          citation_url_or_ref: 'https://example.org/source',
-          relevance_note: 'Primary dataset.',
-          evidence_type: 'dataset',
-          relationship_type: 'supports',
-        },
-        cookie,
-      ),
-    );
-    expect(evidenceRes.status).toBe(201);
-    await fixture.settleAll();
-    const emitted = await fixture.events.eventStore.listByTopicsBetween(
-      ['evidence.added'],
-      new Date(0).toISOString(),
-      new Date(Date.now() + 60_000).toISOString(),
-    );
-    expect(emitted).toHaveLength(1);
-    expect((emitted[0]?.payload as { thread_id: string }).thread_id).toBe(seeded.threadId);
   });
 });
 

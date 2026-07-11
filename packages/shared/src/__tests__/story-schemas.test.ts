@@ -159,23 +159,20 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
     ).toBe(true);
   });
 
-  it('evidence_card requires a claim reference and names the missing field', () => {
-    const noClaim = {
-      submission_type: 'evidence_card',
-      citation_url_or_ref: 'https://example.com/study',
-      relevance_note: 'Replicates the headline finding',
-      title: 'Replication study',
-      topic_ids: [TOPIC],
-      room_id: ROOM,
-    };
-    const result = storyCreateRequestSchema.safeParse(noClaim);
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues.some((issue) => issue.path.includes('claim_id'))).toBe(true);
-    }
-    expect(storyCreateRequestSchema.safeParse({ ...noClaim, claim_id: randomUUID() }).success).toBe(
-      true,
-    );
+  it('rejects the removed evidence_card submission type', () => {
+    // The EvidenceCard entity was removed with its orphaned creation paths;
+    // the discriminated union must not accept the retired discriminator.
+    expect(
+      storyCreateRequestSchema.safeParse({
+        submission_type: 'evidence_card',
+        citation_url_or_ref: 'https://example.com/study',
+        claim_id: randomUUID(),
+        relevance_note: 'Replicates the headline finding',
+        title: 'Replication study',
+        topic_ids: [TOPIC],
+        room_id: ROOM,
+      }).success,
+    ).toBe(false);
   });
 
   it('local_update requires a location scope', () => {

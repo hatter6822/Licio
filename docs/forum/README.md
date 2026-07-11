@@ -25,12 +25,12 @@ defense-in-depth pipeline; the server stores raw Markdown-lite only.
 
 | Location | Contents |
 |---|---|
-| `packages/shared/src/schemas/contribution.ts` | The 11-type create union (WS-G.1.2c), citation schema, update/public projections, anchors |
+| `packages/shared/src/schemas/contribution.ts` | The contribution create union (comment + correction live writes; legacy read types), citation schema, update/public projections, anchors |
 | `packages/shared/src/schemas/thread.ts` | Conversation/safety state machines + thread wire contracts |
 | `packages/shared/src/schemas/room.ts`, `forum-api.ts` | Room/lens/steward/subscription + endpoint wire contracts |
 | `packages/shared/src/constants/moderation.ts` | The 51 ratified WS-A.1.2 reason codes (pinned by test) |
 | `packages/shared/src/ugc/` | The WS-G.4 pipeline: Markdown-lite parser → serializer → DOMPurify (`licio-ugc`) → `renderUGC`; drainer-link detection |
-| `packages/db/src/schema/` | `contribution.ts`, `room.ts`, `upload.ts`, the WS-G-owned `thread.ts`, the dual-dimension `claim.ts` evidence cards |
+| `packages/db/src/schema/` | `contribution.ts`, `room.ts`, `upload.ts`, the WS-G-owned `thread.ts` |
 | `packages/db/drizzle/0008_ws_g_forum.sql` | The WS-G migration (validated against live Postgres 16) |
 | `apps/api/src/forum/` | Stores (in-memory + interfaces), services container, contribution guard chain, story comment reads, live broadcaster, compatibility thread reads, rooms, transitions, safety seam, GIF/EXIF stripping, config, Drizzle adapters |
 | `apps/api/src/routes/forum.ts`, `routes/rooms.ts` | The §23.2 endpoint surface |
@@ -204,13 +204,12 @@ so a member can never accidentally post as a lens they were only viewing:
 
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → transactional insert (atomic with the evidence card) → durable `contribution.created` (+`evidence.added`) emission — EXCEPT for safety-held rows, which emit nothing and bump no room activity (scoring/lifecycle/freshness must not count invisible content; emission on release is the WS-J approval seam) |
+| `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → insert → durable `contribution.created` emission — EXCEPT for safety-held rows, which emit nothing and bump no room activity (scoring/lifecycle/freshness must not count invisible content; emission on release is the WS-J approval seam) |
 | `GET /v1/stories/:id/comments` | Story-owned comment section: keyset-paginated roots with bounded reply previews, optional `sources`/`corrections` filters, and a `depth` (1 = inline section's single nested layer; 2 = the dedicated comment page's two layers) materialized server-side from REPLY_PREVIEW-bounded fetches. A focused read (`?root=<id>`) returns that comment as `anchor` with its direct replies as the paginated comment list (404 if the anchor is missing/invisible) — the dedicated page's re-rootable drill-down. This is the primary read surface embedded on `/stories/$storyId`; the old global `/threads` directory is retired on the client. |
 | `GET /v1/threads/:id` | Back-compat overview/resolution surface. The web client uses it only to redirect old `/threads/$threadId` deep links to the owning story comment section. |
 | `GET /v1/stories/:id/comments/stream` | Same-origin SSE stream for new visible comments; frames carry only the public contribution projection, are revalidated by the read bar, and are covered by score/raw/financial-field introspection tests. |
 | `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (`thread_id` + subtree root) for legacy/shared contribution links. |
 | `PATCH/DELETE /v1/contributions/:id` | Author-only edit (history snapshot; citation floors survive edits; the safety classifier RE-RUNS on the edited content and a flag holds it for review) and tombstone removal; 404-over-403 |
-| `POST /v1/evidence` | Standalone cards with explicit material + relationship types; emits the same durable `evidence.added` as the co-create path (resolved through the claim's story thread) so embeddings/lifecycle see every card |
 | `GET/PATCH /v1/feed/preferences` | The §23.2 canonical veneer over the WS-D settings stores (single source of truth; clamped/audited); the five §13 modes |
 | `POST /v1/uploads`, `GET /v1/uploads/:id` | See uploads below |
 | `GET /v1/security/link-blocklist` | Drainer blocklist, steward-tunable, content-hash version for cache busting |
@@ -235,9 +234,9 @@ volume, never negative).  The conservative `classifyLowInfoReplyV0`
 (@licio/invariants) re-classifies unmistakable bare acknowledgments
 ("+1"/"lol"/"this", < 16 chars, uncited) on answer/explanation bodies —
 closing the WS-E residual; the WS-K classifier replaces it behind the same
-signature.  Evidence material types map onto the WS-E `evidence.added` wire
-enum as identity for the five shared values, `expert_reference→other`,
-`fact_check→article`.
+signature.  (The `evidence` contribution type, its EvidenceCard co-creation,
+and the `evidence.added` topic were removed — sourcing is comment-centric
+citations, counted by the store's `sourced` predicate.)
 
 **Composer** (WS-G.3.4–3.6).  Eleven modes in five groups (Ask / Respond /
 Evidence / Improve / Meta); catalogue ids ARE the wire types and field names
@@ -358,10 +357,10 @@ fresh user gesture.
 ## Privacy and WS-D hooks (closed)
 
 * `anonymizeContributions` (the WS-D.2.4 residual) is REAL: account purge
-  tombstones contribution/evidence/upload authorship and REMOVES room
+  tombstones contribution/upload authorship and REMOVES room
   subscriptions and steward rows (membership is personal data).
 * `exportContributions` now composes stories + every forum contribution
-  (keyset-paginated to exhaustion), evidence cards, room subscriptions, AND
+  (keyset-paginated to exhaustion), room subscriptions, AND
   the user's upload records (content type, size, alt text, scan state, and
   the same-origin retrieval URL — the bytes stay in the upload store, which
   serves them publicly once scan-cleared) — the DSAR export is complete

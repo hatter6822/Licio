@@ -245,7 +245,7 @@ export async function runThresholdHuggingScan(
   }
 }
 
-const CALIBRATION_TOPICS = ['contribution.created', 'evidence.added', 'content.submitted'];
+const CALIBRATION_TOPICS = ['contribution.created', 'content.submitted'];
 
 /** Generous bound on the open-case scan for calibration window exclusion. */
 const OPEN_CASE_SCAN_LIMIT = 5_000;

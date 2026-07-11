@@ -78,7 +78,7 @@ describe('GET /v1/search (WS-F.3.1b)', () => {
     expect(ids).toContain(titleHit);
     expect(ids).toContain(bodyHit);
     expect(ids.indexOf(titleHit)).toBeLessThan(ids.indexOf(bodyHit));
-    // Type filter narrows to stories only (claims/evidence excluded).
+    // Type filter narrows to stories only (claims excluded).
     const stories = await search('q=quantum&type=story');
     expect(stories.items.every((i) => i.result_type === 'story')).toBe(true);
   });
@@ -121,8 +121,7 @@ describe('GET /v1/search (WS-F.3.1b)', () => {
     expect(ids.size).toBe(4);
   });
 
-  it('claims and evidence are searchable alongside stories (WS-F.3.1a)', async () => {
-    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+  it('claims are searchable alongside stories (WS-F.3.1a)', async () => {
     const claim = await fixture.ingestion.claims.insert({
       claimId: randomUUID(),
       storyId: null,
@@ -136,75 +135,45 @@ describe('GET /v1/search (WS-F.3.1b)', () => {
       extractionConfidence: null,
       modelVersion: null,
     });
-    await fixture.ingestion.evidence.insert({
-      evidenceId: randomUUID(),
-      claimId: claim.claimId,
-      sourceId: null,
-      submittedBy: userId,
-      evidenceType: 'report',
-      relationshipType: 'supports',
-      contributionId: null,
-      citationUrlOrRef: 'https://example.com/payroll',
-      relevanceNote: 'Payroll filings list the xylophone factory headcount.',
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      storyId: null,
-    });
-    void cookie;
     const result = await search('q=xylophone');
-    const types = new Set(result.items.map((i) => i.result_type));
-    expect(types.has('claim')).toBe(true);
-    expect(types.has('evidence')).toBe(true);
+    expect(result.items.some((i) => i.result_type === 'claim' && i.id === claim.claimId)).toBe(
+      true,
+    );
   });
 
-  it('excludes evidence backed by a HIDDEN story from search (WS-F.3.1b visibility)', async () => {
-    const { userId } = await seedUserWithSession(fixture.identity);
+  it('excludes a claim backed by a HIDDEN story from search (WS-F.3.1b visibility)', async () => {
     const author = await seedUserWithSession(fixture.identity);
     const hiddenStoryId = await submitBrief(author.cookie, {
       title: 'Routine procurement notice',
       body: 'Nothing notable in the quarterly filing.',
     });
     await fixture.ingestion.stories.update(hiddenStoryId, { hiddenState: 'takedown' });
-    const claim = await fixture.ingestion.claims.insert({
-      claimId: randomUUID(),
-      storyId: null,
-      canonicalText: 'A neutral background claim.',
-      normalizedTextHash: randomUUID().replaceAll('-', ''),
-      claimStatus: 'candidate',
+    const claimCommon = {
+      claimStatus: 'candidate' as const,
       firstSeenStoryId: null,
       independenceGroupId: null,
       createdBy: null,
-      extractionSource: 'steward',
+      extractionSource: 'steward' as const,
       extractionConfidence: null,
       modelVersion: null,
-    });
-    const evidenceCommon = {
-      claimId: claim.claimId,
-      sourceId: null,
-      submittedBy: userId,
-      evidenceType: 'report' as const,
-      relationshipType: 'supports' as const,
-      contributionId: null,
-      verificationState: 'unverified' as const,
-      independenceGroupId: null,
     };
-    const hiddenEvidence = await fixture.ingestion.evidence.insert({
-      ...evidenceCommon,
-      evidenceId: randomUUID(),
-      citationUrlOrRef: 'https://example.com/quokkaphone-ledger',
-      relevanceNote: 'Quokkaphone ledger backs the figure.',
+    const hiddenClaim = await fixture.ingestion.claims.insert({
+      ...claimCommon,
+      claimId: randomUUID(),
+      canonicalText: 'The quokkaphone ledger backs the figure.',
+      normalizedTextHash: randomUUID().replaceAll('-', ''),
       storyId: hiddenStoryId, // backed by the HIDDEN story ⇒ filtered out
     });
-    const visibleEvidence = await fixture.ingestion.evidence.insert({
-      ...evidenceCommon,
-      evidenceId: randomUUID(),
-      citationUrlOrRef: 'https://example.com/quokkaphone-public',
-      relevanceNote: 'Quokkaphone public corroboration.',
+    const visibleClaim = await fixture.ingestion.claims.insert({
+      ...claimCommon,
+      claimId: randomUUID(),
+      canonicalText: 'The quokkaphone public corroboration stands.',
+      normalizedTextHash: randomUUID().replaceAll('-', ''),
       storyId: null, // story-less ⇒ always visible
     });
     const ids = (await search('q=quokkaphone')).items.map((i) => i.id);
-    expect(ids).toContain(visibleEvidence.evidenceId);
-    expect(ids).not.toContain(hiddenEvidence.evidenceId);
+    expect(ids).toContain(visibleClaim.claimId);
+    expect(ids).not.toContain(hiddenClaim.claimId);
   });
 });
 
@@ -505,38 +474,19 @@ describe('steward source editing + syndication + config (WS-F.2.3a/2.4)', () => 
   });
 });
 
-describe('public reads (claims/evidence/source)', () => {
-  it('navigates claim→evidence and serves the source profile', async () => {
-    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+describe('public reads (claims/source)', () => {
+  it('serves the story’s claims and the source profile', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
     const storyId = await submitBrief(cookie, {
       body: 'The reservoir level fell by 12 percent in May according to the published utility report.',
     });
     const claims = await fixture.ingestion.claims.listByStory(storyId);
     expect(claims.length).toBeGreaterThanOrEqual(1);
     const claimId = claims[0]?.claimId as string;
-    await fixture.ingestion.evidence.insert({
-      evidenceId: randomUUID(),
-      claimId,
-      sourceId: null,
-      submittedBy: userId,
-      evidenceType: 'report',
-      relationshipType: 'supports',
-      contributionId: null,
-      citationUrlOrRef: 'https://example.com/report',
-      relevanceNote: 'The official bulletin.',
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      storyId,
-    });
     const viaStory = await app().request(`http://localhost/v1/stories/${storyId}/claims`);
     expect(viaStory.status).toBe(200);
     const { items } = (await viaStory.json()) as { items: Array<{ claim_id: string }> };
     expect(items.map((c) => c.claim_id)).toContain(claimId);
-    const viaClaim = await app().request(`http://localhost/v1/claims/${claimId}/evidence`);
-    expect(viaClaim.status).toBe(200);
-    const evidence = (await viaClaim.json()) as { claim: { claim_id: string }; items: unknown[] };
-    expect(evidence.claim.claim_id).toBe(claimId);
-    expect(evidence.items).toHaveLength(1);
 
     const source = await fixture.ingestion.sources.upsertByDomain('profile.example', {
       name: 'Profile Test',

@@ -7,7 +7,7 @@
 //   • PER-USER saturation — each actor's Nth contribution of a type passes
 //     through a diminishing-returns curve before weighting, so volume from one
 //     user saturates for that user only (WS-E.2.3a "per-user/item/window");
-//   • the CONTRIBUTION-TYPE HIERARCHY (WS-E.2.3b) — evidence > correction >
+//   • the CONTRIBUTION-TYPE HIERARCHY (WS-E.2.3b) — correction >
 //     synthesis > question > counterexample > explanation > low_info_reply=0 —
 //     applied at the accusing type's own weight for the source-free downweight;
 //   • PER-DIMENSION saturation with the 50% dominance cap (WS-E.2.3a) — item

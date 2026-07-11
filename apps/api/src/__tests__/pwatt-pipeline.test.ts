@@ -148,7 +148,7 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
     });
     await fixture.events.eventStore.insertMany([
       contributionRow(storyId, a.userId, 'question'),
-      contributionRow(storyId, a.userId, 'evidence', { hasCitation: true }),
+      contributionRow(storyId, a.userId, 'correction', { hasCitation: true }),
       contributionRow(storyId, b.userId, 'low_info_reply'),
     ]);
     await computeAggregationWindow(fixture.events, T0, '1h');
@@ -157,7 +157,7 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
     expect(row?.sourceOpens).toBe(1);
     expect(row?.contextOpens).toBe(1);
     expect(row?.returnVisits).toBe(1);
-    expect(row?.contributionCounts).toEqual({ question: 1, evidence: 1, low_info_reply: 1 });
+    expect(row?.contributionCounts).toEqual({ question: 1, correction: 1, low_info_reply: 1 });
   });
 
   it('folds the §5.3 "Save for later" signal, deduped per (actor, item)', async () => {
@@ -522,7 +522,7 @@ describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
           ],
         });
         await fixture.events.eventStore.insertMany([
-          contributionRow(storyId, userId, 'evidence', { hasCitation: true }),
+          contributionRow(storyId, userId, 'correction', { hasCitation: true }),
         ]);
       }
       return storyId;
@@ -803,34 +803,34 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
     // Two items with identical volume; only the contribution TYPE differs.
     // v0 weighs both constructive types uniformly, so the difference in the
     // stored v1 totals is attributable to the hierarchy alone.
-    const evidenceItem = randomUUID();
+    const correctionItem = randomUUID();
     const questionItem = randomUUID();
     const { userId } = await seedUserWithSession(fixture.identity);
     await fixture.events.eventStore.insertMany([
       // BOTH sourced, so the WS-T citation bonus is identical and the only
       // difference is the contribution TYPE (isolating the hierarchy).
-      contributionRow(evidenceItem, userId, 'evidence', { hasCitation: true }),
+      contributionRow(correctionItem, userId, 'correction', { hasCitation: true }),
       contributionRow(questionItem, userId, 'question', { hasCitation: true }),
     ]);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
-    const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt_v1', evidenceItem);
+    const correctionV1 = await fixture.events.invariantStore.latest('PWAtt_v1', correctionItem);
     const questionV1 = await fixture.events.invariantStore.latest('PWAtt_v1', questionItem);
     // The served `participation` component (what ranking consumes) reflects the
-    // hierarchy — evidence outranks a bare question. (No composite `total` is
-    // stored: the §5.4 composition is @licio/ranking's, PR7.)
-    expect(evidenceV1?.scoreVector['participation']).toBeGreaterThan(
+    // hierarchy — a correction outranks a bare question. (No composite `total`
+    // is stored: the §5.4 composition is @licio/ranking's, PR7.)
+    expect(correctionV1?.scoreVector['participation']).toBeGreaterThan(
       asNumber(questionV1?.scoreVector['participation'], Number.POSITIVE_INFINITY),
     );
     // v0 (uniform weights) sees them identically — the control assertion.
-    const evidenceV0 = await fixture.events.invariantStore.latest('PWAtt_v0', evidenceItem);
+    const correctionV0 = await fixture.events.invariantStore.latest('PWAtt_v0', correctionItem);
     const questionV0 = await fixture.events.invariantStore.latest('PWAtt_v0', questionItem);
-    expect(evidenceV0?.scoreVector['score']).toBe(questionV0?.scoreVector['score']);
+    expect(correctionV0?.scoreVector['score']).toBe(questionV0?.scoreVector['score']);
   });
 
   it('v1 runtime config from the store changes the stored v1 output', async () => {
     const itemId = randomUUID();
     const { userId } = await seedUserWithSession(fixture.identity);
-    await fixture.events.eventStore.insertMany([contributionRow(itemId, userId, 'evidence')]);
+    await fixture.events.eventStore.insertMany([contributionRow(itemId, userId, 'correction')]);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const before = await fixture.events.invariantStore.latest('PWAtt_v1', itemId);
 
@@ -839,7 +839,6 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
     await fixture.events.configStore.set('v1', {
       contributionWeights: {
         question: 0.7,
-        evidence: 1,
         correction: 0.9,
         synthesis: 0.8,
         counterexample: 0.6,

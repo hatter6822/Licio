@@ -39,7 +39,7 @@ async function seedEmbedding(storyId: string, axis: number): Promise<void> {
 }
 
 const groupOf = async (storyId: string): Promise<string | null> => {
-  const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7, 0.85);
+  const candidates = await assembleMeriCandidates(fixture.ingestion, null, null, 100, 0.7, 0.85);
   return candidates.find((c) => c.id === storyId)?.nearDuplicateGroupId ?? null;
 };
 
@@ -55,7 +55,7 @@ describe('MERI semantic independence (WS-O.4.5)', () => {
     // ... but identical embedding direction (cosine 1.0 ≥ the 0.85 threshold).
     await seedEmbedding(a.storyId, 0);
     await seedEmbedding(b.storyId, 0);
-    const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7, 0.85);
+    const candidates = await assembleMeriCandidates(fixture.ingestion, null, null, 100, 0.7, 0.85);
     const ga = candidates.find((c) => c.id === a.storyId)?.nearDuplicateGroupId ?? null;
     const gb = candidates.find((c) => c.id === b.storyId)?.nearDuplicateGroupId ?? null;
     expect(ga).not.toBeNull();

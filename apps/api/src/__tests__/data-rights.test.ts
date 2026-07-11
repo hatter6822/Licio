@@ -123,7 +123,7 @@ describe('WS-Q.3.5 — data-rights export across tiers', () => {
     });
     expect(contribution.ok).toBe(true);
 
-    await anonymizeUserContent(fixture.ingestion, fixture.forum, userId);
+    await anonymizeUserContent(fixture.forum, userId);
 
     // The membership row is gone (personal data, private room included)…
     expect(await fixture.forum.rooms.listSubscriptionsByUser(userId)).toHaveLength(0);

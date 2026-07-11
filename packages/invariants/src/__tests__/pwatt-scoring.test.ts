@@ -238,8 +238,8 @@ describe('participation (WS-E.2.1c)', () => {
 
   it('uses uniform v0 weights for constructive types', () => {
     const question = actorParticipation(actor({ contributions: { question: 1 } }));
-    const evidence = actorParticipation(actor({ contributions: { evidence: 1 } }));
-    expect(question.value).toBe(evidence.value);
+    const correction = actorParticipation(actor({ contributions: { correction: 1 } }));
+    expect(question.value).toBe(correction.value);
     expect(question.value).toBeGreaterThan(0);
   });
 
@@ -271,7 +271,7 @@ describe('participation (WS-E.2.1c)', () => {
 
   it('account-age trust (WS-O.4.5) scales only the ITEM sum, not the per-actor record', () => {
     const aged = Array.from({ length: 4 }, (_, i) =>
-      actor({ actor: `a${i}`, contributions: { evidence: 2 }, returnVisitBucket: 'several' }),
+      actor({ actor: `a${i}`, contributions: { correction: 2 }, returnVisitBucket: 'several' }),
     );
     const fresh = aged.map((a) => ({ ...a, trustWeight: 0.5 }));
     const agedItem = itemParticipation(aged, {});
@@ -291,7 +291,7 @@ describe('participation (WS-E.2.1c)', () => {
       300,
       (rng) => ({
         count: int(rng, 0, rapidThreshold - 1),
-        type: pick(rng, ['question', 'evidence', 'correction', 'synthesis'] as const),
+        type: pick(rng, ['question', 'correction', 'synthesis'] as const),
       }),
       ({ count, type }) => {
         const before = actorParticipation(actor({ contributions: { [type]: count } })).value;

@@ -27,7 +27,6 @@ export const RATING_LABEL_KINDS = [
   'new',
   'getting-attention',
   'deepening',
-  'well-sourced',
   'needs-context',
   'under-review',
   'resolved-context',

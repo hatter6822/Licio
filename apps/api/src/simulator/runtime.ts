@@ -904,8 +904,8 @@ export class DevTrafficSimulator {
         case 'comment':
           await this.#executeComment(action);
           return;
-        case 'evidence':
-          await this.#executeEvidence(action);
+        case 'sourced_comment':
+          await this.#executeSourcedComment(action);
           return;
         case 'attention':
           await this.#executeAttention(action);
@@ -943,7 +943,7 @@ export class DevTrafficSimulator {
       case 'submit_story':
         return 'story';
       case 'comment':
-      case 'evidence':
+      case 'sourced_comment':
         return 'comment';
       case 'attention':
         return 'attention';
@@ -1180,7 +1180,9 @@ export class DevTrafficSimulator {
     }
   }
 
-  async #executeEvidence(action: Extract<SimAction, { kind: 'evidence' }>): Promise<void> {
+  async #executeSourcedComment(
+    action: Extract<SimAction, { kind: 'sourced_comment' }>,
+  ): Promise<void> {
     const { forum, ingestion, events, identity } = this.#graph;
     // Mirror the contribution route's account-state gate the direct call skips.
     if (!(await this.#accountMayPostContent(action.personaUserId))) {
@@ -1199,13 +1201,11 @@ export class DevTrafficSimulator {
       return;
     }
     const candidate = {
-      type: 'evidence' as const,
+      type: 'comment' as const,
       thread_id: thread.threadId,
       client_draft_id: randomUUID(),
       body: action.body,
-      target_claim_id: action.claimId,
       citations: [{ url: action.citationUrl }],
-      evidence_type: 'report' as const,
     };
     const parsed = contributionCreateSchema.safeParse(candidate);
     if (!parsed.success) {
@@ -1232,14 +1232,14 @@ export class DevTrafficSimulator {
       this.#record({
         kind: 'comment',
         actor: this.#handleFor(action.personaUserId),
-        summary: 'added an evidence card',
+        summary: 'added a sourced comment',
         outcome: 'ok',
       });
     } else {
       this.#recordRejection(
         'comment',
         action.personaUserId,
-        'evidence rejected',
+        'sourced comment rejected',
         outcome.rejection.code,
         outcome.rejection.status,
       );

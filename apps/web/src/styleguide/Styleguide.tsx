@@ -207,10 +207,10 @@ function Gallery(): React.ReactElement {
               url: '#main',
               readingMinutes: 4,
             }}
-            ratingLabel="well-sourced"
-            distributionReason="Rising from independent source opens and evidence additions"
+            ratingLabel="deepening"
+            distributionReason="Rising from independent source opens and sourced comments"
             contextChips={[
-              { id: 'c1', label: '3 evidence cards' },
+              { id: 'c1', label: '3 sourced comments' },
               { id: 'c2', label: '2 primary sources' },
             ]}
             onSave={() => undefined}

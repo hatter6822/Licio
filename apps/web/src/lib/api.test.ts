@@ -41,11 +41,11 @@ const VALID_CONTRIBUTION = {
   contribution: {
     contribution_id: '22222222-2222-4222-8222-222222222222',
     thread_id: '33333333-3333-4333-8333-333333333333',
-    type: 'evidence',
+    type: 'comment',
     body: 'A source.',
     citations: [{ url: 'https://example.org/source' }],
     metadata: {},
-    target_claim_id: '55555555-5555-4555-8555-555555555555',
+    target_claim_id: null,
     parent_contribution_id: null,
     author_handle: 'mara',
     author_display_name: 'Mara',
@@ -57,7 +57,6 @@ const VALID_CONTRIBUTION = {
     created_at: '2026-06-09T13:00:00.000Z',
     updated_at: '2026-06-09T13:00:00.000Z',
   },
-  evidence_card: null,
   deduplicated: false,
 };
 
@@ -132,10 +131,9 @@ describe('request interceptor', () => {
     });
     await createContribution({
       thread_id: '33333333-3333-4333-8333-333333333333',
-      type: 'evidence',
+      type: 'comment',
       body: 'A source.',
       citations: [{ url: 'https://example.org/source' }],
-      target_claim_id: '55555555-5555-4555-8555-555555555555',
       client_draft_id: 'draft-1',
     });
     const postCall = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find((c) =>
@@ -159,10 +157,9 @@ describe('request interceptor', () => {
     });
     const body = {
       thread_id: '33333333-3333-4333-8333-333333333333',
-      type: 'evidence' as const,
+      type: 'comment' as const,
       body: 'x',
       citations: [{ url: 'https://example.org/source' }],
-      target_claim_id: '55555555-5555-4555-8555-555555555555',
       client_draft_id: 'd',
     };
     await createContribution(body);
@@ -183,10 +180,9 @@ describe('request interceptor', () => {
     });
     const body = {
       thread_id: '33333333-3333-4333-8333-333333333333',
-      type: 'evidence' as const,
+      type: 'comment' as const,
       body: 'x',
       citations: [{ url: 'https://example.org/source' }],
-      target_claim_id: '55555555-5555-4555-8555-555555555555',
       client_draft_id: 'd',
     };
     await Promise.all([createContribution(body), createContribution(body)]);

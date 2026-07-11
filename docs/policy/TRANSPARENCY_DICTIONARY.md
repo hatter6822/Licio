@@ -36,9 +36,9 @@ The canonical machine-readable enumeration at the end is the source of truth.
 
 | Metric ID | Metric | Definition | Data source (responsible WS) | Aggregation method | Privacy threshold |
 |---|---|---|---|---|---|
-| `TM-CPR` | Constructive-participation rate | Fraction of contributions classified constructive (evidence, correction, synthesis, bridge, question) | Contribution classifier (WS-K) | Mean rate (constructive ÷ total) | Min 100 contributions/period |
+| `TM-CPR` | Constructive-participation rate | Fraction of contributions classified constructive (sourced comments, correction, synthesis, bridge, question) | Contribution classifier (WS-K) | Mean rate (constructive ÷ total) | Min 100 contributions/period |
 | `TM-SOR` | Source-open rate | Fraction of story views where the user opened the original source | Attention event pipeline (WS-E) | Ratio (source opens ÷ views) | Min 1000 views/period |
-| `TM-EAR` | Evidence-addition rate | Rate of evidence cards added per active thread | Evidence submissions (WS-F) | Mean per active thread | Min 50 threads/period |
+| `TM-EAR` | Evidence-addition rate | Rate of sourced comments (comments carrying ≥1 citation) added per active thread | Sourced contributions (WS-G/WS-T) | Mean per active thread | Min 50 threads/period |
 | `TM-QRR` | Question-resolution rate | Fraction of clarifying questions receiving a substantive answer | Thread state tracker (WS-G) | Ratio (answered ÷ asked) | Min 50 questions/period |
 | `TM-MERI` | MERI distribution | Distribution of nonredundancy scores across feeds and topics | MERI service (WS-H.2) | Distribution (percentiles) | Aggregate only; no per-user scores |
 | `TM-SCOI` | SCOI reduction after bridge/synthesis | Change in obstruction score after bridge/synthesis contributions | SCOI service (WS-H.4) | Mean Δ (pre → post) | Min 20 bridge events/period |
@@ -187,4 +187,5 @@ targets. They encode the engagement-trap and speculation-drift patterns Licio re
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
+| 1.0.1 | 2026-07-11 | Maintainer | `TM-EAR`/`TM-CPR` rebased on comment-centric sourcing (sourced comments) after the EvidenceCard entity was removed with its orphaned creation paths; metric ids, aggregation, and thresholds unchanged. | Directed by hatter6822 (maintainer), 2026-07-11 |
 | 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified dictionary: 13 product-health/safety metrics with data source, **aggregation method**, and privacy thresholds (WS-A.1.3a); 8 Knomosis metrics with expansion-blocking semantics for `KM-P2RLEAK`/`KM-RECONGAP` (WS-A.1.3b); 11 anti-metrics plus experimentation rules and quarterly enforcement (WS-A.1.3c). Small-cell suppression applied uniformly; metric counts cross-validated against SPEC §28.1/§28.3. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |

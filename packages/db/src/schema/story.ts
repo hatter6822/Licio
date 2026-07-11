@@ -64,7 +64,6 @@ export const submissionTypeEnum = pgEnum('story_submission_type', [
   'link',
   'original_brief',
   'question',
-  'evidence_card',
   'local_update',
   'live_thread',
   // WS-Q.1.3c — native media posts (appended; migration 0015 `ADD VALUE`s them).

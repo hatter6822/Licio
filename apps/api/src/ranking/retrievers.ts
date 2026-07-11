@@ -61,8 +61,8 @@ export interface CandidateDataPorts {
   latestDayWindow(itemId: string): Promise<AggregationWindowRecord | null>;
   /** Whether a thread currently carries a human summary layer. */
   hasHumanSummary(threadId: string): Promise<boolean>;
-  /** Number of evidence cards attached to a story's claims. */
-  evidenceCountByStory(storyId: string): Promise<number>;
+  /** SOURCED contributions on a story's thread (comments carrying ≥1 citation). */
+  sourcedCountByStory(storyId: string): Promise<number>;
   /** The requesting user's locale (BCP 47) or null. */
   userLocale(userId: string): Promise<string | null>;
 }
@@ -280,7 +280,7 @@ export class GlobalCandidatesRetriever implements CandidateRetriever {
 }
 
 /** 4. Emerging discussions: threads with high CONSTRUCTIVE participation
- *  velocity (evidence/correction/synthesis additions, never raw volume). */
+ *  velocity (correction/synthesis/bridge additions, never raw volume). */
 export class EmergingDiscussionsRetriever implements CandidateRetriever {
   readonly origin = 'emerging_discussions_v1';
   readonly sourceType = 'emerging_discussion' as const;
@@ -298,10 +298,7 @@ export class EmergingDiscussionsRetriever implements CandidateRetriever {
       if (window === null) continue;
       const counts = window.contributionCounts;
       const constructive =
-        (counts['evidence'] ?? 0) +
-        (counts['correction'] ?? 0) +
-        (counts['synthesis'] ?? 0) +
-        (counts['bridge_comment'] ?? 0);
+        (counts['correction'] ?? 0) + (counts['synthesis'] ?? 0) + (counts['bridge_comment'] ?? 0);
       if (constructive < this.minConstructive) continue;
       out.push(
         await storyToCandidate(
@@ -336,8 +333,8 @@ export class IndependentSourceAdditionsRetriever implements CandidateRetriever {
       const lastSeen = seen.get(story.storyId);
       if (lastSeen === undefined) continue;
       if (story.lastMaterialUpdateAt <= lastSeen) continue;
-      const evidence = await this.ports.evidenceCountByStory(story.storyId);
-      if (evidence === 0) continue;
+      const sourced = await this.ports.sourcedCountByStory(story.storyId);
+      if (sourced === 0) continue;
       out.push(
         await storyToCandidate(
           this.ports,

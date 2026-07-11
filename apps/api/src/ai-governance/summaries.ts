@@ -63,7 +63,9 @@ function buildDraft(
   nowIso: string,
 ): AiSummaryDraft {
   const statements = roots.map((root) => {
-    const isFact = root.type === 'evidence';
+    // Sourced comments (≥1 citation) read as fact statements; unsourced ones
+    // stay attributed claims (comment-centric sourcing, WS-T).
+    const isFact = root.citations.length > 0;
     return {
       kind: isFact ? ('fact' as const) : ('claim' as const),
       text: firstSentence(root.body),
@@ -100,12 +102,12 @@ function buildDraft(
 
 /** Thread-derived signals the quality check uses (independent of the draft). */
 function signalsFor(roots: readonly ContributionRecord[]): ThreadQualitySignals {
-  const nonEvidenceRoots = roots.filter((r) => r.type !== 'evidence').length;
+  const unsourcedRoots = roots.filter((r) => r.citations.length === 0).length;
   const hasOpenQuestions = roots.some((r) => /\?/.test(r.body));
   return {
     hasOpenQuestions,
     hasMinorityView: roots.length >= 3,
-    hasDisputedClaim: nonEvidenceRoots >= 2,
+    hasDisputedClaim: unsourcedRoots >= 2,
   };
 }
 

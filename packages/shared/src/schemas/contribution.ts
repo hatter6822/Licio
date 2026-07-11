@@ -20,7 +20,6 @@ import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
 export const CONTRIBUTION_TYPES = [
   'question',
   'answer',
-  'evidence',
   'correction',
   'synthesis',
   'counterexample',
@@ -38,7 +37,6 @@ export const contributionTypeSchema = z.enum(CONTRIBUTION_TYPES);
 export const CONTRIBUTION_BODY_LIMITS: Readonly<Record<ContributionType, number>> = {
   question: 2_000,
   answer: 3_000,
-  evidence: 500,
   correction: 2_000,
   synthesis: 5_000,
   counterexample: 2_000,
@@ -207,32 +205,6 @@ export const answerCreateSchema = z
   })
   .strict();
 
-export const evidenceCreateSchema = z
-  .object({
-    ...createBaseShape,
-    type: z.literal('evidence'),
-    /** The relevance note (the evidence contribution's body, WS-G.3.5a). */
-    body: bodySchema('evidence', 'A relevance note is required.'),
-    citations: z
-      .array(citationSchema)
-      .min(1, 'Evidence contributions require at least one citation.')
-      .max(MAX_CITATIONS),
-    target_claim_id: uuidSchema,
-    /** Evidence-card material type (WS-G.1.3); defaults to `report` at rest. */
-    evidence_type: z
-      .enum([
-        'primary_source',
-        'dataset',
-        'transcript',
-        'legal_text',
-        'report',
-        'expert_reference',
-        'fact_check',
-      ])
-      .optional(),
-  })
-  .strict();
-
 /**
  * A correction is a sourced challenge to a specific comment or to the story
  * root.  It MUST carry at least one supporting citation (a source is
@@ -368,10 +340,11 @@ export const metaDiscussionCreateSchema = z
   })
   .strict();
 
-/** WS-T.1.2b: live create contract; legacy create schemas stay exported for one release. */
+/** WS-T.1.2b: live create contract; legacy create schemas stay exported for one release.
+ *  Sourcing is comment-centric: a comment carries its sources as `citations`
+ *  (inline links) — there is no separate evidence contribution type. */
 export const contributionWriteCreateSchema = z.discriminatedUnion('type', [
   commentCreateSchema,
-  evidenceCreateSchema,
   correctionCreateSchema,
 ]);
 export type ContributionWriteCreate = z.infer<typeof contributionWriteCreateSchema>;
@@ -384,7 +357,6 @@ export type ContributionWriteCreate = z.infer<typeof contributionWriteCreateSche
 export const contributionCreateSchema = z.discriminatedUnion('type', [
   questionCreateSchema,
   answerCreateSchema,
-  evidenceCreateSchema,
   correctionCreateSchema,
   synthesisCreateSchema,
   counterexampleCreateSchema,
@@ -420,9 +392,6 @@ export type ContributionUpdate = z.infer<typeof contributionUpdateSchema>;
 /** The canonical metadata object at rest (all fields optional; strict). */
 export const contributionMetadataSchema = z
   .object({
-    evidence_type: z.string().min(1).max(64).optional(),
-    /** Co-created evidence card (WS-G.3.2 atomic creation). */
-    evidence_id: uuidSchema.optional(),
     target_text_excerpt: z.string().min(1).max(500).optional(),
     included_branch_ids: z.array(uuidSchema).max(20).optional(),
     uncertainty_note: z.string().min(1).max(1_000).optional(),

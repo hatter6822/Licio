@@ -118,7 +118,7 @@ export const lcapRecordClosure = pgTable(
  * row per `(block_cid, target_type, target_id)` so the `DrizzleTakedownOracle` joins a
  * block CID to its content entity and then to the live `takedown_requests` status.
  *
- * `target_type` REUSES the `takedown_requests` enum (story / source / evidence) so the
+ * `target_type` REUSES the `takedown_requests` enum (story / source) so the
  * oracle's join is type-aligned (same enum, same uuid id) — a block's provenance target and
  * a takedown's target are the same coordinate.  A block may derive from more than one
  * entity (e.g. an evidence card embedded in a story), so the PK spans all three columns and
@@ -133,7 +133,7 @@ export const lcapBlockProvenance = pgTable(
   {
     blockCid: text('block_cid').notNull(),
     targetType: takedownTargetTypeEnum('target_type').notNull(),
-    /** The content entity id (story/source/evidence) — the same coordinate a takedown targets. */
+    /** The content entity id (story/source) — the same coordinate a takedown targets. */
     targetId: text('target_id').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

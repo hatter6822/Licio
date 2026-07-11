@@ -65,7 +65,7 @@ function scored(partial: {
 
 const NO_SIGNALS = {
   roomCount: 1,
-  evidenceCount: 0,
+  sourcedCount: 0,
   fromDiversityQuota: false,
   previouslySeen: false,
 };
@@ -88,13 +88,13 @@ describe('WS-I.2.6a template system', () => {
   });
 
   it('renders with valid params and rejects invalid ones', () => {
-    expect(renderTemplate('positive.evidence_rising', { roomCount: 3, evidenceCount: 2 })).toBe(
-      'Rising because readers in 3 rooms opened the source and added 2 independent evidence cards.',
+    expect(renderTemplate('positive.sources_rising', { roomCount: 3, sourcedCount: 2 })).toBe(
+      'Rising because readers in 3 rooms opened the source and added 2 sourced comments.',
     );
-    expect(renderTemplate('positive.evidence_rising', { roomCount: 1, evidenceCount: 1 })).toBe(
-      'Rising because readers opened the source and added 1 independent evidence card.',
+    expect(renderTemplate('positive.sources_rising', { roomCount: 1, sourcedCount: 1 })).toBe(
+      'Rising because readers opened the source and added 1 sourced comment.',
     );
-    expect(() => renderTemplate('positive.evidence_rising', { roomCount: 0 })).toThrow(
+    expect(() => renderTemplate('positive.sources_rising', { roomCount: 0 })).toThrow(
       ExplanationParamError,
     );
     expect(() => renderTemplate('unknown.template', {})).toThrow(ExplanationParamError);
@@ -104,7 +104,7 @@ describe('WS-I.2.6a template system', () => {
     // Render every registered template with minimal valid params and scan
     // against the SHARED prohibited list (the WS-I.3.1i artifact).
     const minimalParams: Record<string, unknown> = {
-      'positive.evidence_rising': { roomCount: 1, evidenceCount: 1 },
+      'positive.sources_rising': { roomCount: 1, sourcedCount: 1 },
       'contextual.lens_diversity': { lensCount: 2 },
     };
     for (const template of EXPLANATION_TEMPLATES.values()) {
@@ -132,12 +132,12 @@ describe('WS-I.2.6b explanation generation', () => {
     const result = explainItem(
       scored({ components: { constructive_participation: 0.6 } }),
       {},
-      { ...NO_SIGNALS, evidenceCount: 2, roomCount: 1 },
+      { ...NO_SIGNALS, sourcedCount: 2, roomCount: 1 },
     );
-    expect(result.templateId).toBe('positive.evidence_rising');
+    expect(result.templateId).toBe('positive.sources_rising');
     // Single-room contexts make NO room-count claim (honest phrasing).
     expect(result.distributionReason).toBe(
-      'Rising because readers opened the source and added 2 independent evidence cards.',
+      'Rising because readers opened the source and added 2 sourced comments.',
     );
   });
 
@@ -151,7 +151,7 @@ describe('WS-I.2.6b explanation generation', () => {
     const result = explainItem(
       scored({ components: { constructive_participation: 0.9 } }),
       { mfci_risk_state: 'severe' },
-      { ...NO_SIGNALS, evidenceCount: 5 },
+      { ...NO_SIGNALS, sourcedCount: 5 },
     );
     expect(result.templateId).toBe('safety.under_review');
     expect(result.distributionReason).toBe('This thread is temporarily under integrity review.');
@@ -207,7 +207,7 @@ describe('WS-I.2.6a localization readiness (x-pseudo two-language proof)', () =>
 
   it('EVERY template renders in x-pseudo, distinct from EN, parameters intact', () => {
     const minimalParams: Record<string, unknown> = {
-      'positive.evidence_rising': { roomCount: 3, evidenceCount: 2 },
+      'positive.sources_rising': { roomCount: 3, sourcedCount: 2 },
       'contextual.lens_diversity': { lensCount: 2 },
     };
     for (const template of EXPLANATION_TEMPLATES.values()) {
@@ -221,8 +221,8 @@ describe('WS-I.2.6a localization readiness (x-pseudo two-language proof)', () =>
     }
     // Parameter values survive localization (digits are never accented).
     const localized = renderTemplate(
-      'positive.evidence_rising',
-      { roomCount: 3, evidenceCount: 2 },
+      'positive.sources_rising',
+      { roomCount: 3, sourcedCount: 2 },
       'x-pseudo',
     );
     expect(localized).toContain('3');

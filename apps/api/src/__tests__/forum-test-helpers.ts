@@ -132,7 +132,7 @@ export async function seedThread(
   return { storyId, threadId };
 }
 
-/** Seed a claim (target for evidence/correction/counterexample). */
+/** Seed a claim (target for correction/counterexample linkage). */
 export async function seedClaim(
   fixture: { ingestion: IngestionServices },
   storyId: string | null = null,
@@ -157,7 +157,14 @@ export async function seedClaim(
 export function contributionBody(
   type: ContributionCreate['type'],
   threadId: string,
-  extra: { claimId?: string; parentId?: string; targetId?: string; storyId?: string } = {},
+  extra: {
+    claimId?: string;
+    parentId?: string;
+    targetId?: string;
+    storyId?: string;
+    /** WS-T sourced comment: attach one citation to a `comment` create. */
+    sourced?: boolean;
+  } = {},
 ): Record<string, unknown> {
   const base = { thread_id: threadId, client_draft_id: `draft-${randomUUID()}` };
   const citation = { url: 'https://example.org/source' };
@@ -170,15 +177,6 @@ export function contributionBody(
         type,
         body: 'Table 3 of the labor report.',
         parent_contribution_id: extra.parentId,
-      };
-    case 'evidence':
-      return {
-        ...base,
-        type,
-        body: 'Primary dataset for the claim.',
-        citations: [citation],
-        target_claim_id: extra.claimId,
-        evidence_type: 'dataset',
       };
     case 'correction':
       // WS-T — a correction targets a comment (targetId) or the story (storyId);
@@ -240,7 +238,10 @@ export function contributionBody(
       return {
         ...base,
         type,
-        body: 'This is a comment in the thread.',
+        body: extra.sourced
+          ? 'Primary dataset supporting the claim.'
+          : 'This is a comment in the thread.',
+        ...(extra.sourced ? { citations: [citation] } : {}),
         ...(extra.parentId ? { parent_contribution_id: extra.parentId } : {}),
       };
   }

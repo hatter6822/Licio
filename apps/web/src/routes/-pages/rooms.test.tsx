@@ -99,7 +99,7 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     source: 'Delta Observer',
     origin: 'independent',
     reading_minutes: 3,
-    rating_label: 'well-sourced',
+    rating_label: 'deepening',
     distribution_reason: 'Recent in this room',
     context_chips: [],
     safety_state: 'ok',

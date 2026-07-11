@@ -34,7 +34,6 @@ import {
 
 const uuidOf = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const THREAD = uuidOf(1);
-const CLAIM = uuidOf(2);
 const TARGET_COMMENT = uuidOf(3);
 const TARGET_STORY = uuidOf(4);
 
@@ -43,14 +42,6 @@ const citation = { url: 'https://example.org/source' } as const;
 
 describe('WS-T.1.2 contribution create union — comment-first writes', () => {
   const validComment = { ...base, type: 'comment', body: 'A plain comment.' } as const;
-  const validEvidence = {
-    ...base,
-    type: 'evidence',
-    body: 'Primary dataset.',
-    citations: [citation],
-    target_claim_id: CLAIM,
-    evidence_type: 'dataset',
-  } as const;
   const validCorrection = {
     ...base,
     type: 'correction',
@@ -60,13 +51,14 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     target_text_excerpt: 'on June 3',
   } as const;
 
-  it('accepts exactly comment, evidence, and correction for new writes', () => {
-    for (const payload of [validComment, validEvidence, validCorrection]) {
+  it('accepts exactly comment and correction for new writes', () => {
+    for (const payload of [validComment, validCorrection]) {
       expect(contributionWriteCreateSchema.safeParse(payload).success).toBe(true);
     }
     for (const type of [
       'question',
       'answer',
+      'evidence',
       'synthesis',
       'counterexample',
       'explanation',
@@ -107,10 +99,7 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     if (!rejected.success) expect(rejected.error.issues[0]?.path).toEqual(['body']);
   });
 
-  it('keeps evidence and correction citation requirements unchanged', () => {
-    expect(
-      contributionWriteCreateSchema.safeParse({ ...validEvidence, citations: [] }).success,
-    ).toBe(false);
+  it('keeps the correction citation requirement unchanged', () => {
     expect(
       contributionWriteCreateSchema.safeParse({ ...validCorrection, citations: [] }).success,
     ).toBe(false);
@@ -331,7 +320,7 @@ describe('WS-G.1.2c update schema — type can never change', () => {
 
   it('rejects a runtime attempt to smuggle `type`', () => {
     expect(
-      contributionUpdateSchema.safeParse({ contribution_id: uuidOf(9), type: 'evidence' }).success,
+      contributionUpdateSchema.safeParse({ contribution_id: uuidOf(9), type: 'comment' }).success,
     ).toBe(false);
   });
 });

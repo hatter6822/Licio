@@ -154,7 +154,7 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       savedForLater: false,
       replyDepthBucket: 'none',
       returnVisitBucket: 'many',
-      contributions: { evidence: 2, bridge_comment: 1 },
+      contributions: { correction: 2, bridge_comment: 1 },
       annotations: [],
     });
     for (const forbidden of ['like', 'upvote', 'karma', 'reaction']) {

@@ -600,7 +600,7 @@ describe('WS-T domainOf — registrable-domain extraction (anti-gaming)', () => 
 
 describe('WS-T sourced roots — filter + count include sourced comments', () => {
   async function seedTyped(
-    type: 'comment' | 'evidence' | 'correction',
+    type: 'comment' | 'correction',
     citations: { url: string }[],
   ): Promise<string> {
     const id = randomUUID();
@@ -611,7 +611,7 @@ describe('WS-T sourced roots — filter + count include sourced comments', () =>
       type,
       body: `${type} body`,
       citations,
-      metadata: type === 'correction' ? { target_story_id: STORY } : type === 'evidence' ? {} : {},
+      metadata: type === 'correction' ? { target_story_id: STORY } : {},
       targetClaimId: null,
       parentContributionId: null,
       clientDraftId: `draft-${id}`,
@@ -621,10 +621,10 @@ describe('WS-T sourced roots — filter + count include sourced comments', () =>
     return id;
   }
 
-  it('the "Sources" view is evidence OR a comment carrying ≥1 citation', async () => {
+  it('the "Sources" view is exactly the comments carrying ≥1 citation', async () => {
     await seedTyped('comment', []); // plain comment — NOT sourced
     const sourcedComment = await seedTyped('comment', [citation]); // sourced comment
-    const evidence = await seedTyped('evidence', [citation]); // evidence — sourced
+    const alsoSourced = await seedTyped('comment', [citation]); // second sourced comment
     await seedTyped('correction', [citation]); // correction — its own tab, NOT here
 
     const sourced = await contributions.listRoots(THREAD, {
@@ -634,7 +634,7 @@ describe('WS-T sourced roots — filter + count include sourced comments', () =>
       order: 'oldest',
     });
     expect(new Set(sourced.map((r) => r.contributionId))).toEqual(
-      new Set([sourcedComment, evidence]),
+      new Set([sourcedComment, alsoSourced]),
     );
     expect(await contributions.countSourced(THREAD, ['published'])).toBe(2);
   });

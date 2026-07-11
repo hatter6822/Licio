@@ -21,12 +21,14 @@ import { z } from 'zod';
 import { httpUrlSchema, uuidSchema } from '../common.js';
 import { eventBaseShape } from './envelope.js';
 
-/** The eight submission types (SPEC §14.1; WS-Q.1.3c added the two media types). */
+/** The submission types (SPEC §14.1; WS-Q.1.3c added the two media types).
+ *  `evidence_card` was removed with the EvidenceCard entity — the PG enum
+ *  keeps the value as documented dead weight (PostgreSQL cannot drop enum
+ *  values in place), but no row can be written with it. */
 export const SUBMISSION_TYPES = [
   'link',
   'original_brief',
   'question',
-  'evidence_card',
   'local_update',
   'live_thread',
   // WS-Q.1.3c — native media posts (appended; existing values keep their order

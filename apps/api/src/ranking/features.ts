@@ -40,6 +40,7 @@ import {
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { InvariantOutputRecord } from '../events/stores.js';
+import type { ForumServices } from '../forum/services.js';
 import { findNearDuplicates } from '../ingestion/dedup.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { InvariantPlatformServices } from '../invariants/services.js';
@@ -85,6 +86,9 @@ export interface FeatureAssemblyDeps {
   events: EventPipelineServices;
   ingestion: IngestionServices;
   invariants: InvariantPlatformServices;
+  /** The thread's sourced-contribution count (comment-centric sourcing) feeds
+   *  `source_evidence_completeness` (§5.4 wE). */
+  forum: Pick<ForumServices, 'contributions'>;
   featureStore: FeatureStore;
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
@@ -268,25 +272,25 @@ export async function assembleFeatureVector(
     const source = await ingestion.sources.getById(story.sourceId);
     if (source !== null) {
       // Inputs are exactly the aggregates the WS-F profile carries
-      // (correction FREQUENCY, evidence-type diversity, community notes).
-      // citationCount (citations by later summaries, the fourth §13.3
-      // input) stays 0 until WS-F aggregates summary citations onto the
-      // source profile — an explicit seam, documented on the pure function.
+      // (correction FREQUENCY, community notes). citationCount (citations by
+      // later summaries, the third §13.3 input) stays 0 until WS-F aggregates
+      // summary citations onto the source profile — an explicit seam,
+      // documented on the pure function.
       vector.source_reliability = sourceReliabilityFromHistory({
         corrections: source.correctionHistory.length,
-        evidenceTypeCount: Object.keys(source.evidenceTypeFrequency).length,
         communityNotes: source.communityNotes.length,
         citationCount: 0,
       });
     }
   }
-  const claims = await ingestion.claims.listByStory(storyId);
-  let evidenceCount = 0;
-  for (const claim of claims) {
-    evidenceCount += (await ingestion.evidence.listByClaim(claim.claimId)).length;
-  }
-  // Saturating completeness: 0 with no evidence, →1 with a rich record.
-  vector.source_evidence_completeness = clamp01(evidenceCount / (evidenceCount + 3));
+  // Comment-centric sourcing: the §5.4 wE completeness input is the thread's
+  // SOURCED contribution count (published comments carrying ≥1 citation).
+  const sourcedCount =
+    thread === null
+      ? 0
+      : await deps.forum.contributions.countSourced(thread.threadId, ['published']);
+  // Saturating completeness: 0 with no sourced discussion, →1 with a rich record.
+  vector.source_evidence_completeness = clamp01(sourcedCount / (sourcedCount + 3));
 
   // --- Duplicate cluster key (WS-I.2.4a input) ------------------------------
   const clusterId = await duplicateClusterId(ingestion, storyId);

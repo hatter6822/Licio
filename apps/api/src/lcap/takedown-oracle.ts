@@ -136,7 +136,7 @@ export class DrizzleTakedownStatusReader implements TakedownStatusReader {
     // A takedown coordinate is `(target_type, target_id)`; a block may have several
     // targets, and `target_type` is a true enum, so we group the lookup by type and ask:
     // does ANY in-force takedown exist for any of this block's ids of that type?  One query
-    // per distinct type (at most three — story/source/evidence), each parameterized.
+    // per distinct type (at most two — story/source), each parameterized.
     const idsByType = new Map<TakedownRequestRow['targetType'], string[]>();
     for (const t of targets) {
       const ids = idsByType.get(t.targetType) ?? [];

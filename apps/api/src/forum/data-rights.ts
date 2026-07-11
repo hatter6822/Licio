@@ -4,14 +4,14 @@
 // content half of DSAR export + account-purge anonymization).
 //
 //   • exportUserContent — a COMPLETE (§19.3 / GDPR Art. 15) listing of the
-//     user's own stories, contributions, evidence cards, room subscriptions,
-//     and uploads, keyset-paginated to exhaustion. Self-access is NOT bounded
+//     user's own stories, contributions, room subscriptions, and uploads,
+//     keyset-paginated to exhaustion. Self-access is NOT bounded
 //     by distribution: `room_only` content and private-room subscriptions are
 //     exported, each tagged with its home room (`room_ref`) and visibility
 //     tier so the subject sees exactly where each item lives (WS-Q.3.5).
 //   • anonymizeUserContent — tombstones the author on every contribution /
-//     evidence card / upload across BOTH tiers (bodies persist per §22.4; the
-//     tombstoned user row IS the anonymization) and REMOVES room memberships
+//     upload across BOTH tiers (bodies persist per §22.4; the tombstoned user
+//     row IS the anonymization) and REMOVES room memberships
 //     and steward assignments (membership is personal data, incl. private
 //     rooms).
 //
@@ -77,19 +77,6 @@ export async function exportUserContent(
     contribAfter = { createdAt: last.createdAt, id: last.contributionId };
   }
 
-  for (const card of await ingestion.evidence.listBySubmitter(userId)) {
-    out.push({
-      kind: 'evidence_card',
-      evidence_id: card.evidenceId,
-      claim_id: card.claimId,
-      evidence_type: card.evidenceType,
-      relationship_type: card.relationshipType,
-      citation_url_or_ref: card.citationUrlOrRef,
-      relevance_note: card.relevanceNote,
-      created_at: card.createdAt,
-    });
-  }
-
   // Room subscriptions — incl. private-room memberships, each tagged with the
   // room's visibility (WS-Q.3.5).
   for (const sub of await forum.rooms.listSubscriptionsByUser(userId)) {
@@ -123,13 +110,8 @@ export async function exportUserContent(
   return out;
 }
 
-export async function anonymizeUserContent(
-  ingestion: IngestionServices,
-  forum: ForumServices,
-  userId: string,
-): Promise<void> {
+export async function anonymizeUserContent(forum: ForumServices, userId: string): Promise<void> {
   await forum.contributions.anonymizeUser(userId);
-  await ingestion.evidence.anonymizeUser(userId);
   await forum.uploads.anonymizeUser(userId);
   await forum.rooms.anonymizeUser(userId);
 }
@@ -138,7 +120,7 @@ export async function anonymizeUserContent(
  * WS-S.9 (PRIVATE_SPEC §24.2 `anonymize`) — ROOM-SCOPED anonymize: detach `userId`'s authored
  * content in ONE room only (the migrated room), leaving their authorship in EVERY OTHER room
  * intact.  Resolves the room's stories + their thread ids, then tombstones the user's
- * contributions (by thread) and evidence cards + media uploads (by story).  Unlike
+ * contributions (by thread) and media uploads (by story).  Unlike
  * {@link anonymizeUserContent} (the account-wide DSAR path), this never reaches across rooms —
  * a steward who migrates one of their rooms keeps their authorship everywhere else.  Room
  * MEMBERSHIP is left untouched (the migrated room is frozen/purged, and membership is not
@@ -160,6 +142,5 @@ export async function anonymizeUserContentInRoom(
     if (thread !== null) threadIds.push(thread.threadId);
   }
   await forum.contributions.anonymizeUserByThreads(threadIds, userId);
-  await ingestion.evidence.anonymizeUserByStories(storyIds, userId);
   await forum.uploads.anonymizeUserByStories(storyIds, userId);
 }

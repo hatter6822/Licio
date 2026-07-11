@@ -114,18 +114,6 @@ export const EVENT_FIXTURES: Readonly<Record<EventTopic, Record<string, unknown>
     privacy_classification: 'public',
     retention_tier: 'public_contribution',
   },
-  'evidence.added': {
-    ...base('evidence.added'),
-    evidence_id: U2,
-    claim_id: U3,
-    thread_id: U4,
-    user_id: U1,
-    evidence_type: 'primary_source',
-    source_id: U2,
-    contribution_id: null,
-    privacy_classification: 'public',
-    retention_tier: 'public_contribution',
-  },
   'claim.updated': {
     ...base('claim.updated'),
     claim_id: U2,

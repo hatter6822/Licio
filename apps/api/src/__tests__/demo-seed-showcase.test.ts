@@ -116,7 +116,6 @@ describe('demo seed — the feed shows every rating label', () => {
     const expected: RatingLabelKind[] = [
       'new',
       'deepening',
-      'well-sourced',
       'needs-context',
       'under-review',
       'resolved-context',
@@ -127,28 +126,36 @@ describe('demo seed — the feed shows every rating label', () => {
     expect(labels.size).toBeGreaterThanOrEqual(6);
   });
 
-  it('labels the evidence-rich, MERI-independent stories "Well-Sourced"', async () => {
+  it('labels the sourced-discussion showcase stories "Deepening"', async () => {
     const items = await fullFrontPage();
-    const wellSourced = items.filter((i) => i.rating_label === 'well-sourced');
-    const ids = new Set(wellSourced.map((i) => i.story_id));
-    // S1 (water dataset), S13 (soil-carbon), S22 (aquifer multi-lab).
+    const deepening = items.filter((i) => i.rating_label === 'deepening');
+    const ids = new Set(deepening.map((i) => i.story_id));
+    // S1 (water dataset), S13 (soil-carbon), S22 (aquifer multi-lab) — the
+    // former Well-Sourced showcase trio: lifecycle `deepening` with sourced
+    // comments, read through the comment-centric §5.6 cascade.
     expect(ids.has(S(1))).toBe(true);
-    expect(ids.has(S(13)) || ids.has(S(22))).toBe(true);
+    expect(ids.has(S(13))).toBe(true);
+    expect(ids.has(S(22))).toBe(true);
   });
 
   it('computes MERI source-independence gains (the honest signal; no user-facing label)', async () => {
     // The MERI exposure LABEL is no longer a user-facing wire field; the COMPUTED
-    // source-independence signal still drives ranking + the §5.6 Well-Sourced gate.
+    // source-independence signal still drives ranking.
     const meri = await fx.events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
     const gains = meri?.scoreVector['marginal_gains'] as Record<string, number>;
-    // The well-sourced stories are MERI-independent (marginal gain ≥ 1) — the
-    // real batch, asserted on the computed output rather than a removed badge.
-    expect((gains[S(1)] ?? 0) >= 1).toBe(true);
-    expect((gains[S(22)] ?? 0) >= 1).toBe(true);
+    // Evidence groups derive from the CITATION DOMAINS of each story thread's
+    // published contributions: every seeded sourced comment cites example.org,
+    // so the shared-domain lineage group exists under the `cit:<host>` token.
+    const groups = meri?.scoreVector['group_ids'] as string[];
+    expect(groups).toContain('evidence_lineage:cit:example.org');
+    // The shared citation domain FOLDS the showcase trio (S1, S13, S22): the
+    // per-class bound caps how many of one lineage group count as independent
+    // exposure, so they are never ALL independent.  WHICH members win is an
+    // order-dependent tiebreak, so assert the order-INDEPENDENT invariant.
+    const trio = [gains[S(1)] ?? 0, gains[S(13)] ?? 0, gains[S(22)] ?? 0];
+    expect(trio.filter((g) => g > 0).length).toBeLessThanOrEqual(2);
     // A verbatim repost (S25 ≡ S21) is a DUPLICATE exposure, not a fresh one —
-    // redundancy never inflates exposure (§7.1).
-    // The verbatim pair (S25 ≡ S21) must NOT both count as independent exposure —
-    // redundancy never inflates exposure (§7.1).  WHICH of the two MERI designates
+    // redundancy never inflates exposure (§7.1); WHICH of the two MERI designates
     // the first-seen (full-gain) member vs the folded duplicate is not stable
     // across runs (equal MinHash signatures → an order-dependent tiebreak), so
     // assert the order-INDEPENDENT invariant rather than a specific member:
@@ -157,6 +164,8 @@ describe('demo seed — the feed shows every rating label', () => {
     const g25 = gains[S(25)] ?? 0;
     expect(g21 > 0 && g25 > 0).toBe(false);
     expect(Object.values(gains).some((g) => g <= 0)).toBe(true);
+    // The batch still designates SOME independent exposure (never all-folded).
+    expect(Object.values(gains).some((g) => g >= 1)).toBe(true);
   });
 
   it('surfaces the coordination-review story as Under Review (descriptive)', async () => {
@@ -187,13 +196,13 @@ describe('demo seed — SCOI divergence + reading signals', () => {
   it('computes a feed-level MERI output the exposure reads resolve against', async () => {
     const meri = await fx.events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
     expect(meri).not.toBeNull();
-    // A real computation (never the fallback): the well-sourced story is
-    // independent. Coverage is honestly limited because most demo stories are
-    // briefs/questions without full source/claim/evidence metadata — graceful
-    // degradation, not a failure (the exposure signal is still computed).
+    // A real computation (never the fallback). Coverage is honestly limited
+    // because most demo stories are briefs/questions without citation-bearing
+    // discussion — graceful degradation, not a failure (the exposure signal is
+    // still computed and the sourced showcase story resolves a gain entry).
     expect(meri?.fallbackUsed).toBe(false);
     const gains = meri?.scoreVector['marginal_gains'] as Record<string, number>;
-    expect(gains[S(1)]).toBeGreaterThanOrEqual(1);
+    expect(typeof gains[S(1)]).toBe('number');
   });
 
   it('produces the owner-scoped Signal Ledger via the REAL PWAtt scorer', async () => {
@@ -215,13 +224,13 @@ describe('demo seed — the story-detail read agrees with the feed', () => {
     return (await res.json()) as { rating_label: string; safety_state: string };
   }
 
-  it('derives the same label on the detail route as on the feed (well-sourced, under-review)', async () => {
+  it('derives the same label on the detail route as on the feed (deepening, under-review)', async () => {
     const items = await fullFrontPage();
     const feedLabel = (id: string) => items.find((i) => i.story_id === id)?.rating_label;
-    // The detail-route signal assembly (safety + SCOI + evidence + MERI) feeds
-    // the SAME shared cascade, so non-trivial labels match the feed.
-    const s1 = await detail(S(1)); // evidence-rich + MERI-independent → well-sourced
-    expect(s1.rating_label).toBe('well-sourced');
+    // The detail-route signal assembly (safety + lifecycle + SCOI divergence)
+    // feeds the SAME shared cascade, so non-trivial labels match the feed.
+    const s1 = await detail(S(1)); // lifecycle deepening + sourced discussion
+    expect(s1.rating_label).toBe('deepening');
     expect(s1.rating_label).toBe(feedLabel(S(1)));
 
     const s19 = await detail(S(19)); // under coordination review

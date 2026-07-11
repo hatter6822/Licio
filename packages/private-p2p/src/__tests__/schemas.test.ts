@@ -198,25 +198,14 @@ describe('WS-S.2.3 contribution.create op — WS-G parity (§13.5)', () => {
     expect(r.success).toBe(false);
   });
 
-  it('requires ≥1 citation + a target claim for evidence', () => {
-    expect(
-      contributionCreateOpSchema.safeParse({
-        ...base,
-        contribution_type: 'evidence',
-        body_markdown_lite: 'Primary dataset.',
-        citations: [],
-        target_claim_id: 'claim-1',
-      }).success,
-    ).toBe(false);
-    expect(
-      contributionCreateOpSchema.safeParse({
-        ...base,
-        contribution_type: 'evidence',
-        body_markdown_lite: 'Primary dataset.',
-        citations: [citation],
-        target_claim_id: 'claim-1',
-      }).success,
-    ).toBe(true);
+  it('accepts a sourced comment (citations are the comment-centric sourcing)', () => {
+    const r = contributionCreateOpSchema.safeParse({
+      ...base,
+      contribution_type: 'comment',
+      body_markdown_lite: 'Primary dataset.',
+      citations: [citation],
+    });
+    expect(r.success).toBe(true);
   });
 
   it('caps corrections at five citations + requires a target claim', () => {
@@ -233,12 +222,12 @@ describe('WS-S.2.3 contribution.create op — WS-G parity (§13.5)', () => {
   });
 
   it('enforces the SHARED per-type body cap (no drift from WS-G)', () => {
-    const overEvidence = 'x'.repeat(CONTRIBUTION_BODY_LIMITS.evidence + 1);
+    const overCorrection = 'x'.repeat(CONTRIBUTION_BODY_LIMITS.correction + 1);
     expect(
       contributionCreateOpSchema.safeParse({
         ...base,
-        contribution_type: 'evidence',
-        body_markdown_lite: overEvidence,
+        contribution_type: 'correction',
+        body_markdown_lite: overCorrection,
         citations: [citation],
         target_claim_id: 'claim-1',
       }).success,

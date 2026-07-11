@@ -362,7 +362,7 @@ describe('CommentSection', () => {
       data: {
         comments: [
           comment({
-            type: 'evidence',
+            citations: [{ url: 'https://example.org/source' }],
             media: [
               {
                 upload_id: '66666666-6666-4666-8666-666666666666',
@@ -386,7 +386,7 @@ describe('CommentSection', () => {
 
     renderSection();
 
-    expect(screen.getByText('Source')).toBeInTheDocument();
+    expect(screen.getByText('Sourced')).toBeInTheDocument();
     expect(screen.getByAltText('Chart from source')).toBeInTheDocument();
     // BOTH nested layers ARE shown (reply + reply-to-reply)…
     expect(screen.getByText('A second-level reply.')).toBeInTheDocument();

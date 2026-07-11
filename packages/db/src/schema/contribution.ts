@@ -38,7 +38,6 @@ import { users } from './user.js';
 export const contributionTypeEnum = pgEnum('contribution_type', [
   'question',
   'answer',
-  'evidence',
   'correction',
   'synthesis',
   'counterexample',

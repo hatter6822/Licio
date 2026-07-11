@@ -311,7 +311,7 @@ describe('WS-G.2.3d — subscriptions', () => {
       jsonRequest(
         `/v1/rooms/${created.room_id}/notifications`,
         'PATCH',
-        { threads: 'all', new_evidence: true },
+        { threads: 'all', bridge_requests: true },
         reader.cookie,
       ),
     );

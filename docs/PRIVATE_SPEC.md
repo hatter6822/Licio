@@ -1165,7 +1165,6 @@ type ContributionCreateOp = {
   contribution_type:
     | 'question'
     | 'answer'
-    | 'evidence'
     | 'correction'
     | 'synthesis'
     | 'counterexample'

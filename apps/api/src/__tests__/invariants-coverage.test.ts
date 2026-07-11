@@ -220,7 +220,7 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
     const noBand = await mkUser(null);
 
     // Story S1: thread with a depth-2 reply chain, a lens-tagged
-    // contribution, and a claim with a REAL evidence card.
+    // contribution, and a SOURCED reply (comment-centric citations).
     const s1 = await seedStory(fixture, { topicIds: ['water'] });
     const s2 = await seedStory(fixture, { topicIds: ['water'] });
     const s3 = await seedStory(fixture, { topicIds: ['transit'] });
@@ -246,7 +246,7 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
       userId: randomUUID(),
       type: 'answer',
       body: 'Quarterly composite samples per the permit.',
-      citations: [],
+      citations: [{ url: 'https://example.com/permit' }],
       metadata: { lens_id: 'lens-expert' },
       targetClaimId: null,
       parentContributionId: rootId,
@@ -255,33 +255,6 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
       moderationState: 'published',
     });
     expect(reply.ok).toBe(true);
-    const claim = await fixture.ingestion.claims.insert({
-      claimId: randomUUID(),
-      storyId: s1.storyId,
-      canonicalText: 'The plant samples quarterly.',
-      normalizedTextHash: randomUUID().replaceAll('-', ''),
-      claimStatus: 'candidate',
-      firstSeenStoryId: s1.storyId,
-      independenceGroupId: null,
-      createdBy: null,
-      extractionSource: 'system',
-      extractionConfidence: 0.8,
-      modelVersion: null,
-    });
-    await fixture.ingestion.evidence.insert({
-      evidenceId: randomUUID(),
-      claimId: claim.claimId,
-      sourceId: null,
-      contributionId: null,
-      submittedBy: teen,
-      evidenceType: 'report',
-      relationshipType: 'supports',
-      citationUrlOrRef: 'https://example.com/permit',
-      relevanceNote: 'permit text',
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      storyId: s1.storyId,
-    });
 
     const aggregate = (userId: string, storyId: string, dwell: 'extended' | 'long') => ({
       aggregate_id: randomUUID(),
@@ -324,7 +297,7 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
     const item1 = enUs?.items.find((i) => i.itemId === s1.storyId);
     const item3 = enUs?.items.find((i) => i.itemId === s3.storyId);
     // Real thread depth (root + reply ⇒ deepest path length 1), the tagged
-    // lens, and evidence reachable through the claim's REAL card.
+    // lens, and evidence carried by the reply's citation.
     expect(item1?.discussionDepth).toBe(1);
     expect(item1?.lensKeys).toEqual(['lens-expert']);
     expect(item1?.hasPrimaryEvidence).toBe(true);

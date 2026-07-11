@@ -408,9 +408,8 @@ STORED shadow outputs only — a page load never triggers computation.
 Client: the MERI exposure label was REMOVED as a user-facing surface — no
 `ExposureLabel` badge on feed cards, and the feed/story wire no longer
 carries an `exposure_label` field. The computed source-independence signal
-survives everywhere it does real work: the §5.6 Well-Sourced rating gate
-(`meriExposureIsIndependent`, a server-side derivation), the WS-I ranking
-features/penalty/quota, and the
+survives everywhere it does real work: the WS-I ranking
+features/penalty/quota and the
 `GET /v1/stories/:id/independent-sources` lineage read — the "Same coverage
 elsewhere" co-group members (near-duplicates by MinHash + confirmed-
 syndication siblings, visibility-gated server-side) — remains available),

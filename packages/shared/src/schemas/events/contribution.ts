@@ -18,7 +18,6 @@ import { eventBaseShape } from './envelope.js';
  */
 export const EVENT_CONTRIBUTION_TYPES = [
   'question',
-  'evidence',
   'correction',
   'synthesis',
   'counterexample',
@@ -57,43 +56,6 @@ export const contributionCreatedEventSchema = z
   })
   .strict();
 export type ContributionCreatedEvent = z.infer<typeof contributionCreatedEventSchema>;
-
-/** Evidence types carried by evidence cards (SPEC §22.1 `EvidenceCard`). */
-export const EVIDENCE_TYPES = [
-  'primary_source',
-  'dataset',
-  'transcript',
-  'legal_text',
-  'report',
-  'article',
-  'other',
-] as const;
-export type EvidenceType = (typeof EVIDENCE_TYPES)[number];
-export const evidenceTypeSchema = z.enum(EVIDENCE_TYPES);
-
-/** Emitted when an evidence card is submitted (SPEC §21.3 `evidence.added`). */
-export const evidenceAddedEventSchema = z
-  .object({
-    ...eventBaseShape,
-    event_type: z.literal('evidence.added'),
-    evidence_id: uuidSchema,
-    claim_id: uuidSchema,
-    thread_id: uuidSchema,
-    user_id: uuidSchema,
-    evidence_type: evidenceTypeSchema,
-    /**
-     * In-app source id backing the evidence (never an arbitrary URL); null
-     * for user-experience evidence with no web source (§22.1 EvidenceCard —
-     * WS-F.2.5a is the first real producer and surfaces both shapes).
-     */
-    source_id: uuidSchema.nullable(),
-    /** The contribution the card was attached to, when applicable. */
-    contribution_id: uuidSchema.nullable(),
-    privacy_classification: z.literal('public'),
-    retention_tier: z.literal('public_contribution'),
-  })
-  .strict();
-export type EvidenceAddedEvent = z.infer<typeof evidenceAddedEventSchema>;
 
 /** Claim lifecycle states (WS-E.1.1c). */
 export const CLAIM_STATUSES = [

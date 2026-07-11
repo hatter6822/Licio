@@ -1,59 +1,39 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // User-facing rating-label derivation (SPEC §5.6). The single source of truth
-// for mapping a story's CONVERSATION STATE onto one of the seven descriptive
+// for mapping a story's CONVERSATION STATE onto one of the descriptive
 // labels — never popularity, never a score. Both the WS-I feed path
 // (apps/api/src/ranking/service.ts) and the story-detail read
 // (apps/api/src/routes/v1.ts) call this SAME cascade, so they agree on the
-// safety, lifecycle, evidence, and MERI dimensions. The one input that is NOT
-// identical is `interpretationsDiverge`: the feed supplies its profile-aware
-// SCOI context card, while the detail supplies SCOI energy ≥ the needs-context
-// threshold (matching the story-page "Where interpretations differ" drawer's
-// stricter signal). The two can therefore differ only at the SCOI margin —
-// every other label is surface-invariant.
+// safety and lifecycle dimensions. The one input that is NOT identical is
+// `interpretationsDiverge`: the feed supplies its profile-aware SCOI context
+// card, while the detail supplies SCOI energy ≥ the needs-context threshold
+// (matching the story-page "Where interpretations differ" drawer's stricter
+// signal). The two can therefore differ only at the SCOI margin — every other
+// label is surface-invariant.
 //
 // The function is PURE and TOTAL: every input yields exactly one label, the same
 // input always yields the same label, and it has no clock, I/O, or financial
 // input. It is a strict PRIORITY CASCADE — live invariant signals (safety, SCOI
-// context divergence, MERI source independence) outrank the slower lifecycle
-// state, because the live signal is the more current truth about the story
-// (the §10.5 principle the feed already applied to SCOI is generalised here to
-// all seven labels).
+// context divergence) outrank the slower lifecycle state, because the live
+// signal is the more current truth about the story (the §10.5 principle the
+// feed already applied to SCOI is generalised here to every label).
 //
 // SPEC §5.6 label meanings — the cascade is a direct transcription:
 //   Getting Attention  Active, non-idle reading is increasing.            (default)
-//   Deepening          Users add evidence, questions, corrections, summaries.
-//   Well-Sourced       The thread contains independent evidence cards and
-//                      primary sources.                                   (live)
+//   Deepening          Users add sources, questions, corrections, summaries.
 //   Needs Context      Interpretations differ or key context is missing.  (live)
 //   Under Review       Coordination, safety, or policy signals require review. (live)
 //   Resolved Context   A previously ambiguous issue has a high-quality synthesis.
 //   Bridge Active      Multiple communities engaging with improving coherence.
+//
+// The former "Well-Sourced" label was removed with the EvidenceCard entity:
+// sourcing is comment-centric (citations on contributions), and no production
+// path could ever verify a card, so the label was unreachable outside seeded
+// demo data.
 
 import type { RatingLabelKind, StorySafetyState } from '../schemas/feed.js';
-import type { MeriExposureLabelWire } from '../schemas/invariants-api.js';
 import type { StoryLifecycleState } from './story-lifecycle.js';
-
-/**
- * Minimum independent evidence cards on a thread for the WELL-SOURCED label.
- * "Independent evidence cards and primary sources present" (SPEC §5.6) needs
- * MORE than one card — a single citation is not yet a well-sourced thread.
- */
-export const WELL_SOURCED_MIN_EVIDENCE_CARDS = 2;
-
-/**
- * Which MERI exposure labels (SPEC §7.6) attest genuine source INDEPENDENCE.
- * `independent_source` (marginal gain ≥ 1) and `new_angle` (gain ≥ 0.5) are the
- * two classes that mean the story adds non-redundant coverage; the weaker
- * `same_claim_new_evidence` / `duplicate_context` (and the honest `null`, "no
- * MERI run has covered this story yet") do NOT, so WELL-SOURCED stays unset
- * until MERI affirmatively verifies independence. The MERI exposure label is
- * no longer a user-facing surface, but its computed value still gates this
- * label (a server-side derivation) and the /independent-sources drawer.
- */
-export function meriExposureIsIndependent(label: MeriExposureLabelWire | null): boolean {
-  return label === 'independent_source' || label === 'new_angle';
-}
 
 /** MFCI durable risk state (matches the ranking feature + the risk-state store). */
 export type MfciRiskLevel = 'normal' | 'elevated' | 'high' | 'severe';
@@ -105,16 +85,6 @@ export interface RatingLabelInputs {
    */
   interpretationsDiverge: boolean;
   /**
-   * Count of DISTINCT INDEPENDENT, VERIFIED evidence units on the story's thread
-   * (WS-G evidence): verified cards sharing a MERI independence group (§13.6)
-   * count once; unverified/disputed/retracted cards never count. Both the feed
-   * and the detail read supply this same independence-aware count, so repeated
-   * or unchecked cards can never alone earn the "Well-Sourced" label.
-   */
-  evidenceCount: number;
-  /** Latest MERI exposure label for the story; null until a MERI run covers it. */
-  meriExposure: MeriExposureLabelWire | null;
-  /**
    * The item's served PWAtt ActiveAttention component in [0, 1] (SPEC §5.4),
    * or undefined when no PWAtt run has covered it yet. Used ONLY to keep the
    * default label truthful: "Getting Attention" (§5.6 "active, non-idle reading
@@ -129,14 +99,14 @@ export interface RatingLabelInputs {
 /**
  * Derive the single SPEC §5.6 rating label for a story. The cascade order is
  * load-bearing: each branch is strictly more specific / more current than the
- * ones below it, so a story under safety review is never mislabelled
- * "Well-Sourced", and a freshly submitted story with strong evidence is
- * upgraded past the generic "Getting Attention".
+ * ones below it, so a story under safety review is never mislabelled with a
+ * calmer state, and an actively discussed story is upgraded past the generic
+ * "Getting Attention".
  */
 export function deriveRatingLabel(inputs: RatingLabelInputs): RatingLabelKind {
   // 1. Safety/coordination/policy review dominates everything (Under Review).
-  //    A story under review is never simultaneously advertised as well-sourced
-  //    or resolved — the review posture is the most important reader signal.
+  //    A story under review is never simultaneously advertised as resolved —
+  //    the review posture is the most important reader signal.
   if (inputs.safetyState === 'under-review' || inputs.safetyState === 'restricted') {
     return 'under-review';
   }
@@ -154,22 +124,11 @@ export function deriveRatingLabel(inputs: RatingLabelInputs): RatingLabelKind {
   if (inputs.lifecycleState === 'stable' || inputs.lifecycleState === 'archived') {
     return 'resolved-context';
   }
-  // 5. Independent evidence cards and primary sources present (Well-Sourced).
-  //    A live evidence signal that UPGRADES the still-active states (deepening /
-  //    gathering / submitted): ≥2 DISTINCT independent, verified evidence cards
-  //    (thread-level) AND a MERI-independent story-level exposure. Both gates are
-  //    independence-aware, so redundant or unchecked cards never reach here.
-  if (
-    inputs.evidenceCount >= WELL_SOURCED_MIN_EVIDENCE_CARDS &&
-    meriExposureIsIndependent(inputs.meriExposure)
-  ) {
-    return 'well-sourced';
-  }
-  // 6. Users are adding evidence, questions, corrections, or summaries (Deepening).
+  // 5. Users are adding sources, questions, corrections, or summaries (Deepening).
   if (inputs.lifecycleState === 'deepening') {
     return 'deepening';
   }
-  // 7. Active, non-idle reading is increasing (Getting Attention) — but ONLY when
+  // 6. Active, non-idle reading is increasing (Getting Attention) — but ONLY when
   //    there is a real ActiveAttention signal (any positive component; the fold
   //    already filtered idle/bounce). A story nobody has actively read yet reads
   //    as the neutral floor "New" rather than falsely claiming rising attention

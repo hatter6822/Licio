@@ -565,7 +565,7 @@ licio/
 │           │   ├── prng.ts               --   deterministic mulberry32 seeded PRNG
 │           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster +
 │           │   │                              per-archetype lens vantage (WS-G.2.2)
-│           │   ├── content.ts            --   deterministic story/comment/evidence generators
+│           │   ├── content.ts            --   deterministic story/comment/citation generators
 │           │   ├── scenarios.ts          --   the seven scenario presets (steady…challenge_wave)
 │           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
 │           │   │                              (tags root comments with the author's vantage lens)
@@ -608,7 +608,7 @@ licio/
 │           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
 │           │   └── demo-seed.ts         --   rich dev seed: dev test accounts
 │           │                                  (admin/steward/expert), rooms/stories across
-│           │                                  every lifecycle state, evidence + divergent
+│           │                                  every lifecycle state, sourced comments + divergent
 │           │                                  lenses + signatures + a native image post +
 │           │                                  a moderation review queue; seedOperationalSignals
 │           │                                  COMPUTES the invariant outputs (real WS-H batch)
@@ -652,7 +652,7 @@ licio/
 │   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
 │   │       │   ├── audit.ts             --   audit event taxonomy
 │   │       │   └── events/              --   WS-E event schemas (envelope, retention
-│   │       │                                 tiers, 16 core topic schemas, topic
+│   │       │                                 tiers, 15 core topic schemas, topic
 │   │       │                                 registry SSOT, knomosis/ bounded context)
 │   │       ├── ugc/                     --   WS-G.4 UGC pipeline: Markdown-lite AST
 │   │       │                                 (no raw-HTML node), constrained serializer,
@@ -688,7 +688,7 @@ licio/
 │   │       │   ├── story.ts, source.ts, claim.ts,
 │   │       │   │   takedown.ts, embedding.ts,
 │   │       │   │   ingestion-review.ts  --     WS-F content tables (stories, sources,
-│   │       │   │                               claims + dual-dimension evidence cards,
+│   │       │   │                               claims,
 │   │       │   │                               syndication, takedowns, pgvector, queue; topic_ids trusted +
 │   │       │   │                               proposed_topic_ids)
 │   │       │   ├── thread.ts            --     WS-G threads (conversation/safety states,

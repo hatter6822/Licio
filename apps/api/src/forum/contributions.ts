@@ -14,11 +14,10 @@
 //      lens belongs to the thread's room, attachments owned + scanned),
 //   5. safety pre-checks (WS-J.2.6 seam) — flagged content persists as
 //      under_review (default-hidden, §18.4) and enters the review queue,
-//   6. transactional insert (atomically with the evidence card for evidence
-//      contributions, WS-G.3.2),
-//   7. durable event emission: contribution.created (+ evidence.added), the
-//      WS-E scoring mapping below, accusation + low-info classification —
-//      events carry ids/types/flags ONLY, never body text.
+//   6. insert,
+//   7. durable event emission: contribution.created, the WS-E scoring
+//      mapping below, accusation + low-info classification — events carry
+//      ids/types/flags ONLY, never body text.
 //
 // Body text is stored verbatim (raw Markdown-lite); sanitization is
 // exclusively render-time (WS-G.4).  Logs and metrics carry ids and counts
@@ -34,7 +33,6 @@ import {
   type ContributionUpdate,
   contributionCreatedEventSchema,
   type EventContributionType,
-  evidenceAddedEventSchema,
   MAX_CONTRIBUTION_DEPTH,
   TOPIC_REGISTRY,
 } from '@licio/shared';
@@ -45,7 +43,7 @@ import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import { maybeEnterDebate } from './debate.js';
 import type { ForumServices } from './services.js';
-import type { ContributionRecord, ForumEvidenceCardInput } from './stores.js';
+import type { ContributionRecord } from './stores.js';
 import { maybeDeepenConversation } from './transitions.js';
 
 const MINUTE_MS = 60_000;
@@ -94,7 +92,6 @@ export class ContributionRateLimiter {
 export const FORUM_TO_EVENT_TYPE: Readonly<Record<ContributionType, EventContributionType>> = {
   question: 'question',
   answer: 'explanation',
-  evidence: 'evidence',
   correction: 'correction',
   synthesis: 'synthesis',
   counterexample: 'counterexample',
@@ -128,7 +125,6 @@ export type ContributionCreateOutcome =
   | {
       ok: true;
       contribution: ContributionRecord;
-      evidenceCardId: string | null;
       deduplicated: boolean;
     }
   | { ok: false; rejection: ContributionRejection };
@@ -140,20 +136,13 @@ interface ServiceBundle {
 }
 
 /** Assemble the canonical metadata object from a flat create request. */
-export function metadataFromRequest(
-  request: ContributionCreate,
-  evidenceCardId: string | null,
-): ContributionMetadata {
+export function metadataFromRequest(request: ContributionCreate): ContributionMetadata {
   const metadata: ContributionMetadata = {};
   if (request.lens_id !== undefined) metadata.lens_id = request.lens_id;
   if (request.attachment_ids !== undefined && request.attachment_ids.length > 0) {
     metadata.attachment_ids = [...request.attachment_ids];
   }
   switch (request.type) {
-    case 'evidence':
-      if (request.evidence_type !== undefined) metadata.evidence_type = request.evidence_type;
-      if (evidenceCardId !== null) metadata.evidence_id = evidenceCardId;
-      break;
     case 'correction':
       // WS-T — a correction targets EXACTLY ONE of a comment or the story root
       // (the create guard validates existence/same-thread); the target's author
@@ -374,13 +363,7 @@ export async function createContribution(
   const existing = await forum.contributions.getByDraft(userId, request.client_draft_id);
   if (existing) {
     forum.metrics.increment('contributions.deduplicated');
-    return {
-      ok: true,
-      contribution: existing,
-      evidenceCardId:
-        typeof existing.metadata.evidence_id === 'string' ? existing.metadata.evidence_id : null,
-      deduplicated: true,
-    };
+    return { ok: true, contribution: existing, deduplicated: true };
   }
 
   // 4. Per-type cross-record validation (WS-G.1.2b/1.2d-1).
@@ -597,37 +580,10 @@ export async function createContribution(
     }
   }
 
-  // 6. Transactional insert (with the evidence card for evidence types).
-  let evidenceCard: ForumEvidenceCardInput | undefined;
-  if (request.type === 'evidence') {
-    const claim = await ingestion.claims.getById(request.target_claim_id);
-    const firstCitation: Citation | undefined = request.citations[0];
-    if (firstCitation === undefined) {
-      // Unreachable through the schema (citations.min(1)); typed guard for
-      // direct service callers.
-      return invalid('citations_required', 'Evidence contributions require at least one citation.');
-    }
-    evidenceCard = {
-      evidenceId: randomUUID(),
-      claimId: request.target_claim_id,
-      sourceId: null,
-      submittedBy: userId,
-      evidenceType: request.evidence_type ?? 'report',
-      // Neutral relationship by default (asserting `supports` would
-      // fabricate a stance — the WS-F.2.5a reasoning); the standalone
-      // POST /v1/evidence carries an explicit relationship_type.
-      relationshipType: 'contextualizes',
-      citationUrlOrRef: firstCitation.url,
-      relevanceNote: request.body,
-      independenceGroupId: claim?.independenceGroupId ?? null,
-      storyId: null,
-      contributionId,
-    };
-  }
-
+  // 6. Insert.
   const citations: Citation[] =
     'citations' in request && request.citations ? request.citations : [];
-  const metadata = metadataFromRequest(request, evidenceCard?.evidenceId ?? null);
+  const metadata = metadataFromRequest(request);
   // WS-T — a PUBLISHED sourced correction opens a debate arena.  The id is minted
   // here so `maybeEnterDebate` can open the arena under it; `debate_arena_id` is
   // written onto the RETURNED contribution's metadata ONLY after the arena is
@@ -635,40 +591,29 @@ export async function createContribution(
   // an id that resolves to nothing (SPEC §15.4).
   const debateArenaId =
     request.type === 'correction' && moderationState === 'published' ? randomUUID() : null;
-  const inserted = await forum.contributions.insert(
-    {
-      contributionId,
-      threadId: request.thread_id,
-      userId,
-      type: request.type,
-      body: request.body,
-      citations,
-      metadata,
-      targetClaimId:
-        'target_claim_id' in request && request.target_claim_id !== undefined
-          ? request.target_claim_id
-          : null,
-      parentContributionId: request.parent_contribution_id ?? null,
-      clientDraftId: request.client_draft_id,
-      path: parentPath,
-      moderationState,
-    },
-    evidenceCard,
-  );
+  const inserted = await forum.contributions.insert({
+    contributionId,
+    threadId: request.thread_id,
+    userId,
+    type: request.type,
+    body: request.body,
+    citations,
+    metadata,
+    targetClaimId:
+      'target_claim_id' in request && request.target_claim_id !== undefined
+        ? request.target_claim_id
+        : null,
+    parentContributionId: request.parent_contribution_id ?? null,
+    clientDraftId: request.client_draft_id,
+    path: parentPath,
+    moderationState,
+  });
   if (!inserted.ok) {
     return invalid('storage_conflict', 'The contribution could not be stored. Retry.');
   }
   if (inserted.duplicate) {
     forum.metrics.increment('contributions.deduplicated');
-    return {
-      ok: true,
-      contribution: inserted.contribution,
-      evidenceCardId:
-        typeof inserted.contribution.metadata.evidence_id === 'string'
-          ? inserted.contribution.metadata.evidence_id
-          : null,
-      deduplicated: true,
-    };
+    return { ok: true, contribution: inserted.contribution, deduplicated: true };
   }
   const contribution = inserted.contribution;
 
@@ -795,7 +740,7 @@ export async function createContribution(
   // 7. Durable events (ids/types/flags only — never body text).  A
   // safety-HELD or AUTO-BLOCKED contribution emits NOTHING (fail toward
   // caution): scoring, lifecycle activity, and freshness must not count content
-  // readers cannot see — a malware-held/removed "evidence" post would otherwise
+  // readers cannot see — a malware-held/removed sourced post would otherwise
   // still earn participation weight while hidden.  Emission on release is the
   // WS-J approval flow's job (the review-queue seam owns the state change).
   if (moderationState === 'under_review' || moderationState === 'removed') {
@@ -810,12 +755,7 @@ export async function createContribution(
       moderation_state: moderationState,
       has_citation: citations.length > 0,
     });
-    return {
-      ok: true,
-      contribution,
-      evidenceCardId: evidenceCard?.evidenceId ?? null,
-      deduplicated: false,
-    };
+    return { ok: true, contribution, deduplicated: false };
   }
   const hasCitation = citations.length > 0;
   const baseType = FORUM_TO_EVENT_TYPE[request.type];
@@ -854,39 +794,8 @@ export async function createContribution(
       purgeAfter: null,
     },
   ];
-  let evidenceAdded: ReturnType<typeof evidenceAddedEventSchema.parse> | null = null;
-  if (evidenceCard) {
-    evidenceAdded = evidenceAddedEventSchema.parse({
-      event_id: randomUUID(),
-      event_type: 'evidence.added',
-      timestamp: contribution.createdAt,
-      schema_version: '1',
-      evidence_id: evidenceCard.evidenceId,
-      claim_id: evidenceCard.claimId,
-      thread_id: contribution.threadId,
-      user_id: userId,
-      evidence_type: mapCardTypeToEventType(evidenceCard.evidenceType),
-      source_id: null,
-      contribution_id: contribution.contributionId,
-      privacy_classification: 'public',
-      retention_tier: 'public_contribution',
-    });
-    const addedEntry = TOPIC_REGISTRY['evidence.added'];
-    eventRows.push({
-      eventId: evidenceAdded.event_id,
-      eventType: evidenceAdded.event_type,
-      topic: evidenceAdded.event_type,
-      timestamp: evidenceAdded.timestamp,
-      privacyClassification: addedEntry.privacy_classification,
-      retentionTier: addedEntry.retention_tier,
-      payload: evidenceAdded as unknown as Record<string, unknown>,
-      ownerUserId: userId,
-      purgeAfter: null,
-    });
-  }
   await events.eventStore.insertMany(eventRows);
   forum.trackBackground(events.router.publish(created));
-  if (evidenceAdded) forum.trackBackground(events.router.publish(evidenceAdded));
 
   // Room activity recency (a timestamp, never a popularity count).
   if (thread.roomId !== null) {
@@ -904,7 +813,10 @@ export async function createContribution(
         trackBackground: forum.trackBackground,
         now: forum.now,
       },
-      (tid, states) => forum.contributions.countByType(tid, states),
+      {
+        countByType: (tid, states) => forum.contributions.countByType(tid, states),
+        countSourced: (tid, states) => forum.contributions.countSourced(tid, states),
+      },
       config,
       contribution.threadId,
       contribution.path.length,
@@ -973,33 +885,7 @@ export async function createContribution(
     has_citation: hasCitation,
   });
 
-  return {
-    ok: true,
-    contribution,
-    evidenceCardId: evidenceCard?.evidenceId ?? null,
-    deduplicated: false,
-  };
-}
-
-/** WS-G.1.3 material types → the WS-E `evidence.added` wire taxonomy.  The
- *  event enum predates WS-G and lacks `expert_reference`/`fact_check`:
- *  expert references map to `other`, fact-checks to `article` (a published
- *  fact-check is an article).  Pinned by unit test. */
-export function mapCardTypeToEventType(
-  cardType: NonNullable<ForumEvidenceCardInput['evidenceType']>,
-): 'primary_source' | 'dataset' | 'transcript' | 'legal_text' | 'report' | 'article' | 'other' {
-  switch (cardType) {
-    case 'primary_source':
-    case 'dataset':
-    case 'transcript':
-    case 'legal_text':
-    case 'report':
-      return cardType;
-    case 'expert_reference':
-      return 'other';
-    case 'fact_check':
-      return 'article';
-  }
+  return { ok: true, contribution, deduplicated: false };
 }
 
 export type ContributionEditOutcome =
@@ -1046,19 +932,8 @@ export async function editContribution(
       },
     };
   }
-  // Citation-floor invariants survive edits (WS-G.1.2b): evidence keeps ≥ 1
-  // citation, corrections keep 1..5.
+  // Citation-floor invariants survive edits (WS-G.1.2b): corrections keep 1..5.
   if (update.citations !== undefined) {
-    if (existing.type === 'evidence' && update.citations.length < 1) {
-      return {
-        ok: false,
-        rejection: {
-          status: 422,
-          code: 'citations_required',
-          message: 'Evidence contributions require at least one citation.',
-        },
-      };
-    }
     if (
       existing.type === 'correction' &&
       (update.citations.length < 1 || update.citations.length > 5)

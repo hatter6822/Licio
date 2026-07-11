@@ -33,7 +33,6 @@ const SPEC_21_3_CORE_TOPICS = [
   'content.saved',
   'attention.aggregate',
   'contribution.created',
-  'evidence.added',
   'claim.updated',
   'thread.state.changed',
   'moderation.case.created',

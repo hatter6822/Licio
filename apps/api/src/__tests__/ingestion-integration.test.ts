@@ -19,7 +19,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DrizzleClaimStore,
   DrizzleEmbeddingStore,
-  DrizzleEvidenceCardStore,
   DrizzleFreshnessStore,
   DrizzleLifecycleAuditStore,
   DrizzleReviewQueueStore,
@@ -44,7 +43,6 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
   let stories: DrizzleStoryStore;
   let sources: DrizzleSourceStore;
   let claims: DrizzleClaimStore;
-  let evidence: DrizzleEvidenceCardStore;
   let signatures: DrizzleSignatureStore;
   let syndications: DrizzleSyndicationStore;
   let audits: DrizzleLifecycleAuditStore;
@@ -121,7 +119,6 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     stories = new DrizzleStoryStore(db);
     sources = new DrizzleSourceStore(db);
     claims = new DrizzleClaimStore(db);
-    evidence = new DrizzleEvidenceCardStore(db);
     signatures = new DrizzleSignatureStore(db);
     syndications = new DrizzleSyndicationStore(db);
     audits = new DrizzleLifecycleAuditStore(db);
@@ -136,8 +133,8 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     // ROW-SCOPED cleanup (the WS-D/WS-E gated-test pattern): vitest projects
     // run in parallel against the SAME live database, so a blanket clear()
     // here would race the db package's gated suite. Everything this suite
-    // created hangs off `submitterId` (stories, evidence) or this suite's
-    // unique embedding model versions; dependents delete before referents.
+    // created hangs off `submitterId` (stories) or this suite's unique
+    // embedding model versions; dependents delete before referents.
     const dbSchema = await import('@licio/db');
     const { inArray, sql } = await import('drizzle-orm');
     const storyIds = (
@@ -149,9 +146,6 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     for (const version of ['lexical-fnv-v1', 'v-next']) {
       await embeddings.deleteVersion(version, 100_000);
     }
-    await db
-      .delete(dbSchema.evidenceCards)
-      .where(sql`${dbSchema.evidenceCards.submittedBy} = ${submitterId}`);
     if (storyIds.length > 0) {
       await db.delete(dbSchema.claims).where(inArray(dbSchema.claims.storyId, storyIds));
       await db
@@ -220,11 +214,12 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     ]);
     expect(a.sourceId).toBe(b.sourceId);
     const topic = randomUUID();
-    await sources.recordObservation(a.sourceId, { topicIds: [topic], evidenceType: 'supports' });
-    await sources.recordObservation(a.sourceId, { evidenceType: 'supports' });
+    const otherTopic = randomUUID();
+    await sources.recordObservation(a.sourceId, { topicIds: [topic] });
+    await sources.recordObservation(a.sourceId, { topicIds: [otherTopic] });
     const after = await sources.getById(a.sourceId);
     expect(after?.typicalTopics).toContain(topic);
-    expect(after?.evidenceTypeFrequency['supports']).toBe(2);
+    expect(after?.typicalTopics).toContain(otherTopic);
     // Corrections append atomically with provenance.
     await sources.appendCorrection(a.sourceId, {
       correction_id: randomUUID(),
@@ -277,7 +272,7 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     expect([...unpackSignature(packSignature(sig))]).toEqual([...sig]);
   });
 
-  it('claims/evidence/lifecycle-audit/freshness/takedown/review adapters round-trip', async () => {
+  it('claims/lifecycle-audit/freshness/takedown/review adapters round-trip', async () => {
     const created = await stories.createWithThread(storyInput(), randomUUID());
     if (!created.ok) throw new Error('setup failed');
     const storyId = created.story.storyId;
@@ -305,25 +300,6 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       lineage,
     );
     expect((await claims.getById(claim.claimId))?.independenceGroupId).toBe(lineage);
-
-    const card = await evidence.insert({
-      evidenceId: randomUUID(),
-      claimId: claim.claimId,
-      sourceId: null,
-      submittedBy: submitterId,
-      evidenceType: 'report',
-      relationshipType: 'supports',
-      contributionId: null,
-      citationUrlOrRef: 'https://example.com/minutes',
-      relevanceNote: 'The port authority minutes.',
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      storyId,
-    });
-    expect((await evidence.listByClaim(claim.claimId))[0]?.evidenceId).toBe(card.evidenceId);
-    expect(
-      (await evidence.updateVerification(card.evidenceId, 'verified'))?.verificationState,
-    ).toBe('verified');
 
     await audits.append({
       storyId,

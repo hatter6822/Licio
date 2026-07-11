@@ -200,11 +200,10 @@ describe('initWebVitals', () => {
   });
 
   it('seeds a CLS = 0 sample only when layout-shift observation attaches', () => {
-    type Listener = (list: { getEntries: () => unknown[] }) => void;
     // A browser WITHOUT layout-shift support (e.g. WebKit) must not fabricate
-    // zeros it cannot measure…
+    // zeros it cannot measure… (the observer callback arg is accepted and
+    // ignored via the implicit constructor — extra args are fine at runtime).
     class PartialPO {
-      constructor(_cb: Listener) {}
       observe(opts: { type: string }): void {
         if (opts.type === 'layout-shift') throw new Error('unsupported entry type');
       }
@@ -218,7 +217,6 @@ describe('initWebVitals', () => {
     // …while a supporting browser reports the quiet pageview's real CLS = 0
     // up front, so zero-shift pageviews reach the p75 aggregate.
     class FullPO {
-      constructor(_cb: Listener) {}
       observe(): void {}
       disconnect(): void {}
     }

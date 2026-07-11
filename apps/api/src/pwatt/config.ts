@@ -258,6 +258,15 @@ function upgradeStoredV1Config(raw: Record<string, unknown>): Record<string, unk
   if (!('citationBonus' in next)) {
     next = { ...next, citationBonus: DEFAULT_PWATT_V1_COMPONENTS_CONFIG.citationBonus };
   }
+  // Strip RETIRED contribution-weight keys (the `evidence` type left the
+  // scoring taxonomy with the EvidenceCard removal): the strict schema would
+  // otherwise reject the whole stored row and silently discard the steward's
+  // surviving tuning — exactly what this upgrader exists to prevent.
+  const weights = next['contributionWeights'];
+  if (typeof weights === 'object' && weights !== null && 'evidence' in weights) {
+    const { evidence: _retired, ...kept } = weights as Record<string, unknown>;
+    next = { ...next, contributionWeights: kept };
+  }
   return next;
 }
 

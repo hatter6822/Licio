@@ -95,8 +95,6 @@ export function submissionBodyText(story: StoryRecord): string {
       return metadata.body;
     case 'question':
       return `${metadata.question} ${metadata.context ?? ''}`.trim();
-    case 'evidence_card':
-      return metadata.relevance_note;
     case 'local_update':
       return metadata.source_or_experience_disclosure;
     case 'live_thread':

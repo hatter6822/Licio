@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Forum endpoint wire contracts (WS-G.3, SPEC §23.2/§23.3): evidence cards,
+// Forum endpoint wire contracts (WS-G.3, SPEC §23.2/§23.3): contributions,
 // feed preferences, uploads, and the link-safety blocklist.  Validated on
 // ingress AND re-validated on egress (the WS-C.1.2 boundary guarantee).
 import { z } from 'zod';
-import { evidenceCardPublicSchema, evidenceCardTypeSchema } from './claim.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
-import { citationUrlSchema, commentItemSchema, contributionPublicSchema } from './contribution.js';
+import { commentItemSchema, contributionPublicSchema } from './contribution.js';
 import { feedModeSchema } from './feed.js';
 import {
   attentionRetentionPreferenceSchema,
@@ -21,38 +20,11 @@ import {
 export const contributionCreateResponseSchema = z
   .object({
     contribution: contributionPublicSchema,
-    /** Present when an evidence card was co-created atomically (WS-G.3.2). */
-    evidence_card: evidenceCardPublicSchema.nullable(),
     /** True when this request matched an existing client_draft_id (dedup). */
     deduplicated: z.boolean(),
   })
   .strict();
 export type ContributionCreateResponse = z.infer<typeof contributionCreateResponseSchema>;
-
-// ---------------------------------------------------------------------------
-// POST /v1/evidence (WS-G.3.2).
-// ---------------------------------------------------------------------------
-
-export const evidenceCreateRequestSchema = z
-  .object({
-    claim_id: uuidSchema,
-    citation_url_or_ref: citationUrlSchema,
-    relevance_note: z.string().trim().min(1).max(500),
-    evidence_type: evidenceCardTypeSchema,
-    /** How the evidence RELATES to the claim (claim.ts relationship enum). */
-    relationship_type: z
-      .enum(['supports', 'contradicts', 'contextualizes', 'corrects', 'counterexample'])
-      .default('contextualizes'),
-    /** The contribution that introduced this card, when created standalone. */
-    contribution_id: uuidSchema.optional(),
-  })
-  .strict();
-export type EvidenceCreateRequest = z.infer<typeof evidenceCreateRequestSchema>;
-
-export const evidenceCreateResponseSchema = z
-  .object({ evidence: evidenceCardPublicSchema })
-  .strict();
-export type EvidenceCreateResponse = z.infer<typeof evidenceCreateResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // GET /v1/stories/:storyId/comments (WS-T.3.1b).

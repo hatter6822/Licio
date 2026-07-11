@@ -2,14 +2,14 @@
 //
 // Takedown intake contracts (WS-F.1.4f, SPEC §14.2/§18.1). The takedown path
 // is MANDATORY platform plumbing: anyone (a rights holder need not hold an
-// account) can file a structured request against a story, source, or evidence
-// card; requests route to the moderation queue (WS-J.2 seam) and are only
-// ACTIONED after review — a fail-open auto-removal path would itself be a
-// censorship-abuse vector (WS-F.1.4f security consideration).
+// account) can file a structured request against a story or source; requests
+// route to the moderation queue (WS-J.2 seam) and are only ACTIONED after
+// review — a fail-open auto-removal path would itself be a censorship-abuse
+// vector (WS-F.1.4f security consideration).
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 
-export const TAKEDOWN_TARGET_TYPES = ['story', 'source', 'evidence'] as const;
+export const TAKEDOWN_TARGET_TYPES = ['story', 'source'] as const;
 export type TakedownTargetType = (typeof TAKEDOWN_TARGET_TYPES)[number];
 export const takedownTargetTypeSchema = z.enum(TAKEDOWN_TARGET_TYPES);
 

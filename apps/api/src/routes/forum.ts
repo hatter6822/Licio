@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-G forum routes (SPEC §23.2): thread reading (overview/branches/subtree/
-// anchor), contribution create/edit/remove, standalone evidence cards,
-// summaries, feed preferences, uploads, the drainer blocklist, and the
-// steward surface (thread-state transitions, forum config, metrics).
+// anchor), contribution create/edit/remove, summaries, feed preferences,
+// uploads, the drainer blocklist, and the steward surface (thread-state
+// transitions, forum config, metrics).
 //
 // Every response is re-validated against the shared schema on egress (the
 // WS-C.1.2 boundary guarantee); logs and metrics carry ids and counts only.
@@ -20,9 +20,6 @@ import {
   debateArenaResponseSchema,
   debateOverrideRequestSchema,
   debatePositionUpdateSchema,
-  evidenceAddedEventSchema,
-  evidenceCreateRequestSchema,
-  evidenceCreateResponseSchema,
   feedPreferencesPatchSchema,
   feedPreferencesSchema,
   linkBlocklistResponseSchema,
@@ -38,7 +35,6 @@ import {
   storyDebatesResponseSchema,
   type ThreadSafetyState,
   type ThreadSummary,
-  TOPIC_REGISTRY,
   threadConversationStateSchema,
   threadDetailSchema,
   threadListResponseSchema,
@@ -65,7 +61,6 @@ import {
 import {
   createContribution,
   editContribution,
-  mapCardTypeToEventType,
   removeContribution,
   threadOnGlobalDirectory,
   threadReadableToUser,
@@ -691,10 +686,6 @@ export function createForumRoutes() {
             return c.json(deny(rejection.code, rejection.message), rejection.status);
           }
           const resolveAuthor = makeAuthorResolver(identity);
-          const card =
-            outcome.evidenceCardId !== null
-              ? await bundle.ingestion.evidence.getById(outcome.evidenceCardId)
-              : null;
           const thread = await bundle.ingestion.stories.getThreadById(
             outcome.contribution.threadId,
           );
@@ -770,22 +761,6 @@ export function createForumRoutes() {
           return c.json(
             contributionCreateResponseSchema.parse({
               contribution,
-              evidence_card: card
-                ? {
-                    evidence_id: card.evidenceId,
-                    claim_id: card.claimId,
-                    source_id: card.sourceId,
-                    contribution_id: card.contributionId,
-                    submitted_by: card.submittedBy,
-                    evidence_type: card.evidenceType,
-                    relationship_type: card.relationshipType,
-                    citation_url_or_ref: card.citationUrlOrRef,
-                    relevance_note: card.relevanceNote,
-                    verification_state: card.verificationState,
-                    independence_group_id: card.independenceGroupId,
-                    created_at: card.createdAt,
-                  }
-                : null,
               deduplicated: outcome.deduplicated,
             }),
             outcome.deduplicated ? 200 : 201,
@@ -854,108 +829,6 @@ export function createForumRoutes() {
             );
           }
           return c.json({ removed: true });
-        },
-      )
-
-      // --- Standalone evidence cards (WS-G.3.2) ------------------------------
-      .post(
-        '/evidence',
-        authMiddleware(),
-        requireVerifiedAccount(),
-        requireUnrestricted(),
-        zValidator('json', evidenceCreateRequestSchema),
-        async (c) => {
-          const auth = getAuth(c);
-          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-          const bundle = bundles();
-          const claim = await bundle.ingestion.claims.getById(c.req.valid('json').claim_id);
-          if (!claim)
-            return c.json(deny('unknown_claim', 'The referenced claim does not exist'), 422);
-          const request = c.req.valid('json');
-          if (request.contribution_id !== undefined) {
-            const contribution = await bundle.forum.contributions.getById(request.contribution_id);
-            if (!contribution || contribution.userId !== auth.userId) {
-              return c.json(deny('invalid_contribution', 'The contribution must be yours'), 422);
-            }
-          }
-          const card = await bundle.ingestion.evidence.insert({
-            evidenceId: randomUUID(),
-            claimId: request.claim_id,
-            sourceId: null,
-            contributionId: request.contribution_id ?? null,
-            submittedBy: auth.userId,
-            evidenceType: request.evidence_type,
-            relationshipType: request.relationship_type,
-            citationUrlOrRef: request.citation_url_or_ref,
-            relevanceNote: request.relevance_note,
-            verificationState: 'unverified',
-            independenceGroupId: claim.independenceGroupId,
-            storyId: claim.storyId,
-          });
-          bundle.forum.metrics.increment(`evidence.created.${card.evidenceType}`);
-          // The standalone path emits the SAME durable `evidence.added` the
-          // contribution co-create path does — the embedding and lifecycle
-          // consumers only see cards through that event.  The wire requires
-          // a thread id: resolve it through the claim's story; a storyless
-          // claim has no thread to attribute, so its card stays unemitted
-          // (counted, not silent).
-          const threadShell =
-            claim.storyId !== null
-              ? await bundle.ingestion.stories.getThreadByStoryId(claim.storyId)
-              : null;
-          if (threadShell) {
-            const added = evidenceAddedEventSchema.parse({
-              event_id: randomUUID(),
-              event_type: 'evidence.added',
-              timestamp: card.createdAt,
-              schema_version: '1',
-              evidence_id: card.evidenceId,
-              claim_id: card.claimId,
-              thread_id: threadShell.threadId,
-              user_id: auth.userId,
-              evidence_type: mapCardTypeToEventType(card.evidenceType),
-              source_id: null,
-              contribution_id: card.contributionId,
-              privacy_classification: 'public',
-              retention_tier: 'public_contribution',
-            });
-            const registryEntry = TOPIC_REGISTRY['evidence.added'];
-            await bundle.events.eventStore.insertMany([
-              {
-                eventId: added.event_id,
-                eventType: added.event_type,
-                topic: added.event_type,
-                timestamp: added.timestamp,
-                privacyClassification: registryEntry.privacy_classification,
-                retentionTier: registryEntry.retention_tier,
-                payload: added as unknown as Record<string, unknown>,
-                ownerUserId: auth.userId,
-                purgeAfter: null,
-              },
-            ]);
-            bundle.forum.trackBackground(bundle.events.router.publish(added));
-          } else {
-            bundle.forum.metrics.increment('evidence.created.unemitted_no_thread');
-          }
-          return c.json(
-            evidenceCreateResponseSchema.parse({
-              evidence: {
-                evidence_id: card.evidenceId,
-                claim_id: card.claimId,
-                source_id: card.sourceId,
-                contribution_id: card.contributionId,
-                submitted_by: card.submittedBy,
-                evidence_type: card.evidenceType,
-                relationship_type: card.relationshipType,
-                citation_url_or_ref: card.citationUrlOrRef,
-                relevance_note: card.relevanceNote,
-                verification_state: card.verificationState,
-                independence_group_id: card.independenceGroupId,
-                created_at: card.createdAt,
-              },
-            }),
-            201,
-          );
         },
       )
 

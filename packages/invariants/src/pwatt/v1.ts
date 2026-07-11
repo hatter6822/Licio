@@ -43,7 +43,6 @@ import { clamp01 } from './types.js';
  * `flag` is a safety action, not content participation: zero.
  */
 export const V1_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, number>> = {
-  evidence: 1,
   correction: 0.9,
   bridge_comment: 0.85,
   synthesis: 0.8,
@@ -56,12 +55,12 @@ export const V1_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, num
   low_info_reply: 0,
 };
 
-/** Validate the hierarchy ordering (evidence highest … low_info_reply zero). */
+/** Validate the hierarchy ordering (correction highest … low_info_reply zero;
+ *  sourced comments earn the citation bonus on top of their type weight). */
 export function assertV1HierarchyOrder(
   weights: Readonly<Record<EventContributionType, number>> = V1_CONTRIBUTION_WEIGHTS,
 ): void {
   const order: EventContributionType[] = [
-    'evidence',
     'correction',
     'synthesis',
     'question',

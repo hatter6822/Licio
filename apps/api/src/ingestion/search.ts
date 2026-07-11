@@ -42,7 +42,7 @@ export function decodeSearchCursor(
 
 /** One indexable document (the in-memory analogue of a tsvector row). */
 export interface SearchDocument {
-  resultType: 'story' | 'claim' | 'evidence';
+  resultType: 'story' | 'claim';
   id: string;
   storyId: string | null;
   title: string;

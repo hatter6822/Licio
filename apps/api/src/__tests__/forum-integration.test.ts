@@ -193,9 +193,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     const dbSchema = await import('@licio/db');
     const { inArray } = await import('drizzle-orm');
     if (storyIds.length > 0) {
-      await db
-        .delete(dbSchema.evidenceCards)
-        .where(inArray(dbSchema.evidenceCards.storyId, storyIds));
       await db.delete(dbSchema.claims).where(inArray(dbSchema.claims.storyId, storyIds));
       await db.delete(dbSchema.threads).where(inArray(dbSchema.threads.storyId, storyIds));
       await db.delete(dbSchema.stories).where(inArray(dbSchema.stories.storyId, storyIds));
@@ -234,10 +231,15 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         body: 'Table 3 of the labor report.',
         parentContributionId: rootId,
         path: [rootId],
+        // The OPTIONAL claim linkage round-trips through the live FK.
+        targetClaimId: claimId,
       }),
     );
     expect(child.ok).toBe(true);
     if (!child.ok) return;
+    expect((await contributions.getById(child.contribution.contributionId))?.targetClaimId).toBe(
+      claimId,
+    );
     const grandchild = await contributions.insert(
       contributionInput({
         type: 'question',
@@ -315,59 +317,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     );
     const afterHide = await contributions.childCounts([child.contribution.contributionId]);
     expect(afterHide.get(child.contribution.contributionId)).toBe(0);
-  });
-
-  it('co-creates the evidence card transactionally — both persist or neither', async () => {
-    const { evidenceCards } = await import('@licio/db');
-    const { eq } = await import('drizzle-orm');
-    const good = contributionInput({
-      type: 'evidence',
-      body: 'Primary dataset for the claim.',
-      citations: [{ url: 'https://example.org/data' }],
-      targetClaimId: claimId,
-    });
-    const evidenceId = randomUUID();
-    const created = await contributions.insert(good, {
-      evidenceId,
-      claimId,
-      sourceId: null,
-      submittedBy: authorId,
-      evidenceType: 'dataset',
-      relationshipType: 'supports',
-      citationUrlOrRef: 'https://example.org/data',
-      relevanceNote: 'Primary dataset for the claim.',
-      independenceGroupId: null,
-      storyId: storyIds[0] ?? null,
-      contributionId: good.contributionId,
-    });
-    expect(created.ok).toBe(true);
-    const card = await db
-      .select()
-      .from(evidenceCards)
-      .where(eq(evidenceCards.evidenceId, evidenceId));
-    expect(card[0]?.contributionId).toBe(good.contributionId);
-    expect(card[0]?.evidenceType).toBe('dataset');
-    expect(card[0]?.relationshipType).toBe('supports');
-
-    // Failure path: an unknown claim id violates the FK INSIDE the
-    // transaction — the contribution must not survive the rollback.
-    const bad = contributionInput({ type: 'evidence', targetClaimId: claimId });
-    await expect(
-      contributions.insert(bad, {
-        evidenceId: randomUUID(),
-        claimId: randomUUID(), // no such claim
-        sourceId: null,
-        submittedBy: authorId,
-        evidenceType: 'report',
-        relationshipType: 'supports',
-        citationUrlOrRef: 'https://example.org/x',
-        relevanceNote: 'x',
-        independenceGroupId: null,
-        storyId: null,
-        contributionId: bad.contributionId,
-      }),
-    ).rejects.toThrow();
-    expect(await contributions.getById(bad.contributionId)).toBeNull();
   });
 
   it('snapshots edits append-only and tracks edit_history_ref', async () => {
@@ -560,13 +509,13 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       status: 'active',
       requestId: randomUUID(), // ignored on conflict — the original survives
       lensId: null,
-      notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES, new_evidence: true },
+      notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES, bridge_requests: true },
       requestedAt,
       joinedAt: new Date().toISOString(),
     });
     expect(activated.status).toBe('active');
     expect(activated.requestId).toBe(requestId);
-    expect(activated.notificationPreferences.new_evidence).toBe(true);
+    expect(activated.notificationPreferences.bridge_requests).toBe(true);
     expect(await roomsStore.countMembers(room.roomId)).toBe(1);
     // Eligible voters = active subscribers ∪ stewards: authorId (active sub) +
     // secondUserId (community_steward, no active subscription) = 2 distinct, so a
@@ -592,7 +541,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     const withLens = await roomsStore.setSubscriptionLens(room.roomId, authorId, lensId);
     expect(withLens?.lensId).toBe(lensId);
     expect(withLens?.status).toBe('active');
-    expect(withLens?.notificationPreferences.new_evidence).toBe(true);
+    expect(withLens?.notificationPreferences.bridge_requests).toBe(true);
     expect((await roomsStore.getSubscription(room.roomId, authorId))?.lensId).toBe(lensId);
     expect((await roomsStore.setSubscriptionLens(room.roomId, authorId, null))?.lensId).toBeNull();
     expect(await roomsStore.setSubscriptionLens(room.roomId, secondUserId, lensId)).toBeNull();

@@ -38,15 +38,32 @@ import type { StoryRecord } from '../ingestion/stores.js';
 // MERI (WS-H.2): candidate exposures with grouping inputs
 // ---------------------------------------------------------------------------
 
+/** A stable evidence-lineage token for one citation URL: `cit:<host>` for an
+ *  http(s) citation (lowercased, `www.` stripped), `cit:doi:<prefix>` for a
+ *  doi: reference; null for anything unparseable (never throws). */
+export function citationDomainToken(url: string): string | null {
+  const doi = /^doi:(10\.\d{4,9})\//i.exec(url);
+  if (doi?.[1]) return `cit:doi:${doi[1]}`;
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return host.length > 0 ? `cit:${host}` : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Build MERI candidates for a topic (or the recent feed pool when topicId is
  * null): near-duplicate groups from MinHash signatures (union by estimated
  * Jaccard ≥ threshold over LSH-band candidates), source-lineage groups from
  * confirmed syndication edges + shared publisher lineage, evidence groups
- * from claim independence groups.
+ * from the CITATION DOMAINS of each story thread's sourced contributions
+ * (comment-centric sourcing: two stories whose discussions cite the same
+ * registrable host share an evidence lineage, §13.6).
  */
 export async function assembleMeriCandidates(
   ingestion: IngestionServices,
+  forum: Pick<ForumServices, 'contributions'> | null,
   topicId: string | null,
   limit: number,
   nearDuplicateThreshold: number,
@@ -177,10 +194,11 @@ export async function assembleMeriCandidates(
     return members.length >= 2 ? `src-${root}` : null;
   };
 
-  // Evidence/claim groups from claim independence grouping. `claimGroupsOf` /
-  // `evidenceGroupsOf` collect ALL distinct independence groups per story (the
-  // §7.4 dimensional inputs); the scalar `*GroupOf` keep the first for the
-  // matroid partition (unchanged behaviour).
+  // Claim groups from claim independence grouping; evidence groups from the
+  // CITATION DOMAINS of the story thread's sourced contributions (WS-T
+  // comment-centric sourcing). `claimGroupsOf` / `evidenceGroupsOf` collect
+  // ALL distinct groups per story (the §7.4 dimensional inputs); the scalar
+  // `*GroupOf` keep the first for the matroid partition.
   const claimGroupOf = new Map<string, string | null>();
   const evidenceGroupOf = new Map<string, string | null>();
   const claimGroupsOf = new Map<string, string[]>();
@@ -190,21 +208,32 @@ export async function assembleMeriCandidates(
     const firstClaimGroup = claims.find((c) => c.independenceGroupId)?.independenceGroupId ?? null;
     claimGroupOf.set(story.storyId, firstClaimGroup);
     const claimGroups = new Set<string>();
-    const evidenceGroups = new Set<string>();
-    let evidenceGroup: string | null = null;
     for (const claim of claims) {
       if (claim.independenceGroupId) claimGroups.add(claim.independenceGroupId);
-      const cards = await ingestion.evidence.listByClaim(claim.claimId);
-      for (const card of cards) {
-        if (card.independenceGroupId) evidenceGroups.add(card.independenceGroupId);
-      }
-      if (evidenceGroup === null) {
-        evidenceGroup = cards.find((card) => card.independenceGroupId)?.independenceGroupId ?? null;
+    }
+    claimGroupsOf.set(story.storyId, [...claimGroups]);
+    // Citation-domain evidence lineage: each cited registrable host is a
+    // stable, cross-story token (`cit:<host>`); a doi: reference maps to the
+    // DOI prefix. Sorted for determinism; bounded to keep the vector compact.
+    const citationDomains = new Set<string>();
+    if (forum !== null) {
+      const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+      if (thread !== null) {
+        const contributions = await forum.contributions.listByThread(thread.threadId, {
+          states: ['published'],
+          limit: 500,
+        });
+        for (const contribution of contributions) {
+          for (const citation of contribution.citations) {
+            const token = citationDomainToken(citation.url);
+            if (token !== null) citationDomains.add(token);
+          }
+        }
       }
     }
-    evidenceGroupOf.set(story.storyId, evidenceGroup);
-    claimGroupsOf.set(story.storyId, [...claimGroups]);
-    evidenceGroupsOf.set(story.storyId, [...evidenceGroups]);
+    const domains = [...citationDomains].sort().slice(0, 8);
+    evidenceGroupOf.set(story.storyId, domains[0] ?? null);
+    evidenceGroupsOf.set(story.storyId, domains);
   }
 
   return stories.map((story) => {
@@ -270,7 +299,7 @@ export interface MfciActionWindow {
   rawActions: Array<{ actorRef: string; targetId: string; atMs: number }>;
 }
 
-const MFCI_TOPICS = ['contribution.created', 'evidence.added', 'content.submitted'] as const;
+const MFCI_TOPICS = ['contribution.created', 'content.submitted'] as const;
 
 /** Account-age bucket as the privacy-preserving user_group dimension. */
 function accountAgeBucket(createdAtMs: number, nowMs: number): string {
@@ -474,6 +503,9 @@ export async function assembleCohorts(
     const cached = enrichmentCache.get(storyId);
     if (cached) return cached;
     let discussionDepth = 0;
+    // Comment-centric sourcing: the "evidence access" dimension reads the
+    // thread's SOURCED contributions (comments carrying ≥1 citation).
+    let hasPrimaryEvidence = false;
     const lensKeys = new Set<string>();
     const thread = await ingestion.stories.getThreadByStoryId(storyId);
     if (thread) {
@@ -482,15 +514,9 @@ export async function assembleCohorts(
       });
       for (const contribution of contributions) {
         discussionDepth = Math.max(discussionDepth, contribution.path.length);
+        if (contribution.citations.length > 0) hasPrimaryEvidence = true;
         const lensId = contribution.metadata['lens_id'];
         if (typeof lensId === 'string' && lensId.length > 0) lensKeys.add(lensId);
-      }
-    }
-    let hasPrimaryEvidence = false;
-    for (const claim of await ingestion.claims.listByStory(storyId)) {
-      if ((await ingestion.evidence.listByClaim(claim.claimId)).length > 0) {
-        hasPrimaryEvidence = true;
-        break;
       }
     }
     const enriched = { discussionDepth, lensKeys: [...lensKeys].sort(), hasPrimaryEvidence };

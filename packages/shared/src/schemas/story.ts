@@ -152,17 +152,6 @@ export const questionMetadataSchema = z
   })
   .strict();
 
-export const evidenceCardMetadataSchema = z
-  .object({
-    submission_type: z.literal('evidence_card'),
-    /** Citation URL or a structured reference (book, filing, dataset id). */
-    citation_url_or_ref: z.string().min(1).max(2048),
-    /** Must reference an EXISTING claim — validated server-side (WS-F.1.2a). */
-    claim_id: uuidSchema,
-    relevance_note: z.string().min(1).max(2_000),
-  })
-  .strict();
-
 export const localUpdateMetadataSchema = z
   .object({
     submission_type: z.literal('local_update'),
@@ -230,7 +219,6 @@ export const submissionMetadataSchema = z.discriminatedUnion('submission_type', 
   linkMetadataSchema,
   originalBriefMetadataSchema,
   questionMetadataSchema,
-  evidenceCardMetadataSchema,
   localUpdateMetadataSchema,
   liveThreadMetadataSchema,
   imageMetadataSchema,
@@ -260,7 +248,7 @@ const storyCreateBaseShape = {
   location_scope: locationScopeSchema.nullable().optional(),
   // WS-Q.1.3a — every content item is posted in exactly one home room
   // (§3.4): `room_id` is REQUIRED on every branch (the `.extend()` below
-  // propagates it to all eight). `visibility` is OPTIONAL on input — the
+  // propagates it to every member). `visibility` is OPTIONAL on input — the
   // server DERIVES it via `deriveStoryVisibility` (a private room forces
   // `room_only`; a public room honors the request, default `public`).
   room_id: uuidSchema,
@@ -271,7 +259,6 @@ export const storyCreateRequestSchema = z.discriminatedUnion('submission_type', 
   linkMetadataSchema.extend(storyCreateBaseShape),
   originalBriefMetadataSchema.extend(storyCreateBaseShape),
   questionMetadataSchema.extend(storyCreateBaseShape),
-  evidenceCardMetadataSchema.extend(storyCreateBaseShape),
   // `location_scope` is REQUIRED for local updates (the base makes it
   // optional, so it is re-tightened after the extend).
   localUpdateMetadataSchema.extend(storyCreateBaseShape).extend({

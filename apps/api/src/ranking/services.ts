@@ -222,12 +222,10 @@ export function createCandidateDataPorts(
     async hasHumanSummary() {
       return false;
     },
-    async evidenceCountByStory(storyId) {
-      let count = 0;
-      for (const claim of await ingestion.claims.listByStory(storyId)) {
-        count += (await ingestion.evidence.listByClaim(claim.claimId)).length;
-      }
-      return count;
+    async sourcedCountByStory(storyId) {
+      const thread = await ingestion.stories.getThreadByStoryId(storyId);
+      if (thread === null) return 0;
+      return forum.contributions.countSourced(thread.threadId, ['published']);
     },
     async userLocale(userId) {
       const user = await identity.store.getUser(userId);
@@ -427,6 +425,7 @@ function featureAssemblyDeps(services: RankingServices): FeatureAssemblyDeps {
     events: services.events,
     ingestion: services.ingestion,
     invariants: services.invariants,
+    forum: services.forum,
     featureStore: services.featureStore,
     log: services.log,
     now: services.now,

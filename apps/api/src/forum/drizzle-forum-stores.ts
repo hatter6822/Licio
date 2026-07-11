@@ -5,9 +5,9 @@
 // integration tests (DATABASE_URL) run these against the real migration
 // chain.  Semantics mirrored from the in-memory adapters exactly:
 //
-//   • contribution insert is transactional WITH the evidence card and
-//     race-safe on the `(user_id, client_draft_id)` partial unique index
-//     (a 23505 resolves to the existing row, duplicate: true);
+//   • contribution insert is race-safe on the `(user_id, client_draft_id)`
+//     partial unique index (a 23505 resolves to the existing row,
+//     duplicate: true);
 //   • subtree reads use the GIN path-containment index (path ⊇ [rootId]);
 //   • room creation maps the case-insensitive name / slug unique indexes to
 //     conflict outcomes (the API's 409).
@@ -25,7 +25,6 @@ import type { DbExecutor } from '@licio/db';
 import {
   contributionEditHistory,
   contributions as contributionsTable,
-  evidenceCards as evidenceTable,
   lenses as lensesTable,
   roomStewards as roomStewardsTable,
   roomSubscriptions as roomSubscriptionsTable,
@@ -50,7 +49,6 @@ import type {
   ContributionRecord,
   ContributionStore,
   CreatedAtCursor,
-  ForumEvidenceCardInput,
   LensCreateOutcome,
   LensRecord,
   LensStore,
@@ -103,10 +101,9 @@ function uniqueViolationConstraint(error: unknown): string {
 // sort AFTER everything else so a debate's loser stays visible-but-sunk.
 const SINK_EXPR = sql`(case when ${contributionsTable.disputeStatus} = 'incorrect' then 1 else 0 end)`;
 
-// WS-T: a SOURCED root — an `evidence` card OR a comment carrying ≥1 citation
-// (the "Sources" view is more than the `evidence` type).  Mirrors `isSourcedRow`
+// WS-T: a SOURCED root — a comment carrying ≥1 citation.  Mirrors `isSourcedRow`
 // in the in-memory adapter exactly.
-const SOURCED_EXPR = sql`(${contributionsTable.type} = 'evidence' or (${contributionsTable.type} = 'comment' and coalesce(jsonb_array_length(${contributionsTable.citations}), 0) > 0))`;
+const SOURCED_EXPR = sql`(${contributionsTable.type} = 'comment' and coalesce(jsonb_array_length(${contributionsTable.citations}), 0) > 0)`;
 
 /** Composite keyset over (sink, created_at, id): rows strictly after `after`.
  *  Mixed directions (sink asc, chronological per order) can't be a single
@@ -168,7 +165,6 @@ export class DrizzleContributionStore implements ContributionStore {
       ContributionRecord,
       'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
     >,
-    evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome> {
     try {
       // Explicit millisecond-precision timestamps (not SQL now()): keyset
@@ -176,46 +172,26 @@ export class DrizzleContributionStore implements ContributionStore {
       // carry milliseconds — a microsecond-precision default would make the
       // cursor row reappear on the next page (gated-test-proven).
       const now = new Date();
-      const inserted = await this.#db.transaction(async (tx) => {
-        const rows = await tx
-          .insert(contributionsTable)
-          .values({
-            contributionId: record.contributionId,
-            threadId: record.threadId,
-            userId: record.userId,
-            type: record.type,
-            body: record.body,
-            citations: record.citations,
-            metadata: record.metadata,
-            targetClaimId: record.targetClaimId,
-            parentContributionId: record.parentContributionId,
-            clientDraftId: record.clientDraftId,
-            path: record.path,
-            moderationState: record.moderationState,
-            createdAt: now,
-            updatedAt: now,
-          })
-          .returning();
-        if (evidenceCard) {
-          await tx.insert(evidenceTable).values({
-            evidenceId: evidenceCard.evidenceId,
-            claimId: evidenceCard.claimId,
-            sourceId: evidenceCard.sourceId,
-            contributionId: evidenceCard.contributionId,
-            submittedBy: evidenceCard.submittedBy,
-            evidenceType: evidenceCard.evidenceType,
-            relationshipType: evidenceCard.relationshipType,
-            citationUrlOrRef: evidenceCard.citationUrlOrRef,
-            relevanceNote: evidenceCard.relevanceNote,
-            verificationState: 'unverified',
-            independenceGroupId: evidenceCard.independenceGroupId,
-            storyId: evidenceCard.storyId,
-            createdAt: now,
-            updatedAt: now,
-          });
-        }
-        return rows[0];
-      });
+      const rows = await this.#db
+        .insert(contributionsTable)
+        .values({
+          contributionId: record.contributionId,
+          threadId: record.threadId,
+          userId: record.userId,
+          type: record.type,
+          body: record.body,
+          citations: record.citations,
+          metadata: record.metadata,
+          targetClaimId: record.targetClaimId,
+          parentContributionId: record.parentContributionId,
+          clientDraftId: record.clientDraftId,
+          path: record.path,
+          moderationState: record.moderationState,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const inserted = rows[0];
       if (!inserted) return { ok: false, reason: 'storage_conflict' };
       return { ok: true, contribution: this.#toRecord(inserted), duplicate: false };
     } catch (error) {
@@ -503,16 +479,12 @@ export class DrizzleContributionStore implements ContributionStore {
   }
 
   async purgeForRollback(contributionId: string): Promise<void> {
-    // Reverse the insert transaction: drop the co-created evidence card (no FK
-    // cascade — it references the contribution by id only) and the contribution
-    // row (its edit-history rows cascade).  Deleting the row also clears the
-    // `client_draft_id` dedup key, so the client's retry recreates row + intake.
-    await this.#db.transaction(async (tx) => {
-      await tx.delete(evidenceTable).where(eq(evidenceTable.contributionId, contributionId));
-      await tx
-        .delete(contributionsTable)
-        .where(eq(contributionsTable.contributionId, contributionId));
-    });
+    // Reverse the insert: drop the contribution row (its edit-history rows
+    // cascade).  Deleting the row also clears the `client_draft_id` dedup key,
+    // so the client's retry recreates row + intake.
+    await this.#db
+      .delete(contributionsTable)
+      .where(eq(contributionsTable.contributionId, contributionId));
   }
 
   async listByUser(
@@ -562,23 +534,13 @@ export class DrizzleContributionStore implements ContributionStore {
   async purgeByThreads(threadIds: readonly string[]): Promise<number> {
     if (threadIds.length === 0) return 0;
     // IRREVERSIBLE room-wide purge (§24.2 phase 6): drop every contribution of
-    // the given threads (any author/state) WITH its co-created evidence card and
-    // edit history. Single transaction so a partial failure leaves nothing
-    // half-removed. Evidence cards reference the contribution by id (no FK
-    // cascade); edit-history rows DO cascade off the contribution delete.
-    return this.#db.transaction(async (tx) => {
-      const ids = await tx
-        .select({ id: contributionsTable.contributionId })
-        .from(contributionsTable)
-        .where(inArray(contributionsTable.threadId, [...threadIds]));
-      const contributionIds = ids.map((row) => row.id);
-      if (contributionIds.length === 0) return 0;
-      await tx.delete(evidenceTable).where(inArray(evidenceTable.contributionId, contributionIds));
-      await tx
-        .delete(contributionsTable)
-        .where(inArray(contributionsTable.threadId, [...threadIds]));
-      return contributionIds.length;
-    });
+    // the given threads (any author/state) WITH its edit history (edit-history
+    // rows cascade off the contribution delete).
+    const rows = await this.#db
+      .delete(contributionsTable)
+      .where(inArray(contributionsTable.threadId, [...threadIds]))
+      .returning({ id: contributionsTable.contributionId });
+    return rows.length;
   }
 
   async listLensTagged(threadIds: readonly string[], limit: number): Promise<ContributionRecord[]> {

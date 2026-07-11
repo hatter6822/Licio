@@ -114,21 +114,21 @@ const count = z.number().int().nonnegative();
 
 // --- Positive signals -------------------------------------------------------
 
-export const TPL_EVIDENCE_RISING = defineTemplate({
-  templateId: 'positive.evidence_rising',
+export const TPL_SOURCES_RISING = defineTemplate({
+  templateId: 'positive.sources_rising',
   category: 'positive',
   signalType: 'constructive_participation',
   priority: 90,
-  i18nKey: 'explain.positive.evidence_rising',
-  paramsSchema: z.object({ roomCount: count.min(1), evidenceCount: count.min(1) }).strict(),
+  i18nKey: 'explain.positive.sources_rising',
+  paramsSchema: z.object({ roomCount: count.min(1), sourcedCount: count.min(1) }).strict(),
   // Room counts are only CLAIMED when genuinely multi-room (threads are
   // currently 1:1 with stories, so roomCount is usually 1 — the single-room
   // variant makes no count claim rather than saying "readers in 1 room").
-  render: ({ roomCount, evidenceCount }) => {
-    const cards = `${evidenceCount} independent ${evidenceCount === 1 ? 'evidence card' : 'evidence cards'}`;
+  render: ({ roomCount, sourcedCount }) => {
+    const sources = `${sourcedCount} sourced ${sourcedCount === 1 ? 'comment' : 'comments'}`;
     return roomCount > 1
-      ? `Rising because readers in ${roomCount} rooms opened the source and added ${cards}.`
-      : `Rising because readers opened the source and added ${cards}.`;
+      ? `Rising because readers in ${roomCount} rooms opened the source and added ${sources}.`
+      : `Rising because readers opened the source and added ${sources}.`;
   },
 });
 
@@ -297,7 +297,7 @@ export const TPL_CHRONOLOGICAL = defineTemplate({
 export const EXPLANATION_TEMPLATES: ReadonlyMap<string, ExplanationTemplate<never>> = new Map(
   (
     [
-      TPL_EVIDENCE_RISING,
+      TPL_SOURCES_RISING,
       TPL_SOURCE_OPENS,
       TPL_INDEPENDENT_SOURCE,
       TPL_BRIDGE_ACTIVE,

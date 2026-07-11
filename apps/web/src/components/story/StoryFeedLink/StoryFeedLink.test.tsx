@@ -39,7 +39,7 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     source: 'Delta Observer',
     origin: 'independent',
     reading_minutes: 4,
-    rating_label: 'well-sourced',
+    rating_label: 'deepening',
     distribution_reason: 'Rising from independent source opens',
     context_chips: [],
     safety_state: 'ok',

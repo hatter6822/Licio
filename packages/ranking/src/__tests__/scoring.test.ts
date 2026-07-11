@@ -200,61 +200,44 @@ describe('WS-I.2.3d baseline', () => {
     expect(topicRelevance(['a'], [])).toBe(0);
   });
 
-  it('source reliability: diversity/citations raise it; correction frequency and notes dampen GENTLY', () => {
+  it('source reliability: citations raise it; correction frequency and notes dampen GENTLY', () => {
     // Inputs are exactly the WS-F §14.3 profile aggregates (the record has
     // no acknowledgment field — frequency is the real correction signal).
-    const diverse = sourceReliabilityFromHistory({
-      corrections: 0,
-      evidenceTypeCount: 4,
-      communityNotes: 0,
-      citationCount: 0,
-    });
-    expect(diverse).toBeGreaterThan(NEUTRAL_SOURCE_RELIABILITY);
     const cited = sourceReliabilityFromHistory({
       corrections: 0,
-      evidenceTypeCount: 4,
       communityNotes: 0,
       citationCount: 8,
     });
-    expect(cited).toBeGreaterThan(diverse);
+    expect(cited).toBeGreaterThan(NEUTRAL_SOURCE_RELIABILITY);
     const corrected = sourceReliabilityFromHistory({
       corrections: 6,
-      evidenceTypeCount: 4,
       communityNotes: 0,
-      citationCount: 0,
+      citationCount: 8,
     });
-    expect(corrected).toBeLessThan(diverse);
+    expect(corrected).toBeLessThan(cited);
     expect(corrected).toBeGreaterThan(0.3); // corrections dampen MILDLY (transparency virtue)
     const noted = sourceReliabilityFromHistory({
       corrections: 0,
-      evidenceTypeCount: 4,
       communityNotes: 16,
-      citationCount: 0,
+      citationCount: 8,
     });
-    expect(noted).toBeLessThan(diverse);
+    expect(noted).toBeLessThan(cited);
     expect(noted).toBeGreaterThan(0);
     // No history at all ⇒ exactly neutral.
     expect(
-      sourceReliabilityFromHistory({
-        corrections: 0,
-        evidenceTypeCount: 0,
-        communityNotes: 0,
-        citationCount: 0,
-      }),
+      sourceReliabilityFromHistory({ corrections: 0, communityNotes: 0, citationCount: 0 }),
     ).toBe(NEUTRAL_SOURCE_RELIABILITY);
-    // Monotone in diversity and citations; antitone in corrections/notes.
+    // Monotone in citations; antitone in corrections/notes.
     for (let k = 0; k < 6; k += 1) {
       const lower = sourceReliabilityFromHistory({
         corrections: 0,
-        evidenceTypeCount: k,
         communityNotes: 0,
-        citationCount: 0,
+        citationCount: k,
       });
       const higher = sourceReliabilityFromHistory({
         corrections: 0,
-        evidenceTypeCount: k + 1,
         communityNotes: 0,
-        citationCount: 0,
+        citationCount: k + 1,
       });
       expect(higher).toBeGreaterThanOrEqual(lower);
     }

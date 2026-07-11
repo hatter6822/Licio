@@ -66,7 +66,6 @@ describe('content events (WS-E.1.1a)', () => {
         'link',
         'original_brief',
         'question',
-        'evidence_card',
         'local_update',
         'live_thread',
         'image_post',

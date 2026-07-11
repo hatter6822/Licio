@@ -6,7 +6,6 @@
 //   1. per-account submission rate limit (429 + Retry-After)
 //   2. account-age + spam-pattern + URL-safety pre-checks (403)
 //   3. URL normalization (400 on malformed/unsupported)
-//   4. evidence-card claim-reference existence (400)
 //   5. exact-URL duplicate (409 + the existing story id — WS-F.1.3b; the
 //      duplicate shape is identical whether or not the requester could see
 //      the existing story: no visibility oracle)
@@ -24,10 +23,8 @@ import {
   contentSubmittedEventSchema,
   DEFAULT_TRACKER_DENYLIST,
   deriveStoryVisibility,
-  evidenceAddedEventSchema,
   normalizeUrl,
   type StoryCreateRequest,
-  TOPIC_REGISTRY,
   type TrackerDenylist,
   UNCLASSIFIED_TOPIC_ID,
 } from '@licio/shared';
@@ -87,13 +84,6 @@ function metadataOf(request: StoryCreateRequest): StoryRecord['submissionMetadat
         submission_type: 'question',
         question: request.question,
         ...(request.context !== undefined ? { context: request.context } : {}),
-      };
-    case 'evidence_card':
-      return {
-        submission_type: 'evidence_card',
-        citation_url_or_ref: request.citation_url_or_ref,
-        claim_id: request.claim_id,
-        relevance_note: request.relevance_note,
       };
     case 'local_update':
       return {
@@ -360,21 +350,6 @@ export async function submitStory(
     };
   }
 
-  // 4. Evidence cards must reference an EXISTING claim (WS-F.1.4b).
-  if (request.submission_type === 'evidence_card') {
-    const claim = await ingestion.claims.getById(request.claim_id);
-    if (claim === null) {
-      return {
-        ok: false,
-        rejection: {
-          status: 400,
-          code: 'unknown_claim',
-          message: 'The referenced claim_id does not exist',
-        },
-      };
-    }
-  }
-
   // 7. Media intake (WS-Q.2.3a/e): image/video posts anchor a previously
   //    uploaded, scan-gated, metadata-stripped object. Verify it exists, is
   //    OWNED by the submitter, is the right media type, and is not already
@@ -628,99 +603,6 @@ export async function submitStory(
       notBefore: null,
     });
     ingestion.metrics.increment('submission.media_held_for_scan');
-  }
-
-  // 6b. Evidence-card submissions create the actual EvidenceCard row in the
-  //     same request (WS-F.2.5a), then emit `evidence.added` so the
-  //     `ingestion-embeddings` consumer generates the card's vector
-  //     (WS-F.3.2c) — durable insert now, publication DETACHED so embedding
-  //     latency never delays the 201 (crash recovery = checkpoint replay,
-  //     the content.submitted pattern).
-  if (request.submission_type === 'evidence_card') {
-    // Resolve a WEB citation to an in-app source so the §14.3 evidence-type
-    // frequency populates (WS-F.2.1a); a non-web citation (book, filing,
-    // dataset id) stays source-less — "user-experience evidence" (WS-F.2.5a).
-    let evidenceSourceId: string | null = null;
-    const citation = normalizeUrl(
-      request.citation_url_or_ref,
-      effectiveTrackerDenylist(config.extraTrackerParams),
-    );
-    if (citation.ok) {
-      const citationSource = await ingestion.sources.upsertByDomain(citation.canonicalDomain, {
-        name: citation.canonicalDomain,
-      });
-      evidenceSourceId = citationSource.sourceId;
-    }
-    const card = await ingestion.evidence.insert({
-      evidenceId: randomUUID(),
-      claimId: request.claim_id,
-      sourceId: evidenceSourceId,
-      contributionId: null,
-      submittedBy: userId,
-      // The §14.1 evidence-card submission carries no MATERIAL type and no
-      // relationship direction; `report` and `contextualizes` are the
-      // neutral defaults (asserting `supports` would fabricate a stance).
-      // WS-G's evidence composer attaches both dimensions explicitly.
-      evidenceType: 'report',
-      relationshipType: 'contextualizes',
-      citationUrlOrRef: request.citation_url_or_ref,
-      relevanceNote: request.relevance_note,
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      storyId: created.story.storyId,
-    });
-    // Bump the source's §14.3 evidence-type frequency by the card's
-    // relationship type (the field that was otherwise never populated).
-    if (evidenceSourceId !== null) {
-      await ingestion.sources.recordObservation(evidenceSourceId, {
-        evidenceType: 'contextualizes',
-      });
-    }
-    // Attribute the material-update signal to the discussion the CLAIM lives
-    // in: the ingestion-signals consumer resolves thread_id → story → freshness
-    // /lifecycle, so evidence added to an existing claim must advance the story
-    // CONTAINING that claim, not the new evidence-card shell. A story-less
-    // (cross-story) claim falls back to the shell thread.
-    const referencedClaim = await ingestion.claims.getById(request.claim_id);
-    let evidenceThreadId = created.thread.threadId;
-    if (referencedClaim?.storyId != null) {
-      const claimThread = await ingestion.stories.getThreadByStoryId(referencedClaim.storyId);
-      if (claimThread !== null) evidenceThreadId = claimThread.threadId;
-    }
-    // The WS-E `evidence.added` event carries the MATERIAL taxonomy (what the
-    // evidence IS), distinct from the card's RELATIONSHIP type; a §14.1
-    // submission gives no material classification, so `other` is the honest
-    // default (the governed classifier is the WS-K seam).
-    const evidenceEvent = evidenceAddedEventSchema.parse({
-      event_id: randomUUID(),
-      event_type: 'evidence.added',
-      timestamp: created.story.createdAt,
-      schema_version: '1',
-      evidence_id: card.evidenceId,
-      claim_id: card.claimId,
-      thread_id: evidenceThreadId,
-      user_id: userId,
-      evidence_type: 'other',
-      source_id: evidenceSourceId,
-      contribution_id: null,
-      privacy_classification: 'public',
-      retention_tier: 'public_contribution',
-    });
-    const evidenceRegistryEntry = TOPIC_REGISTRY['evidence.added'];
-    await events.eventStore.insertMany([
-      {
-        eventId: evidenceEvent.event_id,
-        eventType: evidenceEvent.event_type,
-        topic: evidenceEvent.event_type,
-        timestamp: evidenceEvent.timestamp,
-        privacyClassification: evidenceRegistryEntry.privacy_classification,
-        retentionTier: evidenceRegistryEntry.retention_tier,
-        payload: evidenceEvent as unknown as Record<string, unknown>,
-        ownerUserId: userId,
-        purgeAfter: null,
-      },
-    ]);
-    ingestion.trackBackground(events.router.publish(evidenceEvent));
   }
 
   // 7. SYNC near-duplicate pass — ONLY for stories whose text is COMPLETE at

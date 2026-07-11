@@ -99,7 +99,6 @@ export function buildAuthorHistoryReader(deps: AuthorHistoryReaderDeps): AuthorH
 }
 
 function contentKindOf(type: ContributionType): ModerationContext['contentKind'] {
-  if (type === 'evidence') return 'evidence';
   if (type === 'correction') return 'correction';
   return 'comment';
 }

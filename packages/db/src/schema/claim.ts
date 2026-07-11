@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Claim + EvidenceCard entities (WS-F.1.2a / WS-F.2.5a, SPEC §22.1/§22.3/
-// §21.1). The `independence_group_id` SHARED between claims and evidence
-// cards is the MERI grouping key (WS-H.2): non-independent lineages carry one
-// group id so duplicated claims/evidence can never count as independent
-// validation (§13.6). Claim↔evidence links are navigable in BOTH directions
-// (claim → cards via the claim_id index; card → claim via the FK).
+// Claim entity (WS-F.1.2a, SPEC §22.1/§22.3/§21.1). `independence_group_id`
+// is the MERI grouping key (WS-H.2): non-independent lineages carry one group
+// id so duplicated claims can never count as independent validation (§13.6).
+// The former `evidence_cards` table was dropped with the EvidenceCard entity
+// (sourcing is comment-centric citations on contributions; migration 0045).
 //
-// Both tables carry generated full-text columns (WS-F.3.1a) so claims and
-// evidence cards are searchable alongside stories.
+// The table carries a generated full-text column (WS-F.3.1a) so claims are
+// searchable alongside stories.
 import { sql } from 'drizzle-orm';
 import {
   check,
@@ -21,7 +20,6 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { tsvector } from './_custom.js';
-import { sources } from './source.js';
 import { stories } from './story.js';
 import { users } from './user.js';
 
@@ -50,7 +48,7 @@ export const claims = pgTable(
     normalizedTextHash: text('normalized_text_hash').notNull(),
     claimStatus: claimRecordStatusEnum('claim_status').notNull().default('candidate'),
     firstSeenStoryId: uuid('first_seen_story_id').references(() => stories.storyId),
-    /** MERI grouping key shared with evidence_cards (§13.6). */
+    /** MERI grouping key (§13.6). */
     independenceGroupId: uuid('independence_group_id'),
     /** Null for system-extracted claims; attribution/moderation only. */
     createdBy: uuid('created_by').references(() => users.userId, { onDelete: 'set null' }),
@@ -86,93 +84,3 @@ export const claims = pgTable(
 
 export type ClaimRow = typeof claims.$inferSelect;
 export type ClaimInsert = typeof claims.$inferInsert;
-
-// ---------------------------------------------------------------------------
-// Evidence cards (§22.1 EvidenceCard; WS-F.2.5a).
-// ---------------------------------------------------------------------------
-
-/** Claim-RELATIONSHIP taxonomy (§22.3 edges) — how evidence relates to the
- *  claim, distinct from the MATERIAL taxonomy below. */
-export const evidenceRelationshipTypeEnum = pgEnum('evidence_relationship_type', [
-  'supports',
-  'contradicts',
-  'contextualizes',
-  'corrects',
-  'counterexample',
-]);
-
-/** Evidence MATERIAL taxonomy (WS-G.1.3, §22.1 `EvidenceCard.evidence_type`
- *  / §5.3) — what the evidence IS. */
-export const evidenceCardTypeEnum = pgEnum('evidence_card_type', [
-  'primary_source',
-  'dataset',
-  'transcript',
-  'legal_text',
-  'report',
-  'expert_reference',
-  'fact_check',
-]);
-
-export const evidenceVerificationStateEnum = pgEnum('evidence_verification_state', [
-  'unverified',
-  'verified',
-  'disputed',
-  'retracted',
-]);
-
-export const evidenceCards = pgTable(
-  'evidence_cards',
-  {
-    evidenceId: uuid('evidence_id').primaryKey().defaultRandom(),
-    /** Deleting a claim cascades to its cards (WS-G.1.3 acceptance). */
-    claimId: uuid('claim_id')
-      .notNull()
-      .references(() => claims.claimId, { onDelete: 'cascade' }),
-    /** Nullable for user-experience evidence (no web source). */
-    sourceId: uuid('source_id').references(() => sources.sourceId, { onDelete: 'set null' }),
-    /** The forum contribution that introduced this card (WS-G.1.3); SQL FK
-     *  added by the 0008 migration (contributions table; avoids a TS module
-     *  cycle claim→contribution→claim). */
-    contributionId: uuid('contribution_id'),
-    /** Attribution/moderation only — never a ranking authority signal
-     *  (§13.6); tombstoned on account deletion (WS-G.1.3). */
-    submittedBy: uuid('submitted_by').references(() => users.userId, { onDelete: 'set null' }),
-    /** MATERIAL type (WS-G.1.3 canon). */
-    evidenceType: evidenceCardTypeEnum('evidence_type').notNull(),
-    /** Claim relationship (renamed from the WS-F-era `evidence_type`). */
-    relationshipType: evidenceRelationshipTypeEnum('relationship_type').notNull(),
-    citationUrlOrRef: text('citation_url_or_ref').notNull(),
-    relevanceNote: text('relevance_note').notNull(),
-    verificationState: evidenceVerificationStateEnum('verification_state')
-      .notNull()
-      .default('unverified'),
-    /** MERI grouping key shared with claims (§13.6). */
-    independenceGroupId: uuid('independence_group_id'),
-    /** The evidence-card story shell that created this card, when applicable. */
-    storyId: uuid('story_id').references(() => stories.storyId),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-    searchTsv: tsvector('search_tsv').generatedAlwaysAs(
-      () =>
-        sql`setweight(to_tsvector('simple', coalesce(relevance_note, '')), 'A') || setweight(to_tsvector('simple', coalesce(citation_url_or_ref, '')), 'B')`,
-    ),
-  },
-  (t) => [
-    index('evidence_cards_claim_idx').on(t.claimId),
-    index('evidence_cards_source_idx').on(t.sourceId),
-    index('evidence_cards_contribution_idx').on(t.contributionId),
-    index('evidence_cards_submitted_by_idx').on(t.submittedBy),
-    index('evidence_cards_type_idx').on(t.evidenceType),
-    index('evidence_cards_verification_idx').on(t.verificationState),
-    index('evidence_cards_independence_idx').on(t.independenceGroupId),
-    index('evidence_cards_search_gin').using('gin', t.searchTsv),
-    check(
-      'evidence_cards_citation_len',
-      sql`char_length(${t.citationUrlOrRef}) between 1 and 2048`,
-    ),
-    check('evidence_cards_note_len', sql`char_length(${t.relevanceNote}) between 1 and 2000`),
-  ],
-);
-
-export type EvidenceCardRow = typeof evidenceCards.$inferSelect;
-export type EvidenceCardInsert = typeof evidenceCards.$inferInsert;

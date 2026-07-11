@@ -43,7 +43,6 @@ async function joinAsMember(roomId: string, userId: string): Promise<void> {
     lensId: null,
     notificationPreferences: {
       threads: 'mentions',
-      new_evidence: false,
       bridge_requests: false,
       steward_announcements: true,
     },
@@ -105,7 +104,6 @@ describe('WS-Q.2.1 submission guards', () => {
       lensId: null,
       notificationPreferences: {
         threads: 'mentions',
-        new_evidence: false,
         bridge_requests: false,
         steward_announcements: true,
       },
@@ -252,7 +250,6 @@ describe('WS-Q.3.2 item read bar', () => {
       lensId: null,
       notificationPreferences: {
         threads: 'mentions',
-        new_evidence: false,
         bridge_requests: false,
         steward_announcements: true,
       },
@@ -939,7 +936,6 @@ describe('WS-Q.3.3b/3.4 room governance + visibility cascade (steward)', () => {
       lensId: null,
       notificationPreferences: {
         threads: 'mentions',
-        new_evidence: false,
         bridge_requests: false,
         steward_announcements: true,
       },

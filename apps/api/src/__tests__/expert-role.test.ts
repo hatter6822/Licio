@@ -48,7 +48,6 @@ async function joinMember(roomId: string, userId: string): Promise<void> {
     lensId: null,
     notificationPreferences: {
       threads: 'mentions',
-      new_evidence: false,
       bridge_requests: false,
       steward_announcements: true,
     },

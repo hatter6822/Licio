@@ -189,8 +189,8 @@ export const threadStateOpSchema = z
 
 /**
  * §13.5 — the contribution create op.  WS-G PARITY: the per-type body cap is
- * `CONTRIBUTION_BODY_LIMITS[contribution_type]` (the shared constant) and
- * evidence/correction citation rules mirror the shipped server schema exactly.
+ * `CONTRIBUTION_BODY_LIMITS[contribution_type]` (the shared constant) and the
+ * correction citation rule mirrors the shipped server schema exactly.
  */
 export const contributionCreateOpSchema = z
   .object({
@@ -235,22 +235,6 @@ export const contributionCreateOpSchema = z
         path: ['body_markdown_lite'],
         message: 'Body text is required.',
       });
-    }
-    if (type === 'evidence') {
-      if (v.citations.length < 1) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['citations'],
-          message: 'Evidence contributions require at least one citation.',
-        });
-      }
-      if (v.target_claim_id === undefined) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['target_claim_id'],
-          message: 'Evidence contributions require a target claim.',
-        });
-      }
     }
     if (type === 'correction') {
       if (v.citations.length < 1) {

@@ -21,7 +21,6 @@ import {
   DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  type EvidenceCardType,
   emptyReputationSummary,
   type LocationScope,
   type StewardRoleId,
@@ -67,7 +66,6 @@ const T = (n: number): string => `5f5e2000-0000-4000-8000-${String(n).padStart(1
 const LENS = (n: number): string => `5f5e5000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const SUB = (n: number): string => `5f5e8000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const CLAIM = (n: number): string => `5f5e9000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const EVID = (n: number): string => `5f5ea000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
@@ -267,7 +265,7 @@ export async function seedForumDemoData(
       threadId: DEMO_IDS.THREAD_1,
       roomId: DEMO_IDS.ROOM_1,
       visibility: 'public' as const,
-      // Deepening + seeded evidence cards + MERI independence ⇒ "Well-Sourced".
+      // Deepening + sourced comments ⇒ "Deepening" with the sources chip.
       lifecycle: 'deepening' as StoryLifecycleState,
       title: 'Regional water board publishes the full testing dataset',
       body: 'The board released raw and processed results alongside the sampling methodology.',
@@ -605,9 +603,8 @@ export async function seedForumDemoData(
   // --- Stories (varied submission types + visibility tiers + lifecycle) -----
   // The lifecycle state is the BASE of the §5.6 rating label, so varying it
   // across the corpus is what makes the feed show every label rather than a
-  // monotone "Getting Attention". Live invariant signals (evidence + MERI →
-  // well-sourced, thread safety → under-review) are layered on in
-  // seedShadowSignals below.
+  // monotone "Getting Attention". Live invariant signals (SCOI → needs-context,
+  // thread safety → under-review) are layered on in seedShadowSignals below.
   const seedStory = async (spec: {
     n: number;
     roomId: string;
@@ -960,8 +957,8 @@ export async function seedForumDemoData(
     excerpt: 'Just submitted; reading is beginning. No interpretation has formed yet.',
     topicIds: [topics.climate],
   });
-  // S22 — an expert-room post with independent evidence ⇒ "Well-Sourced"
-  // (evidence cards seeded below + a MERI independence signal in seedShadowSignals).
+  // S22 — an expert-room post with independent sourced comments (cited
+  // comments seeded below + a MERI independence signal in seedShadowSignals).
   await seedStory({
     n: 22,
     lifecycle: 'deepening',
@@ -1155,17 +1152,12 @@ export async function seedForumDemoData(
     description: 'How the story reads for the firms the tariff regulates.',
   });
 
-  // Evidence cards make the "Well-Sourced" stories genuinely well-sourced: a
-  // claim per story with ≥2 independent evidence cards (counted by the ranking
-  // evidence path through claims → evidence). Combined with a MERI independence
-  // signal (seedShadowSignals) the §5.6 cascade promotes them to Well-Sourced.
-  const seedEvidence = async (
-    storyId: string,
-    claimN: number,
-    claimText: string,
-    cards: ReadonlyArray<{ type: EvidenceCardType; url: string; note: string }>,
-  ): Promise<void> => {
-    const claim = await ingestion.claims.insert({
+  // Claims give MERI's claim-extraction input real demo coverage (the real
+  // batch computes each story's exposure over these independence groups).
+  // Sourcing itself is comment-centric: the cited comments seeded below are
+  // what the sourced-comment surfaces (chips, "Sources" view, wE) count.
+  const seedClaim = async (storyId: string, claimN: number, claimText: string): Promise<void> => {
+    await ingestion.claims.insert({
       claimId: CLAIM(claimN),
       storyId,
       canonicalText: claimText,
@@ -1180,74 +1172,10 @@ export async function seedForumDemoData(
       extractionConfidence: null,
       modelVersion: null,
     });
-    for (const [i, card] of cards.entries()) {
-      await ingestion.evidence.insert({
-        evidenceId: EVID(claimN * 10 + i),
-        claimId: claim.claimId,
-        sourceId: null,
-        contributionId: null,
-        submittedBy: SEED_USER.userId,
-        evidenceType: card.type,
-        relationshipType: 'supports',
-        citationUrlOrRef: card.url,
-        relevanceNote: card.note,
-        verificationState: 'verified',
-        independenceGroupId: `demo-indep-${claimN}-${i}`,
-        storyId,
-      });
-    }
   };
-  await seedEvidence(DEMO_IDS.STORY_1, 1, 'Nitrate levels are within the regional legal limit.', [
-    {
-      type: 'dataset',
-      url: 'https://example.org/water/raw-results.csv',
-      note: 'The raw measurement series.',
-    },
-    {
-      type: 'report',
-      url: 'https://example.org/water/independent-lab',
-      note: 'An independent lab’s corroboration.',
-    },
-    {
-      type: 'primary_source',
-      url: 'https://example.org/water/methodology',
-      note: 'The sampling methodology.',
-    },
-  ]);
-  await seedEvidence(
-    S(13),
-    2,
-    'The soil-carbon estimate replicates within its confidence interval.',
-    [
-      {
-        type: 'primary_source',
-        url: 'https://example.org/science/soil-carbon-replication#data',
-        note: 'Open replication data.',
-      },
-      {
-        type: 'expert_reference',
-        url: 'https://example.org/science/soil-carbon-prereg',
-        note: 'The pre-registration.',
-      },
-    ],
-  );
-  await seedEvidence(S(22), 3, 'Three independent labs report the same aquifer drawdown.', [
-    {
-      type: 'dataset',
-      url: 'https://example.org/science/lab-a-series.csv',
-      note: 'Lab A’s series.',
-    },
-    {
-      type: 'dataset',
-      url: 'https://example.org/science/lab-b-series.csv',
-      note: 'Lab B’s series.',
-    },
-    {
-      type: 'dataset',
-      url: 'https://example.org/science/lab-c-series.csv',
-      note: 'Lab C’s series.',
-    },
-  ]);
+  await seedClaim(DEMO_IDS.STORY_1, 1, 'Nitrate levels are within the regional legal limit.');
+  await seedClaim(S(13), 2, 'The soil-carbon estimate replicates within its confidence interval.');
+  await seedClaim(S(22), 3, 'Three independent labs report the same aquifer drawdown.');
 
   // --- Threads with several nested, multi-author comments --------------------
   const at = <X>(arr: readonly X[], i: number): X => {
@@ -1297,7 +1225,7 @@ export async function seedForumDemoData(
   };
 
   // Hospital-readmission link (public): a question answered with a cited answer,
-  // an evidence card, a clarifying sub-question, and a meta note.
+  // a sourced comment, a clarifying sub-question, and a meta note.
   await tree(T(4), 100, [
     {
       type: 'question',
@@ -1317,14 +1245,13 @@ export async function seedForumDemoData(
       ],
     },
     {
-      type: 'evidence',
+      type: 'comment',
       author: samd,
       parent: 1,
       body: 'The adjustment model matches the national specification (linked).',
       citations: [
         { url: 'https://example.org/standards/readmission-model', title: 'National model spec' },
       ],
-      metadata: { evidence_type: 'report' },
     },
     {
       type: 'question',
@@ -1376,7 +1303,7 @@ export async function seedForumDemoData(
     },
   ]);
 
-  // Grid-demand brief (public climate): evidence, a correction with citations, a synthesis.
+  // Grid-demand brief (public climate): a sourced comment, a correction with citations, a synthesis.
   await tree(T(9), 140, [
     {
       type: 'question',
@@ -1399,12 +1326,11 @@ export async function seedForumDemoData(
       metadata: { target_text_excerpt: 'Monday evening peak' },
     },
     {
-      type: 'evidence',
+      type: 'comment',
       author: raj,
       parent: 1,
       body: 'Independent ISO data agrees with the normalized read.',
       citations: [{ url: 'https://example.org/iso/demand' }],
-      metadata: { evidence_type: 'dataset' },
     },
     {
       type: 'synthesis',
@@ -1446,7 +1372,7 @@ export async function seedForumDemoData(
     },
   ]);
 
-  // Elections turnout (public): a question + answer + evidence.
+  // Elections turnout (public): a question + answer + a sourced comment.
   await tree(T(11), 180, [
     {
       type: 'question',
@@ -1461,12 +1387,11 @@ export async function seedForumDemoData(
       citations: [{ url: 'https://example.org/elections/precinct-turnout#dictionary' }],
     },
     {
-      type: 'evidence',
+      type: 'comment',
       author: samd,
       parent: 1,
       body: 'Cross-checked three precincts against the certified totals; they match.',
       citations: [{ url: 'https://example.org/elections/certified-totals' }],
-      metadata: { evidence_type: 'primary_source' },
     },
   ]);
 
@@ -1508,11 +1433,10 @@ export async function seedForumDemoData(
   ]);
   await tree(T(8), 230, [
     {
-      type: 'evidence',
+      type: 'comment',
       author: lena,
       body: 'The two rezoned parcels border the floodplain (map linked).',
       citations: [{ url: 'https://example.org/riverside/floodplain-map' }],
-      metadata: { evidence_type: 'primary_source' },
     },
   ]);
   await tree(T(12), 240, [
@@ -1530,11 +1454,10 @@ export async function seedForumDemoData(
   ]);
   await tree(T(13), 250, [
     {
-      type: 'evidence',
+      type: 'comment',
       author: samd,
       body: 'Pre-registration and analysis plan are both posted.',
       citations: [{ url: 'https://example.org/science/soil-carbon-replication#prereg' }],
-      metadata: { evidence_type: 'expert_reference' },
     },
   ]);
   await tree(T(16), 260, [
@@ -1566,11 +1489,10 @@ export async function seedForumDemoData(
   ]);
   await tree(T(22), 280, [
     {
-      type: 'evidence',
+      type: 'comment',
       author: expert,
       body: 'Each lab measured independently with its own instrumentation; the three series overlap within error.',
       citations: [{ url: 'https://example.org/science/aquifer-drawdown-multilab#methods' }],
-      metadata: { evidence_type: 'dataset' },
     },
     {
       type: 'answer',
@@ -1658,12 +1580,11 @@ export async function seedForumDemoData(
       body: 'By registered-voter id against the voter file, so two distinct voters who share a name were never merged.',
     },
     {
-      type: 'evidence',
+      type: 'comment',
       author: samd,
       parent: 1,
       body: 'The published rejection log lists each excluded signature with its reason code.',
       citations: [{ url: 'https://example.org/elections/recall-rejection-log' }],
-      metadata: { evidence_type: 'primary_source' },
     },
   ]);
   // Winter-rate filing (public, just submitted ⇒ Getting Attention): one opening
@@ -1744,7 +1665,7 @@ export async function seedForumDemoData(
 // Unlike a fixture, this COMPUTES the demo's invariant outputs and reading
 // signals by running the actual production engines over the shaped content:
 //   • the WS-H invariant batch (MERI exposure, SCOI divergence, …) reads the
-//     seeded signatures / evidence groups / lens contributions;
+//     seeded signatures / claim groups / lens contributions;
 //   • the WS-E PWAtt scorer reads seeded bucketed attention aggregates and
 //     PRODUCES the owner-scoped Signal Ledger exactly as it does for a reader.
 // The reader-facing surfaces then read these stored outputs through the same
@@ -1764,7 +1685,7 @@ export async function seedOperationalSignals(
   const nowMs = Date.now();
 
   // 1. The REAL WS-H batch over the shaped content: MERI exposure (from genuine
-  //    MinHash-signature near-dup groups + evidence/claim independence groups),
+  //    MinHash-signature near-dup groups + claim independence groups),
   //    SCOI divergence (from the lens-tagged contributions' embeddings), and the
   //    rest — COMPUTED, never hand-authored. Every reader-facing invariant
   //    surface reads these stored shadow outputs through the production paths.

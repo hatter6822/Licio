@@ -28,11 +28,10 @@ const STORY: StoryDetail = {
   origin: 'official',
   url: 'https://example.org/water-testing-dataset',
   reading_minutes: 6,
-  rating_label: 'well-sourced',
+  rating_label: 'deepening',
   more_on_this_story: [],
   context_card: null,
-  distribution_reason:
-    'Rising because readers opened the source and added 2 independent evidence cards.',
+  distribution_reason: 'Rising because readers opened the source and added 2 sourced comments.',
   context_chips: [],
   safety_state: 'ok',
   dispute_status: 'none',
