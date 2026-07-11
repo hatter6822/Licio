@@ -29,6 +29,7 @@ export type PersonaArchetypeId =
   | 'deep_reader'
   | 'burst_returner'
   | 'reporter'
+  | 'room_steward'
   | 'cluster_member'
   | 'newcomer';
 
@@ -118,6 +119,10 @@ export interface PersonaArchetype {
   readonly accountAgeDays: number;
   /** Grants the platform `expert` role (expert-gated room posting). */
   readonly expertRole?: boolean;
+  /** WS-T: registered as a REAL community_steward of every public room the
+   *  simulator uses (idempotent, at world assembly), so the engine can plan
+   *  steward overrules of judged arenas through the real override path. */
+  readonly stewardRole?: boolean;
 }
 
 const dw = (
@@ -291,6 +296,23 @@ export const PERSONA_ARCHETYPES: Readonly<Record<PersonaArchetypeId, PersonaArch
     replyP: 0.4,
     accountAgeDays: 40,
   },
+  room_steward: {
+    id: 'room_steward',
+    // A long-standing, mostly-reading steward: light posting, steady reading,
+    // and — uniquely — the WS-T steward overrule of judged arenas (planned by
+    // the engine, executed through the REAL overrideDebateVerdict path with
+    // its window + stewardship checks biting honestly).
+    rates: { story: 0, comment: 0.04, attention: 0.25, join: 0.02, report: 0.01, correction: 0.02 },
+    dwell: dw(0, 2, 4, 3, 2),
+    replyDepth: rd(4, 3, 2, 1),
+    returns: rv(4, 4, 2, 0),
+    sourceOpenP: 0.6,
+    contextOpenP: 0.6,
+    itemsPerBatch: [1, 2],
+    replyP: 0.5,
+    accountAgeDays: 180,
+    stewardRole: true,
+  },
   cluster_member: {
     id: 'cluster_member',
     // Idle in organic scenarios (never provisioned outside coordinated_burst);
@@ -371,6 +393,7 @@ export const BASE_ROSTER: readonly PersonaSpec[] = [
   P(25, 'greta_holm', 'Greta Holm', 'deep_reader', ['elections', 'local']),
   P(26, 'vic_marchetti', 'Vic Marchetti', 'burst_returner', ['climate']),
   P(27, 'ada_nwosu', 'Ada Nwosu', 'reporter', ['local', 'health']),
+  P(28, 'rowan_ellery', 'Rowan Ellery', 'room_steward', ['elections', 'science']),
 ] as const;
 
 /** The adversarial cluster (provisioned lazily by coordinated_burst so the

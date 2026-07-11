@@ -7,13 +7,20 @@
 // honestly, and that stop() halts the loop.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from '../../ai-governance/services.js';
 import type { CommentFrame } from '../../forum/comment-broadcaster.js';
 import { serveFeed } from '../../ranking/service.js';
+import { MAX_ACTIONS_PER_TICK, type SimAction, type SimWorld } from '../engine.js';
 import { BASE_ROSTER, CLUSTER_ROSTER, newcomerSpec } from '../personas.js';
 import {
   __resetSimStoryMetaForTest,
   __simStoryMetaSizeForTest,
+  consumedDebateChances,
   DevTrafficSimulator,
+  ROOM_GOVERNED_TTL_MS,
 } from '../runtime.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
 import { req } from './sim-test-util.js';
@@ -685,5 +692,181 @@ describe('DevTrafficSimulator runtime', () => {
     await sim.tick();
     const { simulatorStatusSchema } = await import('@licio/shared');
     expect(() => simulatorStatusSchema.parse(req(sim).status())).not.toThrow();
+  });
+});
+
+describe('consumedDebateChances (cap-aware one-shot accounting)', () => {
+  const world = (over: Partial<Pick<SimWorld, 'openDebates' | 'judgedDebates'>>): SimWorld => ({
+    stories: [],
+    rooms: [],
+    commentsByStory: new Map(),
+    recentTitles: new Set(),
+    focusStoryId: null,
+    storyCapReached: false,
+    openDebates: [],
+    judgedDebates: [],
+    ...over,
+  });
+  const openArena = (
+    debateId: string,
+    reinforceEligible = true,
+  ): SimWorld['openDebates'][number] => ({
+    debateId,
+    incumbentUserId: 'u-inc',
+    incumbentPosted: true,
+    incumbentWillRebut: true,
+    domain: 'health',
+    challengerUserId: 'u-chal',
+    challengerSummary: 'The stated figure does not match the primary series.',
+    challengerCitationUrls: ['https://daily-ledger.example/refs/x-0'],
+    reinforceEligible,
+  });
+  const overrideAction = (debateId: string): SimAction => ({
+    kind: 'debate_override',
+    personaUserId: 'u-steward',
+    debateId,
+    winner: 'incumbent',
+    reason: 'The adjudicator under-weighted the primary registry both sides cite.',
+  });
+  const positionAction = (debateId: string, side: 'incumbent' | 'challenger'): SimAction => ({
+    kind: 'debate_position',
+    personaUserId: 'u',
+    debateId,
+    side,
+    summary: 'A substantive position summary for the arena in question.',
+    citationUrls: ['https://civic-wire.example/refs/x-0'],
+  });
+  const filler = (): SimAction => ({ kind: 'join_room', personaUserId: 'u', roomId: 'r' });
+  const saturate = (actions: SimAction[]): SimAction[] => {
+    while (actions.length < MAX_ACTIONS_PER_TICK) actions.push(filler());
+    return actions;
+  };
+
+  it('an UNSATURATED plan consumes every offered chance (absence proves a declined roll)', () => {
+    const w = world({
+      openDebates: [openArena('d-r')],
+      judgedDebates: [{ debateId: 'd-o', roomId: 'r1', winner: 'challenger' }],
+    });
+    const consumed = consumedDebateChances(w, [filler()]);
+    expect(consumed.reinforce.has('d-r')).toBe(true);
+    expect(consumed.override.has('d-o')).toBe(true);
+  });
+
+  it('a SATURATED plan does NOT consume a chance whose action is absent (may have been truncated)', () => {
+    const w = world({
+      openDebates: [openArena('d-r')],
+      judgedDebates: [{ debateId: 'd-o', roomId: 'r1', winner: 'challenger' }],
+    });
+    const consumed = consumedDebateChances(w, saturate([]));
+    expect(consumed.reinforce.has('d-r')).toBe(false);
+    expect(consumed.override.has('d-o')).toBe(false);
+  });
+
+  it('a SATURATED plan still consumes the chances whose actions survived into it', () => {
+    const w = world({
+      openDebates: [openArena('d-r')],
+      judgedDebates: [
+        { debateId: 'd-o', roomId: 'r1', winner: 'challenger' },
+        { debateId: 'd-cut', roomId: 'r1', winner: 'incumbent' },
+      ],
+    });
+    const consumed = consumedDebateChances(
+      w,
+      saturate([positionAction('d-r', 'challenger'), overrideAction('d-o')]),
+    );
+    expect(consumed.reinforce.has('d-r')).toBe(true);
+    expect(consumed.override.has('d-o')).toBe(true);
+    expect(consumed.override.has('d-cut')).toBe(false); // re-offers next tick
+  });
+
+  it('an incumbent rebuttal never consumes the challenger reinforcement chance', () => {
+    const w = world({ openDebates: [openArena('d-r')] });
+    const consumed = consumedDebateChances(w, saturate([positionAction('d-r', 'incumbent')]));
+    expect(consumed.reinforce.has('d-r')).toBe(false);
+  });
+
+  it('a non-eligible open arena is never listed as consumed', () => {
+    const w = world({ openDebates: [openArena('d-quiet', false)] });
+    const consumed = consumedDebateChances(w, [filler()]);
+    expect(consumed.reinforce.size).toBe(0);
+  });
+});
+
+describe('governed-room verdict TTL (live governance changes redirect the bias)', () => {
+  it('re-reads agentOperative after the TTL, so a mid-run freeze/re-admission is picked up', async () => {
+    const base = await buildSimTestGraph();
+    let operative = false;
+    let reads = 0;
+    const graph = {
+      ...base,
+      governance: {
+        agentOperative: async () => {
+          reads += 1;
+          return operative;
+        },
+      },
+    };
+    // Drive the runtime's clock through the events container (its #now()).
+    const realNow = base.events.now;
+    let offsetMs = 0;
+    graph.events.now = () => realNow() + offsetMs;
+
+    const sim = new DevTrafficSimulator({ graph, scenario: 'quiet', seed: 'ttl', autoLoop: false });
+    try {
+      await sim.start();
+      await sim.tick(); // world build #1 → one read per world room
+      const readsAfterFirst = reads;
+      expect(readsAfterFirst).toBeGreaterThan(0);
+      await sim.tick(); // within the TTL → served from cache
+      expect(reads).toBe(readsAfterFirst);
+
+      operative = true; // a LIVE governance change (e.g. re-admission)
+      offsetMs = ROOM_GOVERNED_TTL_MS + 1_000; // move past the TTL
+      await sim.tick(); // world build re-reads and sees the change
+      expect(reads).toBeGreaterThan(readsAfterFirst);
+    } finally {
+      sim.stop();
+      graph.events.now = realNow;
+    }
+  });
+});
+
+describe('pulse metric baselining (boot noise never reads as simulator activity)', () => {
+  // Deliberately LAST in this file: it binds the process ai-governance
+  // singleton, which stays bound for the rest of the worker.
+  it('construction snapshots the process-wide counters; the pulses report deltas', async () => {
+    const graph = await buildSimTestGraph();
+    const aiGov = createInMemoryAiGovernanceServices(graph.events);
+    setAiGovernanceServices(aiGov);
+    // Boot-time noise BEFORE the simulator exists: the WS-K admission-gate
+    // probes and the seeded sample agent action increment the very counters
+    // the pulses read (observed live: 13 proposals at boot).
+    aiGov.metrics.increment('ai.governance.moderation.decided', 13);
+    aiGov.metrics.increment('ai.governance.moderation.proposed.remove', 6);
+    aiGov.metrics.increment('ai.governance.debate.llm.decided', 2);
+    graph.forum.metrics.increment('contributions.agent_moderated', 3);
+
+    const sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'steady',
+      seed: 'baseline',
+      autoLoop: false,
+    });
+    // An IDLE simulator reads zero — never the boot's counters.
+    let status = sim.status();
+    expect(status.moderation_pulse.proposals).toBe(0);
+    expect(status.moderation_pulse.proposed.remove).toBe(0);
+    expect(status.moderation_pulse.agent_escalations).toBe(0);
+    expect(status.debate_pulse.llm_decided).toBe(0);
+
+    // Activity AFTER construction is reported as the delta.
+    aiGov.metrics.increment('ai.governance.moderation.decided', 2);
+    aiGov.metrics.increment('ai.governance.moderation.proposed.remove', 1);
+    graph.forum.metrics.increment('contributions.agent_moderated', 1);
+    status = sim.status();
+    expect(status.moderation_pulse.proposals).toBe(2);
+    expect(status.moderation_pulse.proposed.remove).toBe(1);
+    expect(status.moderation_pulse.agent_escalations).toBe(1);
+    expect(status.debate_pulse.llm_decided).toBe(0);
   });
 });

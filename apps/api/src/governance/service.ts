@@ -1284,6 +1284,27 @@ export class GovernanceService {
   async getBinding(roomId: string) {
     return this.deps.stores.bindings.get(roomId);
   }
+  /**
+   * True when the room's in-room agent is OPERATIVE — i.e. `classify` would
+   * actually sample the proposer for this room: an ACTIVE binding, a live
+   * proposer, an existing model, AND the model admitted under the LIVE
+   * moderation backend (a backendId-less test double skips the pin, exactly
+   * as `classify` does). Advisory/observability only — authority stays with
+   * `classify`, which re-enforces every one of these preconditions per call.
+   * Consumers that would otherwise key on `binding.active` alone (e.g. the
+   * dev traffic simulator's governed-room traffic bias) use this instead, so
+   * a durable dev DB whose model was admitted under a DIFFERENT backend is
+   * not treated as governed while its agent fails closed to the baseline.
+   */
+  async agentOperative(roomId: string): Promise<boolean> {
+    const binding = await this.deps.stores.bindings.get(roomId);
+    if (binding === null || !binding.active) return false;
+    const proposer = this.deps.moderationProposer;
+    if (!proposer) return false;
+    const model = await this.deps.stores.models.get(binding.modelId);
+    if (!model) return false;
+    return proposer.backendId === undefined || proposer.backendId === model.admittedBackendId;
+  }
   async recentAgentActions(roomId: string, limit: number) {
     return this.deps.stores.agentActions.listByRoom(roomId, limit);
   }

@@ -41,6 +41,16 @@ export interface ScenarioDefinition {
   readonly cluster: { attention: number; comment: number; report: number } | null;
   /** Provision this many newcomer accounts per minute (cap applies). */
   readonly newcomersPerMinute: number;
+  /** Share of planned comments swapped for a PROBLEM body (spam wording /
+   *  hostile wording) so the WS-J floor pre-screen and the WS-U in-room
+   *  moderation model classify genuinely actionable content — not only civil
+   *  prose (0 = every comment stays civil). */
+  readonly problemCommentShare: number;
+  /** Share of sourced corrections carrying a `[sim:debate=…]`/
+   *  `[sim:rationale-url]` failure-injection marker for the DEV simulated
+   *  governance-LLM runtime — forcing a verdict class or a fail-closed
+   *  MLP fallback under load. Inert prose against a real local runtime. */
+  readonly debateMarkerShare: number;
 }
 
 const FLAT: ScenarioRateShape = {
@@ -64,6 +74,8 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     repostAfterMs: null,
     cluster: null,
     newcomersPerMinute: 0,
+    problemCommentShare: 0.05,
+    debateMarkerShare: 0,
   },
   breaking_news: {
     id: 'breaking_news',
@@ -77,6 +89,8 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     repostAfterMs: 2 * 60_000,
     cluster: null,
     newcomersPerMinute: 0,
+    problemCommentShare: 0.05,
+    debateMarkerShare: 0,
   },
   viral_thread: {
     id: 'viral_thread',
@@ -89,6 +103,8 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     repostAfterMs: null,
     cluster: null,
     newcomersPerMinute: 0,
+    problemCommentShare: 0.06,
+    debateMarkerShare: 0,
   },
   coordinated_burst: {
     id: 'coordinated_burst',
@@ -104,6 +120,8 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     // window and the report count crosses the detector's minimum (10).
     cluster: { attention: 40, comment: 15, report: 50 },
     newcomersPerMinute: 0,
+    problemCommentShare: 0.05,
+    debateMarkerShare: 0,
   },
   influx: {
     id: 'influx',
@@ -116,6 +134,28 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     repostAfterMs: null,
     cluster: null,
     newcomersPerMinute: 2,
+    problemCommentShare: 0.08,
+    debateMarkerShare: 0,
+  },
+  challenge_wave: {
+    id: 'challenge_wave',
+    label: 'Challenge wave',
+    description:
+      'A surge of sourced corrections: arenas open, both sides argue, the governed adjudicator rules, stewards overrule some — watch the full challenge-resolution lifecycle and the moderation model under load.',
+    // Corrections dominate; comments stay elevated so fresh challengeable
+    // targets keep appearing; attention keeps the feed reacting to dispute
+    // outcomes (`incorrect` demotion / `validated` posture).
+    rates: { story: 0.8, comment: 2, attention: 1.5, join: 1, report: 1, correction: 6 },
+    focusBias: 0.45,
+    kickoffStory: true,
+    repostAfterMs: null,
+    cluster: null,
+    newcomersPerMinute: 0,
+    problemCommentShare: 0.1,
+    // ~1 in 8 corrections carries a failure-injection marker, so forced
+    // verdict classes AND the fail-closed MLP fallback both occur under load
+    // (the pulse's llm_unavailable counter visibly moves).
+    debateMarkerShare: 0.12,
   },
   quiet: {
     id: 'quiet',
@@ -127,6 +167,8 @@ export const SCENARIOS: Readonly<Record<SimulatorScenarioId, ScenarioDefinition>
     repostAfterMs: null,
     cluster: null,
     newcomersPerMinute: 0,
+    problemCommentShare: 0,
+    debateMarkerShare: 0,
   },
 };
 

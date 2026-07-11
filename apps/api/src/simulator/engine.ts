@@ -11,6 +11,7 @@
 
 import type {
   ContributionDisputeStatus,
+  DebateWinner,
   DwellBucket,
   LensType,
   ReplyDepthBucket,
@@ -24,9 +25,13 @@ import {
   generateCommentBody,
   generateCorrection,
   generateEvidence,
+  generateProblemComment,
   generateRebuttal,
+  generateReinforcement,
   generateRepost,
   generateStory,
+  OVERRIDE_REASONS,
+  pickDebateMarker,
   type StoryKind,
 } from './content.js';
 import {
@@ -70,6 +75,14 @@ export interface WorldRoom {
   /** The room's provisioned interpretation lenses, by type (WS-G.2.2). A root
    *  comment is tagged with its author's vantage lens when the room carries it. */
   readonly lensesByType: ReadonlyMap<LensType, string>;
+  /** WS-U: the room's in-room agent is OPERATIVE — an active community
+   *  binding whose model is admitted under the LIVE moderation backend — so
+   *  the bounded agent (the LLM moderation model in dev) actually classifies
+   *  every contribution there. Story placement + contribution targeting
+   *  weight governed rooms up so the moderation automation sees steady
+   *  synthetic traffic; a fail-closed room (backend swap awaiting
+   *  re-admission) is NOT flagged and draws no bias. */
+  readonly governed: boolean;
 }
 
 export interface WorldCommentRef {
@@ -82,12 +95,37 @@ export interface WorldCommentRef {
   readonly disputeStatus: ContributionDisputeStatus;
 }
 
-/** An OPEN debate arena awaiting the incumbent's position (runtime-tracked). */
+/** An OPEN debate arena (runtime-tracked) — both sides' planning state. */
 export interface WorldOpenDebate {
   readonly debateId: string;
   readonly incumbentUserId: string | null;
   readonly incumbentPosted: boolean;
+  /** The ONE-SHOT forfeit decision, rolled when the correction was planned:
+   *  a false here means this incumbent NEVER answers (a true forfeit, so the
+   *  adjudicator genuinely sees one-sided debates); a true means they post a
+   *  rebuttal on some tick inside the edit window. */
+  readonly incumbentWillRebut: boolean;
   readonly domain: DomainId | null;
+  /** The challenger's side, carried so a reinforcement can REPLACE the
+   *  position with the original material plus an addendum (the co-visible
+   *  edit loop, exercised from the challenger's side too). */
+  readonly challengerUserId: string | null;
+  readonly challengerSummary: string;
+  readonly challengerCitationUrls: readonly string[];
+  /** True exactly once, on the first world snapshot after the incumbent's
+   *  rebuttal landed — the engine rolls the challenger's one reinforcement
+   *  chance then, and the runtime marks the arena considered either way. */
+  readonly reinforceEligible: boolean;
+}
+
+/** A JUDGED arena inside its steward-override window. The runtime passes each
+ *  judged arena to the engine EXACTLY ONCE (marking it considered after the
+ *  plan), so the steward's overrule chance is one-shot per arena. */
+export interface WorldJudgedDebate {
+  readonly debateId: string;
+  readonly roomId: string | null;
+  /** The AI verdict's winner (the side an overrule would typically flip). */
+  readonly winner: DebateWinner;
 }
 
 export interface EnginePersona {
@@ -105,8 +143,11 @@ export interface SimWorld {
   readonly recentTitles: ReadonlySet<string>;
   readonly focusStoryId: string | null;
   readonly storyCapReached: boolean;
-  /** WS-T open arenas the incumbent has not yet answered (position planning). */
+  /** WS-T open arenas (rebuttal + reinforcement planning). */
   readonly openDebates: readonly WorldOpenDebate[];
+  /** WS-T judged arenas not yet considered for a steward overrule (each
+   *  appears here exactly once — the runtime marks them considered). */
+  readonly judgedDebates: readonly WorldJudgedDebate[];
 }
 
 export interface PlanTickInput {
@@ -191,22 +232,54 @@ export type SimAction =
       /** The challenged content's author (the arena's incumbent) — carried so
        *  the runtime can track the arena for rebuttal planning. */
       readonly incumbentUserId: string | null;
+      /** The ONE-SHOT forfeit decision for the incumbent, rolled here (the
+       *  runtime tracks it on the opened arena; ~30% of sim incumbents never
+       *  answer, so true forfeits genuinely occur). */
+      readonly incumbentWillRebut: boolean;
       readonly domain: DomainId;
       readonly body: string;
       readonly citationUrls: readonly string[];
     }
   | {
-      /** The incumbent's rebuttal position in an open arena (12h-window path). */
+      /** A position post in an open arena (the 12h-window path): the
+       *  incumbent's rebuttal, or the challenger's reinforcement. */
       readonly kind: 'debate_position';
       readonly personaUserId: string;
       readonly debateId: string;
+      readonly side: 'incumbent' | 'challenger';
       readonly summary: string;
       readonly citationUrls: readonly string[];
+    }
+  | {
+      /** WS-T steward overrule of a judged arena (the 24h human-in-the-loop
+       *  remedy, executed through the REAL override path). */
+      readonly kind: 'debate_override';
+      readonly personaUserId: string;
+      readonly debateId: string;
+      readonly winner: DebateWinner;
+      readonly reason: string;
     };
 
 /** Hard per-tick ceiling — a runaway speed setting degrades to a dense but
  *  bounded plan instead of an unbounded burst. */
 export const MAX_ACTIONS_PER_TICK = 120;
+
+// --- WS-T lifecycle probabilities (one-shot decisions; tick-rate free) -------
+
+/** Share of sim incumbents who WILL answer a challenge (rolled ONCE per
+ *  correction — the complement is a true forfeit: an arena the adjudicator
+ *  judges with an empty incumbent position). */
+export const INCUMBENT_REBUT_P = 0.7;
+/** Per-tick chance a willing incumbent posts THIS tick (spreads rebuttal
+ *  timing across the edit window; over the ~4-tick dev window a willing
+ *  incumbent posts with ≥97% probability). */
+const REBUT_THIS_TICK_P = 0.6;
+/** One-shot chance the challenger reinforces their position after seeing the
+ *  incumbent's rebuttal (the co-visible edit loop, challenger side). */
+export const CHALLENGER_REINFORCE_P = 0.35;
+/** One-shot chance a steward persona overrules a judged arena (the 24h
+ *  human-in-the-loop remedy; most verdicts stand, as in production). */
+export const STEWARD_OVERRIDE_P = 0.3;
 
 const ORGANIC_REPORT_CODES = [
   'MOD_SPAM_001',
@@ -274,15 +347,29 @@ function pickRoom(
   if (eligible.length === 0) return null;
   const matching = eligible.filter((room) => room.domains.includes(domain));
   const pool = matching.length > 0 ? matching : eligible;
-  return prng.pick(pool);
+  // WS-U: weight GOVERNED rooms up (×3) so the bounded in-room agent — the
+  // LLM moderation model on a dev boot — classifies a steady share of the
+  // synthetic contributions, instead of the one governed room receiving a
+  // uniform 1-in-N trickle.
+  return prng.weighted(pool.map((room) => ({ value: room, weight: room.governed ? 3 : 1 })));
 }
 
-/** Recency + affinity-weighted story pick for reading/commenting. */
+/** Recency + affinity-weighted story pick for reading/commenting. When
+ *  `governedRooms` is provided (the CONTRIBUTION picks — comments and
+ *  corrections), stories in a WS-U-governed room are weighted up so the
+ *  bounded in-room agent classifies a steady share of the synthetic
+ *  contributions; reading/attention picks stay unbiased so PWAtt input is
+ *  not skewed toward governed rooms. */
 function pickStory(
   world: SimWorld,
   spec: PersonaSpec,
   prng: Prng,
-  opts: { focusBias: number; needThread: boolean; excludeAuthor?: string },
+  opts: {
+    focusBias: number;
+    needThread: boolean;
+    excludeAuthor?: string;
+    governedRooms?: ReadonlySet<string>;
+  },
 ): WorldStory | null {
   if (
     world.focusStoryId !== null &&
@@ -302,6 +389,7 @@ function pickStory(
   const weighted = candidates.slice(0, 40).map((story, index) => {
     let weight = Math.max(1, 20 - index);
     if (story.domain !== null && spec.affinities.includes(story.domain)) weight *= 2;
+    if (opts.governedRooms?.has(story.roomId)) weight *= 2.5;
     return { value: story, weight };
   });
   return prng.weighted(weighted);
@@ -341,6 +429,11 @@ export function planTick(input: PlanTickInput): SimAction[] {
   // Room lookup for resolving a comment's vantage lens (WS-G.2.2). Built once
   // per tick; the map is small (the public open rooms the simulator uses).
   const roomsById = new Map(world.rooms.map((r) => [r.roomId, r]));
+  // WS-U: rooms with an active model binding — contribution picks weight their
+  // stories up so the in-room moderation model sees steady synthetic traffic.
+  const governedRooms: ReadonlySet<string> = new Set(
+    world.rooms.filter((r) => r.governed).map((r) => r.roomId),
+  );
   const tickMinutes = tickMs / 60_000;
   const phase = scenario.phase ? scenario.phase(input.scenarioElapsedMs) : 1;
   const provisioning: SimAction[] = [];
@@ -376,6 +469,11 @@ export function planTick(input: PlanTickInput): SimAction[] {
   const provisionedCluster = personas.filter(
     (p) => p.provisioned && p.spec.archetype === 'cluster_member',
   );
+  // Every provisioned synthetic actor (organic + cluster): correction planning
+  // prefers persona-authored targets and only rolls the incumbent forfeit for
+  // a persona incumbent — a seed/human-authored target can never answer via
+  // the rebuttal planner, so rolling for it would misreport the forfeit rate.
+  const personaIds = new Set(personas.filter((p) => p.provisioned).map((p) => p.spec.userId));
 
   if (
     scenario.kickoffStory &&
@@ -483,6 +581,7 @@ export function planTick(input: PlanTickInput): SimAction[] {
       const story = pickStory(world, persona.spec, prng, {
         focusBias: scenario.focusBias,
         needThread: true,
+        governedRooms,
       });
       if (!story) continue;
       const domain = story.domain ?? domainForPersona(persona.spec, prng);
@@ -522,12 +621,25 @@ export function planTick(input: PlanTickInput): SimAction[] {
       const vantage = parent === null ? lensVantageOf(persona.spec.archetype) : null;
       const lensId =
         vantage !== null ? (roomsById.get(story.roomId)?.lensesByType.get(vantage) ?? null) : null;
+      // A small scenario-configured share of comments is deliberately
+      // PROBLEMATIC (spam or hostile wording) so the WS-J floor pre-screen and
+      // the WS-U in-room moderation model act on live traffic — otherwise every
+      // synthetic comment is civil and the moderation automation only ever
+      // returns `allow`. The share never applies to the newcomer archetype
+      // (their traffic exercises new-account handling, not abuse handling).
+      const problem =
+        scenario.problemCommentShare > 0 &&
+        persona.spec.archetype !== 'newcomer' &&
+        prng.chance(scenario.problemCommentShare);
+      const body = problem
+        ? generateProblemComment(prng.chance(0.5) ? 'spam' : 'hostile', domain, prng)
+        : generateCommentBody(flavor, domain, prng);
       contributions.push({
         kind: 'comment',
         personaUserId: persona.spec.userId,
         storyId: story.storyId,
         parentContributionId: parent?.contributionId ?? null,
-        body: generateCommentBody(flavor, domain, prng),
+        body,
         lensId,
       });
     }
@@ -541,6 +653,7 @@ export function planTick(input: PlanTickInput): SimAction[] {
       const story = pickStory(world, persona.spec, prng, {
         focusBias: scenario.focusBias / 2,
         needThread: true,
+        governedRooms,
       });
       if (!story) continue;
       const domain = story.domain ?? domainForPersona(persona.spec, prng);
@@ -551,8 +664,17 @@ export function planTick(input: PlanTickInput): SimAction[] {
           c.authorUserId !== null &&
           c.authorUserId !== persona.spec.userId,
       );
+      // Prefer PERSONA-authored targets: their incumbents can genuinely
+      // rebut, so the two-sided debate/reinforcement path gets exercised even
+      // while seeded demo content still dominates a fresh dev boot. Seed- or
+      // human-authored content stays challengeable when nothing else exists
+      // (the dev can answer from the UI).
+      const personaAuthored = eligibleComments.filter(
+        (c) => c.authorUserId !== null && personaIds.has(c.authorUserId),
+      );
+      const targetPool = personaAuthored.length > 0 ? personaAuthored : eligibleComments;
       const targetComment =
-        eligibleComments.length > 0 && prng.chance(0.7) ? prng.pick(eligibleComments) : null;
+        targetPool.length > 0 && prng.chance(0.7) ? prng.pick(targetPool) : null;
       if (targetComment === null) {
         // Fall back to the story root — only when IT is challengeable.
         if (
@@ -564,14 +686,32 @@ export function planTick(input: PlanTickInput): SimAction[] {
         }
       }
       const correction = generateCorrection(domain, storySerial * 10 + i, prng);
+      // challenge_wave: a small share of corrections carries a failure-injection
+      // marker for the DEV simulated runtime (forced verdict class, or the
+      // rationale-URL rejection → the fail-closed MLP fallback). Inert prose
+      // against a real local runtime.
+      const marker =
+        scenario.debateMarkerShare > 0 && prng.chance(scenario.debateMarkerShare)
+          ? pickDebateMarker(prng)
+          : null;
+      const incumbentUserId =
+        targetComment !== null ? targetComment.authorUserId : story.authorUserId;
       contributions.push({
         kind: 'correction',
         personaUserId: persona.spec.userId,
         storyId: story.storyId,
         targetContributionId: targetComment?.contributionId ?? null,
-        incumbentUserId: targetComment !== null ? targetComment.authorUserId : story.authorUserId,
+        incumbentUserId,
+        // The one-shot forfeit roll is only meaningful for a PERSONA incumbent
+        // (the rebuttal planner can only act for provisioned personas); a
+        // seed/human incumbent never rolls, and the runtime excludes such
+        // arenas from the forfeit pulse.
+        incumbentWillRebut:
+          incumbentUserId !== null &&
+          personaIds.has(incumbentUserId) &&
+          prng.chance(INCUMBENT_REBUT_P),
         domain,
-        body: correction.body,
+        body: marker === null ? correction.body : `${correction.body} ${marker}`,
         citationUrls: correction.citationUrls,
       });
     }
@@ -633,27 +773,89 @@ export function planTick(input: PlanTickInput): SimAction[] {
   }
 
   // --- Incumbent rebuttals in open arenas (WS-T) -------------------------------
-  // A challenged synthetic author usually shows up to defend the content before
-  // the edit window closes — with a rebuttal of VARYING strength (1–3 sources;
-  // the real position schema requires at least one) — and ~30% of the time
-  // never answers at all (a true forfeit, the skip below), so the
-  // adjudicator's verdicts split across the full outcome space.
-  let rebuttalSerial = 0;
+  // The forfeit decision was rolled ONCE when the correction was planned
+  // (`incumbentWillRebut`): a forfeiting incumbent NEVER answers — the
+  // adjudicator genuinely sees one-sided debates — while a willing incumbent
+  // posts a rebuttal of VARYING strength (1–3 sources) on some tick inside the
+  // edit window (the per-tick chance only spreads the timing).
+  let positionSerial = 0;
   for (const debate of world.openDebates) {
     if (debate.incumbentPosted || debate.incumbentUserId === null) continue;
+    if (!debate.incumbentWillRebut) continue; // a true forfeit — never answers
     const incumbent = provisionedOrganic.find((p) => p.spec.userId === debate.incumbentUserId);
     if (incumbent === undefined) continue;
-    if (!prng.chance(0.7)) continue; // some incumbents never answer (forfeit)
+    if (!prng.chance(REBUT_THIS_TICK_P)) continue; // posts on a later tick
     const domain = debate.domain ?? domainForPersona(incumbent.spec, prng);
-    rebuttalSerial += 1;
-    const rebuttal = generateRebuttal(domain, storySerial * 10 + rebuttalSerial, prng);
+    positionSerial += 1;
+    const rebuttal = generateRebuttal(domain, storySerial * 10 + positionSerial, prng);
     contributions.push({
       kind: 'debate_position',
       personaUserId: incumbent.spec.userId,
       debateId: debate.debateId,
+      side: 'incumbent',
       summary: rebuttal.body,
       citationUrls: rebuttal.citationUrls,
     });
+  }
+
+  // --- Challenger reinforcements (WS-T, the co-visible edit loop) --------------
+  // Once the incumbent's rebuttal is visible, the challenger gets ONE chance to
+  // strengthen their position (original material + a responsive addendum +
+  // extra sources) through the same REAL position path. `reinforceEligible` is
+  // true exactly once per arena — the runtime marks it considered after this
+  // plan, so the roll below is one-shot.
+  for (const debate of world.openDebates) {
+    if (!debate.reinforceEligible || debate.challengerUserId === null) continue;
+    const challenger = provisionedOrganic.find((p) => p.spec.userId === debate.challengerUserId);
+    if (challenger === undefined) continue;
+    if (!prng.chance(CHALLENGER_REINFORCE_P)) continue;
+    const domain = debate.domain ?? domainForPersona(challenger.spec, prng);
+    positionSerial += 1;
+    const reinforced = generateReinforcement(
+      { summary: debate.challengerSummary, citationUrls: debate.challengerCitationUrls },
+      domain,
+      storySerial * 10 + positionSerial,
+      prng,
+    );
+    contributions.push({
+      kind: 'debate_position',
+      personaUserId: challenger.spec.userId,
+      debateId: debate.debateId,
+      side: 'challenger',
+      summary: reinforced.summary,
+      citationUrls: reinforced.citationUrls,
+    });
+  }
+
+  // --- Steward overrules of judged arenas (WS-T) -------------------------------
+  // Each judged arena reaches this plan EXACTLY ONCE (the runtime marks it
+  // considered). With one-shot probability the steward persona overrules the AI
+  // verdict through the REAL override path — usually FLIPPING the winner (that
+  // is what an overrule is for), occasionally ruling inconclusive. Most
+  // verdicts stand, as in production.
+  const stewards = provisionedOrganic.filter((p) => archetypeOf(p.spec).stewardRole === true);
+  const overrides: SimAction[] = [];
+  if (stewards.length > 0) {
+    for (const judged of world.judgedDebates) {
+      if (judged.roomId === null) continue; // overrule is a room-governance power
+      if (!prng.chance(STEWARD_OVERRIDE_P)) continue;
+      const steward = prng.pick(stewards);
+      const flipped: DebateWinner =
+        judged.winner === 'challenger'
+          ? 'incumbent'
+          : judged.winner === 'incumbent'
+            ? 'challenger'
+            : prng.chance(0.5)
+              ? 'incumbent'
+              : 'challenger';
+      overrides.push({
+        kind: 'debate_override',
+        personaUserId: steward.spec.userId,
+        debateId: judged.debateId,
+        winner: prng.chance(0.8) ? flipped : 'none',
+        reason: prng.pick(OVERRIDE_REASONS),
+      });
+    }
   }
 
   // --- The coordinated cluster -------------------------------------------------
@@ -702,6 +904,14 @@ export function planTick(input: PlanTickInput): SimAction[] {
     }
   }
 
-  const plan = [...provisioning, ...stories, ...contributions, ...attention, ...joins, ...reports];
+  const plan = [
+    ...provisioning,
+    ...stories,
+    ...contributions,
+    ...overrides,
+    ...attention,
+    ...joins,
+    ...reports,
+  ];
   return plan.slice(0, MAX_ACTIONS_PER_TICK);
 }

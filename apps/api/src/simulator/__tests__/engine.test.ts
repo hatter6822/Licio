@@ -19,6 +19,7 @@ function room(
   id: string,
   expertGated = false,
   lensesByType: ReadonlyMap<LensType, string> = new Map(),
+  governed = false,
 ): WorldRoom {
   return {
     roomId: id,
@@ -26,6 +27,7 @@ function room(
     expertGated,
     domains: ['health', 'climate', 'local'],
     lensesByType,
+    governed,
   };
 }
 
@@ -73,6 +75,24 @@ function baseWorld(overrides: Partial<SimWorld> = {}): SimWorld {
     focusStoryId: null,
     storyCapReached: false,
     openDebates: [],
+    judgedDebates: [],
+    ...overrides,
+  };
+}
+
+/** An open-arena fixture with the challenger-side fields defaulted. */
+function openDebate(
+  overrides: Partial<SimWorld['openDebates'][number]> & { debateId: string },
+): SimWorld['openDebates'][number] {
+  return {
+    incumbentUserId: null,
+    incumbentPosted: false,
+    incumbentWillRebut: true,
+    domain: 'health',
+    challengerUserId: null,
+    challengerSummary: 'The stated figure does not match the primary series as published.',
+    challengerCitationUrls: ['https://daily-ledger.example/refs/health-correction-1-0'],
+    reinforceEligible: false,
     ...overrides,
   };
 }
@@ -420,7 +440,7 @@ describe('simulator engine — WS-T corrections + debate positions', () => {
     };
   }
 
-  it('plans sourced corrections against ELIGIBLE targets only (1–3 sources each)', () => {
+  it('plans sourced corrections against ELIGIBLE targets only (1–4 sources each)', () => {
     const world = baseWorld({
       commentsByStory: new Map([
         ['s1', [eligibleComment, underDebateComment, incorrectComment]],
@@ -435,7 +455,7 @@ describe('simulator engine — WS-T corrections + debate positions', () => {
         planned += 1;
         expect(action.body.length).toBeGreaterThan(40);
         expect(action.citationUrls.length).toBeGreaterThanOrEqual(1);
-        expect(action.citationUrls.length).toBeLessThanOrEqual(3);
+        expect(action.citationUrls.length).toBeLessThanOrEqual(4);
         if (action.targetContributionId !== null) {
           // Never the under-debate or incorrect comment; never self-challenge.
           expect(action.targetContributionId).toBe('c-ok');
@@ -466,24 +486,9 @@ describe('simulator engine — WS-T corrections + debate positions', () => {
     const incumbent = req(BASE_ROSTER[0]).userId;
     const world = baseWorld({
       openDebates: [
-        {
-          debateId: 'd-open',
-          incumbentUserId: incumbent,
-          incumbentPosted: false,
-          domain: 'health',
-        },
-        {
-          debateId: 'd-answered',
-          incumbentUserId: incumbent,
-          incumbentPosted: true,
-          domain: 'health',
-        },
-        {
-          debateId: 'd-foreign',
-          incumbentUserId: 'not-a-persona',
-          incumbentPosted: false,
-          domain: 'health',
-        },
+        openDebate({ debateId: 'd-open', incumbentUserId: incumbent }),
+        openDebate({ debateId: 'd-answered', incumbentUserId: incumbent, incumbentPosted: true }),
+        openDebate({ debateId: 'd-foreign', incumbentUserId: 'not-a-persona' }),
       ],
     });
     let planned = 0;
@@ -492,11 +497,322 @@ describe('simulator engine — WS-T corrections + debate positions', () => {
         if (action.kind !== 'debate_position') continue;
         planned += 1;
         expect(action.debateId).toBe('d-open');
+        expect(action.side).toBe('incumbent');
         expect(action.personaUserId).toBe(incumbent);
         expect(action.summary.length).toBeGreaterThan(40);
         expect(action.citationUrls.length).toBeLessThanOrEqual(3);
       }
     }
     expect(planned).toBeGreaterThan(0);
+  });
+
+  it('NEVER plans a rebuttal for a forfeiting incumbent (the one-shot decision is honoured)', () => {
+    const incumbent = req(BASE_ROSTER[0]).userId;
+    const world = baseWorld({
+      openDebates: [
+        openDebate({
+          debateId: 'd-forfeit',
+          incumbentUserId: incumbent,
+          incumbentWillRebut: false,
+        }),
+      ],
+    });
+    // Whatever the seed, a forfeiting incumbent never posts — the per-tick
+    // re-roll bug this replaces made "never answers" a ~0.8% event.
+    for (const seed of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']) {
+      const rebuttals = planTick(input(world, seed)).filter((a) => a.kind === 'debate_position');
+      expect(rebuttals).toHaveLength(0);
+    }
+  });
+
+  it('corrections carry a one-shot incumbentWillRebut decision that FORFEITS a real share', () => {
+    // The target's author must be a SIM PERSONA — only a persona incumbent
+    // rolls the forfeit decision (a seed/human incumbent can never answer via
+    // the rebuttal planner, so it never rolls).
+    const personaComment = {
+      ...eligibleComment,
+      contributionId: 'c-persona',
+      authorUserId: req(BASE_ROSTER[5]).userId,
+    };
+    const world = baseWorld({
+      commentsByStory: new Map([
+        ['s1', [personaComment]],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    let willRebut = 0;
+    let forfeit = 0;
+    for (let i = 0; i < 40; i += 1) {
+      for (const action of planTick(input(world, `forfeit-${i}`))) {
+        if (action.kind !== 'correction') continue;
+        if (action.targetContributionId !== 'c-persona') continue; // story-root targets vary
+        if (action.incumbentWillRebut) willRebut += 1;
+        else forfeit += 1;
+      }
+    }
+    // ~30% forfeit at INCUMBENT_REBUT_P = 0.7 — assert both sides genuinely occur.
+    expect(willRebut).toBeGreaterThan(0);
+    expect(forfeit).toBeGreaterThan(0);
+  });
+
+  it('prefers PERSONA-authored targets and never rolls willRebut for a seed/human incumbent', () => {
+    const personaAuthor = req(BASE_ROSTER[5]).userId;
+    const personaComment = {
+      ...eligibleComment,
+      contributionId: 'c-persona',
+      authorUserId: personaAuthor,
+    };
+    const seedComment = { ...eligibleComment, contributionId: 'c-seed' }; // author 'other-author'
+    // Both kinds present ⇒ every comment-targeted correction picks the persona one.
+    const mixed = baseWorld({
+      commentsByStory: new Map([
+        ['s1', [seedComment, personaComment]],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    let personaTargets = 0;
+    for (let i = 0; i < 30; i += 1) {
+      for (const action of planTick(input(mixed, `prefer-${i}`))) {
+        if (action.kind !== 'correction' || action.targetContributionId === null) continue;
+        // The persona who AUTHORED c-persona cannot target their own comment
+        // (self-challenge exclusion), so their pool honestly falls back to the
+        // seed comment — every OTHER challenger must prefer the persona target.
+        if (action.personaUserId === personaAuthor) continue;
+        expect(action.targetContributionId).toBe('c-persona');
+        expect(action.incumbentUserId).toBe(personaAuthor);
+        personaTargets += 1;
+      }
+    }
+    expect(personaTargets).toBeGreaterThan(0);
+
+    // Only seed-authored content ⇒ still challengeable, but the incumbent
+    // NEVER rolls willRebut (the arena is one-sided by construction and the
+    // runtime excludes it from the forfeit pulse).
+    const seedOnly = baseWorld({
+      commentsByStory: new Map([
+        ['s1', [seedComment]],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    let seedTargets = 0;
+    for (let i = 0; i < 30; i += 1) {
+      for (const action of planTick(input(seedOnly, `seedonly-${i}`))) {
+        if (action.kind !== 'correction') continue;
+        expect(action.incumbentWillRebut).toBe(false);
+        if (action.targetContributionId === 'c-seed') seedTargets += 1;
+      }
+    }
+    expect(seedTargets).toBeGreaterThan(0);
+  });
+
+  it('plans a challenger reinforcement only when the arena is reinforce-eligible', () => {
+    const challenger = req(BASE_ROSTER[1]).userId;
+    const eligible = openDebate({
+      debateId: 'd-reinforce',
+      incumbentUserId: 'not-a-persona',
+      incumbentPosted: true,
+      challengerUserId: challenger,
+      reinforceEligible: true,
+    });
+    const notEligible = openDebate({
+      debateId: 'd-quiet',
+      incumbentUserId: 'not-a-persona',
+      incumbentPosted: true,
+      challengerUserId: challenger,
+      reinforceEligible: false,
+    });
+    let planned = 0;
+    for (let i = 0; i < 30; i += 1) {
+      const world = baseWorld({ openDebates: [eligible, notEligible] });
+      for (const action of planTick(input(world, `reinforce-${i}`))) {
+        if (action.kind !== 'debate_position') continue;
+        planned += 1;
+        expect(action.debateId).toBe('d-reinforce');
+        expect(action.side).toBe('challenger');
+        expect(action.personaUserId).toBe(challenger);
+        // The reinforcement BUILDS ON the original position: original summary
+        // kept, original sources kept, at least one NEW source added.
+        expect(action.summary).toContain(eligible.challengerSummary);
+        for (const url of eligible.challengerCitationUrls) {
+          expect(action.citationUrls).toContain(url);
+        }
+        expect(action.citationUrls.length).toBeGreaterThan(eligible.challengerCitationUrls.length);
+      }
+    }
+    // One-shot p=0.35 over 30 seeds ⇒ reinforcements genuinely occur.
+    expect(planned).toBeGreaterThan(0);
+  });
+
+  it('plans steward overrules of judged arenas — steward persona only, real reason text', () => {
+    const steward = req(BASE_ROSTER.find((p) => p.archetype === 'room_steward'));
+    let planned = 0;
+    const winners = new Set<string>();
+    for (let i = 0; i < 40; i += 1) {
+      const world = baseWorld({
+        judgedDebates: [{ debateId: `d-judged-${i}`, roomId: 'r1', winner: 'challenger' }],
+      });
+      for (const action of planTick(input(world, `override-${i}`))) {
+        if (action.kind !== 'debate_override') continue;
+        planned += 1;
+        expect(action.personaUserId).toBe(steward.userId);
+        expect(action.debateId).toBe(`d-judged-${i}`);
+        expect(action.reason.length).toBeGreaterThan(20);
+        winners.add(action.winner);
+      }
+    }
+    // One-shot p=0.3 over 40 seeds ⇒ overrules occur; most flip the verdict.
+    expect(planned).toBeGreaterThan(0);
+    expect(winners.has('incumbent')).toBe(true);
+  });
+
+  it('never plans an overrule without a steward persona or for a room-less arena', () => {
+    const noSteward = personas(BASE_ROSTER.filter((p) => p.archetype !== 'room_steward'));
+    for (let i = 0; i < 20; i += 1) {
+      const world = baseWorld({
+        judgedDebates: [{ debateId: `d-${i}`, roomId: 'r1', winner: 'challenger' }],
+      });
+      const plan = planTick({ ...input(world, `nosteward-${i}`), personas: noSteward });
+      expect(plan.some((a) => a.kind === 'debate_override')).toBe(false);
+      const roomless = baseWorld({
+        judgedDebates: [{ debateId: `d-${i}`, roomId: null, winner: 'challenger' }],
+      });
+      const plan2 = planTick(input(roomless, `roomless-${i}`));
+      expect(plan2.some((a) => a.kind === 'debate_override')).toBe(false);
+    }
+  });
+
+  it('challenge_wave stamps failure-injection markers on a share of corrections; steady stamps none', () => {
+    const world = baseWorld({
+      commentsByStory: new Map([
+        ['s1', [eligibleComment]],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    const bodiesFor = (scenario: (typeof SCENARIOS)[keyof typeof SCENARIOS]): string[] => {
+      const bodies: string[] = [];
+      for (let i = 0; i < 30; i += 1) {
+        for (const action of planTick({ ...input(world, `marker-${i}`), scenario })) {
+          if (action.kind === 'correction') bodies.push(action.body);
+        }
+      }
+      return bodies;
+    };
+    const waveBodies = bodiesFor(SCENARIOS.challenge_wave);
+    const steadyBodies = bodiesFor(SCENARIOS.steady);
+    expect(waveBodies.some((b) => b.includes('[sim:'))).toBe(true);
+    expect(waveBodies.some((b) => !b.includes('[sim:'))).toBe(true); // most stay clean
+    expect(steadyBodies.every((b) => !b.includes('[sim:'))).toBe(true);
+  });
+});
+
+describe('simulator engine — WS-U moderation exercisers', () => {
+  it('swaps a scenario-configured share of comments for PROBLEM bodies (spam/hostile terms)', () => {
+    const world = baseWorld({
+      commentsByStory: new Map([
+        ['s1', []],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    const problemMarkers = ['promo code', 'giveaway', 'discount', 'idiot', 'worthless', 'shut up'];
+    let problem = 0;
+    let civil = 0;
+    for (let i = 0; i < 30; i += 1) {
+      const plan = planTick({
+        scenario: SCENARIOS.challenge_wave,
+        world,
+        personas: personas(BASE_ROSTER),
+        newcomersProvisioned: 0,
+        prng: createPrng(`problem-${i}`),
+        scenarioElapsedMs: 60_000,
+        tickMs: 60_000,
+        speed: 20,
+        storySerial: 1,
+        kickoffDone: true,
+        repostDone: true,
+      });
+      for (const action of plan) {
+        if (action.kind !== 'comment') continue;
+        const lower = action.body.toLowerCase();
+        if (problemMarkers.some((term) => lower.includes(term))) problem += 1;
+        else civil += 1;
+      }
+    }
+    // A real minority share: both kinds occur, civil traffic dominates.
+    expect(problem).toBeGreaterThan(0);
+    expect(civil).toBeGreaterThan(problem);
+  });
+
+  it('weights story placement toward GOVERNED rooms (the in-room agent sees traffic)', () => {
+    const world = baseWorld({
+      rooms: [room('r-plain'), room('r-governed', false, new Map(), true)],
+      stories: [],
+      commentsByStory: new Map(),
+    });
+    let governed = 0;
+    let plain = 0;
+    for (let i = 0; i < 60; i += 1) {
+      const plan = planTick({
+        scenario: SCENARIOS.steady,
+        world,
+        personas: personas(BASE_ROSTER),
+        newcomersProvisioned: 0,
+        prng: createPrng(`governed-${i}`),
+        scenarioElapsedMs: 60_000,
+        tickMs: 60_000,
+        speed: 20,
+        storySerial: 1,
+        kickoffDone: true,
+        repostDone: true,
+      });
+      for (const action of plan) {
+        if (action.kind !== 'submit_story') continue;
+        if (action.roomId === 'r-governed') governed += 1;
+        else plain += 1;
+      }
+    }
+    // ×3 weighting ⇒ the governed room receives the clear majority.
+    expect(governed).toBeGreaterThan(plain);
+  });
+
+  it('weights comment/correction TARGETS toward governed-room stories too', () => {
+    // Equal-recency story pairs: same index positions, one per room, so the
+    // only systematic difference is the governed-room weight.
+    const stories = Array.from({ length: 20 }, (_, i) =>
+      story(`s-${i}`, i % 2 === 0 ? 'r-governed' : 'r-plain', { domain: null }),
+    );
+    const world = baseWorld({
+      rooms: [room('r-plain'), room('r-governed', false, new Map(), true)],
+      stories,
+      commentsByStory: new Map(stories.map((s) => [s.storyId, []])),
+    });
+    let governed = 0;
+    let plain = 0;
+    for (let i = 0; i < 40; i += 1) {
+      const plan = planTick({
+        scenario: SCENARIOS.steady,
+        world,
+        personas: personas(BASE_ROSTER),
+        newcomersProvisioned: 0,
+        prng: createPrng(`target-${i}`),
+        scenarioElapsedMs: 60_000,
+        tickMs: 60_000,
+        speed: 20,
+        storySerial: 1,
+        kickoffDone: true,
+        repostDone: true,
+      });
+      for (const action of plan) {
+        if (action.kind !== 'comment' && action.kind !== 'correction') continue;
+        const target = stories.find((s) => s.storyId === action.storyId);
+        if (target?.roomId === 'r-governed') governed += 1;
+        else plain += 1;
+      }
+    }
+    expect(governed).toBeGreaterThan(plain);
   });
 });

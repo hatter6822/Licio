@@ -8,10 +8,14 @@ import {
   generateCommentBody,
   generateCorrection,
   generateEvidence,
+  generateProblemComment,
   generateRebuttal,
+  generateReinforcement,
   generateRepost,
   generateStory,
   isSimulatedUrl,
+  OVERRIDE_REASONS,
+  pickDebateMarker,
   type StoryKind,
   simulatedArticleBody,
   uniqueSubject,
@@ -210,16 +214,24 @@ describe('simulator content generation', () => {
 });
 
 describe('WS-T correction + rebuttal generators', () => {
-  it('generateCorrection: schema-conformant body with 1–3 distinct simulated sources', async () => {
+  it('generateCorrection: schema-conformant body with 1–4 distinct simulated sources', async () => {
     const { correctionCreateSchema } = await import('@licio/shared');
+    const counts = new Set<number>();
     for (let i = 0; i < 30; i += 1) {
       const prng = createPrng(`corr-${i}`);
       const correction = generateCorrection('health', i, prng);
+      counts.add(correction.citationUrls.length);
       expect(correction.body.length).toBeGreaterThan(40);
       expect(correction.body.length).toBeLessThanOrEqual(2_000);
       expect(correction.citationUrls.length).toBeGreaterThanOrEqual(1);
-      expect(correction.citationUrls.length).toBeLessThanOrEqual(3);
+      expect(correction.citationUrls.length).toBeLessThanOrEqual(4);
       expect(new Set(correction.citationUrls).size).toBe(correction.citationUrls.length);
+      // Distinct REGISTRABLE DOMAINS, not just distinct URLs — the adjudicator's
+      // independence feature counts domains, so an advertised N-source challenge
+      // must actually provide N independent sources (every bank carries ≥4
+      // outlets so even the heaviest pick never wraps).
+      const hosts = correction.citationUrls.map((url) => new URL(url).hostname);
+      expect(new Set(hosts).size).toBe(hosts.length);
       for (const url of correction.citationUrls) expect(isSimulatedUrl(url)).toBe(true);
       // The exact wire shape the runtime submits parses through the REAL schema.
       const parsed = correctionCreateSchema.safeParse({
@@ -231,6 +243,25 @@ describe('WS-T correction + rebuttal generators', () => {
         target_story_id: '5f5ed000-0000-4000-8000-000000000003',
       });
       expect(parsed.success).toBe(true);
+    }
+    // Weak (1-source) and strong (≥3-source) challenges both occur.
+    expect(counts.has(1)).toBe(true);
+    expect([...counts].some((n) => n >= 3)).toBe(true);
+  });
+
+  it('a FOUR-source correction carries four independent registrable domains (no outlet wrap)', () => {
+    // Deterministic seeds: sweep until the weighted pick lands on 4, across
+    // every domain bank, and assert the hosts are genuinely distinct.
+    for (const domain of DOMAIN_IDS) {
+      let found = false;
+      for (let i = 0; i < 200 && !found; i += 1) {
+        const correction = generateCorrection(domain, i, createPrng(`four-${domain}-${i}`));
+        if (correction.citationUrls.length !== 4) continue;
+        found = true;
+        const hosts = correction.citationUrls.map((url) => new URL(url).hostname);
+        expect(new Set(hosts).size).toBe(4);
+      }
+      expect(found).toBe(true);
     }
   });
 
@@ -251,5 +282,137 @@ describe('WS-T correction + rebuttal generators', () => {
     // The verdict space stays honest: weak (1) AND strong (3) rebuttals occur.
     expect(seen.has(1)).toBe(true);
     expect(seen.has(3)).toBe(true);
+  });
+
+  it('generateReinforcement: keeps the original position, adds an addendum + new sources, caps at 10', () => {
+    const original = {
+      summary: 'The stated figure does not match the primary series.',
+      citationUrls: [
+        'https://daily-ledger.example/refs/health-correction-1-0',
+        'https://civic-wire.example/refs/health-correction-1-1',
+      ],
+    };
+    const originalHosts = new Set(original.citationUrls.map((url) => new URL(url).hostname));
+    for (let i = 0; i < 20; i += 1) {
+      const prng = createPrng(`reinf-${i}`);
+      const reinforced = generateReinforcement(original, 'health', i, prng);
+      // Original material carried forward; genuinely responsive addendum added.
+      expect(reinforced.summary.startsWith(original.summary)).toBe(true);
+      expect(reinforced.summary.length).toBeGreaterThan(original.summary.length + 40);
+      for (const url of original.citationUrls) expect(reinforced.citationUrls).toContain(url);
+      expect(reinforced.citationUrls.length).toBeGreaterThan(original.citationUrls.length);
+      // Extras land on registrable domains the challenger has NOT already
+      // cited — the adjudicator counts independent domains, so a same-domain
+      // "extra source" would strengthen nothing.
+      for (const url of reinforced.citationUrls.slice(original.citationUrls.length)) {
+        expect(originalHosts.has(new URL(url).hostname)).toBe(false);
+      }
+      // The wire schema's citation ceiling holds even for a large original.
+      expect(reinforced.citationUrls.length).toBeLessThanOrEqual(10);
+      expect(new Set(reinforced.citationUrls).size).toBe(reinforced.citationUrls.length);
+    }
+    const bloated = {
+      summary: original.summary,
+      citationUrls: Array.from({ length: 10 }, (_, i) => `https://o${i}.example/r`),
+    };
+    const capped = generateReinforcement(bloated, 'health', 99, createPrng('cap'));
+    expect(capped.citationUrls.length).toBeLessThanOrEqual(10);
+  });
+
+  it('generateReinforcement: an original that EXHAUSTED its bank still gains independent domains', () => {
+    // All four health outlets already cited — extras must come from OTHER
+    // banks' outlets (cross-domain corroboration), never re-cite a domain.
+    const exhausted = {
+      summary: 'The stated figure does not match the primary series.',
+      citationUrls: [
+        'https://daily-ledger.example/refs/x-0',
+        'https://metro-monitor.example/refs/x-1',
+        'https://civic-wire.example/refs/x-2',
+        'https://ward-bulletin.example/refs/x-3',
+      ],
+    };
+    const citedHosts = new Set(exhausted.citationUrls.map((url) => new URL(url).hostname));
+    for (let i = 0; i < 20; i += 1) {
+      const reinforced = generateReinforcement(exhausted, 'health', i, createPrng(`exh-${i}`));
+      const extras = reinforced.citationUrls.slice(exhausted.citationUrls.length);
+      expect(extras.length).toBeGreaterThan(0);
+      for (const url of extras) {
+        const host = new URL(url).hostname;
+        expect(citedHosts.has(host)).toBe(false);
+        expect(isSimulatedUrl(url)).toBe(true); // still a reserved .example outlet
+      }
+    }
+  });
+
+  it('pickDebateMarker returns only markers the simulated runtime interprets', () => {
+    const allowed = new Set([
+      '[sim:debate=incumbent]',
+      '[sim:debate=challenger]',
+      '[sim:debate=inconclusive]',
+      '[sim:rationale-url]',
+    ]);
+    const seen = new Set<string>();
+    for (let i = 0; i < 60; i += 1) seen.add(pickDebateMarker(createPrng(`marker-${i}`)));
+    for (const marker of seen) expect(allowed.has(marker)).toBe(true);
+    // The forced-class markers dominate; every family occurs across seeds.
+    expect(seen.size).toBeGreaterThanOrEqual(3);
+  });
+
+  it('OVERRIDE_REASONS are substantive and within the override wire bound', () => {
+    for (const reason of OVERRIDE_REASONS) {
+      expect(reason.length).toBeGreaterThan(20);
+      expect(reason.length).toBeLessThanOrEqual(1_000);
+    }
+  });
+});
+
+describe('WS-U problem-comment generator', () => {
+  it('spam bodies carry ≥2 distinct spam terms; hostile bodies carry a hostile term', () => {
+    const spamTerms = ['discount', 'promo code', 'free money', 'click', 'giveaway', 'cheap'];
+    const hostileTerms = ['idiot', 'worthless', 'shut up'];
+    for (let i = 0; i < 20; i += 1) {
+      const spam = generateProblemComment('spam', 'health', createPrng(`spam-${i}`)).toLowerCase();
+      expect(spamTerms.filter((t) => spam.includes(t)).length).toBeGreaterThanOrEqual(2);
+      const hostile = generateProblemComment(
+        'hostile',
+        'climate',
+        createPrng(`hostile-${i}`),
+      ).toLowerCase();
+      expect(hostileTerms.some((t) => hostile.includes(t))).toBe(true);
+    }
+  });
+
+  it('spam bodies carry ONE real link token; hostile bodies stay link-free', () => {
+    // The moderation context counts whitespace-delimited http(s) tokens
+    // (governance/forum-agent.ts countLinkTokens) — spam-with-links is what
+    // makes the model propose `remove`, exercising the wrapper's
+    // escalate-to-review clamp; a link-less spam body could only ever drive
+    // flag_for_review.
+    const linkTokens = (body: string): string[] =>
+      body.split(/\s+/).filter((t) => t.startsWith('https://') || t.startsWith('http://'));
+    for (const domain of DOMAIN_IDS) {
+      for (let i = 0; i < 10; i += 1) {
+        const spam = generateProblemComment('spam', domain, createPrng(`slink-${domain}-${i}`));
+        const tokens = linkTokens(spam);
+        expect(tokens.length).toBe(1);
+        expect(isSimulatedUrl(req(tokens[0]))).toBe(true); // stays on reserved .example hosts
+        const hostile = generateProblemComment(
+          'hostile',
+          domain,
+          createPrng(`hlink-${domain}-${i}`),
+        );
+        expect(linkTokens(hostile)).toHaveLength(0);
+      }
+    }
+  });
+
+  it('problem bodies stay within the comment wire bound and are deterministic per seed', () => {
+    for (const kind of ['spam', 'hostile'] as const) {
+      const a = generateProblemComment(kind, 'local', createPrng('det'));
+      const b = generateProblemComment(kind, 'local', createPrng('det'));
+      expect(a).toBe(b);
+      expect(a.length).toBeGreaterThan(40);
+      expect(a.length).toBeLessThanOrEqual(2_000);
+    }
   });
 });

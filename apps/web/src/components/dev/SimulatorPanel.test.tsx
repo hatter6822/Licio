@@ -60,6 +60,7 @@ function status(over: Partial<SimulatorStatus> = {}): SimulatorStatus {
       corrections_posted: 5,
       debates_opened: 4,
       debate_positions_posted: 3,
+      debate_overrides: 1,
       debates_judged: 3,
       debates_finalized: 2,
       rejected_rate_limited: 3,
@@ -110,8 +111,19 @@ function status(over: Partial<SimulatorStatus> = {}): SimulatorStatus {
       llm_verdicts: { upheld: 1, corrected: 2, inconclusive: 0 },
       llm_decided: 3,
       llm_unavailable: 0,
+      resolved: { corrected: 1, upheld: 1, inconclusive: 0 },
+      forfeits: 1,
+      overridden: 1,
       avg_adjudication_ms: 850,
       last_judged_at: '2026-07-04T00:01:00.000Z',
+    },
+    moderation_pulse: {
+      llm_backend_active: true,
+      proposals: 12,
+      proposed: { allow: 8, warn: 1, flag_for_review: 2, restrict: 0, remove: 1 },
+      unavailable: 1,
+      guard_blocked: 0,
+      agent_escalations: 3,
     },
     scenarios: [
       { id: 'steady', label: 'Steady community', description: 'A balanced day.' },
@@ -136,11 +148,21 @@ describe('SimulatorPanel', () => {
     expect(screen.getByText('new to page')).toBeInTheDocument();
     // The rejected activity entry surfaces with its code.
     expect(screen.getByText(/comment rejected \(rate_limited\)/)).toBeInTheDocument();
-    // The WS-T challenge-resolution pulse (corrections → arenas → verdicts).
+    // The WS-T challenge-resolution pulse (corrections → arenas → verdicts →
+    // forfeits/overrules/resolved outcomes).
     expect(screen.getByText('Challenge resolutions')).toBeInTheDocument();
     expect(screen.getByText('Corrections filed')).toBeInTheDocument();
     expect(screen.getByText('Avg adjudication')).toBeInTheDocument();
+    expect(screen.getByText('Forfeits')).toBeInTheDocument();
+    expect(screen.getByText('Steward overrules')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Resolved outcomes: 1 corrected, 1 upheld, 0 inconclusive/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/2 corrected, 1 upheld, 0 inconclusive/)).toBeInTheDocument();
+    // The WS-U in-room moderation pulse (the bounded agent over governed rooms).
+    expect(screen.getByText('In-room moderation')).toBeInTheDocument();
+    expect(screen.getByText('Model proposals')).toBeInTheDocument();
+    expect(screen.getByText(/8 allow, 1 warn, 2 flag for review/)).toBeInTheDocument();
   });
 
   it('shows the unavailable state when the surface is absent', async () => {

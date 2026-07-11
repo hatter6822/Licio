@@ -68,7 +68,10 @@ end-to-end data immediately. The in-memory data is ephemeral — each restart
 re-seeds a fresh corpus. The three governed AI surfaces (lawmaking summaries,
 in-room moderation, debate adjudication) also work out of the box: dev
 auto-starts a deterministic **simulated local LLM runtime** behind the real
-governed pipeline (Section 16).
+governed pipeline (Section 16), and the **traffic simulator** (Section 10)
+starts generating live synthetic activity — including corrections that the
+governed adjudicator resolves and contributions the in-room moderation model
+classifies — so every automated surface has something to act on immediately.
 
 ### Optional: run against a real Postgres + Redis (durable data)
 
@@ -249,8 +252,8 @@ Docker, see the note at the end of Section 6.
 ## 4. Get the code
 
 ```sh
-git clone https://github.com/hatter6822/temp_licio.git
-cd temp_licio
+git clone https://github.com/hatter6822/Licio.git
+cd Licio
 ```
 
 Create a feature branch off `main` for your work (direct pushes to `main`
@@ -605,10 +608,10 @@ This runs the `web` and `api` dev servers in parallel:
 - **API** (Hono, `tsx watch` — restarts on change): <http://localhost:3001>
 
 On a healthy boot the API logs the startup sequence — service wiring,
-event-pipeline recovery, the twelve lease-guarded schedulers (privacy,
+event-pipeline recovery, the thirteen lease-guarded schedulers (privacy,
 ingestion, invariants, event pipeline, ranking, debate, moderation,
-AI-governance, governance elections, Knomosis, LCAP, rendezvous) — and finishes
-with `Server started`. The PWA renders **demo feed fixtures** immediately,
+AI-governance, governance elections, Knomosis, LCAP, rendezvous, telemetry) —
+and finishes with `Server started`. The PWA renders **demo feed fixtures** immediately,
 so you see real end-to-end pages before submitting anything; content you
 create through the UI then flows through the same production read paths.
 
@@ -806,13 +809,14 @@ DevTools → Network to watch the chunk load when you first enter `/private`.
 The seed gives you a static corpus. To see how the platform behaves under
 **continuous, unique traffic** — new stories arriving, discussions cascading,
 readers accumulating attention, the ranked feed reordering — run the
-**development traffic simulator**. It drives the **real** WS-E/F/G/H/I/J
+**development traffic simulator**. It drives the **real** WS-E/F/G/H/I/J/T/U
 pipelines with deterministic, persona-shaped synthetic activity: synthetic
 users submit stories, reply in threads, read (as bucketed attention
-aggregates), join rooms, and file reports, exactly as a real client would. It
-calls the same service functions the HTTP routes call, so everything flows
-through the production read paths and the feed reacts the same way it would to
-real people.
+aggregates), join rooms, file reports, file sourced corrections that open real
+debate arenas, and overrule verdicts as room stewards, exactly as a real
+client would. It calls the same service functions the HTTP routes call, so
+everything flows through the production read paths and the feed reacts the
+same way it would to real people.
 
 It is **development-only** and never runs, mounts, or is reachable in
 production (guarded by `NODE_ENV === 'development'`; the control routes are
@@ -838,7 +842,8 @@ surfaces; see Section 16.
 Traffic simulator** (or go to `/dev/simulator`). The panel shows the run state,
 honest activity counters (stories, comments, reads, reports, plus real pipeline
 rejections such as rate limits and duplicate detection — surfaced, never
-hidden), a front-page **feed-movement** view with per-story position deltas,
+hidden), the **Challenge resolutions** and **In-room moderation** pulse cards
+(below), a front-page **feed-movement** view with per-story position deltas,
 and a live activity ticker. From there you can start/stop, switch scenarios,
 and change the speed multiplier. To watch the effect, keep the front page (or a
 story's comment section) open in a second tab: the feed refreshes on tab focus
@@ -854,6 +859,7 @@ streams new comments over SSE in real time.
 | **Runaway thread** | One discussion cascades into deep nested replies with readers returning — watch thread depth and participation signals. |
 | **Coordinated burst** | A cluster of **fresh** accounts hammers one story with synchronized reading, near-identical replies, and reports — watch the WS-E anti-signal dampening and the WS-J coordinated-report intake respond. |
 | **New-user influx** | A stream of brand-new accounts joins rooms and posts lightly — watch new-account handling across the pipelines. |
+| **Challenge wave** | A surge of sourced corrections: arenas open, both sides argue, the governed AI adjudicator rules, stewards overrule some — the WS-T challenge-resolution stress preset (it also injects a bounded share of failure-injection markers so the fail-closed MLP fallback runs under load). |
 | **Quiet night** | Near-silence — a baseline to compare the others against. |
 
 **How it stays honest.** Synthetic users are real, active, verified accounts in
@@ -865,28 +871,52 @@ anti-signal detectors. A per-boot story budget caps how much it creates. The
 whole run is deterministic: the same seed and scenario replay the same traffic,
 which is what makes a tester's session reproducible.
 
-**Challenge-resolution load (WS-T).** The simulator also drives the full
-correction → debate → adjudication loop through the REAL pipelines, so you can
-watch — and measure — the throughput the AI adjudicator handles. Personas file
-**sourced corrections** (1–3 `.example` citations of varying strength) against
-eligible comments and story roots via the real `POST /v1/contributions` guard
-chain; each published correction opens a real **debate arena**; challenged
-incumbents post rebuttals of varying strength (sometimes none — a forfeit)
-through the real position window; and the simulator advances due arenas
-through the real lifecycle every tick. While the simulator runs, the arena
-windows are **shortened** (≈20s edit / 10s override, via the injectable
-`debateWindowsOverride` seam — the §15.4 spec windows of 12h/24h are restored
-on stop), so a synthetic challenge resolves in about half a minute, verdicts
-split across corrected/upheld/inconclusive, and `Incorrect`/`Validated` tags +
-feed demotion appear live.
+**Challenge-resolution load (WS-T).** The simulator drives the **full**
+correction → debate → adjudication → override → finalize loop through the
+REAL pipelines, so you can watch — and measure — every stage the AI
+adjudicator and its human remedy handle:
+
+- Personas file **sourced corrections** (1–4 `.example` citations of varying
+  strength) against eligible comments and story roots via the real
+  `POST /v1/contributions` guard chain; each published correction opens a real
+  **debate arena**.
+- Each challenged incumbent gets a **one-shot forfeit decision** when the
+  correction is planned: ~70% post a rebuttal (1–3 sources, varying strength)
+  through the real position window; ~30% genuinely never answer, so the
+  adjudicator judges real **one-sided debates** (the panel counts them as
+  *Forfeits*).
+- After a rebuttal lands, the **challenger** sometimes strengthens their own
+  position — original material plus a responsive addendum and extra sources —
+  through the same co-visible position path (both sides of the 12h edit loop
+  are exercised).
+- A dedicated **steward persona** (`rowan_ellery`, a real `community_steward`
+  of every room the simulator uses) **overrules** a share of judged verdicts
+  through the real override path — window, judged-state, and stewardship
+  checks all bite honestly — so the 24h human-in-the-loop remedy has live
+  traffic too.
+- The simulator advances due arenas through the real lifecycle every tick.
+  While it runs, the arena windows are **shortened** (≈20s edit / 15s
+  override, via the injectable `debateWindowsOverride` seam — the §15.4 spec
+  windows of 12h/24h are restored on stop), so a synthetic challenge resolves
+  in well under a minute, verdicts split across corrected/upheld/inconclusive,
+  and `Incorrect`/`Validated` tags + feed demotion appear live.
+
+Run **`LICIO_SIM=challenge_wave pnpm dev`** (or switch scenarios in the panel)
+to stress exactly this loop: corrections dominate the traffic, and a bounded
+share of them carries a failure-injection marker (`[sim:debate=…]` /
+`[sim:rationale-url]`, Section 16) so forced verdict classes AND the
+fail-closed MLP fallback both occur under load.
 
 **Reading the throughput.** The dev panel's **Challenge resolutions** card
-shows corrections filed, arenas opened/awaiting/adjudicated/finalized, the
-LLM-leg verdict split and fallback count, and the **average adjudication
+shows corrections filed, arenas opened/awaiting/adjudicated/finalized,
+forfeits, steward overrules, the LLM-leg verdict split and fallback count,
+the **lifecycle outcome split** (resolved corrected/upheld/inconclusive, with
+how many were decided by a steward overrule), and the **average adjudication
 wall-clock** — or query it directly:
 
 ```sh
-curl -s localhost:3001/v1/dev/simulator/status | jq '{counters: .counters, pulse: .debate_pulse}'
+curl -s localhost:3001/v1/dev/simulator/status \
+  | jq '{counters: .counters, debate: .debate_pulse, moderation: .moderation_pulse}'
 ```
 
 By default the adjudications run against the DEV **simulated** runtime
@@ -908,6 +938,22 @@ runtime simply queues server-side, no worse than serial. Crank the scenario
 speed to queue arenas faster than they resolve and watch the backlog
 (`Awaiting verdict`) — where it stabilizes is the honest throughput ceiling of
 your hardware.
+
+**In-room moderation under load (WS-U).** The same run also exercises the
+moderation automation. The seeded *Elections & Governance* room is **governed**
+(an active community-approved model binding), and the simulator knows it: story
+placement and comment/correction targeting weight governed rooms up, so the
+in-room moderation model — the LLM on a default dev boot — classifies a steady
+share of the synthetic contributions. A small scenario-configured share of
+those comments is deliberately **problematic** (commercial-spam wording or
+hostile wording, never a slur), so the model proposes real `warn` /
+`flag_for_review` / `remove` actions — and the platform's deterministic
+wrapper visibly **bounds** them (a proposed `remove` is clamped to
+flag-for-review; a human confirms before any removal). The panel's **In-room
+moderation** card shows the live pulse: model proposals, the proposed-action
+split (before the wrapper's bound), escalations beyond the WS-J floor,
+unavailability fallbacks (→ platform baseline + deferred re-moderation), and
+guard blocks. The same numbers are in the status payload's `moderation_pulse`.
 
 **Interpretation lenses (WS-G.2.2).** The simulator provisions a focused lens
 set (`skeptical`, `expert`, `local_resident`, `policy`) in each room it uses and
@@ -1375,11 +1421,12 @@ context into a variant and point `GOVERNANCE_LLM_MODEL` at it:
 printf 'FROM deepseek-r1:32b\nPARAMETER num_ctx 8192\n' > /tmp/Modelfile.r1-8k
 ollama create deepseek-r1-8k:32b -f /tmp/Modelfile.r1-8k
 # measured on a 24 GB card: 69s → 15s per debate verdict (full-GPU placement)
-``` On AMD
-cards use `rocm-smi` (not `nvidia-smi`) to see the GPU at all. Known upstream
-issue on some ROCm stacks: gemma3 emits garbage tokens when GPU-offloaded
-while every other family runs correctly — `pnpm bench:llm` detects this and
-prints the CPU-pin remedy.
+```
+
+On AMD cards use `rocm-smi` (not `nvidia-smi`) to see the GPU at all. Known
+upstream issue on some ROCm stacks: gemma3 emits garbage tokens when
+GPU-offloaded while every other family runs correctly — `pnpm bench:llm`
+detects this and prints the CPU-pin remedy.
 
 **Model families negotiate automatically.** The completion layer adapts the
 wire per runtime — logged and counted, never silent: a runtime/model that
@@ -1468,7 +1515,11 @@ GOVERNANCE_LLM_PROVIDER=deterministic pnpm dev  # explicit deterministic (also d
 
 Deterministic **failure-injection markers** anywhere in the governed text (a
 contribution body, or a proposal title/body) let you exercise every
-fail-closed branch on demand:
+fail-closed branch on demand — type one into a comment/correction/proposal
+yourself, or run the traffic simulator's `challenge_wave` scenario, which
+stamps `[sim:debate=…]` / `[sim:rationale-url]` onto a bounded share of its
+corrections automatically (Section 10). Against a **real** local runtime the
+markers are inert prose:
 
 | Marker | Simulated behaviour | Governed outcome |
 |--------|--------------------|------------------|

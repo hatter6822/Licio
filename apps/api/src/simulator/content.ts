@@ -88,7 +88,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Medical reviewers note the outbreak indicators now separate confirmed from suspected counts.',
       'The health office says hospital-level detail will follow once validation completes.',
     ],
-    outlets: ['daily-ledger', 'metro-monitor', 'civic-wire'],
+    outlets: ['daily-ledger', 'metro-monitor', 'civic-wire', 'ward-bulletin'],
   },
   local: {
     topicSlug: 'local-community',
@@ -128,7 +128,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Community groups asked the council to publish the transit overlays used in the plan.',
       'The county schedule shows which neighborhood meetings cover each docket item.',
     ],
-    outlets: ['harbor-signal', 'riverside-post', 'district-notes'],
+    outlets: ['harbor-signal', 'riverside-post', 'district-notes', 'city-gazette'],
     localValue: 'Riverside',
   },
   climate: {
@@ -170,7 +170,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Energy analysts say the grid data now separates solar and wind capacity by county.',
       'The drought bulletin ties reservoir levels to the power demand outlook for summer.',
     ],
-    outlets: ['field-notes', 'north-desk', 'civic-wire'],
+    outlets: ['field-notes', 'north-desk', 'civic-wire', 'grid-observer'],
   },
   elections: {
     topicSlug: 'elections-democracy',
@@ -210,7 +210,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Candidate filings and campaign spending now appear in one machine-readable election dataset.',
       'The clerk says every ballot batch in the election audit carries a scanner reference.',
     ],
-    outlets: ['daily-ledger', 'canvass-desk', 'civic-wire'],
+    outlets: ['daily-ledger', 'canvass-desk', 'civic-wire', 'ballot-brief'],
   },
   science: {
     topicSlug: 'science-research',
@@ -250,7 +250,7 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'Independent research teams can rerun the experiment from the archived pipeline alone.',
       'The consortium argues open research data made this discovery checkable in days rather than months.',
     ],
-    outlets: ['method-review', 'field-notes', 'north-desk'],
+    outlets: ['method-review', 'field-notes', 'north-desk', 'replication-watch'],
   },
 };
 
@@ -396,6 +396,15 @@ function slugify(text: string): string {
 export const SIMULATED_HOSTS: ReadonlySet<string> = new Set(
   Object.values(BANKS).flatMap((bank) => bank.outlets.map((outlet) => `${outlet}.example`)),
 );
+
+/** Every distinct outlet across ALL domain banks — the reinforcement pool, so
+ *  a challenger strengthening their position can always add sources on
+ *  registrable domains they have NOT already cited (cross-domain
+ *  corroboration), even when the original correction exhausted its own
+ *  bank's outlets. */
+const ALL_OUTLETS: readonly string[] = [
+  ...new Set(Object.values(BANKS).flatMap((bank) => bank.outlets)),
+];
 
 export function isSimulatedUrl(rawUrl: string): boolean {
   try {
@@ -770,9 +779,10 @@ function distinctOutlets(bank: DomainBank, count: number, prng: Prng): string[] 
 
 /**
  * A sourced correction challenging a comment or the story root (WS-T). The
- * citation count varies (1–3, distinct outlets) so the governed adjudicator
- * sees challenges of varying strength — under synthetic load every verdict
- * class (corrected / upheld / inconclusive) occurs.
+ * citation count varies (1–4, weighted toward the middle, distinct outlets) so
+ * the governed adjudicator sees challenges of varying strength — under
+ * synthetic load every verdict class (corrected / upheld / inconclusive)
+ * occurs, including the occasional heavily-sourced high-confidence challenge.
  */
 export function generateCorrection(
   domain: DomainId,
@@ -784,7 +794,12 @@ export function generateCorrection(
     .pick(CORRECTION_BODIES)
     .replaceAll('{object}', prng.pick(bank.objects))
     .replaceAll('{period}', prng.pick(PERIODS));
-  const count = 1 + prng.int(3); // 1..3 supporting sources
+  const count = prng.weighted([
+    { value: 1, weight: 3 },
+    { value: 2, weight: 4 },
+    { value: 3, weight: 3 },
+    { value: 4, weight: 1 },
+  ]);
   const citationUrls = distinctOutlets(bank, count, prng).map(
     (outlet, i) => `https://${outlet}.example/refs/${domain}-correction-${serial}-${i}`,
   );
@@ -819,4 +834,139 @@ export function generateRebuttal(
     (outlet, i) => `https://${outlet}.example/refs/${domain}-rebuttal-${serial}-${i}`,
   );
   return { body, citationUrls };
+}
+
+const REINFORCEMENT_ADDENDA: readonly string[] = [
+  'Adding a further independent series covering the same {object}: it lands outside the published interval too, corroborating the correction.',
+  'Since the rebuttal cites the certified totals: the linked follow-up reconciles both release cycles of the {object} and the discrepancy persists.',
+  'A second registry covering the {object} publishes the same denominator the correction used; the recomputed figure holds for the {period}.',
+] as const;
+
+/**
+ * The challenger STRENGTHENS their position after the incumbent's rebuttal —
+ * the original correction text plus a directly-responsive addendum and extra
+ * sources on registrable domains the challenger has NOT already cited (the
+ * adjudicator's independence feature counts domains, so an "extra source" on
+ * an already-cited domain would strengthen nothing). Extras are drawn from
+ * the cross-bank outlet pool, so even an original that exhausted its own
+ * bank's outlets gains genuinely independent corroboration. The co-visible
+ * 12h edit loop, exercised from the challenger's side: `postDebatePosition`
+ * REPLACES the side's position, so the returned summary/citations carry the
+ * original material forward; the total citation list is capped at the wire
+ * schema's MAX (10).
+ */
+export function generateReinforcement(
+  original: { summary: string; citationUrls: readonly string[] },
+  domain: DomainId,
+  serial: number,
+  prng: Prng,
+): { summary: string; citationUrls: readonly string[] } {
+  const bank = domainBank(domain);
+  const addendum = prng
+    .pick(REINFORCEMENT_ADDENDA)
+    .replaceAll('{object}', prng.pick(bank.objects))
+    .replaceAll('{period}', prng.pick(PERIODS));
+  const citedHosts = new Set(
+    original.citationUrls.map((url) => {
+      try {
+        return new URL(url).hostname;
+      } catch {
+        return url;
+      }
+    }),
+  );
+  const pool = ALL_OUTLETS.filter((outlet) => !citedHosts.has(`${outlet}.example`));
+  const extraCount = Math.min(1 + prng.int(2), pool.length); // 1..2 additional sources
+  const extras: string[] = [];
+  const candidates = [...pool];
+  for (let i = 0; i < extraCount; i += 1) {
+    const [outlet] = candidates.splice(prng.int(candidates.length), 1);
+    if (outlet === undefined) break;
+    extras.push(`https://${outlet}.example/refs/${domain}-reinforcement-${serial}-${i}`);
+  }
+  const citationUrls = [...original.citationUrls, ...extras]
+    .filter((url, index, all) => all.indexOf(url) === index)
+    .slice(0, 10);
+  return { summary: `${original.summary}\n\n${addendum}`, citationUrls };
+}
+
+// ---------------------------------------------------------------------------
+// WS-T steward overrules + failure-injection markers (challenge_wave).
+// ---------------------------------------------------------------------------
+
+/** Steward override reasons (the audited overrule statement). */
+export const OVERRIDE_REASONS: readonly string[] = [
+  'The adjudicator under-weighted the primary registry both sides cite; reading it directly, the other position is the accurate one.',
+  'The winning position relies on a source the room has previously found unreliable for this subject; overruling per the room charter.',
+  'Both positions miss the superseding revision published after the debate opened; the verdict does not reflect the current record.',
+  'The rationale rewards source count over source relevance here; the smaller set directly addresses the challenged sentence.',
+] as const;
+
+/**
+ * Failure-injection markers a `challenge_wave` correction may carry (the DEV
+ * simulated governance-LLM runtime interprets them; they read as inert prose
+ * to a real local runtime). Weighted so most markers force a verdict CLASS
+ * (successful completions with a controlled outcome split) and only a small
+ * share triggers the fail-closed rationale-URL rejection (→ the MLP fallback,
+ * without pinning the breaker open under load).
+ */
+export function pickDebateMarker(prng: Prng): string {
+  return prng.weighted([
+    { value: '[sim:debate=incumbent]', weight: 3 },
+    { value: '[sim:debate=challenger]', weight: 3 },
+    { value: '[sim:debate=inconclusive]', weight: 2 },
+    { value: '[sim:rationale-url]', weight: 2 },
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Problem comments (the WS-J floor + WS-U in-room moderation exercisers).
+// ---------------------------------------------------------------------------
+
+export type ProblemCommentKind = 'spam' | 'hostile';
+
+/** Spam bodies carry ≥2 distinct commercial-spam terms AND one real link
+ *  token (the `{url}` placeholder). The moderation context counts links from
+ *  structured citations + whitespace-delimited `http(s)` tokens in the body
+ *  (`countLinkTokens`), and the spam-with-links classification is what makes
+ *  the model propose `remove` — which the deterministic wrapper then clamps
+ *  to flag-for-review, the advertised bound the pulse must exercise. A
+ *  link-less spam body could only ever drive `flag_for_review`. */
+const SPAM_COMMENT_BODIES: readonly string[] = [
+  'Huge discount on verified supplements — use promo code SAVE20 at {url} today, free money back if the {object} disappoints you.',
+  'Why read the {object} when the giveaway at {url} pays better? Cheap rates this {period} only, discount applied automatically.',
+  'Stop wasting time on the {object} — click {url} for the promo code and a giveaway worth more than this whole thread.',
+] as const;
+
+/** Hostile bodies carry a hostile term at civil length — the wrapper routes
+ *  them to human review (never an AI-driven removal; the ceiling clamps). */
+const HOSTILE_COMMENT_BODIES: readonly string[] = [
+  'Only an idiot reads the {object} that way — the rest of us managed to find the definitions table without help.',
+  'This take is worthless and so is the effort behind it; maybe skip the {object} next {period} and spare the thread.',
+  'Honestly, shut up about the methodology — you clearly never opened the {object} and it shows in every sentence.',
+] as const;
+
+/**
+ * A deliberately problematic comment body (spam wording or hostile wording),
+ * generated at a low scenario-configured share so live synthetic traffic gives
+ * the moderation automation something real to act on: the WS-J floor
+ * pre-screen may flag/block it, and in a governed room the in-room moderation
+ * MODEL proposes warn/flag/remove — which the deterministic wrapper then
+ * bounds. Spam bodies embed one reserved-`.example` promo link so the
+ * spam-with-links `remove` proposal (and the wrapper's clamp of it) genuinely
+ * occurs; hostile bodies stay link-free (their path is review routing, not
+ * removal). Still deterministic (PRNG + banks), never a slur — the goal is
+ * classifiable signal, not shock content.
+ */
+export function generateProblemComment(
+  kind: ProblemCommentKind,
+  domain: DomainId,
+  prng: Prng,
+): string {
+  const bank = domainBank(domain);
+  const template = prng.pick(kind === 'spam' ? SPAM_COMMENT_BODIES : HOSTILE_COMMENT_BODIES);
+  return template
+    .replaceAll('{url}', `https://${prng.pick(bank.outlets)}.example/promo/${1 + prng.int(90)}`)
+    .replaceAll('{object}', prng.pick(bank.objects))
+    .replaceAll('{period}', prng.pick(PERIODS));
 }

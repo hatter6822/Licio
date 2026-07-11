@@ -237,11 +237,15 @@ export function SimulatorPanel(): React.ReactElement {
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <CounterTile label="Corrections filed" value={status.counters.corrections_posted} />
           <CounterTile label="Arenas opened" value={status.counters.debates_opened} />
-          <CounterTile label="Rebuttals posted" value={status.counters.debate_positions_posted} />
+          <CounterTile label="Positions posted" value={status.counters.debate_positions_posted} />
           <CounterTile label="Awaiting verdict" value={status.debate_pulse.open_arenas} />
           <CounterTile label="Adjudicated" value={status.counters.debates_judged} />
           <CounterTile label="Finalized" value={status.counters.debates_finalized} />
+          <CounterTile label="Forfeits" value={status.debate_pulse.forfeits} />
+          <CounterTile label="Steward overrules" value={status.counters.debate_overrides} />
           <CounterTile label="LLM verdicts" value={status.debate_pulse.llm_decided} />
+          <CounterTile label="LLM fallbacks" value={status.debate_pulse.llm_unavailable} />
+          <CounterTile label="Overruled outcomes" value={status.debate_pulse.overridden} />
           <CounterTile
             label="Avg adjudication"
             value={status.debate_pulse.avg_adjudication_ms ?? 0}
@@ -249,13 +253,47 @@ export function SimulatorPanel(): React.ReactElement {
           />
         </div>
         <p className="mt-3 text-xs text-ink-muted">
-          LLM verdict split: {status.debate_pulse.llm_verdicts.corrected} corrected,{' '}
+          Resolved outcomes: {status.debate_pulse.resolved.corrected} corrected,{' '}
+          {status.debate_pulse.resolved.upheld} upheld, {status.debate_pulse.resolved.inconclusive}{' '}
+          inconclusive ({status.debate_pulse.overridden} by steward overrule). LLM verdict split:{' '}
+          {status.debate_pulse.llm_verdicts.corrected} corrected,{' '}
           {status.debate_pulse.llm_verdicts.upheld} upheld,{' '}
           {status.debate_pulse.llm_verdicts.inconclusive} inconclusive;{' '}
           {status.debate_pulse.llm_unavailable} fell back to the deterministic adjudicator.
           {status.debate_pulse.last_judged_at !== null
             ? ` Last verdict ${new Date(status.debate_pulse.last_judged_at).toLocaleTimeString()}.`
             : ' No verdicts yet — arenas judge ~20s after they open.'}
+        </p>
+      </Card>
+
+      {/* In-room moderation (WS-U — the bounded agent over governed rooms) */}
+      <Card>
+        <h2 className="text-sm font-semibold text-ink">In-room moderation</h2>
+        <p className="mt-1 text-xs text-ink-muted">
+          In governed rooms, the community-ratified moderation model (
+          {status.moderation_pulse.llm_backend_active
+            ? 'the LLM backend'
+            : 'the deterministic default'}
+          ) classifies every synthetic contribution; the platform wrapper bounds whatever it
+          proposes (escalate-to-review ceiling + capability clamp).
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <CounterTile label="Model proposals" value={status.moderation_pulse.proposals} />
+          <CounterTile
+            label="Escalated to review"
+            value={status.moderation_pulse.agent_escalations}
+          />
+          <CounterTile label="Model unavailable" value={status.moderation_pulse.unavailable} />
+          <CounterTile label="Guard blocked" value={status.moderation_pulse.guard_blocked} />
+        </div>
+        <p className="mt-3 text-xs text-ink-muted">
+          Proposed actions (before the wrapper's bound): {status.moderation_pulse.proposed.allow}{' '}
+          allow, {status.moderation_pulse.proposed.warn} warn,{' '}
+          {status.moderation_pulse.proposed.flag_for_review} flag for review,{' '}
+          {status.moderation_pulse.proposed.restrict} restrict,{' '}
+          {status.moderation_pulse.proposed.remove} remove. A proposed restrict/remove is clamped to
+          flag-for-review — a human confirms first; unavailable calls degrade to the platform
+          baseline and re-moderate later.
         </p>
       </Card>
 
