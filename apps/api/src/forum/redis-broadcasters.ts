@@ -28,11 +28,17 @@ import type {
 } from './comment-broadcaster.js';
 import type { DebateBroadcaster, DebateFrameHandler } from './debate-broadcaster.js';
 
-/** Per-channel ref-counted fan-in over ONE subscriber-mode Redis connection. */
+/** Per-channel ref-counted fan-in over ONE subscriber-mode Redis connection.
+ *  `subscribe` resolves only after the channel's SUBSCRIBE is ACKED by Redis,
+ *  so a caller that awaits it before taking a replay snapshot can never lose
+ *  a message published in the subscribe/ack gap (Redis pub/sub drops, it
+ *  never buffers). */
 export class RefCountedSubscriber {
   readonly #sub: IORedis;
   readonly #onError: (err: unknown) => void;
   readonly #handlers = new Map<string, Set<(message: string) => void>>();
+  /** The channel's in-flight/completed SUBSCRIBE ack (shared by ref-holders). */
+  readonly #ready = new Map<string, Promise<unknown>>();
   #wired = false;
 
   constructor(sub: IORedis, onError: (err: unknown) => void = () => {}) {
@@ -40,7 +46,7 @@ export class RefCountedSubscriber {
     this.#onError = onError;
   }
 
-  subscribe(channel: string, handler: (message: string) => void): () => void {
+  async subscribe(channel: string, handler: (message: string) => void): Promise<() => void> {
     if (!this.#wired) {
       this.#sub.on('message', (incoming: string, message: string) => {
         const set = this.#handlers.get(incoming);
@@ -53,18 +59,24 @@ export class RefCountedSubscriber {
     if (!set) {
       set = new Set();
       this.#handlers.set(channel, set);
-      void this.#sub.subscribe(channel).catch(this.#onError);
+      this.#ready.set(
+        channel,
+        this.#sub.subscribe(channel).catch((err) => this.#onError(err)),
+      );
     }
     set.add(handler);
-    return () => {
+    const unsubscribe = (): void => {
       const current = this.#handlers.get(channel);
       if (!current) return;
       current.delete(handler);
       if (current.size === 0) {
         this.#handlers.delete(channel);
+        this.#ready.delete(channel);
         void this.#sub.unsubscribe(channel).catch(this.#onError);
       }
     };
+    await this.#ready.get(channel);
+    return unsubscribe;
   }
 }
 
@@ -99,7 +111,7 @@ export class RedisCommentBroadcaster implements CommentBroadcaster {
       .catch(this.#onError);
   }
 
-  subscribe(threadId: string, handler: CommentFrameHandler): () => void {
+  async subscribe(threadId: string, handler: CommentFrameHandler): Promise<() => void> {
     return this.#subscriber.subscribe(`${COMMENT_CHANNEL_PREFIX}${threadId}`, (message) => {
       let contribution: CommentFrame['contribution'];
       try {
@@ -142,7 +154,7 @@ export class RedisDebateBroadcaster implements DebateBroadcaster {
       .catch(this.#onError);
   }
 
-  subscribe(debateId: string, handler: DebateFrameHandler): () => void {
+  async subscribe(debateId: string, handler: DebateFrameHandler): Promise<() => void> {
     return this.#subscriber.subscribe(`${DEBATE_CHANNEL_PREFIX}${debateId}`, (message) => {
       let arena: DebateArenaPublic;
       try {

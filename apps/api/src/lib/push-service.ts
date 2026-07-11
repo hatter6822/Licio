@@ -55,6 +55,11 @@ export interface PushStateStore {
   listForUser(userId: string): Promise<StoredSubscription[]>;
   getPreferences(stateKey: string): Promise<NotificationPreferences | null>;
   setPreferences(stateKey: string, prefs: NotificationPreferences): Promise<void>;
+  /** Account-deletion purge (WS-D.2.4): remove the user's subscriptions AND
+   *  their user-keyed preference row.  Required explicitly — production
+   *  deletion TOMBSTONES the users row (update, not delete), so the FK
+   *  cascade never fires. */
+  purgeForUser(userId: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -99,6 +104,13 @@ export class InMemoryPushStateStore implements PushStateStore {
 
   async setPreferences(stateKey: string, prefs: NotificationPreferences): Promise<void> {
     this.#preferences.set(stateKey, prefs);
+  }
+
+  async purgeForUser(userId: string): Promise<void> {
+    for (const [endpoint, stored] of this.#subscriptions) {
+      if (stored.userId === userId) this.#subscriptions.delete(endpoint);
+    }
+    this.#preferences.delete(userId);
   }
 
   async clear(): Promise<void> {
@@ -184,6 +196,11 @@ export function suppressionReason(
   if (options.topic && prefs.muted_topics.includes(options.topic)) return 'muted';
   if (isWithinQuietHours(options.minuteOfDay, prefs.quiet_hours)) return 'quiet-hours';
   return null;
+}
+
+/** Account-deletion purge (WS-D.2.4): subscriptions + user-keyed preferences. */
+export async function purgePushStateForUser(userId: string): Promise<void> {
+  await store.purgeForUser(userId);
 }
 
 /** Test/maintenance helper: clear all push state in the bound store. */

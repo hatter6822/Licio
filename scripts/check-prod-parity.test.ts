@@ -189,6 +189,34 @@ describe('leg 3 — production-adapter purity (the upload-bytes failure shape)',
   });
 });
 
+describe('stripComments (tokenizer)', () => {
+  it('strips line + block comments while preserving newlines (line numbers hold)', () => {
+    const stripped = stripComments('a; // gone\n/* also\ngone */ b;');
+    expect(stripped).not.toContain('gone');
+    expect(stripped).toContain('a;');
+    expect(stripped).toContain('b;');
+    // Newlines survive so leg-3 finding line numbers stay accurate.
+    expect(stripped.split('\n')).toHaveLength(3);
+    expect(stripped.split('\n')[2]).toContain('b;');
+  });
+
+  it('respects string and template literals (no mangling of // inside strings)', () => {
+    expect(stripComments("const u = 'https://x/y'; // tail")).toBe(
+      "const u = 'https://x/y';        ",
+    );
+    expect(stripComments('const s = "a // not a comment";')).toBe(
+      'const s = "a // not a comment";',
+    );
+    expect(stripComments('const t = `block /* kept */ inside`;')).toBe(
+      'const t = `block /* kept */ inside`;',
+    );
+  });
+
+  it('honours escapes so an escaped quote cannot desynchronize the states', () => {
+    expect(stripComments("const q = 'it\\'s'; // gone")).toBe("const q = 'it\\'s';        ");
+  });
+});
+
 describe('the live tree', () => {
   it('passes the full gate with the current allowlists (no rot, no regressions)', () => {
     expect(runProdParityGate(collectApiSourceFiles())).toEqual([]);

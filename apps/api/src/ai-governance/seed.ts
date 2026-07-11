@@ -190,8 +190,18 @@ export async function seedAiGovernance(services: AiGovernanceServices): Promise<
   for (const model of GOVERNED_MODELS) {
     const existing = await services.registry.getVersion(model.name, model.version);
     if (existing) {
-      if (existing.status === 'deployed') fold(model.useCaseId, model.name);
-      continue;
+      if (existing.status === 'deployed') {
+        fold(model.useCaseId, model.name);
+      } else if (existing.status === 'registered') {
+        // A prior boot crashed between register and deploy: the harness
+        // decision was durably recorded BEFORE registration, so retry the
+        // deploy through the same gate rather than stranding the model
+        // registered-but-undeployed forever.
+        const redeployed = await deployModel(registryDeps, model.name, model.version);
+        if (redeployed.ok) fold(model.useCaseId, model.name);
+        else services.log('ai.seed.deploy_failed', { model: model.name, code: redeployed.code });
+      }
+      continue; // never re-run the harness or re-register an existing version
     }
     const riskLevel = CANONICAL_USE_CASES[model.useCaseId].risk_level;
     const decision = await runEvaluationHarness(

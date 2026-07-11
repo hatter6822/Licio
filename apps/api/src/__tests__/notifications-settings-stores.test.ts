@@ -173,6 +173,11 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
       // Settings: durable round-trip under a hashed at-rest ref.
       await settings.set(userId, { ...DEFAULT_USER_SETTINGS, feed_mode: 'chronological' });
       expect((await settings.get(userId))?.feed_mode).toBe('chronological');
+      // Account-deletion purge (the tombstone keeps the users row, so this is
+      // the only path that removes the settings row).
+      await settings.purge(userId);
+      expect(await settings.get(userId)).toBeNull();
+      await settings.set(userId, { ...DEFAULT_USER_SETTINGS, feed_mode: 'chronological' });
       const refs = await db.select({ ref: settingsTable.stateRef }).from(settingsTable);
       expect(refs.every((r) => /^[0-9a-f]{64}$/.test(r.ref))).toBe(true);
       expect(refs.some((r) => r.ref.includes(userId as string))).toBe(false);

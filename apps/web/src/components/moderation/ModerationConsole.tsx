@@ -68,12 +68,14 @@ function isForbidden(error: unknown): boolean {
 /**
  * WS-J.2.6b: a reporter-supplied evidence link resolves the SERVER-side
  * redirect-chain malware verdict before the reviewer navigates (evidence URLs
- * are stored, never fetched at submission time).  `malicious` replaces the
- * anchor with a blocked notice; `unavailable` warns but leaves the reviewer in
- * control ("open anyway" — the reviewer IS the human-review path); `clear`
- * opens with the opener severed.  The verdict is a real network round-trip, so
- * a popup-blocked clean open surfaces a fresh-gesture anchor instead of
- * failing silently.
+ * are stored, never fetched at submission time).  Until a verdict exists the
+ * trigger is a BUTTON, not an anchor — an `href` would let middle-click,
+ * context-menu "open in new tab", and other non-click activations bypass the
+ * check entirely.  `malicious` replaces it with a blocked notice;
+ * `unavailable` warns but leaves the reviewer in control ("open anyway" — the
+ * reviewer IS the human-review path); `clear` opens with the opener severed,
+ * and a popup-blocked clean open surfaces a real fresh-gesture anchor instead
+ * of failing silently.
  */
 function EvidenceLink({ url }: { url: string }): React.ReactElement {
   const t = useT();
@@ -81,8 +83,7 @@ function EvidenceLink({ url }: { url: string }): React.ReactElement {
     'idle' | 'checking' | 'clear-blocked' | 'malicious' | 'unavailable'
   >('idle');
 
-  const activate = (event: { preventDefault: () => void }): void => {
-    event.preventDefault();
+  const activate = (): void => {
     if (state === 'checking') return;
     setState('checking');
     void checkEvidenceUrl(url)
@@ -110,18 +111,14 @@ function EvidenceLink({ url }: { url: string }): React.ReactElement {
   }
   return (
     <>
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer noopener"
-        className="text-primary underline"
+      <button
+        type="button"
+        className="text-left text-primary underline"
         onClick={activate}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') activate(event);
-        }}
+        title={t('console.evidenceCheckTitle', 'Checks this link for malware before opening')}
       >
         {url}
-      </a>
+      </button>
       {state === 'checking' ? (
         <span role="status" className="ml-1 text-ink-muted">
           {t('console.evidenceChecking', 'checking link…')}

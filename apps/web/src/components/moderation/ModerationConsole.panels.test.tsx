@@ -339,8 +339,9 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
-    // The reporter's evidence link is surfaced before the action palette.
-    expect(await screen.findByRole('link', { name: /evidence-1/ })).toBeInTheDocument();
+    // The reporter's evidence link is surfaced before the action palette —
+    // as a BUTTON until the WS-J.2.6b verdict resolves (no bypassable href).
+    expect(await screen.findByRole('button', { name: /evidence-1/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Apply action/ }));
     await waitFor(() =>
       expect(api.applyModerationAction).toHaveBeenCalledWith(
@@ -363,10 +364,10 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'malicious' });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
-    fireEvent.click(await screen.findByRole('link', { name: /evidence-1/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
     expect(await screen.findByText(/known malicious site/i)).toBeInTheDocument();
     expect(api.checkEvidenceUrl).toHaveBeenCalledWith('https://example.com/evidence-1');
-    expect(screen.queryByRole('link', { name: /evidence-1/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /evidence-1/ })).not.toBeInTheDocument();
   });
 
   it('WS-J.2.6b: an unverifiable link warns but leaves the reviewer in control', async () => {
@@ -381,7 +382,7 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'unavailable' });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
-    fireEvent.click(await screen.findByRole('link', { name: /evidence-1/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
     expect(await screen.findByText(/could not verify/i)).toBeInTheDocument();
     // The reviewer IS the human-review path: an explicit fresh-gesture anchor.
     expect(screen.getByRole('link', { name: /open anyway/i })).toBeInTheDocument();
@@ -399,7 +400,7 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'clear' });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
-    fireEvent.click(await screen.findByRole('link', { name: /evidence-1/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
     // jsdom's window.open returns falsy (the popup-blocked path), so the
     // verified fresh-gesture anchor appears instead of a silent failure.
     expect(await screen.findByText(/verified/i)).toBeInTheDocument();

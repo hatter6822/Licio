@@ -18,7 +18,9 @@ export type DebateFrameHandler = (frame: DebateFrame) => void | Promise<void>;
 
 export interface DebateBroadcaster {
   publish(debateId: string, arena: DebateArenaPublic): void;
-  subscribe(debateId: string, handler: DebateFrameHandler): () => void;
+  /** Resolves (or returns) once the subscription is LIVE on the transport
+   *  (see CommentBroadcaster.subscribe). */
+  subscribe(debateId: string, handler: DebateFrameHandler): (() => void) | Promise<() => void>;
 }
 
 class DebateEvent extends Event {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { createLogger } from '../lib/logger.js';
@@ -82,8 +82,16 @@ export class RedisTokenStore implements TokenStore {
     this.redis = redis;
   }
 
+  /** The Redis key is a SHA-256 of the session id, never the raw value: the
+   *  cookie value is a BEARER session token, and raw keys would expose it to
+   *  keyspace scans, monitoring, and backups (the session store itself only
+   *  ever persists token hashes).  High-entropy input ⇒ a plain hash suffices. */
+  #key(sessionId: string): string {
+    return `${this.prefix}${createHash('sha256').update(sessionId).digest('hex')}`;
+  }
+
   async get(sessionId: string): Promise<StoredToken | undefined> {
-    const raw = await this.redis.get(`${this.prefix}${sessionId}`);
+    const raw = await this.redis.get(this.#key(sessionId));
     if (!raw) return undefined;
     let parsed: unknown;
     try {
@@ -98,12 +106,12 @@ export class RedisTokenStore implements TokenStore {
   async set(sessionId: string, token: StoredToken): Promise<void> {
     const ttlSeconds = Math.ceil((token.expiresAt - Date.now()) / 1000);
     if (ttlSeconds > 0) {
-      await this.redis.set(`${this.prefix}${sessionId}`, JSON.stringify(token), 'EX', ttlSeconds);
+      await this.redis.set(this.#key(sessionId), JSON.stringify(token), 'EX', ttlSeconds);
     }
   }
 
   async delete(sessionId: string): Promise<void> {
-    await this.redis.del(`${this.prefix}${sessionId}`);
+    await this.redis.del(this.#key(sessionId));
   }
 
   async clear(): Promise<void> {

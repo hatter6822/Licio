@@ -14,11 +14,12 @@
 //
 // Upload BYTES live in S3-compatible object storage when the all-or-none
 // S3_* env group is configured (plain objects; metadata was stripped BEFORE
-// storage). Authorization is enforced at the serving route, not the object ACL:
-// restricted (room_only) media is reached only through a signed, expiring URL
-// minted after the read-bar check (WS-Q.5.2c).  Without S3, bytes are held
-// in-memory and production logs a loud warning (the same posture as the
-// WS-D DSAR archives): records survive, bytes do not survive a restart.
+// storage), else in the durable `upload_blobs` Postgres table — written
+// ATOMICALLY with the metadata row, so bytes and record can never diverge and
+// both configurations are durable + instance-shared.  Authorization is
+// enforced at the serving route, not the object ACL: restricted (room_only)
+// media is reached only through a signed, expiring URL minted after the
+// read-bar check (WS-Q.5.2c).
 
 import type { DbExecutor } from '@licio/db';
 import {
@@ -1146,42 +1147,40 @@ export class DrizzleUploadStore implements UploadStore {
     record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
     bytes: Uint8Array,
   ): Promise<UploadRecord> {
+    const metadataValues = {
+      uploadId: record.uploadId,
+      ownerUserId: record.ownerUserId,
+      contentType: record.contentType,
+      byteSize: record.byteSize,
+      altText: record.altText,
+      storageRef: record.storageRef,
+      metadataStripped: record.metadataStripped,
+      scanState: record.scanState,
+      ownerStoryId: record.ownerStoryId ?? null,
+    };
     if (this.#s3) {
       const res = await this.#s3Request('PUT', this.#objectUrl(record.storageRef), bytes);
       if (!res.ok) throw new Error(`S3 upload put failed: ${res.status}`);
+      const rows = await this.#db.insert(uploadsTable).values(metadataValues).returning();
+      const row = rows[0];
+      if (!row) throw new Error('upload insert returned no row');
+      return this.#toRecord(row);
     }
-    const rows = await this.#db
-      .insert(uploadsTable)
-      .values({
-        uploadId: record.uploadId,
-        ownerUserId: record.ownerUserId,
-        contentType: record.contentType,
-        byteSize: record.byteSize,
-        altText: record.altText,
-        storageRef: record.storageRef,
-        metadataStripped: record.metadataStripped,
-        scanState: record.scanState,
-        ownerStoryId: record.ownerStoryId ?? null,
-      })
-      .returning();
-    const row = rows[0];
-    if (!row) throw new Error('upload insert returned no row');
-    if (!this.#s3) {
-      // No S3: the bytes land in the durable Postgres blob table (the FK
-      // requires the metadata row first). A metadata row must never exist
-      // whose bytes are unreadable, so a failed blob write rolls the metadata
-      // back before rethrowing.
-      try {
-        const blob = Buffer.from(bytes);
-        await this.#db
-          .insert(uploadBlobsTable)
-          .values({ uploadId: record.uploadId, bytes: blob })
-          .onConflictDoUpdate({ target: uploadBlobsTable.uploadId, set: { bytes: blob } });
-      } catch (error) {
-        await this.#db.delete(uploadsTable).where(eq(uploadsTable.uploadId, record.uploadId));
-        throw error;
-      }
-    }
+    // No S3: metadata + bytes commit ATOMICALLY in one transaction, so a crash
+    // (or lost connection) between the two writes can never leave a metadata
+    // row whose bytes are unreadable.  When #db is already a transaction
+    // handle, drizzle nests this as a savepoint.
+    const blob = Buffer.from(bytes);
+    const row = await this.#db.transaction(async (tx) => {
+      const rows = await tx.insert(uploadsTable).values(metadataValues).returning();
+      const inserted = rows[0];
+      if (!inserted) throw new Error('upload insert returned no row');
+      await tx
+        .insert(uploadBlobsTable)
+        .values({ uploadId: record.uploadId, bytes: blob })
+        .onConflictDoUpdate({ target: uploadBlobsTable.uploadId, set: { bytes: blob } });
+      return inserted;
+    });
     return this.#toRecord(row);
   }
 

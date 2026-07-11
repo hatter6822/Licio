@@ -111,6 +111,13 @@ export class DrizzlePushStateStore implements PushStateStore {
       .onConflictDoUpdate({ target: pushPreferences.stateRef, set: values });
   }
 
+  async purgeForUser(userId: string): Promise<void> {
+    // Explicit, not cascade-reliant: production deletion TOMBSTONES the users
+    // row (update, not delete), so the subscriptions FK never fires there.
+    await this.#db.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, userId));
+    await this.#db.delete(pushPreferences).where(eq(pushPreferences.stateRef, refOf(userId)));
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(pushSubscriptions);
     await this.#db.delete(pushPreferences);

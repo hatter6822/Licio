@@ -295,11 +295,16 @@ describe('RedisTokenStore', () => {
   }
   const asClient = (r: ReturnType<typeof fakeRedis>) => r as unknown as import('ioredis').default;
 
-  it('round-trips a token under the csrf: prefix and deletes it', async () => {
+  it('round-trips a token under a HASHED csrf: key (never the raw session id)', async () => {
     const redis = fakeRedis();
     const store = new RedisTokenStore(asClient(redis));
     await store.set('sess-1', { token: 'a'.repeat(64), expiresAt: Date.now() + 60_000 });
-    expect(redis.map.has('csrf:sess-1')).toBe(true);
+    const keys = [...redis.map.keys()];
+    expect(keys).toHaveLength(1);
+    // The cookie value is a bearer session token — the keyspace must expose a
+    // SHA-256 of it, never the raw value.
+    expect(keys[0]).toMatch(/^csrf:[0-9a-f]{64}$/);
+    expect(keys[0]).not.toContain('sess-1');
     expect((await store.get('sess-1'))?.token).toBe('a'.repeat(64));
     await store.delete('sess-1');
     expect(await store.get('sess-1')).toBeUndefined();
@@ -315,9 +320,12 @@ describe('RedisTokenStore', () => {
   it('treats a corrupted stored value as "no token" (fail closed), never a crash', async () => {
     const redis = fakeRedis();
     const store = new RedisTokenStore(asClient(redis));
-    redis.map.set('csrf:sess-3', 'not-json');
+    // Seed corruption under the REAL (hashed) key by writing then clobbering.
+    await store.set('sess-3', { token: 'c'.repeat(64), expiresAt: Date.now() + 60_000 });
+    const key = [...redis.map.keys()][0] as string;
+    redis.map.set(key, 'not-json');
     expect(await store.get('sess-3')).toBeUndefined();
-    redis.map.set('csrf:sess-3', JSON.stringify({ token: 42, expiresAt: 'soon' }));
+    redis.map.set(key, JSON.stringify({ token: 42, expiresAt: 'soon' }));
     expect(await store.get('sess-3')).toBeUndefined();
   });
 

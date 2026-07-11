@@ -23,6 +23,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -45,6 +46,11 @@ export const aiModelCards = pgTable(
     index('ai_model_cards_name_idx').on(t.name),
     index('ai_model_cards_status_idx').on(t.status),
     check('ai_model_cards_status', sql`${t.status} in ('registered', 'deployed', 'deprecated')`),
+    // One deployed version per model name, enforced STRUCTURALLY: two
+    // concurrent deploys (multi-replica admin route) cannot both commit —
+    // the second promote fails the partial unique index instead of silently
+    // leaving two `deployed` rows.
+    uniqueIndex('ai_model_cards_one_deployed_idx').on(t.name).where(sql`${t.status} = 'deployed'`),
   ],
 );
 

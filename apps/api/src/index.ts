@@ -220,12 +220,13 @@ import { createLogger } from './lib/logger.js';
 import { assertProductionParity } from './lib/parity-guard.js';
 import {
   getVapidConfig,
+  purgePushStateForUser,
   sendBodylessWakeToUser,
   setPushStateStore,
   subscriptionsForUser,
 } from './lib/push-service.js';
 import { setReplyNotificationStore } from './lib/reply-notifications.js';
-import { setUserSettingsStore } from './lib/user-settings.js';
+import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
@@ -639,8 +640,18 @@ if (s3Config) {
 // audit-log entry) stays in sendSecurityAlert; delivery is best-effort by
 // construction (a transport failure logs and can never fail the auth flow).
 const alertVapidConfig = getVapidConfig();
-identityServices.hasPushChannel = async (userId) =>
-  alertVapidConfig !== null && (await subscriptionsForUser(userId)).length > 0;
+identityServices.hasPushChannel = async (userId) => {
+  if (alertVapidConfig === null) return false;
+  try {
+    return (await subscriptionsForUser(userId)).length > 0;
+  } catch (err) {
+    // BEST-EFFORT like the transports themselves: a push-store outage answers
+    // "no push channel" — it must never fail the auth flow the alert decorates
+    // (the audit-log entry is the guaranteed channel regardless).
+    logger.warn({ err }, 'push-channel lookup failed; treating as no push channel');
+    return false;
+  }
+};
 identityServices.alertTransports = createAlertTransports({
   getUserEmail: async (userId) => (await identityServices.store.getUser(userId))?.email ?? null,
   sendNotice: (to, kind, payload) => identityServices.mailer.sendNotice(to, kind, payload),
@@ -653,6 +664,12 @@ identityServices.alertTransports = createAlertTransports({
     : {}),
   onError: (channel, err) => logger.warn({ channel, err }, 'security-alert delivery failed'),
 });
+// WS-C client-state purge on hard deletion (WS-D.2.4): push subscriptions +
+// notification preferences + settings-sync rows die with the account.
+identityServices.purgeClientState = async (userId) => {
+  await purgePushStateForUser(userId);
+  await getUserSettingsStore().purge(userId);
+};
 setIdentityServices(identityServices);
 
 // --- WS-J trust, safety, and abuse operations -------------------------------

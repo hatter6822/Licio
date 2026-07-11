@@ -25,7 +25,7 @@
 //
 // Every allowlist entry requires a written reason; an entry that no longer
 // matches anything is itself an error (allowlists must not rot).
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -76,6 +76,13 @@ export const PURITY_ALLOWLIST: Array<{ file: string; needle: string; reason: str
       'per-channel handler ROUTING table for the shared subscriber connection — bounded by ' +
       'live SSE subscriptions on this instance, not replicated state',
   },
+  {
+    file: 'forum/redis-broadcasters.ts',
+    needle: '#ready = new Map',
+    reason:
+      'per-channel SUBSCRIBE-ack promises (subscribe resolves only after Redis acks, closing ' +
+      'the snapshot/live race) — connection-local handshake state, not replicated state',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -93,21 +100,81 @@ export function collectApiSourceFiles(): Map<string, string> {
 }
 
 function collectFiles(dir: string, base: string, out: Map<string, string>): void {
-  for (const entry of readdirSync(dir)) {
-    const abs = join(dir, entry);
+  // Dirent-based walk (no separate stat) — atomic type information per entry.
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const abs = join(dir, entry.name);
     const rel = abs.slice(base.length + 1).replaceAll('\\', '/');
-    if (statSync(abs).isDirectory()) {
+    if (entry.isDirectory()) {
       collectFiles(abs, base, out);
       continue;
     }
-    if (!entry.endsWith('.ts') || entry.endsWith('.d.ts') || isExcluded(rel)) continue;
+    if (!entry.name.endsWith('.ts') || entry.name.endsWith('.d.ts') || isExcluded(rel)) continue;
     out.set(rel, readFileSync(abs, 'utf-8'));
   }
 }
 
-/** Strip block + line comments so prose can never trip a code pattern. */
+/**
+ * Strip block + line comments so prose can never trip a code pattern — via a
+ * small tokenizer, not regexes: string/template literals are respected (a
+ * regex strip mangles sources carrying `//` inside a string), and newlines
+ * are preserved so finding line numbers stay accurate.  Regex literals are
+ * not modeled (a quote inside one could open a phantom string state) — an
+ * accepted residual far rarer than the regex-stripper's failure modes.
+ */
 export function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  let out = '';
+  let state: 'code' | 'line' | 'block' | 'single' | 'double' | 'template' = 'code';
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i] as string;
+    const next = source[i + 1];
+    if (state === 'code') {
+      if (ch === '/' && next === '/') {
+        state = 'line';
+        out += '  ';
+        i += 1;
+      } else if (ch === '/' && next === '*') {
+        state = 'block';
+        out += '  ';
+        i += 1;
+      } else {
+        if (ch === "'") state = 'single';
+        else if (ch === '"') state = 'double';
+        else if (ch === '`') state = 'template';
+        out += ch;
+      }
+    } else if (state === 'line') {
+      if (ch === '\n') {
+        state = 'code';
+        out += ch;
+      } else {
+        out += ' ';
+      }
+    } else if (state === 'block') {
+      if (ch === '*' && next === '/') {
+        state = 'code';
+        out += '  ';
+        i += 1;
+      } else {
+        out += ch === '\n' ? ch : ' ';
+      }
+    } else {
+      // Inside a string/template literal: emit verbatim, honour escapes.
+      if (ch === '\\') {
+        out += ch + (next ?? '');
+        i += 1;
+        continue;
+      }
+      if (
+        (state === 'single' && (ch === "'" || ch === '\n')) ||
+        (state === 'double' && (ch === '"' || ch === '\n')) ||
+        (state === 'template' && ch === '`')
+      ) {
+        state = 'code';
+      }
+      out += ch;
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

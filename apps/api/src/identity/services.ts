@@ -196,6 +196,11 @@ export interface IdentityServices {
   }) => void;
   /** Attention-history purge (WS-E owns the store); returns the rows removed. */
   purgeAttention?: (userId: string, mode: 'delete' | 'reset') => Promise<number>;
+  /** WS-C client-state purge on hard deletion: push subscriptions +
+   *  notification preferences + settings-sync rows (default no-op).  Explicit
+   *  — production deletion TOMBSTONES the users row, so FK cascades never
+   *  fire there. */
+  purgeClientState?: (userId: string) => Promise<void>;
   /** WS-D.1.4d out-of-band security-alert delivery (email via the mailer, push
    *  via a bodyless Web Push wake).  Wired at boot; absent ⇒ the in-app
    *  security-activity log entry (always written) is the only channel. */

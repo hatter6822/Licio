@@ -103,6 +103,26 @@ describe.skipIf(!DB_URL)('WS-K ai-governance Drizzle adapters (live Postgres)', 
     const existing = await stores.registry.getVersion(first.name, first.version);
     if (!existing) throw new Error('expected the seeded model to exist');
     expect(await stores.registry.register(existing)).toBeNull();
+
+    // One deployed version per name is STRUCTURAL (migration 0073's partial
+    // unique index): promoting a second version without demoting the first is
+    // refused by the database, so concurrent deploys can never double-deploy.
+    const second = {
+      ...existing,
+      version: '9.9.9',
+      status: 'registered' as const,
+      deployed_at: null,
+      deprecation: null,
+      card: { ...existing.card, version: '9.9.9' },
+    };
+    expect(await stores.registry.register(second)).not.toBeNull();
+    await expect(
+      stores.registry.patchStatus(first.name, '9.9.9', {
+        status: 'deployed',
+        deployed_at: new Date().toISOString(),
+        deprecation: null,
+      }),
+    ).rejects.toThrow();
   });
 
   it('output records are append-only with the single correction-link mutation', async () => {

@@ -11,6 +11,8 @@ import type { UserSettings } from '@licio/shared';
 export interface UserSettingsStore {
   get(stateKey: string): Promise<UserSettings | null>;
   set(stateKey: string, settings: UserSettings): Promise<void>;
+  /** Account-deletion purge (WS-D.2.4) for a user-keyed settings row. */
+  purge(stateKey: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -23,6 +25,10 @@ export class InMemoryUserSettingsStore implements UserSettingsStore {
 
   async set(stateKey: string, settings: UserSettings): Promise<void> {
     this.#rows.set(stateKey, { ...settings });
+  }
+
+  async purge(stateKey: string): Promise<void> {
+    this.#rows.delete(stateKey);
   }
 
   async clear(): Promise<void> {

@@ -169,6 +169,10 @@ export async function runDeletionPurge(
     // WS-L: a linked financial wallet + its receipts must never outlive the
     // account — purge them alongside the other domains' personal data.
     await services.purgeFinancialWallets?.(req.userId);
+    // WS-C client state: push subscriptions + notification preferences +
+    // settings-sync rows (explicit — the tombstone below keeps the users row,
+    // so FK cascades never fire).
+    await services.purgeClientState?.(req.userId);
     // ALL export archives for the user (completed ones included) are removed
     // from object storage before the job rows are dropped by the tombstone.
     for (const job of await services.store.listExportJobs(req.userId)) {

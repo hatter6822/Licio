@@ -16,7 +16,11 @@ export type CommentFrameHandler = (frame: CommentFrame) => void | Promise<void>;
 
 export interface CommentBroadcaster {
   publish(threadId: string, frame: CommentFrame): void;
-  subscribe(threadId: string, handler: CommentFrameHandler): () => void;
+  /** Resolves (or returns) once the subscription is LIVE on the transport —
+   *  the Redis adapter resolves after the SUBSCRIBE ack, so a caller that
+   *  awaits before taking its replay snapshot can never lose a frame in the
+   *  subscribe/ack gap.  The in-memory adapter is synchronously live. */
+  subscribe(threadId: string, handler: CommentFrameHandler): (() => void) | Promise<() => void>;
 }
 
 class CommentEvent extends Event {

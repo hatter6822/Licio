@@ -217,11 +217,10 @@ describe.skipIf(!REDIS_URL)('Redis transient-state adapters (live Redis)', () =>
       const a = new RedisCommentBroadcaster(open(), new RefCountedSubscriber(open()));
       const b = new RedisCommentBroadcaster(open(), new RefCountedSubscriber(open()));
       const received: string[] = [];
-      const unsubscribe = b.subscribe(publicContribution.thread_id, (frame) => {
+      // subscribe resolves only after the Redis SUBSCRIBE ack — no sleep needed.
+      const unsubscribe = await b.subscribe(publicContribution.thread_id, (frame) => {
         received.push(frame.eventId);
       });
-      // Give the SUBSCRIBE a moment to register before publishing.
-      await new Promise((resolve) => setTimeout(resolve, 100));
       a.publish(publicContribution.thread_id, {
         eventId: publicContribution.contribution_id,
         contribution: publicContribution,
@@ -278,10 +277,10 @@ describe.skipIf(!REDIS_URL)('Redis transient-state adapters (live Redis)', () =>
       const a = new RedisDebateBroadcaster(pubConnection, new RefCountedSubscriber(open()));
       const b = new RedisDebateBroadcaster(open(), new RefCountedSubscriber(open()));
       const received: string[] = [];
-      const unsubscribe = b.subscribe(publicDebate.debate_id, (frame) => {
+      // subscribe resolves only after the Redis SUBSCRIBE ack — no sleep needed.
+      const unsubscribe = await b.subscribe(publicDebate.debate_id, (frame) => {
         received.push(frame.arena.debate_id);
       });
-      await new Promise((resolve) => setTimeout(resolve, 100));
       // A corrupted raw message on the channel is dropped by the fail-closed
       // delivery-side validation, never dispatched.
       await pubConnection.publish(`licio:debate:${publicDebate.debate_id}`, 'not-json');

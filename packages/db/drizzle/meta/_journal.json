@@ -505,6 +505,13 @@
       "when": 1783724000000,
       "tag": "0072_reply_notifications_user_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1783725000000,
+      "tag": "0073_ws_k_one_deployed_per_name",
+      "breakpoints": true
     }
   ]
 }

@@ -18,6 +18,7 @@ import {
   type AttentionIngestAck,
   attentionAggregateBatchSchema,
   attentionIngestAckSchema,
+  DEFAULT_NOTIFICATION_PREFERENCES,
   DEFAULT_USER_SETTINGS,
   deriveRatingLabel,
   deriveStorySafetyState,
@@ -764,21 +765,24 @@ export function createV1Routes() {
       )
 
       // --- Notification preferences (WS-C.2.4c) -----------------------------
+      // Keyed like settings sync: USER id when signed in (survives re-login,
+      // purged on account deletion), else the session id; a cookieless visitor
+      // is never persisted server-side (no shared 'anonymous' key).
       .get('/notifications/preferences', async (c) => {
-        const userId = await resolveOptionalUserId(c.req.header('cookie'));
-        return c.json(await getPreferences(userId ?? stateKey(c.req.header('cookie'))));
+        const key = await settingsKey(c.req.header('cookie'));
+        if (key === undefined) return c.json(DEFAULT_NOTIFICATION_PREFERENCES);
+        return c.json(await getPreferences(key));
       })
       .patch(
         '/notifications/preferences',
         zValidator('json', notificationPreferencesSchema.partial()),
         async (c) => {
-          const userId = await resolveOptionalUserId(c.req.header('cookie'));
-          const key = userId ?? stateKey(c.req.header('cookie'));
+          const key = await settingsKey(c.req.header('cookie'));
           const merged = notificationPreferencesSchema.parse({
-            ...(await getPreferences(key)),
+            ...(key === undefined ? DEFAULT_NOTIFICATION_PREFERENCES : await getPreferences(key)),
             ...c.req.valid('json'),
           });
-          await setPreferences(key, merged);
+          if (key !== undefined) await setPreferences(key, merged);
           return c.json(merged);
         },
       )

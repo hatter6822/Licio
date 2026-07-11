@@ -116,9 +116,21 @@ describe.skipIf(!DB_URL)('DrizzlePushStateStore (live Postgres)', () => {
       userId = (inserted[0] as { userId: string }).userId;
       await store.register(sub('https://push.example/pg-u'), 'session-u', userId);
       expect(await store.listForUser(userId)).toHaveLength(1);
+
+      // Account-deletion purge under PRODUCTION semantics: the deletion job
+      // TOMBSTONES the users row (update, not delete), so the FK cascade never
+      // fires — purgeForUser must remove both the subscriptions and the
+      // user-keyed preference row explicitly.
+      await store.setPreferences(userId, {
+        ...DEFAULT_NOTIFICATION_PREFERENCES,
+        reply_notifications: false,
+      });
+      await store.purgeForUser(userId);
+      expect(await store.listForUser(userId)).toHaveLength(0);
+      expect(await store.getPreferences(userId)).toBeNull();
+
       await db.delete(users).where(eq(users.userId, userId));
       userId = null;
-      expect(await store.listForUser((inserted[0] as { userId: string }).userId)).toHaveLength(0);
     } finally {
       await store.clear();
       if (userId) await db.delete(users).where(eq(users.userId, userId));

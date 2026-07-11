@@ -46,6 +46,10 @@ export class DrizzleUserSettingsStore implements UserSettingsStore {
       .onConflictDoUpdate({ target: userSettingsTable.stateRef, set: values });
   }
 
+  async purge(stateKey: string): Promise<void> {
+    await this.#db.delete(userSettingsTable).where(eq(userSettingsTable.stateRef, refOf(stateKey)));
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(userSettingsTable);
   }
