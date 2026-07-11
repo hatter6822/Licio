@@ -74,6 +74,11 @@ export interface AiGovernanceServices {
    *  boot when an LLM backend is enabled). Absent ⇒ `adjudicateDebate` runs the
    *  deterministic MLP directly (the fail-closed floor either way). */
   llmDebateJudge?: LlmDebateJudge | undefined;
+  /** True when the governed LLM MODERATION proposer is the in-room moderation
+   *  model this boot (WS-U ADR-9; set alongside the GovernanceService wiring).
+   *  Observability only — the proposer itself lives in the GovernanceService
+   *  deps; the dev simulator's moderation pulse reports this flag. */
+  llmModerationActive?: boolean | undefined;
   // Config (fail-closed, lazily readable).
   config: () => AiGovernanceConfig;
   reloadConfig: () => Promise<AiGovernanceConfig>;

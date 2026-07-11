@@ -770,9 +770,10 @@ function distinctOutlets(bank: DomainBank, count: number, prng: Prng): string[] 
 
 /**
  * A sourced correction challenging a comment or the story root (WS-T). The
- * citation count varies (1–3, distinct outlets) so the governed adjudicator
- * sees challenges of varying strength — under synthetic load every verdict
- * class (corrected / upheld / inconclusive) occurs.
+ * citation count varies (1–4, weighted toward the middle, distinct outlets) so
+ * the governed adjudicator sees challenges of varying strength — under
+ * synthetic load every verdict class (corrected / upheld / inconclusive)
+ * occurs, including the occasional heavily-sourced high-confidence challenge.
  */
 export function generateCorrection(
   domain: DomainId,
@@ -784,7 +785,12 @@ export function generateCorrection(
     .pick(CORRECTION_BODIES)
     .replaceAll('{object}', prng.pick(bank.objects))
     .replaceAll('{period}', prng.pick(PERIODS));
-  const count = 1 + prng.int(3); // 1..3 supporting sources
+  const count = prng.weighted([
+    { value: 1, weight: 3 },
+    { value: 2, weight: 4 },
+    { value: 3, weight: 3 },
+    { value: 4, weight: 1 },
+  ]);
   const citationUrls = distinctOutlets(bank, count, prng).map(
     (outlet, i) => `https://${outlet}.example/refs/${domain}-correction-${serial}-${i}`,
   );
@@ -819,4 +825,111 @@ export function generateRebuttal(
     (outlet, i) => `https://${outlet}.example/refs/${domain}-rebuttal-${serial}-${i}`,
   );
   return { body, citationUrls };
+}
+
+const REINFORCEMENT_ADDENDA: readonly string[] = [
+  'Adding a further independent series covering the same {object}: it lands outside the published interval too, corroborating the correction.',
+  'Since the rebuttal cites the certified totals: the linked follow-up reconciles both release cycles of the {object} and the discrepancy persists.',
+  'A second registry covering the {object} publishes the same denominator the correction used; the recomputed figure holds for the {period}.',
+] as const;
+
+/**
+ * The challenger STRENGTHENS their position after the incumbent's rebuttal —
+ * the original correction text plus a directly-responsive addendum and extra
+ * distinct sources (the co-visible 12h edit loop, exercised from the
+ * challenger's side). `postDebatePosition` REPLACES the side's position, so
+ * the returned summary/citations carry the original material forward; the
+ * total citation list is capped at the wire schema's MAX (10).
+ */
+export function generateReinforcement(
+  original: { summary: string; citationUrls: readonly string[] },
+  domain: DomainId,
+  serial: number,
+  prng: Prng,
+): { summary: string; citationUrls: readonly string[] } {
+  const bank = domainBank(domain);
+  const addendum = prng
+    .pick(REINFORCEMENT_ADDENDA)
+    .replaceAll('{object}', prng.pick(bank.objects))
+    .replaceAll('{period}', prng.pick(PERIODS));
+  const extraCount = 1 + prng.int(2); // 1..2 additional sources
+  const extras = distinctOutlets(bank, extraCount, prng).map(
+    (outlet, i) => `https://${outlet}.example/refs/${domain}-reinforcement-${serial}-${i}`,
+  );
+  const citationUrls = [...original.citationUrls, ...extras]
+    .filter((url, index, all) => all.indexOf(url) === index)
+    .slice(0, 10);
+  return { summary: `${original.summary}\n\n${addendum}`, citationUrls };
+}
+
+// ---------------------------------------------------------------------------
+// WS-T steward overrules + failure-injection markers (challenge_wave).
+// ---------------------------------------------------------------------------
+
+/** Steward override reasons (the audited overrule statement). */
+export const OVERRIDE_REASONS: readonly string[] = [
+  'The adjudicator under-weighted the primary registry both sides cite; reading it directly, the other position is the accurate one.',
+  'The winning position relies on a source the room has previously found unreliable for this subject; overruling per the room charter.',
+  'Both positions miss the superseding revision published after the debate opened; the verdict does not reflect the current record.',
+  'The rationale rewards source count over source relevance here; the smaller set directly addresses the challenged sentence.',
+] as const;
+
+/**
+ * Failure-injection markers a `challenge_wave` correction may carry (the DEV
+ * simulated governance-LLM runtime interprets them; they read as inert prose
+ * to a real local runtime). Weighted so most markers force a verdict CLASS
+ * (successful completions with a controlled outcome split) and only a small
+ * share triggers the fail-closed rationale-URL rejection (→ the MLP fallback,
+ * without pinning the breaker open under load).
+ */
+export function pickDebateMarker(prng: Prng): string {
+  return prng.weighted([
+    { value: '[sim:debate=incumbent]', weight: 3 },
+    { value: '[sim:debate=challenger]', weight: 3 },
+    { value: '[sim:debate=inconclusive]', weight: 2 },
+    { value: '[sim:rationale-url]', weight: 2 },
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Problem comments (the WS-J floor + WS-U in-room moderation exercisers).
+// ---------------------------------------------------------------------------
+
+export type ProblemCommentKind = 'spam' | 'hostile';
+
+/** Spam bodies carry ≥2 distinct commercial-spam terms so both the WS-J floor
+ *  heuristics and the in-room moderation model read them as actionable. */
+const SPAM_COMMENT_BODIES: readonly string[] = [
+  'Huge discount on verified supplements — use promo code SAVE20 at checkout, free money back if the {object} disappoints you.',
+  'Why read the {object} when you can click through for a giveaway? Cheap rates this {period} only, discount applied automatically.',
+  'Stop wasting time on the {object} — click here for the promo code and a giveaway worth more than this whole thread.',
+] as const;
+
+/** Hostile bodies carry a hostile term at civil length — the wrapper routes
+ *  them to human review (never an AI-driven removal; the ceiling clamps). */
+const HOSTILE_COMMENT_BODIES: readonly string[] = [
+  'Only an idiot reads the {object} that way — the rest of us managed to find the definitions table without help.',
+  'This take is worthless and so is the effort behind it; maybe skip the {object} next {period} and spare the thread.',
+  'Honestly, shut up about the methodology — you clearly never opened the {object} and it shows in every sentence.',
+] as const;
+
+/**
+ * A deliberately problematic comment body (spam wording or hostile wording),
+ * generated at a low scenario-configured share so live synthetic traffic gives
+ * the moderation automation something real to act on: the WS-J floor
+ * pre-screen may flag/block it, and in a governed room the in-room moderation
+ * MODEL proposes warn/flag/remove — which the deterministic wrapper then
+ * bounds. Still deterministic (PRNG + banks), never a slur — the goal is
+ * classifiable signal, not shock content.
+ */
+export function generateProblemComment(
+  kind: ProblemCommentKind,
+  domain: DomainId,
+  prng: Prng,
+): string {
+  const bank = domainBank(domain);
+  const template = prng.pick(kind === 'spam' ? SPAM_COMMENT_BODIES : HOSTILE_COMMENT_BODIES);
+  return template
+    .replaceAll('{object}', prng.pick(bank.objects))
+    .replaceAll('{period}', prng.pick(PERIODS));
 }

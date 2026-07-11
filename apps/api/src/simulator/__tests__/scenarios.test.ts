@@ -33,6 +33,33 @@ describe('simulator scenarios', () => {
     expect(SCENARIOS.steady.newcomersPerMinute).toBe(0);
   });
 
+  it('challenge_wave is the WS-T stress preset: dominant corrections, markers, a kickoff', () => {
+    const wave = SCENARIOS.challenge_wave;
+    // Corrections dominate every other scenario's correction load.
+    for (const other of Object.values(SCENARIOS)) {
+      if (other.id === 'challenge_wave') continue;
+      expect(wave.rates.correction).toBeGreaterThan(other.rates.correction);
+    }
+    expect(wave.kickoffStory).toBe(true);
+    // Markers are exclusive to the wave (a bounded minority share), so every
+    // other scenario's corrections stay clean prose.
+    expect(wave.debateMarkerShare).toBeGreaterThan(0);
+    expect(wave.debateMarkerShare).toBeLessThan(0.25);
+    for (const other of Object.values(SCENARIOS)) {
+      if (other.id !== 'challenge_wave') expect(other.debateMarkerShare).toBe(0);
+    }
+  });
+
+  it('problem-comment shares are a bounded minority everywhere; quiet stays fully civil', () => {
+    for (const scenario of Object.values(SCENARIOS)) {
+      expect(scenario.problemCommentShare).toBeGreaterThanOrEqual(0);
+      expect(scenario.problemCommentShare).toBeLessThanOrEqual(0.15);
+    }
+    expect(SCENARIOS.quiet.problemCommentShare).toBe(0);
+    // The default scenario exercises the moderation model out of the box.
+    expect(SCENARIOS.steady.problemCommentShare).toBeGreaterThan(0);
+  });
+
   it('scenario descriptions are within the wire length bound', () => {
     for (const info of SCENARIO_INFOS) {
       expect(info.label.length).toBeGreaterThan(0);

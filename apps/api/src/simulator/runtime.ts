@@ -47,6 +47,7 @@ import { createContribution } from '../forum/contributions.js';
 import {
   type DebateDeps,
   type DebateWindowPolicy,
+  overrideDebateVerdict,
   postDebatePosition,
   runDebateLifecycle,
 } from '../forum/debate.js';
@@ -54,6 +55,7 @@ import { joinRoom } from '../forum/rooms.js';
 import type { ForumServices } from '../forum/services.js';
 import { getForumServices } from '../forum/services.js';
 import { toContributionPublic } from '../forum/threads.js';
+import { getGovernanceService } from '../governance/services.js';
 import { accountRef } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
 import { getIdentityServices } from '../identity/services.js';
@@ -80,6 +82,7 @@ import {
   type SimAction,
   type SimWorld,
   type WorldCommentRef,
+  type WorldJudgedDebate,
   type WorldOpenDebate,
   type WorldRoom,
   type WorldStory,
@@ -107,14 +110,23 @@ const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** Shortened WS-T arena windows while the simulator runs (spec: 12h edit /
  *  24h override — dev-observable instead: an arena opened by a synthetic
- *  correction is adjudicated ~4 ticks later and finalized ~2 ticks after
- *  that). Applied via `ForumServices.debateWindowsOverride` on start() and
- *  RESTORED to the spec windows on stop(); arenas keep the deadline stamped
- *  when they opened. */
+ *  correction is adjudicated ~4 ticks later and finalized ~3 ticks after
+ *  that; the override window spans ≥2 ticks so a judged arena appears in a
+ *  subsequent world snapshot and the steward persona genuinely gets an
+ *  overrule chance before finalization). Applied via
+ *  `ForumServices.debateWindowsOverride` on start() and RESTORED to the spec
+ *  windows on stop(); arenas keep the deadline stamped when they opened. */
 const SIM_DEBATE_WINDOWS: DebateWindowPolicy = {
   editWindowMs: 20_000,
-  overrideWindowMs: 10_000,
+  overrideWindowMs: 15_000,
 };
+
+/** The narrow WS-U read the simulator needs: whether a room carries an ACTIVE
+ *  community-approved model binding (the bounded in-room agent). Structural —
+ *  the real GovernanceService satisfies it via `getBinding`. */
+export interface SimulatorGovernanceReader {
+  getBinding(roomId: string): Promise<{ active: boolean } | null>;
+}
 
 export interface SimulatorServiceGraph {
   readonly identity: IdentityServices;
@@ -124,6 +136,7 @@ export interface SimulatorServiceGraph {
   readonly invariants: InvariantPlatformServices;
   readonly ranking: RankingServices;
   readonly moderation: ModerationServices;
+  readonly governance: SimulatorGovernanceReader;
 }
 
 /** Resolve the boot-installed singletons. Throws if called before boot wiring
@@ -137,6 +150,7 @@ export function resolveServiceGraph(): SimulatorServiceGraph {
     invariants: getInvariantServices(),
     ranking: getRankingServices(),
     moderation: getModerationServices(),
+    governance: getGovernanceService(),
   };
 }
 
@@ -162,6 +176,7 @@ function emptyCounters(): SimulatorCounters {
     corrections_posted: 0,
     debates_opened: 0,
     debate_positions_posted: 0,
+    debate_overrides: 0,
     debates_judged: 0,
     debates_finalized: 0,
     rejected_rate_limited: 0,
@@ -182,6 +197,28 @@ const DEBATE_LLM_UNAVAILABLE_CODES = [
   'invalid_output',
   'unusable_assessment',
   'record_failed',
+] as const;
+
+/** Moderation-proposer unavailability codes (ai-governance/llm/moderation.ts
+ *  `unavailable` — each falls back to the platform baseline + deferred
+ *  re-moderation). */
+const MODERATION_LLM_UNAVAILABLE_CODES = [
+  'transport',
+  'breaker_open',
+  'budget_exhausted',
+  'refusal',
+  'truncated',
+  'invalid_output',
+  'record_failed',
+] as const;
+
+/** The WS-U action vocabulary the moderation pulse splits proposals across. */
+const MODERATION_PROPOSED_ACTIONS = [
+  'allow',
+  'warn',
+  'flag_for_review',
+  'restrict',
+  'remove',
 ] as const;
 
 /** Infer a simulator content domain from a room name (best-effort; only used
@@ -258,14 +295,45 @@ export class DevTrafficSimulator {
    *  the simulator uses, resolved once (create-if-missing) then cached. */
   #roomLensCache = new Map<string, ReadonlyMap<LensType, string>>();
   #counters = emptyCounters();
-  /** WS-T arenas this simulator opened, tracked for incumbent-rebuttal planning
-   *  (pruned once an arena leaves `open`). */
-  #openArenas = new Map<
+  /** WS-T arenas this simulator opened, tracked across the FULL lifecycle
+   *  (open → judged → resolved) for rebuttal/reinforcement/override planning
+   *  and honest outcome accounting; pruned once an arena resolves. */
+  #trackedArenas = new Map<
     string,
-    { incumbentUserId: string | null; incumbentPosted: boolean; domain: DomainId | null }
+    {
+      phase: 'open' | 'judged';
+      incumbentUserId: string | null;
+      incumbentPosted: boolean;
+      /** One-shot forfeit decision from the correction plan. */
+      willRebut: boolean;
+      domain: DomainId | null;
+      /** The challenger's side, carried for the reinforcement plan. */
+      challengerUserId: string | null;
+      challengerSummary: string;
+      challengerCitationUrls: readonly string[];
+      /** The engine saw the reinforcement window once (one-shot roll done). */
+      reinforceConsidered: boolean;
+      /** The engine saw the judged arena once (one-shot override roll done). */
+      overrideConsidered: boolean;
+      /** The judged arena's room + AI winner (override planning input). */
+      roomId: string | null;
+      winner: 'incumbent' | 'challenger' | 'none';
+      /** This arena's forfeit was already tallied (count exactly once). */
+      forfeitCounted: boolean;
+    }
   >();
   /** Challenge-resolution throughput accumulators (the debate pulse). */
   #debateStats = { adjudicationMsTotal: 0, adjudicated: 0, lastJudgedAtMs: null as number | null };
+  /** Lifecycle outcomes of the simulator's own arenas (the debate pulse's
+   *  resolved split — both adjudicator legs, unlike the LLM-only counters). */
+  #debateOutcomes = { corrected: 0, upheld: 0, inconclusive: 0, forfeits: 0, overridden: 0 };
+  /** roomId → the room has an ACTIVE WS-U model binding (cached; governed
+   *  rooms are weighted up for story placement so the in-room moderation
+   *  model sees steady traffic). */
+  #roomGovernedCache = new Map<string, boolean>();
+  /** roomId → the steward persona is registered as a community_steward
+   *  (idempotent, ensured once per room — the WS-T overrule authority). */
+  #roomStewardEnsured = new Set<string>();
   #activity: SimulatorActivityEntry[] = [];
   #feedPulse: { computedAtMs: number | null; fallback: boolean; items: SimulatorFeedPulseItem[] } =
     {
@@ -478,6 +546,9 @@ export class DevTrafficSimulator {
       kickoffDone: this.#kickoffDone,
       repostDone: this.#repostDone,
     });
+    // The engine just rolled this snapshot's one-shot WS-T decisions
+    // (reinforcement, override) — mark them consumed before execution.
+    this.#markDebatePlanningConsidered(world);
     for (const action of plan.slice(0, MAX_ACTIONS_PER_TICK)) {
       // A stop() (or a stop→restart that superseded this tick) takes effect
       // immediately: abandon the rest of the plan rather than keep writing
@@ -574,7 +645,9 @@ export class DevTrafficSimulator {
 
     // Rooms: public, server-storage, open-join rooms are where synthetic
     // stories can land; expert-gated rooms are flagged so only the expert
-    // persona targets them.
+    // persona targets them; WS-U-governed rooms (an ACTIVE model binding —
+    // the bounded in-room agent) are flagged so story placement weights them
+    // up and the moderation model sees steady synthetic traffic.
     const rawRooms = await forum.rooms.list({
       visibilities: ['public'],
       limit: 50,
@@ -582,13 +655,17 @@ export class DevTrafficSimulator {
     const rooms: WorldRoom[] = await Promise.all(
       rawRooms
         .filter((room) => room.storageMode === 'server' && room.joinModel === 'open')
-        .map(async (room) => ({
-          roomId: room.roomId,
-          name: room.name,
-          expertGated: room.postingPolicy === 'experts_and_stewards',
-          domains: inferRoomDomains(room.name),
-          lensesByType: await this.#ensureRoomLenses(room.roomId),
-        })),
+        .map(async (room) => {
+          await this.#ensureRoomSteward(room.roomId);
+          return {
+            roomId: room.roomId,
+            name: room.name,
+            expertGated: room.postingPolicy === 'experts_and_stewards',
+            domains: inferRoomDomains(room.name),
+            lensesByType: await this.#ensureRoomLenses(room.roomId),
+            governed: await this.#isRoomGoverned(room.roomId),
+          };
+        }),
     );
 
     const commentsByStory = new Map<string, WorldCommentRef[]>();
@@ -615,16 +692,28 @@ export class DevTrafficSimulator {
       );
     }
 
-    // WS-T: arenas this simulator opened that are still awaiting the
-    // incumbent's rebuttal (runtime-tracked; pruned by #advanceDebates).
-    const openDebates: WorldOpenDebate[] = [...this.#openArenas.entries()].map(
-      ([debateId, arena]) => ({
-        debateId,
-        incumbentUserId: arena.incumbentUserId,
-        incumbentPosted: arena.incumbentPosted,
-        domain: arena.domain,
-      }),
-    );
+    // WS-T: arenas this simulator opened, projected for the engine's
+    // rebuttal / reinforcement / override planning (runtime-tracked; advanced
+    // and pruned by #advanceDebates).
+    const openDebates: WorldOpenDebate[] = [];
+    const judgedDebates: WorldJudgedDebate[] = [];
+    for (const [debateId, arena] of this.#trackedArenas) {
+      if (arena.phase === 'open') {
+        openDebates.push({
+          debateId,
+          incumbentUserId: arena.incumbentUserId,
+          incumbentPosted: arena.incumbentPosted,
+          incumbentWillRebut: arena.willRebut,
+          domain: arena.domain,
+          challengerUserId: arena.challengerUserId,
+          challengerSummary: arena.challengerSummary,
+          challengerCitationUrls: arena.challengerCitationUrls,
+          reinforceEligible: arena.incumbentPosted && !arena.reinforceConsidered,
+        });
+      } else if (!arena.overrideConsidered) {
+        judgedDebates.push({ debateId, roomId: arena.roomId, winner: arena.winner });
+      }
+    }
 
     return {
       stories,
@@ -634,7 +723,64 @@ export class DevTrafficSimulator {
       focusStoryId: this.#focusStoryId,
       storyCapReached: this.#storiesSubmitted >= this.#storyCap,
       openDebates,
+      judgedDebates,
     };
+  }
+
+  /** Mark the one-shot WS-T planning decisions this world snapshot exposed as
+   *  CONSIDERED (reinforcement roll, override roll) — called right after
+   *  planTick, before execution, so each arena gets each chance exactly once
+   *  regardless of whether the roll produced an action. */
+  #markDebatePlanningConsidered(world: SimWorld): void {
+    for (const debate of world.openDebates) {
+      if (debate.reinforceEligible) {
+        const tracked = this.#trackedArenas.get(debate.debateId);
+        if (tracked !== undefined) tracked.reinforceConsidered = true;
+      }
+    }
+    for (const judged of world.judgedDebates) {
+      const tracked = this.#trackedArenas.get(judged.debateId);
+      if (tracked !== undefined) tracked.overrideConsidered = true;
+    }
+  }
+
+  /** Whether the room carries an ACTIVE WS-U model binding (cached). */
+  async #isRoomGoverned(roomId: string): Promise<boolean> {
+    const cached = this.#roomGovernedCache.get(roomId);
+    if (cached !== undefined) return cached;
+    let governed = false;
+    try {
+      governed = (await this.#graph.governance.getBinding(roomId))?.active === true;
+    } catch {
+      // A governance read failure only loses the placement bias — never a tick.
+    }
+    this.#roomGovernedCache.set(roomId, governed);
+    return governed;
+  }
+
+  /** Register the steward persona as a REAL community_steward of the room
+   *  (idempotent; once per room). This is what makes the engine-planned WS-T
+   *  overrule executable — `overrideDebateVerdict` checks stewardship through
+   *  the same `stewardRolesFor` read the routes use. */
+  async #ensureRoomSteward(roomId: string): Promise<void> {
+    if (this.#roomStewardEnsured.has(roomId)) return;
+    const steward = this.#personas.find((p) => archetypeOf(p.spec).stewardRole === true);
+    if (steward === undefined || !steward.provisioned) return; // retry next world build
+    const { forum } = this.#graph;
+    try {
+      const existing = await forum.rooms.stewardRolesFor(roomId, steward.spec.userId);
+      if (existing.length === 0) {
+        await forum.rooms.addSteward({
+          roomId,
+          userId: steward.spec.userId,
+          role: 'community_steward',
+          assignedAt: new Date(this.#now()).toISOString(),
+        });
+      }
+      this.#roomStewardEnsured.add(roomId);
+    } catch (err) {
+      this.#log('dev-sim: steward registration failed', { roomId, err: String(err) });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -674,6 +820,9 @@ export class DevTrafficSimulator {
         case 'debate_position':
           await this.#executeDebatePosition(action);
           return;
+        case 'debate_override':
+          await this.#executeDebateOverride(action);
+          return;
       }
     } catch (err) {
       this.#counters.errors += 1;
@@ -703,6 +852,7 @@ export class DevTrafficSimulator {
       case 'correction':
         return 'correction';
       case 'debate_position':
+      case 'debate_override':
         return 'debate';
       default:
         return 'provision';
@@ -1062,10 +1212,20 @@ export class DevTrafficSimulator {
     const arenaId = outcome.contribution.metadata.debate_arena_id ?? null;
     if (arenaId !== null) {
       this.#counters.debates_opened += 1;
-      this.#openArenas.set(arenaId, {
+      this.#trackedArenas.set(arenaId, {
+        phase: 'open',
         incumbentUserId: action.incumbentUserId,
         incumbentPosted: false,
+        willRebut: action.incumbentWillRebut,
         domain: action.domain,
+        challengerUserId: action.personaUserId,
+        challengerSummary: action.body,
+        challengerCitationUrls: action.citationUrls,
+        reinforceConsidered: false,
+        overrideConsidered: false,
+        roomId: null,
+        winner: 'none',
+        forfeitCounted: false,
       });
     }
     this.#record({
@@ -1079,8 +1239,10 @@ export class DevTrafficSimulator {
     });
   }
 
-  /** The incumbent posts a rebuttal position in an open arena — the REAL 12h
-   *  window path (`postDebatePosition`), so a closed window rejects honestly. */
+  /** A position post in an open arena — the REAL 12h window path
+   *  (`postDebatePosition`), so a closed window rejects honestly. Serves BOTH
+   *  sides of the co-visible edit loop: the incumbent's rebuttal and the
+   *  challenger's reinforcement. */
   async #executeDebatePosition(
     action: Extract<SimAction, { kind: 'debate_position' }>,
   ): Promise<void> {
@@ -1113,24 +1275,77 @@ export class DevTrafficSimulator {
       parsed.data,
     );
     if (!outcome.ok) {
-      // window_closed / not_found ⇒ the arena moved on; stop planning for it.
-      this.#openArenas.delete(action.debateId);
+      // window_closed / not_found ⇒ the arena moved on (the lifecycle prune in
+      // #advanceDebates re-reads its real state and accounts for it).
       this.#recordRejection(
         'debate',
         action.personaUserId,
-        'rebuttal rejected',
+        action.side === 'incumbent' ? 'rebuttal rejected' : 'reinforcement rejected',
         outcome.reason,
         null,
       );
       return;
     }
-    const tracked = this.#openArenas.get(action.debateId);
-    if (tracked !== undefined) tracked.incumbentPosted = true;
+    const tracked = this.#trackedArenas.get(action.debateId);
+    if (tracked !== undefined) {
+      if (action.side === 'incumbent') tracked.incumbentPosted = true;
+      else {
+        // The challenger's position was REPLACED — carry the new material so a
+        // later snapshot (and any retry) builds on it.
+        tracked.challengerSummary = action.summary;
+        tracked.challengerCitationUrls = action.citationUrls;
+      }
+    }
     this.#counters.debate_positions_posted += 1;
     this.#record({
       kind: 'debate',
       actor: this.#handleFor(action.personaUserId),
-      summary: `defended the challenged content (${action.citationUrls.length} source${action.citationUrls.length === 1 ? '' : 's'})`,
+      summary:
+        action.side === 'incumbent'
+          ? `defended the challenged content (${action.citationUrls.length} source${action.citationUrls.length === 1 ? '' : 's'})`
+          : `strengthened the correction (${action.citationUrls.length} source${action.citationUrls.length === 1 ? '' : 's'})`,
+      outcome: 'ok',
+    });
+  }
+
+  /** The steward persona overrules a judged arena — the REAL 24h override path
+   *  (`overrideDebateVerdict`), so the window, judged-state, and stewardship
+   *  checks all bite honestly. */
+  async #executeDebateOverride(
+    action: Extract<SimAction, { kind: 'debate_override' }>,
+  ): Promise<void> {
+    if (!(await this.#accountMayAuthenticate(action.personaUserId))) {
+      this.#recordRejection(
+        'debate',
+        action.personaUserId,
+        'account not authenticable',
+        'account_suspended',
+        403,
+      );
+      return;
+    }
+    const outcome = await overrideDebateVerdict(
+      this.#debateDeps(),
+      action.debateId,
+      action.personaUserId,
+      action.winner,
+      action.reason,
+    );
+    if (!outcome.ok) {
+      this.#recordRejection(
+        'debate',
+        action.personaUserId,
+        'steward overrule rejected',
+        outcome.reason,
+        null,
+      );
+      return;
+    }
+    this.#counters.debate_overrides += 1;
+    this.#record({
+      kind: 'debate',
+      actor: this.#handleFor(action.personaUserId),
+      summary: `overruled the AI verdict (${action.winner === 'none' ? 'ruled inconclusive' : `for the ${action.winner}`})`,
       outcome: 'ok',
     });
   }
@@ -1160,9 +1375,12 @@ export class DevTrafficSimulator {
   /**
    * Advance every due arena through the REAL lifecycle: judge (the governed
    * adjudicator — the LLM leg when a backend is wired, the deterministic MLP
-   * fallback otherwise) then finalize (dispute tags + feed demotion). Timed for
-   * the throughput pulse; tracked arenas that left `open` are pruned so
-   * rebuttal planning stops for them.
+   * fallback otherwise) then finalize (dispute tags + feed demotion). Timed
+   * for the throughput pulse; every tracked arena is then re-read and advanced
+   * through the runtime's own phase model — `open` arenas keep planning
+   * rebuttals/reinforcements, `judged` arenas become one-shot steward-override
+   * candidates (with a forfeit tallied when the incumbent never posted), and
+   * `resolved` arenas are counted into the outcome split and pruned.
    */
   async #advanceDebates(): Promise<void> {
     const startedMs = this.#now();
@@ -1184,11 +1402,36 @@ export class DevTrafficSimulator {
         summary: `adjudicated ${judged} and finalized ${finalized} arena(s) in ${elapsedMs}ms`,
         outcome: 'ok',
       });
-      // Prune tracked arenas that are no longer open (judged/resolved).
-      for (const debateId of [...this.#openArenas.keys()]) {
-        const arena = await this.#graph.forum.debates.getById(debateId);
-        if (arena === null || arena.state !== 'open') this.#openArenas.delete(debateId);
+    }
+    // Advance the runtime phase model from the REAL arena rows. Runs every
+    // pass (an arena can also be advanced by the 5-min debate scheduler or a
+    // manual route call — never assume this runtime is the only mover).
+    for (const [debateId, tracked] of [...this.#trackedArenas.entries()]) {
+      const arena = await this.#graph.forum.debates.getById(debateId);
+      if (arena === null) {
+        this.#trackedArenas.delete(debateId);
+        continue;
       }
+      if (arena.state === 'open' || arena.state === 'awaiting_verdict') continue;
+      // judged OR resolved: tally the forfeit exactly once (the incumbent
+      // never posted before the edit window closed — a true one-sided debate).
+      if (!tracked.forfeitCounted && !tracked.incumbentPosted) {
+        tracked.forfeitCounted = true;
+        this.#debateOutcomes.forfeits += 1;
+      }
+      if (arena.state === 'judged') {
+        tracked.phase = 'judged';
+        tracked.roomId = arena.roomId;
+        tracked.winner = arena.winner ?? 'none';
+        continue;
+      }
+      // resolved: count the lifecycle outcome (both adjudicator legs) and
+      // whether a steward overrule decided it; then stop tracking.
+      if (arena.verdict === 'corrected') this.#debateOutcomes.corrected += 1;
+      else if (arena.verdict === 'upheld') this.#debateOutcomes.upheld += 1;
+      else this.#debateOutcomes.inconclusive += 1;
+      if (arena.overriddenByUserId !== null) this.#debateOutcomes.overridden += 1;
+      this.#trackedArenas.delete(debateId);
     }
   }
 
@@ -1731,15 +1974,30 @@ export class DevTrafficSimulator {
 
   status(): SimulatorStatus {
     const activePersonas = this.#personas.filter((p) => p.provisioned).length;
-    // WS-T challenge-resolution pulse: the LLM-leg counters come from the REAL
-    // ai-governance metrics (the same numbers the governed path counts); the
-    // wall-clock average comes from the simulator's own lifecycle timing.
+    // WS-T challenge-resolution pulse + WS-U moderation pulse: the LLM-leg
+    // counters come from the REAL ai-governance metrics (the same numbers the
+    // governed paths count); the wall-clock average and the lifecycle outcome
+    // split come from the simulator's own arena tracking.
     const aiGov = tryGetAiGovernanceServices();
     const llmCounter = (name: string): number => aiGov?.metrics.counter(name) ?? 0;
     const llmUnavailable = DEBATE_LLM_UNAVAILABLE_CODES.reduce(
       (sum, code) => sum + llmCounter(`ai.governance.debate.llm.unavailable.${code}`),
       0,
     );
+    const moderationUnavailable = MODERATION_LLM_UNAVAILABLE_CODES.reduce(
+      (sum, code) => sum + llmCounter(`ai.governance.moderation.unavailable.${code}`),
+      0,
+    );
+    const moderationProposed = Object.fromEntries(
+      MODERATION_PROPOSED_ACTIONS.map((action) => [
+        action,
+        llmCounter(`ai.governance.moderation.proposed.${action}`),
+      ]),
+    ) as Record<(typeof MODERATION_PROPOSED_ACTIONS)[number], number>;
+    let openArenas = 0;
+    for (const arena of this.#trackedArenas.values()) {
+      if (arena.phase === 'open') openArenas += 1;
+    }
     return {
       running: this.#running,
       scenario: this.#scenario,
@@ -1764,7 +2022,7 @@ export class DevTrafficSimulator {
       last_signal_refresh_at:
         this.#lastSignalRefreshMs > 0 ? new Date(this.#lastSignalRefreshMs).toISOString() : null,
       debate_pulse: {
-        open_arenas: this.#openArenas.size,
+        open_arenas: openArenas,
         llm_backend_active: aiGov !== null && aiGov.llmDebateJudge !== undefined,
         llm_verdicts: {
           upheld: llmCounter('ai.governance.debate.llm.verdict.upheld'),
@@ -1773,6 +2031,13 @@ export class DevTrafficSimulator {
         },
         llm_decided: llmCounter('ai.governance.debate.llm.decided'),
         llm_unavailable: llmUnavailable,
+        resolved: {
+          corrected: this.#debateOutcomes.corrected,
+          upheld: this.#debateOutcomes.upheld,
+          inconclusive: this.#debateOutcomes.inconclusive,
+        },
+        forfeits: this.#debateOutcomes.forfeits,
+        overridden: this.#debateOutcomes.overridden,
         avg_adjudication_ms:
           this.#debateStats.adjudicated > 0
             ? Math.round(this.#debateStats.adjudicationMsTotal / this.#debateStats.adjudicated)
@@ -1781,6 +2046,14 @@ export class DevTrafficSimulator {
           this.#debateStats.lastJudgedAtMs !== null
             ? new Date(this.#debateStats.lastJudgedAtMs).toISOString()
             : null,
+      },
+      moderation_pulse: {
+        llm_backend_active: aiGov !== null && aiGov.llmModerationActive === true,
+        proposals: llmCounter('ai.governance.moderation.decided'),
+        proposed: moderationProposed,
+        unavailable: moderationUnavailable,
+        guard_blocked: llmCounter('ai.governance.moderation.guard_block'),
+        agent_escalations: this.#graph.forum.metrics.counter('contributions.agent_moderated'),
       },
       scenarios: [...SCENARIO_INFOS],
     };

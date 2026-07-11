@@ -74,4 +74,62 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
     sim.stop();
     expect(graph.forum.debateWindowsOverride).toBeNull();
   });
+
+  it('challenge_wave exercises the FULL arena lifecycle: forfeits, steward overrules, resolved outcomes', {
+    timeout: 120_000,
+  }, async () => {
+    const graph = await buildSimTestGraph();
+    graph.forum.debateJudge = async (_debateId, input) => ({
+      verdict: judgeDebate(input),
+      outputId: null,
+    });
+    sim = new DevTrafficSimulator({
+      graph,
+      scenario: 'challenge_wave',
+      seed: 'challenge-wave-loop',
+      speed: 20,
+      autoLoop: false,
+    });
+    await sim.start();
+    // Compressed windows: arenas judge ~1.2s after opening; the override
+    // window spans ~8s so judged arenas linger long enough for the steward
+    // persona's one-shot overrule roll AND still finalize inside the test.
+    graph.forum.debateWindowsOverride = { editWindowMs: 1_200, overrideWindowMs: 8_000 };
+
+    const done = (): boolean => {
+      const s = sim ? sim.status() : null;
+      if (s === null) return true;
+      return (
+        s.counters.debates_judged > 0 &&
+        s.counters.debate_overrides > 0 &&
+        s.debate_pulse.forfeits > 0 &&
+        s.counters.debates_finalized > 0 &&
+        s.debate_pulse.overridden > 0
+      );
+    };
+    for (let i = 0; i < 600 && !done(); i += 1) {
+      await sim.tick();
+      await sleep(25);
+    }
+
+    const status = sim.status();
+    const { counters, debate_pulse } = status;
+    // Steward overrules executed through the REAL override path (the steward
+    // persona is a real community_steward of the simulator's rooms).
+    expect(counters.debate_overrides).toBeGreaterThan(0);
+    // True forfeits occur (~30% of sim incumbents never answer): the
+    // adjudicator judged genuinely one-sided debates.
+    expect(debate_pulse.forfeits).toBeGreaterThan(0);
+    // Arenas resolved, and the lifecycle outcome split accounts for exactly
+    // the finalized arenas (both adjudicator legs, counted from the store).
+    expect(counters.debates_finalized).toBeGreaterThan(0);
+    const resolvedTotal =
+      debate_pulse.resolved.corrected +
+      debate_pulse.resolved.upheld +
+      debate_pulse.resolved.inconclusive;
+    expect(resolvedTotal).toBe(counters.debates_finalized);
+    // At least one resolved arena was decided by the steward, not the AI.
+    expect(debate_pulse.overridden).toBeGreaterThan(0);
+    expect(debate_pulse.overridden).toBeLessThanOrEqual(resolvedTotal);
+  });
 });

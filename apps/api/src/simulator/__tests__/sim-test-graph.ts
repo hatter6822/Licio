@@ -91,7 +91,18 @@ export async function buildSimTestGraph(): Promise<SimulatorServiceGraph> {
     });
   }
 
-  return { identity, events, ingestion, forum, invariants, ranking, moderation };
+  return {
+    identity,
+    events,
+    ingestion,
+    forum,
+    invariants,
+    ranking,
+    moderation,
+    // No governed rooms in the default test graph (a test that wants the
+    // governed-room placement bias swaps in its own reader).
+    governance: { getBinding: async () => null },
+  };
 }
 
 /** Force one story's ranking features to refresh (used to assert the feed

@@ -1338,6 +1338,8 @@ if (governanceLlmDecision.enabled) {
         identity: modIdentity,
         complete,
       });
+      // Observability flag (the dev simulator's moderation pulse reads it).
+      aiGovernanceServices.llmModerationActive = true;
       logger.info(
         { backend: backend.kind, modelId: settings.modelId },
         'WS-U in-room moderation model = LLM (deterministically wrapped: escalate-to-review ceiling + capability clamp; fail-to-baseline + deferred re-moderation). NOTE: a room model is admitted under a specific backend/model — moderation FAILS CLOSED to the platform baseline for any room whose model was admitted under a different backend, until it is re-admitted (re-run the model evaluation) under this one.',
@@ -1743,6 +1745,9 @@ if (
         invariants: invariantServices,
         ranking: rankingServices,
         moderation: moderationServices,
+        // WS-U: governed-room awareness (the demo-governed room is weighted up
+        // for story placement so the in-room moderation model sees traffic).
+        governance: getGovernanceService(),
       },
       scenario,
       seed: process.env['LICIO_SIM_SEED'] ?? 'licio-sim',

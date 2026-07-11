@@ -26,6 +26,7 @@ export const SIMULATOR_SCENARIO_IDS = [
   'viral_thread',
   'coordinated_burst',
   'influx',
+  'challenge_wave',
   'quiet',
 ] as const;
 
@@ -89,11 +90,16 @@ export const simulatorCountersSchema = z
     reports_filed: countSchema,
     users_provisioned: countSchema,
     /** WS-T challenge-resolution load: sourced corrections posted, the arenas
-     *  they opened, incumbent rebuttal positions, and the REAL lifecycle's
-     *  judged/finalized progress (the governed adjudicator under load). */
+     *  they opened, position posts on BOTH sides (incumbent rebuttals AND
+     *  challenger reinforcements — the co-visible edit loop), steward
+     *  overrules, and the REAL lifecycle's judged/finalized progress (the
+     *  governed adjudicator under load). */
     corrections_posted: countSchema,
     debates_opened: countSchema,
     debate_positions_posted: countSchema,
+    /** Steward overrules executed through the REAL override path (the 24h
+     *  human-in-the-loop remedy, exercised on the shortened dev window). */
+    debate_overrides: countSchema,
     debates_judged: countSchema,
     debates_finalized: countSchema,
     /** Real pipeline rejections, surfaced (rate limits, dedup, guards). */
@@ -163,9 +169,57 @@ export const simulatorStatusSchema = z
         llm_decided: countSchema,
         /** LLM-leg unavailability (transport/budget/breaker/… → MLP fallback). */
         llm_unavailable: countSchema,
+        /** LIFECYCLE-level outcomes of the simulator's own arenas (read from
+         *  the arena store as each resolves — covers BOTH adjudicator legs,
+         *  unlike the LLM-only split above). */
+        resolved: z
+          .object({
+            corrected: countSchema,
+            upheld: countSchema,
+            inconclusive: countSchema,
+          })
+          .strict(),
+        /** Simulator arenas whose incumbent NEVER posted a rebuttal (a true
+         *  forfeit — the one-sided debates the adjudicator must handle). */
+        forfeits: countSchema,
+        /** Simulator arenas resolved under a steward overrule (vs the AI). */
+        overridden: countSchema,
         /** Mean wall-clock ms per adjudicated arena (lifecycle-measured). */
         avg_adjudication_ms: z.number().min(0).nullable(),
         last_judged_at: isoTimestampSchema.nullable(),
+      })
+      .strict(),
+    /** WS-U in-room moderation automation: the governed moderation MODEL's
+     *  live activity over synthetic traffic in governed rooms (the LLM
+     *  proposer the deterministic wrapper bounds). Counter values come from
+     *  the REAL ai-governance metrics — descriptive counts only, never a
+     *  score. */
+    moderation_pulse: z
+      .object({
+        /** Whether the governed LLM moderation proposer is wired this boot
+         *  (false ⇒ the deterministic default proposer serves bound rooms). */
+        llm_backend_active: z.boolean(),
+        /** Decided LLM proposals (each carries an immutable AIOutputRecord). */
+        proposals: countSchema,
+        /** The model's PROPOSED action split — BEFORE the deterministic
+         *  wrapper's escalate-to-review ceiling + capability clamp. */
+        proposed: z
+          .object({
+            allow: countSchema,
+            warn: countSchema,
+            flag_for_review: countSchema,
+            restrict: countSchema,
+            remove: countSchema,
+          })
+          .strict(),
+        /** Proposer unavailability (transport/budget/breaker/… → the platform
+         *  baseline + deferred re-moderation). */
+        unavailable: countSchema,
+        /** Invocations the pre-execution ProhibitedUseGuard blocked. */
+        guard_blocked: countSchema,
+        /** Contributions the bounded in-room agent escalated beyond the WS-J
+         *  floor decision (the wrapper-applied restriction, forum-counted). */
+        agent_escalations: countSchema,
       })
       .strict(),
     scenarios: z.array(simulatorScenarioInfoSchema).min(1),

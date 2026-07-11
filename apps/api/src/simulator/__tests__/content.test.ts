@@ -8,10 +8,14 @@ import {
   generateCommentBody,
   generateCorrection,
   generateEvidence,
+  generateProblemComment,
   generateRebuttal,
+  generateReinforcement,
   generateRepost,
   generateStory,
   isSimulatedUrl,
+  OVERRIDE_REASONS,
+  pickDebateMarker,
   type StoryKind,
   simulatedArticleBody,
   uniqueSubject,
@@ -210,15 +214,17 @@ describe('simulator content generation', () => {
 });
 
 describe('WS-T correction + rebuttal generators', () => {
-  it('generateCorrection: schema-conformant body with 1–3 distinct simulated sources', async () => {
+  it('generateCorrection: schema-conformant body with 1–4 distinct simulated sources', async () => {
     const { correctionCreateSchema } = await import('@licio/shared');
+    const counts = new Set<number>();
     for (let i = 0; i < 30; i += 1) {
       const prng = createPrng(`corr-${i}`);
       const correction = generateCorrection('health', i, prng);
+      counts.add(correction.citationUrls.length);
       expect(correction.body.length).toBeGreaterThan(40);
       expect(correction.body.length).toBeLessThanOrEqual(2_000);
       expect(correction.citationUrls.length).toBeGreaterThanOrEqual(1);
-      expect(correction.citationUrls.length).toBeLessThanOrEqual(3);
+      expect(correction.citationUrls.length).toBeLessThanOrEqual(4);
       expect(new Set(correction.citationUrls).size).toBe(correction.citationUrls.length);
       for (const url of correction.citationUrls) expect(isSimulatedUrl(url)).toBe(true);
       // The exact wire shape the runtime submits parses through the REAL schema.
@@ -232,6 +238,9 @@ describe('WS-T correction + rebuttal generators', () => {
       });
       expect(parsed.success).toBe(true);
     }
+    // Weak (1-source) and strong (≥3-source) challenges both occur.
+    expect(counts.has(1)).toBe(true);
+    expect([...counts].some((n) => n >= 3)).toBe(true);
   });
 
   it('generateRebuttal: 1–3 simulated sources (a POSTED position always meets the schema minimum)', () => {
@@ -251,5 +260,81 @@ describe('WS-T correction + rebuttal generators', () => {
     // The verdict space stays honest: weak (1) AND strong (3) rebuttals occur.
     expect(seen.has(1)).toBe(true);
     expect(seen.has(3)).toBe(true);
+  });
+
+  it('generateReinforcement: keeps the original position, adds an addendum + new sources, caps at 10', () => {
+    const original = {
+      summary: 'The stated figure does not match the primary series.',
+      citationUrls: [
+        'https://daily-ledger.example/refs/health-correction-1-0',
+        'https://civic-wire.example/refs/health-correction-1-1',
+      ],
+    };
+    for (let i = 0; i < 20; i += 1) {
+      const prng = createPrng(`reinf-${i}`);
+      const reinforced = generateReinforcement(original, 'health', i, prng);
+      // Original material carried forward; genuinely responsive addendum added.
+      expect(reinforced.summary.startsWith(original.summary)).toBe(true);
+      expect(reinforced.summary.length).toBeGreaterThan(original.summary.length + 40);
+      for (const url of original.citationUrls) expect(reinforced.citationUrls).toContain(url);
+      expect(reinforced.citationUrls.length).toBeGreaterThan(original.citationUrls.length);
+      // The wire schema's citation ceiling holds even for a large original.
+      expect(reinforced.citationUrls.length).toBeLessThanOrEqual(10);
+      expect(new Set(reinforced.citationUrls).size).toBe(reinforced.citationUrls.length);
+    }
+    const bloated = {
+      summary: original.summary,
+      citationUrls: Array.from({ length: 10 }, (_, i) => `https://o${i}.example/r`),
+    };
+    const capped = generateReinforcement(bloated, 'health', 99, createPrng('cap'));
+    expect(capped.citationUrls.length).toBeLessThanOrEqual(10);
+  });
+
+  it('pickDebateMarker returns only markers the simulated runtime interprets', () => {
+    const allowed = new Set([
+      '[sim:debate=incumbent]',
+      '[sim:debate=challenger]',
+      '[sim:debate=inconclusive]',
+      '[sim:rationale-url]',
+    ]);
+    const seen = new Set<string>();
+    for (let i = 0; i < 60; i += 1) seen.add(pickDebateMarker(createPrng(`marker-${i}`)));
+    for (const marker of seen) expect(allowed.has(marker)).toBe(true);
+    // The forced-class markers dominate; every family occurs across seeds.
+    expect(seen.size).toBeGreaterThanOrEqual(3);
+  });
+
+  it('OVERRIDE_REASONS are substantive and within the override wire bound', () => {
+    for (const reason of OVERRIDE_REASONS) {
+      expect(reason.length).toBeGreaterThan(20);
+      expect(reason.length).toBeLessThanOrEqual(1_000);
+    }
+  });
+});
+
+describe('WS-U problem-comment generator', () => {
+  it('spam bodies carry ≥2 distinct spam terms; hostile bodies carry a hostile term', () => {
+    const spamTerms = ['discount', 'promo code', 'free money', 'click', 'giveaway', 'cheap'];
+    const hostileTerms = ['idiot', 'worthless', 'shut up'];
+    for (let i = 0; i < 20; i += 1) {
+      const spam = generateProblemComment('spam', 'health', createPrng(`spam-${i}`)).toLowerCase();
+      expect(spamTerms.filter((t) => spam.includes(t)).length).toBeGreaterThanOrEqual(2);
+      const hostile = generateProblemComment(
+        'hostile',
+        'climate',
+        createPrng(`hostile-${i}`),
+      ).toLowerCase();
+      expect(hostileTerms.some((t) => hostile.includes(t))).toBe(true);
+    }
+  });
+
+  it('problem bodies stay within the comment wire bound and are deterministic per seed', () => {
+    for (const kind of ['spam', 'hostile'] as const) {
+      const a = generateProblemComment(kind, 'local', createPrng('det'));
+      const b = generateProblemComment(kind, 'local', createPrng('det'));
+      expect(a).toBe(b);
+      expect(a.length).toBeGreaterThan(40);
+      expect(a.length).toBeLessThanOrEqual(2_000);
+    }
   });
 });

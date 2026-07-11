@@ -43,6 +43,9 @@ export class ForumMetrics {
   increment(name: string, by = 1): void {
     this.counters.set(name, (this.counters.get(name) ?? 0) + by);
   }
+  counter(name: string): number {
+    return this.counters.get(name) ?? 0;
+  }
   snapshot(): Record<string, number> {
     return Object.fromEntries(this.counters);
   }
