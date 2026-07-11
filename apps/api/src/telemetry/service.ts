@@ -51,11 +51,30 @@ export interface TelemetryServicesOptions {
 
 const VITAL_METRICS: ReadonlySet<string> = new Set(['LCP', 'INP', 'CLS']);
 
+/** Client clocks drift and the beacon endpoint is unauthenticated, so the
+ *  client-stamped `at` is CLAMPED into a tight window around server receipt:
+ *  a forged/skewed timestamp can neither future-date a sample past every
+ *  retention sweep (poisoning the rolling p75 indefinitely) nor pre-age it
+ *  out of the window.  The past allowance covers a hide-flushed beacon that
+ *  sat in a background tab for a while. */
+export const SAMPLE_MAX_PAST_SKEW_MS = 15 * 60 * 1000;
+export const SAMPLE_MAX_FUTURE_SKEW_MS = 60 * 1000;
+
 /** Map a validated `web_vital` telemetry event to a sample row, or null. */
-export function toWebVitalSample(event: TelemetryEvent): WebVitalSample | null {
+export function toWebVitalSample(
+  event: TelemetryEvent,
+  nowMs: number = Date.now(),
+): WebVitalSample | null {
   if (event.name !== 'web_vital') return null;
   if (event.metric === undefined || !VITAL_METRICS.has(event.metric)) return null;
   if (event.value === undefined || !Number.isFinite(event.value) || event.value < 0) return null;
+  const clientAt = Date.parse(event.at);
+  const clampedAt = Number.isFinite(clientAt)
+    ? Math.min(
+        Math.max(clientAt, nowMs - SAMPLE_MAX_PAST_SKEW_MS),
+        nowMs + SAMPLE_MAX_FUTURE_SKEW_MS,
+      )
+    : nowMs;
   return {
     metric: event.metric as WebVitalMetric,
     deviceClass: (event.device_class ?? 'unknown') as TelemetryDeviceClass,
@@ -63,7 +82,7 @@ export function toWebVitalSample(event: TelemetryEvent): WebVitalSample | null {
     // `bucket` carries the route PATTERN by contract; absent ⇒ 'unknown'.
     route: event.bucket ?? 'unknown',
     value: event.value,
-    at: event.at,
+    at: new Date(clampedAt).toISOString(),
   };
 }
 
@@ -78,9 +97,10 @@ export function createInMemoryTelemetryServices(
     metrics,
     async ingest(events: readonly TelemetryEvent[]): Promise<number> {
       const vitals: WebVitalSample[] = [];
+      const receivedAt = services.now();
       for (const event of events) {
         metrics.increment(`telemetry.event.${event.name}`);
-        const sample = toWebVitalSample(event);
+        const sample = toWebVitalSample(event, receivedAt);
         if (sample) vitals.push(sample);
       }
       if (vitals.length > 0) await services.samples.insert(vitals);

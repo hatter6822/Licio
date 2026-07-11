@@ -15,7 +15,12 @@ import {
   WEB_VITAL_TARGETS,
 } from '../telemetry/aggregate.js';
 import { runTelemetryTick, SAMPLE_RETENTION_MS, VITALS_WINDOW_MS } from '../telemetry/scheduler.js';
-import { createInMemoryTelemetryServices, toWebVitalSample } from '../telemetry/service.js';
+import {
+  createInMemoryTelemetryServices,
+  SAMPLE_MAX_FUTURE_SKEW_MS,
+  SAMPLE_MAX_PAST_SKEW_MS,
+  toWebVitalSample,
+} from '../telemetry/service.js';
 import type { WebVitalSample } from '../telemetry/stores.js';
 
 const NOW = Date.parse('2026-07-10T12:00:00.000Z');
@@ -97,7 +102,7 @@ describe('computeVitalAlerts', () => {
 
 describe('toWebVitalSample + ingest', () => {
   it('maps a web_vital event with defaults for absent buckets', () => {
-    const full = toWebVitalSample(vitalEvent());
+    const full = toWebVitalSample(vitalEvent(), NOW);
     expect(full).toEqual({
       metric: 'LCP',
       deviceClass: 'mid',
@@ -108,19 +113,33 @@ describe('toWebVitalSample + ingest', () => {
     });
     const bare = toWebVitalSample(
       vitalEvent({ bucket: undefined, device_class: undefined, connection: undefined }),
+      NOW,
     );
     expect(bare?.deviceClass).toBe('unknown');
     expect(bare?.connection).toBe('unknown');
     expect(bare?.route).toBe('unknown');
   });
 
+  it('clamps a forged/skewed client timestamp into the receipt window', () => {
+    // The beacon endpoint is unauthenticated: a future-dated sample would
+    // satisfy every rolling listSince() read and dodge retention until its
+    // future date passed — clamp it to receipt time (+small skew).
+    const future = toWebVitalSample(vitalEvent({ at: iso(NOW + 86_400_000) }), NOW);
+    expect(Date.parse(future?.at ?? '')).toBeLessThanOrEqual(NOW + SAMPLE_MAX_FUTURE_SKEW_MS);
+    const ancient = toWebVitalSample(vitalEvent({ at: iso(NOW - 86_400_000) }), NOW);
+    expect(Date.parse(ancient?.at ?? '')).toBeGreaterThanOrEqual(NOW - SAMPLE_MAX_PAST_SKEW_MS);
+    // An honestly-delayed hide-flushed beacon keeps its own timestamp.
+    const delayed = toWebVitalSample(vitalEvent({ at: iso(NOW - 120_000) }), NOW);
+    expect(delayed?.at).toBe(iso(NOW - 120_000));
+  });
+
   it('rejects non-vitals and malformed values; counts every event name', async () => {
-    expect(toWebVitalSample(vitalEvent({ metric: 'not-a-vital' }))).toBeNull();
-    expect(toWebVitalSample(vitalEvent({ value: undefined }))).toBeNull();
-    expect(toWebVitalSample(vitalEvent({ value: -5 }))).toBeNull();
-    expect(toWebVitalSample({ name: 'navigation', bucket: '/', value: 12, at: iso(NOW) })).toBe(
-      null,
-    );
+    expect(toWebVitalSample(vitalEvent({ metric: 'not-a-vital' }), NOW)).toBeNull();
+    expect(toWebVitalSample(vitalEvent({ value: undefined }), NOW)).toBeNull();
+    expect(toWebVitalSample(vitalEvent({ value: -5 }), NOW)).toBeNull();
+    expect(
+      toWebVitalSample({ name: 'navigation', bucket: '/', value: 12, at: iso(NOW) }, NOW),
+    ).toBe(null);
 
     const services = createInMemoryTelemetryServices({ now: () => NOW });
     const accepted = await services.ingest([

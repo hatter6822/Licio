@@ -156,9 +156,12 @@ export function startRuntime(): () => void {
   // incremental CLS/INP update. The coarse device/connection buckets and the
   // route PATTERN ride along (closed enums / pattern only — never a URL, a
   // fingerprint, or an identifier). Lab measurement remains the authoritative gate.
-  const latestVitals = new Map<WebVital['name'], WebVital>();
+  const latestVitals = new Map<WebVital['name'], WebVital & { route: string }>();
   const teardownObservers = initWebVitals((vital) => {
-    latestVitals.set(vital.name, vital);
+    // Attribute the vital to the route where it was OBSERVED: reading the
+    // route at flush time would stamp the initial page's LCP with whatever
+    // route the user navigated to last, corrupting the per-route p75 buckets.
+    latestVitals.set(vital.name, { ...vital, route: getActiveRoutePattern() });
   });
   let vitalsFlushed = false;
   const flushVitals = (): void => {
@@ -171,7 +174,7 @@ export function startRuntime(): () => void {
         metric: vital.name,
         value: vital.value,
         rating: vital.rating,
-        bucket: getActiveRoutePattern(),
+        bucket: vital.route,
         device_class: deviceClassBucket(),
         connection: connectionBucket(),
       });
