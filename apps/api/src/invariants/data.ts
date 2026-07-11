@@ -29,6 +29,7 @@ import {
 } from '@licio/invariants';
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import { domainOf } from '../forum/debate.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -38,18 +39,27 @@ import type { StoryRecord } from '../ingestion/stores.js';
 // MERI (WS-H.2): candidate exposures with grouping inputs
 // ---------------------------------------------------------------------------
 
-/** A stable evidence-lineage token for one citation URL: `cit:<host>` for an
- *  http(s) citation (lowercased, `www.` stripped), `cit:doi:<prefix>` for a
- *  doi: reference; null for anything unparseable (never throws). */
+/** A stable evidence-lineage token for one citation URL: `cit:<registrable>`
+ *  for an http(s) citation (eTLD+1 via the debate judge's `domainOf`, so
+ *  sibling subdomains of one registrable domain cannot inflate independence),
+ *  `cit:doi:<prefix>` for a doi: reference OR a DOI-resolver URL (grouping by
+ *  DOI prefix, not by the shared resolver host); null for anything
+ *  unparseable (never throws). */
 export function citationDomainToken(url: string): string | null {
   const doi = /^doi:(10\.\d{4,9})\//i.exec(url);
   if (doi?.[1]) return `cit:doi:${doi[1]}`;
   try {
-    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
-    return host.length > 0 ? `cit:${host}` : null;
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/\.$/, '').toLowerCase();
+    if (host === 'doi.org' || host === 'www.doi.org' || host === 'dx.doi.org') {
+      const resolver = /^\/(10\.\d{4,9})\//.exec(parsed.pathname);
+      if (resolver?.[1]) return `cit:doi:${resolver[1]}`;
+    }
   } catch {
     return null;
   }
+  const registrable = domainOf(url);
+  return registrable !== null ? `cit:${registrable}` : null;
 }
 
 /**

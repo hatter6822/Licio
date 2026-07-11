@@ -316,9 +316,20 @@ describe('MERI assembly through real MinHash signatures', () => {
     );
   });
 
-  it('citationDomainToken: host lowercasing/www-stripping, DOI prefixes, junk → null', () => {
+  it('citationDomainToken: registrable-domain grouping, DOI prefixes, junk → null', () => {
     expect(citationDomainToken('https://WWW.Example.COM/path?x=1')).toBe('cit:example.com');
     expect(citationDomainToken('doi:10.1234/abc.def')).toBe('cit:doi:10.1234');
+    // Sibling subdomains collapse to ONE registrable domain (eTLD+1, the
+    // debate judge's anti-gaming rule) — spreading citations across
+    // a./b.example.com cannot inflate apparent independence.
+    expect(citationDomainToken('https://a.example.com/x')).toBe('cit:example.com');
+    expect(citationDomainToken('https://b.example.com/y')).toBe('cit:example.com');
+    expect(citationDomainToken('https://news.example.co.uk/z')).toBe('cit:example.co.uk');
+    // DOI RESOLVER URLs group by DOI prefix, never by the shared resolver host.
+    expect(citationDomainToken('https://doi.org/10.1234/abc')).toBe('cit:doi:10.1234');
+    expect(citationDomainToken('https://dx.doi.org/10.5555/xyz')).toBe('cit:doi:10.5555');
+    // A resolver URL with no parseable DOI falls through to the host token.
+    expect(citationDomainToken('https://doi.org/about')).toBe('cit:doi.org');
     expect(citationDomainToken('not a url')).toBeNull();
   });
 
