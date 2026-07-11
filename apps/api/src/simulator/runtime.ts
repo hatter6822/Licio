@@ -243,6 +243,12 @@ const PULSE_METRIC_NAMES: readonly string[] = [
 /** The forum counter the moderation pulse reads (same baseline treatment). */
 const FORUM_AGENT_METRIC = 'contributions.agent_moderated';
 
+/** How long a governed-room verdict stays cached before the next world build
+ *  re-reads it — long enough that the read is negligible against the tick
+ *  cadence, short enough that a live freeze/reactivation/re-admission
+ *  redirects the traffic bias promptly (exported for the TTL test). */
+export const ROOM_GOVERNED_TTL_MS = 60_000;
+
 /** Infer a simulator content domain from a room name (best-effort; only used
  *  to bias reading toward affinity — never a correctness dependency). */
 function inferRoomDomains(name: string): DomainId[] {
@@ -388,10 +394,12 @@ export class DevTrafficSimulator {
   /** Lifecycle outcomes of the simulator's own arenas (the debate pulse's
    *  resolved split — both adjudicator legs, unlike the LLM-only counters). */
   #debateOutcomes = { corrected: 0, upheld: 0, inconclusive: 0, forfeits: 0, overridden: 0 };
-  /** roomId → the room has an ACTIVE WS-U model binding (cached; governed
-   *  rooms are weighted up for story placement so the in-room moderation
-   *  model sees steady traffic). */
-  #roomGovernedCache = new Map<string, boolean>();
+  /** roomId → whether the room's in-room agent is operative, with the read
+   *  timestamp (TTL-cached: governed rooms are weighted up for traffic, and a
+   *  LIVE governance change — a floor freeze, a reactivation, a re-admission
+   *  after a backend swap — must redirect the bias within the TTL, not after
+   *  a process restart). */
+  #roomGovernedCache = new Map<string, { governed: boolean; readAtMs: number }>();
   /** roomId → the steward persona is registered as a community_steward
    *  (idempotent, ensured once per room — the WS-T overrule authority). */
   #roomStewardEnsured = new Set<string>();
@@ -824,22 +832,32 @@ export class DevTrafficSimulator {
     }
   }
 
-  /** Whether the room's in-room agent is OPERATIVE (cached): an active
+  /** Whether the room's in-room agent is OPERATIVE (TTL-cached): an active
    *  binding admitted under the LIVE backend — the same preconditions
    *  `classify` enforces — so the traffic bias never targets a room whose
    *  agent is failing closed to the baseline (e.g. after a backend swap on a
-   *  durable dev DB, until re-admission). */
+   *  durable dev DB, until re-admission). The TTL keeps LIVE governance
+   *  experiments honest: freezing, reactivating, or re-admitting a room's
+   *  agent mid-run redirects the bias within ROOM_GOVERNED_TTL_MS. */
   async #isRoomGoverned(roomId: string): Promise<boolean> {
+    const nowMs = this.#now();
     const cached = this.#roomGovernedCache.get(roomId);
-    if (cached !== undefined) return cached;
-    let governed = false;
-    try {
-      governed = await this.#graph.governance.agentOperative(roomId);
-    } catch {
-      // A governance read failure only loses the placement bias — never a tick.
+    if (cached !== undefined && nowMs - cached.readAtMs < ROOM_GOVERNED_TTL_MS) {
+      return cached.governed;
     }
-    this.#roomGovernedCache.set(roomId, governed);
-    return governed;
+    try {
+      const governed = await this.#graph.governance.agentOperative(roomId);
+      this.#roomGovernedCache.set(roomId, { governed, readAtMs: nowMs });
+      return governed;
+    } catch {
+      // A governance read failure only loses the placement bias — never a
+      // tick. Keep any previous verdict (a transient store error must not
+      // flap the bias) but re-stamp it so the failing read is not retried on
+      // every world build.
+      const governed = cached?.governed ?? false;
+      this.#roomGovernedCache.set(roomId, { governed, readAtMs: nowMs });
+      return governed;
+    }
   }
 
   /** Register the steward persona as a REAL community_steward of the room
@@ -1501,9 +1519,16 @@ export class DevTrafficSimulator {
         continue;
       }
       if (arena.state === 'open' || arena.state === 'awaiting_verdict') continue;
-      // judged OR resolved: tally the forfeit exactly once (the incumbent
-      // never posted before the edit window closed — a true one-sided debate).
-      if (!tracked.forfeitCounted && !tracked.incumbentPosted) {
+      // judged OR resolved: tally the forfeit exactly once — but ONLY when the
+      // incumbent is a SIM PERSONA (the one-shot willRebut roll was live). An
+      // arena challenging seed/human content is one-sided unless the human
+      // answers; counting it would inflate the ~30% designed forfeit rate the
+      // pulse reports.
+      if (
+        !tracked.forfeitCounted &&
+        !tracked.incumbentPosted &&
+        this.#isSimPersona(tracked.incumbentUserId)
+      ) {
         tracked.forfeitCounted = true;
         this.#debateOutcomes.forfeits += 1;
       }
@@ -2007,6 +2032,12 @@ export class DevTrafficSimulator {
   #handleFor(userId: string | null): string {
     if (userId === null) return 'system';
     return this.#personas.find((p) => p.spec.userId === userId)?.spec.handle ?? 'unknown';
+  }
+
+  /** True when the user is one of this simulator's synthetic personas (the
+   *  forfeit pulse counts only arenas whose incumbent could have answered). */
+  #isSimPersona(userId: string | null): boolean {
+    return userId !== null && this.#personas.some((p) => p.spec.userId === userId);
   }
 
   #domainFromSlug(slugs: readonly string[]): DomainId {

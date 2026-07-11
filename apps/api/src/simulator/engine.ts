@@ -469,6 +469,11 @@ export function planTick(input: PlanTickInput): SimAction[] {
   const provisionedCluster = personas.filter(
     (p) => p.provisioned && p.spec.archetype === 'cluster_member',
   );
+  // Every provisioned synthetic actor (organic + cluster): correction planning
+  // prefers persona-authored targets and only rolls the incumbent forfeit for
+  // a persona incumbent — a seed/human-authored target can never answer via
+  // the rebuttal planner, so rolling for it would misreport the forfeit rate.
+  const personaIds = new Set(personas.filter((p) => p.provisioned).map((p) => p.spec.userId));
 
   if (
     scenario.kickoffStory &&
@@ -659,8 +664,17 @@ export function planTick(input: PlanTickInput): SimAction[] {
           c.authorUserId !== null &&
           c.authorUserId !== persona.spec.userId,
       );
+      // Prefer PERSONA-authored targets: their incumbents can genuinely
+      // rebut, so the two-sided debate/reinforcement path gets exercised even
+      // while seeded demo content still dominates a fresh dev boot. Seed- or
+      // human-authored content stays challengeable when nothing else exists
+      // (the dev can answer from the UI).
+      const personaAuthored = eligibleComments.filter(
+        (c) => c.authorUserId !== null && personaIds.has(c.authorUserId),
+      );
+      const targetPool = personaAuthored.length > 0 ? personaAuthored : eligibleComments;
       const targetComment =
-        eligibleComments.length > 0 && prng.chance(0.7) ? prng.pick(eligibleComments) : null;
+        targetPool.length > 0 && prng.chance(0.7) ? prng.pick(targetPool) : null;
       if (targetComment === null) {
         // Fall back to the story root — only when IT is challengeable.
         if (
@@ -680,13 +694,22 @@ export function planTick(input: PlanTickInput): SimAction[] {
         scenario.debateMarkerShare > 0 && prng.chance(scenario.debateMarkerShare)
           ? pickDebateMarker(prng)
           : null;
+      const incumbentUserId =
+        targetComment !== null ? targetComment.authorUserId : story.authorUserId;
       contributions.push({
         kind: 'correction',
         personaUserId: persona.spec.userId,
         storyId: story.storyId,
         targetContributionId: targetComment?.contributionId ?? null,
-        incumbentUserId: targetComment !== null ? targetComment.authorUserId : story.authorUserId,
-        incumbentWillRebut: prng.chance(INCUMBENT_REBUT_P),
+        incumbentUserId,
+        // The one-shot forfeit roll is only meaningful for a PERSONA incumbent
+        // (the rebuttal planner can only act for provisioned personas); a
+        // seed/human incumbent never rolls, and the runtime excludes such
+        // arenas from the forfeit pulse.
+        incumbentWillRebut:
+          incumbentUserId !== null &&
+          personaIds.has(incumbentUserId) &&
+          prng.chance(INCUMBENT_REBUT_P),
         domain,
         body: marker === null ? correction.body : `${correction.body} ${marker}`,
         citationUrls: correction.citationUrls,

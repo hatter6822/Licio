@@ -20,6 +20,7 @@ import {
   __simStoryMetaSizeForTest,
   consumedDebateChances,
   DevTrafficSimulator,
+  ROOM_GOVERNED_TTL_MS,
 } from '../runtime.js';
 import { buildSimTestGraph } from './sim-test-graph.js';
 import { req } from './sim-test-util.js';
@@ -788,6 +789,45 @@ describe('consumedDebateChances (cap-aware one-shot accounting)', () => {
     const w = world({ openDebates: [openArena('d-quiet', false)] });
     const consumed = consumedDebateChances(w, [filler()]);
     expect(consumed.reinforce.size).toBe(0);
+  });
+});
+
+describe('governed-room verdict TTL (live governance changes redirect the bias)', () => {
+  it('re-reads agentOperative after the TTL, so a mid-run freeze/re-admission is picked up', async () => {
+    const base = await buildSimTestGraph();
+    let operative = false;
+    let reads = 0;
+    const graph = {
+      ...base,
+      governance: {
+        agentOperative: async () => {
+          reads += 1;
+          return operative;
+        },
+      },
+    };
+    // Drive the runtime's clock through the events container (its #now()).
+    const realNow = base.events.now;
+    let offsetMs = 0;
+    graph.events.now = () => realNow() + offsetMs;
+
+    const sim = new DevTrafficSimulator({ graph, scenario: 'quiet', seed: 'ttl', autoLoop: false });
+    try {
+      await sim.start();
+      await sim.tick(); // world build #1 → one read per world room
+      const readsAfterFirst = reads;
+      expect(readsAfterFirst).toBeGreaterThan(0);
+      await sim.tick(); // within the TTL → served from cache
+      expect(reads).toBe(readsAfterFirst);
+
+      operative = true; // a LIVE governance change (e.g. re-admission)
+      offsetMs = ROOM_GOVERNED_TTL_MS + 1_000; // move past the TTL
+      await sim.tick(); // world build re-reads and sees the change
+      expect(reads).toBeGreaterThan(readsAfterFirst);
+    } finally {
+      sim.stop();
+      graph.events.now = realNow;
+    }
   });
 });
 

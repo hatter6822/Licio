@@ -397,6 +397,15 @@ export const SIMULATED_HOSTS: ReadonlySet<string> = new Set(
   Object.values(BANKS).flatMap((bank) => bank.outlets.map((outlet) => `${outlet}.example`)),
 );
 
+/** Every distinct outlet across ALL domain banks — the reinforcement pool, so
+ *  a challenger strengthening their position can always add sources on
+ *  registrable domains they have NOT already cited (cross-domain
+ *  corroboration), even when the original correction exhausted its own
+ *  bank's outlets. */
+const ALL_OUTLETS: readonly string[] = [
+  ...new Set(Object.values(BANKS).flatMap((bank) => bank.outlets)),
+];
+
 export function isSimulatedUrl(rawUrl: string): boolean {
   try {
     return SIMULATED_HOSTS.has(new URL(rawUrl).hostname);
@@ -836,10 +845,15 @@ const REINFORCEMENT_ADDENDA: readonly string[] = [
 /**
  * The challenger STRENGTHENS their position after the incumbent's rebuttal —
  * the original correction text plus a directly-responsive addendum and extra
- * distinct sources (the co-visible 12h edit loop, exercised from the
- * challenger's side). `postDebatePosition` REPLACES the side's position, so
- * the returned summary/citations carry the original material forward; the
- * total citation list is capped at the wire schema's MAX (10).
+ * sources on registrable domains the challenger has NOT already cited (the
+ * adjudicator's independence feature counts domains, so an "extra source" on
+ * an already-cited domain would strengthen nothing). Extras are drawn from
+ * the cross-bank outlet pool, so even an original that exhausted its own
+ * bank's outlets gains genuinely independent corroboration. The co-visible
+ * 12h edit loop, exercised from the challenger's side: `postDebatePosition`
+ * REPLACES the side's position, so the returned summary/citations carry the
+ * original material forward; the total citation list is capped at the wire
+ * schema's MAX (10).
  */
 export function generateReinforcement(
   original: { summary: string; citationUrls: readonly string[] },
@@ -852,10 +866,24 @@ export function generateReinforcement(
     .pick(REINFORCEMENT_ADDENDA)
     .replaceAll('{object}', prng.pick(bank.objects))
     .replaceAll('{period}', prng.pick(PERIODS));
-  const extraCount = 1 + prng.int(2); // 1..2 additional sources
-  const extras = distinctOutlets(bank, extraCount, prng).map(
-    (outlet, i) => `https://${outlet}.example/refs/${domain}-reinforcement-${serial}-${i}`,
+  const citedHosts = new Set(
+    original.citationUrls.map((url) => {
+      try {
+        return new URL(url).hostname;
+      } catch {
+        return url;
+      }
+    }),
   );
+  const pool = ALL_OUTLETS.filter((outlet) => !citedHosts.has(`${outlet}.example`));
+  const extraCount = Math.min(1 + prng.int(2), pool.length); // 1..2 additional sources
+  const extras: string[] = [];
+  const candidates = [...pool];
+  for (let i = 0; i < extraCount; i += 1) {
+    const [outlet] = candidates.splice(prng.int(candidates.length), 1);
+    if (outlet === undefined) break;
+    extras.push(`https://${outlet}.example/refs/${domain}-reinforcement-${serial}-${i}`);
+  }
   const citationUrls = [...original.citationUrls, ...extras]
     .filter((url, index, all) => all.indexOf(url) === index)
     .slice(0, 10);

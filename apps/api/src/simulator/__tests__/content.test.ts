@@ -292,6 +292,7 @@ describe('WS-T correction + rebuttal generators', () => {
         'https://civic-wire.example/refs/health-correction-1-1',
       ],
     };
+    const originalHosts = new Set(original.citationUrls.map((url) => new URL(url).hostname));
     for (let i = 0; i < 20; i += 1) {
       const prng = createPrng(`reinf-${i}`);
       const reinforced = generateReinforcement(original, 'health', i, prng);
@@ -300,6 +301,12 @@ describe('WS-T correction + rebuttal generators', () => {
       expect(reinforced.summary.length).toBeGreaterThan(original.summary.length + 40);
       for (const url of original.citationUrls) expect(reinforced.citationUrls).toContain(url);
       expect(reinforced.citationUrls.length).toBeGreaterThan(original.citationUrls.length);
+      // Extras land on registrable domains the challenger has NOT already
+      // cited — the adjudicator counts independent domains, so a same-domain
+      // "extra source" would strengthen nothing.
+      for (const url of reinforced.citationUrls.slice(original.citationUrls.length)) {
+        expect(originalHosts.has(new URL(url).hostname)).toBe(false);
+      }
       // The wire schema's citation ceiling holds even for a large original.
       expect(reinforced.citationUrls.length).toBeLessThanOrEqual(10);
       expect(new Set(reinforced.citationUrls).size).toBe(reinforced.citationUrls.length);
@@ -310,6 +317,31 @@ describe('WS-T correction + rebuttal generators', () => {
     };
     const capped = generateReinforcement(bloated, 'health', 99, createPrng('cap'));
     expect(capped.citationUrls.length).toBeLessThanOrEqual(10);
+  });
+
+  it('generateReinforcement: an original that EXHAUSTED its bank still gains independent domains', () => {
+    // All four health outlets already cited — extras must come from OTHER
+    // banks' outlets (cross-domain corroboration), never re-cite a domain.
+    const exhausted = {
+      summary: 'The stated figure does not match the primary series.',
+      citationUrls: [
+        'https://daily-ledger.example/refs/x-0',
+        'https://metro-monitor.example/refs/x-1',
+        'https://civic-wire.example/refs/x-2',
+        'https://ward-bulletin.example/refs/x-3',
+      ],
+    };
+    const citedHosts = new Set(exhausted.citationUrls.map((url) => new URL(url).hostname));
+    for (let i = 0; i < 20; i += 1) {
+      const reinforced = generateReinforcement(exhausted, 'health', i, createPrng(`exh-${i}`));
+      const extras = reinforced.citationUrls.slice(exhausted.citationUrls.length);
+      expect(extras.length).toBeGreaterThan(0);
+      for (const url of extras) {
+        const host = new URL(url).hostname;
+        expect(citedHosts.has(host)).toBe(false);
+        expect(isSimulatedUrl(url)).toBe(true); // still a reserved .example outlet
+      }
+    }
   });
 
   it('pickDebateMarker returns only markers the simulated runtime interprets', () => {

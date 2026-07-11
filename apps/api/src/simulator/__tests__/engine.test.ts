@@ -526,9 +526,17 @@ describe('simulator engine — WS-T corrections + debate positions', () => {
   });
 
   it('corrections carry a one-shot incumbentWillRebut decision that FORFEITS a real share', () => {
+    // The target's author must be a SIM PERSONA — only a persona incumbent
+    // rolls the forfeit decision (a seed/human incumbent can never answer via
+    // the rebuttal planner, so it never rolls).
+    const personaComment = {
+      ...eligibleComment,
+      contributionId: 'c-persona',
+      authorUserId: req(BASE_ROSTER[5]).userId,
+    };
     const world = baseWorld({
       commentsByStory: new Map([
-        ['s1', [eligibleComment]],
+        ['s1', [personaComment]],
         ['s2', []],
         ['s3', []],
       ]),
@@ -538,6 +546,7 @@ describe('simulator engine — WS-T corrections + debate positions', () => {
     for (let i = 0; i < 40; i += 1) {
       for (const action of planTick(input(world, `forfeit-${i}`))) {
         if (action.kind !== 'correction') continue;
+        if (action.targetContributionId !== 'c-persona') continue; // story-root targets vary
         if (action.incumbentWillRebut) willRebut += 1;
         else forfeit += 1;
       }
@@ -545,6 +554,58 @@ describe('simulator engine — WS-T corrections + debate positions', () => {
     // ~30% forfeit at INCUMBENT_REBUT_P = 0.7 — assert both sides genuinely occur.
     expect(willRebut).toBeGreaterThan(0);
     expect(forfeit).toBeGreaterThan(0);
+  });
+
+  it('prefers PERSONA-authored targets and never rolls willRebut for a seed/human incumbent', () => {
+    const personaAuthor = req(BASE_ROSTER[5]).userId;
+    const personaComment = {
+      ...eligibleComment,
+      contributionId: 'c-persona',
+      authorUserId: personaAuthor,
+    };
+    const seedComment = { ...eligibleComment, contributionId: 'c-seed' }; // author 'other-author'
+    // Both kinds present ⇒ every comment-targeted correction picks the persona one.
+    const mixed = baseWorld({
+      commentsByStory: new Map([
+        ['s1', [seedComment, personaComment]],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    let personaTargets = 0;
+    for (let i = 0; i < 30; i += 1) {
+      for (const action of planTick(input(mixed, `prefer-${i}`))) {
+        if (action.kind !== 'correction' || action.targetContributionId === null) continue;
+        // The persona who AUTHORED c-persona cannot target their own comment
+        // (self-challenge exclusion), so their pool honestly falls back to the
+        // seed comment — every OTHER challenger must prefer the persona target.
+        if (action.personaUserId === personaAuthor) continue;
+        expect(action.targetContributionId).toBe('c-persona');
+        expect(action.incumbentUserId).toBe(personaAuthor);
+        personaTargets += 1;
+      }
+    }
+    expect(personaTargets).toBeGreaterThan(0);
+
+    // Only seed-authored content ⇒ still challengeable, but the incumbent
+    // NEVER rolls willRebut (the arena is one-sided by construction and the
+    // runtime excludes it from the forfeit pulse).
+    const seedOnly = baseWorld({
+      commentsByStory: new Map([
+        ['s1', [seedComment]],
+        ['s2', []],
+        ['s3', []],
+      ]),
+    });
+    let seedTargets = 0;
+    for (let i = 0; i < 30; i += 1) {
+      for (const action of planTick(input(seedOnly, `seedonly-${i}`))) {
+        if (action.kind !== 'correction') continue;
+        expect(action.incumbentWillRebut).toBe(false);
+        if (action.targetContributionId === 'c-seed') seedTargets += 1;
+      }
+    }
+    expect(seedTargets).toBeGreaterThan(0);
   });
 
   it('plans a challenger reinforcement only when the arena is reinforce-eligible', () => {
