@@ -186,11 +186,28 @@ const PRODUCTION_PREFIX = /^(?:Drizzle|Redis|Postgres|S3|Ses|Http)\w*/;
 const PRODUCTION_CLASS =
   /class\s+((?:Drizzle|Redis|Postgres|S3|Ses|Http)\w*)(?:<[^>{]*>)?\s+implements\s+([^{]+)\{/g;
 
+/** Split an `implements` list into interface names: commas split at generic
+ *  depth 0 only, and each entry contributes its LEADING identifier — a
+ *  positive match, no sanitizing replace (`Store<Map<K, V>>, Other` →
+ *  `['Store', 'Other']`). */
 function parseInterfaceList(raw: string): string[] {
-  return raw
-    .split(',')
-    .map((part) => part.replace(/<[^>]*>/g, '').trim())
-    .filter((name) => /^\w+$/.test(name));
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of raw) {
+    if (ch === '<') depth += 1;
+    else if (ch === '>') depth = Math.max(0, depth - 1);
+    else if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts
+    .map((part) => /^\s*([A-Za-z_$][\w$]*)/.exec(part)?.[1])
+    .filter((name): name is string => name !== undefined);
 }
 
 export interface AdapterInfo {

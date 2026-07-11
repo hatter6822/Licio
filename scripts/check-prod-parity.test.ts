@@ -52,6 +52,29 @@ describe('leg 1 — adapter coverage (the WS-K / CSRF failure shapes)', () => {
     expect(checkAdapterCoverage(tree, buildBootClosure(tree, 'index.ts'), {})).toEqual([]);
   });
 
+  it('parses generic implements lists at depth 0 (nested type arguments, no phantom names)', () => {
+    const tree = files({
+      'index.ts':
+        "import { RedisPairStore } from './stores.js';\n" + 'const wired = new RedisPairStore();',
+      'stores.ts': `
+        export interface PairStore<K, V> { get(k: K): Promise<V | undefined>; }
+        export interface Closable { close(): Promise<void>; }
+        export class MemoryPairStore implements PairStore<string, Map<string, number>>, Closable {
+          async get() { return undefined; }
+          async close() {}
+        }
+        export class RedisPairStore implements PairStore<string, Map<string, number>>, Closable {
+          async get() { return undefined; }
+          async close() {}
+        }
+        let store: PairStore<string, Map<string, number>> = new MemoryPairStore();
+      `,
+    });
+    // The comma inside Map<string, number> must NOT split the list — both
+    // PairStore and Closable are covered by the wired Redis adapter.
+    expect(checkAdapterCoverage(tree, buildBootClosure(tree, 'index.ts'), {})).toEqual([]);
+  });
+
   it('BITES on an interface with NO production adapter at all (the WS-K gap)', () => {
     const tree = files({
       'index.ts': "import './ai/stores.js';",
