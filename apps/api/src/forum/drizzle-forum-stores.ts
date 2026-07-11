@@ -1198,9 +1198,12 @@ export class DrizzleUploadStore implements UploadStore {
     if (!record) return null;
     if (this.#s3) {
       const res = await this.#s3Request('GET', this.#objectUrl(record.storageRef));
-      if (res.status === 404) return null;
-      if (!res.ok) throw new Error(`S3 upload get failed: ${res.status}`);
-      return new Uint8Array(await res.arrayBuffer());
+      // An S3 miss falls THROUGH to the durable Postgres blob row: uploads
+      // persisted while the process ran without S3 config stay readable after
+      // an operator enables S3 (their bytes live in upload_blobs, not the
+      // bucket).  Only a genuine transport/auth failure throws.
+      if (!res.ok && res.status !== 404) throw new Error(`S3 upload get failed: ${res.status}`);
+      if (res.ok) return new Uint8Array(await res.arrayBuffer());
     }
     const rows = await this.#db
       .select({ bytes: uploadBlobsTable.bytes })

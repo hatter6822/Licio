@@ -23,9 +23,11 @@ import {
 } from '../telemetry/scheduler.js';
 import {
   createInMemoryTelemetryServices,
+  normalizeRouteBucket,
   SAMPLE_MAX_FUTURE_SKEW_MS,
   SAMPLE_MAX_PAST_SKEW_MS,
   toWebVitalSample,
+  VITAL_VALUE_CAPS,
 } from '../telemetry/service.js';
 import type { WebVitalSample } from '../telemetry/stores.js';
 
@@ -137,6 +139,36 @@ describe('toWebVitalSample + ingest', () => {
     // An honestly-delayed hide-flushed beacon keeps its own timestamp.
     const delayed = toWebVitalSample(vitalEvent({ at: iso(NOW - 120_000) }), NOW);
     expect(delayed?.at).toBe(iso(NOW - 120_000));
+  });
+
+  it('clamps implausible values to the per-metric cap (unauthenticated beacon)', () => {
+    // A forged Number.MAX_VALUE-scale batch must not own the rolling p75.
+    const forged = toWebVitalSample(vitalEvent({ value: Number.MAX_VALUE }), NOW);
+    expect(forged?.value).toBe(VITAL_VALUE_CAPS.LCP);
+    const cls = toWebVitalSample(vitalEvent({ metric: 'CLS', value: 5000 }), NOW);
+    expect(cls?.value).toBe(VITAL_VALUE_CAPS.CLS);
+    // Honest readings — even slow ones — pass through unchanged.
+    const slow = toWebVitalSample(vitalEvent({ value: 30_000 }), NOW);
+    expect(slow?.value).toBe(30_000);
+  });
+
+  it('normalizes the route bucket: patterns pass, concrete identifiers fail closed', () => {
+    // Route PATTERNS (what the client sends by contract) persist as-is.
+    expect(normalizeRouteBucket('/stories/$storyId')).toBe('/stories/$storyId');
+    expect(normalizeRouteBucket('/')).toBe('/');
+    expect(normalizeRouteBucket('/rooms_/$roomId/governance')).toBe('/rooms_/$roomId/governance');
+    expect(normalizeRouteBucket(undefined)).toBe('unknown');
+    // A concrete path or identifier — a buggy or forged client — must never
+    // enter the 90-day per-route series.
+    expect(normalizeRouteBucket('/stories/2b7e1516-28ae-d2a6-abf7-158809cf4f3c')).toBe('unknown');
+    expect(normalizeRouteBucket('/u/deadbeefcafe')).toBe('unknown'); // long hex
+    expect(normalizeRouteBucket('/orders/123456')).toBe('unknown'); // numeric id
+    expect(normalizeRouteBucket('not-a-path')).toBe('unknown');
+    expect(normalizeRouteBucket('/a//b')).toBe('unknown');
+    expect(normalizeRouteBucket('/search?q=secret')).toBe('unknown'); // query strings
+    // The mapping applies inside toWebVitalSample.
+    const sampleRow = toWebVitalSample(vitalEvent({ bucket: '/stories/123456' }), NOW);
+    expect(sampleRow?.route).toBe('unknown');
   });
 
   it('rejects non-vitals and malformed values; counts every event name', async () => {

@@ -19,6 +19,7 @@ import {
   deviceClassBucket,
   getActiveRoutePattern,
   initWebVitals,
+  onFirstRoutePattern,
   type WebVital,
 } from '../perf/vitals.js';
 import { ensurePushSubscription } from '../push/subscription.js';
@@ -163,6 +164,16 @@ export function startRuntime(): () => void {
     // route the user navigated to last, corrupting the per-route p75 buckets.
     latestVitals.set(vital.name, { ...vital, route: getActiveRoutePattern() });
   });
+  // Vitals observed before RootLayout announces the LANDING route — the
+  // CLS = 0 seed, a buffered LCP — were stamped with the '/' placeholder;
+  // re-stamp them once the real pattern is known (everything recorded before
+  // that moment carries the placeholder, so the sweep is exact, and later
+  // observations already read the live pattern).
+  const teardownFirstRoute = onFirstRoutePattern((pattern) => {
+    for (const [name, vital] of latestVitals) {
+      latestVitals.set(name, { ...vital, route: pattern });
+    }
+  });
   let vitalsFlushed = false;
   const flushVitals = (): void => {
     if (vitalsFlushed || typeof document === 'undefined') return;
@@ -186,6 +197,7 @@ export function startRuntime(): () => void {
   }
   const teardownVitals = (): void => {
     teardownObservers();
+    teardownFirstRoute();
     if (typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', flushVitals);
     }

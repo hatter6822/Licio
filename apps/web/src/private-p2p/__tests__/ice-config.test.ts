@@ -38,4 +38,16 @@ describe('configuredIceServers', () => {
     expect(configuredIceServers('[{"username":"u"}]')).toEqual([]); // missing urls
     expect(configuredIceServers('[{"urls":[]}]')).toEqual([]); // empty urls list
   });
+
+  it('fails closed to [] on a non-ICE URL scheme (an invalid URL makes RTCPeerConnection throw)', () => {
+    expect(configuredIceServers('[{"urls":"https://turn.example:5349"}]')).toEqual([]);
+    expect(configuredIceServers('[{"urls":"turn.example:3478"}]')).toEqual([]); // no scheme
+    expect(
+      configuredIceServers('[{"urls":["stun:stun.example:3478","https://oops.example"]}]'),
+    ).toEqual([]); // ONE bad URL in a list is a config error, not a partial success
+    // RFC 7064/7065 schemes are case-insensitive.
+    expect(configuredIceServers('[{"urls":"STUN:stun.example:3478"}]')).toEqual([
+      { urls: 'STUN:stun.example:3478' },
+    ]);
+  });
 });

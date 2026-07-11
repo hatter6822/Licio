@@ -751,6 +751,43 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(seenHeaders.at(-1)?.['authorization']).toMatch(/^AWS4-HMAC-SHA256 /);
   });
 
+  it('serves bytes persisted by the Postgres fallback after an operator enables S3', async () => {
+    // Uploaded while the process ran WITHOUT S3: bytes land in upload_blobs.
+    const uploadId = randomUUID();
+    uploadIds.push(uploadId);
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 4, 4, 4]);
+    await uploads.put(
+      {
+        uploadId,
+        ownerUserId: authorId,
+        contentType: 'image/jpeg',
+        byteSize: bytes.length,
+        altText: null,
+        storageRef: `uploads/${uploadId}`,
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      bytes,
+    );
+    // The same deployment later enables S3: the bucket has no such object
+    // (404), and the read must fall through to the durable blob row instead
+    // of treating the miss as absent.
+    const s3Miss: typeof fetch = async () => new Response(null, { status: 404 });
+    const migrated = new DrizzleUploadStore(
+      db,
+      {
+        endpoint: 'https://s3.test.example',
+        region: 'us-east-1',
+        bucket: 'licio-uploads',
+        accessKeyId: 'AKIDEXAMPLE',
+        secretAccessKey: 'secret',
+        prefix: 'forum/',
+      },
+      s3Miss,
+    );
+    expect(await migrated.getBytes(uploadId)).toEqual(bytes);
+  });
+
   it('listThreadsByRoom pages by the descending keyset exactly once', async () => {
     const room = roomInput();
     expect((await roomsStore.insert(room)).ok).toBe(true);

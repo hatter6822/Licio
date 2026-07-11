@@ -51,6 +51,38 @@ export interface TelemetryServicesOptions {
 
 const VITAL_METRICS: ReadonlySet<string> = new Set(['LCP', 'INP', 'CLS']);
 
+/** Per-metric plausibility CAPS (the beacon is unauthenticated): a forged or
+ *  broken client sending `Number.MAX_VALUE`-scale values would otherwise own
+ *  the rolling p75 and the regression alert until retention caught up.  Caps
+ *  sit far past any honest reading (worst real LCP/INP are tens of seconds;
+ *  CLS 'poor' starts at 0.25) so clamping preserves the "very bad" signal
+ *  while bounding the poison. */
+export const VITAL_VALUE_CAPS: Record<WebVitalMetric, number> = {
+  LCP: 120_000,
+  INP: 60_000,
+  CLS: 100,
+};
+
+const ROUTE_BUCKET_SHAPE = /^\/[A-Za-z0-9_$/-]*$/;
+const IDENTIFIER_SEGMENT =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8,}|\d{4,})$/i;
+
+/** `bucket` carries a route PATTERN by contract, but the schema only bounds
+ *  it to a short string and the endpoint is unauthenticated — so the contract
+ *  is enforced HERE before anything persists into the 90-day per-route
+ *  series.  Wrong shape, or any non-`$`-parameter segment that reads as a
+ *  concrete identifier (uuid / long hex / number), buckets as 'unknown':
+ *  a buggy or forged client cannot store paths or identifiers. */
+export function normalizeRouteBucket(bucket: string | undefined): string {
+  if (bucket === undefined) return 'unknown';
+  if (!ROUTE_BUCKET_SHAPE.test(bucket) || bucket.includes('//')) return 'unknown';
+  for (const segment of bucket.split('/')) {
+    if (segment.startsWith('$')) continue;
+    if (IDENTIFIER_SEGMENT.test(segment)) return 'unknown';
+  }
+  return bucket;
+}
+
 /** Client clocks drift and the beacon endpoint is unauthenticated, so the
  *  client-stamped `at` is CLAMPED into a tight window around server receipt:
  *  a forged/skewed timestamp can neither future-date a sample past every
@@ -75,13 +107,14 @@ export function toWebVitalSample(
         nowMs + SAMPLE_MAX_FUTURE_SKEW_MS,
       )
     : nowMs;
+  const metric = event.metric as WebVitalMetric;
   return {
-    metric: event.metric as WebVitalMetric,
+    metric,
     deviceClass: (event.device_class ?? 'unknown') as TelemetryDeviceClass,
     connection: (event.connection ?? 'unknown') as TelemetryConnection,
-    // `bucket` carries the route PATTERN by contract; absent ⇒ 'unknown'.
-    route: event.bucket ?? 'unknown',
-    value: event.value,
+    route: normalizeRouteBucket(event.bucket),
+    // Clamped to the per-metric plausibility cap (see VITAL_VALUE_CAPS).
+    value: Math.min(event.value, VITAL_VALUE_CAPS[metric]),
     at: new Date(clampedAt).toISOString(),
   };
 }

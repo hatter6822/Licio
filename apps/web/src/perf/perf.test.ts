@@ -11,7 +11,9 @@ import {
   deviceClassBucket,
   getActiveRoutePattern,
   initWebVitals,
+  onFirstRoutePattern,
   rateMetric,
+  resetRoutePatternForTests,
   setActiveRoutePattern,
 } from './vitals.js';
 
@@ -170,6 +172,31 @@ describe('initWebVitals', () => {
     });
 
     teardown();
+  });
+
+  it('announces the FIRST route pattern to listeners exactly once (immediately if already known)', () => {
+    resetRoutePatternForTests();
+    // Bootstrap subscribes BEFORE the router mounts: the vitals recorded in
+    // that window (the CLS = 0 seed, a buffered LCP) carry the '/'
+    // placeholder and are re-stamped with the landing route on this signal.
+    const landed: string[] = [];
+    onFirstRoutePattern((pattern) => landed.push(pattern));
+    expect(landed).toEqual([]);
+    setActiveRoutePattern('/stories/$storyId');
+    setActiveRoutePattern('/rooms'); // later navigations do NOT re-fire
+    expect(landed).toEqual(['/stories/$storyId']);
+
+    // Subscribing after the router announced fires immediately with the
+    // CURRENT pattern; an unsubscribed listener never fires.
+    const late: string[] = [];
+    onFirstRoutePattern((pattern) => late.push(pattern));
+    expect(late).toEqual(['/rooms']);
+    resetRoutePatternForTests();
+    const cancelled: string[] = [];
+    const unsubscribe = onFirstRoutePattern((pattern) => cancelled.push(pattern));
+    unsubscribe();
+    setActiveRoutePattern('/profile');
+    expect(cancelled).toEqual([]);
   });
 
   it('seeds a CLS = 0 sample only when layout-shift observation attaches', () => {

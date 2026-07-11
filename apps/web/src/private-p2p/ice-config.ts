@@ -15,8 +15,15 @@
 import { z } from 'zod';
 import type { RtcIceServerLike } from './connect-peer.js';
 
+// Only the four ICE schemes are valid RTCIceServer URLs: anything else (an
+// `https://` typo, a bare hostname) makes the RTCPeerConnection CONSTRUCTOR
+// throw, breaking private-room sync outright instead of degrading — so a bad
+// scheme is malformed config and takes the documented []-with-warning path.
+const iceUrlSchema = z
+  .string()
+  .regex(/^(?:stun|stuns|turn|turns):\S+$/i, 'not a stun(s):/turn(s): URL');
 const iceServerSchema = z.object({
-  urls: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+  urls: z.union([iceUrlSchema, z.array(iceUrlSchema).min(1)]),
   username: z.string().optional(),
   credential: z.string().optional(),
 });
@@ -45,7 +52,7 @@ export function configuredIceServers(
     warned = true;
     // An operator config error must surface somewhere visible.
     console.warn(
-      'VITE_ICE_SERVERS is set but malformed (expected a JSON array of {urls, username?, credential?}); continuing without STUN/TURN.',
+      'VITE_ICE_SERVERS is set but malformed (expected a JSON array of {urls, username?, credential?} with stun(s):/turn(s): URLs); continuing without STUN/TURN.',
     );
   }
   return [];

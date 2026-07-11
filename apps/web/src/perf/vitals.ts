@@ -69,15 +69,46 @@ export function connectionBucket(
 }
 
 let activeRoutePattern = '/';
+let routePatternKnown = false;
+let firstRouteListeners: Array<(pattern: string) => void> = [];
 
 /** Record the current route PATTERN (never a concrete path) for RUM attribution. */
 export function setActiveRoutePattern(pattern: string): void {
   activeRoutePattern = pattern.slice(0, 64);
+  if (!routePatternKnown) {
+    routePatternKnown = true;
+    const listeners = firstRouteListeners;
+    firstRouteListeners = [];
+    for (const listener of listeners) listener(activeRoutePattern);
+  }
 }
 
 /** The current route pattern (the WS-P per-route vitals bucket). */
 export function getActiveRoutePattern(): string {
   return activeRoutePattern;
+}
+
+/** Run `listener` once, when the router FIRST announces a real route pattern
+ *  (immediately if it already has).  Vitals observed during startRuntime —
+ *  the CLS = 0 seed, an early buffered LCP — predate RootLayout's first
+ *  setActiveRoutePattern and would otherwise be misattributed to the '/'
+ *  placeholder.  Returns an unsubscribe. */
+export function onFirstRoutePattern(listener: (pattern: string) => void): () => void {
+  if (routePatternKnown) {
+    listener(activeRoutePattern);
+    return () => {};
+  }
+  firstRouteListeners.push(listener);
+  return () => {
+    firstRouteListeners = firstRouteListeners.filter((l) => l !== listener);
+  };
+}
+
+/** Test helper: restore the pre-router placeholder state. */
+export function resetRoutePatternForTests(): void {
+  activeRoutePattern = '/';
+  routePatternKnown = false;
+  firstRouteListeners = [];
 }
 
 interface LayoutShiftEntry extends PerformanceEntry {
