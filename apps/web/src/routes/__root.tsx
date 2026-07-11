@@ -17,6 +17,7 @@ import { EVICTION_EVENT } from '../lib/bootstrap.js';
 import { SW_UPDATE_EVENT } from '../lib/sw-register.js';
 import { track } from '../lib/telemetry.js';
 import type { ProbeResult } from '../offline/eviction.js';
+import { setActiveRoutePattern } from '../perf/vitals.js';
 import { NotFoundPage } from './-pages/auth.js';
 
 /** Surface the SW-update and storage-eviction events as non-blocking toasts. */
@@ -80,6 +81,8 @@ function useRuntimeToasts(): void {
 /** Emit a navigation breadcrumb (route pattern + render ms) on each route change. */
 function useNavigationBreadcrumb(routeId: string): void {
   useEffect(() => {
+    // Keep the RUM vitals attribution on the current route PATTERN (WS-P.1.1d).
+    setActiveRoutePattern(routeId);
     const start = typeof performance !== 'undefined' ? performance.now() : 0;
     const raf =
       typeof requestAnimationFrame === 'function'

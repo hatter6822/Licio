@@ -433,6 +433,7 @@ reach the client bundle (a guard rejects anything else).
 |----------|---------|---------|
 | `VITE_API_URL` | `http://localhost:3001` | API base URL the client calls for `/v1/*`. **Optional in dev** — the dev server proxies `/v1/*` same-origin to the API by default. Set it only to call a **cross-origin** API |
 | `VITE_APP_URL` | `http://localhost:5173` | The app's own public URL |
+| `VITE_ICE_SERVERS` | `[{"urls":"stun:stun.example:3478"},{"urls":"turns:turn.example:5349","username":"u","credential":"c"}]` | **Production WS-S NAT traversal**: a JSON array of RTCIceServer entries for the private-room WebRTC transport. Unset ⇒ host candidates only (same-LAN peers connect; cross-NAT peers generally cannot, and the §26.4 relay-only mode is inoperable — it requires a TURN entry). Malformed input fails closed to none (console warning). NOTE: a TURN credential baked here is client-visible by nature — use a scoped/rotating credential (e.g. coturn's REST shared-secret scheme) |
 
 > In dev, the Vite server proxies **both** same-origin `/api/*` (e.g. the
 > CSRF-token endpoint) and `/v1/*` (every data call) to the API
@@ -463,11 +464,13 @@ covered in detail in Section 16.
 | `ALLOW_INSECURE_NULL_MAILER=true` | In `production`, lets the API boot without SES (and stays silent). In development it is an explicit opt-out that silences the dev mailer — codes are no longer surfaced to the log. Read directly from `process.env` |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Web Push disabled; push endpoints report "unconfigured" |
 | `CHAIN_RPC_URLS` | Only EOA wallet sign-in is available (no contract-wallet EIP-1271/6492 verification) |
-| `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev) |
+| `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev; production warns). Upload/story-media bytes fall back to the durable Postgres `upload_blobs` table (durable + instance-shared with or without S3) |
 | `SES_*` group | A **dev mailer** surfaces the one-time code + recipient to the API log (no email is sent) so the passwordless email flows — sign-in, email-factor verification, deletion-cancel — are testable end-to-end; this is the only way to become a verified account on a `pnpm dev` box. CI / `NODE_ENV=test` use the silent logging mailer (never the code/recipient) |
 | `EMBEDDING_*` group | A deterministic **lexical** embedding provider is used (fine for dedup; not a real semantic model) |
 | `GOVERNANCE_LLM_*` group | **Development:** the DEV-ONLY simulated loopback LLM runtime auto-starts and serves the three governed AI surfaces (lawmaking summary, in-room moderation, debate adjudication) — disable it with `LICIO_LLM_SIM=off`, or pick its port with `LICIO_LLM_SIM_PORT`. **Production:** defaults to the loopback-`local` backend (Ollama URL + `gpt-oss:20b`); every governed surface fails closed per call to its deterministic path until the runtime responds. `GOVERNANCE_LLM_PROVIDER=deterministic` opts out anywhere; `anthropic` (+ `ANTHROPIC_API_KEY`) is an explicit hosted opt-in. Provision + verify a real runtime with `pnpm setup:llm [--docker]`. Details: Section 16 |
 | `KNOMOSIS_GATEWAY_URL` + `KNOMOSIS_GATEWAY_TOKEN_FILE` group | The WS-L Knomosis gateway uses the deterministic in-memory `FakeKnomosisGateway` (fine for dev; no real substrate). Both must be set together to bind the real `HttpKnomosisGateway` (bearer token read from the file); if the pin declares more than one **active** deployment the server refuses to boot, since one gateway URL cannot route multiple deployments. The `knomosis.cryptoEnabled` / `knomosis.governanceEnabled` runtime-config keys gate every WS-L endpoint and both default `false` + fail closed in **production**. For developer convenience a non-production (`pnpm dev`) boot DEFAULTS both keys **`true`** (so the wallet + governance-simulation surface is reachable out of the box) — but only when the key is not already explicitly set, so a durable (Redis-backed) dev config or an admin write still wins and can force fail-closed testing. Production is untouched: the flags stay `false` unless an operator flips them through the admin surface. The dev deployment is scoped to the **Knomosis L2 (chain `8357`)**, settling to its **Sepolia L1 (`11155111`)** — the SIWE wallet-link allowlist is both. The web client binds the link message to the Knomosis chain (`8357`) regardless of the extension's active network — override with `VITE_WALLET_CHAIN_ID` — so a dev wallet never signs a mainnet-scoped message. A non-production box also scopes the WS-D wallet **sign-in** allowlist to `[8357, 11155111]` (never mainnet); production keeps the multi-chain default |
+| `LCAP_NETWORK_ID` | The WS-R LCAP network id defaults to `licio` (it scopes COSE domain separation + the acceptance log). Set it only to run a distinct LCAP network |
+| `LCAP_IPFS_GATEWAY_URL` + `LCAP_IPFS_PINNING_URL` group | The Gate-19 LCAP public-block → IPFS bridge (WS-R.15.7) is **off**: no publisher exists and the steward `public-bridge` publish/republish routes return 503 (fail-closed). Set **both** (all-or-none — a partial pair fails env validation at boot) to run the opt-in bridge; it also needs `DATABASE_URL` (always present in production) for the live takedown-oracle + §22.7 review-gate reads |
 
 ### 7.5 Generate a real `SESSION_SECRET`
 
@@ -1155,8 +1158,11 @@ violation still blocks the merge.
 
 The CI pipeline ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml))
 runs nine jobs on every PR: **Lint & Format** (Biome, `lint:security`, and the
-doctrine scans including `check:no-applause` / `check:no-raw-egress` / the
-private-P2P and update-channel gates), **Type Check** (`typecheck:ci`),
+doctrine scans including `check:no-applause` / `check:no-raw-egress` /
+`check:prod-parity` — the dev↔prod parity gate: every in-memory adapter needs
+a boot-wired production counterpart, every env key must be schema-validated or
+a documented dev flag, and production adapters hold no in-memory state — plus
+the private-P2P and update-channel gates), **Type Check** (`typecheck:ci`),
 **Lockfile Integrity**, **Dependency Budget**, **Test & Coverage** (with live
 Postgres/Redis service containers so the gated suites run, plus the named
 neutrality gate), **Build & Size Check** (production build, bundle-size gate,
@@ -1224,16 +1230,30 @@ Copy the printed `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
 `VAPID_SUBJECT` into `.env`. The **private key stays on the server** and is
 never added to the client bundle. When unset, push is simply disabled.
 
-### S3-compatible export storage (`S3_*`)
+Subscriptions and notification preferences are **durable** whenever a
+database is configured (production always): they persist in
+`push_subscriptions` / `push_preferences` — a restart/deploy never
+invalidates delivery, every replica can wake any user's endpoints, the
+owning-session handle is stored as a SHA-256 hash (never the raw token),
+and a deleted account's subscriptions cascade away with it.
+
+### S3-compatible object storage (`S3_*`)
 
 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`,
-`S3_SECRET_ACCESS_KEY` (and optional `S3_PREFIX`). Stores DSAR export
-archives (AWS S3 / Cloudflare R2 / MinIO). The API seals each archive with
-SecretBox (AES-256-GCM) **before** writing it to the bucket, so object
-storage only ever holds ciphertext — this is application-side encryption
-before upload (done by the API, which sees the plaintext while assembling
-the export), **not** browser/end-to-end encryption. Unset → in-memory store
-(dev/CI; archives don't survive a restart, which production warns about).
+`S3_SECRET_ACCESS_KEY` (and optional `S3_PREFIX`). Two consumers:
+
+- **DSAR export archives** (AWS S3 / Cloudflare R2 / MinIO). The API seals
+  each archive with SecretBox (AES-256-GCM) **before** writing it to the
+  bucket, so object storage only ever holds ciphertext — this is
+  application-side encryption before upload (done by the API, which sees the
+  plaintext while assembling the export), **not** browser/end-to-end
+  encryption. Unset → in-memory store (dev/CI; archives don't survive a
+  restart, which production warns about — the user simply re-requests the
+  export).
+- **Upload/story-media bytes** (WS-G attachments, WS-Q story media). With
+  `S3_*` set, blob bytes go to the bucket; unset, they go to the durable
+  Postgres `upload_blobs` table — production is durable and instance-shared
+  in **both** configurations (metadata lives in `uploads` either way).
 
 ### Email delivery (`SES_*`)
 
@@ -1653,11 +1673,15 @@ NODE_ENV=production …        pnpm --filter api start   # = node dist/index.js 
 
 A healthy production boot, in order: env validation → durable adapters bound
 (the Postgres/Redis stores for identity, events, ingestion, forum, invariants,
-ranking, moderation, governance, Knomosis, and LCAP) → the MERI
-ranking-enforcement promotion (the one seed that runs in **every**
+ranking, moderation, AI governance, Knomosis, LCAP, telemetry, push,
+notifications, and settings) → the MERI ranking-enforcement promotion and the
+WS-K governed-model provisioning (the two seeds that run in **every**
 environment, serialized across replicas by the Postgres job lease) →
 event-pipeline recovery (at-least-once replay from durable checkpoints) → the
-twelve lease-guarded schedulers → `Server started`. The demo seeds, the
+**runtime parity guard** (`lib/parity-guard.ts`: production REFUSES TO SERVE
+if any container field still holds an un-allowlisted in-memory adapter — a
+wiring regression crashes loudly instead of silently serving restart-volatile
+state) → the lease-guarded schedulers → `Server started`. The demo seeds, the
 traffic simulator, and the simulated LLM runtime are all `NODE_ENV`-gated and
 never construct in production.
 

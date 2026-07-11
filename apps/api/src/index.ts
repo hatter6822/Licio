@@ -8,6 +8,8 @@ import { serve } from '@hono/node-server';
 import { createDbClient, pingDatabase } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
+import { createDrizzleAiGovernanceStores } from './ai-governance/drizzle-ai-governance-stores.js';
+import { ProhibitedUseGuard } from './ai-governance/guard.js';
 import {
   type GovernanceLlmEnvInput,
   resolveGovernanceLlmDecision,
@@ -79,6 +81,11 @@ import {
   DrizzleRoomStore,
   DrizzleUploadStore,
 } from './forum/drizzle-forum-stores.js';
+import {
+  RedisCommentBroadcaster,
+  RedisDebateBroadcaster,
+  RefCountedSubscriber,
+} from './forum/redis-broadcasters.js';
 import { storyReadableByUser } from './forum/rooms.js';
 import {
   createInMemoryForumServices,
@@ -122,6 +129,7 @@ import {
   RedisEphemeralStore,
   RedisSessionStore,
 } from './identity/redis-stores.js';
+import { createAlertTransports } from './identity/security-alerts.js';
 import {
   buildIdentityServicesFromEnv,
   selectMailer,
@@ -144,6 +152,7 @@ import {
 } from './ingestion/drizzle-ingestion-stores.js';
 import { HttpEmbeddingProvider } from './ingestion/embeddings.js';
 import { SubmissionRateLimiter } from './ingestion/prechecks.js';
+import { safeFetch } from './ingestion/safe-fetch.js';
 import { INGESTION_SCHEDULER_INTERVAL_MS, startIngestionScheduler } from './ingestion/scheduler.js';
 import {
   createInMemoryIngestionServices,
@@ -161,6 +170,7 @@ import {
   DrizzleRunMetadataStore,
   DrizzleScoiContextActionStore,
 } from './invariants/drizzle-invariant-stores.js';
+import { RedisSessionTopicSequenceStore } from './invariants/redis-session-store.js';
 import {
   INVARIANTS_SCHEDULER_INTERVAL_MS,
   startInvariantsScheduler,
@@ -203,13 +213,33 @@ import {
   seedModerationDemo,
   seedOperationalSignals,
 } from './lib/demo-seed.js';
+import { DrizzlePushStateStore } from './lib/drizzle-push-store.js';
+import { DrizzleReplyNotificationStore } from './lib/drizzle-reply-notification-store.js';
+import { DrizzleUserSettingsStore } from './lib/drizzle-settings-store.js';
 import { createLogger } from './lib/logger.js';
+import { assertProductionParity } from './lib/parity-guard.js';
+import {
+  getPreferences,
+  getVapidConfig,
+  purgePushStateForUser,
+  sendBodylessWakeToUser,
+  setPushStateStore,
+  subscriptionsForUser,
+} from './lib/push-service.js';
+import {
+  REPLY_NOTIFICATIONS_PER_USER_CAP,
+  replyNotifications,
+  setReplyNotificationStore,
+} from './lib/reply-notifications.js';
+import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
+import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
   createAutoModerationSink,
   createWsJContributionSafety,
 } from './moderation/forum-integration.js';
+import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
 import { noticeToView } from './moderation/notices.js';
 import {
   createProductionContentPort,
@@ -244,6 +274,12 @@ import {
   setRankingServices,
 } from './ranking/services.js';
 import type { ReadinessProbe } from './routes/health.js';
+import {
+  DrizzleWebVitalAggregateStore,
+  DrizzleWebVitalSampleStore,
+} from './telemetry/drizzle-telemetry-stores.js';
+import { startTelemetryScheduler, TELEMETRY_SCHEDULER_INTERVAL_MS } from './telemetry/scheduler.js';
+import { createInMemoryTelemetryServices, setTelemetryServices } from './telemetry/service.js';
 
 const env = validateServerEnv(process.env);
 const logger = createLogger(env.LOG_LEVEL);
@@ -301,6 +337,10 @@ if (env.REDIS_URL !== undefined) {
   identityServices.challenges = new RedisEphemeralStore(redis, 'wachal:');
   identityServices.otp = new RedisEphemeralStore(redis, 'otp:');
   identityServices.rateLimit = new AuthRateLimiter(new RedisAuthRateLimitStore(redis));
+  // The WS-C double-submit CSRF tokens live in Redis too, so a token minted on
+  // one instance verifies on every other and survives a restart (the in-memory
+  // default store is the dev/test posture only).
+  setTokenStore(new RedisTokenStore(redis));
   // WS-E Redis bindings: single-use replay nonces, per-user sliding-window
   // rate limiting (fail-closed in-memory fallback at 50% limits inside the
   // limiter), and the short-lived real-time aggregation counters (WS-E.3.2).
@@ -324,6 +364,15 @@ const makeJobLease = () => (db ? new DrizzleJobLeaseStore(db) : new InMemoryJobL
 if (db) {
   identityServices.store = new DrizzleIdentityStore(db);
   identityServices.audit = new DrizzleAuditStore(db);
+  // Web Push state (WS-C.2.4a/c): durable subscriptions + preferences, so a
+  // restart/deploy never invalidates delivery and every replica can wake any
+  // user's endpoints.
+  setPushStateStore(new DrizzlePushStateStore(db));
+  // WS-T.6 reply-notification inbox + WS-C settings sync: durable, so a
+  // restart never destroys a user's inbox/settings, and settings — keyed by
+  // USER id when signed in — sync across sessions and devices.
+  setReplyNotificationStore(new DrizzleReplyNotificationStore(db));
+  setUserSettingsStore(new DrizzleUserSettingsStore(db));
   // WS-E durable stores (Postgres, WS-E.3.1): the partitioned event log, §22.1
   // aggregates, aggregation windows, invariant outputs (shadow), the owner-only
   // Signal Ledger, safety states, tunable config, dead letters, and checkpoints.
@@ -437,6 +486,26 @@ if (env.REDIS_URL !== undefined) {
   forumServices.contributionLimiter = new ContributionRateLimiter(
     new RedisSlidingWindowStore(redis),
   );
+  // Live fan-out over Redis pub/sub (multi-instance): a comment or debate
+  // frame published on one instance reaches SSE subscribers held by every
+  // other.  A subscriber-mode connection cannot issue other commands, so the
+  // two broadcasters share one dedicated subscriber alongside the publisher.
+  const redisSub = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redisSub.on('error', (err) => logger.warn({ err }, 'Redis connection error (forum fan-out)'));
+  const fanoutSubscriber = new RefCountedSubscriber(redisSub, (err) =>
+    logger.warn({ err }, 'forum live fan-out subscribe/publish failed'),
+  );
+  const onFanoutError = (err: unknown) => logger.warn({ err }, 'forum live fan-out publish failed');
+  forumServices.commentBroadcaster = new RedisCommentBroadcaster(
+    redis,
+    fanoutSubscriber,
+    onFanoutError,
+  );
+  forumServices.debateBroadcaster = new RedisDebateBroadcaster(
+    redis,
+    fanoutSubscriber,
+    onFanoutError,
+  );
 }
 if (db) {
   forumServices.contributions = new DrizzleContributionStore(db);
@@ -474,6 +543,16 @@ if (db) {
   invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
   invariantServices.scoiActions = new DrizzleScoiContextActionStore(db);
   invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
+}
+// The PHI session-topic sequences are SESSION-SCOPED ephemera (WS-H.6.1a) —
+// Redis, never Postgres, is their durable-enough production home: attention
+// events landing on different instances now append to ONE shared sequence,
+// and the batch holonomy tier sees every instance's sessions.
+if (env.REDIS_URL !== undefined) {
+  const IORedis = (await import('ioredis')).default;
+  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (PHI sessions)'));
+  invariantServices.sessions = new RedisSessionTopicSequenceStore(redis);
 }
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);
@@ -559,6 +638,57 @@ if (s3Config) {
     'S3 is not configured (S3_* env group): DSAR export archives are in-memory and will NOT survive a restart.',
   );
 }
+// WS-D.1.4d out-of-band security alerts: deliver on the REAL channels — email
+// through the selected mailer (SES in production; the dev mailer surfaces the
+// notice locally) and push as a bodyless wake through the Web Push service
+// when VAPID is configured.  Channel selection (email → else push → always the
+// audit-log entry) stays in sendSecurityAlert; delivery is best-effort by
+// construction (a transport failure logs and can never fail the auth flow).
+const alertVapidConfig = getVapidConfig();
+identityServices.hasPushChannel = async (userId) => {
+  if (alertVapidConfig === null) return false;
+  try {
+    return (await subscriptionsForUser(userId)).length > 0;
+  } catch (err) {
+    // BEST-EFFORT like the transports themselves: a push-store outage answers
+    // "no push channel" — it must never fail the auth flow the alert decorates
+    // (the audit-log entry is the guaranteed channel regardless).
+    logger.warn({ err }, 'push-channel lookup failed; treating as no push channel');
+    return false;
+  }
+};
+identityServices.alertTransports = createAlertTransports({
+  getUserEmail: async (userId) => (await identityServices.store.getUser(userId))?.email ?? null,
+  sendNotice: (to, kind, payload) => identityServices.mailer.sendNotice(to, kind, payload),
+  ...(alertVapidConfig !== null
+    ? {
+        sendPushWake: async (userId: string) => {
+          await sendBodylessWakeToUser(userId, alertVapidConfig);
+        },
+      }
+    : {}),
+  onError: (channel, err) => logger.warn({ channel, err }, 'security-alert delivery failed'),
+});
+// WS-C/WS-T client-state purge on hard deletion (WS-D.2.4): push
+// subscriptions + notification preferences + settings-sync rows + the
+// reply-notification inbox die with the account, and rows the account left
+// as the ACTOR in other users' inboxes are anonymized (production tombstones
+// the users row, so no FK action ever does this implicitly).
+identityServices.purgeClientState = async (userId) => {
+  await purgePushStateForUser(userId);
+  await getUserSettingsStore().purge(userId);
+  await replyNotifications.purgeForUser(userId);
+};
+// …and the SAME durable per-user state reaches the DSAR archive (Art. 15):
+// what deletion knows how to remove, export must know how to disclose.
+identityServices.exportClientState = async (userId) => ({
+  settings: await getUserSettingsStore().get(userId),
+  notification_preferences: await getPreferences(userId),
+  reply_notifications: await replyNotifications.listForUser(
+    userId,
+    REPLY_NOTIFICATIONS_PER_USER_CAP,
+  ),
+});
 setIdentityServices(identityServices);
 
 // --- WS-J trust, safety, and abuse operations -------------------------------
@@ -845,6 +975,34 @@ forumServices.relationshipReader = createRelationshipReader(moderationServices);
 // risk flag-to-review (the WS-F denylist is consulted as the malware fallback).
 forumServices.safety = createWsJContributionSafety(moderationServices, ingestionServices.urlSafety);
 forumServices.autoModerationSink = createAutoModerationSink(moderationServices);
+// WS-J.2.6b — the reviewer link-OPENING malware check: redirect-chain analysis
+// over the WS-F SSRF-hardened fetcher against the LIVE moderation + ingestion
+// blocklists.  Submitted URLs are never fetched at submission time (§18.3);
+// the console resolves this verdict on demand before a reviewer navigates to
+// reported/evidence links.  A fetch failure fails toward flagging.
+moderationServices.urlVerdict = (url) =>
+  malwareVerdictForUrl(url, {
+    fetch: async (target) => {
+      const res = await safeFetch(target, {
+        timeoutMs: 10_000,
+        maxBytes: 2_097_152,
+        maxRedirects: moderationServices.config().malwareRedirectMaxHops,
+        userAgent: 'licio-link-safety-check',
+      });
+      return res.ok
+        ? { ok: true, finalUrl: res.finalUrl }
+        : {
+            ok: false,
+            reason: res.reason,
+            ...(res.detail !== undefined ? { detail: res.detail } : {}),
+          };
+    },
+    blocklist: () => {
+      const merged = new Set<string>(moderationServices.config().malwareDomains);
+      for (const domain of ingestionServices.config().malwareDomains) merged.add(domain);
+      return merged;
+    },
+  });
 
 // WS-J.2.3 shadow enforcement: late-bind the ranking safety filter's
 // `shadowedSubjects` to the (now finalized, Drizzle-swapped) moderation action
@@ -862,12 +1020,40 @@ rankingServices.moderation = createDefaultModerationStateProvider({
 // guard, evaluation harness, data lineage, audit-sensitive output records, the
 // content/summary/translation/governance pipelines, and runtime monitoring. The
 // ingestion + forum seams are injected so the durable WS-E consumer can classify/
-// extract during ingestion and the summary pipeline can read threads. (Gated
-// Drizzle adapters for the WS-K stores are a tracked residual; the in-memory
-// stores serve every environment until they land.)
+// extract during ingestion and the summary pipeline can read threads. The gated
+// Drizzle adapters swap in whenever a database is configured (production
+// always), so the registry + deploy gate, the immutable AIOutputRecords,
+// lineage, evaluations, corrections, the review queue, and the WS-U moderation
+// decision log survive restarts and are shared across instances.
 const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
   log: (event, meta) => logger.info(meta, event),
 });
+if (db) {
+  const aiStores = createDrizzleAiGovernanceStores(db);
+  aiGovernanceServices.registry = aiStores.registry;
+  aiGovernanceServices.riskAssessments = aiStores.riskAssessments;
+  aiGovernanceServices.inventory = aiStores.inventory;
+  aiGovernanceServices.lineage = aiStores.lineage;
+  aiGovernanceServices.outputRecords = aiStores.outputRecords;
+  aiGovernanceServices.evaluations = aiStores.evaluations;
+  aiGovernanceServices.corrections = aiStores.corrections;
+  aiGovernanceServices.blocked = aiStores.blocked;
+  aiGovernanceServices.reviewQueue = aiStores.reviewQueue;
+  aiGovernanceServices.summaries = aiStores.summaries;
+  aiGovernanceServices.translations = aiStores.translations;
+  aiGovernanceServices.governanceSummaries = aiStores.governanceSummaries;
+  aiGovernanceServices.runtime = aiStores.runtime;
+  aiGovernanceServices.moderationLog = aiStores.moderationLog;
+  // The prohibited-use guard captured the in-memory blocked store at container
+  // construction — REBUILD it over the durable store, or its audit rows would
+  // keep flowing to the discarded in-memory adapter.
+  aiGovernanceServices.guard = new ProhibitedUseGuard({
+    blocked: aiStores.blocked,
+    metrics: aiGovernanceServices.metrics,
+    log: aiGovernanceServices.log,
+    now: aiGovernanceServices.now,
+  });
+}
 aiGovernanceServices.ingestion = ingestionServices;
 aiGovernanceServices.forum = forumServices;
 await aiGovernanceServices.reloadConfig();
@@ -875,6 +1061,43 @@ setAiGovernanceServices(aiGovernanceServices);
 registerAiGovernanceConsumers(eventServices, aiGovernanceServices, (storyId) =>
   refreshStoryFeatures(rankingServices, storyId),
 );
+// WS-K provisioning (EVERY environment, production included — these are the
+// canonical platform governance artifacts, not demo data): risk assessments,
+// base lineage, the governed deterministic models registered + DEPLOYED through
+// the real evaluation-harness/deploy gate, and the AI inventory. Idempotent
+// against the durable registry; the shared Postgres job lease serializes
+// concurrent FIRST-boots across replicas (same posture as the MERI enforcement
+// seed: an unavailable lease store FAILS OPEN — a broken lease must never leave
+// production without its governed models, and a rare double run is harmless
+// because every step is idempotent).
+{
+  let holdsProvisioningLease = true;
+  try {
+    holdsProvisioningLease = await makeJobLease().tryAcquire(
+      'seed:ai-governance',
+      60_000,
+      'platform-boot',
+    );
+  } catch {
+    holdsProvisioningLease = true; // fail open — provisioning is idempotent
+  }
+  if (holdsProvisioningLease) await seedAiGovernance(aiGovernanceServices);
+}
+
+// WS-P.1.1d Core Web Vitals RUM sink: the REAL consumer behind POST
+// /v1/telemetry (web_vital samples → rolling-24h p75 aggregation → the 90-day
+// trend series + regression alerts; every other event name counts into the
+// observability metrics — nothing is silently discarded).  Durable Postgres
+// stores whenever a database is configured (production always).
+const telemetryServices = createInMemoryTelemetryServices({
+  log: (event, meta) => logger.info(meta, event),
+  alert: (event, meta) => logger.warn(meta, `ALERT ${event}`),
+});
+if (db) {
+  telemetryServices.samples = new DrizzleWebVitalSampleStore(db);
+  telemetryServices.aggregates = new DrizzleWebVitalAggregateStore(db);
+}
+setTelemetryServices(telemetryServices);
 
 // WS-U AI-governed rooms: bind the GovernanceService process singleton to the
 // production Drizzle stores (the isolated `knomosis` context) when a database is
@@ -1277,10 +1500,8 @@ if (env.NODE_ENV !== 'production') {
     // the demo repost demotion needs no separate dev-only promotion here.
     // WS-J: a small report queue so the dev console shows real data on boot.
     await seedModerationDemo(moderationServices);
-    // WS-K: register + DEPLOY the governed models through the real gate, and seed
-    // the risk assessments / lineage / AI inventory so the governance surfaces
-    // render on first boot. Idempotent (register is a no-op once present).
-    await seedAiGovernance(aiGovernanceServices);
+    // (WS-K provisioning — models/risk assessments/lineage/inventory — runs on
+    // the unconditional boot path above, production included.)
     // WS-U: make one demo room actually governed so the in-room "governed by"
     // panel + the steward manager render real data on first boot (uses the
     // bound GovernanceService; logs a sample agent action without a queue hold).
@@ -1455,6 +1676,16 @@ startRendezvousScheduler(
   { lease: makeJobLease() },
 );
 
+// Hourly WS-P.1.1d telemetry maintenance: rolling-24h p75 aggregation per
+// (metric, device class, connection, route) bucket, the target-regression
+// alert, and the two retention sweeps — under its own job lease.
+startTelemetryScheduler(
+  telemetryServices,
+  (err, task) => logger.error({ err, task }, 'telemetry scheduler task failed'),
+  TELEMETRY_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
 // DEV ONLY: the continuous traffic simulator. It drives the REAL pipelines with
 // deterministic, persona-shaped synthetic activity so a local tester can watch
 // the feed react to new posts, live discussion, and reading signals. NEVER
@@ -1463,6 +1694,27 @@ startRendezvousScheduler(
 // route, and are never part of the production AppType. Set LICIO_SIM=off (or 0)
 // to boot dev without it; LICIO_SIM=<scenario> selects the opening scenario
 // (default 'steady'); LICIO_SIM=idle boots it stopped for manual control.
+// RUNTIME parity guard (belt-and-braces for the static `check:prod-parity`
+// gate): a production boot REFUSES TO SERVE if any container field still holds
+// an un-allowlisted in-memory adapter after the wiring above — a wiring
+// regression then crashes loudly at boot instead of silently serving
+// restart-volatile, per-instance state.
+if (env.NODE_ENV === 'production') {
+  assertProductionParity({
+    identity: identityServices,
+    events: eventServices,
+    ingestion: ingestionServices,
+    forum: forumServices,
+    invariants: invariantServices,
+    ranking: rankingServices,
+    moderation: moderationServices,
+    aiGovernance: aiGovernanceServices,
+    knomosis: knomosisServices,
+    telemetry: telemetryServices,
+    csrf: { tokenStore: getTokenStore() },
+  });
+}
+
 const baseApp = createApp({ readinessProbes });
 // `serve` needs only the fetch handler; capturing it (rather than the app
 // object) sidesteps typing the two differently-shaped Hono instances.

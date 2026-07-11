@@ -25,7 +25,8 @@ export type RankingSchedulerTask =
   | 'feature_batch'
   | 'decision_log_sweep'
   | 'replay_regression'
-  | 'config_reload';
+  | 'config_reload'
+  | 'lease';
 
 /** One scheduler tick; exported for tests and manual recovery. */
 export async function runRankingTick(
@@ -116,18 +117,23 @@ export function startRankingScheduler(
   intervalMs: number = RANKING_SCHEDULER_INTERVAL_MS,
   runner?: { lease: JobLeaseStore; holder?: string },
 ): () => void {
-  const timer = setInterval(async () => {
-    if (!runner) {
-      await runRankingTick(services, onError);
-      return;
+  const tick = async (): Promise<void> => {
+    if (runner) {
+      try {
+        const acquired = await runner.lease.tryAcquire(
+          RANKING_JOB_LEASE,
+          Math.ceil(intervalMs * 0.9),
+          runner.holder ?? hostname(),
+        );
+        if (!acquired) return;
+      } catch (err) {
+        onError(err, 'lease');
+        return; // fail closed: skip the tick; idempotent tasks catch up next time
+      }
     }
-    const acquired = await runner.lease.tryAcquire(
-      RANKING_JOB_LEASE,
-      Math.ceil(intervalMs * 0.9),
-      runner.holder ?? hostname(),
-    );
-    if (acquired) await runRankingTick(services, onError);
-  }, intervalMs);
+    await runRankingTick(services, onError);
+  };
+  const timer = setInterval(() => void tick(), intervalMs);
   timer.unref();
   return () => clearInterval(timer);
 }

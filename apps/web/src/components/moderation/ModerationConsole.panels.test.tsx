@@ -29,6 +29,7 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchAudit: vi.fn(),
   fetchIncidents: vi.fn(),
   applyModerationAction: vi.fn(),
+  checkEvidenceUrl: vi.fn(),
   decideAppeal: vi.fn(),
   resolveIncident: vi.fn(),
 }));
@@ -338,14 +339,74 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
-    // The reporter's evidence link is surfaced before the action palette.
-    expect(await screen.findByRole('link', { name: /evidence-1/ })).toBeInTheDocument();
+    // The reporter's evidence link is surfaced before the action palette —
+    // as a BUTTON until the WS-J.2.6b verdict resolves (no bypassable href).
+    expect(await screen.findByRole('button', { name: /evidence-1/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Apply action/ }));
     await waitFor(() =>
       expect(api.applyModerationAction).toHaveBeenCalledWith(
         expect.objectContaining({ targetType: 'room' }),
       ),
     );
+  });
+
+  it('WS-J.2.6b: an evidence link resolves the server verdict before navigating', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      reports: caseReview.reports.map((r) => ({
+        ...r,
+        evidence_urls: ['https://example.com/evidence-1'],
+      })),
+    });
+
+    // malicious → the anchor is replaced by a blocked notice (no navigation).
+    vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'malicious' });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
+    expect(await screen.findByText(/known malicious site/i)).toBeInTheDocument();
+    expect(api.checkEvidenceUrl).toHaveBeenCalledWith('https://example.com/evidence-1');
+    expect(screen.queryByRole('button', { name: /evidence-1/ })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.6b: an unverifiable link warns but leaves the reviewer in control', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      reports: caseReview.reports.map((r) => ({
+        ...r,
+        evidence_urls: ['https://example.com/evidence-1'],
+      })),
+    });
+    vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'unavailable' });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
+    expect(await screen.findByText(/could not verify/i)).toBeInTheDocument();
+    // The reviewer IS the human-review path: an explicit fresh-gesture anchor.
+    expect(screen.getByRole('link', { name: /open anyway/i })).toBeInTheDocument();
+  });
+
+  it('WS-J.2.6b: a clear verdict surfaces the verified noreferrer anchor (no auto-open)', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      reports: caseReview.reports.map((r) => ({
+        ...r,
+        evidence_urls: ['https://example.com/evidence-1'],
+      })),
+    });
+    vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'clear' });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
+    // No window.open: the destination is reporter-supplied, and window.open
+    // cannot withhold the Referer — the verified rel="noreferrer noopener"
+    // anchor is the ONLY navigation path.
+    expect(await screen.findByText(/verified/i)).toBeInTheDocument();
+    const anchor = screen.getByRole('link', { name: /open link/i });
+    expect(anchor.getAttribute('rel')).toBe('noreferrer noopener');
   });
 
   it('#6 shows the story snapshot AND the thread context for a story-level report', async () => {

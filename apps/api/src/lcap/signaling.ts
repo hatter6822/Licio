@@ -11,6 +11,10 @@
 // channel only — they never reach this server.
 
 import { readUvarint, type UvarintRead, writeUvarint } from '@licio/lcap';
+// A deliberate lazy-use import cycle: the adapter imports this module's types +
+// helpers, and this module constructs the adapter only inside getSignalMailbox()
+// (call time, never module-eval) — safe under ESM live bindings.
+import { RedisLcapSignalMailbox } from './redis-signal-mailbox.js';
 
 /** A pending opaque blob queued for a recipient, with its enqueue time (for TTL). */
 interface QueuedBlob {
@@ -43,7 +47,18 @@ export type PostResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly status: 400 | 413 | 429 };
 
-export class SignalMailbox {
+/** The mailbox contract the routes consume.  Methods may be sync (the
+ *  in-memory adapter) or async (the Redis adapter) — callers always await. */
+export interface SignalMailboxPort {
+  post(to: string | undefined, blob: Uint8Array, nowMs: number): PostResult | Promise<PostResult>;
+  drain(
+    peer: string | undefined,
+    nowMs: number,
+  ): readonly Uint8Array[] | Promise<readonly Uint8Array[]>;
+  size(): number | Promise<number>;
+}
+
+export class SignalMailbox implements SignalMailboxPort {
   private readonly queues = new Map<string, QueuedBlob[]>();
   constructor(private readonly config: SignalMailboxConfig = DEFAULT_SIGNAL_CONFIG) {}
 
@@ -145,9 +160,20 @@ export function unframeBlobs(bytes: Uint8Array): Uint8Array[] {
   return out;
 }
 
-/** The process-wide signaling mailbox (in-memory; a future Redis adapter is a residual). */
-let singleton: SignalMailbox | null = null;
-export function getSignalMailbox(): SignalMailbox {
-  if (!singleton) singleton = new SignalMailbox();
+/** The process-wide signaling mailbox: the shared Redis adapter when REDIS_URL
+ *  is configured (production always — a blob posted on one instance is
+ *  drainable on every other), else the in-memory adapter (single-process
+ *  dev/test).  Lazy, like the sibling LCAP singletons. */
+let singleton: SignalMailboxPort | null = null;
+export function getSignalMailbox(): SignalMailboxPort {
+  if (!singleton) {
+    const redisUrl = process.env['REDIS_URL'];
+    singleton = redisUrl ? new RedisLcapSignalMailbox(redisUrl) : new SignalMailbox();
+  }
   return singleton;
+}
+
+/** Replace the singleton (tests / an explicit binding). */
+export function setSignalMailbox(next: SignalMailboxPort | null): void {
+  singleton = next;
 }

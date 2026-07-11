@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { InMemoryAuditStore } from '../audit.js';
 import {
   assessLogin,
+  createAlertTransports,
   deviceProfile,
   selectAlertChannels,
   sendSecurityAlert,
@@ -104,5 +105,75 @@ describe('sendSecurityAlert', () => {
     });
     expect(channels).toEqual(['log']);
     expect((await audit.securityActivityForUser(userId))[0]?.event_type).toBe('account_lockout');
+  });
+});
+
+describe('createAlertTransports (the boot-wired real channels, WS-D.1.4d)', () => {
+  const userId = '44444444-4444-4444-8444-444444444444';
+
+  it('emails the minimized §19.1 payload through the mailer notice channel', async () => {
+    const sendNotice = vi.fn(async () => {});
+    const transports = createAlertTransports({
+      getUserEmail: async () => 'owner@example.com',
+      sendNotice,
+      onError: () => {},
+    });
+    await transports.sendEmail?.(userId, {
+      type: 'new_signin',
+      device: 'macOS/Chrome',
+      authMethod: 'webauthn',
+    });
+    expect(sendNotice).toHaveBeenCalledWith('owner@example.com', 'security_alert', {
+      alert: 'new_signin',
+      device: 'macOS/Chrome',
+      auth_method: 'webauthn',
+    });
+  });
+
+  it('re-checks the email at DELIVERY time — a just-removed address is never mailed', async () => {
+    const sendNotice = vi.fn(async () => {});
+    const transports = createAlertTransports({
+      getUserEmail: async () => null,
+      sendNotice,
+      onError: () => {},
+    });
+    await transports.sendEmail?.(userId, { type: 'account_lockout' });
+    expect(sendNotice).not.toHaveBeenCalled();
+  });
+
+  it('is best-effort: a mailer failure reports through onError and never throws', async () => {
+    const onError = vi.fn();
+    const transports = createAlertTransports({
+      getUserEmail: async () => 'owner@example.com',
+      sendNotice: async () => {
+        throw new Error('ses outage');
+      },
+      onError,
+    });
+    await expect(
+      transports.sendEmail?.(userId, { type: 'cloned_authenticator' }),
+    ).resolves.toBeUndefined();
+    expect(onError).toHaveBeenCalledWith('email', expect.any(Error));
+  });
+
+  it('wires the push wake only when provided, and swallows its failures too', async () => {
+    const withoutPush = createAlertTransports({
+      getUserEmail: async () => null,
+      sendNotice: async () => {},
+      onError: () => {},
+    });
+    expect(withoutPush.sendPush).toBeUndefined();
+
+    const onError = vi.fn();
+    const withPush = createAlertTransports({
+      getUserEmail: async () => null,
+      sendNotice: async () => {},
+      sendPushWake: async () => {
+        throw new Error('push endpoint gone');
+      },
+      onError,
+    });
+    await expect(withPush.sendPush?.(userId, { type: 'new_signin' })).resolves.toBeUndefined();
+    expect(onError).toHaveBeenCalledWith('push', expect.any(Error));
   });
 });

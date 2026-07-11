@@ -57,6 +57,10 @@ export async function assembleExport(
     personalization_settings: user.personalizationSettings,
     reputation_summary: user.reputationSummary,
     attention_aggregates: (await services.exportAttention?.(userId)) ?? [],
+    // WS-C/WS-T durable client state (settings sync, notification
+    // preferences, the reply-notification inbox) — the same per-user rows the
+    // deletion purge removes must also reach the Art. 15 archive.
+    client_state: (await services.exportClientState?.(userId)) ?? {},
     contributions: (await services.exportContributions?.(userId)) ?? [],
     // Reasons only — reporter identities are NEVER exported (§19.5).
     moderation_notices: (await services.exportModerationNotices?.(userId)) ?? [],
@@ -169,6 +173,10 @@ export async function runDeletionPurge(
     // WS-L: a linked financial wallet + its receipts must never outlive the
     // account — purge them alongside the other domains' personal data.
     await services.purgeFinancialWallets?.(req.userId);
+    // WS-C client state: push subscriptions + notification preferences +
+    // settings-sync rows (explicit — the tombstone below keeps the users row,
+    // so FK cascades never fire).
+    await services.purgeClientState?.(req.userId);
     // ALL export archives for the user (completed ones included) are removed
     // from object storage before the job rows are dropped by the tombstone.
     for (const job of await services.store.listExportJobs(req.userId)) {

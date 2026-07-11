@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
+import { z } from 'zod';
 import { createLogger } from '../lib/logger.js';
 import { getAllowedOrigins } from './cors.js';
 
@@ -63,7 +64,17 @@ class MemoryTokenStore implements TokenStore {
   }
 }
 
-class RedisTokenStore implements TokenStore {
+/** Shape guard for the Redis round-trip: a corrupted value must read as "no
+ *  token" (→ 403, fail closed), never as a crash or a forged acceptance. */
+const storedTokenSchema = z.object({ token: z.string(), expiresAt: z.number() });
+
+/**
+ * The PRODUCTION token store: tokens live in Redis (TTL-bounded), so a token
+ * minted on one instance verifies on every other and survives a process
+ * restart.  Wired at boot (`setTokenStore`) alongside the other Redis-backed
+ * identity stores — the in-memory default below is the dev/test posture only.
+ */
+export class RedisTokenStore implements TokenStore {
   private readonly redis: import('ioredis').default;
   private readonly prefix = 'csrf:';
 
@@ -71,21 +82,36 @@ class RedisTokenStore implements TokenStore {
     this.redis = redis;
   }
 
+  /** The Redis key is a SHA-256 of the session id, never the raw value: the
+   *  cookie value is a BEARER session token, and raw keys would expose it to
+   *  keyspace scans, monitoring, and backups (the session store itself only
+   *  ever persists token hashes).  High-entropy input ⇒ a plain hash suffices. */
+  #key(sessionId: string): string {
+    return `${this.prefix}${createHash('sha256').update(sessionId).digest('hex')}`;
+  }
+
   async get(sessionId: string): Promise<StoredToken | undefined> {
-    const raw = await this.redis.get(`${this.prefix}${sessionId}`);
+    const raw = await this.redis.get(this.#key(sessionId));
     if (!raw) return undefined;
-    return JSON.parse(raw) as StoredToken;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    const result = storedTokenSchema.safeParse(parsed);
+    return result.success ? result.data : undefined;
   }
 
   async set(sessionId: string, token: StoredToken): Promise<void> {
     const ttlSeconds = Math.ceil((token.expiresAt - Date.now()) / 1000);
     if (ttlSeconds > 0) {
-      await this.redis.set(`${this.prefix}${sessionId}`, JSON.stringify(token), 'EX', ttlSeconds);
+      await this.redis.set(this.#key(sessionId), JSON.stringify(token), 'EX', ttlSeconds);
     }
   }
 
   async delete(sessionId: string): Promise<void> {
-    await this.redis.del(`${this.prefix}${sessionId}`);
+    await this.redis.del(this.#key(sessionId));
   }
 
   async clear(): Promise<void> {
@@ -97,23 +123,6 @@ class RedisTokenStore implements TokenStore {
 }
 
 let _tokenStore: TokenStore | undefined;
-
-export async function createTokenStore(): Promise<TokenStore> {
-  const redisUrl = process.env['REDIS_URL'];
-  if (redisUrl && process.env['NODE_ENV'] !== 'test') {
-    try {
-      const Redis = (await import('ioredis')).default;
-      const redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 3 });
-      await redis.connect();
-      logger.info('CSRF token store: Redis');
-      return new RedisTokenStore(redis);
-    } catch (err) {
-      logger.warn({ err }, 'Redis unavailable for CSRF tokens, falling back to in-memory store');
-    }
-  }
-  logger.info('CSRF token store: in-memory');
-  return new MemoryTokenStore();
-}
 
 export function getTokenStore(): TokenStore {
   if (!_tokenStore) {

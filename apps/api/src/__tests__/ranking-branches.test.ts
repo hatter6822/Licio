@@ -347,6 +347,38 @@ describe('scheduler lease behavior', () => {
     expect(ticks).toBe(after); // stopped cleanly
   });
 
+  it('a lease-store failure is reported as task=lease and skips the tick (fail closed)', async () => {
+    const lease: JobLeaseStore = {
+      tryAcquire: async () => {
+        throw new Error('lease store down');
+      },
+    };
+    let ticks = 0;
+    const counting = {
+      ...fixture.ranking,
+      reloadConfig: async () => {
+        ticks += 1;
+        return fixture.ranking.config();
+      },
+    };
+    const failures: string[] = [];
+    const stop = startRankingScheduler(
+      counting as typeof fixture.ranking,
+      (_err, task) => failures.push(task),
+      5,
+      { lease, holder: 'test-holder' },
+    );
+    const deadline = Date.now() + 5_000;
+    while (failures.length < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    stop();
+    // Reported through onError (never an unhandled rejection from the timer);
+    // the tick body never ran.
+    expect(failures[0]).toBe('lease');
+    expect(ticks).toBe(0);
+  });
+
   it('the replay-regression sample flags mismatches as metrics', async () => {
     // A clearly nonzero age: at age 0 every decay curve gives freshness
     // exactly 1, so a tampered curve would (correctly) replay to a match.

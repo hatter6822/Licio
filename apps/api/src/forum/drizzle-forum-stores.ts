@@ -14,11 +14,12 @@
 //
 // Upload BYTES live in S3-compatible object storage when the all-or-none
 // S3_* env group is configured (plain objects; metadata was stripped BEFORE
-// storage). Authorization is enforced at the serving route, not the object ACL:
-// restricted (room_only) media is reached only through a signed, expiring URL
-// minted after the read-bar check (WS-Q.5.2c).  Without S3, bytes are held
-// in-memory and production logs a loud warning (the same posture as the
-// WS-D DSAR archives): records survive, bytes do not survive a restart.
+// storage), else in the durable `upload_blobs` Postgres table — written
+// ATOMICALLY with the metadata row, so bytes and record can never diverge and
+// both configurations are durable + instance-shared.  Authorization is
+// enforced at the serving route, not the object ACL: restricted (room_only)
+// media is reached only through a signed, expiring URL minted after the
+// read-bar check (WS-Q.5.2c).
 
 import type { DbExecutor } from '@licio/db';
 import {
@@ -29,6 +30,7 @@ import {
   roomStewards as roomStewardsTable,
   roomSubscriptions as roomSubscriptionsTable,
   rooms as roomsTable,
+  uploadBlobs as uploadBlobsTable,
   uploads as uploadsTable,
 } from '@licio/db';
 import type {
@@ -1089,8 +1091,6 @@ export class DrizzleUploadStore implements UploadStore {
   readonly #s3: S3ObjectStoreConfig | null;
   readonly #creds: SigV4Credentials | null;
   readonly #fetch: typeof fetch;
-  /** Restart-volatile fallback when S3 is not configured. */
-  readonly #memoryBytes = new Map<string, Uint8Array>();
 
   constructor(db: Db, s3: S3ObjectStoreConfig | null, fetchFn: typeof fetch = fetch) {
     this.#db = db;
@@ -1147,28 +1147,40 @@ export class DrizzleUploadStore implements UploadStore {
     record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
     bytes: Uint8Array,
   ): Promise<UploadRecord> {
+    const metadataValues = {
+      uploadId: record.uploadId,
+      ownerUserId: record.ownerUserId,
+      contentType: record.contentType,
+      byteSize: record.byteSize,
+      altText: record.altText,
+      storageRef: record.storageRef,
+      metadataStripped: record.metadataStripped,
+      scanState: record.scanState,
+      ownerStoryId: record.ownerStoryId ?? null,
+    };
     if (this.#s3) {
       const res = await this.#s3Request('PUT', this.#objectUrl(record.storageRef), bytes);
       if (!res.ok) throw new Error(`S3 upload put failed: ${res.status}`);
-    } else {
-      this.#memoryBytes.set(record.uploadId, new Uint8Array(bytes));
+      const rows = await this.#db.insert(uploadsTable).values(metadataValues).returning();
+      const row = rows[0];
+      if (!row) throw new Error('upload insert returned no row');
+      return this.#toRecord(row);
     }
-    const rows = await this.#db
-      .insert(uploadsTable)
-      .values({
-        uploadId: record.uploadId,
-        ownerUserId: record.ownerUserId,
-        contentType: record.contentType,
-        byteSize: record.byteSize,
-        altText: record.altText,
-        storageRef: record.storageRef,
-        metadataStripped: record.metadataStripped,
-        scanState: record.scanState,
-        ownerStoryId: record.ownerStoryId ?? null,
-      })
-      .returning();
-    const row = rows[0];
-    if (!row) throw new Error('upload insert returned no row');
+    // No S3: metadata + bytes commit ATOMICALLY in one transaction, so a crash
+    // (or lost connection) between the two writes can never leave a metadata
+    // row whose bytes are unreadable.  When #db is already a transaction
+    // handle, drizzle nests this as a savepoint.
+    const blob = Buffer.from(bytes);
+    const row = await this.#db.transaction(async (tx) => {
+      const rows = await tx.insert(uploadsTable).values(metadataValues).returning();
+      const inserted = rows[0];
+      if (!inserted) throw new Error('upload insert returned no row');
+      await tx
+        .insert(uploadBlobsTable)
+        .values({ uploadId: record.uploadId, bytes: blob })
+        .onConflictDoUpdate({ target: uploadBlobsTable.uploadId, set: { bytes: blob } });
+      return inserted;
+    });
     return this.#toRecord(row);
   }
 
@@ -1186,11 +1198,20 @@ export class DrizzleUploadStore implements UploadStore {
     if (!record) return null;
     if (this.#s3) {
       const res = await this.#s3Request('GET', this.#objectUrl(record.storageRef));
-      if (res.status === 404) return null;
-      if (!res.ok) throw new Error(`S3 upload get failed: ${res.status}`);
-      return new Uint8Array(await res.arrayBuffer());
+      // An S3 miss falls THROUGH to the durable Postgres blob row: uploads
+      // persisted while the process ran without S3 config stay readable after
+      // an operator enables S3 (their bytes live in upload_blobs, not the
+      // bucket).  Only a genuine transport/auth failure throws.
+      if (!res.ok && res.status !== 404) throw new Error(`S3 upload get failed: ${res.status}`);
+      if (res.ok) return new Uint8Array(await res.arrayBuffer());
     }
-    return this.#memoryBytes.get(uploadId) ?? null;
+    const rows = await this.#db
+      .select({ bytes: uploadBlobsTable.bytes })
+      .from(uploadBlobsTable)
+      .where(eq(uploadBlobsTable.uploadId, uploadId))
+      .limit(1);
+    const blob = rows[0]?.bytes;
+    return blob ? new Uint8Array(blob) : null;
   }
 
   async setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void> {
@@ -1240,23 +1261,22 @@ export class DrizzleUploadStore implements UploadStore {
 
   async purgeByStories(storyIds: readonly string[]): Promise<number> {
     if (storyIds.length === 0) return 0;
-    // Read the doomed upload rows first so the BYTES (S3 object or the
-    // restart-volatile in-memory fallback) are destroyed alongside the metadata.
+    // Read the doomed upload rows first so S3-held BYTES are destroyed
+    // alongside the metadata (Postgres-held bytes go with the row itself —
+    // the upload_blobs FK cascades on delete).
     const rows = await this.#db
       .select()
       .from(uploadsTable)
       .where(inArray(uploadsTable.ownerStoryId, [...storyIds]));
     if (rows.length === 0) return 0;
-    for (const row of rows) {
-      if (this.#s3) {
+    if (this.#s3) {
+      for (const row of rows) {
         // A failed/absent object delete must not abort the purge; S3 DELETE is
         // idempotent and a 404 is success-equivalent for our intent (bytes gone).
         const res = await this.#s3Request('DELETE', this.#objectUrl(row.storageRef));
         if (!res.ok && res.status !== 404) {
           throw new Error(`S3 upload delete failed: ${res.status}`);
         }
-      } else {
-        this.#memoryBytes.delete(row.uploadId);
       }
     }
     const deleted = await this.#db
@@ -1267,7 +1287,7 @@ export class DrizzleUploadStore implements UploadStore {
   }
 
   async clear(): Promise<void> {
+    // upload_blobs rows cascade with their metadata rows.
     await this.#db.delete(uploadsTable);
-    this.#memoryBytes.clear();
   }
 }

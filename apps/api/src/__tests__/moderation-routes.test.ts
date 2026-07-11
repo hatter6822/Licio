@@ -291,6 +291,63 @@ describe('blocks + mutes', () => {
   });
 });
 
+describe('POST /v1/moderation/url-verdict (WS-J.2.6b reviewer link-opening check)', () => {
+  it('is gated like the review panel: non-steward and evidence-only steward are forbidden', async () => {
+    const plain = await seedUser({ handle: `p${randomUUID().slice(0, 6)}` });
+    const plainRes = await app().request(
+      post('/v1/moderation/url-verdict', { url: 'https://example.com/x' }, plain.cookie),
+    );
+    expect(plainRes.status).toBe(403);
+
+    const evidence = await seedUser({
+      handle: `e${randomUUID().slice(0, 6)}`,
+      stewardRoles: ['ROLE_EVIDENCE'],
+    });
+    const evRes = await app().request(
+      post('/v1/moderation/url-verdict', { url: 'https://example.com/x' }, evidence.cookie),
+    );
+    expect(evRes.status).toBe(403);
+  });
+
+  it('reports `unavailable` when the verdict seam is unwired (fail toward flagging)', async () => {
+    const safety = await seedUser({
+      handle: `saf${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_SAFETY'],
+    });
+    const res = await app().request(
+      post('/v1/moderation/url-verdict', { url: 'https://unverifiable.example/x' }, safety.cookie),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ verdict: 'unavailable' });
+  });
+
+  it('returns the wired redirect-chain verdict and rejects a malformed URL', async () => {
+    const safety = await seedUser({
+      handle: `saf${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_SAFETY'],
+    });
+    const checked: string[] = [];
+    getModerationServices().urlVerdict = async (url) => {
+      checked.push(url);
+      return 'malicious';
+    };
+    const res = await app().request(
+      post('/v1/moderation/url-verdict', { url: 'https://evil.example/payload' }, safety.cookie),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ verdict: 'malicious' });
+    expect(checked).toEqual(['https://evil.example/payload']);
+    expect(getModerationServices().metrics.snapshot()['moderation.url_verdict.malicious']).toBe(1);
+
+    const bad = await app().request(
+      post('/v1/moderation/url-verdict', { url: 'not-a-url' }, safety.cookie),
+    );
+    expect(bad.status).toBe(400);
+  });
+});
+
 describe('moderation console (role-gated)', () => {
   it('forbids a non-steward and an evidence-only steward from the report queue', async () => {
     const plain = await seedUser({ handle: `p${randomUUID().slice(0, 6)}` });

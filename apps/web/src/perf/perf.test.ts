@@ -6,10 +6,45 @@ import {
   markInteractionStart,
   measureInteraction,
 } from './marks.js';
-import { initWebVitals, rateMetric } from './vitals.js';
+import {
+  connectionBucket,
+  deviceClassBucket,
+  getActiveRoutePattern,
+  initWebVitals,
+  onFirstRoutePattern,
+  rateMetric,
+  resetRoutePatternForTests,
+  setActiveRoutePattern,
+} from './vitals.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('WS-P.1.1d coarse RUM buckets (privacy-safe hints only)', () => {
+  it('classifies device class from deviceMemory/hardwareConcurrency buckets', () => {
+    expect(deviceClassBucket({})).toBe('unknown');
+    expect(deviceClassBucket({ deviceMemory: 2 })).toBe('low');
+    expect(deviceClassBucket({ hardwareConcurrency: 2 })).toBe('low');
+    expect(deviceClassBucket({ deviceMemory: 4, hardwareConcurrency: 8 })).toBe('mid');
+    expect(deviceClassBucket({ hardwareConcurrency: 4 })).toBe('mid');
+    expect(deviceClassBucket({ deviceMemory: 8, hardwareConcurrency: 12 })).toBe('high');
+  });
+
+  it('classifies connection from the Network Information effectiveType', () => {
+    expect(connectionBucket({})).toBe('unknown');
+    expect(connectionBucket({ connection: { effectiveType: '4g' } })).toBe('4g');
+    expect(connectionBucket({ connection: { effectiveType: 'slow-2g' } })).toBe('slow-2g');
+    expect(connectionBucket({ connection: { effectiveType: 'wifi' } })).toBe('unknown'); // not in the closed set
+  });
+
+  it('tracks the active route PATTERN, truncated to the telemetry label cap', () => {
+    setActiveRoutePattern('/stories/$storyId');
+    expect(getActiveRoutePattern()).toBe('/stories/$storyId');
+    setActiveRoutePattern(`/x${'y'.repeat(100)}`);
+    expect(getActiveRoutePattern()).toHaveLength(64);
+    setActiveRoutePattern('/');
+  });
 });
 
 describe('rateMetric', () => {
@@ -89,6 +124,7 @@ describe('initWebVitals', () => {
     vi.stubGlobal('PerformanceObserver', MockPO);
     const report = vi.fn();
     const teardown = initWebVitals(report);
+    report.mockClear(); // drop the CLS = 0 seed — this test is about INP only
 
     // A continuous event (no interactionId) must NOT register as INP…
     handlers['event']?.({ getEntries: () => [{ duration: 300, interactionId: 0 }] });
@@ -136,5 +172,59 @@ describe('initWebVitals', () => {
     });
 
     teardown();
+  });
+
+  it('announces the FIRST route pattern to listeners exactly once (immediately if already known)', () => {
+    resetRoutePatternForTests();
+    // Bootstrap subscribes BEFORE the router mounts: the vitals recorded in
+    // that window (the CLS = 0 seed, a buffered LCP) carry the '/'
+    // placeholder and are re-stamped with the landing route on this signal.
+    const landed: string[] = [];
+    onFirstRoutePattern((pattern) => landed.push(pattern));
+    expect(landed).toEqual([]);
+    setActiveRoutePattern('/stories/$storyId');
+    setActiveRoutePattern('/rooms'); // later navigations do NOT re-fire
+    expect(landed).toEqual(['/stories/$storyId']);
+
+    // Subscribing after the router announced fires immediately with the
+    // CURRENT pattern; an unsubscribed listener never fires.
+    const late: string[] = [];
+    onFirstRoutePattern((pattern) => late.push(pattern));
+    expect(late).toEqual(['/rooms']);
+    resetRoutePatternForTests();
+    const cancelled: string[] = [];
+    const unsubscribe = onFirstRoutePattern((pattern) => cancelled.push(pattern));
+    unsubscribe();
+    setActiveRoutePattern('/profile');
+    expect(cancelled).toEqual([]);
+  });
+
+  it('seeds a CLS = 0 sample only when layout-shift observation attaches', () => {
+    type Listener = (list: { getEntries: () => unknown[] }) => void;
+    // A browser WITHOUT layout-shift support (e.g. WebKit) must not fabricate
+    // zeros it cannot measure…
+    class PartialPO {
+      constructor(_cb: Listener) {}
+      observe(opts: { type: string }): void {
+        if (opts.type === 'layout-shift') throw new Error('unsupported entry type');
+      }
+      disconnect(): void {}
+    }
+    vi.stubGlobal('PerformanceObserver', PartialPO);
+    const blind = vi.fn();
+    initWebVitals(blind)();
+    expect(blind).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'CLS' }));
+
+    // …while a supporting browser reports the quiet pageview's real CLS = 0
+    // up front, so zero-shift pageviews reach the p75 aggregate.
+    class FullPO {
+      constructor(_cb: Listener) {}
+      observe(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('PerformanceObserver', FullPO);
+    const report = vi.fn();
+    initWebVitals(report)();
+    expect(report).toHaveBeenCalledWith({ name: 'CLS', value: 0, rating: 'good' });
   });
 });

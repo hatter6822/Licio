@@ -18,12 +18,14 @@
 //
 // Signals (§15.4) are TRANSIENT (seconds-lived, consumed once); the durable
 // `private_rendezvous_records` table persists only PRESENCE.  In the Postgres
-// binding the signal mailbox stays in-memory (process-local — a multi-node
-// deployment needs a shared transient store, the same tracked limitation as the
-// WS-R LCAP signal mailbox).
+// binding the signal mailbox rides the shared Redis adapter when REDIS_URL is
+// configured (production always — multi-node safe, native TTL), else the
+// process-local in-memory mailbox (single-process dev).
 
 import { createDbClient } from '@licio/db';
+import IORedis from 'ioredis';
 import { DrizzleRendezvousStore } from './drizzle-store.js';
+import { RedisSignalMailbox } from './redis-signal-mailbox.js';
 import {
   type AnnounceRequest,
   InMemoryRendezvousStore,
@@ -208,7 +210,19 @@ export class RendezvousService {
 
 function buildStore(): RendezvousStore {
   const dbUrl = process.env['DATABASE_URL'];
-  return dbUrl ? new DrizzleRendezvousStore(createDbClient(dbUrl)) : new InMemoryRendezvousStore();
+  if (!dbUrl) return new InMemoryRendezvousStore();
+  // Production (both URLs are boot-required there): presence in Postgres, the
+  // §15.4 transient signal mailbox in Redis — so a signal posted on one
+  // instance is drainable on every other and survives a restart within its
+  // TTL.  Without Redis (a bare dev boot with only Postgres) the mailbox
+  // stays process-local.
+  const redisUrl = process.env['REDIS_URL'];
+  return new DrizzleRendezvousStore(
+    createDbClient(dbUrl),
+    redisUrl
+      ? new RedisSignalMailbox(new IORedis(redisUrl, { maxRetriesPerRequest: 3 }))
+      : undefined,
+  );
 }
 
 let service: RendezvousService | undefined;

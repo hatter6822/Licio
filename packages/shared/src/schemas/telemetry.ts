@@ -27,6 +27,17 @@ export type TelemetryEventName = (typeof TELEMETRY_EVENT_NAMES)[number];
 
 export const telemetryRatingSchema = z.enum(['good', 'needs-improvement', 'poor']);
 
+/** Coarse device class (WS-P.1.1d): derived from privacy-safe hints only —
+ *  the deviceMemory bucket + hardwareConcurrency bucket, never a precise
+ *  fingerprint.  A closed enum so nothing finer-grained can egress. */
+export const telemetryDeviceClassSchema = z.enum(['low', 'mid', 'high', 'unknown']);
+export type TelemetryDeviceClass = z.infer<typeof telemetryDeviceClassSchema>;
+
+/** Coarse connection type (WS-P.1.1d): the Network Information API's
+ *  effectiveType where available, else 'unknown'.  Closed enum. */
+export const telemetryConnectionSchema = z.enum(['slow-2g', '2g', '3g', '4g', 'unknown']);
+export type TelemetryConnection = z.infer<typeof telemetryConnectionSchema>;
+
 /**
  * One telemetry event. Fields are deliberately coarse and PII-free: `metric` and
  * `bucket` are short enum-like labels (≤64 chars), `value`/`count` are numeric.
@@ -43,6 +54,10 @@ export const telemetryEventSchema = z.object({
   rating: telemetryRatingSchema.optional(),
   /** Non-negative count (queue depth, stores lost). */
   count: z.number().int().nonnegative().optional(),
+  /** Coarse device class (web_vital events; WS-P.1.1d p75 bucketing). */
+  device_class: telemetryDeviceClassSchema.optional(),
+  /** Coarse connection type (web_vital events; WS-P.1.1d p75 bucketing). */
+  connection: telemetryConnectionSchema.optional(),
   /** Emit time (ISO-8601). */
   at: isoTimestampSchema,
 });

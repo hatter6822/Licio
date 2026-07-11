@@ -33,6 +33,8 @@ import {
   revertActionResponseSchema,
   reviewerStatusRequestSchema,
   stewardRolesCanAccessQueue,
+  urlVerdictRequestSchema,
+  urlVerdictResponseSchema,
   uuidSchema,
 } from '@licio/shared';
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
@@ -182,6 +184,23 @@ export function createModerationConsoleRoutes() {
         const review = await buildCaseReview(getModerationServices(), actor, caseId);
         if (!review) return c.json(deny('not_found', 'Case not found'), 404);
         return c.json(caseReviewResponseSchema.parse(review));
+      })
+
+      // --- WS-J.2.6b reviewer link-opening malware check -------------------
+      // Evidence URLs are stored, never fetched at submission time (§18.3 SSRF
+      // posture); a reviewer resolves the redirect-chain verdict HERE before
+      // navigating.  Same access gate as the review panel the links render in.
+      // An unwired verdict seam reports `unavailable` — fail toward flagging,
+      // never trusting.
+      .post('/url-verdict', zValidator('json', urlVerdictRequestSchema), async (c) => {
+        const actor = mustActor(c);
+        const queueDenial = denyQueue(actor, 'report-queue');
+        if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
+        const { url } = c.req.valid('json');
+        const mod = getModerationServices();
+        const verdict = mod.urlVerdict ? await mod.urlVerdict(url) : 'unavailable';
+        mod.metrics.increment(`moderation.url_verdict.${verdict}`);
+        return c.json(urlVerdictResponseSchema.parse({ verdict }));
       })
 
       // --- Case assignment (WS-J.2.1d) ------------------------------------

@@ -79,6 +79,42 @@ const CODE_TEMPLATES = {
   },
 } as const;
 
+/** Per-alert-type subject + lead sentence for the `security_alert` notice
+ *  (WS-D.1.4d).  The `default` entry backstops an unknown alert type so a
+ *  best-effort security alert is never dropped over copy drift. */
+const SECURITY_ALERT_COPY: Record<string, { subject: string; lead: string }> = {
+  new_signin: {
+    subject: 'New sign-in to your Licio account',
+    lead: 'Your Licio account was just signed in from a device we had not seen on this account before.',
+  },
+  cloned_authenticator: {
+    subject: 'Security alert: unusual passkey activity on your Licio account',
+    lead:
+      'A sign-in attempt used a passkey whose usage counter went backwards — a ' +
+      'possible cloned authenticator. The attempt was rejected.',
+  },
+  account_lockout: {
+    subject: 'Security alert: your Licio account was temporarily locked',
+    lead: 'Repeated failed sign-in attempts temporarily locked your Licio account.',
+  },
+  auth_method_added: {
+    subject: 'A sign-in method was added to your Licio account',
+    lead: 'A new sign-in method was just added to your Licio account.',
+  },
+  auth_method_removed: {
+    subject: 'A sign-in method was removed from your Licio account',
+    lead: 'A sign-in method was just removed from your Licio account.',
+  },
+  duplicate_registration_attempt: {
+    subject: 'Was this you? A Licio sign-up used your email',
+    lead: 'Someone just tried to create a Licio account with this email address.',
+  },
+  default: {
+    subject: 'Security alert for your Licio account',
+    lead: 'There was recent security-relevant activity on your Licio account.',
+  },
+};
+
 export class SesMailer implements Mailer {
   readonly #cfg: SesMailerConfig;
   readonly #fetch: typeof fetch;
@@ -140,6 +176,31 @@ export class SesMailer implements Mailer {
             `${this.#cfg.appOrigin}/profile/security`,
         );
         return;
+      case 'security_alert': {
+        // WS-D.1.4d out-of-band security alert.  The payload carries the
+        // minimized §19.1 context only (alert type + coarse device descriptor +
+        // auth method) — never an IP or a location.
+        const copy =
+          SECURITY_ALERT_COPY[payload?.['alert'] ?? ''] ?? SECURITY_ALERT_COPY['default'];
+        if (copy === undefined) throw new Error('unreachable: default copy is always present');
+        const device = payload?.['device'];
+        const method = payload?.['auth_method'];
+        const detailLines = [
+          ...(device ? [`Device: ${device}`] : []),
+          ...(method ? [`Sign-in method: ${method}`] : []),
+        ];
+        await this.#send(
+          to,
+          copy.subject,
+          `${copy.lead}\n\n` +
+            (detailLines.length > 0 ? `${detailLines.join('\n')}\n\n` : '') +
+            'If this was you, no action is needed.\n\n' +
+            'If this was NOT you, review your active sessions and sign-in methods\n' +
+            `now at ${this.#cfg.appOrigin}/profile/security — revoke any session\n` +
+            'you do not recognize and remove any sign-in method you did not add.',
+        );
+        return;
+      }
       default:
         // Fail loud: a typo'd kind must never silently send an empty email.
         throw new Error(`SES mailer: unknown notice kind ${JSON.stringify(kind)}`);

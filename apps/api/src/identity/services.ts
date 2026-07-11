@@ -13,6 +13,7 @@ import { SesMailer, type SesMailerConfig } from './mailer-ses.js';
 import { InMemoryObjectStore, type ObjectStore } from './object-store.js';
 import { AuthRateLimiter, InMemoryAuthRateLimitStore } from './rate-limit-auth.js';
 import { createLocalSecretBox, type SecretBox } from './secrets.js';
+import type { AlertTransports } from './security-alerts.js';
 import { InMemorySessionStore, type SessionStore } from './sessions.js';
 import type { SiweConfig } from './siwe.js';
 import { type IdentityStore, InMemoryIdentityStore } from './store.js';
@@ -195,6 +196,23 @@ export interface IdentityServices {
   }) => void;
   /** Attention-history purge (WS-E owns the store); returns the rows removed. */
   purgeAttention?: (userId: string, mode: 'delete' | 'reset') => Promise<number>;
+  /** WS-C client-state purge on hard deletion: push subscriptions +
+   *  notification preferences + settings-sync rows (default no-op).  Explicit
+   *  — production deletion TOMBSTONES the users row, so FK cascades never
+   *  fire there. */
+  purgeClientState?: (userId: string) => Promise<void>;
+  /** WS-C/WS-T client-state DSAR export (GDPR Art. 15): the SAME durable
+   *  per-user rows purgeClientState removes — settings sync, notification
+   *  preferences, the reply-notification inbox — included in the export
+   *  archive as `client_state` (default absent ⇒ empty object). */
+  exportClientState?: (userId: string) => Promise<Record<string, unknown>>;
+  /** WS-D.1.4d out-of-band security-alert delivery (email via the mailer, push
+   *  via a bodyless Web Push wake).  Wired at boot; absent ⇒ the in-app
+   *  security-activity log entry (always written) is the only channel. */
+  alertTransports?: AlertTransports;
+  /** True when the user currently holds ≥1 push subscription AND Web Push is
+   *  configured — the `hasPush` input to the alert channel selection. */
+  hasPushChannel?: (userId: string) => boolean | Promise<boolean>;
 }
 
 const DEFAULT_CHAIN_ALLOWLIST = [1, 8453, 42161, 10] as const; // mainnet, Base, Arbitrum, Optimism

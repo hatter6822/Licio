@@ -77,7 +77,7 @@ import {
   toDebateArenaPublic,
   toDebateArenaSummary,
 } from '../forum/debate.js';
-import { sseDebateFrame } from '../forum/debate-broadcaster.js';
+import { type DebateFrame, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import { stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
@@ -388,20 +388,40 @@ export function createForumRoutes() {
           const resolveAuthor = makeAuthorResolver(identity);
           const lastEventId = c.req.header('last-event-id') ?? since ?? null;
           const restrictedMedia = story.visibility === 'room_only';
-          const replay = await replayFramesAfter(
-            bundle,
+          // Subscribe BEFORE the replay snapshot, awaiting transport readiness
+          // (the Redis broadcaster resolves only after the SUBSCRIBE ack — pub/
+          // sub drops, it never buffers), so no frame can fall between the
+          // snapshot and the live stream.  Frames arriving while the stream is
+          // still opening are buffered and flushed after the replay; the `sent`
+          // set dedupes the overlap.
+          let deliver: (frame: CommentFrame) => void;
+          const buffered: CommentFrame[] = [];
+          deliver = (frame) => {
+            buffered.push(frame);
+          };
+          const unsubscribe = await bundle.forum.commentBroadcaster.subscribe(
             thread.threadId,
-            lastEventId,
-            userId,
-            resolveAuthor,
-            restrictedMedia,
+            (frame) => deliver(frame),
           );
+          let replay: CommentFrame[];
+          try {
+            replay = await replayFramesAfter(
+              bundle,
+              thread.threadId,
+              lastEventId,
+              userId,
+              resolveAuthor,
+              restrictedMedia,
+            );
+          } catch (error) {
+            unsubscribe(); // never leak the subscription on a failed replay read
+            throw error;
+          }
           const encoder = new TextEncoder();
           let cleanup = () => {};
           const readable = new ReadableStream<Uint8Array>({
             start(controller) {
               const sent = new Set(replay.map((frame) => frame.eventId));
-              let unsubscribe = () => {};
               let heartbeat: ReturnType<typeof setInterval> | null = null;
               const write = (chunk: string) => {
                 try {
@@ -420,27 +440,29 @@ export function createForumRoutes() {
                   // Already closed by the client; cleanup above is the important part.
                 }
               };
-              unsubscribe = bundle.forum.commentBroadcaster.subscribe(
-                thread.threadId,
-                async (frame) => {
-                  if (sent.has(frame.eventId)) return;
-                  if (!(await threadReadableToUser(bundle, thread, userId))) {
-                    close();
-                    return;
-                  }
-                  const row = await bundle.forum.contributions.getById(frame.eventId);
-                  if (!row) return;
-                  const hide = await viewerHideSet(bundle, userId);
-                  if (visibleRows([row], userId, hide).length === 0) return;
-                  sent.add(frame.eventId);
-                  write(sseCommentFrame(frame));
-                },
-              );
+              const emitLive = async (frame: CommentFrame): Promise<void> => {
+                if (sent.has(frame.eventId)) return;
+                if (!(await threadReadableToUser(bundle, thread, userId))) {
+                  close();
+                  return;
+                }
+                const row = await bundle.forum.contributions.getById(frame.eventId);
+                if (!row) return;
+                const hide = await viewerHideSet(bundle, userId);
+                if (visibleRows([row], userId, hide).length === 0) return;
+                sent.add(frame.eventId);
+                write(sseCommentFrame(frame));
+              };
               heartbeat = setInterval(() => write(': heartbeat\n\n'), SSE_HEARTBEAT_MS);
               cleanup = close;
               c.req.raw.signal.addEventListener('abort', close, { once: true });
               write(': heartbeat\n\n');
               for (const frame of replay) write(sseCommentFrame(frame));
+              // Flush anything that arrived during setup, then go write-through.
+              for (const frame of buffered) void emitLive(frame).catch(() => {});
+              deliver = (frame) => {
+                void emitLive(frame).catch(() => {});
+              };
             },
             cancel() {
               cleanup();
@@ -717,15 +739,16 @@ export function createForumRoutes() {
               ) {
                 bundle.forum.trackBackground(
                   (async () => {
-                    const notification = replyNotifications.enqueue({
+                    const notification = await replyNotifications.enqueue({
                       recipientUserId,
                       storyId: story.storyId,
                       threadId: thread.threadId,
                       commentId: outcome.contribution.contributionId,
                       parentCommentId: outcome.contribution.parentContributionId as string,
+                      actorUserId: auth.userId,
                       actorHandle: contribution.author_handle ?? 'deleted-user',
                     });
-                    const prefs = getPreferences(recipientUserId);
+                    const prefs = await getPreferences(recipientUserId);
                     const vapid = getVapidConfig();
                     const minuteOfDay = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
                     if (
@@ -1395,11 +1418,22 @@ export function createForumRoutes() {
             const arena = await bundle.forum.debates.getById(debateId);
             return arena ? toDebateArenaPublic(arena, null, async () => null, false) : null;
           };
+          // Subscribe BEFORE priming, awaiting transport readiness (the Redis
+          // broadcaster resolves only after the SUBSCRIBE ack), so an update
+          // published by another replica while this stream opens is buffered
+          // rather than dropped, then flushed after the prime.
+          let deliver: (frame: DebateFrame) => void;
+          const bufferedFrames: DebateFrame[] = [];
+          deliver = (frame) => {
+            bufferedFrames.push(frame);
+          };
+          const unsubscribe = await bundle.forum.debateBroadcaster.subscribe(debateId, (frame) =>
+            deliver(frame),
+          );
           const encoder = new TextEncoder();
           let cleanup = () => {};
           const readable = new ReadableStream<Uint8Array>({
             async start(controller) {
-              let unsubscribe = () => {};
               let heartbeat: ReturnType<typeof setInterval> | null = null;
               const write = (chunk: string): void => {
                 try {
@@ -1418,9 +1452,6 @@ export function createForumRoutes() {
                   // Already closed by the client.
                 }
               };
-              unsubscribe = bundle.forum.debateBroadcaster.subscribe(debateId, (frame) => {
-                write(sseDebateFrame(frame));
-              });
               heartbeat = setInterval(() => write(': heartbeat\n\n'), SSE_HEARTBEAT_MS);
               cleanup = close;
               c.req.raw.signal.addEventListener('abort', close, { once: true });
@@ -1428,6 +1459,9 @@ export function createForumRoutes() {
               // Prime with the current arena so a late joiner has the latest state.
               const initial = await observer();
               if (initial) write(sseDebateFrame({ eventId: initial.updated_at, arena: initial }));
+              // Flush anything that arrived during setup, then go write-through.
+              for (const frame of bufferedFrames) write(sseDebateFrame(frame));
+              deliver = (frame) => write(sseDebateFrame(frame));
             },
             cancel() {
               cleanup();

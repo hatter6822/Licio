@@ -168,6 +168,23 @@ Implement collection and monitoring of Core Web Vitals at the 75th percentile: L
 
 **Security/privacy:** RUM readings are anonymous performance samples with no user identifier and no attention/behavioral content. Device class is a coarse bucket; precise device or network fingerprinting is prohibited.
 
+**Tracked debt — the `/v1/telemetry` ingest sink: CLOSED (2026-07).**  The
+route's claim is now true: `POST /v1/telemetry` consumes every batch through
+the WS-P sink (`apps/api/src/telemetry/`).  `web_vital` events (with the
+coarse `device_class`/`connection` buckets and the route PATTERN the client
+now attaches, one final-value sample per pageview flushed on hide) land in the
+short-lived sample store; the lease-guarded hourly scheduler computes the
+rolling-24h p75 per (metric, device class, connection, route) bucket into the
+durable 90-day `web_vital_aggregates` trend series, emits
+`metric.web_vitals.aggregated`, and fires the `telemetry.web_vitals.regression`
+alert (with the worst-regressing bucket) when any metric's overall p75 exceeds
+its target past the noise floor; retention sweeps enforce both classes.  Every
+other event name counts into the observability metrics — nothing is silently
+discarded.  Durable Postgres adapters bind whenever a database is configured
+(production always; migration `0071`).  Remaining for the full WS-P.1.1d
+acceptance: the dashboard rendering of the trend series (WS-P.1.1e) and the
+WS-O paging binding for the alert channel.
+
 ---
 
 ### WS-P.1.1e Metrics dashboard

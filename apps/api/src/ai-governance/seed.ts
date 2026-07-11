@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-K governance seed. Populates the registry, risk assessments, data lineage,
-// and AI inventory, and registers + DEPLOYS each governed model THROUGH the real
-// machinery — every model passes the evaluation harness (bias/hallucination/
-// safety/red-team) and the registry deployment gate before it is marked
-// deployed. This proves the whole governance backbone end to end and gives the
-// pipelines a real deployed model version to reference. Runs on non-prod boot
-// and in tests.
+// WS-K governance provisioning. Populates the registry, risk assessments, data
+// lineage, and AI inventory, and registers + DEPLOYS each governed model
+// THROUGH the real machinery — every model passes the evaluation harness
+// (bias/hallucination/safety/red-team) and the registry deployment gate before
+// it is marked deployed. This proves the whole governance backbone end to end
+// and gives the pipelines a real deployed model version to reference.
+//
+// Runs on EVERY boot — production included (these are the canonical platform
+// governance artifacts, not demo data) — and in tests. IDEMPOTENT against a
+// durable registry: an already-registered version is never re-evaluated or
+// re-registered, and the inventory audit trail gains a new version only when
+// the deployed-model map actually changed.
 import {
   type AiRiskLevel,
   type AiUseCaseId,
@@ -172,9 +177,32 @@ export async function seedAiGovernance(services: AiGovernanceServices): Promise<
     now: services.now,
   };
 
-  // 3. Register + deploy each governed model through the real gate.
+  // 3. Register + deploy each governed model through the real gate. Idempotent
+  //    against a DURABLE registry (production Postgres): an already-registered
+  //    version is never re-evaluated or re-registered — its deployed state
+  //    simply folds into the inventory below.
   const modelNamesByUseCase: Partial<Record<AiUseCaseId, string[]>> = {};
+  const fold = (useCaseId: AiUseCaseId, name: string): void => {
+    const list = modelNamesByUseCase[useCaseId] ?? [];
+    list.push(name);
+    modelNamesByUseCase[useCaseId] = list;
+  };
   for (const model of GOVERNED_MODELS) {
+    const existing = await services.registry.getVersion(model.name, model.version);
+    if (existing) {
+      if (existing.status === 'deployed') {
+        fold(model.useCaseId, model.name);
+      } else if (existing.status === 'registered') {
+        // A prior boot crashed between register and deploy: the harness
+        // decision was durably recorded BEFORE registration, so retry the
+        // deploy through the same gate rather than stranding the model
+        // registered-but-undeployed forever.
+        const redeployed = await deployModel(registryDeps, model.name, model.version);
+        if (redeployed.ok) fold(model.useCaseId, model.name);
+        else services.log('ai.seed.deploy_failed', { model: model.name, code: redeployed.code });
+      }
+      continue; // never re-run the harness or re-register an existing version
+    }
     const riskLevel = CANONICAL_USE_CASES[model.useCaseId].risk_level;
     const decision = await runEvaluationHarness(
       {
@@ -197,13 +225,21 @@ export async function seedAiGovernance(services: AiGovernanceServices): Promise<
       services.log('ai.seed.deploy_failed', { model: model.name, code: deployed.code });
       continue;
     }
-    const list = modelNamesByUseCase[model.useCaseId] ?? [];
-    list.push(model.name);
-    modelNamesByUseCase[model.useCaseId] = list;
+    fold(model.useCaseId, model.name);
   }
 
-  // 4. The AI inventory linking models to use cases (WS-K.1.1c).
-  await services.inventory.put(buildInventory(1, nowIso, modelNamesByUseCase));
-  services.metrics.increment('ai.inventory.updated');
-  services.log('ai.inventory.updated', { version: 1, models: GOVERNED_MODELS.length });
+  // 4. The AI inventory linking models to use cases (WS-K.1.1c). Append a new
+  //    version ONLY when the deployed-model map changed — a re-boot with an
+  //    unchanged registry never rewrites the append-only audit trail.
+  const latest = await services.inventory.latest();
+  const next = buildInventory((latest?.version ?? 0) + 1, nowIso, modelNamesByUseCase);
+  const modelMap = (inv: { use_cases: Array<{ use_case_id: string; model_names: string[] }> }) =>
+    JSON.stringify(
+      inv.use_cases.map((u) => ({ id: u.use_case_id, models: [...u.model_names].sort() })),
+    );
+  if (latest === null || modelMap(latest) !== modelMap(next)) {
+    await services.inventory.put(next);
+    services.metrics.increment('ai.inventory.updated');
+    services.log('ai.inventory.updated', { version: next.version, models: GOVERNED_MODELS.length });
+  }
 }

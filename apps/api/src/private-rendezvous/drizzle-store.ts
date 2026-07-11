@@ -9,12 +9,14 @@
 // peer blind id, PRIV-API-RENDEZVOUS-4); the table has no unique constraint by
 // design — it stores no stable identity.  Covered by the gated store-contract test.
 //
-// Signals (§15.4) are TRANSIENT and never persisted — they ride an in-memory
-// mailbox even here (process-local, the same limitation as the WS-R LCAP signal
-// mailbox; a multi-node deployment needs a shared transient store).
+// Signals (§15.4) are TRANSIENT and never persisted to Postgres — they ride an
+// injectable mailbox: the Redis adapter in production (multi-node safe, shared
+// across instances, native TTL), the in-memory adapter for a single-process
+// dev/test boot.
 
 import { type DbExecutor, privateRendezvousRecords } from '@licio/db';
 import { and, desc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
+import type { SignalMailbox } from './redis-signal-mailbox.js';
 import {
   InMemoryRendezvousStore,
   MAX_RECORDS_PER_ROOM,
@@ -24,10 +26,17 @@ import {
 } from './stores.js';
 
 export class DrizzleRendezvousStore implements RendezvousStore {
-  /** Signals are transient (consumed once) — never written to Postgres. */
-  private readonly signalMailbox = new InMemoryRendezvousStore();
+  /** Signals are transient (consumed once) — never written to Postgres.  The
+   *  production boot injects the shared Redis mailbox; the default in-memory
+   *  mailbox is the single-process dev/test posture. */
+  private readonly signalMailbox: SignalMailbox;
 
-  constructor(private readonly db: DbExecutor) {}
+  constructor(
+    private readonly db: DbExecutor,
+    signalMailbox: SignalMailbox = new InMemoryRendezvousStore(),
+  ) {
+    this.signalMailbox = signalMailbox;
+  }
 
   async announce(record: StoredRendezvousRecord): Promise<void> {
     // Dedup by the sealed-announcement CONTENT, NOT the forgeable `peer_blind_id`

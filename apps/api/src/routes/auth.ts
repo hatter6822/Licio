@@ -251,8 +251,9 @@ function createLoginRoutes(resolve: () => IdentityServices) {
               await sendSecurityAlert({
                 userId: stored.userId,
                 hasEmail: !!user?.email,
-                hasPush: false,
+                hasPush: (await services.hasPushChannel?.(stored.userId)) ?? false,
                 audit: services.audit,
+                ...(services.alertTransports ? { transports: services.alertTransports } : {}),
                 event: { type: 'cloned_authenticator', authMethod: 'webauthn' },
               });
             }
