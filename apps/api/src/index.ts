@@ -219,13 +219,18 @@ import { DrizzleUserSettingsStore } from './lib/drizzle-settings-store.js';
 import { createLogger } from './lib/logger.js';
 import { assertProductionParity } from './lib/parity-guard.js';
 import {
+  getPreferences,
   getVapidConfig,
   purgePushStateForUser,
   sendBodylessWakeToUser,
   setPushStateStore,
   subscriptionsForUser,
 } from './lib/push-service.js';
-import { replyNotifications, setReplyNotificationStore } from './lib/reply-notifications.js';
+import {
+  REPLY_NOTIFICATIONS_PER_USER_CAP,
+  replyNotifications,
+  setReplyNotificationStore,
+} from './lib/reply-notifications.js';
 import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
@@ -674,6 +679,16 @@ identityServices.purgeClientState = async (userId) => {
   await getUserSettingsStore().purge(userId);
   await replyNotifications.purgeForUser(userId);
 };
+// …and the SAME durable per-user state reaches the DSAR archive (Art. 15):
+// what deletion knows how to remove, export must know how to disclose.
+identityServices.exportClientState = async (userId) => ({
+  settings: await getUserSettingsStore().get(userId),
+  notification_preferences: await getPreferences(userId),
+  reply_notifications: await replyNotifications.listForUser(
+    userId,
+    REPLY_NOTIFICATIONS_PER_USER_CAP,
+  ),
+});
 setIdentityServices(identityServices);
 
 // --- WS-J trust, safety, and abuse operations -------------------------------

@@ -388,7 +388,7 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     expect(screen.getByRole('link', { name: /open anyway/i })).toBeInTheDocument();
   });
 
-  it('WS-J.2.6b: a clear verdict opens; a blocked popup surfaces a fresh-gesture anchor', async () => {
+  it('WS-J.2.6b: a clear verdict surfaces the verified noreferrer anchor (no auto-open)', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchCase).mockResolvedValue({
       ...caseReview,
@@ -401,10 +401,12 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
     fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
-    // jsdom's window.open returns falsy (the popup-blocked path), so the
-    // verified fresh-gesture anchor appears instead of a silent failure.
+    // No window.open: the destination is reporter-supplied, and window.open
+    // cannot withhold the Referer — the verified rel="noreferrer noopener"
+    // anchor is the ONLY navigation path.
     expect(await screen.findByText(/verified/i)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /open link/i })).toBeInTheDocument();
+    const anchor = screen.getByRole('link', { name: /open link/i });
+    expect(anchor.getAttribute('rel')).toBe('noreferrer noopener');
   });
 
   it('#6 shows the story snapshot AND the thread context for a story-level report', async () => {

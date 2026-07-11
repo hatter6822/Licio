@@ -57,6 +57,10 @@ export async function assembleExport(
     personalization_settings: user.personalizationSettings,
     reputation_summary: user.reputationSummary,
     attention_aggregates: (await services.exportAttention?.(userId)) ?? [],
+    // WS-C/WS-T durable client state (settings sync, notification
+    // preferences, the reply-notification inbox) — the same per-user rows the
+    // deletion purge removes must also reach the Art. 15 archive.
+    client_state: (await services.exportClientState?.(userId)) ?? {},
     contributions: (await services.exportContributions?.(userId)) ?? [],
     // Reasons only — reporter identities are NEVER exported (§19.5).
     moderation_notices: (await services.exportModerationNotices?.(userId)) ?? [],

@@ -7,7 +7,12 @@
 // rolling-p75 aggregation; every other (already schema-validated) event name
 // counts into the in-process observability counters — nothing is silently
 // discarded any more.
-import type { TelemetryConnection, TelemetryDeviceClass, TelemetryEvent } from '@licio/shared';
+import {
+  ROUTE_PATTERN_SET,
+  type TelemetryConnection,
+  type TelemetryDeviceClass,
+  type TelemetryEvent,
+} from '@licio/shared';
 import {
   InMemoryWebVitalAggregateStore,
   InMemoryWebVitalSampleStore,
@@ -63,24 +68,15 @@ export const VITAL_VALUE_CAPS: Record<WebVitalMetric, number> = {
   CLS: 100,
 };
 
-const ROUTE_BUCKET_SHAPE = /^\/[A-Za-z0-9_$/-]*$/;
-const IDENTIFIER_SEGMENT =
-  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8,}|\d{4,})$/i;
-
 /** `bucket` carries a route PATTERN by contract, but the schema only bounds
  *  it to a short string and the endpoint is unauthenticated — so the contract
  *  is enforced HERE before anything persists into the 90-day per-route
- *  series.  Wrong shape, or any non-`$`-parameter segment that reads as a
- *  concrete identifier (uuid / long hex / number), buckets as 'unknown':
- *  a buggy or forged client cannot store paths or identifiers. */
+ *  series: only a member of the canonical route-pattern catalog (the
+ *  `ROUTE_PATTERNS` SSOT in @licio/shared, drift-tested against the generated
+ *  route tree in apps/web) survives.  A concrete path, a handle, a slug, or
+ *  any forged string buckets as 'unknown'. */
 export function normalizeRouteBucket(bucket: string | undefined): string {
-  if (bucket === undefined) return 'unknown';
-  if (!ROUTE_BUCKET_SHAPE.test(bucket) || bucket.includes('//')) return 'unknown';
-  for (const segment of bucket.split('/')) {
-    if (segment.startsWith('$')) continue;
-    if (IDENTIFIER_SEGMENT.test(segment)) return 'unknown';
-  }
-  return bucket;
+  return bucket !== undefined && ROUTE_PATTERN_SET.has(bucket) ? bucket : 'unknown';
 }
 
 /** Client clocks drift and the beacon endpoint is unauthenticated, so the

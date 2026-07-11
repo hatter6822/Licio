@@ -152,19 +152,19 @@ describe('toWebVitalSample + ingest', () => {
     expect(slow?.value).toBe(30_000);
   });
 
-  it('normalizes the route bucket: patterns pass, concrete identifiers fail closed', () => {
-    // Route PATTERNS (what the client sends by contract) persist as-is.
+  it('normalizes the route bucket against the ROUTE_PATTERNS catalog (allowlist, fail closed)', () => {
+    // Members of the shared route-pattern SSOT persist as-is.
     expect(normalizeRouteBucket('/stories/$storyId')).toBe('/stories/$storyId');
     expect(normalizeRouteBucket('/')).toBe('/');
-    expect(normalizeRouteBucket('/rooms_/$roomId/governance')).toBe('/rooms_/$roomId/governance');
+    expect(normalizeRouteBucket('/rooms_/$roomId_/governance')).toBe('/rooms_/$roomId_/governance');
     expect(normalizeRouteBucket(undefined)).toBe('unknown');
-    // A concrete path or identifier — a buggy or forged client — must never
-    // enter the 90-day per-route series.
+    // ANYTHING outside the catalog — a concrete path, an identifier, a
+    // handle, a slug, a forged string — must never enter the 90-day series.
     expect(normalizeRouteBucket('/stories/2b7e1516-28ae-d2a6-abf7-158809cf4f3c')).toBe('unknown');
-    expect(normalizeRouteBucket('/u/deadbeefcafe')).toBe('unknown'); // long hex
+    expect(normalizeRouteBucket('/profile/alice')).toBe('unknown'); // user handle
+    expect(normalizeRouteBucket('/rooms/my-private-room')).toBe('unknown'); // room slug
     expect(normalizeRouteBucket('/orders/123456')).toBe('unknown'); // numeric id
     expect(normalizeRouteBucket('not-a-path')).toBe('unknown');
-    expect(normalizeRouteBucket('/a//b')).toBe('unknown');
     expect(normalizeRouteBucket('/search?q=secret')).toBe('unknown'); // query strings
     // The mapping applies inside toWebVitalSample.
     const sampleRow = toWebVitalSample(vitalEvent({ bucket: '/stories/123456' }), NOW);

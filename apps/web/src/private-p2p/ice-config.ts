@@ -29,6 +29,13 @@ const iceServerSchema = z.object({
 });
 const iceServersSchema = z.array(iceServerSchema);
 
+/** RFC 7064/7065 schemes are case-insensitive, but the §26.4 relay-only
+ *  preflight detects TURN by the literal `turn:`/`turns:` prefix — normalize
+ *  the scheme to lowercase so a valid `TURN:` config enables relay-only mode
+ *  instead of failing its preflight. */
+const normalizeIceUrl = (url: string): string =>
+  url.replace(/^[^:]+:/, (scheme) => scheme.toLowerCase());
+
 let warned = false;
 
 /** Parse the configured ICE servers once per call; [] when unset/malformed. */
@@ -40,7 +47,9 @@ export function configuredIceServers(
     const parsed = iceServersSchema.safeParse(JSON.parse(raw));
     if (parsed.success) {
       return parsed.data.map((entry) => ({
-        urls: entry.urls,
+        urls: Array.isArray(entry.urls)
+          ? entry.urls.map(normalizeIceUrl)
+          : normalizeIceUrl(entry.urls),
         ...(entry.username !== undefined ? { username: entry.username } : {}),
         ...(entry.credential !== undefined ? { credential: entry.credential } : {}),
       }));

@@ -124,6 +124,10 @@ describe('assembleExport', () => {
     services.exportAttention = async () => [{ bucket: 'topic:tech', weight: 3 }];
     services.exportContributions = async () => [{ id: 'c1', kind: 'post' }];
     services.exportModerationNotices = async () => [{ reason: 'spam', severity: 'low' }];
+    services.exportClientState = async () => ({
+      settings: { theme: 'dark' },
+      reply_notifications: [{ notification_id: 'n1' }],
+    });
 
     const archive = await assembleExport(services, user.userId);
     expect(archive['schema_version']).toBe(EXPORT_SCHEMA_VERSION);
@@ -142,6 +146,11 @@ describe('assembleExport', () => {
     expect(archive['attention_aggregates']).toEqual([{ bucket: 'topic:tech', weight: 3 }]);
     expect(archive['contributions']).toEqual([{ id: 'c1', kind: 'post' }]);
     expect(archive['moderation_notices']).toEqual([{ reason: 'spam', severity: 'low' }]);
+    // WS-C/WS-T durable client state: what deletion purges, export discloses.
+    expect(archive['client_state']).toEqual({
+      settings: { theme: 'dark' },
+      reply_notifications: [{ notification_id: 'n1' }],
+    });
 
     // The raw wallet address hash is NEVER present anywhere in the archive.
     expect(JSON.stringify(archive)).not.toContain('SECRET_WALLET_HASH_NEVER_EXPORTED');
@@ -166,6 +175,7 @@ describe('assembleExport', () => {
     expect(archive['attention_aggregates']).toEqual([]);
     expect(archive['contributions']).toEqual([]);
     expect(archive['moderation_notices']).toEqual([]);
+    expect(archive['client_state']).toEqual({});
   });
 
   it('throws for an unknown user', async () => {

@@ -45,9 +45,14 @@ describe('configuredIceServers', () => {
     expect(
       configuredIceServers('[{"urls":["stun:stun.example:3478","https://oops.example"]}]'),
     ).toEqual([]); // ONE bad URL in a list is a config error, not a partial success
-    // RFC 7064/7065 schemes are case-insensitive.
+    // RFC 7064/7065 schemes are case-insensitive on input, but the scheme is
+    // NORMALIZED to lowercase so the relay-only preflight's literal
+    // turn:/turns: detection recognizes the entry.
     expect(configuredIceServers('[{"urls":"STUN:stun.example:3478"}]')).toEqual([
-      { urls: 'STUN:stun.example:3478' },
+      { urls: 'stun:stun.example:3478' },
+    ]);
+    expect(configuredIceServers('[{"urls":["TURNS:turn.example:5349"],"username":"u"}]')).toEqual([
+      { urls: ['turns:turn.example:5349'], username: 'u' },
     ]);
   });
 });

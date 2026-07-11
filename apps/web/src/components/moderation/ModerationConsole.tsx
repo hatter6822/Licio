@@ -18,7 +18,6 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
-import { openExternal } from '../../lib/open-external.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyModerationAction,
@@ -73,28 +72,24 @@ function isForbidden(error: unknown): boolean {
  * context-menu "open in new tab", and other non-click activations bypass the
  * check entirely.  `malicious` replaces it with a blocked notice;
  * `unavailable` warns but leaves the reviewer in control ("open anyway" — the
- * reviewer IS the human-review path); `clear` opens with the opener severed,
- * and a popup-blocked clean open surfaces a real fresh-gesture anchor instead
- * of failing silently.
+ * reviewer IS the human-review path); `clear` surfaces a real
+ * `rel="noreferrer noopener"` anchor rather than auto-opening: this is a
+ * reporter-supplied destination, and `window.open` cannot withhold the
+ * Referer (its `noreferrer` feature string would also null the SUCCESS
+ * return, making popup blocking undetectable), so the deliberate second
+ * click on the anchor is the referrer-safe navigation path.
  */
 function EvidenceLink({ url }: { url: string }): React.ReactElement {
   const t = useT();
-  const [state, setState] = useState<
-    'idle' | 'checking' | 'clear-blocked' | 'malicious' | 'unavailable'
-  >('idle');
+  const [state, setState] = useState<'idle' | 'checking' | 'clear' | 'malicious' | 'unavailable'>(
+    'idle',
+  );
 
   const activate = (): void => {
     if (state === 'checking') return;
     setState('checking');
     void checkEvidenceUrl(url)
-      .then(({ verdict }) => {
-        if (verdict === 'clear') {
-          setState('idle');
-          openExternal(url, () => setState('clear-blocked'));
-        } else {
-          setState(verdict);
-        }
-      })
+      .then(({ verdict }) => setState(verdict))
       .catch(() => {
         // Fail toward flagging: an unreachable check warns, never silently opens.
         setState('unavailable');
@@ -132,7 +127,7 @@ function EvidenceLink({ url }: { url: string }): React.ReactElement {
           </a>
         </span>
       ) : null}
-      {state === 'clear-blocked' ? (
+      {state === 'clear' ? (
         <span role="status" className="ml-1 text-ink-muted">
           {t('console.evidenceVerified', 'Verified.')}{' '}
           <a href={url} target="_blank" rel="noreferrer noopener" className="underline">

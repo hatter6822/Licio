@@ -201,6 +201,11 @@ export interface IdentityServices {
    *  — production deletion TOMBSTONES the users row, so FK cascades never
    *  fire there. */
   purgeClientState?: (userId: string) => Promise<void>;
+  /** WS-C/WS-T client-state DSAR export (GDPR Art. 15): the SAME durable
+   *  per-user rows purgeClientState removes — settings sync, notification
+   *  preferences, the reply-notification inbox — included in the export
+   *  archive as `client_state` (default absent ⇒ empty object). */
+  exportClientState?: (userId: string) => Promise<Record<string, unknown>>;
   /** WS-D.1.4d out-of-band security-alert delivery (email via the mailer, push
    *  via a bodyless Web Push wake).  Wired at boot; absent ⇒ the in-app
    *  security-activity log entry (always written) is the only channel. */
