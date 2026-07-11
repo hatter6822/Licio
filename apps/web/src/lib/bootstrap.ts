@@ -14,7 +14,13 @@ import {
   requestPersistentStorage,
 } from '../offline/eviction.js';
 import { initForegroundSync, processPendingQueue } from '../offline/sync.js';
-import { initWebVitals } from '../perf/vitals.js';
+import {
+  connectionBucket,
+  deviceClassBucket,
+  getActiveRoutePattern,
+  initWebVitals,
+  type WebVital,
+} from '../perf/vitals.js';
 import { ensurePushSubscription } from '../push/subscription.js';
 import { resolveCollectionPolicy } from '../signals/privacy.js';
 import { getSignalProcessor } from '../signals/runtime.js';
@@ -24,7 +30,7 @@ import { initUIStore, useUIStore } from '../stores/ui.js';
 import { fetchAuthStatus, fetchFeatureFlags, fetchSettings } from './api.js';
 import { warmLinkSafety } from './link-safety.js';
 import { fetchPrivacySettings } from './privacy-api.js';
-import { initTelemetry, track } from './telemetry.js';
+import { flushTelemetry, initTelemetry, track } from './telemetry.js';
 
 /** Event dispatched on detected eviction so the UI can notify the reader. */
 export const EVICTION_EVENT = 'licio:storage-evicted';
@@ -144,11 +150,43 @@ export function startRuntime(): () => void {
   const teardownLcapSync = startLcapSync();
   // WS-G.3.7c: drafts older than 30 days are cleaned up on app start.
   void expireOldDrafts().catch(() => undefined);
-  // Core Web Vitals RUM → privacy-safe telemetry (metric name/value/rating only,
-  // never a URL or identifier). Lab measurement remains the authoritative gate.
-  const teardownVitals = initWebVitals((vital) => {
-    track({ name: 'web_vital', metric: vital.name, value: vital.value, rating: vital.rating });
+  // Core Web Vitals RUM → privacy-safe telemetry. Each vital reports ONCE per
+  // pageload at its FINAL value, flushed when the page is first hidden — so the
+  // WS-P.1.1d p75 aggregation counts one sample per pageview instead of every
+  // incremental CLS/INP update. The coarse device/connection buckets and the
+  // route PATTERN ride along (closed enums / pattern only — never a URL, a
+  // fingerprint, or an identifier). Lab measurement remains the authoritative gate.
+  const latestVitals = new Map<WebVital['name'], WebVital>();
+  const teardownObservers = initWebVitals((vital) => {
+    latestVitals.set(vital.name, vital);
   });
+  let vitalsFlushed = false;
+  const flushVitals = (): void => {
+    if (vitalsFlushed || typeof document === 'undefined') return;
+    if (document.visibilityState !== 'hidden') return;
+    vitalsFlushed = true;
+    for (const vital of latestVitals.values()) {
+      track({
+        name: 'web_vital',
+        metric: vital.name,
+        value: vital.value,
+        rating: vital.rating,
+        bucket: getActiveRoutePattern(),
+        device_class: deviceClassBucket(),
+        connection: connectionBucket(),
+      });
+    }
+    flushTelemetry();
+  };
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', flushVitals);
+  }
+  const teardownVitals = (): void => {
+    teardownObservers();
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', flushVitals);
+    }
+  };
   void requestPersistentStorage();
   void reportStorageEstimate();
   // Renew-on-load: re-register an existing push subscription (no prompt). The SW

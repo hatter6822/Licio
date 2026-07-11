@@ -75,10 +75,12 @@ import {
 import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
 import { feedMediaOf } from '../lib/story-media.js';
+import { getUserSettingsStore } from '../lib/user-settings.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { pwattRowForRanking } from '../pwatt/shadow.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
+import { getTelemetryServices } from '../telemetry/service.js';
 import { createAiGovernanceAdminRoutes } from './ai-governance-admin.js';
 import { createAiGovernancePublicRoutes } from './ai-governance-public.js';
 import { createAuthRoutes } from './auth.js';
@@ -131,8 +133,16 @@ function stateKey(cookieHeader: string | undefined): string {
   return sessionIdOf(cookieHeader) ?? 'anonymous';
 }
 
-// In-memory settings store (BFF contract; durable store is a later concern).
-const settingsBySession = new Map<string, z.infer<typeof userSettingsSchema>>();
+/**
+ * The settings-sync key (SPEC §23.2): the USER id when signed in — so settings
+ * survive re-login and sync across devices — else the session id.  A
+ * cookieless visitor gets `undefined` and is never persisted server-side (the
+ * client's local persistence owns that state; the old shared 'anonymous'
+ * fallback was a cross-user state bleed).
+ */
+async function settingsKey(cookieHeader: string | undefined): Promise<string | undefined> {
+  return (await resolveOptionalUserId(cookieHeader)) ?? sessionIdOf(cookieHeader);
+}
 
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } } as const;
 
@@ -569,15 +579,19 @@ export function createV1Routes() {
       .route('/', createRoomGovernanceSimRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
-      .get('/settings', (c) => {
-        const key = stateKey(c.req.header('cookie'));
-        return c.json(settingsBySession.get(key) ?? DEFAULT_USER_SETTINGS);
+      .get('/settings', async (c) => {
+        const key = await settingsKey(c.req.header('cookie'));
+        if (key === undefined) return c.json(DEFAULT_USER_SETTINGS);
+        return c.json((await getUserSettingsStore().get(key)) ?? DEFAULT_USER_SETTINGS);
       })
-      .patch('/settings', zValidator('json', userSettingsSchema.partial()), (c) => {
-        const key = stateKey(c.req.header('cookie'));
-        const current = settingsBySession.get(key) ?? DEFAULT_USER_SETTINGS;
+      .patch('/settings', zValidator('json', userSettingsSchema.partial()), async (c) => {
+        const key = await settingsKey(c.req.header('cookie'));
+        const current =
+          key === undefined
+            ? DEFAULT_USER_SETTINGS
+            : ((await getUserSettingsStore().get(key)) ?? DEFAULT_USER_SETTINGS);
         const merged = userSettingsSchema.parse({ ...current, ...c.req.valid('json') });
-        settingsBySession.set(key, merged);
+        if (key !== undefined) await getUserSettingsStore().set(key, merged);
         return c.json(merged);
       })
 
@@ -700,13 +714,20 @@ export function createV1Routes() {
           onError: (c) => c.json({ error: 'Payload too large' }, 413),
         }),
         zValidator('json', telemetryBatchSchema),
-        (c) => {
+        async (c) => {
           const { events } = c.req.valid('json');
-          // Privacy-safe by schema (no URLs/PII, ≤100 events). The analytics
-          // pipeline (WS-P) consumes these; here we validate and ack the count.
-          const ack: TelemetryIngestAck = telemetryIngestAckSchema.parse({
-            accepted: events.length,
-          });
+          // Privacy-safe by schema (no URLs/PII, ≤100 events). The WS-P.1.1d
+          // sink consumes the batch: web_vital events land in the sample store
+          // for the rolling-p75 aggregation; every other event name counts into
+          // the observability metrics. Ingest is BEST-EFFORT — a beacon cannot
+          // retry, so a store outage drops the batch (counted) rather than 500s.
+          let accepted = 0;
+          try {
+            accepted = await getTelemetryServices().ingest(events);
+          } catch {
+            getTelemetryServices().metrics.increment('telemetry.ingest.failed');
+          }
+          const ack: TelemetryIngestAck = telemetryIngestAckSchema.parse({ accepted });
           return c.json(ack, { status: 202 });
         },
       )
@@ -764,11 +785,11 @@ export function createV1Routes() {
       .get('/notifications', authMiddleware(), async (c) => {
         const auth = getAuth(c);
         if (!auth) return c.json(notFound, 404);
-        const notifications = replyNotifications.listForUser(auth.userId);
+        const notifications = await replyNotifications.listForUser(auth.userId);
         return c.json(
           notificationsResponseSchema.parse({
             notifications,
-            unread_count: replyNotifications.unreadCount(auth.userId),
+            unread_count: await replyNotifications.unreadCount(auth.userId),
           }),
         );
       })
@@ -776,11 +797,11 @@ export function createV1Routes() {
         '/notifications/:notificationId/read',
         authMiddleware(),
         zValidator('param', z.object({ notificationId: uuidSchema })),
-        (c) => {
+        async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(notFound, 404);
           const { notificationId } = c.req.valid('param');
-          if (!replyNotifications.markRead(notificationId, auth.userId))
+          if (!(await replyNotifications.markRead(notificationId, auth.userId)))
             return c.json(notFound, 404);
           return c.json(okAckSchema.parse({ ok: true }));
         },
@@ -790,7 +811,7 @@ export function createV1Routes() {
 
 export type V1Routes = ReturnType<typeof createV1Routes>;
 
-/** Test helper: clear in-memory settings between cases. */
+/** Test helper: clear the bound settings store between cases. */
 export function resetSettingsState(): void {
-  settingsBySession.clear();
+  void getUserSettingsStore().clear();
 }

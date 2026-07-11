@@ -168,16 +168,22 @@ Implement collection and monitoring of Core Web Vitals at the 75th percentile: L
 
 **Security/privacy:** RUM readings are anonymous performance samples with no user identifier and no attention/behavioral content. Device class is a coarse bucket; precise device or network fingerprinting is prohibited.
 
-**Tracked debt — the `/v1/telemetry` ingest sink (2026-07 production-parity audit).**
-The client RUM pipeline (`apps/web/src/lib/telemetry.ts`, `sendBeacon`) and the
-schema-validated `POST /v1/telemetry` route ship today, but the route
-acknowledges and then **discards** the batch — no consumer or store exists yet
-in ANY environment (the route comment says "The analytics pipeline (WS-P)
-consumes these").  This is not a dev/prod asymmetry (both drop identically);
-it is the unimplemented server half of THIS task.  Closure target: the
-WS-P.1.1d implementation pass MUST land the ingest consumer (aggregation to
-p75 buckets + 90-day trend storage + the regression alert) and remove the
-discard, so the route's claim becomes true.
+**Tracked debt — the `/v1/telemetry` ingest sink: CLOSED (2026-07).**  The
+route's claim is now true: `POST /v1/telemetry` consumes every batch through
+the WS-P sink (`apps/api/src/telemetry/`).  `web_vital` events (with the
+coarse `device_class`/`connection` buckets and the route PATTERN the client
+now attaches, one final-value sample per pageview flushed on hide) land in the
+short-lived sample store; the lease-guarded hourly scheduler computes the
+rolling-24h p75 per (metric, device class, connection, route) bucket into the
+durable 90-day `web_vital_aggregates` trend series, emits
+`metric.web_vitals.aggregated`, and fires the `telemetry.web_vitals.regression`
+alert (with the worst-regressing bucket) when any metric's overall p75 exceeds
+its target past the noise floor; retention sweeps enforce both classes.  Every
+other event name counts into the observability metrics — nothing is silently
+discarded.  Durable Postgres adapters bind whenever a database is configured
+(production always; migration `0071`).  Remaining for the full WS-P.1.1d
+acceptance: the dashboard rendering of the trend series (WS-P.1.1e) and the
+WS-O paging binding for the alert channel.
 
 ---
 

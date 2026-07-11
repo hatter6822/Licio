@@ -6,10 +6,43 @@ import {
   markInteractionStart,
   measureInteraction,
 } from './marks.js';
-import { initWebVitals, rateMetric } from './vitals.js';
+import {
+  connectionBucket,
+  deviceClassBucket,
+  getActiveRoutePattern,
+  initWebVitals,
+  rateMetric,
+  setActiveRoutePattern,
+} from './vitals.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('WS-P.1.1d coarse RUM buckets (privacy-safe hints only)', () => {
+  it('classifies device class from deviceMemory/hardwareConcurrency buckets', () => {
+    expect(deviceClassBucket({})).toBe('unknown');
+    expect(deviceClassBucket({ deviceMemory: 2 })).toBe('low');
+    expect(deviceClassBucket({ hardwareConcurrency: 2 })).toBe('low');
+    expect(deviceClassBucket({ deviceMemory: 4, hardwareConcurrency: 8 })).toBe('mid');
+    expect(deviceClassBucket({ hardwareConcurrency: 4 })).toBe('mid');
+    expect(deviceClassBucket({ deviceMemory: 8, hardwareConcurrency: 12 })).toBe('high');
+  });
+
+  it('classifies connection from the Network Information effectiveType', () => {
+    expect(connectionBucket({})).toBe('unknown');
+    expect(connectionBucket({ connection: { effectiveType: '4g' } })).toBe('4g');
+    expect(connectionBucket({ connection: { effectiveType: 'slow-2g' } })).toBe('slow-2g');
+    expect(connectionBucket({ connection: { effectiveType: 'wifi' } })).toBe('unknown'); // not in the closed set
+  });
+
+  it('tracks the active route PATTERN, truncated to the telemetry label cap', () => {
+    setActiveRoutePattern('/stories/$storyId');
+    expect(getActiveRoutePattern()).toBe('/stories/$storyId');
+    setActiveRoutePattern(`/x${'y'.repeat(100)}`);
+    expect(getActiveRoutePattern()).toHaveLength(64);
+    setActiveRoutePattern('/');
+  });
 });
 
 describe('rateMetric', () => {

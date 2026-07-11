@@ -214,6 +214,8 @@ import {
   seedOperationalSignals,
 } from './lib/demo-seed.js';
 import { DrizzlePushStateStore } from './lib/drizzle-push-store.js';
+import { DrizzleReplyNotificationStore } from './lib/drizzle-reply-notification-store.js';
+import { DrizzleUserSettingsStore } from './lib/drizzle-settings-store.js';
 import { createLogger } from './lib/logger.js';
 import {
   getVapidConfig,
@@ -221,6 +223,8 @@ import {
   setPushStateStore,
   subscriptionsForUser,
 } from './lib/push-service.js';
+import { setReplyNotificationStore } from './lib/reply-notifications.js';
+import { setUserSettingsStore } from './lib/user-settings.js';
 import { RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
@@ -263,6 +267,12 @@ import {
   setRankingServices,
 } from './ranking/services.js';
 import type { ReadinessProbe } from './routes/health.js';
+import {
+  DrizzleWebVitalAggregateStore,
+  DrizzleWebVitalSampleStore,
+} from './telemetry/drizzle-telemetry-stores.js';
+import { startTelemetryScheduler, TELEMETRY_SCHEDULER_INTERVAL_MS } from './telemetry/scheduler.js';
+import { createInMemoryTelemetryServices, setTelemetryServices } from './telemetry/service.js';
 
 const env = validateServerEnv(process.env);
 const logger = createLogger(env.LOG_LEVEL);
@@ -351,6 +361,11 @@ if (db) {
   // restart/deploy never invalidates delivery and every replica can wake any
   // user's endpoints.
   setPushStateStore(new DrizzlePushStateStore(db));
+  // WS-T.6 reply-notification inbox + WS-C settings sync: durable, so a
+  // restart never destroys a user's inbox/settings, and settings — keyed by
+  // USER id when signed in — sync across sessions and devices.
+  setReplyNotificationStore(new DrizzleReplyNotificationStore(db));
+  setUserSettingsStore(new DrizzleUserSettingsStore(db));
   // WS-E durable stores (Postgres, WS-E.3.1): the partitioned event log, §22.1
   // aggregates, aggregation windows, invariant outputs (shadow), the owner-only
   // Signal Ledger, safety states, tunable config, dead letters, and checkpoints.
@@ -1032,6 +1047,21 @@ registerAiGovernanceConsumers(eventServices, aiGovernanceServices, (storyId) =>
   if (holdsProvisioningLease) await seedAiGovernance(aiGovernanceServices);
 }
 
+// WS-P.1.1d Core Web Vitals RUM sink: the REAL consumer behind POST
+// /v1/telemetry (web_vital samples → rolling-24h p75 aggregation → the 90-day
+// trend series + regression alerts; every other event name counts into the
+// observability metrics — nothing is silently discarded).  Durable Postgres
+// stores whenever a database is configured (production always).
+const telemetryServices = createInMemoryTelemetryServices({
+  log: (event, meta) => logger.info(meta, event),
+  alert: (event, meta) => logger.warn(meta, `ALERT ${event}`),
+});
+if (db) {
+  telemetryServices.samples = new DrizzleWebVitalSampleStore(db);
+  telemetryServices.aggregates = new DrizzleWebVitalAggregateStore(db);
+}
+setTelemetryServices(telemetryServices);
+
 // WS-U AI-governed rooms: bind the GovernanceService process singleton to the
 // production Drizzle stores (the isolated `knomosis` context) when a database is
 // configured, else the in-memory stores. Done BEFORE serving, so the routes and
@@ -1606,6 +1636,16 @@ startRendezvousScheduler(
   getRendezvousService(),
   (err, task) => logger.error({ err, task }, 'rendezvous scheduler task failed'),
   RENDEZVOUS_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-P.1.1d telemetry maintenance: rolling-24h p75 aggregation per
+// (metric, device class, connection, route) bucket, the target-regression
+// alert, and the two retention sweeps — under its own job lease.
+startTelemetryScheduler(
+  telemetryServices,
+  (err, task) => logger.error({ err, task }, 'telemetry scheduler task failed'),
+  TELEMETRY_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resetPushState } from '../lib/push-service.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
 import { createV1Routes, resetSettingsState } from '../routes/v1.js';
+import { createInMemoryTelemetryServices, setTelemetryServices } from '../telemetry/service.js';
 import { freshEventServices, legacyAggregate, seedUserWithSession } from './event-test-helpers.js';
 import { freshForumServices, seedThread } from './forum-test-helpers.js';
 
@@ -219,7 +220,9 @@ describe('v1 writes', () => {
     expect(await res.json()).toEqual({ accepted: 1 });
   });
 
-  it('ingests a privacy-safe telemetry batch and acks the accepted count', async () => {
+  it('ingests a privacy-safe telemetry batch into the WS-P sink and acks the count', async () => {
+    const telemetry = createInMemoryTelemetryServices();
+    setTelemetryServices(telemetry);
     const events = [
       {
         name: 'navigation',
@@ -232,12 +235,27 @@ describe('v1 writes', () => {
         metric: 'LCP',
         value: 980,
         rating: 'good',
+        bucket: '/stories/$storyId',
+        device_class: 'mid',
+        connection: '4g',
         at: '2026-06-09T13:30:01.000Z',
       },
     ];
     const res = await app().request(jsonRequest('/v1/telemetry', 'POST', { events }));
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ accepted: 2 });
+    // The batch is CONSUMED, not discarded: the vital landed as a sample and
+    // every event name counted into the observability metrics.
+    const stored = await telemetry.samples.listSince('2026-06-09T00:00:00.000Z');
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      metric: 'LCP',
+      value: 980,
+      route: '/stories/$storyId',
+      deviceClass: 'mid',
+      connection: '4g',
+    });
+    expect(telemetry.metrics.snapshot()['telemetry.event.navigation']).toBe(1);
   });
 
   it('rejects a malformed telemetry event (unknown name) with 400', async () => {
@@ -292,7 +310,7 @@ describe('v1 push + notifications', () => {
   it('serves and marks bodyless reply notifications for the authenticated user', async () => {
     const { identity } = freshEventServices();
     const { userId, cookie } = await seedUserWithSession(identity);
-    const item = replyNotifications.enqueue({
+    const item = await replyNotifications.enqueue({
       recipientUserId: userId,
       storyId: VALID_UUID,
       threadId: '22222222-2222-4222-8222-222222222222',

@@ -717,7 +717,7 @@ export function createForumRoutes() {
               ) {
                 bundle.forum.trackBackground(
                   (async () => {
-                    const notification = replyNotifications.enqueue({
+                    const notification = await replyNotifications.enqueue({
                       recipientUserId,
                       storyId: story.storyId,
                       threadId: thread.threadId,

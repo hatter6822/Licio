@@ -30,6 +30,56 @@ export function rateMetric(name: VitalName, value: number): Rating {
   return 'poor';
 }
 
+export type DeviceClassBucket = 'low' | 'mid' | 'high' | 'unknown';
+export type ConnectionBucket = 'slow-2g' | '2g' | '3g' | '4g' | 'unknown';
+
+/**
+ * Coarse device class from PRIVACY-SAFE hints only (WS-P.1.1d): the (already
+ * spec-coarsened) `deviceMemory` bucket and the `hardwareConcurrency` bucket —
+ * never a precise fingerprint.  Browsers that expose neither (Safari, Firefox)
+ * read 'unknown'.
+ */
+export function deviceClassBucket(
+  nav: { deviceMemory?: number; hardwareConcurrency?: number } = navigator as {
+    deviceMemory?: number;
+    hardwareConcurrency?: number;
+  },
+): DeviceClassBucket {
+  const memory = nav.deviceMemory;
+  const cores = nav.hardwareConcurrency;
+  if (memory === undefined && cores === undefined) return 'unknown';
+  if ((memory !== undefined && memory <= 2) || (cores !== undefined && cores <= 2)) return 'low';
+  if ((memory !== undefined && memory <= 4) || (cores !== undefined && cores <= 4)) return 'mid';
+  return 'high';
+}
+
+/** Coarse connection type from the Network Information API, else 'unknown'. */
+export function connectionBucket(
+  nav: { connection?: { effectiveType?: string } } = navigator as {
+    connection?: { effectiveType?: string };
+  },
+): ConnectionBucket {
+  const effectiveType = nav.connection?.effectiveType;
+  return effectiveType === 'slow-2g' ||
+    effectiveType === '2g' ||
+    effectiveType === '3g' ||
+    effectiveType === '4g'
+    ? effectiveType
+    : 'unknown';
+}
+
+let activeRoutePattern = '/';
+
+/** Record the current route PATTERN (never a concrete path) for RUM attribution. */
+export function setActiveRoutePattern(pattern: string): void {
+  activeRoutePattern = pattern.slice(0, 64);
+}
+
+/** The current route pattern (the WS-P per-route vitals bucket). */
+export function getActiveRoutePattern(): string {
+  return activeRoutePattern;
+}
+
 interface LayoutShiftEntry extends PerformanceEntry {
   value: number;
   hadRecentInput: boolean;
