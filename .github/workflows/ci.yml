@@ -29,6 +29,10 @@ jobs:
       - run: pnpm biome check .
       - run: pnpm lint:security
       - run: pnpm check:policy
+      # The dev↔prod parity gate: every in-memory adapter needs a boot-wired
+      # production counterpart; every env key must be schema-validated or a
+      # documented dev flag; production adapters hold no in-memory state.
+      - run: pnpm check:prod-parity
       - run: pnpm check:no-raw-egress
       - run: pnpm check:no-applause
       - run: pnpm check:lcap-schema-egress

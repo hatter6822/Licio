@@ -1158,8 +1158,11 @@ violation still blocks the merge.
 
 The CI pipeline ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml))
 runs nine jobs on every PR: **Lint & Format** (Biome, `lint:security`, and the
-doctrine scans including `check:no-applause` / `check:no-raw-egress` / the
-private-P2P and update-channel gates), **Type Check** (`typecheck:ci`),
+doctrine scans including `check:no-applause` / `check:no-raw-egress` /
+`check:prod-parity` — the dev↔prod parity gate: every in-memory adapter needs
+a boot-wired production counterpart, every env key must be schema-validated or
+a documented dev flag, and production adapters hold no in-memory state — plus
+the private-P2P and update-channel gates), **Type Check** (`typecheck:ci`),
 **Lockfile Integrity**, **Dependency Budget**, **Test & Coverage** (with live
 Postgres/Redis service containers so the gated suites run, plus the named
 neutrality gate), **Build & Size Check** (production build, bundle-size gate,
@@ -1670,11 +1673,15 @@ NODE_ENV=production …        pnpm --filter api start   # = node dist/index.js 
 
 A healthy production boot, in order: env validation → durable adapters bound
 (the Postgres/Redis stores for identity, events, ingestion, forum, invariants,
-ranking, moderation, governance, Knomosis, and LCAP) → the MERI
-ranking-enforcement promotion (the one seed that runs in **every**
+ranking, moderation, AI governance, Knomosis, LCAP, telemetry, push,
+notifications, and settings) → the MERI ranking-enforcement promotion and the
+WS-K governed-model provisioning (the two seeds that run in **every**
 environment, serialized across replicas by the Postgres job lease) →
 event-pipeline recovery (at-least-once replay from durable checkpoints) → the
-twelve lease-guarded schedulers → `Server started`. The demo seeds, the
+**runtime parity guard** (`lib/parity-guard.ts`: production REFUSES TO SERVE
+if any container field still holds an un-allowlisted in-memory adapter — a
+wiring regression crashes loudly instead of silently serving restart-volatile
+state) → the lease-guarded schedulers → `Server started`. The demo seeds, the
 traffic simulator, and the simulated LLM runtime are all `NODE_ENV`-gated and
 never construct in production.
 

@@ -217,6 +217,7 @@ import { DrizzlePushStateStore } from './lib/drizzle-push-store.js';
 import { DrizzleReplyNotificationStore } from './lib/drizzle-reply-notification-store.js';
 import { DrizzleUserSettingsStore } from './lib/drizzle-settings-store.js';
 import { createLogger } from './lib/logger.js';
+import { assertProductionParity } from './lib/parity-guard.js';
 import {
   getVapidConfig,
   sendBodylessWakeToUser,
@@ -225,7 +226,7 @@ import {
 } from './lib/push-service.js';
 import { setReplyNotificationStore } from './lib/reply-notifications.js';
 import { setUserSettingsStore } from './lib/user-settings.js';
-import { RedisTokenStore, setTokenStore } from './middleware/csrf.js';
+import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
@@ -1657,6 +1658,27 @@ startTelemetryScheduler(
 // route, and are never part of the production AppType. Set LICIO_SIM=off (or 0)
 // to boot dev without it; LICIO_SIM=<scenario> selects the opening scenario
 // (default 'steady'); LICIO_SIM=idle boots it stopped for manual control.
+// RUNTIME parity guard (belt-and-braces for the static `check:prod-parity`
+// gate): a production boot REFUSES TO SERVE if any container field still holds
+// an un-allowlisted in-memory adapter after the wiring above — a wiring
+// regression then crashes loudly at boot instead of silently serving
+// restart-volatile, per-instance state.
+if (env.NODE_ENV === 'production') {
+  assertProductionParity({
+    identity: identityServices,
+    events: eventServices,
+    ingestion: ingestionServices,
+    forum: forumServices,
+    invariants: invariantServices,
+    ranking: rankingServices,
+    moderation: moderationServices,
+    aiGovernance: aiGovernanceServices,
+    knomosis: knomosisServices,
+    telemetry: telemetryServices,
+    csrf: { tokenStore: getTokenStore() },
+  });
+}
+
 const baseApp = createApp({ readinessProbes });
 // `serve` needs only the fetch handler; capturing it (rather than the app
 // object) sidesteps typing the two differently-shaped Hono instances.

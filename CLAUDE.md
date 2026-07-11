@@ -62,6 +62,10 @@ pnpm lint:lockfile                  # lockfile integrity
 pnpm check:deps                     # dependency-budget enforcement
 pnpm check:workspace-deps           # workspace boundary enforcement (pkg.json + imports)
 pnpm check:policy                   # doctrine/policy document validation
+pnpm check:prod-parity              # the dev↔prod parity gate: every in-memory adapter needs a
+                                    #   boot-wired production counterpart; every env key must be
+                                    #   schema-validated or a documented dev flag; production
+                                    #   adapters hold no in-memory state
 pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
 pnpm check:adversarial              # the WS-O.4.5 ensemble adversarial suite
 pnpm check:lcap-scheduler           # the WS-R.5.4 LCAP lane anti-starvation gate
@@ -578,6 +582,10 @@ licio/
 │           │   │                              shortened arena windows (throughput pulse); tick loop
 │           │   └── routes.ts             --   dev control routes (mounted in front of createApp,
 │           │                                  never in the production AppType; header-guarded)
+│           ├── telemetry/            -- WS-P.1.1d Core Web Vitals RUM sink: stores (in-memory +
+│           │                                  Drizzle), nearest-rank p75 aggregation + regression
+│           │                                  alerts, the lease-guarded hourly scheduler, and the
+│           │                                  ingest service behind POST /v1/telemetry
 │           ├── lib/
 │           │   ├── concurrency.ts       --   mapBounded: order-preserving bounded fan-out with
 │           │   │                             per-item failure isolation (the LLM fan-outs:
@@ -590,6 +598,13 @@ licio/
 │           │   ├── logger.ts            --   pino logger setup
 │           │   ├── story-media.ts       --   WS-Q.5.2c story→feed media projection
 │           │   ├── media-urls.ts        --   WS-Q.5.2c signed media read URLs (mint/verify)
+│           │   ├── parity-guard.ts      --   RUNTIME production-parity assert: a production boot
+│           │   │                             refuses to serve with an un-allowlisted in-memory
+│           │   │                             adapter wired (belt-and-braces for check:prod-parity)
+│           │   ├── reply-notifications.ts + drizzle-reply-notification-store.ts -- WS-T.6 inbox
+│           │   │                             behind a durable store boundary (Drizzle in production)
+│           │   ├── user-settings.ts + drizzle-settings-store.ts -- WS-C settings sync, USER-keyed
+│           │   │                             when signed in (hashed at-rest refs; Drizzle in production)
 │           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
 │           │   └── demo-seed.ts         --   rich dev seed: dev test accounts
 │           │                                  (admin/steward/expert), rooms/stories across
@@ -789,6 +804,10 @@ licio/
 │   ├── check-workspace-deps.ts  --   workspace boundary enforcement
 │   ├── check-lockfile.ts        --   lockfile integrity
 │   ├── check-policy.ts          --   doctrine/policy document validation
+│   ├── check-prod-parity.ts     --   the dev↔prod parity gate (adapter coverage over the
+│   │                                  production boot import closure, env-schema validation,
+│   │                                  production-adapter purity; reasoned allowlists that
+│   │                                  fail when stale)
 │   ├── private-p2p-gates.ts     --   WS-S.1.5 shared assertions for the 7 private-room gates
 │   ├── check-no-p2p-server-content.ts  --  WS-S.1.5 umbrella server-non-storage gate
 │   ├── check-no-private-cid-egress.ts  --  WS-S.1.5 no public-gateway for a private CID
@@ -1089,6 +1108,13 @@ foreground agent has already modified the same files.
     (`KEY_DB`, `RECORD_SCHEMA_VERSION`), `camelCase` for
     schema-derived constants.
   - Test files: `<module>.test.ts` (unit), `<feature>.spec.ts` (E2E).
+  - Store adapters (ENFORCED by `check:prod-parity`): in-memory
+    adapters are named `InMemory*` (or `Memory*`); production
+    adapters `Drizzle*` / `Redis*` / `Postgres*` / `S3*` / `Ses*` /
+    `Http*`.  The gate keys on these prefixes to prove every
+    in-memory adapter has a production counterpart instantiated in
+    the production boot's import closure — an unconventionally named
+    adapter is invisible to it.
 
 - **Testing patterns:**
   - Unit tests via Vitest (jsdom for web, node for api/packages).
@@ -1548,9 +1574,10 @@ production app).  Both run in CI's E2E job.
 
 **CI pipeline.**  `.github/workflows/ci.yml` runs 9 jobs on every PR:
 
-1. Lint & format (Biome + security lint + policy + no-raw-egress +
-   no-applause + the WS-R.14.3 `check:lcap-schema-egress` LCAP doctrine gate
-   + the WS-S.10.2b `check:update-channel` verify-before-activate gate)
+1. Lint & format (Biome + security lint + policy + the `check:prod-parity`
+   dev↔prod parity gate + no-raw-egress + no-applause + the WS-R.14.3
+   `check:lcap-schema-egress` LCAP doctrine gate + the WS-S.10.2b
+   `check:update-channel` verify-before-activate gate)
 2. Type check (strict-mode across all workspaces)
 3. Lockfile integrity
 4. Dependency budget

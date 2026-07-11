@@ -42,6 +42,7 @@
     "check:deps": "tsx scripts/check-dep-budget.ts",
     "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
     "check:policy": "tsx scripts/check-policy.ts",
+    "check:prod-parity": "tsx scripts/check-prod-parity.ts",
     "check:neutrality": "vitest run --project api src/__tests__/ranking-neutrality.test.ts",
     "check:lcap-scheduler": "tsx scripts/check-lcap-scheduler.ts",
     "check:adversarial": "vitest run --project api src/__tests__/invariants-ensemble-adversarial.test.ts",
