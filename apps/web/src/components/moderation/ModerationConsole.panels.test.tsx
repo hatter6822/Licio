@@ -508,10 +508,16 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
     expect(screen.getByText('Methodology annex')).toBeInTheDocument();
     // The reviewability trail below the queue.
     expect(screen.getByText('mark-primary-source')).toBeInTheDocument();
-    expect(screen.getByText(/example\.com\/earlier-primary/)).toBeInTheDocument();
+    // Plain substring matchers (not URL-shaped regexes — CodeQL's
+    // missing-anchor rule has no false positive to chase on a string).
+    expect(
+      screen.getByText('https://example.com/earlier-primary', { exact: false }),
+    ).toBeInTheDocument();
     // The internal reviewer note renders on the trail (console-only surface).
-    expect(screen.getByText(/Cross-checked against the registry copy\./)).toBeInTheDocument();
-    expect(screen.getByText(/evidence_steward/)).toBeInTheDocument();
+    expect(
+      screen.getByText('Cross-checked against the registry copy.', { exact: false }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('evidence_steward', { exact: false })).toBeInTheDocument();
   });
 
   it('marks a citation as a primary source with that citation url', async () => {
