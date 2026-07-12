@@ -8,6 +8,7 @@
 // tests.  Defaults are safe no-ops / "unavailable" so the console is fully
 // usable before the invariant services ship (WS-J.2.2c graceful degradation).
 import type {
+  Citation,
   ContributionPublic,
   InvariantSignalsPanel,
   ReportContentKind,
@@ -27,6 +28,18 @@ export interface TargetResolution {
 export type ContentVisibilityState = 'visible' | 'hidden' | 'removed';
 /** Account states an account action drives. */
 export type AccountActionState = 'active' | 'restricted' | 'suspended' | 'banned';
+
+/** A citation-bearing contribution as the evidence queue reviews it. */
+export interface CitedContribution {
+  contributionId: string;
+  threadId: string;
+  storyId: string | null;
+  storyTitle: string | null;
+  type: 'comment' | 'correction';
+  bodyPreview: string;
+  citations: Citation[];
+  createdAt: string;
+}
 
 export interface ContentSnapshot {
   originalBody: string;
@@ -79,6 +92,17 @@ export interface ModerationContentPort {
     contentKind: ReportContentKind | null,
     requesterUserId: string,
   ): Promise<boolean>;
+  /** STEWARD_ROLES.md evidence queue: PUBLISHED citation-bearing contributions
+   *  (sourced comments + corrections) across all threads, `(created_at, id)`
+   *  ascending keyset.  OPTIONAL: a port without it serves an empty queue (the
+   *  in-memory seam); the production port reads the real WS-G/WS-F stores. */
+  listCitedContributions?(opts: {
+    after: { createdAt: string; id: string } | null;
+    limit: number;
+  }): Promise<CitedContribution[]>;
+  /** One PUBLISHED citation-bearing contribution (decision validation), or
+   *  null when absent/uncited/not-published.  OPTIONAL like the list. */
+  getCitedContribution?(contributionId: string): Promise<CitedContribution | null>;
 }
 
 export interface ResolvedUser {

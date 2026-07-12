@@ -88,12 +88,13 @@ ALTER TABLE "ingestion_review_items" ALTER COLUMN "kind" TYPE "ingestion_review_
 DROP TYPE "ingestion_review_kind_old";--> statement-breakpoint
 
 -- ---------------------------------------------------------------------------
--- 5. uploads: PDF documents had no client path (the composer offers
---    images/video/captions only).  Dev-only PDF rows are removed (their
---    upload_blobs cascade) and the CHECK is recreated without the type
---    (the 0021 swap pattern).
+-- 5. uploads: the PDF document path is retired for WRITES only.  The old
+--    /v1/uploads endpoint accepted application/pdf, so another deployment may
+--    hold real user documents (and contributions whose `attachment_ids` point
+--    at them) — those rows are GRANDFATHERED, never deleted: the recreated
+--    CHECK is deliberately left NOT VALID (it gates new writes; pre-existing
+--    PDF rows stay readable and serve with the download disposition), so no
+--    attachment reference dangles and no user document is lost.
 -- ---------------------------------------------------------------------------
-DELETE FROM "uploads" WHERE "content_type" = 'application/pdf';--> statement-breakpoint
 ALTER TABLE "uploads" DROP CONSTRAINT "uploads_content_type_allowed";--> statement-breakpoint
-ALTER TABLE "uploads" ADD CONSTRAINT "uploads_content_type_allowed" CHECK ("uploads"."content_type" in ('image/jpeg','image/png','image/webp','image/avif','image/gif','video/mp4','video/webm','text/vtt')) NOT VALID;--> statement-breakpoint
-ALTER TABLE "uploads" VALIDATE CONSTRAINT "uploads_content_type_allowed";
+ALTER TABLE "uploads" ADD CONSTRAINT "uploads_content_type_allowed" CHECK ("uploads"."content_type" in ('image/jpeg','image/png','image/webp','image/avif','image/gif','video/mp4','video/webm','text/vtt')) NOT VALID;

@@ -56,6 +56,9 @@ export const uploads = pgTable(
     index('uploads_owner_story_idx').on(t.ownerStoryId),
     // WS-Q.2.3c — the allowlist gains the two video containers (mp4/webm); the
     // shared allowlist (forum/safety.ts) mirrors this exactly (parity-tested).
+    // On upgraded databases this CHECK is NOT VALID (migration 0076): rows from
+    // the retired application/pdf document path are grandfathered read-only —
+    // new writes cannot mint the type, existing user documents are never lost.
     check(
       'uploads_content_type_allowed',
       sql`${t.contentType} in ('image/jpeg','image/png','image/webp','image/avif','image/gif','video/mp4','video/webm','text/vtt')`,

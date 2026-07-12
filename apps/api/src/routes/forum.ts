@@ -1087,7 +1087,15 @@ export function createForumRoutes() {
             'Cache-Control',
             restricted ? 'private, no-store' : 'public, max-age=31536000, immutable',
           );
-          c.header('Content-Disposition', 'inline');
+          // GRANDFATHERED legacy documents (the retired PDF upload path;
+          // migration 0076 preserves the rows) download rather than render
+          // inline — embedded-JS viewers must never execute in-origin.
+          c.header(
+            'Content-Disposition',
+            record.contentType === 'application/pdf'
+              ? `attachment; filename="${uploadId}.pdf"`
+              : 'inline',
+          );
           // Range requests (WS-Q.2.3e): native <video> seeks via `Range`, so the
           // gated path advertises and honors single-range byte serving.
           c.header('Accept-Ranges', 'bytes');

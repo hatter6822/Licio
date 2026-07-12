@@ -30,6 +30,13 @@ import {
   type CreateAppealRequest,
   type CreateReportRequest,
   caseReviewResponseSchema,
+  type EvidenceDecisionRequest,
+  type EvidenceDecisionsResponse,
+  type EvidenceDecisionView,
+  type EvidenceQueueResponse,
+  evidenceDecisionsResponseSchema,
+  evidenceDecisionViewSchema,
+  evidenceQueueResponseSchema,
   type IncidentQueueResponse,
   type IncidentResolveResponse,
   incidentQueueResponseSchema,
@@ -263,4 +270,33 @@ export async function resolveIncident(
     json: { resolution, ...(note ? { note } : {}) },
   });
   return parseResponse(response, incidentResolveResponseSchema);
+}
+
+// --- Evidence queue + decisions (STEWARD_ROLES.md ROLE_EVIDENCE) ------------
+
+/** The FIFO stream of citation-bearing contributions (sourced comments +
+ *  corrections) with no evidence decision yet — oldest first. */
+export async function fetchEvidenceQueue(cursor?: string): Promise<EvidenceQueueResponse> {
+  const response = await client.v1.moderation['evidence-queue'].$get({
+    query: cursor ? { cursor } : {},
+  });
+  return parseResponse(response, evidenceQueueResponseSchema);
+}
+
+/** Recent evidence decisions, newest first (the reviewability trail). */
+export async function fetchEvidenceDecisions(cursor?: string): Promise<EvidenceDecisionsResponse> {
+  const response = await client.v1.moderation['evidence-decisions'].$get({
+    query: cursor ? { cursor } : {},
+  });
+  return parseResponse(response, evidenceDecisionsResponseSchema);
+}
+
+/** Record an evidence decision — evidence METADATA, never a content action
+ *  (`mark-primary-source`/`flag-citation` annotate ONE citation; `clear` marks
+ *  the contribution reviewed with no annotation). */
+export async function applyEvidenceDecision(
+  request: EvidenceDecisionRequest,
+): Promise<EvidenceDecisionView> {
+  const response = await client.v1.moderation['evidence-decisions'].$post({ json: request });
+  return parseResponse(response, evidenceDecisionViewSchema);
 }

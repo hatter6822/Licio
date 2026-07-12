@@ -11,6 +11,7 @@ import type {
   AppealReviewResponse,
   CaseReviewResponse,
   ConsoleAction,
+  EvidenceDecisionRequest,
   ModerationCaseRow,
   ModerationReasonCode,
 } from '@licio/shared';
@@ -20,6 +21,7 @@ import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
+  applyEvidenceDecision,
   applyModerationAction,
   checkEvidenceUrl,
   decideAppeal,
@@ -27,6 +29,8 @@ import {
   fetchAppealQueue,
   fetchAudit,
   fetchCase,
+  fetchEvidenceDecisions,
+  fetchEvidenceQueue,
   fetchIncidents,
   fetchReportQueue,
   resolveIncident,
@@ -150,6 +154,7 @@ export function ModerationConsole(): React.ReactElement {
         label={t('console.tabs', 'Console sections')}
         tabs={[
           { id: 'queue', label: t('console.queue', 'Report queue') },
+          { id: 'evidence', label: t('console.evidence', 'Evidence') },
           { id: 'appeals', label: t('console.appeals', 'Appeals') },
           { id: 'integrity', label: t('console.integrity', 'Integrity') },
           { id: 'audit', label: t('console.audit', 'Audit log') },
@@ -158,6 +163,7 @@ export function ModerationConsole(): React.ReactElement {
         {(activeId) => (
           <>
             {activeId === 'queue' ? <ReportQueuePanel /> : null}
+            {activeId === 'evidence' ? <EvidencePanel /> : null}
             {activeId === 'appeals' ? <AppealsPanel /> : null}
             {activeId === 'integrity' ? <IncidentsPanel /> : null}
             {activeId === 'audit' ? <AuditPanel /> : null}
@@ -445,6 +451,290 @@ function CaseReviewDialog({
           </section>
         </div>
       ) : null}
+    </Dialog>
+  );
+}
+
+/** STEWARD_ROLES.md ROLE_EVIDENCE: the FIFO queue of citation-bearing
+ *  contributions (sourced comments + corrections) awaiting an evidence
+ *  steward's review.  Decisions are evidence METADATA — never a content action
+ *  (ROLE_EVIDENCE holds no removal power): `mark-primary-source` and
+ *  `flag-citation` annotate ONE citation, `clear` marks the contribution
+ *  reviewed with no annotation.  Every decision lands in the reviewable
+ *  "Recent decisions" trail below the queue. */
+function EvidencePanel(): React.ReactElement {
+  const t = useT();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [flagTarget, setFlagTarget] = useState<{
+    contributionId: string;
+    citationUrl: string;
+  } | null>(null);
+  const queue = useInfiniteQuery({
+    queryKey: queryKeys.modEvidenceQueue(),
+    queryFn: ({ pageParam }) => fetchEvidenceQueue(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    retry: false,
+  });
+  const decisions = useInfiniteQuery({
+    queryKey: queryKeys.modEvidenceDecisions(),
+    queryFn: ({ pageParam }) => fetchEvidenceDecisions(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    retry: false,
+  });
+  const refresh = (): void => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.modEvidenceQueue() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.modEvidenceDecisions() });
+  };
+  const decide = useMutation({
+    mutationFn: (request: EvidenceDecisionRequest) => applyEvidenceDecision(request),
+    onSuccess: () => {
+      toast({
+        message: t('console.evidenceDecided', 'Evidence decision recorded.'),
+        tone: 'success',
+      });
+      refresh();
+    },
+    onError: (e) => {
+      // A 409 means another steward already decided this contribution — the
+      // row has left the queue; refresh rather than treating it as a failure.
+      const duplicate = e instanceof ApiClientError && e.status === 409;
+      toast({
+        message: duplicate
+          ? t(
+              'console.evidenceDuplicate',
+              'This contribution was already reviewed by another steward.',
+            )
+          : isForbidden(e)
+            ? t('console.evidenceForbidden', 'Your role cannot record that decision.')
+            : t('console.evidenceDecisionFailed', 'Could not record that decision.'),
+        tone: duplicate ? 'info' : 'error',
+      });
+      if (duplicate) refresh();
+    },
+  });
+  if (queue.isError) return <AccessNotice />;
+  const rows = queue.data?.pages.flatMap((p) => p.items) ?? [];
+  const decisionRows = decisions.data?.pages.flatMap((p) => p.items) ?? [];
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-xs text-ink-muted">
+        {t(
+          'console.evidenceHelp',
+          'Evidence decisions annotate citations (primary source / flagged) or mark a contribution reviewed. They never remove content.',
+        )}
+      </p>
+      {queue.data && rows.length === 0 ? (
+        <p className="text-ink-muted">
+          {t('console.evidenceQueueEmpty', 'The evidence queue is clear.')}
+        </p>
+      ) : null}
+      <ul className="flex flex-col gap-2">
+        {rows.map((row) => (
+          <li
+            key={row.contribution_id}
+            className="flex flex-col gap-2 rounded-md border border-line bg-canvas p-3"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <span className="flex flex-col text-sm">
+                <span className="font-medium text-ink">{row.story_title ?? row.thread_id}</span>
+                <span className="text-xs text-ink-muted">{row.created_at.slice(0, 16)}</span>
+              </span>
+              <span className="shrink-0 rounded border border-line px-1.5 py-px text-xs text-ink-muted">
+                {row.type === 'correction'
+                  ? t('console.evidenceCorrection', 'correction')
+                  : t('console.evidenceComment', 'comment')}
+              </span>
+            </div>
+            <p className="whitespace-pre-wrap text-sm text-ink">{row.body_preview}</p>
+            <ul className="flex flex-col gap-2">
+              {row.citations.map((citation) => (
+                <li
+                  key={citation.url}
+                  className="flex flex-col gap-1 rounded bg-surface p-2 text-xs"
+                >
+                  <span className="truncate">
+                    <span className="text-ink-muted">{t('console.citation', 'Citation')}: </span>
+                    {/* Steward-facing citation links resolve the WS-J.2.6b
+                        server-side malware verdict before navigation (the
+                        url-verdict route accepts evidence stewards too). */}
+                    <EvidenceLink url={citation.url} />
+                  </span>
+                  {citation.title ? <span className="text-ink-muted">{citation.title}</span> : null}
+                  <span className="flex flex-wrap gap-2">
+                    <Button
+                      variant="secondary"
+                      disabled={decide.isPending}
+                      onClick={() =>
+                        decide.mutate({
+                          contribution_id: row.contribution_id,
+                          action: 'mark-primary-source',
+                          citation_url: citation.url,
+                        })
+                      }
+                    >
+                      {t('console.markPrimary', 'Mark primary source')}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      aria-haspopup="dialog"
+                      onClick={() =>
+                        setFlagTarget({
+                          contributionId: row.contribution_id,
+                          citationUrl: citation.url,
+                        })
+                      }
+                    >
+                      {t('console.flagCitation', 'Flag citation')}
+                    </Button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex justify-end">
+              <Button
+                variant="ghost"
+                disabled={decide.isPending}
+                onClick={() =>
+                  decide.mutate({ contribution_id: row.contribution_id, action: 'clear' })
+                }
+              >
+                {t('console.markReviewed', 'Mark reviewed')}
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {queue.hasNextPage ? (
+        <Button
+          variant="ghost"
+          loading={queue.isFetchingNextPage}
+          onClick={() => void queue.fetchNextPage()}
+          className="self-center"
+        >
+          {t('console.loadMore', 'Load more')}
+        </Button>
+      ) : null}
+
+      <section
+        aria-label={t('console.recentDecisions', 'Recent decisions')}
+        className="flex flex-col gap-1"
+      >
+        <h3 className="text-xs font-semibold uppercase text-ink-muted">
+          {t('console.recentDecisions', 'Recent decisions')}
+        </h3>
+        <ul className="flex flex-col gap-1 text-sm">
+          {decisionRows.map((d) => (
+            <li key={d.decision_id} className="rounded bg-surface p-2">
+              <span className="font-medium text-ink">{d.action}</span>
+              {d.citation_url ? (
+                <span className="break-all text-ink-muted"> · {d.citation_url}</span>
+              ) : null}
+              {d.reason_code ? <span className="text-ink-muted"> · {d.reason_code}</span> : null}
+              <span className="text-ink-muted">
+                {' '}
+                · {d.decided_by_handle ?? t('console.system', 'system')} ·{' '}
+                {d.created_at.slice(0, 16)}
+              </span>
+            </li>
+          ))}
+          {decisions.data && decisionRows.length === 0 ? (
+            <li className="text-ink-muted">
+              {t('console.noDecisions', 'No evidence decisions yet.')}
+            </li>
+          ) : null}
+        </ul>
+        {decisions.hasNextPage ? (
+          <Button
+            variant="ghost"
+            loading={decisions.isFetchingNextPage}
+            onClick={() => void decisions.fetchNextPage()}
+            className="self-center"
+          >
+            {t('console.loadMore', 'Load more')}
+          </Button>
+        ) : null}
+      </section>
+
+      {flagTarget ? (
+        <FlagCitationDialog
+          citationUrl={flagTarget.citationUrl}
+          pending={decide.isPending}
+          onSubmit={(reasonCode, note) => {
+            const trimmed = note.trim();
+            decide.mutate(
+              {
+                contribution_id: flagTarget.contributionId,
+                action: 'flag-citation',
+                citation_url: flagTarget.citationUrl,
+                reason_code: reasonCode,
+                ...(trimmed ? { note: trimmed } : {}),
+              },
+              { onSettled: () => setFlagTarget(null) },
+            );
+          }}
+          onClose={() => setFlagTarget(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Flagging a citation requires a ratified WS-A reason code (a flag without a
+ *  reason is not reviewable) — the Flag button stays disabled until one is
+ *  chosen.  The note is an internal reviewer note, never shown to the author. */
+function FlagCitationDialog({
+  citationUrl,
+  pending,
+  onSubmit,
+  onClose,
+}: {
+  citationUrl: string;
+  pending: boolean;
+  onSubmit: (reasonCode: ModerationReasonCode, note: string) => void;
+  onClose: () => void;
+}): React.ReactElement {
+  const t = useT();
+  // Empty until the steward picks — flagging REQUIRES an explicit reason.
+  const [reasonCode, setReasonCode] = useState<ModerationReasonCode | ''>('');
+  const [note, setNote] = useState('');
+  return (
+    <Dialog open onClose={onClose} title={t('console.flagCitationTitle', 'Flag citation')}>
+      <div className="flex flex-col gap-3">
+        <p className="break-all text-xs text-ink-muted">{citationUrl}</p>
+        <Select
+          label={t('console.reason', 'Reason code')}
+          value={reasonCode}
+          onValueChange={(v) => setReasonCode(v as ModerationReasonCode)}
+          options={REASON_OPTIONS}
+          placeholder={t('console.pickReason', 'Select a reason')}
+          required
+        />
+        <TextArea
+          label={t('console.flagNote', 'Internal note (optional)')}
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          maxLength={2000}
+          rows={3}
+        />
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>
+            {t('common.cancel', 'Cancel')}
+          </Button>
+          <Button
+            variant="primary"
+            loading={pending}
+            disabled={reasonCode === ''}
+            onClick={() => {
+              if (reasonCode !== '') onSubmit(reasonCode, note);
+            }}
+          >
+            {t('console.flagSubmit', 'Flag')}
+          </Button>
+        </div>
+      </div>
     </Dialog>
   );
 }

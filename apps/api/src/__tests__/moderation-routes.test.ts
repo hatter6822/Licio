@@ -290,13 +290,17 @@ describe('blocks + mutes', () => {
 });
 
 describe('POST /v1/moderation/url-verdict (WS-J.2.6b reviewer link-opening check)', () => {
-  it('is gated like the review panel: non-steward and evidence-only steward are forbidden', async () => {
+  it('is gated to the panels the links render in: report-queue OR evidence-queue', async () => {
+    // No steward role at all → forbidden.
     const plain = await seedUser({ handle: `p${randomUUID().slice(0, 6)}` });
     const plainRes = await app().request(
       post('/v1/moderation/url-verdict', { url: 'https://example.com/x' }, plain.cookie),
     );
     expect(plainRes.status).toBe(403);
 
+    // ROLE_EVIDENCE reviews citations and opens them (STEWARD_ROLES.md
+    // "verify source provenance") — the citations render in the evidence
+    // panel, so the malware pre-open check must be reachable there too.
     const evidence = await seedUser({
       handle: `e${randomUUID().slice(0, 6)}`,
       stewardRoles: ['ROLE_EVIDENCE'],
@@ -304,7 +308,17 @@ describe('POST /v1/moderation/url-verdict (WS-J.2.6b reviewer link-opening check
     const evRes = await app().request(
       post('/v1/moderation/url-verdict', { url: 'https://example.com/x' }, evidence.cookie),
     );
-    expect(evRes.status).toBe(403);
+    expect(evRes.status).toBe(200);
+
+    // A steward with NEITHER queue (appeals-only) stays forbidden.
+    const appeals = await seedUser({
+      handle: `a${randomUUID().slice(0, 6)}`,
+      stewardRoles: ['ROLE_APPEALS'],
+    });
+    const apRes = await app().request(
+      post('/v1/moderation/url-verdict', { url: 'https://example.com/x' }, appeals.cookie),
+    );
+    expect(apRes.status).toBe(403);
   });
 
   it('reports `unavailable` when the verdict seam is unwired (fail toward flagging)', async () => {

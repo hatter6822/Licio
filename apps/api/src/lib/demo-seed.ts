@@ -39,6 +39,7 @@ import type { IngestionServices } from '../ingestion/services.js';
 import { runBatchTier } from '../invariants/scheduler.js';
 import type { InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
+import { applyEvidenceDecision } from '../moderation/evidence.js';
 import { submitReport } from '../moderation/reports.js';
 import type { ModerationServices } from '../moderation/services.js';
 import { windowStartMs } from '../pwatt/aggregation.js';
@@ -1932,6 +1933,26 @@ export async function seedModerationDemo(moderation: ModerationServices): Promis
       local_operation_id: `demo-report-${i}`,
     });
   }
+  // One ROLE_EVIDENCE showcase decision: the methodology citation on the
+  // sourced reply C(2) is marked a PRIMARY SOURCE, so the evidence queue, the
+  // recent-decisions panel, AND the story's independent-sources drawer all
+  // render real reviewed metadata on `pnpm dev`.  Best-effort + idempotent
+  // (a re-boot hits duplicate_decision and moves on).
+  await applyEvidenceDecision(
+    moderation,
+    {
+      userId: U(20),
+      platformRoles: ['admin'],
+      stewardRoles: [],
+      mfaActive: true,
+      mfaVerified: true,
+    },
+    {
+      contribution_id: C(2),
+      action: 'mark-primary-source',
+      citation_url: 'https://example.org/methodology',
+    },
+  );
 }
 
 /** The demo room that ships GOVERNED (WS-U) — "Elections & Governance" (public). */

@@ -51,3 +51,4 @@ export type ClaimPublic = z.infer<typeof claimPublicSchema>;
 export const storyClaimsResponseSchema = z
   .object({ items: z.array(claimPublicSchema).max(100) })
   .strict();
+export type StoryClaimsResponse = z.infer<typeof storyClaimsResponseSchema>;

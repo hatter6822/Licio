@@ -27,6 +27,8 @@ import { getIngestionServices, type IngestionServices } from '../ingestion/servi
 import type { StoryRecord } from '../ingestion/stores.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
+import { primarySourcesForStory } from '../moderation/evidence.js';
+import { getModerationServices, type ModerationServices } from '../moderation/services.js';
 import { usable } from '../pwatt/shadow.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
@@ -103,6 +105,7 @@ export function createInvariantsPublicRoutes(
   resolveInvariants: () => InvariantPlatformServices = getInvariantServices,
   resolveForum: () => ForumServices = getForumServices,
   resolveIdentity: () => IdentityServices = getIdentityServices,
+  resolveModeration: () => ModerationServices = getModerationServices,
 ) {
   return new Hono()
     .get('/stories/:storyId/interpretations', async (c) => {
@@ -258,6 +261,10 @@ export function createInvariantsPublicRoutes(
         if (!(await storyReadableTo(forum, member, userId))) continue;
         coGroupStories.push({ story_id: coStoryId, title: member.title, relationship });
       }
+      // Citations an evidence steward marked as PRIMARY SOURCES on this
+      // story's conversation (STEWARD_ROLES.md ROLE_EVIDENCE) — reviewed
+      // evidence metadata, deduplicated by URL.
+      const primarySources = await primarySourcesForStory(resolveModeration(), storyId);
       return c.json({
         story_id: storyId,
         marginal_gain: gain,
@@ -271,6 +278,7 @@ export function createInvariantsPublicRoutes(
           : null,
         confirmed_syndication_count: syndication.length,
         co_group_stories: coGroupStories,
+        primary_sources: primarySources,
       });
     });
 }

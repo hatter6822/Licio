@@ -20,6 +20,10 @@ import {
   bulkActionResponseSchema,
   type ConsoleAction,
   caseReviewResponseSchema,
+  evidenceDecisionRequestSchema,
+  evidenceDecisionsResponseSchema,
+  evidenceDecisionViewSchema,
+  evidenceQueueResponseSchema,
   incidentQueueResponseSchema,
   incidentResolveRequestSchema,
   incidentResolveResponseSchema,
@@ -56,6 +60,11 @@ import {
   storeModerationConfigValue,
   validateModerationConfigValue,
 } from '../moderation/config.js';
+import {
+  applyEvidenceDecision,
+  buildEvidenceQueue,
+  decisionToView,
+} from '../moderation/evidence.js';
 import { buildIncidentQueue, resolveIncident } from '../moderation/incidents.js';
 import {
   buildAppealQueue,
@@ -189,12 +198,16 @@ export function createModerationConsoleRoutes() {
       // --- WS-J.2.6b reviewer link-opening malware check -------------------
       // Evidence URLs are stored, never fetched at submission time (§18.3 SSRF
       // posture); a reviewer resolves the redirect-chain verdict HERE before
-      // navigating.  Same access gate as the review panel the links render in.
-      // An unwired verdict seam reports `unavailable` — fail toward flagging,
-      // never trusting.
+      // navigating.  Same access gate as the panels the links render in: the
+      // report-queue review panel AND the evidence queue (ROLE_EVIDENCE opens
+      // citations, STEWARD_ROLES.md "verify source provenance").  An unwired
+      // verdict seam reports `unavailable` — fail toward flagging, never
+      // trusting.
       .post('/url-verdict', zValidator('json', urlVerdictRequestSchema), async (c) => {
         const actor = mustActor(c);
-        const queueDenial = denyQueue(actor, 'report-queue');
+        const queueDenial = denyQueue(actor, 'report-queue')
+          ? denyQueue(actor, 'evidence-queue')
+          : null;
         if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
         const { url } = c.req.valid('json');
         const mod = getModerationServices();
@@ -446,6 +459,106 @@ export function createModerationConsoleRoutes() {
           );
         },
       )
+
+      // --- Evidence queue + decisions (STEWARD_ROLES.md ROLE_EVIDENCE) ----
+      // The queue is DERIVED: citation-bearing published contributions with no
+      // decision row yet, oldest first.  Decisions are evidence METADATA (no
+      // content-removal power) — `mark-primary-source`/`flag-citation` require
+      // the exact doctrine capability; `clear` is queue workflow (access-gated).
+      .get(
+        '/evidence-queue',
+        zValidator(
+          'query',
+          z.object({
+            cursor: z.string().min(1).max(512).optional(),
+            limit: z.coerce.number().int().min(1).max(100).optional(),
+          }),
+        ),
+        async (c) => {
+          const actor = mustActor(c);
+          const queueDenial = denyQueue(actor, 'evidence-queue');
+          if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
+          const q = c.req.valid('query');
+          const result = await buildEvidenceQueue(getModerationServices(), {
+            cursor: q.cursor,
+            limit: q.limit ?? 25,
+          });
+          return c.json(evidenceQueueResponseSchema.parse(result));
+        },
+      )
+      .get(
+        '/evidence-decisions',
+        zValidator(
+          'query',
+          z.object({
+            contribution_id: uuidSchema.optional(),
+            cursor: z.string().min(1).max(512).optional(),
+            limit: z.coerce.number().int().min(1).max(200).optional(),
+          }),
+        ),
+        async (c) => {
+          const actor = mustActor(c);
+          const queueDenial = denyQueue(actor, 'evidence-queue');
+          if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
+          const q = c.req.valid('query');
+          const mod = getModerationServices();
+          const limit = q.limit ?? 50;
+          let records: Awaited<ReturnType<typeof mod.evidenceDecisions.listRecent>>;
+          let nextCursor: string | null = null;
+          if (q.contribution_id) {
+            records = await mod.evidenceDecisions.listByContribution(q.contribution_id);
+          } else {
+            const [curTime, curId] = q.cursor
+              ? Buffer.from(q.cursor, 'base64url').toString('utf-8').split('|')
+              : [undefined, undefined];
+            records = await mod.evidenceDecisions.listRecent({
+              ...(curTime && curId ? { after: { createdAt: curTime, decisionId: curId } } : {}),
+              limit: limit + 1,
+            });
+            const last = records[limit - 1];
+            if (records.length > limit && last) {
+              nextCursor = Buffer.from(`${last.createdAt}|${last.decisionId}`, 'utf-8').toString(
+                'base64url',
+              );
+            }
+            records = records.slice(0, limit);
+          }
+          const deciderIds = [...new Set(records.map((r) => r.decidedBy))];
+          const resolved = await mod.users.resolveMany(deciderIds);
+          const handles = new Map<string, string | null>();
+          for (const id of deciderIds) handles.set(id, resolved.get(id)?.handle ?? null);
+          return c.json(
+            evidenceDecisionsResponseSchema.parse({
+              items: records.map((r) => decisionToView(r, handles)),
+              next_cursor: nextCursor,
+            }),
+          );
+        },
+      )
+      .post('/evidence-decisions', zValidator('json', evidenceDecisionRequestSchema), async (c) => {
+        const actor = mustActor(c);
+        const mod = getModerationServices();
+        const outcome = await applyEvidenceDecision(mod, actor, c.req.valid('json'));
+        if (!outcome.ok) {
+          const status =
+            outcome.code === 'target_not_found'
+              ? 404
+              : outcome.code === 'citation_not_found'
+                ? 400
+                : outcome.code === 'duplicate_decision'
+                  ? 409
+                  : 403;
+          return c.json(deny(outcome.code, outcome.message), status);
+        }
+        const resolved = await mod.users.resolveMany([outcome.record.decidedBy]);
+        const handles = new Map<string, string | null>([
+          [outcome.record.decidedBy, resolved.get(outcome.record.decidedBy)?.handle ?? null],
+        ]);
+        return c.json(
+          evidenceDecisionViewSchema.parse(decisionToView(outcome.record, handles)),
+          201,
+        );
+      })
 
       // --- Appeal queue + review + decision (WS-J.1.3c, WS-J.2.4a) --------
       .get(

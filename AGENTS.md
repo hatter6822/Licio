@@ -228,12 +228,13 @@ licio/
 │   │       │   │                           the posting lens on join)
 │   │       │   ├── story/               -- StoryCard, RatingLabel,
 │   │       │   │                           ExposureLabel, TopicRepeatsButton,
+│   │       │   │                           IndependentSourcesDrawer (WS-H §7.6),
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
 │   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),
 │   │       │   │                           block/mute controls, notice inbox + appeal (WS-J.1)
 │   │       │   ├── moderation/          -- ModerationConsole (queue/review/palette/appeals/
-│   │       │   │                           integrity/audit; server-side authorized) (WS-J.2)
+│   │       │   │                           integrity/evidence/audit; server-side authorized) (WS-J.2)
 │   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
 │   │       │   │                           + LinkInterstitial (WS-G.4.2c)
 │   │       │   ├── reader/              -- SourceReader + readability worker
@@ -491,6 +492,9 @@ licio/
 │           │   ├── actions.ts           --   action palette + reversal-integrity revert + MFCI-2 gate
 │           │   ├── incidents.ts         --   ROLE_INTEGRITY coordinated-report incident review
 │           │   ├── audit.ts             --   append-only writer + suppressed transparency export
+│           │   ├── evidence.ts          --   ROLE_EVIDENCE surface: the derived evidence queue +
+│           │   │                             mark-primary-source/flag-citation decisions (audited
+│           │   │                             evidence metadata; feeds the drawer's primary sources)
 │           │   ├── notices.ts           --   statement-of-reasons + appeal-outcome inbox
 │           │   ├── review.ts            --   queue + full-context review + appeal projections
 │           │   ├── prechecks.ts         --   WS-J.2.6 detection math (spam/malware/flood/policy-risk)
@@ -703,7 +707,8 @@ licio/
 │   │       │   │                               logs (privacy-bucket CHECK, §22.4 retention)
 │   │       │   ├── moderation.ts        --     WS-J cases, reports, actions, append-only
 │   │       │   │                               audit (right-to-erasure-safe trigger), blocks,
-│   │       │   │                               mutes, appeals, notices, incidents (+steward_roles)
+│   │       │   │                               mutes, appeals, notices, incidents, evidence
+│   │       │   │                               decisions (+steward_roles)
 │   │       │   ├── lcap.ts              --     WS-R.12.2 LCAP server state: content store,
 │   │       │   │                               per-room acceptance log, device-seq index,
 │   │       │   │                               fork evidence (no FK edges; CID-addressed)

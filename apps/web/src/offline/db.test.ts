@@ -192,6 +192,82 @@ describe('migrations', () => {
     await deleteDatabase(name);
   });
 
+  it('the v5 bump remaps retired contribution types instead of quarantining', async () => {
+    const name = `licio-v5-${Math.random().toString(36).slice(2)}`;
+    const v4 = await openDb(name, 4, MIGRATIONS);
+    await new Promise<void>((resolve, reject) => {
+      const tx = v4.transaction([STORE.draftContributions, STORE.pendingQueue], 'readwrite');
+      // A pre-shrink draft carrying a retired plaintext type (encrypted body
+      // untouched by the remap)…
+      tx.objectStore(STORE.draftContributions).put({
+        schemaVersion: 2,
+        draftId: 'd-legacy',
+        storyId: null,
+        threadId: null,
+        contributionType: 'question',
+        values: {},
+        updatedAt: 1,
+        encrypted: true,
+        cipher: { iv: 'aXY=', data: 'Y2lwaGVy' },
+      });
+      // …a live-typed draft that must NOT be touched…
+      tx.objectStore(STORE.draftContributions).put({
+        schemaVersion: 2,
+        draftId: 'd-live',
+        storyId: null,
+        threadId: null,
+        contributionType: 'correction',
+        values: {},
+        updatedAt: 2,
+        encrypted: false,
+      });
+      // …and a queued legacy submission whose payload must rebuild onto the
+      // live comment shape (retired per-type keys dropped, words preserved).
+      tx.objectStore(STORE.pendingQueue).put({
+        schemaVersion: 2,
+        operationId: 'op-legacy',
+        operationType: 'contribution',
+        status: 'pending',
+        createdAt: 1,
+        attempts: 0,
+        lastError: null,
+        payload: {
+          type: 'synthesis',
+          thread_id: '33333333-3333-4333-8333-333333333333',
+          client_draft_id: 'd-legacy',
+          body: 'The two threads agree on the sampling window.',
+          included_branch_ids: ['x'],
+          uncertainty_note: 'n',
+        },
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    v4.close();
+
+    const v5 = await openDb(name, 5, MIGRATIONS);
+    const get = (store: string, key: string) =>
+      new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+        const req = v5.transaction(store, 'readonly').objectStore(store).get(key);
+        req.onsuccess = () => resolve(req.result as Record<string, unknown> | undefined);
+        req.onerror = () => reject(req.error);
+      });
+    const legacy = await get(STORE.draftContributions, 'd-legacy');
+    expect(legacy?.['contributionType']).toBe('comment');
+    expect(legacy?.['cipher']).toEqual({ iv: 'aXY=', data: 'Y2lwaGVy' }); // body untouched
+    const live = await get(STORE.draftContributions, 'd-live');
+    expect(live?.['contributionType']).toBe('correction'); // untouched
+    const op = await get(STORE.pendingQueue, 'op-legacy');
+    expect(op?.['payload']).toEqual({
+      type: 'comment',
+      thread_id: '33333333-3333-4333-8333-333333333333',
+      client_draft_id: 'd-legacy',
+      body: 'The two threads agree on the sampling window.',
+    });
+    v5.close();
+    await deleteDatabase(name);
+  });
+
   it('aborts atomically and keeps the old version when a migration throws', async () => {
     const name = `licio-fail-${Math.random().toString(36).slice(2)}`;
     const v1 = await openDb(name, 1);

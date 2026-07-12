@@ -105,6 +105,10 @@ const SINK_EXPR = sql`(case when ${contributionsTable.disputeStatus} = 'incorrec
 // in the in-memory adapter exactly.
 const SOURCED_EXPR = sql`(${contributionsTable.type} = 'comment' and coalesce(jsonb_array_length(${contributionsTable.citations}), 0) > 0)`;
 
+// WS-J evidence queue: EVERY citation-bearing row (sourced comments AND
+// corrections — a correction always carries ≥ 1 citation by schema).
+const CITED_EXPR = sql`(coalesce(jsonb_array_length(${contributionsTable.citations}), 0) > 0)`;
+
 /** Composite keyset over (sink, created_at, id): rows strictly after `after`.
  *  Mixed directions (sink asc, chronological per order) can't be a single
  *  row-value tuple, so the cursor decomposes into sink-then-chronological. */
@@ -378,6 +382,27 @@ export class DrizzleContributionStore implements ContributionStore {
         ),
       );
     return rows[0]?.value ?? 0;
+  }
+
+  async listCited(opts: {
+    states?: readonly ContributionModerationState[];
+    after?: CreatedAtCursor | null;
+    limit: number;
+  }): Promise<ContributionRecord[]> {
+    const conditions: SQL[] = [CITED_EXPR];
+    if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
+    if (opts.after) {
+      conditions.push(
+        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
+      );
+    }
+    const rows = await this.#db
+      .select()
+      .from(contributionsTable)
+      .where(and(...conditions))
+      .orderBy(asc(contributionsTable.createdAt), asc(contributionsTable.contributionId))
+      .limit(opts.limit);
+    return rows.map((row) => this.#toRecord(row));
   }
 
   async childCounts(contributionIds: readonly string[]): Promise<Map<string, number>> {

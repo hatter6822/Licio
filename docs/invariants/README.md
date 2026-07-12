@@ -410,9 +410,13 @@ Client: the MERI exposure label was REMOVED as a user-facing surface — no
 carries an `exposure_label` field. The computed source-independence signal
 survives everywhere it does real work: the WS-I ranking
 features/penalty/quota and the
-`GET /v1/stories/:id/independent-sources` lineage read — the "Same coverage
-elsewhere" co-group members (near-duplicates by MinHash + confirmed-
-syndication siblings, visibility-gated server-side) — remains available),
+`GET /v1/stories/:id/independent-sources` lineage read — consumed by the
+story page's "Independent sources" drawer (`IndependentSourcesDrawer`, the
+SPEC §7.6 promise): exposure label, source lineage + syndication, the "Same
+coverage elsewhere" co-group members (near-duplicates by MinHash +
+confirmed-syndication siblings, visibility-gated server-side), the
+evidence-steward-marked primary sources, and the story's claims
+(`GET /v1/stories/:id/claims`) — remains available),
 `WhereInterpretationsDiffer` (+ the needs-context framing; human lens
 NAMES resolved through the room when available), the composer
 `ContextWarning` (dismissible; the user can always proceed), the

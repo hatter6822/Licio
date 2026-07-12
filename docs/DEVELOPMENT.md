@@ -736,7 +736,10 @@ reader-facing surface has something meaningful to render:
   redirects to the owning story's `#comments` anchor.
 - A non-empty moderation queue and a WS-J report case so steward/admin review
   surfaces render real queue, review-panel, action-palette, and audit-log data
-  on first boot.
+  on first boot — plus one ROLE_EVIDENCE showcase decision (a citation marked
+  as a primary source), so the console's Evidence tab, its recent-decisions
+  trail, and the story page's "Independent sources" drawer all render real
+  reviewed metadata.
 
 When using Postgres-backed dev data, the seed is transactional and idempotent.
 If you need to discard old seeded data completely, reset the local stack with

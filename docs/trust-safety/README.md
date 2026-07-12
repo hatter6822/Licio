@@ -287,6 +287,26 @@ These are structural guarantees the code holds (each covered by a test):
   recomputed aggregate severity; and a user's moderation notices are included in
   their DSAR export (reason codes only, never reporter identity).
 
+**Evidence queue + decisions (ROLE_EVIDENCE — STEWARD_ROLES.md).**  The
+console's Evidence tab serves the doctrine surface: `GET
+/v1/moderation/evidence-queue` lists citation-bearing published contributions
+(sourced comments + corrections) OLDEST first — the queue is DERIVED
+(citation-bearing rows with no decision yet), so it can never drift from
+store reality; the cursor advances over already-decided rows.  `POST
+/v1/moderation/evidence-decisions` applies the two doctrine actions —
+`mark-primary-source` / `flag-citation` (each annotates exactly ONE of the
+contribution's own citations; flags require a ratified WS-A reason code) —
+plus the `clear` queue workflow (reviewed, no annotation).  Decisions are
+evidence METADATA only (ROLE_EVIDENCE holds no content-removal power by
+construction: the module never touches a moderation state), audited under the
+doctrine action ids, duplicate-protected by partial unique indexes
+(`evidence_decisions`, migration 0077), and listed newest-first via `GET
+/v1/moderation/evidence-decisions`.  The public consumer is the WS-H
+independent-sources drawer, which surfaces `mark-primary-source` annotations
+on the story's lineage panel ("reviewed by an evidence steward").  The
+reviewer link-opening malware check (`/url-verdict`) is access-gated to the
+panels the links render in: report-queue OR evidence-queue roles.
+
 ## Residuals (tracked)
 
 These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
@@ -301,11 +321,6 @@ These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
   senior queue (today `escalate` sets the case status and seniors pull it);
   room-report room-steward-layer-first routing; and the on-call paging PROVIDER
   (a WS-O binding — alerts log today).
-- **ROLE_EVIDENCE console surface**: the doctrine role, its
-  `mark-primary-source`/`flag-citation` actions, and the `evidence-queue` are
-  ratified in `steward-roles.ts` (the validator pins all five roles), but the
-  moderation console does not yet render that queue or those two actions —
-  a console panel gap, not a doctrine change (the role ids must not change).
 
 ## Room-class scope (honest boundary)
 

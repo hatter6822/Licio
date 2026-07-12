@@ -23,6 +23,7 @@ import {
 import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
 import {
   type AccountActionState,
+  type CitedContribution,
   type ContentSnapshot,
   type ContentVisibilityState,
   type ModerationContentPort,
@@ -101,6 +102,15 @@ export interface ContentPortDeps {
     contentKind: ReportContentKind | null,
     requesterUserId: string,
   ): Promise<boolean>;
+  /** STEWARD_ROLES.md evidence queue: published citation-bearing contributions
+   *  across all threads, `(created_at, id)` ascending keyset.  Absent ⇒ empty
+   *  queue (the in-memory seam). */
+  listCitedContributions?(opts: {
+    after: { createdAt: string; id: string } | null;
+    limit: number;
+  }): Promise<CitedContribution[]>;
+  /** One published citation-bearing contribution (decision validation). */
+  getCitedContribution?(contributionId: string): Promise<CitedContribution | null>;
   now: () => number;
 }
 
@@ -282,6 +292,9 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
       if (deps.isContentReadable === undefined) return true;
       return deps.isContentReadable(targetId, contentKind, requesterUserId);
     },
+
+    ...(deps.listCitedContributions ? { listCitedContributions: deps.listCitedContributions } : {}),
+    ...(deps.getCitedContribution ? { getCitedContribution: deps.getCitedContribution } : {}),
   };
 }
 

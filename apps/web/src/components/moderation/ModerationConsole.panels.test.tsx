@@ -10,6 +10,9 @@ import type {
   AppealReviewResponse,
   AuditListResponse,
   CaseReviewResponse,
+  EvidenceDecisionsResponse,
+  EvidenceDecisionView,
+  EvidenceQueueResponse,
   IncidentQueueResponse,
   ReportQueueResponse,
 } from '@licio/shared';
@@ -28,6 +31,9 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchAppeal: vi.fn(),
   fetchAudit: vi.fn(),
   fetchIncidents: vi.fn(),
+  fetchEvidenceQueue: vi.fn(),
+  fetchEvidenceDecisions: vi.fn(),
+  applyEvidenceDecision: vi.fn(),
   applyModerationAction: vi.fn(),
   checkEvidenceUrl: vi.fn(),
   decideAppeal: vi.fn(),
@@ -253,6 +259,55 @@ const auditList: AuditListResponse = {
   next_cursor: null,
 };
 
+const CONTRIB_ID = '00000000-0000-4000-8000-0000000000f1';
+const evidenceQueue: EvidenceQueueResponse = {
+  items: [
+    {
+      contribution_id: CONTRIB_ID,
+      thread_id: '00000000-0000-4000-8000-0000000000e1',
+      story_id: '00000000-0000-4000-8000-0000000000a5',
+      story_title: 'Regional water board publishes the dataset',
+      type: 'comment',
+      body_preview: 'The dataset shows the levels dropped after the filtration upgrade.',
+      citations: [
+        { url: 'https://example.com/dataset' },
+        { url: 'https://example.com/methodology', title: 'Methodology annex' },
+      ],
+      created_at: NOW,
+    },
+  ],
+  next_cursor: null,
+};
+
+const evidenceDecisions: EvidenceDecisionsResponse = {
+  items: [
+    {
+      decision_id: '00000000-0000-4000-8000-0000000000dd',
+      contribution_id: CONTRIB_ID,
+      story_id: null,
+      action: 'mark-primary-source',
+      citation_url: 'https://example.com/earlier-primary',
+      reason_code: null,
+      note: null,
+      decided_by_handle: 'evidence_steward',
+      created_at: NOW,
+    },
+  ],
+  next_cursor: null,
+};
+
+const evidenceDecisionView: EvidenceDecisionView = {
+  decision_id: '00000000-0000-4000-8000-0000000000de',
+  contribution_id: CONTRIB_ID,
+  story_id: null,
+  action: 'clear',
+  citation_url: null,
+  reason_code: null,
+  note: null,
+  decided_by_handle: 'evidence_steward',
+  created_at: NOW,
+};
+
 afterEach(() => vi.clearAllMocks());
 
 function tab(name: string): void {
@@ -424,6 +479,149 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     // the steward never decides on a hide/remove without seeing the story.
     expect(await screen.findByText(/Reported Story Title/)).toBeInTheDocument();
     expect(screen.getByText(/the reported contribution text/)).toBeInTheDocument();
+  });
+});
+
+describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
+  function mountEvidenceTab(): void {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchEvidenceQueue).mockResolvedValue(evidenceQueue);
+    vi.mocked(api.fetchEvidenceDecisions).mockResolvedValue(evidenceDecisions);
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Evidence');
+  }
+
+  it('renders queue rows with their citations and the recent-decisions trail', async () => {
+    mountEvidenceTab();
+    // Row context: story title, type chip, body preview, created-at.
+    expect(
+      await screen.findByText('Regional water board publishes the dataset'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('comment')).toBeInTheDocument();
+    expect(screen.getByText(/levels dropped after the filtration upgrade/)).toBeInTheDocument();
+    // Each citation renders through EvidenceLink — a BUTTON until the WS-J.2.6b
+    // malware verdict resolves (no bypassable href).
+    expect(screen.getByRole('button', { name: 'https://example.com/dataset' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'https://example.com/methodology' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Methodology annex')).toBeInTheDocument();
+    // The reviewability trail below the queue.
+    expect(screen.getByText('mark-primary-source')).toBeInTheDocument();
+    expect(screen.getByText(/example\.com\/earlier-primary/)).toBeInTheDocument();
+    expect(screen.getByText(/evidence_steward/)).toBeInTheDocument();
+  });
+
+  it('marks a citation as a primary source with that citation url', async () => {
+    vi.mocked(api.applyEvidenceDecision).mockResolvedValue({
+      ...evidenceDecisionView,
+      action: 'mark-primary-source',
+      citation_url: 'https://example.com/dataset',
+    });
+    mountEvidenceTab();
+    const markButtons = await screen.findAllByRole('button', { name: 'Mark primary source' });
+    fireEvent.click(markButtons[0] as HTMLElement);
+    await waitFor(() => expect(api.applyEvidenceDecision).toHaveBeenCalledTimes(1));
+    expect(api.applyEvidenceDecision).toHaveBeenCalledWith({
+      contribution_id: CONTRIB_ID,
+      action: 'mark-primary-source',
+      citation_url: 'https://example.com/dataset',
+    });
+    expect(await screen.findByText(/evidence decision recorded/i)).toBeInTheDocument();
+  });
+
+  it('flagging a citation requires a ratified reason code, then posts it', async () => {
+    vi.mocked(api.applyEvidenceDecision).mockResolvedValue({
+      ...evidenceDecisionView,
+      action: 'flag-citation',
+      citation_url: 'https://example.com/methodology',
+      reason_code: 'MOD_HARASS_001',
+    });
+    mountEvidenceTab();
+    const flagButtons = await screen.findAllByRole('button', { name: 'Flag citation' });
+    fireEvent.click(flagButtons[1] as HTMLElement); // the second citation
+    // The Flag submit stays inert (aria-disabled) until a reason is chosen —
+    // a flag without a ratified reason is not reviewable.
+    const submit = await screen.findByRole('button', { name: 'Flag' });
+    expect(submit).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(submit);
+    expect(api.applyEvidenceDecision).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('combobox', { name: /reason code/i }));
+    fireEvent.click(screen.getByRole('option', { name: /MOD_HARASS_001/ }));
+    fireEvent.change(screen.getByLabelText(/internal note/i), {
+      target: { value: 'Blog post citing itself.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Flag' }));
+    await waitFor(() => expect(api.applyEvidenceDecision).toHaveBeenCalledTimes(1));
+    expect(api.applyEvidenceDecision).toHaveBeenCalledWith({
+      contribution_id: CONTRIB_ID,
+      action: 'flag-citation',
+      citation_url: 'https://example.com/methodology',
+      reason_code: 'MOD_HARASS_001',
+      note: 'Blog post citing itself.',
+    });
+  });
+
+  it('mark reviewed posts a clear (no citation target)', async () => {
+    vi.mocked(api.applyEvidenceDecision).mockResolvedValue(evidenceDecisionView);
+    mountEvidenceTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }));
+    await waitFor(() => expect(api.applyEvidenceDecision).toHaveBeenCalledTimes(1));
+    expect(api.applyEvidenceDecision).toHaveBeenCalledWith({
+      contribution_id: CONTRIB_ID,
+      action: 'clear',
+    });
+  });
+
+  it('a 409 duplicate reads as an informative toast, not a failure', async () => {
+    vi.mocked(api.applyEvidenceDecision).mockRejectedValue(
+      new ApiClientError('duplicate_decision', 'already decided', 409),
+    );
+    mountEvidenceTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }));
+    expect(await screen.findByText(/already reviewed by another steward/i)).toBeInTheDocument();
+  });
+
+  it('shows the empty state and the access notice on a forbidden queue', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchEvidenceQueue).mockResolvedValue({ items: [], next_cursor: null });
+    vi.mocked(api.fetchEvidenceDecisions).mockResolvedValue({ items: [], next_cursor: null });
+    const { unmount } = render(<ModerationConsole />, { wrapper: Providers });
+    tab('Evidence');
+    expect(await screen.findByText(/evidence queue is clear/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no evidence decisions yet/i)).toBeInTheDocument();
+    unmount();
+
+    vi.mocked(api.fetchEvidenceQueue).mockRejectedValue(
+      new ApiClientError('insufficient_capability', 'no', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Evidence');
+    expect(await screen.findByText(/does not have access/i)).toBeInTheDocument();
+  });
+
+  it('pages the evidence queue beyond the first page', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchEvidenceDecisions).mockResolvedValue(evidenceDecisions);
+    vi.mocked(api.fetchEvidenceQueue).mockImplementation(async (cursor) =>
+      cursor
+        ? {
+            items: evidenceQueue.items.map((row) => ({
+              ...row,
+              contribution_id: '00000000-0000-4000-8000-0000000000f2',
+              story_title: 'Second page of the evidence queue',
+            })),
+            next_cursor: null,
+          }
+        : { ...evidenceQueue, next_cursor: 'cursor-1' },
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Evidence');
+    expect(
+      await screen.findByText('Regional water board publishes the dataset'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    expect(await screen.findByText('Second page of the evidence queue')).toBeInTheDocument();
   });
 });
 

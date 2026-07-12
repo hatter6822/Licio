@@ -230,6 +230,15 @@ export interface ContributionStore {
   /** WS-T — count a thread's SOURCED contributions (comments carrying ≥1
    *  citation) in the given states — the "Sources" overview count. */
   countSourced(threadId: string, states: readonly ContributionModerationState[]): Promise<number>;
+  /** Citation-bearing contributions ACROSS ALL THREADS (sourced comments +
+   *  corrections — every row carrying ≥ 1 citation), `(created_at, id)`
+   *  ascending keyset — the WS-J evidence-queue feed (STEWARD_ROLES.md
+   *  ROLE_EVIDENCE reviews sourced comments and their citations). */
+  listCited(opts: {
+    states?: readonly ContributionModerationState[];
+    after?: CreatedAtCursor | null;
+    limit: number;
+  }): Promise<ContributionRecord[]>;
   /** Child counts for the given parents (published children only). */
   childCounts(contributionIds: readonly string[]): Promise<Map<string, number>>;
   /** Update body/citations/metadata, snapshotting the previous values into
@@ -674,6 +683,30 @@ export class InMemoryContributionStore implements ContributionStore {
       }
     }
     return count;
+  }
+
+  async listCited(opts: {
+    states?: readonly ContributionModerationState[];
+    after?: CreatedAtCursor | null;
+    limit: number;
+  }): Promise<ContributionRecord[]> {
+    const states = opts.states ? new Set(opts.states) : null;
+    const after = opts.after ?? null;
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.citations.length > 0 &&
+          (states === null || states.has(row.moderationState)) &&
+          (after === null ||
+            row.createdAt > after.createdAt ||
+            (row.createdAt === after.createdAt && row.contributionId > after.id)),
+      )
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.contributionId.localeCompare(b.contributionId),
+      )
+      .slice(0, opts.limit);
   }
 
   async childCounts(contributionIds: readonly string[]): Promise<Map<string, number>> {

@@ -13,7 +13,14 @@
 //     never on the queue rows or any user-facing shape (SPEC §19.5).
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
-import { contributionPublicSchema, contributionReasonCodeSchema } from './contribution.js';
+import {
+  citationSchema,
+  citationUrlSchema,
+  contributionPublicSchema,
+  contributionReasonCodeSchema,
+  contributionTypeSchema,
+  MAX_CITATIONS,
+} from './contribution.js';
 import {
   appealStatusSchema,
   reportCaseStatusSchema,
@@ -495,6 +502,115 @@ export const auditExportResponseSchema = z
   })
   .strict();
 export type AuditExportResponse = z.infer<typeof auditExportResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Evidence queue + decisions (STEWARD_ROLES.md ROLE_EVIDENCE; SPEC §16.3).
+//
+// The queue is the stream of citation-bearing contributions (sourced comments
+// + corrections) awaiting an evidence steward's review.  A DECISION is
+// evidence METADATA — never a content action (ROLE_EVIDENCE holds no
+// content-removal power by doctrine): `mark-primary-source` and
+// `flag-citation` annotate ONE citation; `clear` marks the contribution
+// reviewed with no annotation.  Every decision is audited and reviewable.
+// ---------------------------------------------------------------------------
+
+export const EVIDENCE_DECISION_ACTIONS = ['mark-primary-source', 'flag-citation', 'clear'] as const;
+export const evidenceDecisionActionSchema = z.enum(EVIDENCE_DECISION_ACTIONS);
+export type EvidenceDecisionAction = z.infer<typeof evidenceDecisionActionSchema>;
+
+export const evidenceQueueRowSchema = z
+  .object({
+    contribution_id: uuidSchema,
+    thread_id: uuidSchema,
+    story_id: uuidSchema.nullable(),
+    /** The anchoring story's title (review context), or null when unresolvable. */
+    story_title: z.string().min(1).max(300).nullable(),
+    type: contributionTypeSchema,
+    /** Truncated body (review context; the full text lives on the thread). */
+    body_preview: z.string().max(280),
+    citations: z.array(citationSchema).min(1).max(MAX_CITATIONS),
+    created_at: isoTimestampSchema,
+  })
+  .strict();
+export type EvidenceQueueRow = z.infer<typeof evidenceQueueRowSchema>;
+
+export const evidenceQueueResponseSchema = z
+  .object({
+    /** Oldest first (FIFO review); rows leave the queue once ANY decision
+     *  (including `clear`) exists for the contribution. */
+    items: z.array(evidenceQueueRowSchema),
+    next_cursor: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type EvidenceQueueResponse = z.infer<typeof evidenceQueueResponseSchema>;
+
+export const evidenceDecisionRequestSchema = z
+  .object({
+    contribution_id: uuidSchema,
+    action: evidenceDecisionActionSchema,
+    /** The annotated citation — REQUIRED for the two citation actions and must
+     *  be one of the contribution's own citation URLs (validated server-side). */
+    citation_url: citationUrlSchema.optional(),
+    /** Why a citation is weak/misleading — REQUIRED for `flag-citation`
+     *  (evidence decisions are reviewable; a flag without a ratified reason is
+     *  not reviewable).  Optional context for the other actions. */
+    reason_code: contributionReasonCodeSchema.optional(),
+    /** Internal reviewer note — never shown to the author. */
+    note: z.string().max(2000).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.action === 'clear') {
+      if (value.citation_url !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['citation_url'],
+          message: 'A clear reviews the whole contribution — it takes no citation target.',
+        });
+      }
+      return;
+    }
+    if (value.citation_url === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['citation_url'],
+        message: 'This action annotates exactly one of the contribution’s citations.',
+      });
+    }
+    if (value.action === 'flag-citation' && value.reason_code === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['reason_code'],
+        message: 'Flagging a citation requires a ratified reason code.',
+      });
+    }
+  });
+export type EvidenceDecisionRequest = z.infer<typeof evidenceDecisionRequestSchema>;
+
+export const evidenceDecisionViewSchema = z
+  .object({
+    decision_id: uuidSchema,
+    contribution_id: uuidSchema,
+    story_id: uuidSchema.nullable(),
+    action: evidenceDecisionActionSchema,
+    citation_url: citationUrlSchema.nullable(),
+    reason_code: contributionReasonCodeSchema.nullable(),
+    /** Internal note — console-visible only. */
+    note: z.string().max(2000).nullable(),
+    decided_by_handle: z.string().min(1).nullable(),
+    created_at: isoTimestampSchema,
+  })
+  .strict();
+export type EvidenceDecisionView = z.infer<typeof evidenceDecisionViewSchema>;
+
+export const evidenceDecisionsResponseSchema = z
+  .object({
+    /** Newest first. */
+    items: z.array(evidenceDecisionViewSchema),
+    next_cursor: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type EvidenceDecisionsResponse = z.infer<typeof evidenceDecisionsResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Coordinated-report incidents (WS-J.2.6e / MFCI-2) — the integrity queue.

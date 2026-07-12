@@ -73,6 +73,18 @@ export const independentSourcesResponseSchema = z.object({
     )
     .max(8)
     .default([]),
+  /** Citations an evidence steward marked as PRIMARY SOURCES on this story's
+   * conversation (STEWARD_ROLES.md ROLE_EVIDENCE `mark-primary-source`) —
+   * reviewed evidence metadata, deduplicated by URL. */
+  primary_sources: z
+    .array(
+      z.object({
+        url: z.string().min(1).max(2048),
+        title: z.string().min(1).max(300).optional(),
+      }),
+    )
+    .max(8)
+    .default([]),
 });
 export type IndependentSourcesResponse = z.infer<typeof independentSourcesResponseSchema>;
 
