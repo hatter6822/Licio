@@ -148,11 +148,15 @@ describe('IndependentSourcesDrawer (SPEC §7.6)', () => {
     expect(coLink).toHaveAttribute('href', `/stories/${CO_STORY_ID}`);
     expect(screen.getByText('syndicated')).toBeInTheDocument();
 
-    // Primary sources — external anchors, marked as steward-reviewed.
+    // Primary sources — marked as steward-reviewed, and rendered through the
+    // MANDATED drainer-safe link flow (SafeExternalLink): the anchor carries
+    // rel="noreferrer nofollow" and its click runs the blocklist/heuristics
+    // check before any navigation — a steward's provenance mark never exempts
+    // the destination from the reader-side safety interstitial.
     expect(screen.getByText('Reviewed by an evidence steward.')).toBeInTheDocument();
     const primary = screen.getByRole('link', { name: 'Raw dataset (CSV)' });
     expect(primary).toHaveAttribute('href', 'https://records.example.org/dataset.csv');
-    expect(primary).toHaveAttribute('rel', 'noreferrer noopener');
+    expect(primary).toHaveAttribute('rel', 'noreferrer nofollow');
     expect(primary).toHaveAttribute('target', '_blank');
 
     // Claims — text plus the subtle independence-group annotation on the
@@ -164,6 +168,21 @@ describe('IndependentSourcesDrawer (SPEC §7.6)', () => {
       screen.getByText('The methodology annex was published alongside the data.'),
     ).toBeInTheDocument();
     expect(screen.getAllByText('lineage group 1')).toHaveLength(1);
+  });
+
+  it.each([
+    ['independent_source', 'Independent source'],
+    ['same_claim_new_evidence', 'Same claim, new evidence'],
+    ['duplicate_context', 'Duplicate context'],
+  ] as const)('renders the %s exposure label as plain language', async (label, copy) => {
+    vi.mocked(api.fetchIndependentSources).mockResolvedValue({
+      ...fullResponse,
+      exposure_label: label,
+    });
+    vi.mocked(api.fetchStoryClaims).mockResolvedValue({ items: [] });
+    render(<IndependentSourcesDrawer storyId={STORY_ID} />, { wrapper: Providers });
+    open();
+    expect(await screen.findByText(copy)).toBeInTheDocument();
   });
 
   it('is absence-honest when MERI has not covered the story yet', async () => {

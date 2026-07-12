@@ -8,7 +8,7 @@
 //     through a diminishing-returns curve before weighting, so volume from one
 //     user saturates for that user only (WS-E.2.3a "per-user/item/window");
 //   • the CONTRIBUTION-TYPE HIERARCHY (WS-E.2.3b) — correction >
-//     synthesis > question > counterexample > explanation > low_info_reply=0 —
+//     explanation > low_info_reply=0 —
 //     applied at the accusing type's own weight for the source-free downweight;
 //   • PER-DIMENSION saturation with the 50% dominance cap (WS-E.2.3a) — item
 //     totals compose through `applySaturation`, so no single dimension can
@@ -104,7 +104,7 @@ export function antiSignalAttenuation(
 }
 
 export interface PwattV1ComponentsConfig {
-  /** The WS-E.2.3b hierarchy weights, each in [0, 1]; low_info_reply/flag = 0. */
+  /** The WS-E.2.3b hierarchy weights, each in [0, 1]; low_info_reply = 0. */
   contributionWeights: Readonly<Record<EventContributionType, number>>;
   /** Per-user diminishing-returns curve over each contribution type's count. */
   contributionCurve: SaturationCurve;

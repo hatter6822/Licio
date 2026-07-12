@@ -288,7 +288,7 @@ const evidenceDecisions: EvidenceDecisionsResponse = {
       action: 'mark-primary-source',
       citation_url: 'https://example.com/earlier-primary',
       reason_code: null,
-      note: null,
+      note: 'Cross-checked against the registry copy.',
       decided_by_handle: 'evidence_steward',
       created_at: NOW,
     },
@@ -509,6 +509,8 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
     // The reviewability trail below the queue.
     expect(screen.getByText('mark-primary-source')).toBeInTheDocument();
     expect(screen.getByText(/example\.com\/earlier-primary/)).toBeInTheDocument();
+    // The internal reviewer note renders on the trail (console-only surface).
+    expect(screen.getByText(/Cross-checked against the registry copy\./)).toBeInTheDocument();
     expect(screen.getByText(/evidence_steward/)).toBeInTheDocument();
   });
 

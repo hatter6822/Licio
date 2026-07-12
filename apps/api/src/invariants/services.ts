@@ -336,7 +336,7 @@ export function registerInvariantConsumers(
     const fromIso = new Date(nowMs - 3_600_000).toISOString();
     const toIso = new Date(nowMs).toISOString();
     const rows = await events.eventStore.listByTopicsBetween(
-      ['contribution.created', 'evidence.added', 'content.submitted'],
+      ['contribution.created', 'content.submitted'],
       fromIso,
       toIso,
     );

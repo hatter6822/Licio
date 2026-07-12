@@ -52,7 +52,6 @@ const SAVED_STORY = {
   reading_minutes: 3,
   rating_label: 'deepening' as const,
   more_on_this_story: [],
-  context_card: null,
   distribution_reason: 'reason',
   context_chips: [],
   safety_state: 'ok' as const,

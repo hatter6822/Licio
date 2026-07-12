@@ -35,9 +35,17 @@ const QUEUE_SCAN_CAP = 500;
 const encodeCursor = (createdAt: string, id: string): string =>
   Buffer.from(`${createdAt}|${id}`, 'utf-8').toString('base64url');
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Decode + SHAPE-VALIDATE a keyset cursor.  A malformed cursor (garbage
+ *  base64, non-timestamp, non-uuid) restarts from the beginning — the
+ *  defensive branchContent semantics, never a 500 from a failed `::uuid`
+ *  cast inside the store. */
 const decodeCursor = (cursor: string): { createdAt: string; id: string } | null => {
   const [createdAt, id] = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
-  return createdAt && id ? { createdAt, id } : null;
+  if (!createdAt || !id) return null;
+  if (!Number.isFinite(Date.parse(createdAt)) || !UUID_RE.test(id)) return null;
+  return { createdAt, id };
 };
 
 /**
@@ -115,6 +123,7 @@ export type EvidenceDecisionOutcome =
         | 'mfa_required'
         | 'target_not_found'
         | 'citation_not_found'
+        | 'citation_malicious'
         | 'duplicate_decision';
       message: string;
     };
@@ -154,6 +163,28 @@ export async function applyEvidenceDecision(
       code: 'citation_not_found',
       message: 'citation_url must be one of the contribution’s own citations',
     };
+  }
+  // Promoting a citation to the PUBLIC primary-source surface is the one
+  // console action that must not skip the malware check: a KNOWN-malicious
+  // destination is refused outright.  `unavailable` (or an unwired seam)
+  // proceeds on steward judgment — the reader-side drainer-safe link flow
+  // still guards every click — and doi: references have no fetchable
+  // destination to check.
+  if (
+    request.action === 'mark-primary-source' &&
+    citationUrl !== null &&
+    /^https?:\/\//i.test(citationUrl) &&
+    mod.urlVerdict
+  ) {
+    const verdict = await mod.urlVerdict(citationUrl);
+    if (verdict === 'malicious') {
+      mod.metrics.increment('moderation.evidence.mark_primary_source_malicious');
+      return {
+        ok: false,
+        code: 'citation_malicious',
+        message: 'This citation resolves to a known malicious destination',
+      };
+    }
   }
   const citationTitle =
     citationUrl !== null
@@ -212,7 +243,7 @@ export function decisionToView(
     // ratified-code refinement); the store field is a plain string column.
     reason_code: record.reasonCode as EvidenceDecisionView['reason_code'],
     note: record.note,
-    decided_by_handle: handles.get(record.decidedBy) ?? null,
+    decided_by_handle: record.decidedBy === null ? null : (handles.get(record.decidedBy) ?? null),
     created_at: record.createdAt,
   };
 }

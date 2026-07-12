@@ -14,6 +14,7 @@ import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { useIndependentSourcesQuery, useStoryClaimsQuery } from '../../../lib/queries.js';
+import { SafeExternalLink } from '../../ugc/SafeExternalLink.js';
 import { Button } from '../../ui/Button/index.js';
 import { Sheet } from '../../ui/Sheet/index.js';
 
@@ -170,14 +171,13 @@ export function IndependentSourcesDrawer({
                   <ul className="mt-1 flex flex-col gap-1">
                     {data.primary_sources.map((primary) => (
                       <li key={primary.url} className="truncate text-sm">
-                        <a
-                          href={primary.url}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="text-primary underline"
-                        >
+                        {/* A user-supplied URL on a public surface MUST ride the
+                            drainer-safe link flow (blocklist + heuristics +
+                            interstitial) — a steward's primary mark reviews
+                            provenance, it does not exempt the destination. */}
+                        <SafeExternalLink href={primary.url} className="text-primary underline">
                           {primary.title ?? primary.url}
-                        </a>
+                        </SafeExternalLink>
                       </li>
                     ))}
                   </ul>

@@ -39,7 +39,6 @@ const feedWater: FeedItem = {
   context_chips: [{ id: 'c1', label: '3 sourced comments', icon: 'document-check' }],
   safety_state: 'ok',
   more_on_this_story: [],
-  context_card: null,
   topic_ids: [topicIdForSlug('climate-environment')],
 };
 
@@ -55,7 +54,6 @@ const feedZoning: FeedItem = {
   context_chips: [{ id: 'c3', label: 'cross-community', icon: 'bridge' }],
   safety_state: 'ok',
   more_on_this_story: [],
-  context_card: null,
   topic_ids: [topicIdForSlug('local-community')],
 };
 
@@ -70,7 +68,6 @@ const feedTransit: FeedItem = {
   context_chips: [{ id: 'c4', label: 'awaiting evidence', icon: 'circle-question' }],
   safety_state: 'caution',
   more_on_this_story: [],
-  context_card: null,
   topic_ids: [topicIdForSlug('local-community')],
 };
 

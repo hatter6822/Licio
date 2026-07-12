@@ -6,7 +6,7 @@
 // interpretation, explicit unresolved questions, and explicit minority views —
 // so the §24.3 quality constraints are mechanically checkable (../summary-quality.ts)
 // rather than a matter of prose inspection. Every draft cites source
-// contributions and evidence cards (verifiable links) and carries the
+// contributions and their citations (verifiable links) and carries the
 // machine-generated label; reports and steward corrections feed the WS-K.1.3c
 // model-improvement loop.
 import { z } from 'zod';

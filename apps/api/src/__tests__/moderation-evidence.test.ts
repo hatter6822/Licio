@@ -242,13 +242,30 @@ describe('GET /v1/moderation/evidence-queue (ROLE_EVIDENCE)', () => {
     expect(body.items).toHaveLength(2);
   });
 
-  it('paginates with a cursor that advances over decided rows', async () => {
+  it('paginates with a cursor that advances over rows decided between pages', async () => {
     const first = await app().fetch(
       get('/v1/moderation/evidence-queue?limit=2', evidenceSteward.cookie),
     );
     const page1 = evidenceQueueResponseSchema.parse(await first.json());
     expect(page1.items).toHaveLength(2);
     expect(page1.next_cursor).not.toBeNull();
+    // Decide BOTH page-1 rows (including the page-boundary row the cursor
+    // encodes) BETWEEN the page reads — the cursor must still advance to the
+    // undecided remainder without skipping it.
+    for (const item of page1.items) {
+      const decided = await getModerationServices().evidenceDecisions.insert({
+        contributionId: item.contribution_id,
+        threadId: item.thread_id,
+        storyId: item.story_id,
+        action: 'clear',
+        citationUrl: null,
+        citationTitle: null,
+        reasonCode: null,
+        note: null,
+        decidedBy: evidenceSteward.userId,
+      });
+      expect(decided.ok).toBe(true);
+    }
     const second = await app().fetch(
       get(
         `/v1/moderation/evidence-queue?limit=2&cursor=${page1.next_cursor}`,
@@ -257,6 +274,53 @@ describe('GET /v1/moderation/evidence-queue (ROLE_EVIDENCE)', () => {
     );
     const page2 = evidenceQueueResponseSchema.parse(await second.json());
     expect(page2.items.map((i) => i.body_preview)).toEqual(['Sourced comment 3']);
+  });
+
+  it('a fully-decided first scan batch still yields the later undecided row', async () => {
+    // 30 candidates; the queue scans internal batches of ≥25 — decide the whole
+    // first batch (and the first row of the second) so page 1 must advance
+    // across an entirely-decided batch to reach fixture 27.
+    cited = Array.from({ length: 30 }, (_, i) => citedFixture(i + 1));
+    const mod = getModerationServices();
+    for (const candidate of cited.slice(0, 26)) {
+      const decided = await mod.evidenceDecisions.insert({
+        contributionId: candidate.contributionId,
+        threadId: candidate.threadId,
+        storyId: candidate.storyId,
+        action: 'clear',
+        citationUrl: null,
+        citationTitle: null,
+        reasonCode: null,
+        note: null,
+        decidedBy: evidenceSteward.userId,
+      });
+      expect(decided.ok).toBe(true);
+    }
+    const res = await app().fetch(
+      get('/v1/moderation/evidence-queue?limit=1', evidenceSteward.cookie),
+    );
+    expect(res.status).toBe(200);
+    const body = evidenceQueueResponseSchema.parse(await res.json());
+    expect(body.items.map((i) => i.body_preview)).toEqual(['Sourced comment 27']);
+  });
+
+  it('a malformed cursor restarts from page 1 instead of erroring', async () => {
+    for (const cursor of [
+      'garbage', // not a decodable createdAt|id pair at all
+      Buffer.from('not-a-timestamp|not-a-uuid', 'utf-8').toString('base64url'),
+      Buffer.from('2026-01-01T00:00:00.000Z|not-a-uuid', 'utf-8').toString('base64url'),
+    ]) {
+      const res = await app().fetch(
+        get(`/v1/moderation/evidence-queue?cursor=${cursor}`, evidenceSteward.cookie),
+      );
+      expect(res.status).toBe(200); // restart-from-beginning, never a 500
+      const body = evidenceQueueResponseSchema.parse(await res.json());
+      expect(body.items.map((i) => i.body_preview)).toEqual([
+        'Sourced comment 1',
+        'Sourced comment 2',
+        'Sourced comment 3',
+      ]);
+    }
   });
 });
 
@@ -388,6 +452,68 @@ describe('POST /v1/moderation/evidence-decisions', () => {
       ),
     );
     expect(dupe.status).toBe(409);
+  });
+});
+
+describe('mark-primary-source malware gate (citation_malicious)', () => {
+  it('refuses a known-malicious http(s) citation with 422 citation_malicious', async () => {
+    const target = cited[0];
+    if (!target) throw new Error('fixture missing');
+    getModerationServices().urlVerdict = async () => 'malicious';
+    const res = await app().fetch(
+      post(
+        '/v1/moderation/evidence-decisions',
+        {
+          contribution_id: target.contributionId,
+          action: 'mark-primary-source',
+          citation_url: target.citations[0]?.url ?? '',
+        },
+        evidenceSteward.cookie,
+      ),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('citation_malicious');
+    // Refused ⇒ NOTHING recorded: the contribution is still an open candidate.
+    const queue = await app().fetch(get('/v1/moderation/evidence-queue', evidenceSteward.cookie));
+    const queueBody = evidenceQueueResponseSchema.parse(await queue.json());
+    expect(queueBody.items.map((i) => i.contribution_id)).toContain(target.contributionId);
+  });
+
+  it('a doi: citation has no fetchable destination — 201 even under a malicious verdict', async () => {
+    const target = cited[0];
+    if (!target) throw new Error('fixture missing');
+    getModerationServices().urlVerdict = async () => 'malicious';
+    const res = await app().fetch(
+      post(
+        '/v1/moderation/evidence-decisions',
+        {
+          contribution_id: target.contributionId,
+          action: 'mark-primary-source',
+          citation_url: target.citations[1]?.url ?? '', // doi:10.1000/demo.1
+        },
+        evidenceSteward.cookie,
+      ),
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("an 'unavailable' verdict proceeds on steward judgment (201)", async () => {
+    const target = cited[1];
+    if (!target) throw new Error('fixture missing');
+    getModerationServices().urlVerdict = async () => 'unavailable';
+    const res = await app().fetch(
+      post(
+        '/v1/moderation/evidence-decisions',
+        {
+          contribution_id: target.contributionId,
+          action: 'mark-primary-source',
+          citation_url: target.citations[0]?.url ?? '',
+        },
+        evidenceSteward.cookie,
+      ),
+    );
+    expect(res.status).toBe(201);
   });
 });
 

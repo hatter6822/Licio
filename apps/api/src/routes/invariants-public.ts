@@ -200,7 +200,10 @@ export function createInvariantsPublicRoutes(
         return c.json(deny('not_found', 'Story not found'), 404);
       }
       const events = resolveEvents();
-      const latest = await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
+      // The SAME WS-H.1.2c `usable` gate the gains read applies: a degraded
+      // batch (TIMEOUT / COMPUTE_ERROR / INSUFFICIENT_COVERAGE) contributes
+      // NOTHING to this response — neither gains nor redundancy classes.
+      const latest = usable(await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID));
       const bounds =
         latest &&
         typeof latest.scoreVector['per_class_bounds'] === 'object' &&

@@ -67,7 +67,7 @@ export interface MeriExposure {
   nearDuplicateGroupId?: string | null | undefined;
   /** Shared publisher/ownership/wire lineage group, when known. */
   sourceLineageGroupId?: string | null | undefined;
-  /** Shared primary-evidence group (claims/evidence cards), when known. */
+  /** Shared primary-evidence group (claim lineage), when known. */
   evidenceGroupId?: string | null | undefined;
 }
 

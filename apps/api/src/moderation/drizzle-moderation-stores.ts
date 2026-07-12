@@ -200,7 +200,7 @@ function mapAppeal(row: typeof moderationAppeals.$inferSelect): ModerationAppeal
     isBanAppeal: row.isBanAppeal,
     slaDueAt: iso(row.slaDueAt),
     decidedAt: isoOrNull(row.decidedAt),
-    decidedBy: row.decidedBy,
+    decidedBy: row.decidedBy ?? null,
     decisionReasonCode: row.decisionReasonCode,
     decisionExplanation: row.decisionExplanation,
     createdAt: iso(row.createdAt),
@@ -1564,21 +1564,17 @@ export class DrizzleEvidenceDecisionStore implements EvidenceDecisionStore {
         reasonCode: record.reasonCode,
         note: record.note,
         decidedBy: record.decidedBy,
+        // Explicit millisecond-precision timestamp (never the DB's µs `now()`):
+        // the listRecent keyset round-trips through a JS Date, and a µs-precision
+        // row makes the DESC cursor SKIP same-millisecond neighbours (the
+        // documented contributions-store discipline).
+        createdAt: new Date(),
       })
       .onConflictDoNothing()
       .returning();
     const row = rows[0];
     if (row === undefined) return { ok: false, code: 'duplicate_decision' };
     return { ok: true, record: mapEvidenceDecision(row) };
-  }
-
-  async listByContribution(contributionId: string): Promise<EvidenceDecisionRecord[]> {
-    const rows = await this.#db
-      .select()
-      .from(evidenceDecisions)
-      .where(eq(evidenceDecisions.contributionId, contributionId))
-      .orderBy(desc(evidenceDecisions.createdAt), desc(evidenceDecisions.decisionId));
-    return rows.map(mapEvidenceDecision);
   }
 
   async decidedContributionIds(contributionIds: readonly string[]): Promise<Set<string>> {

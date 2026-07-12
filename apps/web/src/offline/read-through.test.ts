@@ -22,7 +22,6 @@ const STORY: StoryDetail = {
   reading_minutes: 4,
   rating_label: 'deepening',
   more_on_this_story: [],
-  context_card: null,
   distribution_reason: 'Read by people who also read primary sources.',
   context_chips: [],
   safety_state: 'ok',

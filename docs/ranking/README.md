@@ -40,9 +40,11 @@ Three constraints govern everything here:
    SCOI reduction/pause, PHI diversification, GWEI deployment gate, MERI
    effects) applies only when `effectsEnabled(invariantType)` — otherwise it
    is computed and RECORDED in the decision log with `enforced: false`
-   (observable, never a hidden sanction). The SCOI context card is the one
-   deliberate exception: it is informational ("Needs Context" never means
-   false), so it attaches regardless of promotion state.
+   (observable, never a hidden sanction). The SCOI divergence flag
+   (`scoi_context_card`) is the one deliberate exception: it is informational
+   ("Needs Context" never means false), so it attaches regardless of
+   promotion state — surfacing as the feed card's label; the lens-map detail
+   lives on the story read surface.
 
 ## Architecture
 
@@ -270,7 +272,8 @@ then PHI's ranking effect is diversification only.)
   four are nonnegative; enforced penalties can drive a total below zero.
 - **Constraints (WS-I.2.3c).** MFCI at/above the profile state excludes
   cross-community distribution + flags review; SCOI medium attaches the
-  context card (always), high reduces cross-community distribution by the
+  divergence flag (always — it drives the "Needs Context" label), high
+  reduces cross-community distribution by the
   profile multiplier, very-high pauses pending review (room-internal reads
   stay feasible); PHI above threshold diversifies the REQUESTING USER's
   feed (topic caps halve) — the per-user input is the MAX holonomy over the

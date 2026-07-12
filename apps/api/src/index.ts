@@ -241,6 +241,7 @@ import {
 import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
 import { noticeToView } from './moderation/notices.js';
 import {
+  createCitedContributionReads,
   createProductionContentPort,
   createProductionEventPort,
   createProductionInvariantPort,
@@ -714,47 +715,12 @@ const moderationServices = createInMemoryModerationServices({
       const c = await forumServices.contributions.getById(id);
       return c ? { userId: c.userId } : null;
     },
-    // STEWARD_ROLES.md evidence queue: published citation-bearing rows across
-    // all threads, with the anchoring story title resolved for review context.
-    listCitedContributions: async ({ after, limit }) => {
-      const rows = await forumServices.contributions.listCited({
-        states: ['published'],
-        after,
-        limit,
-      });
-      const out = [];
-      for (const row of rows) {
-        const thread = await ingestionServices.stories.getThreadById(row.threadId);
-        const story = thread ? await ingestionServices.stories.getById(thread.storyId) : null;
-        out.push({
-          contributionId: row.contributionId,
-          threadId: row.threadId,
-          storyId: story?.storyId ?? null,
-          storyTitle: story?.title ?? null,
-          type: row.type,
-          bodyPreview: row.body.slice(0, 280),
-          citations: row.citations,
-          createdAt: row.createdAt,
-        });
-      }
-      return out;
-    },
-    getCitedContribution: async (contributionId) => {
-      const row = await forumServices.contributions.getById(contributionId);
-      if (row?.moderationState !== 'published' || row.citations.length === 0) return null;
-      const thread = await ingestionServices.stories.getThreadById(row.threadId);
-      const story = thread ? await ingestionServices.stories.getById(thread.storyId) : null;
-      return {
-        contributionId: row.contributionId,
-        threadId: row.threadId,
-        storyId: story?.storyId ?? null,
-        storyTitle: story?.title ?? null,
-        type: row.type,
-        bodyPreview: row.body.slice(0, 280),
-        citations: row.citations,
-        createdAt: row.createdAt,
-      };
-    },
+    // STEWARD_ROLES.md evidence queue: the published-only cited reads over the
+    // real WS-G/WS-F stores (the testable factory in production-ports.ts).
+    ...createCitedContributionReads({
+      contributions: forumServices.contributions,
+      stories: ingestionServices.stories,
+    }),
     // WS-J #23: a thread report target → the thread's story owner.
     getThread: async (threadId) => {
       const thread = await ingestionServices.stories.getThreadById(threadId);

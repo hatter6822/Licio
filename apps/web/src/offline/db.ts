@@ -113,8 +113,10 @@ export const MIGRATIONS: MigrationMap = {
   // PLAINTEXT type to `comment` in place (the encrypted body is untouched:
   // its ciphertext stays valid and decrypts exactly as before), and rebuild a
   // retired queued contribution payload onto the live comment shape, keeping
-  // only the keys the strict create schema accepts.  Data is preserved, never
-  // dropped — the same principle as migration 2.
+  // only the keys the strict create schema accepts.  The user's WORDS (body,
+  // citations, attachments) are preserved; the retired per-type metadata
+  // annotations (assumptions/uncertainty notes/relevance explanations) are
+  // dropped, mirroring server migration 0076's metadata strip.
   5: (_db, tx) => {
     remapRetiredContributionTypes(tx.objectStore(STORE.draftContributions));
     remapRetiredQueuedContributions(tx.objectStore(STORE.pendingQueue));

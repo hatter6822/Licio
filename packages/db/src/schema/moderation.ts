@@ -469,9 +469,10 @@ export const evidenceDecisions = pgTable(
     reasonCode: text('reason_code'),
     /** Internal reviewer note — console-visible only. */
     note: text('note'),
-    /** The deciding steward — an accountability field (audit-actor posture:
-     *  kept on erasure, like moderation_audit.actor_user_id). */
-    decidedBy: uuid('decided_by').notNull(),
+    /** The deciding steward.  The audit-actor posture is nullable + set-null
+     *  (like moderation_audit.actor_user_id): a hard right-to-erasure purge
+     *  severs the link while the decision record survives. */
+    decidedBy: uuid('decided_by').references(() => users.userId, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

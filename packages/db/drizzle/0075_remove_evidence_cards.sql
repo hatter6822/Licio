@@ -97,15 +97,18 @@ DROP TYPE "takedown_target_type_old";--> statement-breakpoint
 -- 4. Archive the cards (the conversion + drop follow step 5: writing the
 --    `comment` label — an ALTER TYPE ADD VALUE addition (0029) — before the
 --    enum recreate would hit 55P04 on a fresh single-transaction bootstrap).
---    EVERY card is archived verbatim (enums cast to text so the type drops
---    below succeed) into `evidence_cards_archive_0075` — the operator-facing
+--    EVERY card is archived (enums cast to text so the type drops below
+--    succeed) into `evidence_cards_archive_0075` — the operator-facing
 --    preservation record for fields the live model does not carry
 --    (relationship/material type, verification state, independence group).
---    The archive is dropped again when it is empty (a fresh bootstrap leaves
---    no stray table).
+--    `submitted_by` is deliberately NOT archived: the archive sits outside
+--    the right-to-erasure/DSAR machinery, so it must hold no user id —
+--    attribution lives on the converted contributions, which the WS-D
+--    erasure path tombstones like any other.  The archive is dropped again
+--    when it is empty (a fresh bootstrap leaves no stray table).
 -- ---------------------------------------------------------------------------
 CREATE TABLE "evidence_cards_archive_0075" AS
-  SELECT "evidence_id", "claim_id", "source_id", "contribution_id", "submitted_by",
+  SELECT "evidence_id", "claim_id", "source_id", "contribution_id",
          "evidence_type"::text AS "evidence_type",
          "relationship_type"::text AS "relationship_type",
          "citation_url_or_ref", "relevance_note",
@@ -139,7 +142,11 @@ DROP TYPE "contribution_type_old";--> statement-breakpoint
 --     submitter at the original timestamps, carrying the citation (when it
 --     is a valid http/doi reference — the strict wire schema's shape) and
 --     the relevance note as the body, with the claim link preserved on
---     `target_claim_id`.  Runs AFTER the enum recreate so the `comment`
+--     `target_claim_id`.  The citation gate uses the printable-ASCII class
+--     `[!-~]` rather than `\S` (whose Postgres semantics are libc/locale-
+--     dependent), so a reference the JS wire schema would reject can never be
+--     written as a citation — non-conforming references ride the body
+--     instead.  Runs AFTER the enum recreate so the `comment`
 --     label is a same-transaction CREATE TYPE value (fresh-bootstrap-safe);
 --     co-created cards already live on as their (just remapped) comment.
 --     The entity table + its enums then drop.
@@ -148,13 +155,16 @@ INSERT INTO "contributions" ("contribution_id", "thread_id", "user_id", "type", 
     "citations", "metadata", "target_claim_id", "parent_contribution_id", "client_draft_id",
     "path", "moderation_state", "created_at", "updated_at")
   SELECT gen_random_uuid(), t."thread_id", ec."submitted_by", 'comment',
-      left(coalesce(nullif(concat_ws(E'\n\n',
-        nullif(ec."relevance_note", ''),
-        case when NOT (ec."citation_url_or_ref" ~* '^(https?://\S+|doi:10\.\d{4,9}/\S{1,200})$'
-                       and char_length(ec."citation_url_or_ref") <= 2048)
-             then concat('Source reference: ', ec."citation_url_or_ref") end), ''),
-        concat('Source reference: ', ec."citation_url_or_ref")), 5000),
-      case when ec."citation_url_or_ref" ~* '^(https?://\S+|doi:10\.\d{4,9}/\S{1,200})$'
+      -- The wire body cap counts UTF-16 UNITS; char_length counts CODE POINTS.
+      -- Each astral character (≥ U+10000) is two units, so truncating to
+      -- (5000 − astral-count) code points guarantees ≤ 5000 units — exact for
+      -- the BMP-only common case, conservative otherwise (rows written through
+      -- the old zod paths were unit-bounded already; this guards ops-written
+      -- rows so a migrated comment can never 500 the read path).
+      left(body_composed.body, greatest(1,
+        5000 - (char_length(body_composed.body)
+                - char_length(regexp_replace(body_composed.body, '[\U00010000-\U0010FFFF]', '', 'g'))))),
+      case when ec."citation_url_or_ref" ~ '(?i)^(https?://[!-~]+|doi:10\.[0-9]{4,9}/[!-~]{1,200})$'
              and char_length(ec."citation_url_or_ref") <= 2048
            then jsonb_build_array(jsonb_build_object('url', ec."citation_url_or_ref"))
            else '[]'::jsonb end,
@@ -165,6 +175,14 @@ INSERT INTO "contributions" ("contribution_id", "thread_id", "user_id", "type", 
   LEFT JOIN "claims" c ON c."claim_id" = ec."claim_id"
   JOIN "threads" t ON t."story_id" = COALESCE(ec."story_id", c."story_id")
     AND t."branch_index" = 0
+  CROSS JOIN LATERAL (
+    SELECT coalesce(nullif(concat_ws(E'\n\n',
+      nullif(ec."relevance_note", ''),
+      case when NOT (ec."citation_url_or_ref" ~ '(?i)^(https?://[!-~]+|doi:10\.[0-9]{4,9}/[!-~]{1,200})$'
+                     and char_length(ec."citation_url_or_ref") <= 2048)
+           then concat('Source reference: ', ec."citation_url_or_ref") end), ''),
+      concat('Source reference: ', ec."citation_url_or_ref")) AS body
+  ) body_composed
   WHERE ec."contribution_id" IS NULL
   ON CONFLICT DO NOTHING;--> statement-breakpoint
 DROP TABLE IF EXISTS "evidence_cards";--> statement-breakpoint

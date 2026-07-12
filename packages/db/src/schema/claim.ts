@@ -4,7 +4,7 @@
 // is the MERI grouping key (WS-H.2): non-independent lineages carry one group
 // id so duplicated claims can never count as independent validation (§13.6).
 // The former `evidence_cards` table was dropped with the EvidenceCard entity
-// (sourcing is comment-centric citations on contributions; migration 0045).
+// (sourcing is comment-centric citations on contributions; migration 0075).
 //
 // The table carries a generated full-text column (WS-F.3.1a) so claims are
 // searchable alongside stories.

@@ -638,6 +638,11 @@ function EvidencePanel(): React.ReactElement {
                 · {d.decided_by_handle ?? t('console.system', 'system')} ·{' '}
                 {d.created_at.slice(0, 16)}
               </span>
+              {d.note ? (
+                <p className="mt-0.5 text-xs text-ink-muted">
+                  {t('console.decisionNote', 'Note')}: {d.note}
+                </p>
+              ) : null}
             </li>
           ))}
           {decisions.data && decisionRows.length === 0 ? (

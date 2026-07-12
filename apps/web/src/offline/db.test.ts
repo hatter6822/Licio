@@ -268,6 +268,97 @@ describe('migrations', () => {
     await deleteDatabase(name);
   });
 
+  it('the v5 rebuild leaves live payloads, legacy citations, and non-contribution ops intact', async () => {
+    const name = `licio-v5b-${Math.random().toString(36).slice(2)}`;
+    const livePayload = {
+      type: 'correction',
+      thread_id: '44444444-4444-4444-8444-444444444444',
+      client_draft_id: 'd-corr',
+      body: 'The date is wrong; the vote was on Wednesday.',
+      target_story_id: '55555555-5555-4555-8555-555555555555',
+      citations: [{ url: 'https://example.org/minutes' }],
+      target_text_excerpt: 'on Tuesday evening',
+    };
+    const reportPayload = {
+      type: 'question', // a retired-LOOKING key on a NON-contribution op
+      target_id: '66666666-6666-4666-8666-666666666666',
+      reason_code: 'MOD_SPAM_001',
+    };
+    const v4 = await openDb(name, 4, MIGRATIONS);
+    await new Promise<void>((resolve, reject) => {
+      const tx = v4.transaction(STORE.pendingQueue, 'readwrite');
+      const queue = tx.objectStore(STORE.pendingQueue);
+      // A queued LIVE correction must pass through UNTOUCHED (its own keys —
+      // target_story_id, target_text_excerpt — are not stripped).
+      queue.put({
+        schemaVersion: 2,
+        operationId: 'op-live-correction',
+        operationType: 'contribution',
+        status: 'pending',
+        createdAt: 1,
+        attempts: 0,
+        lastError: null,
+        payload: livePayload,
+      });
+      // A retired `evidence` op keeps its CITATIONS through the comment rebuild
+      // (citations is a live comment key; the retired stance/relevance drop).
+      queue.put({
+        schemaVersion: 2,
+        operationId: 'op-evidence',
+        operationType: 'contribution',
+        status: 'pending',
+        createdAt: 2,
+        attempts: 0,
+        lastError: null,
+        payload: {
+          type: 'evidence',
+          thread_id: '44444444-4444-4444-8444-444444444444',
+          client_draft_id: 'd-evid',
+          body: 'Primary dataset supporting the claim.',
+          citations: [{ url: 'https://example.org/dataset' }, { url: 'doi:10.1000/demo.1' }],
+          stance: 'supporting',
+          relevance_explanation: 'Direct measurement.',
+        },
+      });
+      // A NON-contribution queue op is untouched even with a retired `type`.
+      queue.put({
+        schemaVersion: 2,
+        operationId: 'op-report',
+        operationType: 'report',
+        status: 'pending',
+        createdAt: 3,
+        attempts: 0,
+        lastError: null,
+        payload: reportPayload,
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    v4.close();
+
+    const v5 = await openDb(name, 5, MIGRATIONS);
+    const get = (store: string, key: string) =>
+      new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+        const req = v5.transaction(store, 'readonly').objectStore(store).get(key);
+        req.onsuccess = () => resolve(req.result as Record<string, unknown> | undefined);
+        req.onerror = () => reject(req.error);
+      });
+    const live = await get(STORE.pendingQueue, 'op-live-correction');
+    expect(live?.['payload']).toEqual(livePayload); // untouched
+    const evidence = await get(STORE.pendingQueue, 'op-evidence');
+    expect(evidence?.['payload']).toEqual({
+      type: 'comment',
+      thread_id: '44444444-4444-4444-8444-444444444444',
+      client_draft_id: 'd-evid',
+      body: 'Primary dataset supporting the claim.',
+      citations: [{ url: 'https://example.org/dataset' }, { url: 'doi:10.1000/demo.1' }],
+    });
+    const report = await get(STORE.pendingQueue, 'op-report');
+    expect(report?.['payload']).toEqual(reportPayload); // untouched
+    v5.close();
+    await deleteDatabase(name);
+  });
+
   it('aborts atomically and keeps the old version when a migration throws', async () => {
     const name = `licio-fail-${Math.random().toString(36).slice(2)}`;
     const v1 = await openDb(name, 1);

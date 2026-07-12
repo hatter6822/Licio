@@ -332,15 +332,13 @@ describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
       mode: undefined,
     });
     const item = served.items.find((i) => i.story_id === storyId);
-    expect(item?.context_card).toEqual({
-      scoi_level: 'medium', // split → medium on the §10.4 ladder
-      lens_count: 3,
-      bridge_attempts_open: 0,
-      where_interpretations_differ: true,
-    });
-    // §10.5: the live SCOI signal outranks the lifecycle label mapping.
+    // §10.5: the live SCOI divergence signal (the scoi_context_card constraint
+    // flag at a non-low stored level) outranks the lifecycle label mapping.
+    // The compact card payload itself left the wire with the other
+    // client-unreachable planes — the label IS the feed's divergence surface;
+    // the lens map lives on GET /v1/stories/:id/interpretations.
     expect(item?.rating_label).toBe('needs-context');
-    // Unflagged items carry NO card (null on the wire, schema-defaulted).
+    // An unflagged item keeps its lifecycle-derived label (no divergence).
     const clean = await seedStory(fixture.ingestion);
     const second = await serveFeed(fixture.ranking, {
       userId: null,
@@ -349,7 +347,9 @@ describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(second.items.find((i) => i.story_id === clean.storyId)?.context_card).toBeNull();
+    expect(second.items.find((i) => i.story_id === clean.storyId)?.rating_label).not.toBe(
+      'needs-context',
+    );
   });
 
   it('cluster representatives carry more_on_this_story with the demoted sibling ids', async () => {

@@ -485,6 +485,21 @@ for a future swap to an audited WASM build (tracked residual).
 | `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate; **and the WS-S.6.6 rendezvous suite** — the TTL clamp, the §15.3.1 no-existence-oracle (poll never 404s), re-announce-replaces, the signal queue/drain round-trip, aggregate-only metrics, the sweep, route shape-validation/oversized rejection, and the full-app CSRF-exempt mount |
 | `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 
+## Protocol-evolution note — the §13.5 contribution-op narrowing
+
+The §13.5 `contribution.create` op's `contribution_type` follows the shared
+live taxonomy and narrowed IN PLACE to `comment | correction` (no `schema`
+literal bump, no epoch gate) when the WS-G-era types were removed.  This is
+deliberate pre-GA policy: the ONLY shipped producer (`room-manager.ts`) has
+only ever sealed `comment` ops, so no conforming peer can hold an op the
+narrowed schema rejects; a non-conforming peer's op quarantines at `openOp`
+(fail-closed, the §14.2 posture), and the reducer tolerates retired types in
+REPLAYED STATE (the cap check skips an unknown type rather than crashing).
+Contrast LCAP, which RETAINED its §12.1 vocabulary — its packs are a durable
+interchange format with a golden conformance corpus; private-room ops are
+E2EE room-internal state with no cross-version archive yet.  Post-GA, a
+schema narrowing of this kind requires a `schema` literal bump.
+
 ## Residuals (the next slices)
 
 The pure protocol core is complete through WS-S.6.5; the remaining work is the

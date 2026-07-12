@@ -17,6 +17,7 @@ import {
   DrizzleAccountBlockStore,
   DrizzleAccountMuteStore,
   DrizzleCoordinatedReportIncidentStore,
+  DrizzleEvidenceDecisionStore,
   DrizzleModerationActionStore,
   DrizzleModerationAppealStore,
   DrizzleModerationAuditStore,
@@ -42,7 +43,15 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
   let notices: DrizzleModerationNoticeStore;
   let reviewerStatus: DrizzleReviewerStatusStore;
   let incidents: DrizzleCoordinatedReportIncidentStore;
+  let evidence: DrizzleEvidenceDecisionStore;
   const userIds: string[] = [];
+
+  /** The evidence store has no test-only clear() (it is append-shaped);
+   *  wipe the table directly (this suite's blanket-reset posture). */
+  async function clearEvidenceDecisions(): Promise<void> {
+    const { evidenceDecisions } = await import('@licio/db');
+    await db.delete(evidenceDecisions);
+  }
 
   async function insertUser(label: string): Promise<string> {
     const { users } = await import('@licio/db');
@@ -75,6 +84,7 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     notices = new DrizzleModerationNoticeStore(db);
     reviewerStatus = new DrizzleReviewerStatusStore(db);
     incidents = new DrizzleCoordinatedReportIncidentStore(db);
+    evidence = new DrizzleEvidenceDecisionStore(db);
   });
 
   beforeEach(async () => {
@@ -88,6 +98,7 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     await blocks.clear();
     await mutes.clear();
     await reviewerStatus.clear();
+    await clearEvidenceDecisions();
     await audit.clear();
   });
 
@@ -101,6 +112,7 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     await blocks.clear();
     await mutes.clear();
     await reviewerStatus.clear();
+    await clearEvidenceDecisions();
     // TRUNCATE the append-only audit (the only permitted bulk reset; row
     // UPDATE/DELETE stay blocked).  Deleting the seeded users below now cascades
     // cleanly even with audit rows present — the append-only trigger PERMITS the
@@ -611,5 +623,147 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     );
     expect(resolved?.status).toBe('cleared');
     expect(await incidents.findOpenByTarget('account', target)).toBeNull();
+  });
+
+  it('evidence decisions: round-trip, per-action duplicate protection, story/action filters', async () => {
+    const steward = await insertUser('evidstew');
+    const contributionId = randomUUID();
+    const base = {
+      contributionId,
+      threadId: randomUUID(),
+      storyId: randomUUID(),
+      citationTitle: 'Primary dataset',
+      reasonCode: null,
+      note: 'Verified against the registry.',
+      decidedBy: steward,
+    };
+    const mark = await evidence.insert({
+      ...base,
+      action: 'mark-primary-source',
+      citationUrl: 'https://example.test/dataset',
+    });
+    expect(mark.ok).toBe(true);
+    if (!mark.ok) return;
+    // Insert→read round-trip through listByStory (every field survives).
+    const read = (await evidence.listByStory(base.storyId))[0];
+    expect(read?.decisionId).toBe(mark.record.decisionId);
+    expect(read?.contributionId).toBe(contributionId);
+    expect(read?.citationUrl).toBe('https://example.test/dataset');
+    expect(read?.citationTitle).toBe('Primary dataset');
+    expect(read?.note).toBe('Verified against the registry.');
+    expect(read?.decidedBy).toBe(steward);
+    expect(Number.isFinite(Date.parse(read?.createdAt ?? ''))).toBe(true);
+
+    // The SAME (contribution, citation, action) conflicts on the partial
+    // unique index to a duplicate outcome...
+    expect(
+      await evidence.insert({
+        ...base,
+        action: 'mark-primary-source',
+        citationUrl: 'https://example.test/dataset',
+      }),
+    ).toEqual({ ok: false, code: 'duplicate_decision' });
+    // ...while a FLAG on the same citation is a DIFFERENT action and inserts.
+    const flag = await evidence.insert({
+      ...base,
+      action: 'flag-citation',
+      citationUrl: 'https://example.test/dataset',
+      reasonCode: 'MOD_MISINFO_001',
+    });
+    expect(flag.ok).toBe(true);
+    // One `clear` per contribution: the second hits the clear partial unique.
+    const clear = await evidence.insert({
+      ...base,
+      action: 'clear',
+      citationUrl: null,
+      citationTitle: null,
+    });
+    expect(clear.ok).toBe(true);
+    expect(
+      await evidence.insert({ ...base, action: 'clear', citationUrl: null, citationTitle: null }),
+    ).toEqual({ ok: false, code: 'duplicate_decision' });
+
+    // decidedContributionIds filters to the decided subset only.
+    const undecided = randomUUID();
+    const decided = await evidence.decidedContributionIds([contributionId, undecided]);
+    expect(decided.has(contributionId)).toBe(true);
+    expect(decided.has(undecided)).toBe(false);
+    expect((await evidence.decidedContributionIds([])).size).toBe(0);
+
+    // The action filter on listByStory returns ONLY the mark (not flag/clear).
+    const marks = await evidence.listByStory(base.storyId, 'mark-primary-source');
+    expect(marks.map((r) => r.decisionId)).toEqual([mark.record.decisionId]);
+    expect(await evidence.listByStory(base.storyId)).toHaveLength(3);
+    expect(await evidence.listByStory(randomUUID())).toEqual([]);
+  });
+
+  it('evidence decisions: listRecent keyset walk visits same-millisecond rows exactly once', async () => {
+    const threadId = randomUUID();
+    const insertClear = () =>
+      evidence.insert({
+        contributionId: randomUUID(),
+        threadId,
+        storyId: null,
+        action: 'clear',
+        citationUrl: null,
+        citationTitle: null,
+        reasonCode: null,
+        note: null,
+        decidedBy: null,
+      });
+    // Insert PAIRS concurrently until two rows land in the SAME millisecond —
+    // the case the app-set ms-precision createdAt exists for (a µs-precision
+    // DB default would make the DESC cursor SKIP the same-ms neighbour).
+    let sameMsPair = false;
+    for (let attempt = 0; attempt < 30 && !sameMsPair; attempt += 1) {
+      for (const outcome of await Promise.all([insertClear(), insertClear()])) {
+        expect(outcome.ok).toBe(true);
+      }
+      const stamps = (await evidence.listRecent({ limit: 100 })).map((r) => r.createdAt);
+      sameMsPair = stamps.some((stamp, i) => stamps.indexOf(stamp) !== i);
+    }
+    expect(sameMsPair).toBe(true);
+
+    // Walk pages of 1 through the DESC keyset: no row skipped, none repeated.
+    const full = await evidence.listRecent({ limit: 100 });
+    const walked: string[] = [];
+    let after: { createdAt: string; decisionId: string } | null = null;
+    for (;;) {
+      const page = await evidence.listRecent({ after, limit: 1 });
+      const row = page[0];
+      if (!row) break;
+      walked.push(row.decisionId);
+      after = { createdAt: row.createdAt, decisionId: row.decisionId };
+    }
+    expect(walked).toEqual(full.map((r) => r.decisionId)); // complete + ordered
+    expect(new Set(walked).size).toBe(walked.length); // no duplicates
+  });
+
+  it('evidence decisions: a hard user purge severs decided_by while the decision survives', async () => {
+    const steward = await insertUser('evidpurge');
+    const inserted = await evidence.insert({
+      contributionId: randomUUID(),
+      threadId: randomUUID(),
+      storyId: randomUUID(),
+      action: 'mark-primary-source',
+      citationUrl: 'https://example.test/survives-erasure',
+      citationTitle: null,
+      reasonCode: null,
+      note: null,
+      decidedBy: steward,
+    });
+    expect(inserted.ok).toBe(true);
+    if (!inserted.ok) return;
+    const { users } = await import('@licio/db');
+    const { eq } = await import('drizzle-orm');
+    // The WS-D right-to-erasure purge is a plain DELETE; the FK is SET NULL.
+    await db.delete(users).where(eq(users.userId, steward));
+    const survivor = (await evidence.listRecent({ limit: 50 })).find(
+      (r) => r.decisionId === inserted.record.decisionId,
+    );
+    expect(survivor).toBeDefined();
+    expect(survivor?.decidedBy).toBeNull();
+    expect(survivor?.citationUrl).toBe('https://example.test/survives-erasure');
+    expect(survivor?.action).toBe('mark-primary-source');
   });
 });

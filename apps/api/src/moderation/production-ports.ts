@@ -10,6 +10,7 @@
 // the full service container.
 import { randomUUID } from 'node:crypto';
 import {
+  type Citation,
   type ContributionPublic,
   EVENT_SCHEMA_VERSION,
   type InvariantSignal,
@@ -295,6 +296,94 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
 
     ...(deps.listCitedContributions ? { listCitedContributions: deps.listCitedContributions } : {}),
     ...(deps.getCitedContribution ? { getCitedContribution: deps.getCitedContribution } : {}),
+  };
+}
+
+/** The narrow store surface the cited-contribution reads need (the WS-G
+ *  contribution store + the WS-F story/thread reads). */
+export interface CitedReadsDeps {
+  contributions: {
+    getById(contributionId: string): Promise<{
+      contributionId: string;
+      threadId: string;
+      type: 'comment' | 'correction';
+      body: string;
+      citations: Citation[];
+      moderationState: string;
+      createdAt: string;
+    } | null>;
+    listCited(opts: {
+      states?: readonly ('published' | 'under_review' | 'hidden' | 'removed')[];
+      after?: { createdAt: string; id: string } | null;
+      limit: number;
+    }): Promise<
+      Array<{
+        contributionId: string;
+        threadId: string;
+        type: 'comment' | 'correction';
+        body: string;
+        citations: Citation[];
+        createdAt: string;
+      }>
+    >;
+  };
+  stories: {
+    getThreadById(threadId: string): Promise<{ storyId: string } | null>;
+    getById(storyId: string): Promise<{ storyId: string; title: string } | null>;
+  };
+}
+
+/**
+ * The STEWARD_ROLES.md evidence-queue reads over the real WS-G/WS-F stores
+ * (boot wiring for `ContentPortDeps.listCitedContributions` /
+ * `getCitedContribution`): PUBLISHED citation-bearing contributions with the
+ * anchoring story title resolved for review context.  Extracted from the boot
+ * closure so the published-only gate and the title resolution are directly
+ * testable against real in-memory stores.
+ */
+export function createCitedContributionReads(deps: CitedReadsDeps): {
+  listCitedContributions: NonNullable<ContentPortDeps['listCitedContributions']>;
+  getCitedContribution: NonNullable<ContentPortDeps['getCitedContribution']>;
+} {
+  const resolveStory = async (
+    threadId: string,
+  ): Promise<{ storyId: string | null; storyTitle: string | null }> => {
+    const thread = await deps.stories.getThreadById(threadId);
+    const story = thread ? await deps.stories.getById(thread.storyId) : null;
+    return { storyId: story?.storyId ?? null, storyTitle: story?.title ?? null };
+  };
+  const project = async (row: {
+    contributionId: string;
+    threadId: string;
+    type: 'comment' | 'correction';
+    body: string;
+    citations: Citation[];
+    createdAt: string;
+  }): Promise<CitedContribution> => {
+    const { storyId, storyTitle } = await resolveStory(row.threadId);
+    return {
+      contributionId: row.contributionId,
+      threadId: row.threadId,
+      storyId,
+      storyTitle,
+      type: row.type,
+      bodyPreview: row.body.slice(0, 280),
+      citations: row.citations,
+      createdAt: row.createdAt,
+    };
+  };
+  return {
+    listCitedContributions: async ({ after, limit }) => {
+      const rows = await deps.contributions.listCited({ states: ['published'], after, limit });
+      const out: CitedContribution[] = [];
+      for (const row of rows) out.push(await project(row));
+      return out;
+    },
+    getCitedContribution: async (contributionId) => {
+      const row = await deps.contributions.getById(contributionId);
+      if (row?.moderationState !== 'published' || row.citations.length === 0) return null;
+      return project(row);
+    },
   };
 }
 

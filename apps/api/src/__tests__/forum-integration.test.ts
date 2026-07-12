@@ -733,6 +733,64 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(await migrated.getBytes(uploadId)).toEqual(bytes);
   });
 
+  it('listCited walks the global (created_at, id) keyset exactly once, published-only', async () => {
+    const stories = new DrizzleStoryStore(db);
+    // A dedicated thread: listCited is GLOBAL, so assertions on MY rows are
+    // made order-relative (other tests/suites may interleave their own rows).
+    const walkThreadId = await seedThread(stories);
+    const insertRow = async (
+      over: Partial<Pick<ContributionRecord, 'citations' | 'moderationState'>> = {},
+    ): Promise<ContributionRecord> => {
+      const outcome = await contributions.insert(
+        contributionInput({
+          threadId: walkThreadId,
+          citations: [{ url: 'https://example.org/walk-source' }],
+          ...over,
+        }),
+      );
+      if (!outcome.ok) throw new Error('cited-walk insert failed');
+      return outcome.contribution;
+    };
+    const mine: ContributionRecord[] = [await insertRow()];
+    // Insert concurrent PAIRS until two of the cited rows share a MILLISECOND —
+    // the app-set ms-precision created_at the ascending keyset cursor pins
+    // (a µs-precision default would skip the same-ms neighbour on resume).
+    let sameMsPair = false;
+    for (let attempt = 0; attempt < 30 && !sameMsPair; attempt += 1) {
+      const [a, b] = await Promise.all([insertRow(), insertRow()]);
+      mine.push(a, b);
+      sameMsPair = mine.some((row, i) =>
+        mine.some((other, j) => j !== i && other.createdAt === row.createdAt),
+      );
+    }
+    expect(sameMsPair).toBe(true);
+    const citationless = await insertRow({ citations: [] });
+    const hidden = await insertRow({ moderationState: 'under_review' });
+
+    const expected = [...mine]
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.contributionId.localeCompare(b.contributionId),
+      )
+      .map((row) => row.contributionId);
+
+    const walked: string[] = [];
+    let after: { createdAt: string; id: string } | null = null;
+    for (;;) {
+      const page = await contributions.listCited({ states: ['published'], after, limit: 1 });
+      const row = page[0];
+      if (!row) break;
+      walked.push(row.contributionId);
+      after = { createdAt: row.createdAt, id: row.contributionId };
+    }
+    expect(new Set(walked).size).toBe(walked.length); // no row visited twice
+    // MY published cited rows appear COMPLETE and in exact keyset order.
+    expect(walked.filter((id) => expected.includes(id))).toEqual(expected);
+    expect(walked).not.toContain(citationless.contributionId); // no citations
+    expect(walked).not.toContain(hidden.contributionId); // states filter bites
+  });
+
   it('listThreadsByRoom pages by the descending keyset exactly once', async () => {
     const room = roomInput();
     expect((await roomsStore.insert(room)).ok).toBe(true);

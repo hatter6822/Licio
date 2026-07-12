@@ -56,7 +56,6 @@ function feedItem(id: string) {
     context_chips: [],
     safety_state: 'ok',
     more_on_this_story: [],
-    context_card: null,
     topic_ids: [],
   };
 }

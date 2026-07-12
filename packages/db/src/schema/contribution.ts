@@ -118,6 +118,13 @@ export const contributions = pgTable(
     uniqueIndex('contributions_user_draft_uq')
       .on(t.userId, t.clientDraftId)
       .where(sql`${t.userId} is not null`),
+    /** The STEWARD_ROLES.md evidence-queue scan (published citation-bearing
+     *  rows, ascending keyset) — exactly matches `listCited`'s predicate. */
+    index('contributions_cited_published_idx')
+      .on(t.createdAt, t.contributionId)
+      .where(
+        sql`coalesce(jsonb_array_length(${t.citations}), 0) > 0 and ${t.moderationState} = 'published'`,
+      ),
     check('contributions_body_len', sql`char_length(${t.body}) between 0 and 5000`),
     check('contributions_citations_array', sql`jsonb_typeof(${t.citations}) = 'array'`),
     check('contributions_metadata_object', sql`jsonb_typeof(${t.metadata}) = 'object'`),

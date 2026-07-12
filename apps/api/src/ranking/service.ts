@@ -49,7 +49,6 @@ import {
   rankingDecisionLogSchema,
   retentionDeadline,
   type SafetyExclusion,
-  type ScoiLevel,
   type ScoredItem,
   selectProfileForContext,
   topicRelevance,
@@ -57,7 +56,6 @@ import {
 import {
   deriveRatingLabel,
   deriveStorySafetyState,
-  type FeedContextCard,
   type FeedItem,
   type FeedMode,
   feedItemSchema,
@@ -178,7 +176,9 @@ interface SelectedEntry {
   features: FeatureVector | undefined;
   /** Same-cluster items demoted by dedup ("more on this story"). */
   moreOnThisStory: readonly string[];
-  contextCard: FeedContextCard | null;
+  /** §10.6 divergence signal for the §5.6 label: the item carries the
+   *  `scoi_context_card` constraint flag at a non-low stored SCOI level. */
+  interpretationsDiverge: boolean;
 }
 
 /**
@@ -235,7 +235,7 @@ async function buildFeedItems(
     const ratingLabel = deriveRatingLabel({
       lifecycleState: story.lifecycleState,
       safetyState,
-      interpretationsDiverge: entry.contextCard !== null,
+      interpretationsDiverge: entry.interpretationsDiverge,
       // The served ActiveAttention component keeps the default label truthful:
       // "Getting Attention" only when there is a real signal, else "New".
       ...(entry.features?.active_attention !== undefined
@@ -247,7 +247,6 @@ async function buildFeedItems(
         story_id: story.storyId,
         title: story.title,
         source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
-        origin: 'independent' as const,
         ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
         visibility: story.visibility,
         media: feedMediaOf(story, makeMediaUrlMinter()),
@@ -257,7 +256,6 @@ async function buildFeedItems(
         context_chips: chips,
         safety_state: safetyState,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
-        context_card: entry.contextCard,
         // Never surface the UNCLASSIFIED sentinel as a topic on the wire — it
         // would drive a topic-repeats control for a non-subject "topic".
         topic_ids: story.topicIds.filter((id) => !isSentinelTopicId(id)).slice(0, 8),
@@ -420,40 +418,26 @@ async function lensAssignments(
 }
 
 /**
- * Compact SCOI context cards (WS-I.2.4c) for the selected items that carry
- * the `scoi_context_card` flag: lens count from the stored SCOI row, open
- * bridge attempts from the WS-H records — bounded by page size, stored rows
- * only (never computed on request).
+ * §10.6 interpretation-divergence flags (WS-I.2.4c) for the §5.6 label: an
+ * item diverges when the constraint stage flagged it (`scoi_context_card`)
+ * and its stored SCOI level is non-low.  Derived from the ALREADY-JOINED
+ * features — no extra store reads; the lens-map detail lives on the story
+ * read surface (`GET /v1/stories/{id}/interpretations`), which is where the
+ * client actually consumes it (the compact feed card payload had no client
+ * and was removed with the other unreachable planes).
  */
-async function contextCardsFor(
-  services: RankingServices,
+function interpretationDivergenceFor(
   selected: readonly ScoredItem[],
   featuresById: ReadonlyMap<string, FeatureVector>,
-): Promise<Map<string, FeedContextCard>> {
-  const out = new Map<string, FeedContextCard>();
-  const flagged = selected.filter((item) => item.constraint_flags.includes('scoi_context_card'));
-  if (flagged.length === 0) return out;
-  const threads = await services.ingestion.stories.getThreadsByStoryIds(
-    flagged.map((item) => item.item_id),
-  );
-  for (const item of flagged) {
-    const level = featuresById.get(item.item_id)?.scoi_level;
-    if (level === undefined || level === 'low') continue;
-    const scoiRow = await services.events.invariantStore.latest('SCOI', item.item_id);
-    const lensCount = scoiRow?.scoreVector['lens_count'];
-    const thread = threads.get(item.item_id);
-    const openBridges =
-      thread !== undefined &&
-      (await services.invariants.bridgeAttempts.openForThread(thread.threadId)) !== null
-        ? 1
-        : 0;
-    out.set(item.item_id, {
-      scoi_level: level as Exclude<ScoiLevel, 'low'>,
-      lens_count: typeof lensCount === 'number' && lensCount >= 0 ? Math.floor(lensCount) : 0,
-      bridge_attempts_open: openBridges,
-      where_interpretations_differ: true,
-    });
-    services.events.metrics.increment('ranking.context_gate.card');
+  metrics: RankingServices['events']['metrics'],
+): Map<string, boolean> {
+  const out = new Map<string, boolean>();
+  for (const item of selected) {
+    const diverges =
+      item.constraint_flags.includes('scoi_context_card') &&
+      (featuresById.get(item.item_id)?.scoi_level ?? 'low') !== 'low';
+    out.set(item.item_id, diverges);
+    if (diverges) metrics.increment('ranking.context_gate.card');
   }
   return out;
 }
@@ -814,7 +798,11 @@ export async function serveFeed(
   const sourcedCounts = await Promise.all(
     ranked.selected.map((scored) => sourcedCountOf(services, scored.item_id)),
   );
-  const contextCards = await contextCardsFor(services, ranked.selected, featuresById);
+  const divergenceById = interpretationDivergenceFor(
+    ranked.selected,
+    featuresById,
+    services.events.metrics,
+  );
   // "More on this story" (WS-I.2.4a): the selected cluster representative
   // carries its demoted same-cluster siblings.
   const moreByItem = new Map<string, string[]>();
@@ -861,7 +849,7 @@ export async function serveFeed(
       explanation,
       features,
       moreOnThisStory: moreByItem.get(scored.item_id) ?? [],
-      contextCard: contextCards.get(scored.item_id) ?? null,
+      interpretationsDiverge: divergenceById.get(scored.item_id) ?? false,
     });
   }
   const items = await buildFeedItems(services, entries);
@@ -987,7 +975,7 @@ async function serveFallback(
     explanation,
     features: undefined,
     moreOnThisStory: [],
-    contextCard: null,
+    interpretationsDiverge: false,
   }));
   const items = await buildFeedItems(services, entries);
   const servedIds = new Set(items.map((item) => item.story_id));

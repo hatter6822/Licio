@@ -75,6 +75,20 @@ import {
 import { getModerationServices } from '../moderation/services.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
+
+const CURSOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Decode + shape-validate a `(timestamp|uuid)` keyset cursor.  Malformed
+ *  cursors restart from the beginning (defensive, never a 500 from a failed
+ *  `::timestamptz`/`::uuid` cast inside a store). */
+function decodeKeysetCursor(cursor: string | undefined): [string, string] | [undefined, undefined] {
+  if (!cursor) return [undefined, undefined];
+  const [time, id] = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
+  if (!time || !id || !Number.isFinite(Date.parse(time)) || !CURSOR_UUID_RE.test(id)) {
+    return [undefined, undefined];
+  }
+  return [time, id];
+}
 const uuidParam = <K extends string>(name: K) =>
   z.object({ [name]: uuidSchema } as Record<K, typeof uuidSchema>);
 
@@ -503,27 +517,22 @@ export function createModerationConsoleRoutes() {
           const q = c.req.valid('query');
           const mod = getModerationServices();
           const limit = q.limit ?? 50;
-          let records: Awaited<ReturnType<typeof mod.evidenceDecisions.listRecent>>;
           let nextCursor: string | null = null;
-          if (q.contribution_id) {
-            records = await mod.evidenceDecisions.listByContribution(q.contribution_id);
-          } else {
-            const [curTime, curId] = q.cursor
-              ? Buffer.from(q.cursor, 'base64url').toString('utf-8').split('|')
-              : [undefined, undefined];
-            records = await mod.evidenceDecisions.listRecent({
-              ...(curTime && curId ? { after: { createdAt: curTime, decisionId: curId } } : {}),
-              limit: limit + 1,
-            });
-            const last = records[limit - 1];
-            if (records.length > limit && last) {
-              nextCursor = Buffer.from(`${last.createdAt}|${last.decisionId}`, 'utf-8').toString(
-                'base64url',
-              );
-            }
-            records = records.slice(0, limit);
+          const [curTime, curId] = decodeKeysetCursor(q.cursor);
+          let records = await mod.evidenceDecisions.listRecent({
+            ...(curTime && curId ? { after: { createdAt: curTime, decisionId: curId } } : {}),
+            limit: limit + 1,
+          });
+          const last = records[limit - 1];
+          if (records.length > limit && last) {
+            nextCursor = Buffer.from(`${last.createdAt}|${last.decisionId}`, 'utf-8').toString(
+              'base64url',
+            );
           }
-          const deciderIds = [...new Set(records.map((r) => r.decidedBy))];
+          records = records.slice(0, limit);
+          const deciderIds = [
+            ...new Set(records.map((r) => r.decidedBy).filter((id): id is string => id !== null)),
+          ];
           const resolved = await mod.users.resolveMany(deciderIds);
           const handles = new Map<string, string | null>();
           for (const id of deciderIds) handles.set(id, resolved.get(id)?.handle ?? null);
@@ -545,15 +554,18 @@ export function createModerationConsoleRoutes() {
               ? 404
               : outcome.code === 'citation_not_found'
                 ? 400
-                : outcome.code === 'duplicate_decision'
-                  ? 409
-                  : 403;
+                : outcome.code === 'citation_malicious'
+                  ? 422
+                  : outcome.code === 'duplicate_decision'
+                    ? 409
+                    : 403;
           return c.json(deny(outcome.code, outcome.message), status);
         }
-        const resolved = await mod.users.resolveMany([outcome.record.decidedBy]);
-        const handles = new Map<string, string | null>([
-          [outcome.record.decidedBy, resolved.get(outcome.record.decidedBy)?.handle ?? null],
-        ]);
+        const decider = outcome.record.decidedBy;
+        const resolved = decider === null ? new Map() : await mod.users.resolveMany([decider]);
+        const handles = new Map<string, string | null>(
+          decider === null ? [] : [[decider, resolved.get(decider)?.handle ?? null]],
+        );
         return c.json(
           evidenceDecisionViewSchema.parse(decisionToView(outcome.record, handles)),
           201,
@@ -649,9 +661,7 @@ export function createModerationConsoleRoutes() {
         // Keyset cursor on (eventTime, auditId) DESC — stable when the
         // `audit_view` meta-record below is inserted between page reads (an
         // offset cursor would shift, duplicating/skipping rows).
-        const [curTime, curId] = q.cursor
-          ? Buffer.from(q.cursor, 'base64url').toString('utf-8').split('|')
-          : [undefined, undefined];
+        const [curTime, curId] = decodeKeysetCursor(q.cursor);
         const limit = q.limit ?? 50;
         const records = await mod.audit.list({
           ...(q.actor_id ? { actorUserId: q.actor_id } : {}),

@@ -429,8 +429,8 @@ const DWELL_WEIGHT: Record<string, number> = {
  *
  * The §9.4 experience features are real: discussion depth is the story
  * thread's deepest contribution, lens keys are the lenses with tagged
- * contributions on the thread, primary evidence requires an actual
- * evidence card reachable from a claim, and topic familiarity is repeat
+ * contributions on the thread, primary evidence requires a PUBLISHED
+ * citation-bearing contribution on the conversation, and topic familiarity is repeat
  * exposure — the share of the cohort's attention weight coming from users
  * who engaged ≥ 2 distinct stories sharing one of the item's topics.
  */

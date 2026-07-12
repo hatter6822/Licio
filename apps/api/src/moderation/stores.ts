@@ -204,8 +204,9 @@ export interface EvidenceDecisionRecord {
   reasonCode: string | null;
   /** Internal reviewer note — console-visible only. */
   note: string | null;
-  /** The deciding steward (an accountability field, like the audit actor). */
-  decidedBy: string;
+  /** The deciding steward; null after a hard right-to-erasure purge severs
+   *  the link (the audit-actor posture — the decision record survives). */
+  decidedBy: string | null;
   createdAt: string;
 }
 
@@ -504,7 +505,6 @@ export interface EvidenceDecisionStore {
   ): Promise<
     { ok: true; record: EvidenceDecisionRecord } | { ok: false; code: 'duplicate_decision' }
   >;
-  listByContribution(contributionId: string): Promise<EvidenceDecisionRecord[]>;
   /** Which of `contributionIds` already carry ≥ 1 decision (queue filtering). */
   decidedContributionIds(contributionIds: readonly string[]): Promise<Set<string>>;
   /** Decisions on a story's conversation, optionally one action (the public
@@ -1303,15 +1303,6 @@ export class InMemoryEvidenceDecisionStore implements EvidenceDecisionStore {
     };
     this.#rows.set(full.decisionId, full);
     return { ok: true, record: { ...full } };
-  }
-  async listByContribution(contributionId: string): Promise<EvidenceDecisionRecord[]> {
-    return [...this.#rows.values()]
-      .filter((r) => r.contributionId === contributionId)
-      .sort(
-        (a, b) =>
-          b.createdAt.localeCompare(a.createdAt) || b.decisionId.localeCompare(a.decisionId),
-      )
-      .map((r) => ({ ...r }));
   }
   async decidedContributionIds(contributionIds: readonly string[]): Promise<Set<string>> {
     const wanted = new Set(contributionIds);

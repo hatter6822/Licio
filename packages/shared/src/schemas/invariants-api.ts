@@ -8,6 +8,7 @@
 // repetition equals truth.
 import { z } from 'zod';
 import { uuidSchema } from './common.js';
+import { citationUrlSchema } from './contribution.js';
 
 /** SCOI context states (SPEC §10.4). */
 export const SCOI_CONTEXT_STATES_WIRE = [
@@ -79,7 +80,10 @@ export const independentSourcesResponseSchema = z.object({
   primary_sources: z
     .array(
       z.object({
-        url: z.string().min(1).max(2048),
+        /** Scheme-pinned at the trust boundary (http(s)/doi only) — this field
+         *  feeds an href on a public surface, so no other scheme may pass even
+         *  if a future writer misbehaves. */
+        url: citationUrlSchema,
         title: z.string().min(1).max(300).optional(),
       }),
     )

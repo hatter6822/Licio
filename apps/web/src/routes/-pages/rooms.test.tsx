@@ -103,7 +103,6 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     context_chips: [],
     safety_state: 'ok',
     more_on_this_story: [],
-    context_card: null,
     topic_ids: [],
     ...over,
   } as FeedItem;

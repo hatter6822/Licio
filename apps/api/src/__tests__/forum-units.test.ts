@@ -4,6 +4,7 @@
 // events), the EXIF/metadata strippers on real binary fixtures, the forum
 // runtime config (fail-closed), the scoring-taxonomy mappings (pinned), and the
 // steward thread-state route.
+import { randomUUID } from 'node:crypto';
 import type { ContributionPublic } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -727,6 +728,78 @@ describe('WS-G → WS-E scoring-taxonomy mappings (pinned)', () => {
       comment: 'explanation', // citations carry the sourcing weight via has_citation
       correction: 'correction',
     });
+  });
+});
+
+describe('WS-J evidence-queue feed — listCited global keyset walk (in-memory)', () => {
+  it('walks exactly the published cited rows in (createdAt, id) order across threads', async () => {
+    const { threadId: otherThreadId } = await seedThread(fixture);
+    const insert = async (
+      thread: string,
+      over: {
+        citations?: Array<{ url: string }>;
+        moderationState?: 'published' | 'under_review';
+      } = {},
+    ) => {
+      const outcome = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId: thread,
+        userId: randomUUID(),
+        type: 'comment',
+        body: 'A row for the cited-feed walk.',
+        citations: over.citations ?? [],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: `draft-${randomUUID()}`,
+        path: [],
+        moderationState: over.moderationState ?? 'published',
+      });
+      if (!outcome.ok) throw new Error('cited-walk insert failed');
+      return outcome.contribution;
+    };
+    const cite = [{ url: 'https://example.org/source' }];
+    // Published cited rows across BOTH threads (the feed is global) — inserted
+    // back-to-back so same-millisecond createdAt exercises the id tiebreaker.
+    const citedRows = [
+      await insert(threadId, { citations: cite }),
+      await insert(otherThreadId, { citations: cite }),
+      await insert(threadId, { citations: cite }),
+    ];
+    await insert(threadId); // citation-less — never a queue candidate
+    const underReview = await insert(otherThreadId, {
+      citations: cite,
+      moderationState: 'under_review',
+    });
+
+    const expected = [...citedRows]
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.contributionId.localeCompare(b.contributionId),
+      )
+      .map((row) => row.contributionId);
+
+    // Walk pages of 1 with the after-cursor: complete, ordered, no duplicates.
+    const walked: string[] = [];
+    let after: { createdAt: string; id: string } | null = null;
+    for (;;) {
+      const page = await fixture.forum.contributions.listCited({
+        states: ['published'],
+        after,
+        limit: 1,
+      });
+      const row = page[0];
+      if (!row) break;
+      walked.push(row.contributionId);
+      after = { createdAt: row.createdAt, id: row.contributionId };
+    }
+    expect(walked).toEqual(expected);
+    expect(new Set(walked).size).toBe(walked.length);
+    expect(walked).not.toContain(underReview.contributionId);
+    // Without the states filter the under_review cited row IS a citation row.
+    const unfiltered = await fixture.forum.contributions.listCited({ limit: 10 });
+    expect(unfiltered.map((row) => row.contributionId)).toContain(underReview.contributionId);
   });
 });
 

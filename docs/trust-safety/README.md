@@ -305,7 +305,18 @@ doctrine action ids, duplicate-protected by partial unique indexes
 independent-sources drawer, which surfaces `mark-primary-source` annotations
 on the story's lineage panel ("reviewed by an evidence steward").  The
 reviewer link-opening malware check (`/url-verdict`) is access-gated to the
-panels the links render in: report-queue OR evidence-queue roles.
+panels the links render in: report-queue OR evidence-queue roles — and
+`mark-primary-source` itself refuses a citation whose server verdict is
+`malicious` (promoting a URL to a public surface is the one console action
+that cannot skip the check).  Two deliberate postures: the queue is
+PROACTIVE — unlike the report queue it lists citation-bearing contributions
+platform-wide (including private-room and `room_only` content) with no
+member report as a trigger, the SPEC §16.1 "private from the public, not
+from the platform" rule applied to provenance review; and
+`evidence_decisions.decided_by` is an accountability field with the
+audit-actor erasure posture (nullable, severed on a hard purge — steward
+actions are not subject-data in the actor's own DSAR export, matching the
+moderation audit log).
 
 ## Residuals (tracked)
 

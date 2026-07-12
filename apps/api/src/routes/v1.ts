@@ -224,7 +224,6 @@ function realStoryToDetail(
     story_id: story.storyId,
     title: story.title,
     source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
-    origin: 'independent' as const,
     ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
     visibility: story.visibility,
     media: feedMediaOf(story, makeMediaUrlMinter()),
@@ -513,8 +512,8 @@ export function createV1Routes() {
 
       // --- Forum, conversation, rooms, and lenses (WS-G) ----------------------
       // Thread reading (overview/branches/subtree/anchor), contributions,
-      // evidence cards, summaries, feed preferences, uploads, the drainer
-      // blocklist, room listing/creation/detail/subscription, and lenses.
+      // feed preferences, uploads, the drainer blocklist, room
+      // listing/creation/detail/subscription, and lenses.
       .route('/', createForumRoutes())
       .route('/', createRoomsRoutes())
 
