@@ -12,6 +12,7 @@ import {
   type ContributionPublic,
   contributionPublicSchema,
   DEBATE_EDIT_WINDOW_MS,
+  DEBATE_LOCK_WINDOW_MS,
   DEBATE_OVERRIDE_WINDOW_MS,
 } from '@licio/shared';
 import { Hono } from 'hono';
@@ -223,9 +224,15 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
       throw err;
     };
 
-    // Past the 12h edit window: the tick judges (fail-closed inconclusive — no AI
-    // governance is booted in this fixture, so the runner returns null).
+    // Past the 23h edit deadline: the tick LOCKS the material in (the frozen
+    // final countdown) — the AI resolution queue opens at hour 24.
     nowMs += DEBATE_EDIT_WINDOW_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('locked');
+
+    // At hour 24 the tick judges (fail-closed inconclusive — no AI governance
+    // is booted in this fixture, so the runner returns null).
+    nowMs += DEBATE_LOCK_WINDOW_MS + 1000;
     await runDebateSchedulerTick(rethrow);
     expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
 

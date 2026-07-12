@@ -540,6 +540,20 @@
       "idx": 76,
       "when": 1783728000001,
       "tag": "0077_evidence_decisions"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 77,
+      "when": 1783728000002,
+      "tag": "0078_ws_t_debate_live_window_enums"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 78,
+      "when": 1783728000003,
+      "tag": "0079_ws_t_debate_live_window"
     }
   ]
 }

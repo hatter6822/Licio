@@ -216,10 +216,18 @@ export default defineConfig({
           // — it carries no weight for a user who never opts into P2P/courier sync.  Keep
           // it in ONE `lcap-p2p` chunk with its OWN budget, excluded from the core total
           // (separately budgeted, never silently exempt — see check-bundle-size.ts).
+          // `jsqr` is the QR-carrier decoder of this SAME transport plane
+          // (reached only through the lazy decode in
+          // `apps/web/src/lcap/transports/qr/`) — folded into the plane chunk
+          // exactly like the private plane's @noble/@hpke vendor deps, so it
+          // is measured under the plane's own budget rather than the core
+          // total (it previously escaped into a `jsQR-*` vendor chunk on
+          // name alone).
           if (
             id.includes('packages/lcap-p2p') ||
             id.includes('@licio/lcap-p2p') ||
-            id.includes('apps/web/src/lcap/transports')
+            id.includes('apps/web/src/lcap/transports') ||
+            id.includes('node_modules/jsqr')
           ) {
             return 'lcap-p2p';
           }

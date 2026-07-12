@@ -64,13 +64,16 @@ import {
   threadReadableToUser,
 } from '../forum/contributions.js';
 import {
-  type DebateDeps,
+  concedeDebate,
   overrideDebateVerdict,
   postDebatePosition,
+  readDebateArenaContent,
   toDebateArenaPublic,
   toDebateArenaSummary,
+  withdrawDebate,
 } from '../forum/debate.js';
 import { type DebateFrame, sseDebateFrame } from '../forum/debate-broadcaster.js';
+import { buildDebateDeps } from '../forum/debate-scheduler.js';
 import { stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
@@ -180,23 +183,11 @@ function bundles() {
   };
 }
 
-/** Assemble the WS-T debate-arena service deps from the request bundle. */
-function debateDepsFromBundle(bundle: ReturnType<typeof bundles>): DebateDeps {
-  return {
-    debates: bundle.forum.debates,
-    contributions: bundle.forum.contributions,
-    storyAuthor: async (sid) => (await bundle.ingestion.stories.getById(sid))?.submittedBy ?? null,
-    isSteward: async (roomId, uid) =>
-      (await bundle.forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
-    setStoryDispute: async (sid, status) => {
-      await bundle.ingestion.stories.update(sid, { disputeStatus: status });
-    },
-    runJudge: bundle.forum.debateJudge,
-    broadcast: (id, arena) => bundle.forum.debateBroadcaster.publish(id, arena),
-    windows: bundle.forum.debateWindowsOverride ?? undefined,
-    now: bundle.forum.now,
-    log: bundle.forum.log,
-  };
+/** Assemble the WS-T debate-arena service deps from the request bundle (the
+ *  ONE shared assembly — window scoping, story-content reads, and the
+ *  ranking-feature refresh on a story dispute change never diverge here). */
+function debateDepsFromBundle(bundle: ReturnType<typeof bundles>) {
+  return buildDebateDeps(bundle.forum, bundle.ingestion);
 }
 
 const SSE_HEARTBEAT_MS = 25_000;
@@ -1253,19 +1244,22 @@ export function createForumRoutes() {
           const isSteward =
             arena.roomId !== null &&
             (await bundle.forum.rooms.stewardRolesFor(arena.roomId, auth.userId)).length > 0;
+          const deps = debateDepsFromBundle(bundle);
           const projected = await toDebateArenaPublic(
             arena,
             auth.userId,
             makeAuthorResolver(identity),
             isSteward,
+            await readDebateArenaContent(deps.contributions, deps.storyContent, arena),
           );
           return c.json(debateArenaResponseSchema.parse({ debate: projected }));
         },
       )
-      // Live arena stream (WS-T): pushes the co-visible position drafts, verdict,
-      // and resolution so each side sees the other's draft AS THEY EDIT.  The
-      // frame is the OBSERVER projection — a nudge; the client re-fetches its own
-      // role-scoped view for its edit affordances.
+      // Live arena stream (WS-T): pushes the underlying material + co-visible
+      // rebuttal drafts, verdict, and resolution so each side sees the other's
+      // current case AS THEY EDIT.  The frame is the OBSERVER projection — a
+      // nudge; the client re-fetches its own role-scoped view for its edit
+      // affordances.
       .get(
         '/debates/:debateId/stream',
         rateLimit({ limit: 250, windowMs: 60_000 }),
@@ -1284,9 +1278,16 @@ export function createForumRoutes() {
           if (!streamThread || !(await threadReadableToUser(bundle, streamThread, auth.userId))) {
             return c.json(notFound, 404);
           }
+          const streamDeps = debateDepsFromBundle(bundle);
           const observer = async () => {
             const arena = await bundle.forum.debates.getById(debateId);
-            return arena ? toDebateArenaPublic(arena, null, async () => null, false) : null;
+            if (arena === null) return null;
+            const content = await readDebateArenaContent(
+              streamDeps.contributions,
+              streamDeps.storyContent,
+              arena,
+            );
+            return toDebateArenaPublic(arena, null, async () => null, false, content);
           };
           // Subscribe BEFORE priming, awaiting transport readiness (the Redis
           // broadcaster resolves only after the SUBSCRIBE ack), so an update
@@ -1348,8 +1349,9 @@ export function createForumRoutes() {
           });
         },
       )
-      // Post/replace the caller's co-visible position (incumbent/challenger only,
-      // within the 12h edit window).
+      // Post/replace the caller's co-visible rebuttal statement (incumbent/
+      // challenger only, while the arena is `open` — until the material locks
+      // in on the 23h schedule or the both-sides-idle expedite).
       .post(
         '/debates/:debateId/position',
         authMiddleware(),
@@ -1362,8 +1364,9 @@ export function createForumRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const bundle = bundles();
           const { debateId } = c.req.valid('param');
+          const deps = debateDepsFromBundle(bundle);
           const outcome = await postDebatePosition(
-            debateDepsFromBundle(bundle),
+            deps,
             debateId,
             auth.userId,
             c.req.valid('json'),
@@ -1383,6 +1386,72 @@ export function createForumRoutes() {
             auth.userId,
             makeAuthorResolver(identity),
             isSteward,
+            await readDebateArenaContent(deps.contributions, deps.storyContent, outcome.arena),
+          );
+          return c.json(debateArenaResponseSchema.parse({ debate: projected }));
+        },
+      )
+      // The challenger retracts the correction while the arena is open: the
+      // debate closes `withdrawn` — no verdict, the target's tag clears, and
+      // the target stays re-challengeable.
+      .post(
+        '/debates/:debateId/withdraw',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        requireUnrestricted(),
+        zValidator('param', z.object({ debateId: uuidSchema })),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { debateId } = c.req.valid('param');
+          const deps = debateDepsFromBundle(bundle);
+          const outcome = await withdrawDebate(deps, debateId, auth.userId);
+          if (!outcome.ok) {
+            const status =
+              outcome.reason === 'not_found'
+                ? 404
+                : outcome.reason === 'not_challenger'
+                  ? 403
+                  : 409;
+            return c.json(deny(outcome.reason, withdrawErrorMessage(outcome.reason)), status);
+          }
+          const projected = await toDebateArenaPublic(
+            outcome.arena,
+            auth.userId,
+            makeAuthorResolver(getIdentityServices()),
+            false,
+            await readDebateArenaContent(deps.contributions, deps.storyContent, outcome.arena),
+          );
+          return c.json(debateArenaResponseSchema.parse({ debate: projected }));
+        },
+      )
+      // The incumbent concedes while the arena is open: the challenger
+      // prevails without adjudication (decided_by = 'concession').
+      .post(
+        '/debates/:debateId/concede',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        requireUnrestricted(),
+        zValidator('param', z.object({ debateId: uuidSchema })),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { debateId } = c.req.valid('param');
+          const deps = debateDepsFromBundle(bundle);
+          const outcome = await concedeDebate(deps, debateId, auth.userId);
+          if (!outcome.ok) {
+            const status =
+              outcome.reason === 'not_found' ? 404 : outcome.reason === 'not_incumbent' ? 403 : 409;
+            return c.json(deny(outcome.reason, concedeErrorMessage(outcome.reason)), status);
+          }
+          const projected = await toDebateArenaPublic(
+            outcome.arena,
+            auth.userId,
+            makeAuthorResolver(getIdentityServices()),
+            false,
+            await readDebateArenaContent(deps.contributions, deps.storyContent, outcome.arena),
           );
           return c.json(debateArenaResponseSchema.parse({ debate: projected }));
         },
@@ -1417,11 +1486,17 @@ export function createForumRoutes() {
           // The override is durably recorded on the arena row (overridden_by +
           // override_reason) and the service audit log; no separate identity-
           // audit taxonomy entry is minted here.
+          const overrideDeps = debateDepsFromBundle(bundle);
           const projected = await toDebateArenaPublic(
             outcome.arena,
             auth.userId,
             makeAuthorResolver(getIdentityServices()),
             true,
+            await readDebateArenaContent(
+              overrideDeps.contributions,
+              overrideDeps.storyContent,
+              outcome.arena,
+            ),
           );
           return c.json(debateArenaResponseSchema.parse({ debate: projected }));
         },
@@ -1432,7 +1507,19 @@ export function createForumRoutes() {
 function positionErrorMessage(reason: 'not_found' | 'not_a_party' | 'window_closed'): string {
   if (reason === 'not_found') return 'The debate no longer exists.';
   if (reason === 'not_a_party') return 'Only the incumbent or challenger may post a position.';
-  return 'The 12-hour editing window has closed.';
+  return 'The debate material is locked in awaiting AI resolution.';
+}
+
+function withdrawErrorMessage(reason: 'not_found' | 'not_challenger' | 'window_closed'): string {
+  if (reason === 'not_found') return 'The debate no longer exists.';
+  if (reason === 'not_challenger') return 'Only the challenger may withdraw the correction.';
+  return 'The debate material is locked in awaiting AI resolution.';
+}
+
+function concedeErrorMessage(reason: 'not_found' | 'not_incumbent' | 'window_closed'): string {
+  if (reason === 'not_found') return 'The debate no longer exists.';
+  if (reason === 'not_incumbent') return 'Only the challenged author may concede.';
+  return 'The debate material is locked in awaiting AI resolution.';
 }
 
 function overrideErrorMessage(

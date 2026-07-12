@@ -121,6 +121,19 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   **statement-of-reasons notice** carrying the agent's own reason: a COMMUNITY-layer
   notice (no platform taxonomy reason code, the queued human review as its recourse)
   distinct from a platform-floor enforcement.
+- **Stage 3b (the room's AI resolution queue, WS-T)** — a governed room whose
+  ratified agent holds the `debate.judge` capability (permitted by the default
+  law-pack; deny-by-default derivation) adjudicates its own correction-debate
+  queue: `GovernanceService.debateConditioning(roomId)` resolves the active
+  binding → capability gate → the ratified model under the SAME
+  backend-admission pin as moderation → the community-ratified prompt, and the
+  governed LLM debate leg runs room-conditioned (the prompt folds in
+  subordinate to the platform rules).  The verdict's `AIOutputRecord` pins the
+  room/model/prompt digest and `recordDebateAgentAction` appends the
+  provenance triple to the agent action log (`actionType: 'debate.judge'`,
+  reversible — the steward's 24h overrule is the human remedy).  Every failure
+  resolves deny-by-default to the platform adjudicator legs
+  (`docs/forum/DEBATE-ARENA.md`).
 - **Stage 4 (facilitation)** — deterministic lawmaking facilitation
   (`@licio/governance` `summarizeProposal`/`scheduleProposalVote`/`attestOutcome`),
   exposed as capability-gated `facilitateSummary`/`Schedule`/`Attest`: each requires

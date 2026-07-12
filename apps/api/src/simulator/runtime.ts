@@ -50,6 +50,7 @@ import {
   postDebatePosition,
   runDebateLifecycle,
 } from '../forum/debate.js';
+import { buildDebateDeps } from '../forum/debate-scheduler.js';
 import { joinRoom } from '../forum/rooms.js';
 import type { ForumServices } from '../forum/services.js';
 import { getForumServices } from '../forum/services.js';
@@ -107,16 +108,22 @@ const ACTIVITY_LOG_LIMIT = 60;
 const RECENT_TITLE_LIMIT = 200;
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
-/** Shortened WS-T arena windows while the simulator runs (spec: 12h edit /
- *  24h override — dev-observable instead: an arena opened by a synthetic
- *  correction is adjudicated ~4 ticks later and finalized ~3 ticks after
- *  that; the override window spans ≥2 ticks so a judged arena appears in a
- *  subsequent world snapshot and the steward persona genuinely gets an
- *  overrule chance before finalization). Applied via
- *  `ForumServices.debateWindowsOverride` on start() and RESTORED to the spec
- *  windows on stop(); arenas keep the deadline stamped when they opened. */
+/** Shortened WS-T arena windows while the simulator runs (spec: 23h edit /
+ *  1h lock / 1h both-sides-idle expedite / 24h override — dev-observable
+ *  instead: a forfeited synthetic arena expedites ~4 ticks after it opens, a
+ *  contested one locks on the 45s schedule and queues 15s later, and the
+ *  override window spans ≥2 ticks so a judged arena appears in a subsequent
+ *  world snapshot and the steward persona genuinely gets an overrule chance
+ *  before finalization). Applied via `ForumServices.debateWindowsOverride` on
+ *  start() and RESTORED to the spec windows on stop(); arenas keep the
+ *  deadlines stamped when they opened.  SCOPED via `appliesToUser` to arenas
+ *  whose parties are BOTH synthetic personas — a debate the developer's own
+ *  account opens (or defends) runs the REAL spec windows and can be watched
+ *  live (the fast-forward control jumps it on demand). */
 const SIM_DEBATE_WINDOWS: DebateWindowPolicy = {
-  editWindowMs: 20_000,
+  editWindowMs: 45_000,
+  lockWindowMs: 15_000,
+  inactivityWindowMs: 20_000,
   overrideWindowMs: 15_000,
 };
 
@@ -496,9 +503,14 @@ export class DevTrafficSimulator {
     this.#scenarioStartedAtMs = this.#now();
     this.#lastSignalRefreshMs = this.#now();
     // WS-T: shorten the arena windows while the simulator runs so a synthetic
-    // correction resolves in seconds, not 36h (restored on stop()). Arenas the
-    // real spec windows already stamped keep their deadlines.
-    this.#graph.forum.debateWindowsOverride = SIM_DEBATE_WINDOWS;
+    // correction resolves in seconds, not 24h+ (restored on stop()). Arenas
+    // the real spec windows already stamped keep their deadlines.  Scoped to
+    // BOTH-synthetic-party arenas so a debate the developer opens or defends
+    // keeps the real spec windows (watchable live; fast-forward on demand).
+    this.#graph.forum.debateWindowsOverride = {
+      windows: SIM_DEBATE_WINDOWS,
+      appliesToUser: (userId) => this.#isSimPersona(userId),
+    };
     // Provision the organic roster up front so the first tick has actors. A
     // provisioning failure (e.g. a durable-store handle collision) must not
     // leave the instance stuck "running" with no timer and no way to restart —
@@ -547,7 +559,7 @@ export class DevTrafficSimulator {
       this.#timer = null;
     }
     // Restore the §15.4 spec arena windows (new arenas outlive the simulator
-    // at the real 12h/24h cadence; open synthetic arenas keep their short
+    // at the real spec cadence; open synthetic arenas keep their short
     // stamped deadlines and the 5-min debate scheduler resolves them).
     this.#graph.forum.debateWindowsOverride = null;
     this.#log('dev-sim: stopped');
@@ -1434,26 +1446,65 @@ export class DevTrafficSimulator {
     });
   }
 
-  /** The REAL arena deps (mirrors the debate scheduler's assembly, bound to the
-   *  simulator's service graph; the shortened windows flow from the override). */
+  /** The REAL arena deps (the debate scheduler's one shared assembly, bound to
+   *  the simulator's service graph; the scoped shortened windows flow from the
+   *  override). */
   #debateDeps(): DebateDeps {
     const { forum, ingestion } = this.#graph;
-    return {
-      debates: forum.debates,
-      contributions: forum.contributions,
-      storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
-      isSteward: async (roomId, uid) => (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
-      setStoryDispute: async (sid, status) => {
-        await ingestion.stories.update(sid, { disputeStatus: status });
-        const ranking = await import('../ranking/services.js');
-        await ranking.refreshStoryFeaturesBestEffort(sid);
-      },
-      runJudge: forum.debateJudge,
-      broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),
-      windows: forum.debateWindowsOverride ?? undefined,
-      now: forum.now,
-      log: forum.log,
-    };
+    return buildDebateDeps(forum, ingestion);
+  }
+
+  /**
+   * DEV control: fast-forward a debate to its next lifecycle milestone by
+   * shifting the arena's OWN deadlines into the past and running the REAL
+   * lifecycle sweep — never a synthetic state write, so the snapshot, the
+   * governed adjudicator, the broadcasts, and the dispute tags all run
+   * exactly as they would at the real instants.  This is how a developer
+   * watches a real spec-window (24h) arena lock, enter the AI resolution
+   * queue, and resolve on demand.  Works whether or not the tick loop runs.
+   */
+  async fastForwardDebate(
+    debateId: string,
+    to: 'locked' | 'verdict' | 'resolved',
+  ): Promise<{ ok: true; state: string } | { ok: false; code: 'not_found' }> {
+    const { forum } = this.#graph;
+    const arena = await forum.debates.getById(debateId);
+    if (arena === null) return { ok: false, code: 'not_found' };
+    const deps = this.#debateDeps();
+    const past = new Date(this.#now() - 1_000).toISOString();
+    if (to === 'locked') {
+      if (arena.state === 'open') {
+        await forum.debates.shiftDeadlines(debateId, { editDeadlineAt: past });
+      }
+      await runDebateLifecycle(deps);
+    } else if (to === 'verdict') {
+      if (arena.state === 'open' || arena.state === 'locked') {
+        await forum.debates.shiftDeadlines(debateId, { editDeadlineAt: past, resolveDueAt: past });
+      }
+      await runDebateLifecycle(deps);
+    } else {
+      if (
+        arena.state === 'open' ||
+        arena.state === 'locked' ||
+        arena.state === 'awaiting_verdict'
+      ) {
+        await forum.debates.shiftDeadlines(debateId, { editDeadlineAt: past, resolveDueAt: past });
+        await runDebateLifecycle(deps);
+      }
+      const judged = await forum.debates.getById(debateId);
+      if (judged?.state === 'judged') {
+        await forum.debates.shiftDeadlines(debateId, { overrideDeadlineAt: past });
+        await runDebateLifecycle(deps);
+      }
+    }
+    const after = await forum.debates.getById(debateId);
+    this.#record({
+      kind: 'debate',
+      actor: 'system',
+      summary: `fast-forwarded a debate to ${to} (now ${after?.state ?? 'gone'})`,
+      outcome: 'ok',
+    });
+    return { ok: true, state: after?.state ?? 'resolved' };
   }
 
   /**
@@ -1468,7 +1519,7 @@ export class DevTrafficSimulator {
    */
   async #advanceDebates(): Promise<void> {
     const startedMs = this.#now();
-    const { judged, finalized } = await runDebateLifecycle(this.#debateDeps());
+    const { locked, expedited, judged, finalized } = await runDebateLifecycle(this.#debateDeps());
     const elapsedMs = this.#now() - startedMs;
     if (judged > 0) {
       this.#counters.debates_judged += judged;
@@ -1479,11 +1530,11 @@ export class DevTrafficSimulator {
       this.#debateStats.lastJudgedAtMs = this.#now();
     }
     if (finalized > 0) this.#counters.debates_finalized += finalized;
-    if (judged > 0 || finalized > 0) {
+    if (locked > 0 || expedited > 0 || judged > 0 || finalized > 0) {
       this.#record({
         kind: 'debate',
         actor: 'system',
-        summary: `adjudicated ${judged} and finalized ${finalized} arena(s) in ${elapsedMs}ms`,
+        summary: `locked ${locked + expedited} (${expedited} idle-expedited), adjudicated ${judged}, finalized ${finalized} arena(s) in ${elapsedMs}ms`,
         outcome: 'ok',
       });
     }
@@ -1496,7 +1547,16 @@ export class DevTrafficSimulator {
         this.#trackedArenas.delete(debateId);
         continue;
       }
-      if (arena.state === 'open' || arena.state === 'awaiting_verdict') continue;
+      // `locked` is still pre-verdict (the frozen countdown / queue entry) —
+      // an arena resting there must NOT fall through to the resolved tally.
+      if (arena.state === 'open' || arena.state === 'locked' || arena.state === 'awaiting_verdict')
+        continue;
+      // A withdrawn close carries no verdict and no forfeit: the challenger
+      // retracted — drop the tracking without touching the outcome split.
+      if (arena.state === 'withdrawn') {
+        this.#trackedArenas.delete(debateId);
+        continue;
+      }
       // judged OR resolved: tally the forfeit exactly once — but ONLY when the
       // incumbent is a SIM PERSONA (the one-shot willRebut roll was live). An
       // arena challenging seed/human content is one-sided unless the human

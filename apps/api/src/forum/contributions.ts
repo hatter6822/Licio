@@ -41,7 +41,14 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
-import { maybeEnterDebate } from './debate.js';
+import {
+  concedeDebate,
+  maybeEnterDebate,
+  touchDebateActivityForContribution,
+  withdrawDebate,
+} from './debate.js';
+import { buildDebateDeps } from './debate-scheduler.js';
+import type { DebateArenaRecord } from './debate-store.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord } from './stores.js';
 import { maybeDeepenConversation } from './transitions.js';
@@ -108,6 +115,7 @@ export type ContributionRejection =
   | { status: 403; code: 'thread_restricted'; message: string }
   | { status: 403; code: 'interaction_blocked'; message: string }
   | { status: 409; code: 'thread_archived'; message: string }
+  | { status: 409; code: 'debate_locked'; message: string }
   | { status: 422; code: string; message: string }
   | { status: 429; code: 'rate_limited'; message: string; retryAfterSec: number };
 
@@ -722,26 +730,7 @@ export async function createContribution(
   if (debateArenaId !== null) {
     try {
       const openedArena = await maybeEnterDebate(
-        {
-          debates: forum.debates,
-          contributions: forum.contributions,
-          storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
-          isSteward: async (roomId, uid) =>
-            (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
-          setStoryDispute: async (sid, status) => {
-            await ingestion.stories.update(sid, { disputeStatus: status });
-            // Keep the ranking feature vector in sync so a story's dispute-driven
-            // feed penalty applies now (lazy import avoids a static forum→ranking
-            // module cycle).
-            const ranking = await import('../ranking/services.js');
-            await ranking.refreshStoryFeaturesBestEffort(sid);
-          },
-          runJudge: forum.debateJudge,
-          broadcast: (id, arena) => forum.debateBroadcaster.publish(id, arena),
-          windows: forum.debateWindowsOverride ?? undefined,
-          now: forum.now,
-          log: forum.log,
-        },
+        buildDebateDeps(forum, ingestion),
         {
           contributionId: contribution.contributionId,
           threadId: contribution.threadId,
@@ -786,6 +775,20 @@ export type ContributionEditOutcome =
  * citations/metadata only — `type` is structurally absent from the contract.
  * The previous values are snapshotted into the append-only edit history.
  */
+/** The live debate arena this contribution is a party to — as the challenged
+ *  target (`incumbent`) or as the correction that opened it (`challenger`) —
+ *  or null when it is not debated. */
+async function liveArenaForContribution(
+  forum: ForumServices,
+  contributionId: string,
+): Promise<{ arena: DebateArenaRecord; side: 'incumbent' | 'challenger' } | null> {
+  const asTarget = await forum.debates.getActiveForComment(contributionId);
+  if (asTarget !== null) return { arena: asTarget, side: 'incumbent' };
+  const asCorrection = await forum.debates.getActiveForCorrection(contributionId);
+  if (asCorrection !== null) return { arena: asCorrection, side: 'challenger' };
+  return null;
+}
+
 export async function editContribution(
   bundle: ServiceBundle,
   userId: string,
@@ -808,6 +811,25 @@ export async function editContribution(
         status: 409,
         code: 'thread_archived',
         message: 'This contribution can no longer be edited',
+      },
+    };
+  }
+  // WS-T — once a debate's material is locked in (the hour-23 schedule or the
+  // both-sides-idle expedite), neither party may change the debated content
+  // until the verdict lands (§15.4: "locked in").  While the arena is `open`
+  // the edit proceeds — the arena shows the live content — and counts as the
+  // side's activity (below).
+  const debateParty = await liveArenaForContribution(forum, contributionId);
+  if (
+    debateParty !== null &&
+    (debateParty.arena.state === 'locked' || debateParty.arena.state === 'awaiting_verdict')
+  ) {
+    return {
+      ok: false,
+      rejection: {
+        status: 409,
+        code: 'debate_locked',
+        message: 'This content is locked in a live debate awaiting AI resolution.',
       },
     };
   }
@@ -952,6 +974,15 @@ export async function editContribution(
     forum.metrics.increment('contributions.edited');
     return { ok: true, contribution: held ?? edited };
   }
+  // WS-T — a published edit to a debated contribution resets the editor's
+  // side-activity clock (the both-sides-idle expedited path) and fans the
+  // fresh material out to arena viewers.
+  if (debateParty !== null && debateParty.arena.state === 'open') {
+    await touchDebateActivityForContribution(
+      buildDebateDeps(bundle.forum, bundle.ingestion),
+      contributionId,
+    );
+  }
   forum.metrics.increment('contributions.edited');
   return { ok: true, contribution: edited };
 }
@@ -975,6 +1006,48 @@ export async function removeContribution(
   }
   if (existing.moderationState === 'removed') {
     return { ok: true, contribution: existing }; // idempotent
+  }
+  // WS-T — removing content that is party to a live debate:
+  //   • `open`: the removal IS the party's exit — the challenger removing the
+  //     correction WITHDRAWS the debate (no verdict, the target's tag clears);
+  //     the incumbent removing the challenged comment CONCEDES (the challenger
+  //     prevails without adjudication).  Then the tombstone proceeds.
+  //   • `locked`/`awaiting_verdict`: refused — the material is locked in
+  //     until the AI resolution queue renders the verdict.
+  //   • `judged`/terminal: the outcome already stands; removal proceeds.
+  const debateParty = await liveArenaForContribution(forum, contributionId);
+  if (debateParty !== null) {
+    const { arena, side } = debateParty;
+    if (arena.state === 'locked' || arena.state === 'awaiting_verdict') {
+      return {
+        ok: false,
+        rejection: {
+          status: 409,
+          code: 'debate_locked',
+          message: 'This content is locked in a live debate awaiting AI resolution.',
+        },
+      };
+    }
+    if (arena.state === 'open') {
+      const deps = buildDebateDeps(forum, bundle.ingestion);
+      const outcome =
+        side === 'challenger'
+          ? await withdrawDebate(deps, arena.debateId, userId)
+          : await concedeDebate(deps, arena.debateId, userId);
+      // A close racing the lock loses (`window_closed`): the material just
+      // locked in, so the removal is refused too.  A stale party record
+      // (`not_found`/`not_*`) has nothing to close — the removal proceeds.
+      if (!outcome.ok && outcome.reason === 'window_closed') {
+        return {
+          ok: false,
+          rejection: {
+            status: 409,
+            code: 'debate_locked',
+            message: 'This content is locked in a live debate awaiting AI resolution.',
+          },
+        };
+      }
+    }
   }
   const removed = await forum.contributions.setModerationState(contributionId, 'removed');
   if (!removed) {

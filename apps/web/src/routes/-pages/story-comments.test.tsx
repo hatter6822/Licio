@@ -13,7 +13,14 @@ const recordReplyDepth = vi.fn();
 const setActiveStory = vi.fn();
 let canGoBack: boolean;
 let search: { root?: string };
-let storyState: { data?: { title: string; thread_id: string | null; room_id?: string | null } };
+let storyState: {
+  data?: {
+    title: string;
+    thread_id: string | null;
+    room_id?: string | null;
+    dispute_status: 'none' | 'under_debate' | 'incorrect' | 'validated';
+  };
+};
 let commentsState: {
   data?: { comments: CommentItem[]; anchor: CommentItem | null; next_cursor: string | null };
   isError?: boolean;
@@ -79,6 +86,8 @@ vi.mock('../../lib/queries.js', () => ({
   // WS-G.2.2 — the top-level composer reads the room's posting lens; no lenses ⇒
   // no posting-lens note and an untagged comment (the default here).
   useRoomQuery: () => roomState,
+  // WS-T — the page surfaces active-debate discovery; no debates by default.
+  useStoryDebatesQuery: () => ({ data: { debates: [] } }),
 }));
 
 const { StoryCommentsPage } = await import('./story-comments.js');
@@ -125,7 +134,12 @@ beforeEach(() => {
   canGoBack = true;
   search = {};
   storyState = {
-    data: { title: 'Regional water board dataset', thread_id: THREAD_ID, room_id: ROOM_ID },
+    data: {
+      title: 'Regional water board dataset',
+      thread_id: THREAD_ID,
+      room_id: ROOM_ID,
+      dispute_status: 'none',
+    },
   };
   commentsState = { data: { comments: [], anchor: null, next_cursor: null } };
   roomState = { data: { lenses: [], my_lens_id: null } };

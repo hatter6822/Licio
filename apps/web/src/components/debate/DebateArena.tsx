@@ -1,21 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-T debate arena — the live, open adjudication surface (SPEC §15.4/§24.6).
-// A sourced correction opens a debate: the INCUMBENT (the challenged content's
-// author) and the CHALLENGER each post + edit a co-visible position (summary +
-// sources) for 12 hours — each sees the other's current draft while the window
-// is open (the query polls) so both offer their strongest case.  The room's
-// governed AI then renders a probabilistic verdict; the room STEWARD may fully
-// overrule it for 24 hours.  A `corrected` outcome tags the loser "incorrect".
+// A sourced correction opens a debate: the arena shows the REAL material under
+// dispute — the challenged story/comment and the correction — live while the
+// arena is open (either author may keep adjusting their content and an
+// optional rebuttal statement; each sees the other's current case as it
+// changes).  The debate queues for AI resolution by the EARLIER of: both
+// sides idle for an hour (the expedited path), or the 23h edit deadline + a
+// 1h locked countdown (the schedule).  While open, the challenger may
+// withdraw the correction and the incumbent may concede.  The room's governed
+// AI then renders a probabilistic verdict over the LOCKED material; the room
+// STEWARD may fully overrule it for 24 hours.  A `corrected` outcome tags the
+// loser "incorrect".
 //
 // Strictly no-applause: there is no member vote/tally anywhere — the outcome is a
 // content-structural adjudication, not a popularity count.
-import type { DebateArenaPublic, DebatePosition, DebateWinner } from '@licio/shared';
-import { citationUrlSchema, DEBATE_POSITION_BODY_LIMIT } from '@licio/shared';
-import { useState } from 'react';
+import type { DebateArenaPublic, DebateContent, DebatePosition, DebateWinner } from '@licio/shared';
+import {
+  citationUrlSchema,
+  DEBATE_INACTIVITY_WINDOW_MS,
+  DEBATE_POSITION_BODY_LIMIT,
+} from '@licio/shared';
+import { lazy, Suspense, useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useDebateStream } from '../../lib/debate-stream.js';
 import {
+  useCloseDebateMutation,
   useDebateQuery,
   useOverrideDebateMutation,
   usePostDebatePositionMutation,
@@ -30,20 +40,110 @@ import { Icon } from '../ui/Icon/index.js';
 
 const badge = 'rounded border px-1.5 py-px text-xs font-medium uppercase tracking-wide';
 
-function Countdown({ deadline, label }: { deadline: string; label: string }): React.ReactElement {
+function remaining(deadline: string): { closed: boolean; label: string } {
   const ms = Date.parse(deadline) - Date.now();
-  const closed = ms <= 0;
-  const hours = Math.max(0, Math.floor(ms / 3_600_000));
-  const minutes = Math.max(0, Math.floor((ms % 3_600_000) / 60_000));
+  if (ms <= 0) return { closed: true, label: '' };
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  return { closed: false, label: hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m` };
+}
+
+function Countdown({ deadline, label }: { deadline: string; label: string }): React.ReactElement {
+  const r = remaining(deadline);
   return (
     <p className="text-sm text-ink-muted">
-      {closed ? `${label} closed` : `${label}: ${hours}h ${minutes}m remaining`}
+      {r.closed ? `${label} closed` : `${label}: ${r.label} remaining`}
     </p>
   );
 }
 
-/** One side's position: read-only for observers; editable for its author while
- *  the 12h window is open. */
+/** A compact source list (shared by the content and rebuttal cards). */
+function SourceList({
+  heading,
+  citations,
+}: {
+  heading: string;
+  citations: readonly { url: string; title?: string | undefined }[];
+}): React.ReactElement | null {
+  if (citations.length === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1" aria-label={`${heading} sources`}>
+      {citations.map((c) => (
+        <li key={c.url} className="flex items-start gap-1.5 text-sm">
+          <Icon name="quote" className="mt-0.5 size-3.5 shrink-0 text-ink-muted" aria-hidden />
+          <SafeExternalLink
+            href={c.url}
+            className="break-all font-medium text-primary-on-soft underline hover:no-underline"
+          >
+            {c.title ?? c.url}
+          </SafeExternalLink>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** One side's REAL material under debate: the challenged story/comment (the
+ *  incumbent's) or the correction (the challenger's).  Live while the arena
+ *  is open — it re-renders as the author edits — and the locked snapshot from
+ *  the lock onward (what the AI resolution queue judges). */
+function ContentCard({
+  heading,
+  author,
+  content,
+}: {
+  heading: string;
+  author: string;
+  content: DebateContent | null;
+}): React.ReactElement {
+  return (
+    <section
+      className={cn('flex flex-col gap-2 p-3', raisedSurface)}
+      aria-label={`${heading} content`}
+    >
+      <header className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="font-semibold text-ink">
+          {heading} <span className="font-normal text-ink-muted">· {author}</span>
+        </h3>
+        {content !== null ? (
+          <span
+            className={cn(
+              badge,
+              content.locked
+                ? 'border-line text-ink-muted'
+                : 'border-primary/40 text-primary-on-soft',
+            )}
+          >
+            {content.locked ? 'Locked in' : 'Live'}
+          </span>
+        ) : null}
+      </header>
+      {content === null ? (
+        <p className="text-sm text-ink-muted italic">This content is no longer available.</p>
+      ) : content.removed ? (
+        <p className="text-sm text-ink-muted italic">
+          This content was removed and is no longer shown.
+        </p>
+      ) : (
+        <>
+          {content.title !== null && content.title.length > 0 ? (
+            <p className="font-medium text-ink">{content.title}</p>
+          ) : null}
+          {content.body.length > 0 ? (
+            <UgcBody markdown={content.body} compact />
+          ) : content.title === null ? (
+            <p className="text-sm text-ink-muted italic">No content.</p>
+          ) : null}
+          <SourceList heading={heading} citations={content.citations} />
+        </>
+      )}
+    </section>
+  );
+}
+
+/** One side's optional rebuttal statement, layered over their underlying
+ *  content: read-only for observers; editable for its author while the arena
+ *  is open. */
 function PositionCard({
   debateId,
   position,
@@ -62,7 +162,7 @@ function PositionCard({
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const heading = position.side === 'incumbent' ? 'Incumbent' : 'Challenger';
+  const heading = position.side === 'incumbent' ? 'Incumbent rebuttal' : 'Challenger argument';
   const author = position.author_display_name ?? position.author_handle ?? 'Unknown';
 
   const addSource = (): void => {
@@ -182,28 +282,10 @@ function PositionCard({
       ) : position.submitted ? (
         <>
           <UgcBody markdown={position.summary} compact />
-          {position.citations.length > 0 ? (
-            <ul className="flex flex-col gap-1" aria-label={`${heading} sources`}>
-              {position.citations.map((c) => (
-                <li key={c.url} className="flex items-start gap-1.5 text-sm">
-                  <Icon
-                    name="quote"
-                    className="mt-0.5 size-3.5 shrink-0 text-ink-muted"
-                    aria-hidden
-                  />
-                  <SafeExternalLink
-                    href={c.url}
-                    className="break-all font-medium text-primary-on-soft underline hover:no-underline"
-                  >
-                    {c.title ?? c.url}
-                  </SafeExternalLink>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          <SourceList heading={heading} citations={position.citations} />
         </>
       ) : (
-        <p className="text-sm text-ink-muted italic">No position posted yet.</p>
+        <p className="text-sm text-ink-muted italic">No statement posted yet.</p>
       )}
     </section>
   );
@@ -239,7 +321,12 @@ function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactEleme
       <div className="flex flex-wrap items-center gap-2">
         <span className={cn(badge, tone)}>{label}</span>
         <span className="text-sm text-ink-muted">
-          Decided by {arena.decided_by === 'steward' ? 'the room steward' : "the room's AI"}
+          Decided by{' '}
+          {arena.decided_by === 'steward'
+            ? 'the room steward'
+            : arena.decided_by === 'concession'
+              ? "the incumbent's concession"
+              : "the room's AI"}
           {arena.confidence !== null ? ` · ${Math.round(arena.confidence * 100)}% confidence` : ''}
         </span>
       </div>
@@ -299,6 +386,65 @@ function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactEleme
   );
 }
 
+/** The withdraw (challenger) / concede (incumbent) affordance — a two-step
+ *  inline confirm, allowed only while the arena is open. */
+function PartyExitControl({
+  arena,
+  debateId,
+}: {
+  arena: DebateArenaPublic;
+  debateId: string;
+}): React.ReactElement | null {
+  const role = arena.viewer_role;
+  const isChallenger = role === 'challenger';
+  const mutation = useCloseDebateMutation(debateId, isChallenger ? 'withdraw' : 'concede');
+  const [confirming, setConfirming] = useState(false);
+  if (arena.state !== 'open' || (role !== 'challenger' && role !== 'incumbent')) return null;
+  return (
+    <div
+      role="group"
+      className="flex flex-wrap items-center gap-2"
+      aria-label={isChallenger ? 'Withdraw the correction' : 'Concede the challenge'}
+    >
+      {confirming ? (
+        <>
+          <span className="text-sm text-ink">
+            {isChallenger
+              ? 'Withdraw the correction? The debate closes with no verdict.'
+              : 'Concede? The correction prevails and your content is tagged Incorrect.'}
+          </span>
+          <Button
+            type="button"
+            variant="primary"
+            loading={mutation.isPending}
+            onClick={() => mutation.mutate()}
+          >
+            {isChallenger ? 'Withdraw' : 'Concede'}
+          </Button>
+          <Button type="button" variant="ghost" onClick={() => setConfirming(false)}>
+            Keep debating
+          </Button>
+        </>
+      ) : (
+        <Button type="button" variant="ghost" onClick={() => setConfirming(true)}>
+          {isChallenger ? 'Withdraw the correction…' : 'Concede the challenge…'}
+        </Button>
+      )}
+      {mutation.isError ? (
+        <p role="alert" className="text-sm text-error">
+          This debate can no longer be changed — the material may already be locked in.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** DEV-ONLY: the debate fast-forward control (see DevFastForward.tsx) loads
+ *  behind a compile-time gate — the conditional folds to `null` in a
+ *  production build, so neither the component nor the simulator client ever
+ *  enters a production chunk. */
+const LazyDevFastForward = import.meta.env.DEV ? lazy(() => import('./DevFastForward.js')) : null;
+
 export function DebateArena({
   debateId,
   storyId,
@@ -307,10 +453,11 @@ export function DebateArena({
   storyId: string;
 }): React.ReactElement {
   const query = useDebateQuery(debateId);
-  // Live co-visibility: stream while the arena is still active (a resolved arena
-  // is static).  Each frame re-fetches the viewer's role-scoped view, so each
-  // side sees the other's current draft as they edit (backs up the poll).
-  useDebateStream(debateId, query.data?.debate.state !== 'resolved');
+  const state = query.data?.debate.state;
+  // Live co-visibility: stream while the arena is still active (a terminal
+  // arena is static).  Each frame re-fetches the viewer's role-scoped view, so
+  // each side sees the other's current material as it changes (backs the poll).
+  useDebateStream(debateId, state !== 'resolved' && state !== 'withdrawn');
 
   if (query.isLoading) return <p className="text-sm text-ink-muted">Loading the debate…</p>;
   if (query.isError || !query.data) {
@@ -319,11 +466,26 @@ export function DebateArena({
   const arena = query.data.debate;
   const windowOpen = arena.state === 'open' && Date.parse(arena.edit_deadline_at) > Date.now();
   const stateLabel: Record<DebateArenaPublic['state'], string> = {
-    open: 'Open — both sides are making their case',
-    awaiting_verdict: 'Editing closed — awaiting the verdict',
+    open: 'Live — both sides are making their case',
+    locked: 'Locked in — the final countdown to AI resolution',
+    awaiting_verdict: "In the room's AI resolution queue",
     judged: 'Judged — steward may overrule',
     resolved: 'Resolved',
+    withdrawn: 'Withdrawn by the challenger — no verdict',
   };
+  // The expedited path: the debate queues one inactivity window after the
+  // LAST edit from either side (whichever comes before the 23h schedule).
+  const lastActiveMs = Math.max(
+    Date.parse(arena.incumbent_last_active_at),
+    Date.parse(arena.challenger_last_active_at),
+  );
+  const idleQueueAt = new Date(lastActiveMs + DEBATE_INACTIVITY_WINDOW_MS).toISOString();
+  const idleBeforeSchedule = windowOpen && idleQueueAt < arena.edit_deadline_at;
+
+  const incumbentAuthor =
+    arena.incumbent.author_display_name ?? arena.incumbent.author_handle ?? 'Unknown';
+  const challengerAuthor =
+    arena.challenger.author_display_name ?? arena.challenger.author_handle ?? 'Unknown';
 
   return (
     <section className="flex flex-col gap-4" aria-labelledby="debate-heading">
@@ -332,16 +494,47 @@ export function DebateArena({
           Debate arena
         </h1>
         <p className="text-sm text-ink-muted">
-          A sourced correction of a {arena.target_type}. The room's AI weighs both sides' sources —
-          this is not a vote. {stateLabel[arena.state]}.
+          A sourced correction of a {arena.target_type}. The room's AI weighs both sides' content
+          and sources — this is not a vote. {stateLabel[arena.state]}.
         </p>
-        {windowOpen ? <Countdown deadline={arena.edit_deadline_at} label="Editing window" /> : null}
+        {windowOpen ? (
+          <>
+            <Countdown deadline={arena.edit_deadline_at} label="Editing window" />
+            {idleBeforeSchedule ? (
+              <p className="text-sm text-ink-muted">
+                Resolves early once both sides stay idle for an hour
+                {remaining(idleQueueAt).closed
+                  ? ' (queueing imminently)'
+                  : ` (~${remaining(idleQueueAt).label} unless someone edits)`}
+                .
+              </p>
+            ) : null}
+          </>
+        ) : null}
+        {arena.state === 'locked' ? (
+          <Countdown deadline={arena.resolve_due_at} label="AI resolution" />
+        ) : null}
         {arena.state === 'judged' && arena.override_deadline_at ? (
           <Countdown deadline={arena.override_deadline_at} label="Steward-override window" />
         ) : null}
       </header>
 
       <VerdictPanel arena={arena} />
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <ContentCard
+          heading={
+            arena.target_type === 'story' ? 'The challenged story' : 'The challenged comment'
+          }
+          author={incumbentAuthor}
+          content={arena.target_content}
+        />
+        <ContentCard
+          heading="The correction"
+          author={challengerAuthor}
+          content={arena.correction_content}
+        />
+      </div>
 
       <div className="grid gap-3 md:grid-cols-2">
         <PositionCard
@@ -357,6 +550,13 @@ export function DebateArena({
           windowOpen={windowOpen}
         />
       </div>
+
+      <PartyExitControl arena={arena} debateId={debateId} />
+      {LazyDevFastForward !== null ? (
+        <Suspense fallback={null}>
+          <LazyDevFastForward debateId={debateId} />
+        </Suspense>
+      ) : null}
 
       <a
         href={`/stories/${encodeURIComponent(storyId)}`}

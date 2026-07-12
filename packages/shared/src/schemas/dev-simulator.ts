@@ -245,3 +245,28 @@ export const simulatorConfigureRequestSchema = z
   })
   .strict();
 export type SimulatorConfigureRequest = z.infer<typeof simulatorConfigureRequestSchema>;
+
+/**
+ * POST /v1/dev/simulator/debates/:debateId/fast-forward — jump a debate to
+ * its next lifecycle milestone so a developer can watch a REAL spec-window
+ * (24h) arena lock, enter the AI resolution queue, and resolve on demand.
+ * DEV-ONLY like the rest of this surface.
+ */
+export const SIMULATOR_DEBATE_FAST_FORWARD_TARGETS = ['locked', 'verdict', 'resolved'] as const;
+export const simulatorDebateFastForwardRequestSchema = z
+  .object({ to: z.enum(SIMULATOR_DEBATE_FAST_FORWARD_TARGETS) })
+  .strict();
+export type SimulatorDebateFastForwardRequest = z.infer<
+  typeof simulatorDebateFastForwardRequestSchema
+>;
+
+export const simulatorDebateFastForwardResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    /** The arena's state after the jump (mirrors the debate wire vocabulary). */
+    state: z.enum(['open', 'locked', 'awaiting_verdict', 'judged', 'resolved', 'withdrawn']),
+  })
+  .strict();
+export type SimulatorDebateFastForwardResponse = z.infer<
+  typeof simulatorDebateFastForwardResponseSchema
+>;

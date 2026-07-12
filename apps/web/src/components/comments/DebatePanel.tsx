@@ -15,9 +15,11 @@ import { Icon } from '../ui/Icon/index.js';
 
 const STATE_LABEL: Record<DebateArenaSummary['state'], string> = {
   open: 'Live — both sides are making their case',
-  awaiting_verdict: 'Editing closed — awaiting the verdict',
+  locked: 'Locked in — the final countdown to AI resolution',
+  awaiting_verdict: "In the room's AI resolution queue",
   judged: 'Judged — steward may still overrule',
   resolved: 'Resolved',
+  withdrawn: 'Withdrawn — no verdict',
 };
 
 /** A coarse "Nh Nm left" countdown to a deadline; null once it has passed. */
@@ -52,9 +54,11 @@ export function DebatePanel({
           const countdown =
             debate.state === 'open'
               ? remainingLabel(debate.edit_deadline_at)
-              : debate.state === 'judged' && debate.override_deadline_at !== null
-                ? remainingLabel(debate.override_deadline_at)
-                : null;
+              : debate.state === 'locked'
+                ? remainingLabel(debate.resolve_due_at)
+                : debate.state === 'judged' && debate.override_deadline_at !== null
+                  ? remainingLabel(debate.override_deadline_at)
+                  : null;
           return (
             <li key={debate.debate_id}>
               <Link

@@ -890,7 +890,7 @@ adjudicator and its human remedy handle:
   *Forfeits*).
 - After a rebuttal lands, the **challenger** sometimes strengthens their own
   position — original material plus a responsive addendum and extra sources —
-  through the same co-visible position path (both sides of the 12h edit loop
+  through the same co-visible rebuttal path (both sides of the live edit loop
   are exercised).
 - A dedicated **steward persona** (`rowan_ellery`, a real `community_steward`
   of every room the simulator uses) **overrules** a share of judged verdicts
@@ -898,11 +898,21 @@ adjudicator and its human remedy handle:
   checks all bite honestly — so the 24h human-in-the-loop remedy has live
   traffic too.
 - The simulator advances due arenas through the real lifecycle every tick.
-  While it runs, the arena windows are **shortened** (≈20s edit / 15s
-  override, via the injectable `debateWindowsOverride` seam — the §15.4 spec
-  windows of 12h/24h are restored on stop), so a synthetic challenge resolves
-  in well under a minute, verdicts split across corrected/upheld/inconclusive,
-  and `Incorrect`/`Validated` tags + feed demotion appear live.
+  While it runs, the arena windows are **shortened** (45s edit / 15s lock /
+  20s both-sides-idle / 15s override, via the injectable
+  `debateWindowsOverride` seam — the §15.4 spec windows of 23h/1h/1h/24h are
+  restored on stop), so a synthetic challenge resolves in about a minute,
+  verdicts split across corrected/upheld/inconclusive, and
+  `Incorrect`/`Validated` tags + feed demotion appear live.  The shortened
+  windows are **scoped to arenas whose parties are BOTH synthetic personas**
+  (`appliesToUser`): a debate YOUR dev account opens or defends keeps the real
+  spec windows, so you can watch it live — and jump it forward on demand with
+  the arena page's dev **fast-forward** row (or
+  `POST /v1/dev/simulator/debates/:id/fast-forward` with
+  `{"to": "locked" | "verdict" | "resolved"}` + the control header), which
+  shifts that arena's own deadlines into the past and runs the REAL lifecycle
+  sweep — snapshot, adjudicator, broadcasts, and dispute tags all fire exactly
+  as they would at the real instants.
 
 Run **`LICIO_SIM=challenge_wave pnpm dev`** (or switch scenarios in the panel)
 to stress exactly this loop: corrections dominate the traffic, and a bounded
@@ -1479,15 +1489,20 @@ delayed, never dropped). Inspect the decision log as an AI-team member: `GET
 allowed / warned / flagged-for-review / clamped-by-wrapper) plus recent
 metadata-only rows (raw proposed vs bounded action — no content).
 **(3)** The **debate ADJUDICATOR** (WS-T challenge resolution): when a sourced
-correction opens a debate arena and its 12h window closes, the LLM weighs both
-positions and emits ONLY class probabilities + a bounded rationale; the
+correction's debate locks in and enters the AI resolution queue (one hour
+after both sides stop editing, or on the 23h/24h schedule for a continuously
+contested arena), the LLM weighs both sides' locked content, rebuttals, and
+sourcing and emits ONLY class probabilities + a bounded rationale; the
 deterministic shell (`ai-governance/llm/debate.ts`) maps the outcome — the
 exact `judgeDebate` argmax/tie rule, the shared verdict vocabulary, a no-URLs
 rationale bound — and ANY failure falls back to the pinned-weights
 deterministic MLP, so a verdict is always rendered (the room steward may still
-fully overrule it for 24h). Try it in dev: post a sourced `correction`
-contribution against a comment/story and watch the arena judge on the debate
-scheduler tick.
+fully overrule it for 24h).  In a governed room whose ratified agent holds the
+WS-U `debate.judge` capability (the seeded demo room requests it), the SAME
+leg runs room-conditioned on the community-ratified prompt — the room's AI
+resolution queue.  Try it in dev: post a sourced `correction` contribution
+against a comment/story, watch the live arena, and use the arena's dev
+fast-forward row to jump it to the verdict.
 
 #### The dev-simulated local runtime (the `pnpm dev` default)
 

@@ -483,16 +483,23 @@ export function useStoryDebatesQuery(storyId: string) {
 }
 
 /**
- * The live debate arena.  Polls while the arena is still `open` (the co-visible
- * editing window) so each side sees the other's current draft as they write; a
- * judged/resolved arena is static and stops polling.
+ * The live debate arena.  Polls fast while the arena is live (`open` — the
+ * co-visible editing window — plus `locked`/`awaiting_verdict`, the frozen
+ * countdown and the AI resolution queue) so each side sees the other's
+ * current material as it changes; a judged arena polls slowly through the
+ * steward-override window; a terminal arena is static and stops polling.
  */
 export function useDebateQuery(debateId: string | null) {
   return useQuery({
     queryKey: queryKeys.debate(debateId ?? 'none'),
     enabled: debateId !== null,
     queryFn: () => api.fetchDebate(debateId as string),
-    refetchInterval: (query) => (query.state.data?.debate.state === 'open' ? 5_000 : false),
+    refetchInterval: (query) => {
+      const state = query.state.data?.debate.state;
+      if (state === 'open' || state === 'locked' || state === 'awaiting_verdict') return 5_000;
+      if (state === 'judged') return 30_000;
+      return false;
+    },
   });
 }
 
@@ -508,6 +515,16 @@ export function useOverrideDebateMutation(debateId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: DebateOverrideRequest) => api.overrideDebate(debateId, body),
+    onSuccess: (data) => queryClient.setQueryData(queryKeys.debate(debateId), data),
+  });
+}
+
+/** The party-driven early close: the challenger withdraws the correction or
+ *  the incumbent concedes the challenge (open window only). */
+export function useCloseDebateMutation(debateId: string, action: 'withdraw' | 'concede') {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.closeDebate(debateId, action),
     onSuccess: (data) => queryClient.setQueryData(queryKeys.debate(debateId), data),
   });
 }

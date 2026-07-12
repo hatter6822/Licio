@@ -255,6 +255,15 @@ describe('WS-T — live debate arena broadcaster', () => {
     updated_at: '2026-07-05T00:00:00.000Z',
     submitted: true,
   });
+  const content = (kind: 'comment' | 'correction') => ({
+    kind,
+    title: null,
+    body: kind === 'correction' ? 'the sourced correction body' : 'the material under debate',
+    citations: [],
+    updated_at: '2026-07-05T00:00:00.000Z',
+    removed: false,
+    locked: false,
+  });
   const publicDebate = {
     debate_id: '00000000-0000-4000-8000-0000000000f1',
     story_id: '00000000-0000-4000-8000-0000000000f2',
@@ -266,7 +275,13 @@ describe('WS-T — live debate arena broadcaster', () => {
     state: 'open' as const,
     incumbent: position('incumbent'),
     challenger: position('challenger'),
+    target_content: content('comment'),
+    correction_content: content('correction'),
     edit_deadline_at: '2026-07-05T12:00:00.000Z',
+    resolve_due_at: '2026-07-05T13:00:00.000Z',
+    locked_at: null,
+    incumbent_last_active_at: '2026-07-05T00:00:00.000Z',
+    challenger_last_active_at: '2026-07-05T00:00:00.000Z',
     verdict: null,
     winner: null,
     decided_by: null,

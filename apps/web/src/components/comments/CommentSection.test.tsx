@@ -267,6 +267,7 @@ describe('CommentSection', () => {
           challenger_contribution_id: '44444444-4444-4444-8444-444444444444',
           state: 'open',
           edit_deadline_at: '2999-01-01T00:00:00.000Z',
+          resolve_due_at: '2999-01-01T01:00:00.000Z',
           override_deadline_at: null,
           verdict: null,
           winner: null,
@@ -305,8 +306,9 @@ describe('CommentSection', () => {
       },
     };
     renderSection();
-    // Anyone — especially the incumbent author — reaches the arena to post their
-    // 12-hour position, even though the `Correct` button is disabled here.
+    // Anyone — especially the incumbent author — reaches the arena to make
+    // their case while it is live, even though the `Correct` button is
+    // disabled here.
     const link = screen.getByRole('link', { name: /view debate/i });
     expect(link).toHaveAttribute('href', `/stories/${storyId}/debate/${debateId}`);
     expect(screen.getByRole('button', { name: 'Correct' })).toBeDisabled();

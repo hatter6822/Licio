@@ -38,6 +38,7 @@ function summary(overrides: Partial<DebateArenaSummary> = {}): DebateArenaSummar
     challenger_contribution_id: '44444444-4444-4444-8444-444444444444',
     state: 'open',
     edit_deadline_at: '2999-01-01T00:00:00.000Z',
+    resolve_due_at: '2999-01-01T01:00:00.000Z',
     override_deadline_at: null,
     verdict: null,
     winner: null,
@@ -69,7 +70,27 @@ describe('DebatePanel', () => {
     );
   });
 
-  it('counts multiple debates and drops the countdown once the deadline passes', () => {
+  it('a locked debate shows the AI-resolution queue countdown', () => {
+    render(
+      <DebatePanel
+        storyId={storyId}
+        debates={[
+          summary({
+            state: 'locked',
+            edit_deadline_at: '2000-01-01T00:00:00.000Z',
+            resolve_due_at: '2999-01-01T00:00:00.000Z',
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByText(/Locked in — the final countdown to AI resolution/),
+    ).toBeInTheDocument();
+    // The countdown now runs to the queue instant, not the (past) edit deadline.
+    expect(screen.getByText(/left$/)).toBeInTheDocument();
+  });
+
+  it('counts multiple debates and drops the countdown once adjudication is queued', () => {
     render(
       <DebatePanel
         storyId={storyId}
@@ -80,6 +101,7 @@ describe('DebatePanel', () => {
             state: 'awaiting_verdict',
             target_type: 'story',
             edit_deadline_at: '2000-01-01T00:00:00.000Z',
+            resolve_due_at: '2000-01-01T01:00:00.000Z',
             target_excerpt: null,
           }),
         ]}
@@ -87,6 +109,8 @@ describe('DebatePanel', () => {
     );
     expect(screen.getByText('2 active debates')).toBeInTheDocument();
     expect(screen.getByText(/The story is challenged/)).toBeInTheDocument();
-    expect(screen.getByText(/Editing closed/)).toBeInTheDocument();
+    expect(screen.getByText(/In the room's AI resolution queue/)).toBeInTheDocument();
+    // Only the still-open first row carries a countdown.
+    expect(screen.getAllByText(/left$/)).toHaveLength(1);
   });
 });

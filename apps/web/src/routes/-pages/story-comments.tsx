@@ -16,6 +16,7 @@ import type { CommentItem } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { useSpaFocus } from '../../components/a11y/index.js';
+import { DebatePanel } from '../../components/comments/DebatePanel.js';
 import {
   CommentComposer,
   CommentHeader,
@@ -24,6 +25,7 @@ import {
   commentActionClass,
 } from '../../components/comments/index.js';
 import { lensDisplayName } from '../../components/rooms/RoomLensControl/RoomLensSelector.js';
+import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
 import { UgcBody } from '../../components/ugc/UgcBody.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -34,7 +36,12 @@ import { useGoBack } from '../../hooks/useGoBack.js';
 import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
-import { useRoomQuery, useStoryCommentsQuery, useStoryQuery } from '../../lib/queries.js';
+import {
+  useRoomQuery,
+  useStoryCommentsQuery,
+  useStoryDebatesQuery,
+  useStoryQuery,
+} from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
@@ -175,6 +182,10 @@ function StoryCommentsContent({
     storyId,
     isRooted ? { root, depth: FOCUSED_DEPTH } : { depth: ALL_COMMENTS_DEPTH },
   );
+  // WS-T — active-debate discovery + the story's dispute posture render on
+  // this dedicated comments surface too (previously only the story page had
+  // them, so a reader here could not find a live debate).
+  const debates = useStoryDebatesQuery(storyId);
 
   // Retrace history so the back button returns the reader to exactly where they
   // came from (the story page, or the previous drill-down level); a cold-loaded
@@ -271,6 +282,9 @@ function StoryCommentsContent({
             </Link>
           </p>
         ) : null}
+
+        {story.data ? <DisputeBanner status={story.data.dispute_status} /> : null}
+        {debates.data ? <DebatePanel storyId={storyId} debates={debates.data.debates} /> : null}
 
         {comments.isError ? (
           <ErrorState

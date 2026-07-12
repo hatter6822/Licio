@@ -15,7 +15,7 @@ import type { IngestionServices } from '../ingestion/services.js';
 import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-broadcaster.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
-import type { DebateJudgeRunner, DebateWindowPolicy } from './debate.js';
+import type { DebateJudgeRunner, DebateWindowsOverride } from './debate.js';
 import { type DebateBroadcaster, InMemoryDebateBroadcaster } from './debate-broadcaster.js';
 import { type DebateStore, InMemoryDebateStore } from './debate-store.js';
 import {
@@ -146,9 +146,11 @@ export interface ForumServices {
   /** WS-T arena-window override (DEV traffic simulator / tests ONLY — set while
    *  the simulator runs so the correction → adjudication → finalize lifecycle
    *  completes on an observable cadence; null ⇒ the §15.4 spec windows —
-   *  nothing in production wiring ever sets it). Every DebateDeps construction
-   *  site threads it through. */
-  debateWindowsOverride: DebateWindowPolicy | null;
+   *  nothing in production wiring ever sets it).  The simulator scopes it via
+   *  `appliesToUser` to arenas whose parties are BOTH synthetic personas, so a
+   *  debate a real dev-account user is party to runs the REAL spec windows.
+   *  Every DebateDeps construction site threads it through. */
+  debateWindowsOverride: DebateWindowsOverride | null;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;

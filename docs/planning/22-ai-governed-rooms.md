@@ -246,16 +246,23 @@ the explicit opt-out anywhere; the hosted `anthropic` backend remains an explici
 (data-processor egress, boot-logged loudly); an explicit non-loopback URL fails env validation
 even with the provider unset.
 (2) **The debate adjudicator is the third governed LLM surface** (WS-T challenge resolution —
-the AI reviewing a sourced story/comment correction debate). The LLM
-(`apps/api/src/ai-governance/llm/debate.ts`) reads both positions' substance/sourcing and emits
-ONLY class probabilities + a bounded rationale; the deterministic shell owns every
-authority-bearing step — `judgeDebate`'s exact argmax/tie rule, the shared class→verdict
+the AI resolving a sourced story/comment correction debate once its material locks in and it
+enters the room's AI resolution queue). The LLM
+(`apps/api/src/ai-governance/llm/debate.ts`) reads both sides' LOCKED content, rebuttals, and
+sourcing and emits ONLY class probabilities + a bounded rationale; the deterministic shell owns
+every authority-bearing step — `judgeDebate`'s exact argmax/tie rule, the shared class→verdict
 vocabulary (`debateClassToOutcome`, exported from `@licio/ai-governance` as the SSOT),
 clamp/renormalize, and a no-URLs length-capped rationale bound (the arena renders it) — under a
 global hourly budget + breaker + its own config-hashed registry identity + `AIOutputRecord`.
+In a governed room whose ratified agent holds the `debate.judge` capability (permitted by the
+default law-pack; deny-by-default derivation), `GovernanceService.debateConditioning` routes
+the SAME leg room-conditioned: the community-ratified prompt folds in subordinate to the
+platform rules under the moderation-admission backend pin, the record's input refs pin the
+room/model/prompt digest, and the verdict lands in the WS-U agent action log
+(`actionType: 'debate.judge'`, reversible).
 ANY failure returns null and `adjudicateDebate` falls back to the pinned-weights MLP, so a
 verdict is always rendered at at least the deterministic floor; the steward's 24h overrule
-stays the human remedy over both legs. Opt out per-surface with `GOVERNANCE_LLM_DEBATE=off`
+stays the human remedy over every leg. Opt out per-surface with `GOVERNANCE_LLM_DEBATE=off`
 (symmetric with `GOVERNANCE_LLM_MODERATION`).
 (3) **Development fakes the runtime rather than running less.** A dev boot with no provider
 auto-starts the DEV-ONLY deterministic simulated local runtime

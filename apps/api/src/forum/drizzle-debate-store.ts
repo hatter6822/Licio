@@ -3,20 +3,25 @@
 // WS-T production Postgres adapter for the debate arena store (SPEC §15.4/§24.6),
 // behind the SAME `DebateStore` interface as the in-memory adapter — the
 // WS-G/WS-R house pattern.  Gated integration tests (DATABASE_URL) run this
-// against the real migration chain (0056); the semantics mirror
+// against the real migration chain (0056/0078/0079); the semantics mirror
 // InMemoryDebateStore exactly:
 //
-//   • `open` relies on the two partial unique indexes (one non-resolved arena
-//     per comment / story target); a 23505 resolves to `null`;
+//   • `open` relies on the two partial unique indexes (one live arena per
+//     comment / story target); a 23505 resolves to `null`;
 //   • `updatePosition` uses `jsonb_set` so a side's edit never clobbers the
 //     OTHER side's concurrent draft (co-visible editing is concurrent);
-//   • the deadline sweeps read the `(state, *_deadline_at)` indexes.
+//   • `lock`/`withdraw`/`concede` are `state = 'open'`-conditional CAS writes
+//     (a change racing the lock loses; the material is locked in);
+//   • the deadline sweeps read the `(state, *_deadline/_due_at)` indexes and
+//     the both-sides-idle sweep reads the partial `greatest(...)` index.
 import type { DbExecutor } from '@licio/db';
 import { debateArenas as debateArenasTable } from '@licio/db';
 import type { Citation, DebateState } from '@licio/shared';
 import { and, asc, count, eq, inArray, lte, ne, sql } from 'drizzle-orm';
 import type {
   DebateArenaRecord,
+  DebateConcessionPatch,
+  DebateLockedContent,
   DebateSidePosition,
   DebateStore,
   DebateVerdictPatch,
@@ -41,7 +46,10 @@ function isUniqueViolation(error: unknown): boolean {
   return false;
 }
 
-const NON_RESOLVED: readonly DebateState[] = ['open', 'awaiting_verdict', 'judged'];
+const NON_RESOLVED: readonly DebateState[] = ['open', 'locked', 'awaiting_verdict', 'judged'];
+
+/** The states a verdict may still land on (the claim/record CAS window). */
+const PRE_VERDICT: readonly DebateState[] = ['open', 'locked', 'awaiting_verdict'];
 
 export class DrizzleDebateStore implements DebateStore {
   readonly #db: Db;
@@ -76,6 +84,27 @@ export class DrizzleDebateStore implements DebateStore {
         },
       },
       editDeadlineAt: iso(row.editDeadlineAt),
+      resolveDueAt: iso(row.resolveDueAt),
+      lockedAt: isoOrNull(row.lockedAt),
+      lockedContent:
+        row.lockedContent === null
+          ? null
+          : {
+              target: {
+                title: row.lockedContent.target.title,
+                body: row.lockedContent.target.body,
+                citations: row.lockedContent.target.citations as Citation[],
+                updatedAt: row.lockedContent.target.updatedAt,
+              },
+              correction: {
+                title: row.lockedContent.correction.title,
+                body: row.lockedContent.correction.body,
+                citations: row.lockedContent.correction.citations as Citation[],
+                updatedAt: row.lockedContent.correction.updatedAt,
+              },
+            },
+      incumbentLastActiveAt: iso(row.incumbentLastActiveAt),
+      challengerLastActiveAt: iso(row.challengerLastActiveAt),
       verdict: row.verdict,
       winner: row.winner,
       decidedBy: row.decidedBy,
@@ -112,6 +141,11 @@ export class DrizzleDebateStore implements DebateStore {
           state: record.state,
           positions: record.positions,
           editDeadlineAt: new Date(record.editDeadlineAt),
+          resolveDueAt: new Date(record.resolveDueAt),
+          lockedAt: record.lockedAt === null ? null : new Date(record.lockedAt),
+          lockedContent: record.lockedContent,
+          incumbentLastActiveAt: new Date(record.incumbentLastActiveAt),
+          challengerLastActiveAt: new Date(record.challengerLastActiveAt),
           verdict: record.verdict,
           winner: record.winner,
           decidedBy: record.decidedBy,
@@ -175,6 +209,20 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async getActiveForCorrection(contributionId: string): Promise<DebateArenaRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(debateArenasTable)
+      .where(
+        and(
+          eq(debateArenasTable.challengerContributionId, contributionId),
+          inArray(debateArenasTable.state, [...NON_RESOLVED]),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
   async updatePosition(
     debateId: string,
     side: 'incumbent' | 'challenger',
@@ -183,13 +231,88 @@ export class DrizzleDebateStore implements DebateStore {
     // jsonb_set ONLY the edited side, so it can never clobber the other side's
     // concurrent draft (co-visible editing is concurrent by design).  The
     // `state = 'open'` guard makes the write ATOMIC against the scheduler: if the
-    // lifecycle tick judged the arena between `postDebatePosition`'s pre-read and
-    // this write, no row matches and the stale position is dropped (never mutating
-    // an already-judged arena's positions out from under its recorded verdict).
+    // lifecycle tick locked/judged the arena between `postDebatePosition`'s
+    // pre-read and this write, no row matches and the stale position is dropped
+    // (never mutating a locked-in arena's positions out from under its verdict).
+    // A rebuttal edit is side activity (the both-sides-idle expedited path).
+    const activityAt = position.updatedAt === null ? new Date() : new Date(position.updatedAt);
     const rows = await this.#db
       .update(debateArenasTable)
       .set({
         positions: sql`jsonb_set(${debateArenasTable.positions}, ${`{${side}}`}, ${JSON.stringify(position)}::jsonb, true)`,
+        ...(side === 'incumbent'
+          ? { incumbentLastActiveAt: activityAt }
+          : { challengerLastActiveAt: activityAt }),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'open')))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async touchActivity(
+    debateId: string,
+    side: 'incumbent' | 'challenger',
+    at: string,
+  ): Promise<DebateArenaRecord | null> {
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({
+        ...(side === 'incumbent'
+          ? { incumbentLastActiveAt: new Date(at) }
+          : { challengerLastActiveAt: new Date(at) }),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'open')))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async lock(
+    debateId: string,
+    lockedAt: string,
+    content: DebateLockedContent,
+    resolveDueAt?: string,
+  ): Promise<DebateArenaRecord | null> {
+    // CAS: only an `open` arena locks (idempotent no-op on a later state).
+    // The optional resolveDueAt pulls the queue-entry instant forward on the
+    // both-sides-idle expedited path.
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({
+        state: 'locked',
+        lockedAt: new Date(lockedAt),
+        lockedContent: content,
+        ...(resolveDueAt !== undefined ? { resolveDueAt: new Date(resolveDueAt) } : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'open')))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async withdraw(debateId: string, closedAt: string): Promise<DebateArenaRecord | null> {
+    // CAS: a withdrawal racing the lock loses (the material was locked in).
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({ state: 'withdrawn', resolvedAt: new Date(closedAt), updatedAt: new Date() })
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'open')))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async concede(debateId: string, patch: DebateConcessionPatch): Promise<DebateArenaRecord | null> {
+    // CAS: a concession racing the lock loses (the material was locked in).
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({
+        state: 'resolved',
+        verdict: patch.verdict,
+        winner: patch.winner,
+        decidedBy: patch.decidedBy,
+        rationale: patch.rationale,
+        verdictAt: new Date(patch.verdictAt),
+        resolvedAt: new Date(patch.resolvedAt),
         updatedAt: new Date(),
       })
       .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'open')))
@@ -198,8 +321,8 @@ export class DrizzleDebateStore implements DebateStore {
   }
 
   async claimForVerdict(debateId: string): Promise<DebateArenaRecord | null> {
-    // Atomic claim: only an open/awaiting arena flips; the RETURNING row is
-    // the post-claim position snapshot the judge scores (position writes are
+    // Atomic claim: only a pre-verdict arena flips; the RETURNING row is
+    // the post-claim snapshot the judge scores (position writes are
     // rejected from this instant by updatePosition's `state = 'open'` guard).
     const rows = await this.#db
       .update(debateArenasTable)
@@ -207,7 +330,7 @@ export class DrizzleDebateStore implements DebateStore {
       .where(
         and(
           eq(debateArenasTable.debateId, debateId),
-          inArray(debateArenasTable.state, ['open', 'awaiting_verdict']),
+          inArray(debateArenasTable.state, [...PRE_VERDICT]),
         ),
       )
       .returning();
@@ -239,7 +362,7 @@ export class DrizzleDebateStore implements DebateStore {
       .where(
         and(
           eq(debateArenasTable.debateId, debateId),
-          inArray(debateArenasTable.state, ['open', 'awaiting_verdict']),
+          inArray(debateArenasTable.state, [...PRE_VERDICT]),
         ),
       )
       .returning();
@@ -287,19 +410,51 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
-  async listPastEditDeadline(nowIso: string, limit: number): Promise<DebateArenaRecord[]> {
+  async listDueForLock(nowIso: string, limit: number): Promise<DebateArenaRecord[]> {
     const rows = await this.#db
       .select()
       .from(debateArenasTable)
       .where(
         and(
-          // `awaiting_verdict` included: a claim whose judge crashed mid-flight
-          // must be re-listed on a later tick, never stranded.
-          inArray(debateArenasTable.state, ['open', 'awaiting_verdict']),
+          eq(debateArenasTable.state, 'open'),
           lte(debateArenasTable.editDeadlineAt, new Date(nowIso)),
         ),
       )
       .orderBy(asc(debateArenasTable.editDeadlineAt))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async listPastResolveDeadline(nowIso: string, limit: number): Promise<DebateArenaRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(debateArenasTable)
+      .where(
+        and(
+          // `open` included for lock-sweep catch-up; `awaiting_verdict` so a
+          // claim whose judge crashed mid-flight is re-listed, never stranded.
+          inArray(debateArenasTable.state, [...PRE_VERDICT]),
+          lte(debateArenasTable.resolveDueAt, new Date(nowIso)),
+        ),
+      )
+      .orderBy(asc(debateArenasTable.resolveDueAt))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async listIdleSince(idleSinceIso: string, limit: number): Promise<DebateArenaRecord[]> {
+    // The both-sides-idle expedited sweep, over the partial greatest(...) index.
+    const lastActivity = sql`greatest(${debateArenasTable.incumbentLastActiveAt}, ${debateArenasTable.challengerLastActiveAt})`;
+    const rows = await this.#db
+      .select()
+      .from(debateArenasTable)
+      .where(
+        and(
+          eq(debateArenasTable.state, 'open'),
+          sql`${lastActivity} <= ${idleSinceIso}::timestamptz`,
+        ),
+      )
+      .orderBy(sql`${lastActivity} asc`)
       .limit(limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -367,6 +522,27 @@ export class DrizzleDebateStore implements DebateStore {
       .orderBy(asc(debateArenasTable.editDeadlineAt))
       .limit(Math.max(0, limit));
     return rows.map((row) => this.#toRecord(row));
+  }
+
+  async shiftDeadlines(
+    debateId: string,
+    patch: { editDeadlineAt?: string; resolveDueAt?: string; overrideDeadlineAt?: string },
+  ): Promise<DebateArenaRecord | null> {
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({
+        ...(patch.editDeadlineAt !== undefined
+          ? { editDeadlineAt: new Date(patch.editDeadlineAt) }
+          : {}),
+        ...(patch.resolveDueAt !== undefined ? { resolveDueAt: new Date(patch.resolveDueAt) } : {}),
+        ...(patch.overrideDeadlineAt !== undefined
+          ? { overrideDeadlineAt: new Date(patch.overrideDeadlineAt) }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(debateArenasTable.debateId, debateId))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
   async clear(): Promise<void> {

@@ -2,21 +2,32 @@
 //
 // WS-T debate arena service (SPEC §15.4/§24.6).  A sourced correction against a
 // comment or story opens a live, open debate arena: the incumbent (target
-// author) and challenger (correction author) post + edit a co-visible position
-// (summary + sources) for 12h; the room's governed AI adjudicator then renders a
-// probabilistic verdict; the room steward may FULLY overrule it (either
-// direction) for 24h.  A `corrected` outcome tags the loser `incorrect` and
-// sinks it to the bottom of its comment section / the feed — visible, never
-// hidden.  This is NOT a vote (no member count anywhere; no-applause).
+// author) and challenger (correction author) adjust their underlying content
+// and post + edit a co-visible rebuttal statement (summary + sources) while the
+// arena is open.  The arena queues for AI resolution by the EARLIER of:
+//   • the expedited path — BOTH sides idle (no content/rebuttal edit) for the
+//     inactivity window (1h): the material is locked in and queued immediately;
+//   • the schedule — the 23h edit deadline locks the material; the final hour
+//     is a frozen countdown; at 24h the debate enters the queue.
+// While open, the challenger may WITHDRAW (closes with no verdict) and the
+// incumbent may CONCEDE (the challenger prevails without adjudication).  The
+// room's governed AI adjudicator then renders a probabilistic verdict over the
+// LOCKED material; the room steward may FULLY overrule it (either direction)
+// for 24h.  A `corrected` outcome tags the loser `incorrect` and sinks it to
+// the bottom of its comment section / the feed — visible, never hidden.  This
+// is NOT a vote (no member count anywhere; no-applause).
 
 import type { DebateJudgeVerdict } from '@licio/ai-governance';
 import {
   type Citation,
   type ContributionMetadata,
   DEBATE_EDIT_WINDOW_MS,
+  DEBATE_INACTIVITY_WINDOW_MS,
+  DEBATE_LOCK_WINDOW_MS,
   DEBATE_OVERRIDE_WINDOW_MS,
   type DebateArenaPublic,
   type DebateArenaSummary,
+  type DebateContent,
   type DebateJudgeInput,
   type DebateJudgeSideInput,
   type DebatePosition,
@@ -27,17 +38,31 @@ import {
   debateArenaSummarySchema,
 } from '@licio/shared';
 import { mapBounded } from '../lib/concurrency.js';
-import type { DebateArenaRecord, DebateSidePosition, DebateStore } from './debate-store.js';
+import type {
+  DebateArenaRecord,
+  DebateLockedContent,
+  DebateLockedSide,
+  DebateSidePosition,
+  DebateStore,
+} from './debate-store.js';
 import type { ContributionStore } from './stores.js';
 
+/** The room context handed to the judge runner: a governed room whose ratified
+ *  agent holds the WS-U `debate.judge` capability adjudicates its own queue. */
+export interface DebateJudgeContext {
+  debateId: string;
+  roomId: string | null;
+}
+
 /**
- * The governed-adjudicator port.  Runs the ProhibitedUseGuard + the neural model
- * + the AIOutputRecord (apps/api ai-governance/debate.ts).  A null result means
- * the judge was UNAVAILABLE/BLOCKED — the arena resolves fail-closed to
- * `inconclusive` (nothing is tagged incorrect).
+ * The governed-adjudicator port.  Runs the ProhibitedUseGuard + the model legs
+ * (the room's ratified agent where granted, else the platform LLM leg, else
+ * the deterministic MLP) + the AIOutputRecord (apps/api ai-governance/debate.ts).
+ * A null result means the judge was UNAVAILABLE/BLOCKED — the arena resolves
+ * fail-closed to `inconclusive` (nothing is tagged incorrect).
  */
 export type DebateJudgeRunner = (
-  debateId: string,
+  context: DebateJudgeContext,
   input: DebateJudgeInput,
 ) => Promise<{ verdict: DebateJudgeVerdict; outputId: string | null } | null>;
 
@@ -59,23 +84,76 @@ export type StoryDisputeSetter = (
   status: 'none' | 'under_debate' | 'incorrect' | 'validated',
 ) => Promise<void>;
 
+/** A story's debatable material (the incumbent side of a story-target arena). */
+export interface DebateStoryContent {
+  title: string | null;
+  /** The native-post body or the extraction excerpt ('' when neither exists). */
+  body: string;
+  /** The story's primary source as a citation (empty for a link-less native post). */
+  citations: Citation[];
+  updatedAt: string | null;
+}
+
+/** Read a story's debatable material (null = story missing). */
+export type StoryContentReader = (storyId: string) => Promise<DebateStoryContent | null>;
+
 /**
  * The arena window lengths. Production ALWAYS runs the §15.4 spec windows (the
- * shared `DEBATE_EDIT_WINDOW_MS`/`DEBATE_OVERRIDE_WINDOW_MS` constants — the
- * defaults when this is absent); the override exists so the DEV traffic
- * simulator (and tests) can drive the full correction → adjudication →
- * finalize lifecycle on an observable cadence instead of 12h + 24h. Nothing in
- * production wiring ever sets it.
+ * shared DEBATE_*_WINDOW_MS constants — the defaults when the override is
+ * absent).
  */
 export interface DebateWindowPolicy {
+  /** The outer co-visible edit window (spec: 23h). */
   editWindowMs: number;
+  /** The scheduled final freeze between lock and the queue (spec: 1h). */
+  lockWindowMs: number;
+  /** The both-sides-idle expedited trigger (spec: 1h). */
+  inactivityWindowMs: number;
+  /** The steward-override window after the verdict (spec: 24h). */
   overrideWindowMs: number;
+}
+
+/** The §15.4 spec windows (the production policy, always). */
+export const SPEC_DEBATE_WINDOWS: DebateWindowPolicy = {
+  editWindowMs: DEBATE_EDIT_WINDOW_MS,
+  lockWindowMs: DEBATE_LOCK_WINDOW_MS,
+  inactivityWindowMs: DEBATE_INACTIVITY_WINDOW_MS,
+  overrideWindowMs: DEBATE_OVERRIDE_WINDOW_MS,
+};
+
+/**
+ * The window override (dev simulator / tests ONLY; nothing in production
+ * wiring ever sets it).  The simulator scopes its shortened windows to arenas
+ * whose parties are BOTH synthetic personas via `appliesToUser`, so a debate a
+ * real dev-account user opens (or defends) in the dev environment runs the
+ * REAL spec windows and can actually be watched live.
+ */
+export interface DebateWindowsOverride {
+  windows: DebateWindowPolicy;
+  /** When present, the shortened windows apply only if BOTH parties satisfy
+   *  this predicate; absent ⇒ every arena (the test harness default). */
+  appliesToUser?: (userId: string | null) => boolean;
+}
+
+/** Resolve the effective windows for an arena's two parties. */
+export function resolveDebateWindows(
+  override: DebateWindowsOverride | undefined,
+  incumbentUserId: string | null,
+  challengerUserId: string | null,
+): DebateWindowPolicy {
+  if (override === undefined) return SPEC_DEBATE_WINDOWS;
+  if (override.appliesToUser === undefined) return override.windows;
+  return override.appliesToUser(incumbentUserId) && override.appliesToUser(challengerUserId)
+    ? override.windows
+    : SPEC_DEBATE_WINDOWS;
 }
 
 export interface DebateDeps {
   debates: DebateStore;
   contributions: ContributionStore;
   storyAuthor: StoryAuthorReader;
+  /** Read a story's debatable material (title/body/primary source). */
+  storyContent: StoryContentReader;
   isSteward: StewardReader;
   setStoryDispute: StoryDisputeSetter;
   runJudge: DebateJudgeRunner;
@@ -83,7 +161,7 @@ export interface DebateDeps {
   broadcast?: (debateId: string, arena: DebateArenaPublic) => void;
   /** Window-length override (dev simulator / tests ONLY; absent ⇒ the §15.4
    *  spec constants). */
-  windows?: DebateWindowPolicy | undefined;
+  windows?: DebateWindowsOverride | undefined;
   now: () => number;
   log: (event: string, meta: Record<string, unknown>) => void;
 }
@@ -130,9 +208,9 @@ export async function maybeEnterDebate(
 
   const nowMs = deps.now();
   const nowIso = new Date(nowMs).toISOString();
-  const editDeadlineAt = new Date(
-    nowMs + (deps.windows?.editWindowMs ?? DEBATE_EDIT_WINDOW_MS),
-  ).toISOString();
+  const windows = resolveDebateWindows(deps.windows, incumbentUserId, correction.userId);
+  const editDeadlineAt = new Date(nowMs + windows.editWindowMs).toISOString();
+  const resolveDueAt = new Date(nowMs + windows.editWindowMs + windows.lockWindowMs).toISOString();
   const arena = await deps.debates.open({
     debateId,
     storyId: correction.storyId,
@@ -145,15 +223,21 @@ export async function maybeEnterDebate(
     challengerUserId: correction.userId,
     state: 'open',
     positions: {
-      // The challenger's opening position IS the correction (body + sources).
-      challenger: {
-        summary: correction.body,
-        citations: [...correction.citations],
-        updatedAt: nowIso,
-      },
+      // The correction ITSELF is the challenger's opening material (shown live
+      // on the arena as underlying content); the rebuttal statement starts
+      // empty on both sides.
+      challenger: { summary: '', citations: [], updatedAt: null },
       incumbent: { summary: '', citations: [], updatedAt: null },
     },
     editDeadlineAt,
+    resolveDueAt,
+    lockedAt: null,
+    lockedContent: null,
+    // Posting the correction IS challenger activity; the incumbent's clock
+    // starts at open — with both idle, the expedited path queues the debate
+    // one inactivity window after the challenge (the no-show fast path).
+    incumbentLastActiveAt: nowIso,
+    challengerLastActiveAt: nowIso,
     verdict: null,
     winner: null,
     decidedBy: null,
@@ -182,7 +266,7 @@ export async function maybeEnterDebate(
 }
 
 // ---------------------------------------------------------------------------
-// Post / edit a position (the 12h co-visible window).
+// Post / edit a rebuttal statement (allowed while the arena is `open`).
 // ---------------------------------------------------------------------------
 
 export type PostPositionOutcome =
@@ -199,7 +283,8 @@ export async function postDebatePosition(
   if (arena === null) return { ok: false, reason: 'not_found' };
   const side = sideOf(arena, userId);
   if (side === null) return { ok: false, reason: 'not_a_party' };
-  // The 12h edit window: rejected once the deadline passes (or past `open`).
+  // Rejected once the material is locked in (the expedited/scheduled lock or
+  // the outer edit deadline), or the arena is past `open` for any other reason.
   if (arena.state !== 'open' || new Date(deps.now()).toISOString() > arena.editDeadlineAt) {
     return { ok: false, reason: 'window_closed' };
   }
@@ -208,48 +293,161 @@ export async function postDebatePosition(
     citations: [...update.citations],
     updatedAt: new Date(deps.now()).toISOString(),
   };
+  // The store also resets the side's activity clock (the expedited path).
   const updated = await deps.debates.updatePosition(debateId, side, position);
   if (updated === null) return { ok: false, reason: 'not_found' };
   await broadcastArena(deps, updated);
   return { ok: true, arena: updated };
 }
 
+/**
+ * Reset a party's activity clock after an edit to their UNDERLYING content
+ * (the correction, or the challenged comment) while its arena is open, and
+ * fan the fresh material out to arena viewers.  A no-op for a contribution
+ * with no live arena.  Story edits have no author edit path today, so the
+ * incumbent side of a story-target arena is touched only via its rebuttal.
+ */
+export async function touchDebateActivityForContribution(
+  deps: DebateDeps,
+  contributionId: string,
+): Promise<void> {
+  const asTarget = await deps.debates.getActiveForComment(contributionId);
+  const asCorrection =
+    asTarget === null ? await deps.debates.getActiveForCorrection(contributionId) : null;
+  const arena = asTarget ?? asCorrection;
+  if (arena === null || arena.state !== 'open') return;
+  const side = asTarget !== null ? 'incumbent' : 'challenger';
+  const touched = await deps.debates.touchActivity(
+    arena.debateId,
+    side,
+    new Date(deps.now()).toISOString(),
+  );
+  if (touched !== null) await broadcastArena(deps, touched);
+}
+
 // ---------------------------------------------------------------------------
-// Judge (the edit window has closed).
+// Lock (the material is locked in: the hour-23 schedule or both sides idle).
+// ---------------------------------------------------------------------------
+
+const EMPTY_LOCKED_SIDE: DebateLockedSide = {
+  title: null,
+  body: '',
+  citations: [],
+  updatedAt: null,
+};
+
+/** Snapshot both sides' underlying material (what the queue will judge). */
+async function snapshotDebateContent(
+  deps: DebateDeps,
+  arena: DebateArenaRecord,
+): Promise<DebateLockedContent> {
+  let target: DebateLockedSide = EMPTY_LOCKED_SIDE;
+  if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
+    const row = await deps.contributions.getById(arena.targetContributionId);
+    if (row !== null) {
+      target = {
+        title: null,
+        body: row.body,
+        citations: [...row.citations],
+        updatedAt: row.updatedAt,
+      };
+    }
+  } else {
+    const story = await deps.storyContent(arena.storyId);
+    if (story !== null) {
+      target = {
+        title: story.title,
+        body: story.body,
+        citations: [...story.citations],
+        updatedAt: story.updatedAt,
+      };
+    }
+  }
+  const correctionRow = await deps.contributions.getById(arena.challengerContributionId);
+  const correction: DebateLockedSide =
+    correctionRow === null
+      ? EMPTY_LOCKED_SIDE
+      : {
+          title: null,
+          body: correctionRow.body,
+          citations: [...correctionRow.citations],
+          updatedAt: correctionRow.updatedAt,
+        };
+  return { target, correction };
+}
+
+/**
+ * Lock an open arena's material in (`open` → `locked`), snapshotting both
+ * sides' underlying content for the AI resolution queue.  `expedited` (the
+ * both-sides-idle path) also pulls `resolveDueAt` forward to the lock instant
+ * so the queue picks the debate up on the SAME lifecycle pass.  Idempotent —
+ * a non-`open` arena is returned unchanged (the store CAS refuses).
+ */
+export async function lockDebateArena(
+  deps: DebateDeps,
+  debateId: string,
+  mode: 'scheduled' | 'expedited',
+): Promise<DebateArenaRecord | null> {
+  const arena = await deps.debates.getById(debateId);
+  if (arena === null) return null;
+  if (arena.state !== 'open') return arena;
+  const content = await snapshotDebateContent(deps, arena);
+  const nowIso = new Date(deps.now()).toISOString();
+  const locked = await deps.debates.lock(
+    debateId,
+    nowIso,
+    content,
+    mode === 'expedited' ? nowIso : undefined,
+  );
+  // Lost the CAS (a concurrent lock/withdrawal/concession won) — return current.
+  if (locked === null) return deps.debates.getById(debateId);
+  deps.log('forum.debate_locked', { debate_id: debateId, mode });
+  await broadcastArena(deps, locked);
+  return locked;
+}
+
+// ---------------------------------------------------------------------------
+// Judge (the AI resolution queue).
 // ---------------------------------------------------------------------------
 
 /**
- * Run the governed adjudicator over an arena whose edit window has closed, record
- * the verdict, and open the 24h steward-override window.  Fail-closed: a blocked/
- * unavailable judge resolves to `inconclusive` (nothing tagged).  Idempotent —
- * a no-op unless the arena is `open`/`awaiting_verdict`.
+ * Run the governed adjudicator over a queued arena, record the verdict, and
+ * open the 24h steward-override window.  Fail-closed: a blocked/unavailable
+ * judge resolves to `inconclusive` (nothing tagged).  Idempotent — a no-op
+ * unless the arena is `open`/`locked`/`awaiting_verdict`.
  */
 export async function judgeDebateArena(
   deps: DebateDeps,
   debateId: string,
 ): Promise<DebateArenaRecord | null> {
-  // ATOMICALLY claim the arena (`open` → `awaiting_verdict`) BEFORE the judge
-  // runs, and score the post-claim snapshot the claim returns. Adjudication
-  // can be slow (a real LLM); without the claim, a position submitted just
-  // inside the edit deadline could land WHILE the judge computes on a stale
-  // read and be silently ignored. From the claim onward the store-level
-  // `state = 'open'` guard on position writes rejects the race loser with an
-  // explicit `window_closed` — a timely write either beats the claim and IS
-  // judged, or the writer is told it wasn't considered; never a silent drop.
+  // Catch-up: an arena the lock sweep never saw (scheduler down through both
+  // deadlines) is locked here so the judge always scores a LOCKED snapshot.
+  const pre = await deps.debates.getById(debateId);
+  if (pre === null) return null;
+  if (pre.state === 'open') await lockDebateArena(deps, debateId, 'scheduled');
+  // ATOMICALLY claim the arena (→ `awaiting_verdict`) BEFORE the judge runs,
+  // and score the post-claim snapshot the claim returns. Adjudication can be
+  // slow (a real LLM); without the claim, a write racing the judge could land
+  // mid-computation and be silently ignored. From the lock onward the
+  // store-level `state = 'open'` guards reject every change with an explicit
+  // `window_closed` — a timely write either beat the lock and IS judged, or
+  // the writer is told it wasn't considered; never a silent drop.
   // (Re-claiming `awaiting_verdict` succeeds: a claim whose judge crashed is
-  // re-judged on a later tick.) A judged/resolved arena refuses the claim —
+  // re-judged on a later tick.) A judged/terminal arena refuses the claim —
   // return it unchanged (the idempotent no-op).
   const arena = await deps.debates.claimForVerdict(debateId);
   if (arena === null) return deps.debates.getById(debateId);
-  // Co-viewers see the window flip to "awaiting verdict" immediately.
+  // Co-viewers see the arena enter the resolution queue immediately.
   await broadcastArena(deps, arena);
 
   const input = assembleJudgeInput(arena);
-  const result = await deps.runJudge(debateId, input);
+  const result = await deps.runJudge({ debateId, roomId: arena.roomId }, input);
   const nowMs = deps.now();
   const verdictAt = new Date(nowMs).toISOString();
   const overrideDeadlineAt = new Date(
-    nowMs + (deps.windows?.overrideWindowMs ?? DEBATE_OVERRIDE_WINDOW_MS),
+    nowMs +
+      resolveDebateWindows(deps.windows, arena.incumbentUserId, arena.challengerUserId)
+        .overrideWindowMs,
   ).toISOString();
 
   const patch =
@@ -337,6 +535,91 @@ export async function overrideDebateVerdict(
 }
 
 // ---------------------------------------------------------------------------
+// Withdraw / concede (party-driven early closes, allowed while `open`).
+// ---------------------------------------------------------------------------
+
+export type WithdrawOutcome =
+  | { ok: true; arena: DebateArenaRecord }
+  | { ok: false; reason: 'not_found' | 'not_challenger' | 'window_closed' };
+
+/**
+ * The challenger retracts the correction while the arena is open: the debate
+ * closes as `withdrawn` — no verdict, and the target's `under_debate` tag
+ * clears back to `none` (the target stays re-challengeable).
+ */
+export async function withdrawDebate(
+  deps: DebateDeps,
+  debateId: string,
+  userId: string,
+): Promise<WithdrawOutcome> {
+  const arena = await deps.debates.getById(debateId);
+  if (arena === null) return { ok: false, reason: 'not_found' };
+  if (arena.challengerUserId !== userId) return { ok: false, reason: 'not_challenger' };
+  const nowIso = new Date(deps.now()).toISOString();
+  if (arena.state !== 'open' || nowIso > arena.editDeadlineAt) {
+    return { ok: false, reason: 'window_closed' };
+  }
+  // The store CAS (`open` only): a withdrawal racing the lock loses.
+  const closed = await deps.debates.withdraw(debateId, nowIso);
+  if (closed === null) return { ok: false, reason: 'window_closed' };
+  await clearDisputeTag(deps, closed);
+  deps.log('forum.debate_withdrawn', { debate_id: debateId, story_id: arena.storyId });
+  await broadcastArena(deps, closed);
+  return { ok: true, arena: closed };
+}
+
+export type ConcedeOutcome =
+  | { ok: true; arena: DebateArenaRecord }
+  | { ok: false; reason: 'not_found' | 'not_incumbent' | 'window_closed' };
+
+/**
+ * The incumbent concedes while the arena is open: the challenger prevails
+ * without adjudication — the debate resolves `corrected` with
+ * `decided_by = 'concession'` and the target is tagged `incorrect`.
+ */
+export async function concedeDebate(
+  deps: DebateDeps,
+  debateId: string,
+  userId: string,
+): Promise<ConcedeOutcome> {
+  const arena = await deps.debates.getById(debateId);
+  if (arena === null) return { ok: false, reason: 'not_found' };
+  if (arena.incumbentUserId !== userId) return { ok: false, reason: 'not_incumbent' };
+  const nowIso = new Date(deps.now()).toISOString();
+  if (arena.state !== 'open' || nowIso > arena.editDeadlineAt) {
+    return { ok: false, reason: 'window_closed' };
+  }
+  // The store CAS (`open` only): a concession racing the lock loses.
+  const closed = await deps.debates.concede(debateId, {
+    verdict: 'corrected',
+    winner: 'challenger',
+    decidedBy: 'concession',
+    rationale: 'The incumbent conceded the challenge.',
+    verdictAt: nowIso,
+    resolvedAt: nowIso,
+  });
+  if (closed === null) return { ok: false, reason: 'window_closed' };
+  // Apply the outcome to the conceded target (visible-but-sunk, never hidden).
+  if (closed.targetType === 'comment' && closed.targetContributionId !== null) {
+    await deps.contributions.setDisputeStatus(closed.targetContributionId, 'incorrect');
+  } else if (closed.targetType === 'story') {
+    await deps.setStoryDispute(closed.storyId, 'incorrect');
+  }
+  deps.log('forum.debate_conceded', { debate_id: debateId, story_id: arena.storyId });
+  await broadcastArena(deps, closed);
+  return { ok: true, arena: closed };
+}
+
+/** Clear the challenged target's `under_debate` tag back to `none`. */
+async function clearDisputeTag(deps: DebateDeps, arena: DebateArenaRecord): Promise<void> {
+  if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
+    await deps.contributions.setDisputeStatus(arena.targetContributionId, 'none');
+  } else if (arena.targetType === 'story') {
+    await deps.setStoryDispute(arena.storyId, 'none');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Finalize (the 24h override window has closed) — apply the outcome.
 // ---------------------------------------------------------------------------
 
@@ -396,15 +679,22 @@ export async function finalizeDebate(
 export const DEBATE_JUDGE_CONCURRENCY = 4;
 
 /**
- * One debate-lifecycle sweep: judge every arena whose 12h edit window has closed
- * (fanned out `concurrency`-wide — the adjudicator is the expensive step), then
- * finalize every arena whose 24h override window has closed.  Bounded per tick;
- * idempotent (each stage no-ops on an already-advanced arena); per-arena
- * failures are ISOLATED (logged, the rest of the batch proceeds — one poisoned
- * arena must not stall every other verdict).
+ * One debate-lifecycle sweep, in four passes:
+ *   1. LOCK — every `open` arena past its 23h edit deadline locks its
+ *      material in (the scheduled path; the final hour is a frozen countdown);
+ *   2. EXPEDITE — every `open` arena where BOTH sides have gone the
+ *      inactivity window without an edit locks immediately AND pulls its
+ *      queue entry forward to now (the material is settled);
+ *   3. JUDGE — every arena past its resolve-due instant (including the ones
+ *      pass 2 just expedited) is adjudicated, fanned out `concurrency`-wide —
+ *      the adjudicator is the expensive step;
+ *   4. FINALIZE — every judged arena whose 24h override window has closed.
+ * Bounded per tick; idempotent (each stage no-ops on an already-advanced
+ * arena); per-arena failures are ISOLATED (logged, the rest of the batch
+ * proceeds — one poisoned arena must not stall every other verdict).
  *
  * `judgeDeadlineMs` bounds the judge pass in WALL-CLOCK time: once passed, the
- * remaining due arenas are SKIPPED (they stay open for the next tick/holder).
+ * remaining due arenas are SKIPPED (they stay queued for the next tick/holder).
  * The scheduler derives it from its job-lease window so a slow-LLM backlog can
  * never hold work past the lease — the store-level verdict CAS
  * (`recordVerdict`) independently guarantees a stale overrun can't clobber
@@ -416,12 +706,59 @@ export async function runDebateLifecycle(
   limit = 100,
   concurrency = DEBATE_JUDGE_CONCURRENCY,
   judgeDeadlineMs?: number,
-): Promise<{ judged: number; finalized: number }> {
-  const nowIso = new Date(deps.now()).toISOString();
+): Promise<{ locked: number; expedited: number; judged: number; finalized: number }> {
+  const nowMs = deps.now();
+  const nowIso = new Date(nowMs).toISOString();
+  let locked = 0;
+  let expedited = 0;
   let judged = 0;
   let finalized = 0;
   let skippedForDeadline = 0;
-  const due = await deps.debates.listPastEditDeadline(nowIso, limit);
+
+  // 1. The scheduled hour-23 lock sweep.
+  const dueLock = await deps.debates.listDueForLock(nowIso, limit);
+  for (const outcome of await mapBounded(dueLock, concurrency, (arena) =>
+    lockDebateArena(deps, arena.debateId, 'scheduled'),
+  )) {
+    if (outcome.ok && outcome.value?.state === 'locked') locked += 1;
+    else if (!outcome.ok) deps.log('forum.debate_lock_failed', { error: String(outcome.error) });
+  }
+
+  // 2. The both-sides-idle expedited sweep.  The store query uses the
+  //    SHORTEST configured inactivity window as the coarse cutoff; each
+  //    candidate is then re-checked against ITS OWN effective windows (a
+  //    sim-scoped override shortens only both-synthetic arenas).
+  const shortestIdleMs = Math.min(
+    SPEC_DEBATE_WINDOWS.inactivityWindowMs,
+    deps.windows?.windows.inactivityWindowMs ?? SPEC_DEBATE_WINDOWS.inactivityWindowMs,
+  );
+  const idleCandidates = await deps.debates.listIdleSince(
+    new Date(nowMs - shortestIdleMs).toISOString(),
+    limit,
+  );
+  for (const outcome of await mapBounded(idleCandidates, concurrency, async (arena) => {
+    const windows = resolveDebateWindows(
+      deps.windows,
+      arena.incumbentUserId,
+      arena.challengerUserId,
+    );
+    const lastActiveIso =
+      arena.incumbentLastActiveAt > arena.challengerLastActiveAt
+        ? arena.incumbentLastActiveAt
+        : arena.challengerLastActiveAt;
+    if (Date.parse(lastActiveIso) + windows.inactivityWindowMs > nowMs) return null;
+    // Already due on the schedule — pass 3 picks it up without the pull-forward.
+    if (arena.resolveDueAt <= nowIso) return null;
+    return lockDebateArena(deps, arena.debateId, 'expedited');
+  })) {
+    if (outcome.ok && outcome.value?.state === 'locked') expedited += 1;
+    else if (!outcome.ok) {
+      deps.log('forum.debate_expedite_failed', { error: String(outcome.error) });
+    }
+  }
+
+  // 3. Drain the AI resolution queue (includes everything pass 2 expedited).
+  const due = await deps.debates.listPastResolveDeadline(nowIso, limit);
   for (const outcome of await mapBounded(due, concurrency, async (arena) => {
     if (judgeDeadlineMs !== undefined && deps.now() > judgeDeadlineMs) {
       skippedForDeadline += 1;
@@ -435,6 +772,8 @@ export async function runDebateLifecycle(
   if (skippedForDeadline > 0) {
     deps.log('forum.debate_judge_deadline', { skipped: skippedForDeadline });
   }
+
+  // 4. Finalize past the steward-override window.
   const closable = await deps.debates.listPastOverrideDeadline(nowIso, limit);
   for (const outcome of await mapBounded(closable, concurrency, (arena) =>
     finalizeDebate(deps, arena.debateId),
@@ -444,7 +783,7 @@ export async function runDebateLifecycle(
       deps.log('forum.debate_finalize_failed', { error: String(outcome.error) });
     }
   }
-  return { judged, finalized };
+  return { locked, expedited, judged, finalized };
 }
 
 // ---------------------------------------------------------------------------
@@ -507,10 +846,25 @@ export function domainOf(url: string): string | null {
   }
 }
 
-function toJudgeSide(position: DebateSidePosition): DebateJudgeSideInput {
+function toJudgeSide(
+  side: 'incumbent' | 'challenger',
+  content: DebateLockedSide,
+  position: DebateSidePosition,
+): DebateJudgeSideInput {
+  // The judge weighs the UNION of the side's sourcing: the locked underlying
+  // content's citations plus the rebuttal statement's (deduped by URL).
+  const byUrl = new Map<string, Citation>();
+  for (const c of [...content.citations, ...position.citations]) {
+    if (!byUrl.has(c.url)) byUrl.set(c.url, c);
+  }
+  const contentText =
+    content.title !== null && content.title.length > 0
+      ? `${content.title}\n\n${content.body}`
+      : content.body;
   return {
+    content: contentText,
     summary: position.summary,
-    sources: position.citations.map((c) => ({
+    sources: [...byUrl.values()].map((c) => ({
       url: c.url,
       domain: domainOf(c.url),
       // The citation schema already rejects dangerous schemes; an http(s) URL is
@@ -519,16 +873,30 @@ function toJudgeSide(position: DebateSidePosition): DebateJudgeSideInput {
       link_safe: /^https?:\/\//i.test(c.url),
       reliability: null,
     })),
-    // Posting a substantive position is treated as engaging/rebutting the opponent.
-    rebuts_opponent: position.summary.trim().length > 0,
+    // The correction inherently rebuts the target; the incumbent rebuts only
+    // once they post a substantive rebuttal statement.
+    rebuts_opponent:
+      side === 'challenger'
+        ? contentText.trim().length > 0 || position.summary.trim().length > 0
+        : position.summary.trim().length > 0,
   };
 }
 
-/** Build the content-structural adjudicator input from the two positions. */
+/** Build the content-structural adjudicator input from the LOCKED material +
+ *  the two rebuttal statements. */
 export function assembleJudgeInput(arena: DebateArenaRecord): DebateJudgeInput {
+  const locked = arena.lockedContent;
   return {
-    incumbent: toJudgeSide(arena.positions.incumbent),
-    challenger: toJudgeSide(arena.positions.challenger),
+    incumbent: toJudgeSide(
+      'incumbent',
+      locked?.target ?? EMPTY_LOCKED_SIDE,
+      arena.positions.incumbent,
+    ),
+    challenger: toJudgeSide(
+      'challenger',
+      locked?.correction ?? EMPTY_LOCKED_SIDE,
+      arena.positions.challenger,
+    ),
   };
 }
 
@@ -550,12 +918,117 @@ function sidePosition(
   };
 }
 
+/** The two underlying-content projections the arena page renders. */
+export interface DebateArenaContent {
+  target: DebateContent | null;
+  correction: DebateContent | null;
+}
+
+function projectContent(
+  kind: DebateContent['kind'],
+  side: DebateLockedSide,
+  suppressed: boolean,
+  locked: boolean,
+): DebateContent {
+  // A row the moderation floor has since removed/hidden keeps its arena SLOT
+  // (the debate happened) but never re-serves the suppressed body on the wire.
+  return {
+    kind,
+    title: suppressed ? null : side.title,
+    body: suppressed ? '' : side.body,
+    citations: suppressed ? [] : side.citations,
+    updated_at: side.updatedAt,
+    removed: suppressed,
+    locked,
+  };
+}
+
+/**
+ * Read the material under debate for the arena projection: the LIVE underlying
+ * content while the arena is `open` (either author may still be adjusting it),
+ * and the locked snapshot from the lock onward.  A currently moderation-
+ * removed/hidden row projects with `removed: true` and no body — the arena
+ * never re-serves content the floor has taken down.
+ */
+export async function readDebateArenaContent(
+  contributions: Pick<ContributionStore, 'getById'>,
+  storyContent: StoryContentReader,
+  arena: DebateArenaRecord,
+): Promise<DebateArenaContent> {
+  const locked = arena.lockedContent;
+
+  const correctionRow = await contributions.getById(arena.challengerContributionId);
+  const correctionSuppressed =
+    correctionRow !== null &&
+    (correctionRow.moderationState === 'removed' || correctionRow.moderationState === 'hidden');
+  let correction: DebateContent | null = null;
+  if (locked !== null) {
+    correction = projectContent('correction', locked.correction, correctionSuppressed, true);
+  } else if (correctionRow !== null) {
+    correction = projectContent(
+      'correction',
+      {
+        title: null,
+        body: correctionRow.body,
+        citations: correctionRow.citations,
+        updatedAt: correctionRow.updatedAt,
+      },
+      correctionSuppressed,
+      false,
+    );
+  }
+
+  let target: DebateContent | null = null;
+  if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
+    const targetRow = await contributions.getById(arena.targetContributionId);
+    const targetSuppressed =
+      targetRow !== null &&
+      (targetRow.moderationState === 'removed' || targetRow.moderationState === 'hidden');
+    if (locked !== null) {
+      target = projectContent('comment', locked.target, targetSuppressed, true);
+    } else if (targetRow !== null) {
+      target = projectContent(
+        'comment',
+        {
+          title: null,
+          body: targetRow.body,
+          citations: targetRow.citations,
+          updatedAt: targetRow.updatedAt,
+        },
+        targetSuppressed,
+        false,
+      );
+    }
+  } else {
+    // Story target.  The reader returns null for a missing/hidden story; a
+    // locked snapshot still projects (the debate happened over it).
+    const story = await storyContent(arena.storyId);
+    if (locked !== null) {
+      target = projectContent('story', locked.target, false, true);
+    } else if (story !== null) {
+      target = projectContent(
+        'story',
+        {
+          title: story.title,
+          body: story.body,
+          citations: story.citations,
+          updatedAt: story.updatedAt,
+        },
+        false,
+        false,
+      );
+    }
+  }
+  return { target, correction };
+}
+
 /** Project an arena record to its public wire shape for `viewerUserId`. */
 export async function toDebateArenaPublic(
   arena: DebateArenaRecord,
   viewerUserId: string | null,
   resolveAuthor: DebateAuthorResolver,
   viewerIsSteward: boolean,
+  content: DebateArenaContent,
 ): Promise<DebateArenaPublic> {
   const [incumbentAuthor, challengerAuthor, overriddenBy] = await Promise.all([
     resolveAuthor(arena.incumbentUserId),
@@ -591,7 +1064,13 @@ export async function toDebateArenaPublic(
       challengerAuthor,
       viewerUserId !== null && arena.challengerUserId === viewerUserId,
     ),
+    target_content: content.target,
+    correction_content: content.correction,
     edit_deadline_at: arena.editDeadlineAt,
+    resolve_due_at: arena.resolveDueAt,
+    locked_at: arena.lockedAt,
+    incumbent_last_active_at: arena.incumbentLastActiveAt,
+    challenger_last_active_at: arena.challengerLastActiveAt,
     verdict: arena.verdict,
     winner: arena.winner,
     decided_by: arena.decidedBy,
@@ -631,6 +1110,7 @@ export async function toDebateArenaSummary(
     challenger_contribution_id: arena.challengerContributionId,
     state: arena.state,
     edit_deadline_at: arena.editDeadlineAt,
+    resolve_due_at: arena.resolveDueAt,
     override_deadline_at: arena.overrideDeadlineAt,
     verdict: arena.verdict,
     winner: arena.winner,
@@ -647,6 +1127,7 @@ async function broadcastArena(deps: DebateDeps, arena: DebateArenaRecord): Promi
   if (deps.broadcast === undefined) return;
   // The live frame is the OBSERVER projection (no per-viewer is_author flags on
   // the wire); each client re-fetches its own role-scoped view on nudge.
-  const projected = await toDebateArenaPublic(arena, null, async () => null, false);
+  const content = await readDebateArenaContent(deps.contributions, deps.storyContent, arena);
+  const projected = await toDebateArenaPublic(arena, null, async () => null, false, content);
   deps.broadcast(arena.debateId, projected);
 }
