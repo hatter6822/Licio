@@ -40,12 +40,26 @@ export function parseFeedSearch(search: Record<string, unknown>): FeedSearch {
 }
 
 /**
+ * WS-T: `?debate=<id>` deep-links the debate-arena MODAL open over the story
+ * surface (a shareable link; the legacy `/stories/:id/debate/:id` route
+ * redirects here — the room-governance modal's pattern).  Absent ⇒ no modal;
+ * an invalid value coerces to undefined, never silently accepted.  Closing
+ * the modal CLEARS the param, so back/refresh behave honestly.
+ */
+export const storyDetailSearchSchema = z.object({
+  debate: uuidSchema.optional().catch(undefined),
+});
+export type StoryDetailSearch = z.infer<typeof storyDetailSearchSchema>;
+
+/**
  * Dedicated comment-centric page (WS-T.7.2): `?root=` focuses the view on one
- * comment's replies (the drill-down anchor).  An invalid/absent value coerces to
+ * comment's replies (the drill-down anchor); `?debate=` opens the arena modal
+ * exactly as on the story page.  An invalid/absent value coerces to
  * undefined — the unrooted "all comments" view — never silently accepted.
  */
 export const storyCommentsSearchSchema = z.object({
   root: uuidSchema.optional().catch(undefined),
+  debate: uuidSchema.optional().catch(undefined),
 });
 export type StoryCommentsSearch = z.infer<typeof storyCommentsSearchSchema>;
 

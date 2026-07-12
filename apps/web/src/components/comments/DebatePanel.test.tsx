@@ -1,30 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { DebateArenaSummary } from '@licio/shared';
-import { render, screen } from '@testing-library/react';
-import type { ReactNode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DebatePanel } from './DebatePanel.js';
 
+// Each row OPENS the arena modal by adding `?debate=<id>` to the current
+// location (useOpenDebate → useNavigate); capture the navigations.
+const navigateMock = vi.fn();
 vi.mock('@tanstack/react-router', () => ({
-  Link: ({
-    children,
-    to,
-    params,
-    className,
-  }: {
-    children?: ReactNode;
-    to?: string;
-    params?: Record<string, string>;
-    className?: string;
-  }) => {
-    let href = to ?? '#';
-    for (const [key, value] of Object.entries(params ?? {})) href = href.replace(`$${key}`, value);
-    return (
-      <a href={href} className={className}>
-        {children}
-      </a>
-    );
-  },
+  useNavigate: () => navigateMock,
 }));
 
 const storyId = '11111111-1111-4111-8111-111111111111';
@@ -52,28 +36,38 @@ function summary(overrides: Partial<DebateArenaSummary> = {}): DebateArenaSummar
 }
 
 describe('DebatePanel', () => {
+  beforeEach(() => navigateMock.mockReset());
+
   it('renders nothing when there are no active debates', () => {
-    const { container } = render(<DebatePanel storyId={storyId} debates={[]} />);
+    const { container } = render(<DebatePanel debates={[]} />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('lists an open debate with its subject, a countdown, and a link to the arena', () => {
-    render(<DebatePanel storyId={storyId} debates={[summary()]} />);
+  it('lists an open debate with its subject, a countdown, and opens the arena modal', () => {
+    render(<DebatePanel debates={[summary()]} />);
     expect(screen.getByText('1 active debate')).toBeInTheDocument();
     expect(screen.getByText(/A comment is challenged/)).toBeInTheDocument();
     expect(screen.getByText(/The vote passed 5-4\./)).toBeInTheDocument();
     // An open arena shows a countdown to the editing deadline.
     expect(screen.getByText(/left$/)).toBeInTheDocument();
-    expect(screen.getByRole('link')).toHaveAttribute(
-      'href',
-      `/stories/${storyId}/debate/99999999-9999-4999-8999-999999999999`,
-    );
+    // The row opens the arena MODAL via the `?debate=` param on the current
+    // route (deep-linkable; the back button closes it).
+    fireEvent.click(screen.getByRole('button', { name: /View debate/ }));
+    expect(navigateMock).toHaveBeenCalledTimes(1);
+    const call = navigateMock.mock.calls[0]?.[0] as {
+      to: string;
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.to).toBe('.');
+    expect(call.search({ root: 'r1' })).toEqual({
+      root: 'r1',
+      debate: '99999999-9999-4999-8999-999999999999',
+    });
   });
 
   it('a locked debate shows the AI-resolution queue countdown', () => {
     render(
       <DebatePanel
-        storyId={storyId}
         debates={[
           summary({
             state: 'locked',
@@ -93,7 +87,6 @@ describe('DebatePanel', () => {
   it('counts multiple debates and drops the countdown once adjudication is queued', () => {
     render(
       <DebatePanel
-        storyId={storyId}
         debates={[
           summary({ debate_id: 'a1111111-1111-4111-8111-111111111111' }),
           summary({

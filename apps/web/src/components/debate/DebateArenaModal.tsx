@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-T debate arena — the live, open adjudication surface (SPEC §15.4/§24.6).
-// A sourced correction opens a debate: the arena shows the REAL material under
-// dispute — the challenged story/comment and the correction — live while the
-// arena is open (either author may keep adjusting their content and an
-// optional rebuttal statement; each sees the other's current case as it
-// changes).  The debate queues for AI resolution by the EARLIER of: both
-// sides idle for an hour (the expedited path), or the 23h edit deadline + a
-// 1h locked countdown (the schedule).  While open, the challenger may
-// withdraw the correction and the incumbent may concede.  The room's governed
-// AI then renders a probabilistic verdict over the LOCKED material; the room
-// STEWARD may fully overrule it for 24 hours.  A `corrected` outcome tags the
-// loser "incorrect".
+// WS-T debate arena — a focused MODAL over the story surface (SPEC §15.4/§24.6),
+// deep-linked via `?debate=<id>` (the legacy /stories/:id/debate/:id route
+// redirects into the param). The arena reads as a compact side-by-side
+// comparison of the REAL material under dispute: the challenged story/comment
+// and the correction, each clamped to a short preview that expands to the full
+// content, with each side's optional argument statement beneath it. Live while
+// the debate is open (either author may keep adjusting content + argument; the
+// SSE stream and poll keep both sides co-visible), locked snapshots afterward.
+// The debate queues for AI resolution by the EARLIER of both sides idle for an
+// hour or the 23h/24h schedule; while open the challenger may withdraw and the
+// incumbent may concede; the steward may overrule the verdict for 24h.
 //
-// Strictly no-applause: there is no member vote/tally anywhere — the outcome is a
-// content-structural adjudication, not a popularity count.
+// Strictly no-applause: there is no member vote/tally anywhere — the outcome is
+// a content-structural adjudication, not a popularity count.
 import type { DebateArenaPublic, DebateContent, DebatePosition, DebateWinner } from '@licio/shared';
 import {
   citationUrlSchema,
@@ -37,8 +36,14 @@ import { UgcBody } from '../ugc/UgcBody.js';
 import { Button } from '../ui/Button/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
 import { Icon } from '../ui/Icon/index.js';
+import { Sheet } from '../ui/Sheet/index.js';
 
 const badge = 'rounded border px-1.5 py-px text-xs font-medium uppercase tracking-wide';
+
+/** Bodies longer than this render clamped with a "Show more" expand. */
+const COLLAPSE_CHARS = 420;
+/** Sources beyond this many stay behind the same expand. */
+const COLLAPSE_SOURCES = 2;
 
 function remaining(deadline: string): { closed: boolean; label: string } {
   const ms = Date.parse(deadline) - Date.now();
@@ -57,18 +62,22 @@ function Countdown({ deadline, label }: { deadline: string; label: string }): Re
   );
 }
 
-/** A compact source list (shared by the content and rebuttal cards). */
+/** A compact source list; collapsed shows the first few, expanded shows all. */
 function SourceList({
   heading,
   citations,
+  expanded,
 }: {
   heading: string;
   citations: readonly { url: string; title?: string | undefined }[];
+  expanded: boolean;
 }): React.ReactElement | null {
   if (citations.length === 0) return null;
+  const shown = expanded ? citations : citations.slice(0, COLLAPSE_SOURCES);
+  const hidden = citations.length - shown.length;
   return (
     <ul className="flex flex-col gap-1" aria-label={`${heading} sources`}>
-      {citations.map((c) => (
+      {shown.map((c) => (
         <li key={c.url} className="flex items-start gap-1.5 text-sm">
           <Icon name="quote" className="mt-0.5 size-3.5 shrink-0 text-ink-muted" aria-hidden />
           <SafeExternalLink
@@ -79,14 +88,65 @@ function SourceList({
           </SafeExternalLink>
         </li>
       ))}
+      {hidden > 0 ? (
+        <li className="text-sm text-ink-muted">
+          +{hidden} more {hidden === 1 ? 'source' : 'sources'}
+        </li>
+      ) : null}
     </ul>
+  );
+}
+
+/**
+ * A body clamped to a short preview with a "Show more/less" toggle — the
+ * "efficient, expandable" reading the modal is built around.  The toggle
+ * appears from a character threshold (deterministic + SSR/test-safe), and the
+ * expanded state also reveals the full source list.
+ */
+function ClampedContent({
+  body,
+  citations,
+  heading,
+  title,
+}: {
+  body: string;
+  citations: readonly { url: string; title?: string | undefined }[];
+  heading: string;
+  title?: string | null;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const collapsible = body.length > COLLAPSE_CHARS || citations.length > COLLAPSE_SOURCES;
+  return (
+    <div className="flex flex-col gap-2">
+      {title != null && title.length > 0 ? <p className="font-medium text-ink">{title}</p> : null}
+      {body.length > 0 ? (
+        <div className={cn(!expanded && collapsible && 'max-h-36 overflow-hidden')}>
+          <UgcBody
+            markdown={expanded || !collapsible ? body : body.slice(0, COLLAPSE_CHARS)}
+            compact
+          />
+        </div>
+      ) : title == null ? (
+        <p className="text-sm text-ink-muted italic">No content.</p>
+      ) : null}
+      <SourceList heading={heading} citations={citations} expanded={expanded || !collapsible} />
+      {collapsible ? (
+        <button
+          type="button"
+          className="self-start text-sm font-medium text-primary-on-soft underline hover:no-underline"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
 /** One side's REAL material under debate: the challenged story/comment (the
  *  incumbent's) or the correction (the challenger's).  Live while the arena
- *  is open — it re-renders as the author edits — and the locked snapshot from
- *  the lock onward (what the AI resolution queue judges). */
+ *  is open, the locked snapshot afterward. */
 function ContentCard({
   heading,
   author,
@@ -97,13 +157,10 @@ function ContentCard({
   content: DebateContent | null;
 }): React.ReactElement {
   return (
-    <section
-      className={cn('flex flex-col gap-2 p-3', raisedSurface)}
-      aria-label={`${heading} content`}
-    >
+    <section className="flex flex-col gap-2" aria-label={`${heading} content`}>
       <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="font-semibold text-ink">
-          {heading} <span className="font-normal text-ink-muted">· {author}</span>
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-ink-muted">
+          {heading} <span className="font-normal normal-case">· {author}</span>
         </h3>
         {content !== null ? (
           <span
@@ -125,26 +182,21 @@ function ContentCard({
           This content was removed and is no longer shown.
         </p>
       ) : (
-        <>
-          {content.title !== null && content.title.length > 0 ? (
-            <p className="font-medium text-ink">{content.title}</p>
-          ) : null}
-          {content.body.length > 0 ? (
-            <UgcBody markdown={content.body} compact />
-          ) : content.title === null ? (
-            <p className="text-sm text-ink-muted italic">No content.</p>
-          ) : null}
-          <SourceList heading={heading} citations={content.citations} />
-        </>
+        <ClampedContent
+          body={content.body}
+          citations={content.citations}
+          heading={heading}
+          title={content.title}
+        />
       )}
     </section>
   );
 }
 
-/** One side's optional rebuttal statement, layered over their underlying
- *  content: read-only for observers; editable for its author while the arena
- *  is open. */
-function PositionCard({
+/** One side's optional argument statement, layered over their underlying
+ *  content: clamped for observers; editable in place for its author while the
+ *  arena is open. */
+function ArgumentCard({
   debateId,
   position,
   editable,
@@ -163,7 +215,6 @@ function PositionCard({
   const [error, setError] = useState<string | null>(null);
 
   const heading = position.side === 'incumbent' ? 'Incumbent rebuttal' : 'Challenger argument';
-  const author = position.author_display_name ?? position.author_handle ?? 'Unknown';
 
   const addSource = (): void => {
     const url = draft.trim();
@@ -194,13 +245,11 @@ function PositionCard({
 
   return (
     <section
-      className={cn('flex flex-col gap-2 p-3', raisedSurface)}
+      className="flex flex-col gap-2 border-t border-line pt-2"
       aria-label={`${heading} position`}
     >
       <header className="flex items-baseline justify-between gap-2">
-        <h3 className="font-semibold text-ink">
-          {heading} <span className="font-normal text-ink-muted">· {author}</span>
-        </h3>
+        <h4 className="text-sm font-semibold uppercase tracking-wide text-ink-muted">{heading}</h4>
         {editable && windowOpen && !editing ? (
           <Button type="button" variant="ghost" onClick={() => setEditing(true)}>
             {position.submitted ? 'Edit' : 'Post your case'}
@@ -280,10 +329,7 @@ function PositionCard({
           </div>
         </div>
       ) : position.submitted ? (
-        <>
-          <UgcBody markdown={position.summary} compact />
-          <SourceList heading={heading} citations={position.citations} />
-        </>
+        <ClampedContent body={position.summary} citations={position.citations} heading={heading} />
       ) : (
         <p className="text-sm text-ink-muted italic">No statement posted yet.</p>
       )}
@@ -445,13 +491,8 @@ function PartyExitControl({
  *  enters a production chunk. */
 const LazyDevFastForward = import.meta.env.DEV ? lazy(() => import('./DevFastForward.js')) : null;
 
-export function DebateArena({
-  debateId,
-  storyId,
-}: {
-  debateId: string;
-  storyId: string;
-}): React.ReactElement {
+/** The modal body (exported for tests; the Sheet host is below). */
+export function DebateArenaContent({ debateId }: { debateId: string }): React.ReactElement {
   const query = useDebateQuery(debateId);
   const state = query.data?.debate.state;
   // Live co-visibility: stream while the arena is still active (a terminal
@@ -480,6 +521,7 @@ export function DebateArena({
     Date.parse(arena.challenger_last_active_at),
   );
   const idleQueueAt = new Date(lastActiveMs + DEBATE_INACTIVITY_WINDOW_MS).toISOString();
+  const idle = remaining(idleQueueAt);
   const idleBeforeSchedule = windowOpen && idleQueueAt < arena.edit_deadline_at;
 
   const incumbentAuthor =
@@ -488,11 +530,8 @@ export function DebateArena({
     arena.challenger.author_display_name ?? arena.challenger.author_handle ?? 'Unknown';
 
   return (
-    <section className="flex flex-col gap-4" aria-labelledby="debate-heading">
+    <div className="flex flex-col gap-4">
       <header className="flex flex-col gap-1">
-        <h1 id="debate-heading" className="text-2xl font-semibold text-ink">
-          Debate arena
-        </h1>
         <p className="text-sm text-ink-muted">
           A sourced correction of a {arena.target_type}. The room's AI weighs both sides' content
           and sources — this is not a vote. {stateLabel[arena.state]}.
@@ -503,10 +542,7 @@ export function DebateArena({
             {idleBeforeSchedule ? (
               <p className="text-sm text-ink-muted">
                 Resolves early once both sides stay idle for an hour
-                {remaining(idleQueueAt).closed
-                  ? ' (queueing imminently)'
-                  : ` (~${remaining(idleQueueAt).label} unless someone edits)`}
-                .
+                {idle.closed ? ' (queueing imminently)' : ` (~${idle.label} unless someone edits)`}.
               </p>
             ) : null}
           </>
@@ -521,34 +557,37 @@ export function DebateArena({
 
       <VerdictPanel arena={arena} />
 
-      <div className="grid gap-3 md:grid-cols-2">
-        <ContentCard
-          heading={
-            arena.target_type === 'story' ? 'The challenged story' : 'The challenged comment'
-          }
-          author={incumbentAuthor}
-          content={arena.target_content}
-        />
-        <ContentCard
-          heading="The correction"
-          author={challengerAuthor}
-          content={arena.correction_content}
-        />
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-2">
-        <PositionCard
-          debateId={debateId}
-          position={arena.incumbent}
-          editable={arena.viewer_role === 'incumbent'}
-          windowOpen={windowOpen}
-        />
-        <PositionCard
-          debateId={debateId}
-          position={arena.challenger}
-          editable={arena.viewer_role === 'challenger'}
-          windowOpen={windowOpen}
-        />
+      {/* The side-by-side comparison: each side's REAL material, clamped to a
+          short preview that expands, with its argument statement beneath. */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className={cn('flex flex-col gap-3 p-3', raisedSurface)}>
+          <ContentCard
+            heading={
+              arena.target_type === 'story' ? 'The challenged story' : 'The challenged comment'
+            }
+            author={incumbentAuthor}
+            content={arena.target_content}
+          />
+          <ArgumentCard
+            debateId={debateId}
+            position={arena.incumbent}
+            editable={arena.viewer_role === 'incumbent'}
+            windowOpen={windowOpen}
+          />
+        </div>
+        <div className={cn('flex flex-col gap-3 p-3', raisedSurface)}>
+          <ContentCard
+            heading="The correction"
+            author={challengerAuthor}
+            content={arena.correction_content}
+          />
+          <ArgumentCard
+            debateId={debateId}
+            position={arena.challenger}
+            editable={arena.viewer_role === 'challenger'}
+            windowOpen={windowOpen}
+          />
+        </div>
       </div>
 
       <PartyExitControl arena={arena} debateId={debateId} />
@@ -557,13 +596,26 @@ export function DebateArena({
           <LazyDevFastForward debateId={debateId} />
         </Suspense>
       ) : null}
+    </div>
+  );
+}
 
-      <a
-        href={`/stories/${encodeURIComponent(storyId)}`}
-        className="text-sm text-primary-on-soft underline"
-      >
-        ← Back to the story
-      </a>
-    </section>
+/**
+ * The arena modal host: open exactly while a `?debate=<id>` param is present;
+ * closing clears the param (the host page owns the navigation), so the back
+ * button and refresh behave honestly.
+ */
+export function DebateArenaModal({
+  debateId,
+  onClose,
+}: {
+  debateId: string | null;
+  onClose: () => void;
+}): React.ReactElement | null {
+  if (debateId === null) return null;
+  return (
+    <Sheet open onClose={onClose} title="Debate arena" className="max-w-3xl">
+      <DebateArenaContent debateId={debateId} />
+    </Sheet>
   );
 }

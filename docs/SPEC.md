@@ -2026,7 +2026,7 @@ Sees a card labeled "Getting Attention"; the reason reads "Readers are opening t
 
 ## 35.2 User adds a correction
 
-Sees a comment repeating an incorrect date; taps Correct; the composer requires the correction text with at least one inline-linked source; posting it opens a live debate arena against the comment's author (Section 15.4) and the client lands on the arena page, which shows both sides' real content live. The original author fixes their comment within the hour-long activity window — or lets it rest, and once both sides have been idle for an hour the material locks in and the room's AI resolution queue renders the verdict. The comment ends tagged "Incorrect" (visible, sunk) or "Validated" (challenged and proven accurate); the private ledger says "Your correction improved evidence status for this thread"; no likes are displayed anywhere.
+Sees a comment repeating an incorrect date; taps Correct; the composer requires the correction text with at least one inline-linked source; posting it opens a live debate arena against the comment's author (Section 15.4) and the arena opens as a focused modal over the story — the challenged comment and the correction side by side, each clamped to a short preview that expands to the full content, live as either author edits. The original author fixes their comment within the hour-long activity window — or lets it rest, and once both sides have been idle for an hour the material locks in and the room's AI resolution queue renders the verdict. The comment ends tagged "Incorrect" (visible, sunk) or "Validated" (challenged and proven accurate); the private ledger says "Your correction improved evidence status for this thread"; no likes are displayed anywhere.
 
 ## 35.3 Content crosses communities
 

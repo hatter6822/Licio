@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { createFileRoute } from '@tanstack/react-router';
-import { DebateArena } from '../components/debate/DebateArena.js';
-
-function DebateRoute(): React.ReactElement {
-  const { storyId, debateId } = Route.useParams();
-  return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
-      <DebateArena debateId={debateId} storyId={storyId} />
-    </main>
-  );
-}
+//
+// Back-compat only (WS-T): the debate arena is now a MODAL over the story
+// surface, opened via the `?debate=<id>` deep link (mirroring the room-
+// governance modal's legacy-route pattern). This route redirects old arena
+// links into the param, so a shared URL is never a dead end.
+import { createFileRoute, redirect } from '@tanstack/react-router';
 
 export const Route = createFileRoute('/stories/$storyId/debate/$debateId')({
-  component: DebateRoute,
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      to: '/stories/$storyId',
+      params: { storyId: params.storyId },
+      search: { debate: params.debateId },
+      replace: true,
+    });
+  },
 });

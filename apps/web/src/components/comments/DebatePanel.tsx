@@ -3,14 +3,15 @@
 // WS-T debate discovery — the story's ACTIVE debate arenas surfaced on the
 // conversation so anyone reading a story can FIND and watch a live debate as it
 // happens (previously the arena was only reachable from the challenged comment).
-// Each row links into the arena with a short countdown to the editing / verdict
-// deadline.  Strictly no-applause: it surfaces the debate's subject + state, and
-// there is no member vote or tally anywhere — the outcome is the room AI's
+// Each row OPENS the arena modal over the current surface (via the `?debate=`
+// search param) with a short countdown to the editing / verdict deadline.
+// Strictly no-applause: it surfaces the debate's subject + state, and there is
+// no member vote or tally anywhere — the outcome is the room AI's
 // content-structural adjudication.
 import type { DebateArenaSummary } from '@licio/shared';
-import { Link } from '@tanstack/react-router';
 import { cn } from '../../lib/cn.js';
 import { raisedSurface } from '../../lib/surfaces.js';
+import { useOpenDebate } from '../debate/open-debate.js';
 import { Icon } from '../ui/Icon/index.js';
 
 const STATE_LABEL: Record<DebateArenaSummary['state'], string> = {
@@ -32,12 +33,11 @@ function remainingLabel(deadline: string): string | null {
 }
 
 export function DebatePanel({
-  storyId,
   debates,
 }: {
-  storyId: string;
   debates: readonly DebateArenaSummary[];
 }): React.ReactElement | null {
+  const openDebate = useOpenDebate();
   if (debates.length === 0) return null;
   return (
     <aside className={cn('flex flex-col gap-2 p-4', raisedSurface)} aria-label="Active debates">
@@ -61,10 +61,11 @@ export function DebatePanel({
                   : null;
           return (
             <li key={debate.debate_id}>
-              <Link
-                to="/stories/$storyId/debate/$debateId"
-                params={{ storyId, debateId: debate.debate_id }}
-                className="flex flex-col gap-1 rounded-md border border-line bg-canvas p-3 transition-colors hover:border-line-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                onClick={() => openDebate(debate.debate_id)}
+                className="flex w-full flex-col gap-1 rounded-md border border-line bg-canvas p-3 text-left transition-colors hover:border-line-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
               >
                 <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
                   <span className="font-medium text-ink">
@@ -84,7 +85,7 @@ export function DebatePanel({
                   View debate
                   <Icon name="chevron-right" className="size-3.5" aria-hidden />
                 </span>
-              </Link>
+              </button>
             </li>
           );
         })}

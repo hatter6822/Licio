@@ -27,7 +27,7 @@ remains re-challengeable if new evidence emerges.
 `0056`/`0078`/`0079`; `apps/api/src/forum/debate.ts` + `debate-store.ts`).  The
 arena is about the **real material**: the challenged story/comment (the
 **incumbent**'s side) and the correction (the **challenger**'s side) render on
-the arena page LIVE while it is open — either author may keep adjusting their
+the arena modal LIVE while it is open — either author may keep adjusting their
 underlying content through the normal edit paths, and each side may layer an
 optional co-visible **rebuttal statement** (summary + sources) on top.
 
@@ -131,7 +131,7 @@ while it runs (restored on stop), **scoped via `appliesToUser` to arenas whose
 parties are BOTH synthetic personas** — a debate the developer's own account
 opens or defends keeps the REAL spec windows and can be watched live, with the
 dev **fast-forward** control (`POST /v1/dev/simulator/debates/:id/fast-forward`,
-also on the arena page in dev builds) jumping it to `locked`/`verdict`/`resolved`
+also in the arena modal in dev builds) jumping it to `locked`/`verdict`/`resolved`
 by shifting its own deadlines and running the REAL lifecycle sweep. The
 challenge-resolution **throughput pulse** (arenas opened/awaiting/adjudicated/
 finalized, LLM verdict split + fallbacks, average adjudication wall-clock)
@@ -163,14 +163,22 @@ renders in the dev panel and at `GET /v1/dev/simulator/status` (see
   `UgcBody`, WS-G.4.2c); legacy "bare" citations with no matching inline link fall
   back to a compact trailing list of `SafeExternalLink`s — there is **no separate
   "Sources" modal**.  The report control is an **icon-only flag** (mirrors the
-  story card).  The "Correct" action → `CorrectionComposer`; a "View debate" link
-  on `under_debate` comments; the `/stories/$storyId/debate/$debateId` arena
-  (`components/debate/DebateArena`) shows the REAL challenged story/comment and
-  the correction (live-vs-locked badges), the co-visible rebuttal cards, the
-  lock/queue/override countdowns + the both-sides-idle early-resolution hint,
-  the withdraw/concede affordances, the verdict banner (including "Decided by
-  the incumbent's concession"), the steward override, and a DEV-only
-  fast-forward row.  The active-debates `DebatePanel` + `DisputeBanner` render
+  story card).  The "Correct" action → `CorrectionComposer`; a "View debate"
+  control on `under_debate` comments.  The arena itself is a focused **MODAL**
+  over the story surface (`components/debate/DebateArenaModal`, a Sheet),
+  deep-linked via the `?debate=<id>` search param on the story page AND the
+  dedicated comments page (the legacy `/stories/:id/debate/:id` route
+  redirects into the param — the room-governance modal's pattern; closing
+  clears the param so back/refresh behave honestly).  Inside, the two sides
+  read **side-by-side**: each column shows the REAL material (the challenged
+  story/comment | the correction) with live-vs-locked badges, clamped to a
+  short preview that **expands to the full content + all sources**, with the
+  side's argument statement beneath it (editable in place by its author while
+  open).  The header carries the state line + lock/queue/override countdowns
+  + the both-sides-idle early-resolution hint; the footer carries the
+  withdraw/concede affordances, the verdict banner (including "Decided by the
+  incumbent's concession"), the steward override, and a DEV-only fast-forward
+  row.  The active-debates `DebatePanel` + `DisputeBanner` render
   on the story page AND the dedicated `/stories/:id/comments` surface.  Dispute
   tags render through the shared `DisputeBadge`/`DisputeBanner`:
   **"Challenged"** (`under_debate`), **"Incorrect"** (`incorrect`),

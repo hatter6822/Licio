@@ -127,7 +127,7 @@ export function CommentSection({
 
   return (
     <section id="comments" className="mt-6 flex flex-col gap-4" aria-label="Conversation">
-      {debates.data ? <DebatePanel storyId={storyId} debates={debates.data.debates} /> : null}
+      {debates.data ? <DebatePanel debates={debates.data.debates} /> : null}
       <CommentComposer
         storyId={storyId}
         threadId={threadId}

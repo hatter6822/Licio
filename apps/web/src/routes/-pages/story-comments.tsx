@@ -24,6 +24,8 @@ import {
   CommentNode,
   commentActionClass,
 } from '../../components/comments/index.js';
+import { DebateArenaModal } from '../../components/debate/DebateArenaModal.js';
+import { useCloseDebate } from '../../components/debate/open-debate.js';
 import { lensDisplayName } from '../../components/rooms/RoomLensControl/RoomLensSelector.js';
 import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
 import { UgcBody } from '../../components/ugc/UgcBody.js';
@@ -184,8 +186,11 @@ function StoryCommentsContent({
   );
   // WS-T — active-debate discovery + the story's dispute posture render on
   // this dedicated comments surface too (previously only the story page had
-  // them, so a reader here could not find a live debate).
+  // them, so a reader here could not find a live debate).  The arena modal
+  // opens over THIS page via the same `?debate=<id>` param as the story page.
   const debates = useStoryDebatesQuery(storyId);
+  const debateParam = useSearch({ from: '/stories/$storyId_/comments' }).debate;
+  const closeDebate = useCloseDebate();
 
   // Retrace history so the back button returns the reader to exactly where they
   // came from (the story page, or the previous drill-down level); a cold-loaded
@@ -284,7 +289,8 @@ function StoryCommentsContent({
         ) : null}
 
         {story.data ? <DisputeBanner status={story.data.dispute_status} /> : null}
-        {debates.data ? <DebatePanel storyId={storyId} debates={debates.data.debates} /> : null}
+        {debates.data ? <DebatePanel debates={debates.data.debates} /> : null}
+        <DebateArenaModal debateId={debateParam ?? null} onClose={closeDebate} />
 
         {comments.isError ? (
           <ErrorState

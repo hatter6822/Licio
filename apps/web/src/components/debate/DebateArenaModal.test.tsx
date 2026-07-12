@@ -21,7 +21,7 @@ vi.mock('../../lib/queries.js', () => ({
   }),
 }));
 
-import { DebateArena } from './DebateArena.js';
+import { DebateArenaContent, DebateArenaModal } from './DebateArenaModal.js';
 
 const PAST = '2026-07-05T00:00:00.000Z';
 /** 30 minutes ago — a "recent" last edit, so the expedited idle countdown is
@@ -109,7 +109,7 @@ function arena(over: Partial<DebateArenaPublic> = {}): DebateArenaPublic {
 }
 
 function renderArena() {
-  return render(<DebateArena debateId="00000000-0000-4000-8000-0000000000d1" storyId="s1" />);
+  return render(<DebateArenaContent debateId="00000000-0000-4000-8000-0000000000d1" />);
 }
 
 beforeEach(() => {
@@ -121,19 +121,32 @@ beforeEach(() => {
 });
 afterEach(() => vi.clearAllMocks());
 
-describe('DebateArena', () => {
+describe('DebateArenaModal', () => {
+  it('opens as a modal sheet while a debate id is present and renders nothing without one', () => {
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <DebateArenaModal debateId="00000000-0000-4000-8000-0000000000d1" onClose={onClose} />,
+    );
+    // The Sheet carries the accessible dialog title; the arena body loads inside.
+    expect(screen.getByRole('heading', { name: 'Debate arena' })).toBeInTheDocument();
+    expect(screen.getByText(/this is not a vote/i)).toBeInTheDocument();
+    rerender(<DebateArenaModal debateId={null} onClose={onClose} />);
+    expect(screen.queryByRole('heading', { name: 'Debate arena' })).not.toBeInTheDocument();
+  });
+});
+
+describe('DebateArenaContent', () => {
   it('renders loading and error states', () => {
     queryState = { isLoading: true };
     const { rerender } = renderArena();
     expect(screen.getByText('Loading the debate…')).toBeInTheDocument();
     queryState = { isError: true };
-    rerender(<DebateArena debateId="d1" storyId="s1" />);
+    rerender(<DebateArenaContent debateId="d1" />);
     expect(screen.getByRole('heading', { name: 'Debate unavailable' })).toBeInTheDocument();
   });
 
   it('shows the live state, the challenger draft, both countdowns, and no vote (observer view)', () => {
     renderArena();
-    expect(screen.getByRole('heading', { name: 'Debate arena' })).toBeInTheDocument();
     expect(screen.getByText(/this is not a vote/i)).toBeInTheDocument();
     expect(screen.getByText(/Live — both sides are making their case/)).toBeInTheDocument();
     expect(screen.getByText(/Editing window:/)).toBeInTheDocument();
@@ -254,7 +267,7 @@ describe('DebateArena', () => {
         }),
       },
     };
-    rerender(<DebateArena debateId="00000000-0000-4000-8000-0000000000d1" storyId="s1" />);
+    rerender(<DebateArenaContent debateId="00000000-0000-4000-8000-0000000000d1" />);
     expect(
       screen.queryByRole('button', { name: 'Withdraw the correction…' }),
     ).not.toBeInTheDocument();
@@ -354,6 +367,38 @@ describe('DebateArena', () => {
     expect(screen.getByText('Upheld — the incumbent stands')).toBeInTheDocument();
     expect(screen.getByText(/Overruled by steward stew/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Overrule verdict' })).not.toBeInTheDocument();
+  });
+
+  it('clamps a long body to a preview and expands to the full content + all sources', () => {
+    const longBody = `The council minutes are unambiguous on this point. ${'Detail sentence. '.repeat(40)}FULL-DEPTH-MARKER.`;
+    queryState = {
+      data: {
+        debate: arena({
+          target_content: content('comment', {
+            body: longBody,
+            citations: [
+              { url: 'https://example.org/a' },
+              { url: 'https://example.org/b' },
+              { url: 'https://example.org/c' },
+              { url: 'https://example.org/d' },
+            ],
+          }),
+        }),
+      },
+    };
+    renderArena();
+    // Collapsed: the preview cuts before the end marker and hides the tail
+    // sources behind a "+N more" note.
+    expect(screen.queryByText(/FULL-DEPTH-MARKER/)).not.toBeInTheDocument();
+    expect(screen.getByText('+2 more sources')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'https://example.org/d' })).not.toBeInTheDocument();
+    // Expand: the full body and every source appear; the toggle flips.
+    fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+    expect(screen.getByText(/FULL-DEPTH-MARKER/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'https://example.org/d' })).toBeInTheDocument();
+    expect(screen.queryByText('+2 more sources')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show less' }));
+    expect(screen.queryByText(/FULL-DEPTH-MARKER/)).not.toBeInTheDocument();
   });
 
   it("labels a concession-decided resolution as the incumbent's concession", () => {

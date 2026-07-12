@@ -907,7 +907,7 @@ adjudicator and its human remedy handle:
   windows are **scoped to arenas whose parties are BOTH synthetic personas**
   (`appliesToUser`): a debate YOUR dev account opens or defends keeps the real
   spec windows, so you can watch it live — and jump it forward on demand with
-  the arena page's dev **fast-forward** row (or
+  the arena modal's dev **fast-forward** row (or
   `POST /v1/dev/simulator/debates/:id/fast-forward` with
   `{"to": "locked" | "verdict" | "resolved"}` + the control header), which
   shifts that arena's own deadlines into the past and runs the REAL lifecycle
@@ -1501,7 +1501,7 @@ fully overrule it for 24h).  In a governed room whose ratified agent holds the
 WS-U `debate.judge` capability (the seeded demo room requests it), the SAME
 leg runs room-conditioned on the community-ratified prompt — the room's AI
 resolution queue.  Try it in dev: post a sourced `correction` contribution
-against a comment/story, watch the live arena, and use the arena's dev
+against a comment/story, watch the live arena modal, and use its dev
 fast-forward row to jump it to the verdict.
 
 #### The dev-simulated local runtime (the `pnpm dev` default)

@@ -10,7 +10,7 @@ import type {
   LensPublic,
   StoryInterpretationsResponse,
 } from '@licio/shared';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,6 +20,7 @@ const mutate = vi.fn();
 const refetch = vi.fn();
 const loadMore = vi.fn();
 const recordReplyDepth = vi.fn();
+const navigateMock = vi.fn();
 
 let queryState: {
   data?: {
@@ -71,7 +72,7 @@ vi.mock('@tanstack/react-router', () => ({
       </a>
     );
   },
-  useNavigate: () => vi.fn(),
+  useNavigate: () => navigateMock,
 }));
 
 vi.mock('../../lib/queries.js', () => ({
@@ -283,10 +284,14 @@ describe('CommentSection', () => {
     const panel = screen.getByRole('complementary', { name: 'Active debates' });
     expect(within(panel).getByText('1 active debate')).toBeInTheDocument();
     expect(within(panel).getByText(/The vote passed 5-4\./)).toBeInTheDocument();
-    expect(within(panel).getByRole('link', { name: /view debate/i })).toHaveAttribute(
-      'href',
-      `/stories/${storyId}/debate/${debateId}`,
-    );
+    // The row opens the arena MODAL via the `?debate=` param on this route.
+    fireEvent.click(within(panel).getByRole('button', { name: /view debate/i }));
+    const call = navigateMock.mock.calls.at(-1)?.[0] as {
+      to: string;
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.to).toBe('.');
+    expect(call.search({})).toEqual({ debate: debateId });
   });
 
   it('WS-T — an under-debate comment links to its live arena', () => {
@@ -306,11 +311,16 @@ describe('CommentSection', () => {
       },
     };
     renderSection();
-    // Anyone — especially the incumbent author — reaches the arena to make
+    // Anyone — especially the incumbent author — opens the arena modal to make
     // their case while it is live, even though the `Correct` button is
     // disabled here.
-    const link = screen.getByRole('link', { name: /view debate/i });
-    expect(link).toHaveAttribute('href', `/stories/${storyId}/debate/${debateId}`);
+    fireEvent.click(screen.getByRole('button', { name: /view debate/i }));
+    const call = navigateMock.mock.calls.at(-1)?.[0] as {
+      to: string;
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.to).toBe('.');
+    expect(call.search({})).toEqual({ debate: debateId });
     expect(screen.getByRole('button', { name: 'Correct' })).toBeDisabled();
   });
 
