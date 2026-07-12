@@ -25,12 +25,12 @@ defense-in-depth pipeline; the server stores raw Markdown-lite only.
 
 | Location | Contents |
 |---|---|
-| `packages/shared/src/schemas/contribution.ts` | The 11-type create union (WS-G.1.2c), citation schema, update/public projections, anchors |
+| `packages/shared/src/schemas/contribution.ts` | The contribution create union (comment + correction live writes; legacy read types), citation schema, update/public projections, anchors |
 | `packages/shared/src/schemas/thread.ts` | Conversation/safety state machines + thread wire contracts |
 | `packages/shared/src/schemas/room.ts`, `forum-api.ts` | Room/lens/steward/subscription + endpoint wire contracts |
 | `packages/shared/src/constants/moderation.ts` | The 51 ratified WS-A.1.2 reason codes (pinned by test) |
 | `packages/shared/src/ugc/` | The WS-G.4 pipeline: Markdown-lite parser → serializer → DOMPurify (`licio-ugc`) → `renderUGC`; drainer-link detection |
-| `packages/db/src/schema/` | `contribution.ts`, `room.ts`, `upload.ts`, the WS-G-owned `thread.ts`, the dual-dimension `claim.ts` evidence cards |
+| `packages/db/src/schema/` | `contribution.ts`, `room.ts`, `upload.ts`, the WS-G-owned `thread.ts` |
 | `packages/db/drizzle/0008_ws_g_forum.sql` | The WS-G migration (validated against live Postgres 16) |
 | `apps/api/src/forum/` | Stores (in-memory + interfaces), services container, contribution guard chain, story comment reads, live broadcaster, compatibility thread reads, rooms, transitions, safety seam, GIF/EXIF stripping, config, Drizzle adapters |
 | `apps/api/src/routes/forum.ts`, `routes/rooms.ts` | The §23.2 endpoint surface |
@@ -75,8 +75,8 @@ machine-readable reason:
 * *Structural deepening* — `active → deepening` evaluates at contribution
   creation (detached; the response never waits) and fires only when ALL of
   volume (published contributions ≥ `forum.deepeningMinContributions`,
-  default 12), evidence (citation-bearing types — evidence/correction/
-  counterexample — ≥ `forum.deepeningMinEvidence`, default 2), and a LIVE
+  default 12), sourcing (sourced comments + corrections —
+  ≥ `forum.deepeningMinEvidence`, default 2), and a LIVE
   multi-level exchange (the new contribution's depth ≥
   `forum.deepeningMinDepth`, default 2) hold.  Deterministic given store
   state; never fires from a non-active state.
@@ -92,18 +92,21 @@ machine-readable reason:
 Everything else (de-escalation, review, resolution) stays HUMAN: recovery
 routes through `under_review`, which is steward judgment (WS-J).
 
-**Contributions** (WS-G.1.2a–d).  Eleven types — `question`, `answer`,
-`evidence`, `correction`, `synthesis`, `counterexample`, `explanation`,
-`local_context`, `direct_experience`, `moderation_concern`,
-`meta_discussion`.  The type never changes after creation (structurally
-absent from the update contract).  Bodies are raw Markdown-lite stored
-VERBATIM — sanitization is exclusively render-time (WS-G.4) — bounded 1–5000
-chars with per-type caps.  Per-type metadata lives in the `metadata` JSONB
-column (the plan's field-name canon); citations are validated objects
-(http/https/`doi:` only).
+**Contributions** (WS-G.1.2a–d, re-scoped by WS-T).  Two types — `comment`
+(sourcing rides its citations) and `correction` (a sourced challenge; ≥ 1
+citation, targets exactly one comment or the story).  The WS-G-era nine
+(question/answer/synthesis/counterexample/explanation/local_context/
+direct_experience/moderation_concern/meta_discussion) were REMOVED outright
+(migration `0076` maps stray dev rows onto comments; moderation concerns
+live in the WS-J report flow).  The type never changes after creation
+(structurally absent from the update contract).  Bodies are raw
+Markdown-lite stored VERBATIM — sanitization is exclusively render-time
+(WS-G.4) — bounded with per-type caps (comment 5000, correction 2000).
+Metadata is the STRICT allowlisted object (target refs, debate arena,
+attachments, lens); citations are validated objects (http/https/`doi:`
+only).
 
-The tree: `parent_contribution_id` (any type may nest; `answer` REQUIRES a
-`question` parent in the same thread) with a **materialized JSONB ancestor
+The tree: `parent_contribution_id` with a **materialized JSONB ancestor
 path** (`path`, root-first; `depth = jsonb_array_length(path)` ≤ 10,
 CHECK-enforced).  Subtree reads use the GIN containment index
 (`path ⊇ [rootId]`) — no recursive CTE on the hot path; parity with a
@@ -149,8 +152,8 @@ tests.  `member_count` and `thread_count` are display-only.
 
 Subscriptions (WS-G.2.3d): public joins are immediate and idempotent;
 restricted joins create a pending request (stable `request_id`) decided by
-room stewards; leaving removes the subscription AND its per-room
-notification preferences (one row).  Visibility is two-tier: a pending
+room stewards; leaving removes the subscription (one row; the never-read
+per-room notification preferences were dropped in migration `0076`).  Visibility is two-tier: a pending
 applicant can see the room EXISTS (listings, their join status) but reads
 none of its content — threads, lenses, and detail all require an ACTIVE
 membership or a steward role (`roomContentVisibleToUser`, the same bar
@@ -204,17 +207,16 @@ so a member can never accidentally post as a lens they were only viewing:
 
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → transactional insert (atomic with the evidence card) → durable `contribution.created` (+`evidence.added`) emission — EXCEPT for safety-held rows, which emit nothing and bump no room activity (scoring/lifecycle/freshness must not count invisible content; emission on release is the WS-J approval seam) |
+| `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → insert → durable `contribution.created` emission — EXCEPT for safety-held rows, which emit nothing and bump no room activity (scoring/lifecycle/freshness must not count invisible content; emission on release is the WS-J approval seam) |
 | `GET /v1/stories/:id/comments` | Story-owned comment section: keyset-paginated roots with bounded reply previews, optional `sources`/`corrections` filters, and a `depth` (1 = inline section's single nested layer; 2 = the dedicated comment page's two layers) materialized server-side from REPLY_PREVIEW-bounded fetches. A focused read (`?root=<id>`) returns that comment as `anchor` with its direct replies as the paginated comment list (404 if the anchor is missing/invisible) — the dedicated page's re-rootable drill-down. This is the primary read surface embedded on `/stories/$storyId`; the old global `/threads` directory is retired on the client. |
 | `GET /v1/threads/:id` | Back-compat overview/resolution surface. The web client uses it only to redirect old `/threads/$threadId` deep links to the owning story comment section. |
 | `GET /v1/stories/:id/comments/stream` | Same-origin SSE stream for new visible comments; frames carry only the public contribution projection, are revalidated by the read bar, and are covered by score/raw/financial-field introspection tests. |
 | `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (`thread_id` + subtree root) for legacy/shared contribution links. |
 | `PATCH/DELETE /v1/contributions/:id` | Author-only edit (history snapshot; citation floors survive edits; the safety classifier RE-RUNS on the edited content and a flag holds it for review) and tombstone removal; 404-over-403 |
-| `POST /v1/evidence` | Standalone cards with explicit material + relationship types; emits the same durable `evidence.added` as the co-create path (resolved through the claim's story thread) so embeddings/lifecycle see every card |
 | `GET/PATCH /v1/feed/preferences` | The §23.2 canonical veneer over the WS-D settings stores (single source of truth; clamped/audited); the five §13 modes |
 | `POST /v1/uploads`, `GET /v1/uploads/:id` | See uploads below |
 | `GET /v1/security/link-blocklist` | Drainer blocklist, steward-tunable, content-hash version for cache busting |
-| `GET/POST… /v1/rooms*` | Listing/creation/detail/threads/join (`POST /join` carries the joiner's `{ lens_id }`, WS-G.2.2)/notifications/join-requests/lenses + `PUT /v1/rooms/:id/lens` (the SOLE posting-lens change path — validated lens∈room, `null` = Undecided, member-only); the directory walks the store keyset until a full visible page (no fetch-prefix cap), `joined` enumerates the requester's own memberships, and `thread_count` counts VISIBLE threads only (hidden stories excluded — no oracle) |
+| `GET/POST… /v1/rooms*` | Listing/creation/detail/threads/join (`POST /join` carries the joiner's `{ lens_id }`, WS-G.2.2)/join-requests/lenses + `PUT /v1/rooms/:id/lens` (the SOLE posting-lens change path — validated lens∈room, `null` = Undecided, member-only); the directory walks the store keyset until a full visible page (no fetch-prefix cap), `joined` enumerates the requester's own memberships, and `thread_count` counts VISIBLE threads only (hidden stories excluded — no oracle) |
 | `GET /v1/notifications`, `PATCH /v1/notifications/:id/read` | Bodyless reply-notification inbox; push wakes are user-scoped and honor `reply_notifications`, quiet hours, budgets, and block/mute relationships. |
 | `PATCH /v1/threads/:id/state` | Steward transitions (audited, reasoned) |
 | `/v1/forum/admin/*` | Steward+TOTP: validated config writes (422 on bad values), metrics |
@@ -226,26 +228,21 @@ second bespoke token would duplicate the same proof against the same threat
 model, so none is added.  `client_draft_id` provides the idempotency half.
 
 **Scoring mapping** (the WS-E emission boundary; pinned by test):
-`question→question`, `answer→explanation`, `evidence→evidence`,
-`correction→correction`, `synthesis→synthesis`,
-`counterexample→counterexample`, `explanation→explanation`,
-`local_context/direct_experience→experience`, `moderation_concern→flag`
-(weight 0 — a safety action), `meta_discussion→low_info_reply` (weight 0 —
-volume, never negative).  The conservative `classifyLowInfoReplyV0`
-(@licio/invariants) re-classifies unmistakable bare acknowledgments
-("+1"/"lol"/"this", < 16 chars, uncited) on answer/explanation bodies —
-closing the WS-E residual; the WS-K classifier replaces it behind the same
-signature.  Evidence material types map onto the WS-E `evidence.added` wire
-enum as identity for the five shared values, `expert_reference→other`,
-`fact_check→article`.
+`comment→explanation`, `correction→correction`.  The conservative
+`classifyLowInfoReplyV0` (@licio/invariants) re-classifies unmistakable bare
+acknowledgments ("+1"/"lol"/"this", < 16 chars, uncited) on comment bodies to
+`low_info_reply` (weight 0 — volume, never negative); the WS-K classifier
+replaces it behind the same signature.  (The `evidence` contribution type,
+its EvidenceCard co-creation, and the `evidence.added` topic were removed —
+sourcing is comment-centric citations, counted by the store's `sourced`
+predicate.)
 
-**Composer** (WS-G.3.4–3.6).  Eleven modes in five groups (Ask / Respond /
-Evidence / Improve / Meta); catalogue ids ARE the wire types and field names
-match the WS-G.1.2b canon, so the payload builder validates through the
-SHARED schema — client and server rules are the same module.  Per-type
-char caps with live counters, the `direct_experience` privacy acknowledgment
-gates submit (aria-disabled until checked), flag reasons are a curated
-WS-A.1.2 subset (import-time guarded against the ratified list), voice
+**Composer** (WS-G.3.4–3.6, re-scoped by WS-T).  The inline comment composer:
+a comment (text and/or image/GIF) with two progressive enrichments — *Cite a
+source* (a structured citation ⇒ a sourced comment) and *Mark a correction*
+(the sourced challenge).  The payload builds through the SHARED
+two-branch create schema — client and server rules are the same module.
+Per-type char caps with live counters, voice
 dictation rides the Web Speech API (graceful absence), and drafts autosave
 encrypted to IndexedDB through a trailing 800 ms debounce (one
 encrypt+write per pause — never one per keystroke) with backgrounding and
@@ -260,15 +257,16 @@ seeded with the URL and stays the source of truth: at payload build the
 seed only ENRICHES a surviving matching line (deleting the line — or
 dismissing the chip — drops it).
 
-**Uploads** (WS-G.3.7b).  JPEG/PNG/WebP ≤ 5 MB and PDF ≤ 10 MB with
-magic-byte validation (polyglots rejected).  Image metadata is stripped
+**Uploads** (WS-G.3.7b).  JPEG/PNG/WebP/AVIF/GIF images, MP4/WebM video, and
+VTT captions with magic-byte validation (polyglots rejected; the clientless
+PDF document path was removed).  Image metadata is stripped
 BEFORE storage by pure byte-level container surgery (no re-encode): JPEG
 drops APP1–APP15 + COM; PNG drops tEXt/zTXt/iTXt/eXIf/tIME; WebP drops
 EXIF/XMP chunks, clears the VP8X flag bits, and recomputes the RIFF size.
 AVIF metadata removal would require rewriting ISO-BMFF `iloc` offsets, so an
 AVIF carrying Exif/XMP is REJECTED (fail closed — the privacy promise is
 never silently broken) and metadata-free AVIF passes.  Alt text is required
-for images; PDFs download rather than render inline.  Bytes live in
+for images.  Bytes live in
 S3-compatible storage when the `S3_*` group is configured, else in-memory
 with a production warning (the WS-D DSAR-archive posture).
 
@@ -358,10 +356,10 @@ fresh user gesture.
 ## Privacy and WS-D hooks (closed)
 
 * `anonymizeContributions` (the WS-D.2.4 residual) is REAL: account purge
-  tombstones contribution/evidence/upload authorship and REMOVES room
+  tombstones contribution/upload authorship and REMOVES room
   subscriptions and steward rows (membership is personal data).
 * `exportContributions` now composes stories + every forum contribution
-  (keyset-paginated to exhaustion), evidence cards, room subscriptions, AND
+  (keyset-paginated to exhaustion), room subscriptions, AND
   the user's upload records (content type, size, alt text, scan state, and
   the same-origin retrieval URL — the bytes stay in the upload store, which
   serves them publicly once scan-cleared) — the DSAR export is complete
@@ -412,7 +410,7 @@ user activation, story submission renders with shared-schema validation, and the
 * **WS-I**: feed-mode consumption in real ranking (preferences persist and
   the §13 vocabulary is wired); room/thread read models in the front page.
 * **WS-J**: queue ownership (forum intake lands in the shared review inbox
-  as `contribution_safety_hold`/`moderation_concern` with urgency), steward
+  as `contribution_safety_hold`), steward
   moderation actions on contributions beyond author tombstones, appeals;
   the shared malware intelligence behind the `UploadScanner` seam.
 * **WS-K**: governed classifiers behind the `ContributionSafetyClassifier`

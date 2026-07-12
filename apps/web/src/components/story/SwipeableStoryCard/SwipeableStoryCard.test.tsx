@@ -11,12 +11,11 @@ const sample: StoryCardData = {
     id: 's1',
     title: 'River levels stabilize after upstream coordination',
     source: 'Delta Observer',
-    origin: 'independent',
     url: 'https://example.org/story',
     readingMinutes: 4,
   },
-  ratingLabel: 'well-sourced',
-  distributionReason: 'Rising from independent source opens and evidence additions',
+  ratingLabel: 'deepening',
+  distributionReason: 'Rising from independent source opens and sourced comments',
 };
 
 /** Drive a synthetic swipe across the gesture surface. */

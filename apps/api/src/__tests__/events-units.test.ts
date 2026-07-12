@@ -122,7 +122,6 @@ describe('PWAtt runtime config loader (WS-E.2.3a-d fail-closed)', () => {
     await fixture.events.configStore.set('v1', {
       contributionWeights: {
         question: 0.7,
-        evidence: 1,
         correction: 0.9,
         synthesis: 0.8,
         counterexample: 0.6,
@@ -163,6 +162,15 @@ describe('PWAtt runtime config loader (WS-E.2.3a-d fail-closed)', () => {
       scale: 2,
       saturationPoint: 9,
     }); // preserved
+    // The retired write-taxonomy weight keys are STRIPPED by the upgrader; the
+    // five live weights survive.
+    expect(Object.keys(config.v1.contributionWeights).sort()).toEqual([
+      'bridge_comment',
+      'correction',
+      'explanation',
+      'low_info_reply',
+      'steward_action',
+    ]);
     expect(rejections).toHaveLength(0); // upgraded, not discarded
   });
 });
@@ -350,19 +358,25 @@ describe('metrics (WS-E.1.3a observability)', () => {
   });
 });
 
-describe('aggregation fold: evidence + integrity branches (WS-E.2.1a)', () => {
-  it('counts evidence.added into window volume without double-crediting participation', async () => {
+describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () => {
+  it('counts a sourced contribution into window volume; integrity stays anti-signal-only', async () => {
     const threadId = randomUUID();
     const userId = randomUUID();
     await fixture.events.eventStore.insertMany([
       {
         eventId: randomUUID(),
-        eventType: 'evidence.added',
-        topic: 'evidence.added',
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
         timestamp: IN_WINDOW,
         privacyClassification: 'public',
         retentionTier: 'public_contribution',
-        payload: { thread_id: threadId, user_id: userId },
+        payload: {
+          thread_id: threadId,
+          user_id: userId,
+          contribution_type: 'explanation',
+          has_citation: true,
+          accusation_flag: false,
+        },
         ownerUserId: userId,
         purgeAfter: null,
       },
@@ -383,7 +397,7 @@ describe('aggregation fold: evidence + integrity branches (WS-E.2.1a)', () => {
     // Integrity signals are recorded as anti-signal counts but deliberately
     // do NOT inflate eventCount (which conditions burst detection volume).
     expect(window?.eventCount).toBe(1);
-    expect(window?.contributionCounts).toEqual({}); // no participation credit
+    expect(window?.contributionCounts).toEqual({ explanation: 1 });
     expect(window?.antiSignalCounts).toEqual({ rage_loop: 1 });
   });
 });
@@ -568,16 +582,10 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
   };
   const validV1 = {
     contributionWeights: {
-      question: 0.7,
-      evidence: 1,
       correction: 0.9,
-      synthesis: 0.8,
-      counterexample: 0.6,
-      explanation: 0.5,
-      experience: 0.5,
       bridge_comment: 0.85,
+      explanation: 0.5,
       steward_action: 0.5,
-      flag: 0,
       low_info_reply: 0,
     },
     contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
@@ -663,8 +671,21 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
     await fixture.events.configStore.set('v1', validV1);
     const applied = await loadPwattRuntimeConfig(fixture.events);
     expect(applied.v0.participation.weights.returnPct).toBe(49);
-    expect(applied.v1.contributionWeights.evidence).toBe(1);
+    expect(applied.v1.contributionWeights.correction).toBe(0.9);
     expect(rejections).toHaveLength(0);
+
+    // A pre-WS-T stored row carrying the RETIRED `evidence` weight upgrades in
+    // place: the retired key is stripped and the steward's surviving tuning is
+    // KEPT (never silently discarded for the defaults).
+    await fixture.events.configStore.set('v1', {
+      ...validV1,
+      contributionWeights: { ...validV1.contributionWeights, evidence: 1 },
+      citationBonus: 0.4,
+    });
+    const upgraded = await loadPwattRuntimeConfig(fixture.events);
+    expect(rejections).toHaveLength(0);
+    expect(upgraded.v1.citationBonus).toBe(0.4);
+    expect('evidence' in upgraded.v1.contributionWeights).toBe(false);
 
     await fixture.events.configStore.set('v0', { broken: true });
     // NEW-shape (has `traversal`, so the legacy upgrade never touches it) but

@@ -2,7 +2,9 @@
 //
 // WS-J production ports: removals actually propagate to the WS-E item-safety
 // state (the ranking-exclusion seam) + the WS-G contribution state; account
-// actions write the WS-D state; user resolution reads handle + account age.
+// actions write the WS-D state; user resolution reads handle + account age;
+// the evidence-queue cited reads gate on PUBLISHED and resolve story titles.
+import { randomUUID } from 'node:crypto';
 import type { ModerationCaseCreatedEvent } from '@licio/shared';
 import { describe, expect, it, vi } from 'vitest';
 import type { NewStoredEvent } from '../events/stores.js';
@@ -11,12 +13,14 @@ import {
   type ContentPortDeps,
   type ContributionSnapshotInput,
   composeSnapshot,
+  createCitedContributionReads,
   createProductionContentPort,
   createProductionEventPort,
   createProductionInvariantPort,
   createProductionUserPort,
   type InvariantOutputRead,
 } from '../moderation/production-ports.js';
+import { freshForumServices, seedThread } from './forum-test-helpers.js';
 
 const STORY = '00000000-0000-4000-8000-00000000000a';
 const CONTRIB = '00000000-0000-4000-8000-00000000000b';
@@ -435,6 +439,58 @@ describe('production invariant port (WS-J.2.2c)', () => {
   });
 });
 
+describe('createCitedContributionReads (the evidence-queue reads over the REAL stores)', () => {
+  it('serves only PUBLISHED cited rows and resolves the anchoring story title', async () => {
+    const fixture = freshForumServices();
+    const { storyId, threadId } = await seedThread(fixture, { title: 'Reservoir sampling audit' });
+    const insert = async (over: {
+      citations?: Array<{ url: string; title?: string }>;
+      state?: 'published' | 'hidden';
+    }): Promise<string> => {
+      const outcome = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId,
+        userId: randomUUID(),
+        type: 'comment',
+        body: 'A sourced comment for the evidence queue.',
+        citations: over.citations ?? [],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: `draft-${randomUUID()}`,
+        path: [],
+        moderationState: over.state ?? 'published',
+      });
+      if (!outcome.ok) throw new Error('cited-reads insert failed');
+      return outcome.contribution.contributionId;
+    };
+    const citation = { url: 'https://example.org/registry', title: 'Registry' };
+    const publishedCited = await insert({ citations: [citation] });
+    const hiddenCited = await insert({ citations: [citation], state: 'hidden' });
+    const citationless = await insert({});
+
+    const reads = createCitedContributionReads({
+      contributions: fixture.forum.contributions,
+      stories: fixture.ingestion.stories,
+    });
+    // The list serves ONLY the published cited row, with the story resolved.
+    const listed = await reads.listCitedContributions({ after: null, limit: 10 });
+    expect(listed.map((row) => row.contributionId)).toEqual([publishedCited]);
+    expect(listed[0]?.storyId).toBe(storyId);
+    expect(listed[0]?.storyTitle).toBe('Reservoir sampling audit');
+    expect(listed[0]?.citations).toEqual([citation]);
+    expect(listed[0]?.bodyPreview).toBe('A sourced comment for the evidence queue.');
+    // The single read projects the published row identically...
+    const single = await reads.getCitedContribution(publishedCited);
+    expect(single?.storyTitle).toBe('Reservoir sampling audit');
+    expect(single?.threadId).toBe(threadId);
+    // ...and the published-only gate nulls the hidden + citation-less rows.
+    expect(await reads.getCitedContribution(hiddenCited)).toBeNull();
+    expect(await reads.getCitedContribution(citationless)).toBeNull();
+    expect(await reads.getCitedContribution(randomUUID())).toBeNull();
+  });
+});
+
 describe('production user port', () => {
   it('resolves handle + account age (days) and batches', async () => {
     const nowMs = 1_700_000_000_000;
@@ -482,5 +538,48 @@ describe('production user port', () => {
     // The batch path never pays for the per-subject stats.
     const many = await port.resolveMany([AUTHOR]);
     expect(many.get(AUTHOR)?.contributionCount).toBe(0);
+  });
+});
+
+describe('createCitedContributionReads — WS-J thread-removal gate', () => {
+  const row = {
+    contributionId: '11111111-1111-4111-8111-111111111111',
+    threadId: '22222222-2222-4222-8222-222222222222',
+    type: 'comment' as const,
+    body: 'Cited on a thread WS-J later removed.',
+    citations: [{ url: 'https://example.org/source' }],
+    moderationState: 'published',
+    createdAt: new Date(1_700_000_000_000).toISOString(),
+  };
+  const deps = (removed: boolean) => ({
+    contributions: {
+      getById: async () => row,
+      listCited: async () => [row],
+    },
+    stories: {
+      getThreadById: async () => ({ storyId: '33333333-3333-4333-8333-333333333333' }),
+      getById: async () => ({
+        storyId: '33333333-3333-4333-8333-333333333333',
+        title: 'Anchor story',
+      }),
+    },
+    threadRemoved: async () => removed,
+  });
+
+  it("a removed thread's citations gate the single-row read and FLAG the list", async () => {
+    const live = createCitedContributionReads(deps(false));
+    expect(await live.getCitedContribution(row.contributionId)).not.toBeNull();
+    const liveList = await live.listCitedContributions({ after: null, limit: 10 });
+    expect(liveList).toHaveLength(1);
+    expect(liveList[0]?.threadRemoved).toBe(false);
+    const gated = createCitedContributionReads(deps(true));
+    // Hard gate on the single-row read (decision validation + the public
+    // primary-source projection)…
+    expect(await gated.getCitedContribution(row.contributionId)).toBeNull();
+    // …but the LIST returns the row FLAGGED — the queue skips it with its
+    // scan cursor, so a removed-thread page never reads as store exhaustion.
+    const gatedList = await gated.listCitedContributions({ after: null, limit: 10 });
+    expect(gatedList).toHaveLength(1);
+    expect(gatedList[0]?.threadRemoved).toBe(true);
   });
 });

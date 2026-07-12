@@ -11,7 +11,7 @@
 // burst grows — monotone in volume, scale-free across base rates.
 //
 // HARASSMENT CASCADE: a hostile pile-on — several distinct actors, a
-// contribution mix dominated by low-information replies + flags, and volume
+// contribution mix dominated by low-information replies, and volume
 // above the conditioned base rate. Conservative: isolated criticism (small N,
 // or mixed constructive contributions) never triggers.
 import type { EventContributionType } from '@licio/shared';
@@ -109,7 +109,7 @@ export interface CascadeDetectorConfig {
   minDistinctActors: number;
   /** Minimum contributions in the window (isolated criticism guard). */
   minContributions: number;
-  /** Hostile share (low-info replies + flags) of all contributions. */
+  /** Hostile share (low-info replies) of all contributions. */
   hostileShareThreshold: number;
   /** Volume must exceed multiplier × conditioned base rate. */
   volumeMultiplier: number;
@@ -156,7 +156,7 @@ export function detectHarassmentCascade(
   >) {
     const n = count ?? 0;
     total += n;
-    if (type === 'low_info_reply' || type === 'flag') hostile += n;
+    if (type === 'low_info_reply') hostile += n;
   }
   const hostileShare = total === 0 ? 0 : hostile / total;
   const trailing = input.trailingEventCounts.filter((n) => Number.isFinite(n) && n >= 0);

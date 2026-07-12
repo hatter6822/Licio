@@ -21,7 +21,7 @@
 //     chosen scope.  `purge` IRREVERSIBLY removes the room's content across the
 //     §24.2 categories — stories (taken down + their archived body excerpt nulled),
 //     threads (terminally `archived`), ALL contributions of every member (hard-
-//     deleted with their evidence cards + edit history + draft-dedup keys), derived
+//     deleted with their edit history + draft-dedup keys), derived
 //     summaries (hard-deleted), media uploads (records AND bytes destroyed), lenses
 //     (hard-deleted), and — derived from those — the search documents (a hidden
 //     story + deleted contributions vanish from the index) — leaving only the
@@ -263,7 +263,7 @@ const EMPTY_COUNTS: MigrationPurgeCounts = {
  *
  * `purge` IRREVERSIBLY removes the room's content across the §24.2 categories
  * (stories taken down + body excerpt nulled; threads terminally archived; ALL
- * members' contributions + their evidence cards + edit history hard-deleted;
+ * members' contributions + edit history hard-deleted;
  * derived summaries hard-deleted; media uploads — records AND bytes — destroyed;
  * lenses hard-deleted; the search index follows, since it is DERIVED from the
  * now-hidden stories + deleted contributions).  What remains is only the

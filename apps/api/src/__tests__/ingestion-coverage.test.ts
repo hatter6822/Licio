@@ -56,14 +56,14 @@ describe('scheduler edges', () => {
     expect(ticked).toBe(false);
   });
 
-  it('an ACTIVE backfill resolves text for story/claim/evidence targets', async () => {
+  it('an ACTIVE backfill resolves text for story/claim targets', async () => {
     let nowMs = Date.parse('2026-06-11T12:00:00.000Z');
     const fixture = freshIngestionServices({
       config: { minAccountAgeMinutes: 0 },
       now: () => nowMs,
     });
     const app = new Hono().route('/v1', createV1Routes());
-    const { userId, cookie } = await seedUserWithSession(fixture.identity, { nowMs });
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const res = await app.request(
       post(
         '/v1/stories',
@@ -74,22 +74,8 @@ describe('scheduler edges', () => {
     const { story_id } = (await res.json()) as { story_id: string };
     await fixture.ingestion.settle();
     const claims = await fixture.ingestion.claims.listByStory(story_id);
-    const card = await fixture.ingestion.evidence.insert({
-      evidenceId: randomUUID(),
-      claimId: claims[0]?.claimId as string,
-      sourceId: null,
-      submittedBy: userId,
-      evidenceType: 'report',
-      relationshipType: 'supports',
-      contributionId: null,
-      citationUrlOrRef: 'https://example.com/x',
-      relevanceNote: 'bulletin',
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      storyId: story_id,
-    });
-    // Seed OLD-version vectors so the backfill has work for all three types,
-    // plus one source-type vector that the resolver correctly skips (null).
+    // Seed OLD-version vectors so the backfill has work for both types, plus
+    // one source-type vector that the resolver correctly skips (null).
     const old = {
       modelName: 'old',
       modelVersion: 'old-v',
@@ -104,7 +90,6 @@ describe('scheduler edges', () => {
       claims[0]?.claimId as string,
       'b',
     );
-    await embedTarget(fixture.ingestion.embeddings, old, 'evidence_card', card.evidenceId, 'c');
     await embedTarget(fixture.ingestion.embeddings, old, 'source', randomUUID(), 'd');
     await startBackfill(
       fixture.events.configStore,
@@ -120,9 +105,6 @@ describe('scheduler edges', () => {
     expect(await fixture.ingestion.embeddings.get('story', story_id, active)).not.toBeNull();
     expect(
       await fixture.ingestion.embeddings.get('claim', claims[0]?.claimId as string, active),
-    ).not.toBeNull();
-    expect(
-      await fixture.ingestion.embeddings.get('evidence_card', card.evidenceId, active),
     ).not.toBeNull();
   });
 });

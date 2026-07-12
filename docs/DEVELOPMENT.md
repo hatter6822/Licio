@@ -727,16 +727,19 @@ reader-facing surface has something meaningful to render:
 
 - Public topic rooms, local rooms, an expert-gated public room, and private
   rooms with request-to-join or invite join models.
-- Link, original-brief, question, local-update, and native-image stories across
+- Link, original-brief, and native-image stories across
   public and `room_only` visibility tiers. Upload a video through the composer
   when you need to test the native-video path.
 - A populated inline comment section on every story, including nested
-  multi-author comments, `evidence` and `correction` enrichments, community
+  multi-author comments, sourced comments and `correction` enrichments, community
   summaries, same-origin image/GIF media, and legacy `/threads/$threadId`
   redirects to the owning story's `#comments` anchor.
 - A non-empty moderation queue and a WS-J report case so steward/admin review
   surfaces render real queue, review-panel, action-palette, and audit-log data
-  on first boot.
+  on first boot — plus one ROLE_EVIDENCE showcase decision (a citation marked
+  as a primary source), so the console's Evidence tab, its recent-decisions
+  trail, and the story page's "Independent sources" drawer all render real
+  reviewed metadata.
 
 When using Postgres-backed dev data, the seed is transactional and idempotent.
 If you need to discard old seeded data completely, reset the local stack with
@@ -745,9 +748,9 @@ If you need to discard old seeded data completely, reset the local stack with
 ### Seeded labels and invariant signals
 
 Rating labels describe **conversation state**, never popularity (SPEC §5.6).
-The seed includes stories and signals for all seven labels: Getting Attention,
-Deepening, Well-Sourced, Needs Context, Under Review, Resolved Context, and
-Bridge Active.
+The seed includes stories and signals for the label set: New, Getting
+Attention, Deepening, Needs Context, Under Review, Resolved Context, and
+Bridge Active — plus the "N sourced comments" chip on cited discussions.
 
 The invariant signals are computed through the same WS-H/WS-E paths used by
 production code, not hand-authored fixtures:

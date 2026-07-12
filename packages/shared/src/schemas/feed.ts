@@ -27,7 +27,6 @@ export const RATING_LABEL_KINDS = [
   'new',
   'getting-attention',
   'deepening',
-  'well-sourced',
   'needs-context',
   'under-review',
   'resolved-context',
@@ -35,9 +34,6 @@ export const RATING_LABEL_KINDS = [
 ] as const;
 export const ratingLabelKindSchema = z.enum(RATING_LABEL_KINDS);
 export type RatingLabelKind = (typeof RATING_LABEL_KINDS)[number];
-
-/** Source provenance — feeds the origin badge, never a ranking input. */
-export const storyOriginSchema = z.enum(['independent', 'wire', 'official', 'aggregator']);
 
 /** Story-level safety posture surfaced to readers (SPEC §22.1 safety_state). */
 export const safetyStateSchema = z.enum(['ok', 'caution', 'under-review', 'restricted']);
@@ -53,24 +49,6 @@ export const contextChipSchema = z.object({
   label: z.string().min(1),
   icon: z.string().optional(),
 });
-
-/**
- * Structured SCOI context card attached to feed items whose interpretations
- * diverge (WS-I.2.4c, SPEC §10.6). Informational ONLY: "Needs Context" never
- * means false or banned. Lens-map detail stays on the story read surface
- * (`GET /v1/stories/{id}/interpretations`); the card carries the compact
- * references the feed needs.
- */
-export const feedContextCardSchema = z.object({
-  scoi_level: z.enum(['medium', 'high', 'very_high']),
-  /** Lenses with recorded interpretations on this story. */
-  lens_count: z.number().int().nonnegative(),
-  /** Open bridge attempts on the story's thread (WS-H.4.2d records). */
-  bridge_attempts_open: z.number().int().nonnegative(),
-  /** True ⇒ the story read surface has a lens map worth opening. */
-  where_interpretations_differ: z.boolean(),
-});
-export type FeedContextCard = z.infer<typeof feedContextCardSchema>;
 
 /** A same-origin, relative media read path the client renders directly. Public
  *  media is a bare `/v1/uploads/:id`; a `room_only` item carries a short-lived
@@ -103,7 +81,6 @@ export const feedItemSchema = z.object({
   story_id: uuidSchema,
   title: z.string().min(1),
   source: z.string().min(1),
-  origin: storyOriginSchema,
   url: httpUrlSchema.optional(),
   /** WS-Q.5.3b — item visibility tier; lets a room feed mark non-public items
    *  with the in-room chip. Absent ⇒ public (global feeds carry only public). */
@@ -120,7 +97,6 @@ export const feedItemSchema = z.object({
    * "more on this story" expansion (WS-I.2.4a). */
   more_on_this_story: z.array(uuidSchema).max(12).default([]),
   /** SCOI context card when interpretations diverge (WS-I.2.4c). */
-  context_card: feedContextCardSchema.nullable().default(null),
   /** Topic-cluster ids for the story (descriptive; never a ranking input).
    *  Powers the per-card "repeats on this topic" preference and WS-H.6.1a
    *  client loop tracking. Capped at 8; defaults to empty so producers that

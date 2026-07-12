@@ -25,7 +25,6 @@ import {
   type ForumServicesFixture,
   freshForumServices,
   jsonRequest,
-  seedClaim,
   seedThread,
   seedUserWithSession,
 } from './forum-test-helpers.js';
@@ -38,7 +37,6 @@ let fixture: ForumServicesFixture;
 let cookie: string;
 let threadId: string;
 let storyId: string;
-let claimId: string;
 let nowMs: number;
 
 beforeEach(async () => {
@@ -56,7 +54,6 @@ beforeEach(async () => {
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
   ({ threadId, storyId } = await seedThread(fixture));
-  claimId = await seedClaim(fixture);
 });
 
 async function createOk(body: Record<string, unknown>): Promise<{ contribution_id: string }> {
@@ -69,8 +66,8 @@ describe('WS-T.3.3 — thread overview (comment counts)', () => {
   it('routes each type to its section and reports the layered summary status', async () => {
     const question = await createOk(contributionBody('comment', threadId));
     await createOk(contributionBody('comment', threadId, { parentId: question.contribution_id }));
-    await createOk(contributionBody('evidence', threadId, { claimId }));
-    await createOk(contributionBody('comment', threadId, { claimId }));
+    await createOk(contributionBody('comment', threadId, { sourced: true }));
+    await createOk(contributionBody('comment', threadId));
     await createOk(contributionBody('correction', threadId, { storyId }));
     await createOk(contributionBody('comment', threadId));
     await createOk(contributionBody('comment', threadId));

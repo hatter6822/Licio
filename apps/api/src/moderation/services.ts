@@ -37,9 +37,11 @@ import {
   type AccountBlockStore,
   type AccountMuteStore,
   type CoordinatedReportIncidentStore,
+  type EvidenceDecisionStore,
   InMemoryAccountBlockStore,
   InMemoryAccountMuteStore,
   InMemoryCoordinatedReportIncidentStore,
+  InMemoryEvidenceDecisionStore,
   InMemoryModerationActionStore,
   InMemoryModerationAppealStore,
   InMemoryModerationAuditStore,
@@ -81,6 +83,7 @@ export interface ModerationServices {
   notices: ModerationNoticeStore;
   reviewerStatus: ReviewerStatusStore;
   incidents: CoordinatedReportIncidentStore;
+  evidenceDecisions: EvidenceDecisionStore;
   /** Ephemeral per-account recent-submission window (flood/velocity). */
   submissions: RecentSubmissionTracker;
   content: ModerationContentPort;
@@ -145,6 +148,7 @@ export function createInMemoryModerationServices(
     notices: new InMemoryModerationNoticeStore(now),
     reviewerStatus: new InMemoryReviewerStatusStore(),
     incidents: new InMemoryCoordinatedReportIncidentStore(now),
+    evidenceDecisions: new InMemoryEvidenceDecisionStore(now),
     submissions: new RecentSubmissionTracker(),
     content: options.content ?? defaultContentPort,
     users: options.users ?? defaultUserPort,

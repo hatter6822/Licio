@@ -17,7 +17,7 @@
 
 import { isFinancialFieldName } from '@licio/shared';
 import { getTableColumns, type Table } from 'drizzle-orm';
-import { claims, evidenceCards } from './schema/claim.js';
+import { claims } from './schema/claim.js';
 import { contributionEditHistory, contributions } from './schema/contribution.js';
 import { embeddings } from './schema/embedding.js';
 import { ingestionReviewItems } from './schema/ingestion-review.js';
@@ -47,7 +47,6 @@ export const WS_F_CONTENT_TABLES: Readonly<Record<string, Table>> = {
   sources,
   source_syndications: sourceSyndications,
   claims,
-  evidence_cards: evidenceCards,
   threads,
   takedown_requests: takedownRequests,
   ingestion_review_items: ingestionReviewItems,

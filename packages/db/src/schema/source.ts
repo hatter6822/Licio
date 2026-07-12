@@ -42,11 +42,6 @@ export const sources = pgTable(
       .$type<SourceCorrection[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
-    /** Counts by evidence relationship type observed for this source. */
-    evidenceTypeFrequency: jsonb('evidence_type_frequency')
-      .$type<Record<string, number>>()
-      .notNull()
-      .default(sql`'{}'::jsonb`),
     /** Steward-curated community notes / context-card references (§14.3). */
     communityNotes: jsonb('community_notes')
       .$type<SourceCommunityNote[]>()

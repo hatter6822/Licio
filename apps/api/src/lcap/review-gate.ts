@@ -157,7 +157,7 @@ export class DrizzleBlockPublishReviewStore implements BlockPublishReviewStore {
   async decisionsFor(targets: readonly ProvenanceTarget[]): Promise<readonly ReviewDecision[]> {
     if (targets.length === 0) return [];
     // Group by type so each lookup is a single parameterized `IN (...)` per (at most three)
-    // target types (story/source/evidence) — the same shape the takedown reader uses.
+    // target types (story/source) — the same shape the takedown reader uses.
     const idsByType = new Map<ProvenanceTarget['targetType'], string[]>();
     for (const t of targets) {
       const ids = idsByType.get(t.targetType) ?? [];

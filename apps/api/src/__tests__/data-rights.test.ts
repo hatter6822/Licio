@@ -6,7 +6,7 @@
 // visibility; a purge tombstones contributions across tiers and strips the
 // private-room membership.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID, DEFAULT_ROOM_NOTIFICATION_PREFERENCES } from '@licio/shared';
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { anonymizeUserContent, exportUserContent } from '../forum/data-rights.js';
 import type { RoomRecord } from '../forum/stores.js';
@@ -46,7 +46,6 @@ function activeSubscription(roomId: string, userId: string) {
     status: 'active' as const,
     requestId: randomUUID(),
     lensId: null,
-    notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
     requestedAt: nowIso,
     joinedAt: nowIso,
   };
@@ -111,8 +110,8 @@ describe('WS-Q.3.5 — data-rights export across tiers', () => {
       contributionId: randomUUID(),
       threadId,
       userId,
-      type: 'question',
-      body: 'An in-room question for the record?',
+      type: 'comment',
+      body: 'An in-room comment for the record.',
       citations: [],
       metadata: {},
       targetClaimId: null,
@@ -123,7 +122,7 @@ describe('WS-Q.3.5 — data-rights export across tiers', () => {
     });
     expect(contribution.ok).toBe(true);
 
-    await anonymizeUserContent(fixture.ingestion, fixture.forum, userId);
+    await anonymizeUserContent(fixture.forum, userId);
 
     // The membership row is gone (personal data, private room included)…
     expect(await fixture.forum.rooms.listSubscriptionsByUser(userId)).toHaveLength(0);

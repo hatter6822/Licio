@@ -17,11 +17,7 @@ import {
   contentSubmittedEventSchema,
   contentVisibilityChangedEventSchema,
 } from './content.js';
-import {
-  claimUpdatedEventSchema,
-  contributionCreatedEventSchema,
-  evidenceAddedEventSchema,
-} from './contribution.js';
+import { claimUpdatedEventSchema, contributionCreatedEventSchema } from './contribution.js';
 import {
   EVENT_SCHEMA_VERSION,
   eventEnvelopeSchema,
@@ -41,9 +37,11 @@ import {
   threadStateChangedEventSchema,
 } from './system.js';
 
-/** The sixteen core (non-Knomosis) topics (SPEC §21.3; WS-Q.1.7a added
+/** The fifteen core (non-Knomosis) topics (SPEC §21.3; WS-Q.1.7a added
  *  `content.visibility.changed`; the §5.3 "Save for later" signal added
- *  `content.saved`). */
+ *  `content.saved`; `evidence.added` was removed with the EvidenceCard
+ *  entity — sourcing is comment-centric citations on `contribution.created`,
+ *  whose `has_citation` flag carries the signal). */
 export const CORE_EVENT_SCHEMAS = {
   'content.submitted': contentSubmittedEventSchema,
   'content.normalized': contentNormalizedEventSchema,
@@ -52,7 +50,6 @@ export const CORE_EVENT_SCHEMAS = {
   'content.saved': contentSavedAggregateEventSchema,
   'attention.aggregate': attentionAggregateEventSchema,
   'contribution.created': contributionCreatedEventSchema,
-  'evidence.added': evidenceAddedEventSchema,
   'claim.updated': claimUpdatedEventSchema,
   'thread.state.changed': threadStateChangedEventSchema,
   'moderation.case.created': moderationCaseCreatedEventSchema,
@@ -82,7 +79,6 @@ export const licioEventSchema = z.discriminatedUnion('event_type', [
   contentSavedAggregateEventSchema,
   attentionAggregateEventSchema,
   contributionCreatedEventSchema,
-  evidenceAddedEventSchema,
   claimUpdatedEventSchema,
   threadStateChangedEventSchema,
   moderationCaseCreatedEventSchema,
@@ -180,7 +176,6 @@ export const TOPIC_REGISTRY: Readonly<Record<EventTopic, TopicRegistryEntry>> = 
     'public_contribution',
     false,
   ),
-  'evidence.added': entry(evidenceAddedEventSchema, 'public', 'public_contribution', false),
   'claim.updated': entry(claimUpdatedEventSchema, 'public', 'public_contribution', false),
   'thread.state.changed': entry(threadStateChangedEventSchema, 'sensitive', 'ranking_log', false),
   'moderation.case.created': entry(

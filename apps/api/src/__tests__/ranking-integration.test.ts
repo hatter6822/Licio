@@ -17,11 +17,7 @@ import {
   type RankingDecisionLog,
   retentionDeadline,
 } from '@licio/ranking';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -326,7 +322,6 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
         ageBandIfKnown: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummaryPrivate: emptyReputationSummary(),
       })
       .returning();
     submitterId = (inserted[0] as { userId: string }).userId;

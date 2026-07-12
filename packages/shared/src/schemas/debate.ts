@@ -245,7 +245,7 @@ export const debateJudgeSideInputSchema = z
   .object({
     summary: z.string().max(DEBATE_POSITION_BODY_LIMIT),
     /** Each source URL with an OPTIONAL reputation signal from the WS-F source
-     *  model (correction history / evidence-type frequency), 0..1; absent ⇒ unknown. */
+     *  model (correction history), 0..1; absent ⇒ unknown. */
     sources: z
       .array(
         z

@@ -2,14 +2,13 @@
 //
 // Source-model wire contracts (WS-F.2.1a / WS-F.2.4, SPEC §14.3/§22.3). The
 // source profile exposes CONTEXT AND HISTORY — name/domain, ownership lineage,
-// typical topics, correction history, evidence-type frequency, syndication
-// relationships — and deliberately has NO "truth score", "credibility score",
-// or single reliability number: a scalar judgment would invite gaming and
-// substitute for reader judgment (§14.3 doctrine). A schema-shape test plus
-// the db-layer assertion enforce that absence structurally.
+// typical topics, correction history, syndication relationships — and
+// deliberately has NO "truth score", "credibility score", or single
+// reliability number: a scalar judgment would invite gaming and substitute
+// for reader judgment (§14.3 doctrine). A schema-shape test plus the db-layer
+// assertion enforce that absence structurally.
 import { z } from 'zod';
 import { isSelectableTopicId } from '../constants/topics.js';
-import { evidenceRelationshipTypeSchema } from './claim.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 
 /**
@@ -66,14 +65,6 @@ export const sourceCommunityNoteSchema = z
   .strict();
 export type SourceCommunityNote = z.infer<typeof sourceCommunityNoteSchema>;
 
-/** Counts of evidence types observed for this source (history, not judgment).
- *  Partial: a source that has never drawn a `counterexample` simply omits the
- *  key (zod v4 `z.record` over an enum would demand every key). */
-export const evidenceTypeFrequencySchema = z.partialRecord(
-  evidenceRelationshipTypeSchema,
-  z.number().int().min(0),
-);
-
 /** Public source profile (GET /v1/sources/:id). */
 export const sourcePublicSchema = z
   .object({
@@ -84,7 +75,6 @@ export const sourcePublicSchema = z
     publisher_lineage: z.array(publisherLineageEntrySchema).max(10).nullable(),
     typical_topics: z.array(uuidSchema).max(50),
     correction_history: z.array(sourceCorrectionSchema).max(200),
-    evidence_type_frequency: evidenceTypeFrequencySchema,
     community_notes: z.array(sourceCommunityNoteSchema).max(100),
     display_restrictions: displayRestrictionsSchema,
     created_at: isoTimestampSchema,

@@ -519,6 +519,27 @@
       "when": 1783726000000,
       "tag": "0074_reply_notification_actor_ref",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1783727000000,
+      "tag": "0075_remove_evidence_cards",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1783728000000,
+      "tag": "0076_retire_legacy_write_taxonomy",
+      "breakpoints": true
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 76,
+      "when": 1783728000001,
+      "tag": "0077_evidence_decisions"
     }
   ]
 }

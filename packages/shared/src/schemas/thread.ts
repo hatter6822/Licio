@@ -130,11 +130,9 @@ export const threadDetailSchema = threadSummarySchema
   .extend({
     sections: z
       .object({
-        overview: z.number().int().min(0),
-        questions: z.number().int().min(0),
-        evidence: z.number().int().min(0),
+        /** SOURCED contributions (comments carrying ≥1 citation). */
+        sources: z.number().int().min(0),
         challenges: z.number().int().min(0),
-        lenses: z.number().int().min(0),
         chronology: z.number().int().min(0),
       })
       .strict(),

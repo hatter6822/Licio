@@ -9,12 +9,7 @@
 //   DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev pnpm test
 import { randomUUID } from 'node:crypto';
 import { createDbClient, migrationsFolder } from '@licio/db';
-import {
-  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -57,7 +52,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         ageBandIfKnown: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummaryPrivate: emptyReputationSummary(),
       })
       .returning();
     return (inserted[0] as { userId: string }).userId;
@@ -112,7 +106,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       contributionId: randomUUID(),
       threadId,
       userId: authorId,
-      type: 'question',
+      type: 'comment',
       body: 'What evidence supports the employment claim?',
       citations: [],
       metadata: {},
@@ -193,9 +187,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     const dbSchema = await import('@licio/db');
     const { inArray } = await import('drizzle-orm');
     if (storyIds.length > 0) {
-      await db
-        .delete(dbSchema.evidenceCards)
-        .where(inArray(dbSchema.evidenceCards.storyId, storyIds));
       await db.delete(dbSchema.claims).where(inArray(dbSchema.claims.storyId, storyIds));
       await db.delete(dbSchema.threads).where(inArray(dbSchema.threads.storyId, storyIds));
       await db.delete(dbSchema.stories).where(inArray(dbSchema.stories.storyId, storyIds));
@@ -230,17 +221,23 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
 
     const child = await contributions.insert(
       contributionInput({
-        type: 'answer',
-        body: 'Table 3 of the labor report.',
+        type: 'correction',
+        body: 'The date is wrong; the vote was on Wednesday.',
+        citations: [{ url: 'https://example.org/source' }],
         parentContributionId: rootId,
         path: [rootId],
+        // The OPTIONAL claim linkage round-trips through the live FK.
+        targetClaimId: claimId,
       }),
     );
     expect(child.ok).toBe(true);
     if (!child.ok) return;
+    expect((await contributions.getById(child.contribution.contributionId))?.targetClaimId).toBe(
+      claimId,
+    );
     const grandchild = await contributions.insert(
       contributionInput({
-        type: 'question',
+        type: 'comment',
         body: 'Which edition of the report?',
         userId: secondUserId,
         parentContributionId: child.contribution.contributionId,
@@ -273,13 +270,18 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     }
     expect(subtreeWalk).toEqual(descendants.map((row) => row.contributionId));
 
-    // Filtered + keyset-paginated thread reads.
-    const questionsOnly = await contributions.listByThread(threadId, {
-      types: ['question'],
+    // Filtered + keyset-paginated thread reads (the correction row proves the
+    // type filter actually discriminates).
+    const commentsOnly = await contributions.listByThread(threadId, {
+      types: ['comment'],
       states: ['published'],
       limit: 100,
     });
-    expect(questionsOnly.every((row) => row.type === 'question')).toBe(true);
+    expect(commentsOnly.length).toBeGreaterThanOrEqual(2);
+    expect(commentsOnly.every((row) => row.type === 'comment')).toBe(true);
+    expect(
+      commentsOnly.some((row) => row.contributionId === child.contribution.contributionId),
+    ).toBe(false);
     // Keyset completeness: walking 1-row pages visits every row exactly once
     // (this is the microsecond-precision regression guard — rows are written
     // in the same millisecond, and the cursor must still round-trip exactly).
@@ -301,8 +303,8 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
 
     // Aggregates: per-type counts and published-only child counts.
     const counts = await contributions.countByType(threadId, ['published']);
-    expect(counts.question ?? 0).toBeGreaterThanOrEqual(2);
-    expect(counts.answer ?? 0).toBeGreaterThanOrEqual(1);
+    expect(counts.comment ?? 0).toBeGreaterThanOrEqual(2);
+    expect(counts.correction ?? 0).toBeGreaterThanOrEqual(1);
     const childCounts = await contributions.childCounts([
       rootId,
       child.contribution.contributionId,
@@ -315,59 +317,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     );
     const afterHide = await contributions.childCounts([child.contribution.contributionId]);
     expect(afterHide.get(child.contribution.contributionId)).toBe(0);
-  });
-
-  it('co-creates the evidence card transactionally — both persist or neither', async () => {
-    const { evidenceCards } = await import('@licio/db');
-    const { eq } = await import('drizzle-orm');
-    const good = contributionInput({
-      type: 'evidence',
-      body: 'Primary dataset for the claim.',
-      citations: [{ url: 'https://example.org/data' }],
-      targetClaimId: claimId,
-    });
-    const evidenceId = randomUUID();
-    const created = await contributions.insert(good, {
-      evidenceId,
-      claimId,
-      sourceId: null,
-      submittedBy: authorId,
-      evidenceType: 'dataset',
-      relationshipType: 'supports',
-      citationUrlOrRef: 'https://example.org/data',
-      relevanceNote: 'Primary dataset for the claim.',
-      independenceGroupId: null,
-      storyId: storyIds[0] ?? null,
-      contributionId: good.contributionId,
-    });
-    expect(created.ok).toBe(true);
-    const card = await db
-      .select()
-      .from(evidenceCards)
-      .where(eq(evidenceCards.evidenceId, evidenceId));
-    expect(card[0]?.contributionId).toBe(good.contributionId);
-    expect(card[0]?.evidenceType).toBe('dataset');
-    expect(card[0]?.relationshipType).toBe('supports');
-
-    // Failure path: an unknown claim id violates the FK INSIDE the
-    // transaction — the contribution must not survive the rollback.
-    const bad = contributionInput({ type: 'evidence', targetClaimId: claimId });
-    await expect(
-      contributions.insert(bad, {
-        evidenceId: randomUUID(),
-        claimId: randomUUID(), // no such claim
-        sourceId: null,
-        submittedBy: authorId,
-        evidenceType: 'report',
-        relationshipType: 'supports',
-        citationUrlOrRef: 'https://example.org/x',
-        relevanceNote: 'x',
-        independenceGroupId: null,
-        storyId: null,
-        contributionId: bad.contributionId,
-      }),
-    ).rejects.toThrow();
-    expect(await contributions.getById(bad.contributionId)).toBeNull();
   });
 
   it('snapshots edits append-only and tracks edit_history_ref', async () => {
@@ -543,7 +492,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       status: 'pending',
       requestId,
       lensId: null,
-      notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
       requestedAt,
       joinedAt: null,
     });
@@ -560,13 +508,11 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       status: 'active',
       requestId: randomUUID(), // ignored on conflict — the original survives
       lensId: null,
-      notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES, new_evidence: true },
       requestedAt,
       joinedAt: new Date().toISOString(),
     });
     expect(activated.status).toBe('active');
     expect(activated.requestId).toBe(requestId);
-    expect(activated.notificationPreferences.new_evidence).toBe(true);
     expect(await roomsStore.countMembers(room.roomId)).toBe(1);
     // Eligible voters = active subscribers ∪ stewards: authorId (active sub) +
     // secondUserId (community_steward, no active subscription) = 2 distinct, so a
@@ -579,7 +525,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
 
     // WS-G.2.2 — the member's POSTING lens round-trips through the store, and
     // setSubscriptionLens changes ONLY the lens (null returns to Undecided),
-    // leaving status/preferences untouched; a non-member yields null.
+    // leaving status untouched; a non-member yields null.
     const lensCreate = await lenses.insert({
       lensId: randomUUID(),
       roomId: room.roomId,
@@ -592,7 +538,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     const withLens = await roomsStore.setSubscriptionLens(room.roomId, authorId, lensId);
     expect(withLens?.lensId).toBe(lensId);
     expect(withLens?.status).toBe('active');
-    expect(withLens?.notificationPreferences.new_evidence).toBe(true);
     expect((await roomsStore.getSubscription(room.roomId, authorId))?.lensId).toBe(lensId);
     expect((await roomsStore.setSubscriptionLens(room.roomId, authorId, null))?.lensId).toBeNull();
     expect(await roomsStore.setSubscriptionLens(room.roomId, secondUserId, lensId)).toBeNull();
@@ -786,6 +731,64 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       s3Miss,
     );
     expect(await migrated.getBytes(uploadId)).toEqual(bytes);
+  });
+
+  it('listCited walks the global (created_at, id) keyset exactly once, published-only', async () => {
+    const stories = new DrizzleStoryStore(db);
+    // A dedicated thread: listCited is GLOBAL, so assertions on MY rows are
+    // made order-relative (other tests/suites may interleave their own rows).
+    const walkThreadId = await seedThread(stories);
+    const insertRow = async (
+      over: Partial<Pick<ContributionRecord, 'citations' | 'moderationState'>> = {},
+    ): Promise<ContributionRecord> => {
+      const outcome = await contributions.insert(
+        contributionInput({
+          threadId: walkThreadId,
+          citations: [{ url: 'https://example.org/walk-source' }],
+          ...over,
+        }),
+      );
+      if (!outcome.ok) throw new Error('cited-walk insert failed');
+      return outcome.contribution;
+    };
+    const mine: ContributionRecord[] = [await insertRow()];
+    // Insert concurrent PAIRS until two of the cited rows share a MILLISECOND —
+    // the app-set ms-precision created_at the ascending keyset cursor pins
+    // (a µs-precision default would skip the same-ms neighbour on resume).
+    let sameMsPair = false;
+    for (let attempt = 0; attempt < 30 && !sameMsPair; attempt += 1) {
+      const [a, b] = await Promise.all([insertRow(), insertRow()]);
+      mine.push(a, b);
+      sameMsPair = mine.some((row, i) =>
+        mine.some((other, j) => j !== i && other.createdAt === row.createdAt),
+      );
+    }
+    expect(sameMsPair).toBe(true);
+    const citationless = await insertRow({ citations: [] });
+    const hidden = await insertRow({ moderationState: 'under_review' });
+
+    const expected = [...mine]
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.contributionId.localeCompare(b.contributionId),
+      )
+      .map((row) => row.contributionId);
+
+    const walked: string[] = [];
+    let after: { createdAt: string; id: string } | null = null;
+    for (;;) {
+      const page = await contributions.listCited({ states: ['published'], after, limit: 1 });
+      const row = page[0];
+      if (!row) break;
+      walked.push(row.contributionId);
+      after = { createdAt: row.createdAt, id: row.contributionId };
+    }
+    expect(new Set(walked).size).toBe(walked.length); // no row visited twice
+    // MY published cited rows appear COMPLETE and in exact keyset order.
+    expect(walked.filter((id) => expected.includes(id))).toEqual(expected);
+    expect(walked).not.toContain(citationless.contributionId); // no citations
+    expect(walked).not.toContain(hidden.contributionId); // states filter bites
   });
 
   it('listThreadsByRoom pages by the descending keyset exactly once', async () => {

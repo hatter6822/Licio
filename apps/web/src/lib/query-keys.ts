@@ -9,6 +9,10 @@ export const queryKeys = {
   feed: (mode: FeedMode = 'balanced') => ['feed', mode] as const,
   story: (storyId: string) => ['story', storyId] as const,
   storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
+  /** WS-H.2.3a — the SPEC §7.6 independent-sources drawer payload. */
+  storyIndependentSources: (storyId: string) => ['story', storyId, 'independent-sources'] as const,
+  /** WS-F.1.2a — the story's public claim projections. */
+  storyClaims: (storyId: string) => ['story', storyId, 'claims'] as const,
   storyComments: (
     storyId: string,
     options: {
@@ -58,6 +62,8 @@ export const queryKeys = {
   modAppeal: (appealId: string) => ['mod-appeal', appealId] as const,
   modAudit: (filterKey: string) => ['mod-audit', filterKey] as const,
   modIncidents: () => ['mod-incidents'] as const,
+  modEvidenceQueue: () => ['mod-evidence-queue'] as const,
+  modEvidenceDecisions: () => ['mod-evidence-decisions'] as const,
   // WS-L wallets + knomosis.
   wallets: () => ['wallets'] as const,
   walletRiskState: (walletId: string) => ['wallet-risk-state', walletId] as const,

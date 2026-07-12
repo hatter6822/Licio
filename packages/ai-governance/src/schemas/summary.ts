@@ -6,7 +6,7 @@
 // interpretation, explicit unresolved questions, and explicit minority views —
 // so the §24.3 quality constraints are mechanically checkable (../summary-quality.ts)
 // rather than a matter of prose inspection. Every draft cites source
-// contributions and evidence cards (verifiable links) and carries the
+// contributions and their citations (verifiable links) and carries the
 // machine-generated label; reports and steward corrections feed the WS-K.1.3c
 // model-improvement loop.
 import { z } from 'zod';
@@ -30,7 +30,6 @@ export const summaryStatementSchema = z
     /** Required (non-null) for claims, null for facts/interpretations. */
     attribution: shortTextSchema.nullable(),
     cited_contribution_ids: z.array(refIdSchema).max(50),
-    cited_evidence_ids: z.array(refIdSchema).max(50),
   })
   .strict()
   .refine((s) => (s.kind === 'claim') === (s.attribution !== null), {

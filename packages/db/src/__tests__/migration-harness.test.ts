@@ -232,9 +232,10 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
   // service-layer 409/404 guards — while a server room is unaffected.
   it('§8.3 trigger rejects ALL server rows referencing a Private P2P room', async () => {
     const uid = randomUUID();
+    // Post-chain schema: 0076 dropped reputation_summary_private.
     await client.unsafe(
-      `INSERT INTO users (user_id, handle, display_name, privacy_settings, personalization_settings, reputation_summary_private)
-       VALUES ('${uid}', 'p2p_${uid.slice(0, 8)}', 'P2P', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)`,
+      `INSERT INTO users (user_id, handle, display_name, privacy_settings, personalization_settings)
+       VALUES ('${uid}', 'p2p_${uid.slice(0, 8)}', 'P2P', '{}'::jsonb, '{}'::jsonb)`,
     );
     const p2pRoom = randomUUID();
     // A COHERENT p2p room (the 0043 CHECKs must pass): room_keys + private +
@@ -271,10 +272,11 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
          VALUES ('${p2pRoom}', '${uid}', 'community_steward')`,
       ),
     ).rejects.toThrow(/Private P2P room/);
+    // Post-chain schema: 0076 dropped room_subscriptions.notification_preferences.
     await expect(
       client.unsafe(
-        `INSERT INTO room_subscriptions (room_id, user_id, status, notification_preferences)
-         VALUES ('${p2pRoom}', '${uid}', 'active', '{}'::jsonb)`,
+        `INSERT INTO room_subscriptions (room_id, user_id, status)
+         VALUES ('${p2pRoom}', '${uid}', 'active')`,
       ),
     ).rejects.toThrow(/Private P2P room/);
     await expect(

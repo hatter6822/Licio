@@ -18,6 +18,7 @@ import {
   accountMutes,
   coordinatedReportIncidents,
   type createDbClient,
+  evidenceDecisions,
   moderationActions,
   moderationAppeals,
   moderationAudit,
@@ -26,7 +27,12 @@ import {
   moderationReports,
   reviewerStatus,
 } from '@licio/db';
-import type { AppealStatus, ReportTargetType, ReviewerAvailability } from '@licio/shared';
+import type {
+  AppealStatus,
+  EvidenceDecisionAction,
+  ReportTargetType,
+  ReviewerAvailability,
+} from '@licio/shared';
 import {
   and,
   asc,
@@ -52,6 +58,8 @@ import type {
   CaseQueueFilter,
   CoordinatedReportIncidentRecord,
   CoordinatedReportIncidentStore,
+  EvidenceDecisionRecord,
+  EvidenceDecisionStore,
   ModerationActionRecord,
   ModerationActionStore,
   ModerationAppealRecord,
@@ -192,7 +200,7 @@ function mapAppeal(row: typeof moderationAppeals.$inferSelect): ModerationAppeal
     isBanAppeal: row.isBanAppeal,
     slaDueAt: iso(row.slaDueAt),
     decidedAt: isoOrNull(row.decidedAt),
-    decidedBy: row.decidedBy,
+    decidedBy: row.decidedBy ?? null,
     decisionReasonCode: row.decisionReasonCode,
     decisionExplanation: row.decisionExplanation,
     createdAt: iso(row.createdAt),
@@ -1511,6 +1519,105 @@ export interface DrizzleModerationStores {
   notices: DrizzleModerationNoticeStore;
   reviewerStatus: DrizzleReviewerStatusStore;
   incidents: DrizzleCoordinatedReportIncidentStore;
+  evidenceDecisions: DrizzleEvidenceDecisionStore;
+}
+
+function mapEvidenceDecision(row: typeof evidenceDecisions.$inferSelect): EvidenceDecisionRecord {
+  return {
+    decisionId: row.decisionId,
+    contributionId: row.contributionId,
+    threadId: row.threadId,
+    storyId: row.storyId ?? null,
+    action: row.action,
+    citationUrl: row.citationUrl ?? null,
+    citationTitle: row.citationTitle ?? null,
+    reasonCode: row.reasonCode ?? null,
+    note: row.note ?? null,
+    decidedBy: row.decidedBy,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+export class DrizzleEvidenceDecisionStore implements EvidenceDecisionStore {
+  readonly #db: Db;
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async insert(
+    record: Omit<EvidenceDecisionRecord, 'decisionId' | 'createdAt'>,
+  ): Promise<
+    { ok: true; record: EvidenceDecisionRecord } | { ok: false; code: 'duplicate_decision' }
+  > {
+    // The partial unique indexes (citation-shaped + clear-per-contribution)
+    // are the cross-connection duplicate authority: a concurrent identical
+    // decision conflicts to a no-op (empty returning()).
+    const rows = await this.#db
+      .insert(evidenceDecisions)
+      .values({
+        contributionId: record.contributionId,
+        threadId: record.threadId,
+        storyId: record.storyId,
+        action: record.action,
+        citationUrl: record.citationUrl,
+        citationTitle: record.citationTitle,
+        reasonCode: record.reasonCode,
+        note: record.note,
+        decidedBy: record.decidedBy,
+        // Explicit millisecond-precision timestamp (never the DB's µs `now()`):
+        // the listRecent keyset round-trips through a JS Date, and a µs-precision
+        // row makes the DESC cursor SKIP same-millisecond neighbours (the
+        // documented contributions-store discipline).
+        createdAt: new Date(),
+      })
+      .onConflictDoNothing()
+      .returning();
+    const row = rows[0];
+    if (row === undefined) return { ok: false, code: 'duplicate_decision' };
+    return { ok: true, record: mapEvidenceDecision(row) };
+  }
+
+  async decidedContributionIds(contributionIds: readonly string[]): Promise<Set<string>> {
+    if (contributionIds.length === 0) return new Set();
+    const rows = await this.#db
+      .selectDistinct({ contributionId: evidenceDecisions.contributionId })
+      .from(evidenceDecisions)
+      .where(inArray(evidenceDecisions.contributionId, [...contributionIds]));
+    return new Set(rows.map((r) => r.contributionId));
+  }
+
+  async listByStory(
+    storyId: string,
+    action?: EvidenceDecisionAction,
+  ): Promise<EvidenceDecisionRecord[]> {
+    const conditions = [eq(evidenceDecisions.storyId, storyId)];
+    if (action !== undefined) conditions.push(eq(evidenceDecisions.action, action));
+    const rows = await this.#db
+      .select()
+      .from(evidenceDecisions)
+      .where(and(...conditions))
+      .orderBy(desc(evidenceDecisions.createdAt), desc(evidenceDecisions.decisionId));
+    return rows.map(mapEvidenceDecision);
+  }
+
+  async listRecent(opts: {
+    after?: { createdAt: string; decisionId: string } | null;
+    limit: number;
+  }): Promise<EvidenceDecisionRecord[]> {
+    const conditions: SQL[] = [];
+    if (opts.after) {
+      conditions.push(
+        sql`(${evidenceDecisions.createdAt}, ${evidenceDecisions.decisionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.decisionId}::uuid)`,
+      );
+    }
+    const rows = await this.#db
+      .select()
+      .from(evidenceDecisions)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(evidenceDecisions.createdAt), desc(evidenceDecisions.decisionId))
+      .limit(opts.limit);
+    return rows.map(mapEvidenceDecision);
+  }
 }
 
 export function createDrizzleModerationStores(db: Db): DrizzleModerationStores {
@@ -1525,5 +1632,6 @@ export function createDrizzleModerationStores(db: Db): DrizzleModerationStores {
     notices: new DrizzleModerationNoticeStore(db),
     reviewerStatus: new DrizzleReviewerStatusStore(db),
     incidents: new DrizzleCoordinatedReportIncidentStore(db),
+    evidenceDecisions: new DrizzleEvidenceDecisionStore(db),
   };
 }

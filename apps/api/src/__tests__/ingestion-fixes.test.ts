@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Regression + feature tests for the WS-F items completed in the follow-up
-// pass: anonymous takedown intake (A1), evidence-card embedding via
-// evidence.added (A2), complete DSAR export pagination (A3), embedding-
-// similarity claim dedup (B6 / WS-F.1.2b soft dep), and source
-// evidence-type-frequency population (E18 / WS-F.2.1a).
+// pass: anonymous takedown intake (A1), complete DSAR export pagination (A3),
+// and embedding-similarity claim dedup (B6 / WS-F.1.2b soft dep).
 import { randomUUID } from 'node:crypto';
 import { COMMONS_ROOM_ID } from '@licio/shared';
-import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import {
@@ -21,18 +18,12 @@ import {
   InMemoryEmbeddingStore,
   InMemoryReviewQueueStore,
 } from '../ingestion/stores.js';
-import { createV1Routes } from '../routes/v1.js';
 import {
   freshIngestionServices,
   type IngestionServicesFixture,
-  post,
   seedUserWithSession,
   TEST_TOPIC_ID,
 } from './ingestion-test-helpers.js';
-
-function v1Routes() {
-  return new Hono().route('/v1', createV1Routes());
-}
 
 /** A 384-d unit vector concentrated on `axis`, optionally blended toward the
  *  next axis (controls cosine precisely for the dedup test). */
@@ -92,60 +83,6 @@ describe('A1: anonymous takedown intake through the FULL app (WS-F.1.4f)', () =>
       }),
     );
     expect(res.status).toBe(403); // the exemption is scoped to /v1/takedowns only
-  });
-});
-
-describe('A2: evidence-card submissions get embedded via evidence.added (WS-F.3.2c)', () => {
-  it('emits evidence.added and the embedding consumer generates the card vector', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
-    const claim = await fixture.ingestion.claims.insert({
-      claimId: randomUUID(),
-      storyId: null,
-      canonicalText: 'Seed claim for the evidence card.',
-      normalizedTextHash: randomUUID().replaceAll('-', ''),
-      claimStatus: 'candidate',
-      firstSeenStoryId: null,
-      independenceGroupId: null,
-      createdBy: null,
-      extractionSource: 'steward',
-      extractionConfidence: null,
-      modelVersion: null,
-    });
-    const res = await v1Routes().request(
-      post(
-        '/v1/stories',
-        {
-          submission_type: 'evidence_card',
-          room_id: COMMONS_ROOM_ID,
-          citation_url_or_ref: 'https://journal.example/study-42',
-          claim_id: claim.claimId,
-          relevance_note: 'Replicates the headline finding with a larger sample.',
-          title: 'Replication study',
-          topic_ids: [TEST_TOPIC_ID],
-        },
-        cookie,
-      ),
-    );
-    expect(res.status).toBe(201);
-    await fixture.ingestion.settle();
-
-    const cards = await fixture.ingestion.evidence.listByClaim(claim.claimId);
-    expect(cards).toHaveLength(1);
-    const card = cards[0];
-    if (card === undefined) throw new Error('card missing');
-    // The card now has a vector under the active model version (was never
-    // embedded before the fix — evidence.added was never emitted).
-    const vector = await fixture.ingestion.embeddings.get(
-      'evidence_card',
-      card.evidenceId,
-      fixture.ingestion.embeddingProvider.modelVersion,
-    );
-    expect(vector).not.toBeNull();
-    // And exactly one evidence.added event was stored.
-    const events = (await fixture.events.eventStore.listByOwner(card.submittedBy ?? '')).filter(
-      (e) => e.eventType === 'evidence.added',
-    );
-    expect(events).toHaveLength(1);
   });
 });
 
@@ -350,58 +287,5 @@ describe('B6: embedding-similarity claim dedup (WS-F.1.2b soft dep)', () => {
     );
     // Two identical sentences ⇒ one candidate (extractor dedups by hash).
     expect(candidates).toHaveLength(1);
-  });
-});
-
-describe('E18: evidence-card citations populate source evidence-type frequency (WS-F.2.1a)', () => {
-  it('resolves a WEB citation to a source and bumps the relationship frequency', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
-    const claim = await fixture.ingestion.claims.insert({
-      claimId: randomUUID(),
-      storyId: null,
-      canonicalText: 'A claim to attach evidence to.',
-      normalizedTextHash: randomUUID().replaceAll('-', ''),
-      claimStatus: 'candidate',
-      firstSeenStoryId: null,
-      independenceGroupId: null,
-      createdBy: null,
-      extractionSource: 'steward',
-      extractionConfidence: null,
-      modelVersion: null,
-    });
-    const submit = async (citation: string) =>
-      v1Routes().request(
-        post(
-          '/v1/stories',
-          {
-            submission_type: 'evidence_card',
-            room_id: COMMONS_ROOM_ID,
-            citation_url_or_ref: citation,
-            claim_id: claim.claimId,
-            relevance_note: 'A relevance note about the citation.',
-            title: `Evidence ${randomUUID().slice(0, 6)}`,
-            topic_ids: [TEST_TOPIC_ID],
-          },
-          cookie,
-        ),
-      );
-
-    expect((await submit('https://archive.example/doc/1')).status).toBe(201);
-    expect((await submit('https://archive.example/doc/2')).status).toBe(201);
-    await fixture.ingestion.settle();
-
-    const source = await fixture.ingestion.sources.getByDomain('archive.example');
-    expect(source).not.toBeNull();
-    // Two web-cited evidence cards ⇒ frequency of the 'contextualizes'
-    // relationship is 2 (was permanently {} before the fix).
-    expect(source?.evidenceTypeFrequency['contextualizes']).toBe(2);
-    const cards = await fixture.ingestion.evidence.listByClaim(claim.claimId);
-    expect(cards.every((c) => c.sourceId === source?.sourceId)).toBe(true);
-
-    // A NON-web citation stays source-less (user-experience evidence).
-    expect((await submit('Book: The History of Things, ISBN 978-0-00-000000-0')).status).toBe(201);
-    await fixture.ingestion.settle();
-    const all = await fixture.ingestion.evidence.listByClaim(claim.claimId);
-    expect(all.some((c) => c.sourceId === null)).toBe(true);
   });
 });

@@ -34,7 +34,6 @@ import {
 
 const uuidOf = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const THREAD = uuidOf(1);
-const CLAIM = uuidOf(2);
 const TARGET_COMMENT = uuidOf(3);
 const TARGET_STORY = uuidOf(4);
 
@@ -43,14 +42,6 @@ const citation = { url: 'https://example.org/source' } as const;
 
 describe('WS-T.1.2 contribution create union — comment-first writes', () => {
   const validComment = { ...base, type: 'comment', body: 'A plain comment.' } as const;
-  const validEvidence = {
-    ...base,
-    type: 'evidence',
-    body: 'Primary dataset.',
-    citations: [citation],
-    target_claim_id: CLAIM,
-    evidence_type: 'dataset',
-  } as const;
   const validCorrection = {
     ...base,
     type: 'correction',
@@ -60,13 +51,14 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     target_text_excerpt: 'on June 3',
   } as const;
 
-  it('accepts exactly comment, evidence, and correction for new writes', () => {
-    for (const payload of [validComment, validEvidence, validCorrection]) {
+  it('accepts exactly comment and correction for new writes', () => {
+    for (const payload of [validComment, validCorrection]) {
       expect(contributionWriteCreateSchema.safeParse(payload).success).toBe(true);
     }
     for (const type of [
       'question',
       'answer',
+      'evidence',
       'synthesis',
       'counterexample',
       'explanation',
@@ -107,10 +99,7 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     if (!rejected.success) expect(rejected.error.issues[0]?.path).toEqual(['body']);
   });
 
-  it('keeps evidence and correction citation requirements unchanged', () => {
-    expect(
-      contributionWriteCreateSchema.safeParse({ ...validEvidence, citations: [] }).success,
-    ).toBe(false);
+  it('keeps the correction citation requirement unchanged', () => {
     expect(
       contributionWriteCreateSchema.safeParse({ ...validCorrection, citations: [] }).success,
     ).toBe(false);
@@ -190,12 +179,12 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     }
   });
 
-  it('keeps legacy contribution types readable on the public projection', () => {
+  it('projects exactly the two-type union publicly (legacy types are fully retired)', () => {
     const publicRow = {
       contribution_id: uuidOf(9),
       thread_id: THREAD,
-      type: 'question',
-      body: 'A legacy question remains readable.',
+      type: 'comment',
+      body: 'A migrated legacy row reads as a comment.',
       citations: [],
       metadata: {},
       target_claim_id: null,
@@ -210,7 +199,36 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
       created_at: '2026-06-11T00:00:00.000Z',
       updated_at: '2026-06-11T00:00:00.000Z',
     };
+    // Both live types parse on the public projection…
     expect(contributionPublicSchema.safeParse(publicRow).success).toBe(true);
+    expect(
+      contributionPublicSchema.safeParse({
+        ...publicRow,
+        type: 'correction',
+        body: 'The date is wrong.',
+        citations: [citation],
+        metadata: { target_story_id: TARGET_STORY },
+      }).success,
+    ).toBe(true);
+    // …and NO legacy type survives even on the read path — migration 0076
+    // rewrote every stray row to 'comment', so the projection enum is closed.
+    for (const legacy of [
+      'question',
+      'answer',
+      'evidence',
+      'synthesis',
+      'counterexample',
+      'explanation',
+      'local_context',
+      'direct_experience',
+      'moderation_concern',
+      'meta_discussion',
+    ]) {
+      expect(
+        contributionPublicSchema.safeParse({ ...publicRow, type: legacy }).success,
+        `legacy public type ${legacy} must be rejected`,
+      ).toBe(false);
+    }
   });
 
   it('models resolved media and nested comment items separately from the flat projection', () => {
@@ -331,7 +349,7 @@ describe('WS-G.1.2c update schema — type can never change', () => {
 
   it('rejects a runtime attempt to smuggle `type`', () => {
     expect(
-      contributionUpdateSchema.safeParse({ contribution_id: uuidOf(9), type: 'evidence' }).success,
+      contributionUpdateSchema.safeParse({ contribution_id: uuidOf(9), type: 'comment' }).success,
     ).toBe(false);
   });
 });

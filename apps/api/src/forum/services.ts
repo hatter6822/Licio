@@ -184,22 +184,10 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
   const pending: Array<Promise<unknown>> = [];
   const metrics = new ForumMetrics();
 
-  // The contribution↔evidence co-create is transactional THROUGH the
-  // ingestion evidence store (the sink); without ingestion services the
-  // forum still works, evidence co-creation simply has no card sink.
   const ingestion = options.ingestion;
-  const evidenceSink = ingestion
-    ? {
-        insertForumCard: (
-          card: Parameters<IngestionServices['evidence']['insertForumCard']>[0],
-          createdAt: string,
-        ) => ingestion.evidence.insertForumCard(card, createdAt),
-        removeForumCard: (evidenceId: string) => ingestion.evidence.removeForumCard(evidenceId),
-      }
-    : null;
 
   const services: ForumServices = {
-    contributions: new InMemoryContributionStore(now, evidenceSink),
+    contributions: new InMemoryContributionStore(now),
     rooms: new InMemoryRoomStore(now),
     lenses: new InMemoryLensStore(now),
     uploads: new InMemoryUploadStore(now),

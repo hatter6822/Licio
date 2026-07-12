@@ -2,7 +2,7 @@
 //
 // DSAR export assembly + the privacy background jobs (WS-D.2.2b/c, WS-D.2.4b/c).
 // The export gathers ONLY the requesting user's own data (account, enrolled
-// auth-method labels, settings, reputation, and — via injected WS-E/G/J hooks —
+// auth-method labels, settings, and — via injected WS-E/G/J hooks —
 // attention aggregates, contributions, and moderation notices).  It EXCLUDES other
 // users' data, reporter identities, address hashes (truncated display only), model
 // weights, and any IP/location (none is ever stored, §19.1).
@@ -55,7 +55,6 @@ export async function assembleExport(
     },
     privacy_settings: user.privacySettings,
     personalization_settings: user.personalizationSettings,
-    reputation_summary: user.reputationSummary,
     attention_aggregates: (await services.exportAttention?.(userId)) ?? [],
     // WS-C/WS-T durable client state (settings sync, notification
     // preferences, the reply-notification inbox) — the same per-user rows the

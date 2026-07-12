@@ -226,14 +226,15 @@ licio/
 │   │       │   │                           join + governance; default "Undecided") + RoomMembership
 │   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership; picks
 │   │       │   │                           the posting lens on join)
-│   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
+│   │       │   ├── story/               -- StoryCard, RatingLabel,
 │   │       │   │                           ExposureLabel, TopicRepeatsButton,
+│   │       │   │                           IndependentSourcesDrawer (WS-H §7.6),
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
 │   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),
 │   │       │   │                           block/mute controls, notice inbox + appeal (WS-J.1)
 │   │       │   ├── moderation/          -- ModerationConsole (queue/review/palette/appeals/
-│   │       │   │                           integrity/audit; server-side authorized) (WS-J.2)
+│   │       │   │                           integrity/evidence/audit; server-side authorized) (WS-J.2)
 │   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
 │   │       │   │                           + LinkInterstitial (WS-G.4.2c)
 │   │       │   ├── reader/              -- SourceReader + readability worker
@@ -491,6 +492,9 @@ licio/
 │           │   ├── actions.ts           --   action palette + reversal-integrity revert + MFCI-2 gate
 │           │   ├── incidents.ts         --   ROLE_INTEGRITY coordinated-report incident review
 │           │   ├── audit.ts             --   append-only writer + suppressed transparency export
+│           │   ├── evidence.ts          --   ROLE_EVIDENCE surface: the derived evidence queue +
+│           │   │                             mark-primary-source/flag-citation decisions (audited
+│           │   │                             evidence metadata; feeds the drawer's primary sources)
 │           │   ├── notices.ts           --   statement-of-reasons + appeal-outcome inbox
 │           │   ├── review.ts            --   queue + full-context review + appeal projections
 │           │   ├── prechecks.ts         --   WS-J.2.6 detection math (spam/malware/flood/policy-risk)
@@ -565,7 +569,7 @@ licio/
 │           │   ├── prng.ts               --   deterministic mulberry32 seeded PRNG
 │           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster +
 │           │   │                              per-archetype lens vantage (WS-G.2.2)
-│           │   ├── content.ts            --   deterministic story/comment/evidence generators
+│           │   ├── content.ts            --   deterministic story/comment/citation generators
 │           │   ├── scenarios.ts          --   the seven scenario presets (steady…challenge_wave)
 │           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
 │           │   │                              (tags root comments with the author's vantage lens)
@@ -608,7 +612,7 @@ licio/
 │           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
 │           │   └── demo-seed.ts         --   rich dev seed: dev test accounts
 │           │                                  (admin/steward/expert), rooms/stories across
-│           │                                  every lifecycle state, evidence + divergent
+│           │                                  every lifecycle state, sourced comments + divergent
 │           │                                  lenses + signatures + a native image post +
 │           │                                  a moderation review queue; seedOperationalSignals
 │           │                                  COMPUTES the invariant outputs (real WS-H batch)
@@ -652,7 +656,7 @@ licio/
 │   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
 │   │       │   ├── audit.ts             --   audit event taxonomy
 │   │       │   └── events/              --   WS-E event schemas (envelope, retention
-│   │       │                                 tiers, 16 core topic schemas, topic
+│   │       │                                 tiers, 15 core topic schemas, topic
 │   │       │                                 registry SSOT, knomosis/ bounded context)
 │   │       ├── ugc/                     --   WS-G.4 UGC pipeline: Markdown-lite AST
 │   │       │                                 (no raw-HTML node), constrained serializer,
@@ -688,7 +692,7 @@ licio/
 │   │       │   ├── story.ts, source.ts, claim.ts,
 │   │       │   │   takedown.ts, embedding.ts,
 │   │       │   │   ingestion-review.ts  --     WS-F content tables (stories, sources,
-│   │       │   │                               claims + dual-dimension evidence cards,
+│   │       │   │                               claims,
 │   │       │   │                               syndication, takedowns, pgvector, queue; topic_ids trusted +
 │   │       │   │                               proposed_topic_ids)
 │   │       │   ├── thread.ts            --     WS-G threads (conversation/safety states,
@@ -703,7 +707,8 @@ licio/
 │   │       │   │                               logs (privacy-bucket CHECK, §22.4 retention)
 │   │       │   ├── moderation.ts        --     WS-J cases, reports, actions, append-only
 │   │       │   │                               audit (right-to-erasure-safe trigger), blocks,
-│   │       │   │                               mutes, appeals, notices, incidents (+steward_roles)
+│   │       │   │                               mutes, appeals, notices, incidents, evidence
+│   │       │   │                               decisions (+steward_roles)
 │   │       │   ├── lcap.ts              --     WS-R.12.2 LCAP server state: content store,
 │   │       │   │                               per-room acceptance log, device-seq index,
 │   │       │   │                               fork evidence (no FK edges; CID-addressed)

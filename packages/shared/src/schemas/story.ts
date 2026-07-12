@@ -144,44 +144,6 @@ export const originalBriefMetadataSchema = z
   })
   .strict();
 
-export const questionMetadataSchema = z
-  .object({
-    submission_type: z.literal('question'),
-    question: z.string().min(1).max(2_000),
-    context: z.string().min(1).max(4_000).optional(),
-  })
-  .strict();
-
-export const evidenceCardMetadataSchema = z
-  .object({
-    submission_type: z.literal('evidence_card'),
-    /** Citation URL or a structured reference (book, filing, dataset id). */
-    citation_url_or_ref: z.string().min(1).max(2048),
-    /** Must reference an EXISTING claim — validated server-side (WS-F.1.2a). */
-    claim_id: uuidSchema,
-    relevance_note: z.string().min(1).max(2_000),
-  })
-  .strict();
-
-export const localUpdateMetadataSchema = z
-  .object({
-    submission_type: z.literal('local_update'),
-    location_scope: locationScopeSchema,
-    time_reference: z.string().min(1).max(200).optional(),
-    /** Source citation or first-hand experience disclosure (§14.1). */
-    source_or_experience_disclosure: z.string().min(1).max(2_000),
-  })
-  .strict();
-
-export const liveThreadMetadataSchema = z
-  .object({
-    submission_type: z.literal('live_thread'),
-    event_description: z.string().min(1).max(2_000),
-    time_reference: z.string().min(1).max(200),
-    moderation_mode: z.enum(['standard', 'breaking', 'sensitive']),
-  })
-  .strict();
-
 // WS-Q.1.3c — native media posts. Both reference a previously-uploaded,
 // EXIF-stripped, scan-gated object (the WS-G.4.4 upload pipeline) and carry NO
 // canonical_url (exempt from URL normalization and crawling). Image posts
@@ -229,10 +191,6 @@ export const videoMetadataSchema = z
 export const submissionMetadataSchema = z.discriminatedUnion('submission_type', [
   linkMetadataSchema,
   originalBriefMetadataSchema,
-  questionMetadataSchema,
-  evidenceCardMetadataSchema,
-  localUpdateMetadataSchema,
-  liveThreadMetadataSchema,
   imageMetadataSchema,
   videoMetadataSchema,
 ]);
@@ -260,7 +218,7 @@ const storyCreateBaseShape = {
   location_scope: locationScopeSchema.nullable().optional(),
   // WS-Q.1.3a — every content item is posted in exactly one home room
   // (§3.4): `room_id` is REQUIRED on every branch (the `.extend()` below
-  // propagates it to all eight). `visibility` is OPTIONAL on input — the
+  // propagates it to every member). `visibility` is OPTIONAL on input — the
   // server DERIVES it via `deriveStoryVisibility` (a private room forces
   // `room_only`; a public room honors the request, default `public`).
   room_id: uuidSchema,
@@ -270,14 +228,6 @@ const storyCreateBaseShape = {
 export const storyCreateRequestSchema = z.discriminatedUnion('submission_type', [
   linkMetadataSchema.extend(storyCreateBaseShape),
   originalBriefMetadataSchema.extend(storyCreateBaseShape),
-  questionMetadataSchema.extend(storyCreateBaseShape),
-  evidenceCardMetadataSchema.extend(storyCreateBaseShape),
-  // `location_scope` is REQUIRED for local updates (the base makes it
-  // optional, so it is re-tightened after the extend).
-  localUpdateMetadataSchema.extend(storyCreateBaseShape).extend({
-    location_scope: locationScopeSchema,
-  }),
-  liveThreadMetadataSchema.extend(storyCreateBaseShape),
   imageMetadataSchema.extend(storyCreateBaseShape),
   // The video branch is a refined object (captions XOR); `.extend` on a
   // ZodEffects is unavailable, so the base shape is spread before the refine.

@@ -117,7 +117,6 @@ describe('WS-L wiring ports over real in-memory services', () => {
         ageBand: 'adult',
         privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
         personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
-        reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
         roles: ['user'],
       },
       Date.now(),

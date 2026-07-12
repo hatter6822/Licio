@@ -98,7 +98,6 @@ export const SCORING_TOPICS = [
   'source.opened.aggregate',
   'content.saved',
   'contribution.created',
-  'evidence.added',
   'integrity.signal.detected',
 ] as const;
 
@@ -205,8 +204,7 @@ export async function computeAggregationWindow(
         (actor.contributions[payload.contribution_type] ?? 0) + 1;
       // Source-free accusation (WS-E.2.2b): a direct accusation with no
       // citation, tracked at its own contribution type so the v1 hierarchy
-      // downweights it at the accusing type's weight. (Linked evidence.added
-      // correlation is a WS-G refinement.)
+      // downweights it at the accusing type's weight.
       if (payload.accusation_flag && !payload.has_citation) {
         actor.uncitedAccusationsByType[payload.contribution_type] =
           (actor.uncitedAccusationsByType[payload.contribution_type] ?? 0) + 1;
@@ -217,12 +215,6 @@ export async function computeAggregationWindow(
         actor.citedContributionsByType[payload.contribution_type] =
           (actor.citedContributionsByType[payload.contribution_type] ?? 0) + 1;
       }
-    } else if (row.topic === 'evidence.added') {
-      // Evidence cards count toward window volume; the participation credit
-      // flows through the matching contribution.created event (the composer
-      // emits both) — counting both here would double-credit one action.
-      const payload = row.payload as { thread_id: string };
-      itemOf(payload.thread_id).eventCount += 1;
     } else if (row.topic === 'integrity.signal.detected') {
       // Anti-signal counts only: integrity signals describe the window, so
       // they never inflate eventCount (which conditions burst detection).

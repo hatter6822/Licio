@@ -18,11 +18,7 @@
 //     point is recorded, not assumed.
 import { randomUUID } from 'node:crypto';
 import { createDbClient, migrationsFolder } from '@licio/db';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { sql } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -92,7 +88,6 @@ describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_
         ageBandIfKnown: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummaryPrivate: emptyReputationSummary(),
       })
       .returning();
     submitterId = (inserted[0] as { userId: string }).userId;
@@ -197,10 +192,15 @@ describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_
     console.error(
       `[WS-F.1.3b] exact-URL p99=${p99.toFixed(2)}ms p50=${percentile(latencies, 50).toFixed(2)}ms (N=${N})`,
     );
+    // WS-Q tier dedup replaced the single canonical-URL unique with PER-TIER
+    // partial uniques; the production lookup (getByCanonicalUrl with the
+    // visibility scope) carries the full tier predicate (visibility +
+    // hidden_state IS NULL), so the EXPLAIN probe must too — a bare
+    // canonical_url query cannot use a partial index at all.
     const plan = await (db as unknown as { execute: (q: unknown) => Promise<unknown> }).execute(
-      sql`explain select 1 from stories where canonical_url = ${urls[0] as string}`,
+      sql`explain select 1 from stories where canonical_url = ${urls[0] as string} and visibility = 'public' and hidden_state is null`,
     );
-    expect(JSON.stringify(plan)).toMatch(/stories_canonical_url_uq/);
+    expect(JSON.stringify(plan)).toMatch(/stories_canonical_url_public_uq/);
     expect(p99).toBeLessThan(50);
   });
 

@@ -229,23 +229,22 @@ describe('participation (WS-E.2.1c)', () => {
     expect(saved.value).toBeGreaterThan(0);
   });
 
-  it('gives low_info_reply and flag zero constructive weight', () => {
+  it('gives low_info_reply zero constructive weight', () => {
     expect(V0_CONTRIBUTION_WEIGHTS.low_info_reply).toBe(0);
-    expect(V0_CONTRIBUTION_WEIGHTS.flag).toBe(0);
     const lowInfo = actorParticipation(actor({ contributions: { low_info_reply: 4 } }));
     expect(lowInfo.value).toBe(0);
   });
 
   it('uses uniform v0 weights for constructive types', () => {
-    const question = actorParticipation(actor({ contributions: { question: 1 } }));
-    const evidence = actorParticipation(actor({ contributions: { evidence: 1 } }));
-    expect(question.value).toBe(evidence.value);
-    expect(question.value).toBeGreaterThan(0);
+    const explanation = actorParticipation(actor({ contributions: { explanation: 1 } }));
+    const correction = actorParticipation(actor({ contributions: { correction: 1 } }));
+    expect(explanation.value).toBe(correction.value);
+    expect(explanation.value).toBeGreaterThan(0);
   });
 
   it('dampens rapid repetitive commenting and annotates it (§5.3)', () => {
-    const calm = actorParticipation(actor({ contributions: { question: 3 } }));
-    const rapid = actorParticipation(actor({ contributions: { question: 9 } }));
+    const calm = actorParticipation(actor({ contributions: { explanation: 3 } }));
+    const rapid = actorParticipation(actor({ contributions: { explanation: 9 } }));
     expect(rapid.value).toBeLessThan(calm.value);
     expect(rapid.annotations).toContain('rapid_repetition_dampened');
   });
@@ -262,7 +261,7 @@ describe('participation (WS-E.2.1c)', () => {
   });
 
   it('applies the v0 coordinated-burst placeholder dampening at item level', () => {
-    const actors = [actor({ contributions: { question: 2 } })];
+    const actors = [actor({ contributions: { explanation: 2 } })];
     const clean = itemParticipation(actors, {});
     const burst = itemParticipation(actors, { coordinatedBurst: { confidence: 0.9 } });
     expect(burst.value).toBeLessThan(clean.value);
@@ -271,7 +270,7 @@ describe('participation (WS-E.2.1c)', () => {
 
   it('account-age trust (WS-O.4.5) scales only the ITEM sum, not the per-actor record', () => {
     const aged = Array.from({ length: 4 }, (_, i) =>
-      actor({ actor: `a${i}`, contributions: { evidence: 2 }, returnVisitBucket: 'several' }),
+      actor({ actor: `a${i}`, contributions: { correction: 2 }, returnVisitBucket: 'several' }),
     );
     const fresh = aged.map((a) => ({ ...a, trustWeight: 0.5 }));
     const agedItem = itemParticipation(aged, {});
@@ -291,7 +290,7 @@ describe('participation (WS-E.2.1c)', () => {
       300,
       (rng) => ({
         count: int(rng, 0, rapidThreshold - 1),
-        type: pick(rng, ['question', 'evidence', 'correction', 'synthesis'] as const),
+        type: pick(rng, ['explanation', 'correction', 'bridge_comment'] as const),
       }),
       ({ count, type }) => {
         const before = actorParticipation(actor({ contributions: { [type]: count } })).value;
@@ -307,10 +306,10 @@ describe('participation (WS-E.2.1c)', () => {
 
   it('crossing the rapid threshold dampens rather than rewards (anti-signal dominance)', () => {
     const atThreshold = actorParticipation(
-      actor({ contributions: { question: DEFAULT_PARTICIPATION_CONFIG.rapidThreshold } }),
+      actor({ contributions: { explanation: DEFAULT_PARTICIPATION_CONFIG.rapidThreshold } }),
     );
     const beyond = actorParticipation(
-      actor({ contributions: { question: DEFAULT_PARTICIPATION_CONFIG.rapidThreshold + 1 } }),
+      actor({ contributions: { explanation: DEFAULT_PARTICIPATION_CONFIG.rapidThreshold + 1 } }),
     );
     expect(beyond.value).toBeLessThan(atThreshold.value);
     expect(beyond.annotations).toContain('rapid_repetition_dampened');
@@ -321,16 +320,19 @@ describe('participation (WS-E.2.1c)', () => {
       505,
       300,
       (rng) => ({
-        questions: int(rng, 0, 8),
+        explanations: int(rng, 0, 8),
         lowInfo: int(rng, 1, 6),
         returns: pick(rng, RETURN_VISIT_BUCKETS),
       }),
-      ({ questions, lowInfo, returns }) => {
-        const base = actor({ contributions: { question: questions }, returnVisitBucket: returns });
+      ({ explanations, lowInfo, returns }) => {
+        const base = actor({
+          contributions: { explanation: explanations },
+          returnVisitBucket: returns,
+        });
         const before = actorParticipation(base).value;
         const after = actorParticipation({
           ...base,
-          contributions: { question: questions, low_info_reply: lowInfo },
+          contributions: { explanation: explanations, low_info_reply: lowInfo },
         }).value;
         return after <= before || `low-info replies increased score ${before} -> ${after}`;
       },
@@ -362,7 +364,7 @@ describe('PWAtt v0 (WS-E.2.1)', () => {
           sourceOpened: true,
           returnVisitBucket: 'few',
         }),
-        actor({ actor: 'contributor', contributions: { question: 1 } }),
+        actor({ actor: 'contributor', contributions: { explanation: 1 } }),
       ],
       antiSignals: {},
     });

@@ -37,11 +37,9 @@ import { InMemorySearchIndex, type SearchDocument, type SearchIndex } from './se
 import {
   type ClaimStore,
   type EmbeddingStore,
-  type EvidenceCardStore,
   type FreshnessStore,
   InMemoryClaimStore,
   InMemoryEmbeddingStore,
-  InMemoryEvidenceCardStore,
   InMemoryFreshnessStore,
   InMemoryLifecycleAuditStore,
   InMemoryReviewQueueStore,
@@ -81,7 +79,6 @@ export interface IngestionServices {
   sources: SourceStore;
   syndications: SyndicationStore;
   claims: ClaimStore;
-  evidence: EvidenceCardStore;
   signatures: SignatureStore;
   lifecycleAudits: LifecycleAuditStore;
   freshness: FreshnessStore;
@@ -155,7 +152,7 @@ export interface InMemoryIngestionOptions {
 }
 
 /** Build the in-memory search-document provider over the live stores. */
-/** The per-story search-visibility coordinates a claim/evidence hit inherits. */
+/** The per-story search-visibility coordinates a claim hit inherits. */
 interface StoryDocMeta {
   visible: boolean;
   roomId: string | null;
@@ -182,7 +179,6 @@ const FREE_DOC_META: StoryDocMeta = {
 export function buildSearchDocuments(
   allStories: () => Promise<StoryRecordLike[]>,
   allClaims: () => Promise<ClaimRecordLike[]>,
-  allEvidence: () => Promise<EvidenceRecordLike[]>,
   /** WS-Q.2.5a — resolves each story's home-room visibility (fail-closed: an
    *  unknown room is treated as `private`, so a row whose room can't be
    *  resolved never surfaces globally). */
@@ -242,29 +238,6 @@ export function buildSearchDocuments(
         roomStorageMode: meta.roomStorageMode,
       });
     }
-    for (const card of await allEvidence()) {
-      // Evidence on a hidden story is excluded too (null story_id ⇒
-      // user-experience evidence, always visible). Mirrors the claim path.
-      const meta =
-        card.storyId === null ? FREE_DOC_META : (storyMeta.get(card.storyId) ?? FREE_DOC_META);
-      documents.push({
-        resultType: 'evidence',
-        id: card.evidenceId,
-        storyId: card.storyId,
-        title: card.relevanceNote,
-        body: `${card.relevanceNote} ${card.citationUrlOrRef}`,
-        snippet: card.relevanceNote,
-        topicIds: [],
-        sourceId: card.sourceId,
-        language: null,
-        createdAt: card.createdAt,
-        visible: card.verificationState !== 'retracted' && meta.visible,
-        roomId: meta.roomId,
-        storyVisibility: meta.storyVisibility,
-        roomVisibility: meta.roomVisibility,
-        roomStorageMode: meta.roomStorageMode,
-      });
-    }
     return documents;
   };
 }
@@ -291,15 +264,6 @@ interface ClaimRecordLike {
   claimStatus: string;
   createdAt: string;
 }
-interface EvidenceRecordLike {
-  evidenceId: string;
-  storyId: string | null;
-  relevanceNote: string;
-  citationUrlOrRef: string;
-  sourceId: string | null;
-  verificationState: string;
-  createdAt: string;
-}
 
 /** A fresh, fully in-memory ingestion bundle (tests/dev; prod swaps adapters). */
 export function createInMemoryIngestionServices(
@@ -309,7 +273,6 @@ export function createInMemoryIngestionServices(
   const log = options.log ?? (() => {});
   const stories = new InMemoryStoryStore(now);
   const claims = new InMemoryClaimStore(now);
-  const evidence = new InMemoryEvidenceCardStore(now);
   let config: IngestionRuntimeConfig = { ...DEFAULT_INGESTION_CONFIG, ...options.config };
   const background: Array<Promise<unknown>> = [];
   /** Search-corpus bound for the in-memory index (the Drizzle search adapter
@@ -333,7 +296,6 @@ export function createInMemoryIngestionServices(
     sources: new InMemorySourceStore(now),
     syndications: new InMemorySyndicationStore(now),
     claims,
-    evidence,
     signatures: new InMemorySignatureStore(now),
     lifecycleAudits: new InMemoryLifecycleAuditStore(now),
     freshness: new InMemoryFreshnessStore(),
@@ -405,7 +367,6 @@ export function createInMemoryIngestionServices(
     buildSearchDocuments(
       () => stories.listRecent(SEARCH_CORPUS_LIMIT),
       () => claims.listRecent(SEARCH_CORPUS_LIMIT),
-      () => evidence.listRecent(SEARCH_CORPUS_LIMIT),
       () => roomVisibilityProvider(),
     ),
   );
@@ -438,12 +399,13 @@ export function createInMemoryIngestionServices(
  *   `ingestion-pipeline`   (durable) — content.submitted → extraction,
  *     source resolution, dedup/syndication, claims, content.normalized.
  *   `ingestion-embeddings` (durable) — content.normalized → story + claim
- *     vectors; evidence.added → card vectors (WS-F.3.2c).
+ *     vectors (WS-F.3.2c).
  *   `ingestion-signals`    (durable) — attention.aggregate (first_attention)
- *     + contribution/evidence events (material updates → freshness,
+ *     + contribution events (material updates → freshness,
  *     sustained-participation heuristic) driving the lifecycle (WS-F.1.1c
- *     with WS-E as the available signal source; SCOI/evidence-gap triggers
- *     arrive with WS-H/WS-G through the same applyLifecycleTrigger seam).
+ *     with WS-E as the available signal source; the steward admin surface
+ *     drives the remaining transitions through the same applyLifecycleTrigger
+ *     seam).
  */
 export function registerIngestionConsumers(
   events: EventPipelineServices,
@@ -466,7 +428,7 @@ export function registerIngestionConsumers(
 
   events.router.register({
     name: 'ingestion-embeddings',
-    topics: ['content.normalized', 'evidence.added'],
+    topics: ['content.normalized'],
     // WS-Q.1.7c — embeddings are computed for BOTH tiers (room-scoped search
     // similarity needs room_only vectors); the GLOBAL exclusion is the search
     // tier predicate, not the consumer. Holds `restricted` (non-scoring).
@@ -500,19 +462,6 @@ export function registerIngestionConsumers(
             ingestion.metrics.increment('embeddings.claim');
           }
         }
-      } else if (event.event_type === 'evidence.added') {
-        const added = event as { evidence_id: string };
-        const card = await ingestion.evidence.getById(added.evidence_id);
-        if (card) {
-          await embedTarget(
-            ingestion.embeddings,
-            ingestion.embeddingProvider,
-            'evidence_card',
-            card.evidenceId,
-            `${card.relevanceNote} ${card.citationUrlOrRef}`,
-          );
-          ingestion.metrics.increment('embeddings.evidence');
-        }
       }
     },
   });
@@ -525,7 +474,7 @@ export function registerIngestionConsumers(
 
   events.router.register({
     name: 'ingestion-signals',
-    topics: ['attention.aggregate', 'contribution.created', 'evidence.added'],
+    topics: ['attention.aggregate', 'contribution.created'],
     accessClassifications: ['public', 'aggregated'],
     scoring: false,
     durable: true,
@@ -546,7 +495,7 @@ export function registerIngestionConsumers(
         }
         return;
       }
-      // contribution.created carries a thread id; evidence.added too.
+      // contribution.created carries a thread id.
       const threadId = (event as { thread_id: string }).thread_id;
       const storyId = await ingestion.stories.getStoryIdByThreadId(threadId);
       if (storyId === null) return;

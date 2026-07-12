@@ -131,15 +131,15 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
   it('link requires a URL; other types reject a URL field', () => {
     const { url: _url, ...withoutUrl } = linkBody();
     expect(storyCreateRequestSchema.safeParse(withoutUrl).success).toBe(false);
-    const question = {
-      submission_type: 'question',
-      question: 'What changed in the final bill?',
-      title: 'Final bill changes',
+    const briefWithUrl = {
+      submission_type: 'original_brief',
+      body: 'Detailed first-hand notes…',
+      title: 'What I saw at the council meeting',
       topic_ids: [TOPIC],
       room_id: ROOM,
       url: 'https://example.com/x',
     };
-    expect(storyCreateRequestSchema.safeParse(question).success).toBe(false);
+    expect(storyCreateRequestSchema.safeParse(briefWithUrl).success).toBe(false);
   });
 
   it('original_brief requires a body and accepts the experience disclosure', () => {
@@ -159,69 +159,76 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
     ).toBe(true);
   });
 
-  it('evidence_card requires a claim reference and names the missing field', () => {
-    const noClaim = {
-      submission_type: 'evidence_card',
-      citation_url_or_ref: 'https://example.com/study',
-      relevance_note: 'Replicates the headline finding',
-      title: 'Replication study',
-      topic_ids: [TOPIC],
-      room_id: ROOM,
-    };
-    const result = storyCreateRequestSchema.safeParse(noClaim);
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues.some((issue) => issue.path.includes('claim_id'))).toBe(true);
-    }
-    expect(storyCreateRequestSchema.safeParse({ ...noClaim, claim_id: randomUUID() }).success).toBe(
-      true,
-    );
-  });
-
-  it('local_update requires a location scope', () => {
-    const noScope = {
-      submission_type: 'local_update',
-      source_or_experience_disclosure: 'I live two blocks away',
-      title: 'Bridge closure update',
-      topic_ids: [TOPIC],
-      room_id: ROOM,
-    };
-    const result = storyCreateRequestSchema.safeParse(noScope);
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues.some((issue) => issue.path.includes('location_scope'))).toBe(true);
-    }
+  it('rejects the removed evidence_card submission type', () => {
+    // The EvidenceCard entity was removed with its orphaned creation paths;
+    // the discriminated union must not accept the retired discriminator.
     expect(
       storyCreateRequestSchema.safeParse({
-        ...noScope,
-        location_scope: { type: 'city', value: 'Lisbon' },
-      }).success,
-    ).toBe(true);
-  });
-
-  it('live_thread requires event, time reference, and a moderation mode', () => {
-    const base = {
-      submission_type: 'live_thread',
-      event_description: 'Election night count',
-      title: 'Election night live',
-      topic_ids: [TOPIC],
-      room_id: ROOM,
-    };
-    expect(storyCreateRequestSchema.safeParse(base).success).toBe(false);
-    expect(
-      storyCreateRequestSchema.safeParse({
-        ...base,
-        time_reference: '2026-06-11T20:00:00Z onwards',
-        moderation_mode: 'breaking',
-      }).success,
-    ).toBe(true);
-    expect(
-      storyCreateRequestSchema.safeParse({
-        ...base,
-        time_reference: 'tonight',
-        moderation_mode: 'unmoderated',
+        submission_type: 'evidence_card',
+        citation_url_or_ref: 'https://example.com/study',
+        claim_id: randomUUID(),
+        relevance_note: 'Replicates the headline finding',
+        title: 'Replication study',
+        topic_ids: [TOPIC],
+        room_id: ROOM,
       }).success,
     ).toBe(false);
+  });
+
+  it.each([
+    [
+      'question',
+      {
+        submission_type: 'question',
+        question: 'What changed in the final bill?',
+        title: 'Final bill changes',
+      },
+    ],
+    [
+      'local_update',
+      {
+        submission_type: 'local_update',
+        source_or_experience_disclosure: 'I live two blocks away',
+        location_scope: { type: 'city', value: 'Lisbon' },
+        title: 'Bridge closure update',
+      },
+    ],
+    [
+      'live_thread',
+      {
+        submission_type: 'live_thread',
+        event_description: 'Election night count',
+        time_reference: '2026-06-11T20:00:00Z onwards',
+        moderation_mode: 'breaking',
+        title: 'Election night live',
+      },
+    ],
+  ])('rejects the retired %s submission type outright', (_t, payload) => {
+    // The legacy write taxonomy is retired: the discriminated union carries no
+    // branch for these, so even a fully-formed legacy payload is rejected.
+    expect(
+      storyCreateRequestSchema.safeParse({ ...payload, topic_ids: [TOPIC], room_id: ROOM }).success,
+    ).toBe(false);
+  });
+
+  it('keeps location_scope a live optional story field on the surviving branches', () => {
+    // The retirement removed the local_update BRANCH, not the story-level
+    // location scope — any live submission may still carry one.
+    expect(
+      storyCreateRequestSchema.safeParse(
+        linkBody({ location_scope: { type: 'city', value: 'Lisbon' } }),
+      ).success,
+    ).toBe(true);
+    expect(
+      storyCreateRequestSchema.safeParse({
+        submission_type: 'original_brief',
+        body: 'Detailed first-hand notes…',
+        title: 'Bridge closure update',
+        topic_ids: [TOPIC],
+        room_id: ROOM,
+        location_scope: { type: 'region', value: 'Riverside' },
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -232,8 +239,9 @@ describe('WS-Q.1.3a — home room is required on every branch', () => {
       return rest;
     },
     () => ({
-      submission_type: 'question',
-      question: 'q?',
+      submission_type: 'image_post',
+      upload_id: uuidOf(90),
+      alt_text: 'A chart of reservoir levels',
       title: 't',
       topic_ids: [TOPIC],
     }),

@@ -14,7 +14,6 @@ import {
   contentSavedAggregateEventSchema,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
   type PrivacySettings,
   type SourceOpenedAggregateEvent,
   sourceOpenedAggregateEventSchema,
@@ -107,7 +106,6 @@ export async function seedUserWithSession(
       ageBand: 'adult',
       privacySettings: opts.privacySettings ?? defaultPrivacySettings(),
       personalizationSettings: defaultPersonalizationSettings(),
-      reputationSummary: emptyReputationSummary(),
       roles: opts.admin
         ? ['user', 'admin']
         : opts.steward

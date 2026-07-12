@@ -13,7 +13,6 @@ import {
   deriveAgeBand,
   emailRegisterRequestSchema,
   emailSchema,
-  emptyReputationSummary,
   handleSchema,
   isMinorBand,
   registeredAgeBandSchema,
@@ -145,7 +144,6 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             ageBand: pending.ageBand,
             privacySettings: teen ? teenFloorPrivacySettings() : defaultPrivacySettings(),
             personalizationSettings: defaultPersonalizationSettings(),
-            reputationSummary: emptyReputationSummary(),
             roles: ['user'],
           });
           await services.store.addWebauthn({
@@ -216,7 +214,6 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           ageBand: gate.band,
           privacySettings: teen ? teenFloorPrivacySettings() : defaultPrivacySettings(),
           personalizationSettings: defaultPersonalizationSettings(),
-          reputationSummary: emptyReputationSummary(),
           roles: ['user'],
         });
         const { code } = await startEmailVerification(services.otp, user.userId);

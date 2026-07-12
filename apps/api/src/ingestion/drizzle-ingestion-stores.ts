@@ -21,7 +21,6 @@ import {
   claims as claimsTable,
   type DbExecutor,
   embeddings as embeddingsTable,
-  evidenceCards as evidenceTable,
   ingestionReviewItems,
   sourceSyndications,
   sources as sourcesTable,
@@ -35,12 +34,10 @@ import {
   threads as threadsTable,
 } from '@licio/db';
 import type {
-  EvidenceRelationshipType,
   SearchRequest,
   SearchResult,
   StoryLifecycleState,
   StoryVisibility,
-  VerificationState,
 } from '@licio/shared';
 import {
   and,
@@ -68,9 +65,6 @@ import type {
   EmbeddingRecord,
   EmbeddingStore,
   EmbeddingTargetType,
-  EvidenceCardRecord,
-  EvidenceCardStore,
-  ForumEvidenceCardSinkInput,
   FreshnessRecord,
   FreshnessStore,
   LifecycleAuditRecord,
@@ -646,7 +640,6 @@ export class DrizzleSourceStore implements SourceStore {
       publisherLineage: row.publisherLineage ?? null,
       typicalTopics: row.typicalTopics,
       correctionHistory: row.correctionHistory,
-      evidenceTypeFrequency: row.evidenceTypeFrequency as SourceRecord['evidenceTypeFrequency'],
       communityNotes: row.communityNotes,
       displayRestrictions: row.displayRestrictions,
       createdAt: iso(row.createdAt),
@@ -733,22 +726,15 @@ export class DrizzleSourceStore implements SourceStore {
 
   async recordObservation(
     sourceId: string,
-    observation: { topicIds?: readonly string[]; evidenceType?: EvidenceRelationshipType },
+    observation: { topicIds?: readonly string[] },
   ): Promise<void> {
     const source = await this.getById(sourceId);
     if (!source) return;
     const topics = new Set(source.typicalTopics);
     for (const topic of observation.topicIds ?? []) topics.add(topic);
-    const frequency: Record<string, number> = { ...source.evidenceTypeFrequency };
-    if (observation.evidenceType) {
-      frequency[observation.evidenceType] = (frequency[observation.evidenceType] ?? 0) + 1;
-    }
     await this.#db
       .update(sourcesTable)
-      .set({
-        typicalTopics: [...topics].slice(0, 50),
-        evidenceTypeFrequency: frequency,
-      })
+      .set({ typicalTopics: [...topics].slice(0, 50) })
       .where(eq(sourcesTable.sourceId, sourceId));
   }
 
@@ -849,7 +835,7 @@ export class DrizzleSyndicationStore implements SyndicationStore {
 }
 
 // ---------------------------------------------------------------------------
-// Claims + evidence.
+// Claims.
 // ---------------------------------------------------------------------------
 
 export class DrizzleClaimStore implements ClaimStore {
@@ -960,154 +946,6 @@ export class DrizzleClaimStore implements ClaimStore {
 
   async clear(): Promise<void> {
     await this.#db.delete(claimsTable);
-  }
-}
-
-export class DrizzleEvidenceCardStore implements EvidenceCardStore {
-  readonly #db: Db;
-
-  constructor(db: Db) {
-    this.#db = db;
-  }
-
-  #toRecord(row: typeof evidenceTable.$inferSelect): EvidenceCardRecord {
-    return {
-      evidenceId: row.evidenceId,
-      claimId: row.claimId,
-      sourceId: row.sourceId,
-      contributionId: row.contributionId,
-      submittedBy: row.submittedBy,
-      evidenceType: row.evidenceType,
-      relationshipType: row.relationshipType,
-      citationUrlOrRef: row.citationUrlOrRef,
-      relevanceNote: row.relevanceNote,
-      verificationState: row.verificationState,
-      independenceGroupId: row.independenceGroupId,
-      storyId: row.storyId,
-      createdAt: iso(row.createdAt),
-      updatedAt: iso(row.updatedAt),
-    };
-  }
-
-  async insert(
-    record: Omit<EvidenceCardRecord, 'createdAt' | 'updatedAt'>,
-  ): Promise<EvidenceCardRecord> {
-    // Millisecond-precision timestamps so search keyset cursors round-trip
-    // exactly (see DrizzleStoryStore.createWithThread).
-    const now = new Date();
-    const rows = await this.#db
-      .insert(evidenceTable)
-      .values({
-        evidenceId: record.evidenceId,
-        claimId: record.claimId,
-        sourceId: record.sourceId,
-        contributionId: record.contributionId,
-        submittedBy: record.submittedBy,
-        evidenceType: record.evidenceType,
-        relationshipType: record.relationshipType,
-        citationUrlOrRef: record.citationUrlOrRef,
-        relevanceNote: record.relevanceNote,
-        verificationState: record.verificationState,
-        independenceGroupId: record.independenceGroupId,
-        storyId: record.storyId,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
-    const row = rows[0];
-    if (!row) throw new Error('insert returned no row');
-    return this.#toRecord(row);
-  }
-
-  async insertForumCard(card: ForumEvidenceCardSinkInput, createdAt: string): Promise<void> {
-    const at = new Date(createdAt);
-    await this.#db.insert(evidenceTable).values({
-      evidenceId: card.evidenceId,
-      claimId: card.claimId,
-      sourceId: card.sourceId,
-      contributionId: card.contributionId,
-      submittedBy: card.submittedBy,
-      evidenceType: card.evidenceType,
-      relationshipType: card.relationshipType,
-      citationUrlOrRef: card.citationUrlOrRef,
-      relevanceNote: card.relevanceNote,
-      verificationState: 'unverified',
-      independenceGroupId: card.independenceGroupId,
-      storyId: card.storyId,
-      createdAt: at,
-      updatedAt: at,
-    });
-  }
-
-  async removeForumCard(evidenceId: string): Promise<void> {
-    await this.#db.delete(evidenceTable).where(eq(evidenceTable.evidenceId, evidenceId));
-  }
-
-  async listBySubmitter(userId: string): Promise<EvidenceCardRecord[]> {
-    const rows = await this.#db
-      .select()
-      .from(evidenceTable)
-      .where(eq(evidenceTable.submittedBy, userId));
-    return rows.map((row) => this.#toRecord(row));
-  }
-
-  async anonymizeUser(userId: string): Promise<void> {
-    await this.#db
-      .update(evidenceTable)
-      .set({ submittedBy: null })
-      .where(eq(evidenceTable.submittedBy, userId));
-  }
-
-  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
-    if (storyIds.length === 0) return 0;
-    const rows = await this.#db
-      .update(evidenceTable)
-      .set({ submittedBy: null })
-      .where(
-        and(eq(evidenceTable.submittedBy, userId), inArray(evidenceTable.storyId, [...storyIds])),
-      )
-      .returning({ id: evidenceTable.evidenceId });
-    return rows.length;
-  }
-
-  async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {
-    const rows = await this.#db
-      .select()
-      .from(evidenceTable)
-      .where(eq(evidenceTable.evidenceId, evidenceId))
-      .limit(1);
-    return rows[0] ? this.#toRecord(rows[0]) : null;
-  }
-
-  async listByClaim(claimId: string): Promise<EvidenceCardRecord[]> {
-    const rows = await this.#db
-      .select()
-      .from(evidenceTable)
-      .where(eq(evidenceTable.claimId, claimId))
-      .limit(200);
-    return rows.map((row) => this.#toRecord(row));
-  }
-
-  async listRecent(limit: number): Promise<EvidenceCardRecord[]> {
-    const rows = await this.#db
-      .select()
-      .from(evidenceTable)
-      .orderBy(desc(evidenceTable.createdAt))
-      .limit(limit);
-    return rows.map((row) => this.#toRecord(row));
-  }
-
-  async updateVerification(evidenceId: string, state: VerificationState) {
-    const rows = await this.#db
-      .update(evidenceTable)
-      .set({ verificationState: state, updatedAt: new Date() })
-      .where(eq(evidenceTable.evidenceId, evidenceId))
-      .returning();
-    return rows[0] ? this.#toRecord(rows[0]) : null;
-  }
-
-  async clear(): Promise<void> {
-    await this.#db.delete(evidenceTable);
   }
 }
 
@@ -1715,7 +1553,7 @@ export class PostgresSearchIndex implements SearchIndex {
     // rows index `simple` — `to_tsquery(simple) || to_tsquery(english)` is the
     // tsquery OR, so either representation matches.
     const match = sql`(to_tsquery('simple', ${tsquery}) || to_tsquery('english', ${tsquery}))`;
-    const types = request.type !== undefined ? [request.type] : ['story', 'claim', 'evidence'];
+    const types = request.type !== undefined ? [request.type] : ['story', 'claim'];
 
     // WS-Q.2.5a/b — two-tier visibility. Room-scoped (`?room=`): only this
     // room's pool (the route enforced the read bar). Global: only PUBLIC
@@ -1728,16 +1566,15 @@ export class PostgresSearchIndex implements SearchIndex {
     const storyVisibilityFilter = roomScoped
       ? sql`s.room_id = ${request.room}::uuid and exists (select 1 from rooms r where r.room_id = s.room_id and r.storage_mode = 'server')`
       : sql`s.visibility = 'public' and exists (select 1 from rooms r where r.room_id = s.room_id and r.visibility = 'public' and r.storage_mode = 'server')`;
-    // For claim/evidence hits, the OWNING story's visibility governs. A
-    // null-story (cross-story / user-experience) row is global-eligible but
-    // never room-scoped.
+    // For claim hits, the OWNING story's visibility governs. A null-story
+    // (cross-story) row is global-eligible but never room-scoped.
     const ownerVisibilityFilter = (col: ReturnType<typeof sql>) =>
       roomScoped
         ? sql`exists (select 1 from stories sv join rooms rv on rv.room_id = sv.room_id where sv.story_id = ${col} and sv.hidden_state is null and sv.room_id = ${request.room}::uuid and rv.storage_mode = 'server')`
         : sql`(${col} is null or exists (select 1 from stories sv join rooms rv on rv.room_id = sv.room_id where sv.story_id = ${col} and sv.hidden_state is null and sv.visibility = 'public' and rv.visibility = 'public' and rv.storage_mode = 'server'))`;
 
     const rows: Array<{
-      result_type: 'story' | 'claim' | 'evidence';
+      result_type: 'story' | 'claim';
       id: string;
       story_id: string | null;
       title: string;
@@ -1814,38 +1651,6 @@ export class PostgresSearchIndex implements SearchIndex {
         limit ${fetch}
       `)) as unknown as typeof rows;
       rows.push(...claimRows);
-    }
-
-    if (
-      types.includes('evidence') &&
-      request.topic_id === undefined &&
-      request.language === undefined
-    ) {
-      const filters = [
-        sql`ec.verification_state <> 'retracted'`,
-        sql`ec.search_tsv @@ ${match}`,
-        // Evidence attached to a takedown/safety-hidden OR in-room story is
-        // excluded from global results (its story_id is nullable for
-        // user-experience evidence — that is always global-visible).
-        ownerVisibilityFilter(sql`ec.story_id`),
-      ];
-      if (request.source_id !== undefined) filters.push(sql`ec.source_id = ${request.source_id}`);
-      if (request.date_from !== undefined)
-        filters.push(sql`ec.created_at >= ${request.date_from}::timestamptz`);
-      if (request.date_to !== undefined)
-        filters.push(sql`ec.created_at < ${request.date_to}::timestamptz`);
-      const evidenceRows = (await this.#db.execute(sql`
-        select 'evidence' as result_type, ec.evidence_id as id, ec.story_id as story_id,
-               ec.relevance_note as title, ec.relevance_note as snippet,
-               ts_rank_cd(ec.search_tsv, ${match})::float8 as relevance,
-               ec.created_at as created_at
-        from evidence_cards ec
-        where ${sql.join(filters, sql` and `)}
-          and ${cursorPredicate(sql`ts_rank_cd(ec.search_tsv, ${match})::float8`, sql`ec.created_at`, sql`ec.evidence_id`)}
-        order by relevance desc, created_at desc, id desc
-        limit ${fetch}
-      `)) as unknown as typeof rows;
-      rows.push(...evidenceRows);
     }
 
     // Merge with the SAME total order as the in-memory index, then page.

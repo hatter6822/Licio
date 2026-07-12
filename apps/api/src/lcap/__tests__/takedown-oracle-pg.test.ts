@@ -67,7 +67,7 @@ describe.skipIf(!DB_URL)('Gate-19 — DrizzleTakedownOracle over live Postgres',
 
   /** Insert a takedown row at the given status (the public-intake shape). */
   async function insertTakedown(
-    targetType: 'story' | 'source' | 'evidence',
+    targetType: 'story' | 'source',
     targetId: string,
     status: 'received' | 'under_review' | 'actioned' | 'rejected',
   ): Promise<void> {

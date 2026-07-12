@@ -14,21 +14,18 @@ const draft: AiSummaryDraft = {
       text: 'The vote passed.',
       attribution: null,
       cited_contribution_ids: ['c1'],
-      cited_evidence_ids: ['e1'],
     },
     {
       kind: 'claim',
       text: 'the policy helps',
       attribution: 'User A',
       cited_contribution_ids: ['c2'],
-      cited_evidence_ids: [],
     },
     {
       kind: 'interpretation',
       text: 'the mood was cautious',
       attribution: null,
       cited_contribution_ids: ['c1'],
-      cited_evidence_ids: [],
     },
   ],
   unresolved_questions: ['whether it applies retroactively'],
@@ -59,7 +56,6 @@ describe('WS-K.1.4a renderSummaryDraft', () => {
   it('produces the deduped union of citations', () => {
     const rendered = renderSummaryDraft(draft);
     expect(rendered.cited_contribution_ids.sort()).toEqual(['c1', 'c2', 'c3']);
-    expect(rendered.cited_evidence_ids).toEqual(['e1']);
   });
 
   it('falls back to a placeholder body when empty', () => {

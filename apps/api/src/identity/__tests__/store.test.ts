@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { identityConfigFromEnv } from '../services.js';
 import { type IdentityStore, InMemoryIdentityStore } from '../store.js';
@@ -21,7 +17,6 @@ async function newUser(
     ageBand: 'adult',
     privacySettings: defaultPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
 }

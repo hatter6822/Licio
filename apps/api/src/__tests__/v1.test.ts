@@ -163,7 +163,7 @@ describe('v1 writes', () => {
   it('rejects a malformed unauthenticated contribution with 401 (auth precedes validation)', async () => {
     freshForumServices();
     const res = await app().request(
-      jsonRequest('/v1/contributions', 'POST', { thread_id: 'nope', type: 'evidence' }),
+      jsonRequest('/v1/contributions', 'POST', { thread_id: 'nope', type: 'comment' }),
     );
     // Authentication runs BEFORE body validation: anonymous callers learn
     // nothing about the contract from malformed probes.

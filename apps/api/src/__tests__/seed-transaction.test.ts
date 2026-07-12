@@ -11,11 +11,7 @@
 //   DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev pnpm test
 import { randomUUID } from 'node:crypto';
 import { createDbClient, migrationsFolder } from '@licio/db';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DrizzleRoomStore } from '../forum/drizzle-forum-stores.js';
@@ -44,7 +40,6 @@ describe.skipIf(!DB_URL)('atomic development seed transaction (live Postgres)', 
         ageBandIfKnown: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummaryPrivate: emptyReputationSummary(),
       })
       .returning();
     const created = rows[0];

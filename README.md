@@ -60,7 +60,7 @@ whole network) doesn't.
 There is no applause. Distribution is earned through
 **Participation-Weighted Attention (PWAtt)**: coarse reading signals (dwell
 buckets, source-opening, return visits, reply depth) weighted by constructive
-participation — evidence, corrections, synthesis, bridge-building. Anti-signals
+participation — sourced comments, corrections, synthesis, bridge-building. Anti-signals
 (burst and cascade detectors, coordinated-behavior dampening) can only
 *subtract*; nothing can buy rank. The pay-to-rank firewall is structural:
 a financial denylist inside the ranking feature space, database-level
@@ -182,7 +182,7 @@ The novel layers sit on a complete, hardened platform:
   SIWE, server-side sessions (`__Host-` cookies), RBAC, steward TOTP step-up
   MFA, append-only audit logs, age gates, and granular privacy controls.
 - **Comment-first conversation.** Stories own inline comment sections;
-  `evidence` and `correction` are typed enrichments; interpretation **lenses**
+  sourced comments (citations) and `correction` enrichments carry the sourcing; interpretation **lenses**
   let a room read the same story from declared vantages (feeding SCOI). All
   user-generated HTML egresses through one sanctioned Markdown-lite →
   DOMPurify → Trusted Types path.
@@ -222,7 +222,7 @@ same interfaces as the production adapters, and the whole product is live
 immediately:
 
 - A **seeded demo corpus** — role accounts, rooms across every visibility
-  tier, stories with nested comments, evidence and lenses, a moderation queue,
+  tier, stories with nested comments, sourced comments and lenses, a moderation queue,
   and real computed invariant/reading signals.
 - A **community-governed room** (*Elections & Governance*) with an active,
   member-ratified AI moderation model, so the WS-U surfaces render real data.

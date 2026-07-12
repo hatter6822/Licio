@@ -27,6 +27,9 @@ import { getIngestionServices, type IngestionServices } from '../ingestion/servi
 import type { StoryRecord } from '../ingestion/stores.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
+import { primarySourcesForStory } from '../moderation/evidence.js';
+import { getModerationServices, type ModerationServices } from '../moderation/services.js';
+import { usable } from '../pwatt/shadow.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
 
@@ -42,11 +45,14 @@ export function exposureLabelForGain(gain: number | null): MeriExposureLabelWire
   return 'duplicate_context';
 }
 
-/** Marginal gains from the latest stored MERI output (null when absent). */
+/** Marginal gains from the latest stored MERI output (empty when absent or
+ *  degraded — the WS-H.1.2c `usable` rule every stored-output consumer applies:
+ *  a TIMEOUT/COMPUTE_ERROR fallback row or a zero-coverage row is ABSENT, so a
+ *  degraded batch can never label exposure off stale/fabricated gains). */
 export async function latestMeriGains(
   events: EventPipelineServices,
 ): Promise<Record<string, number>> {
-  const latest = await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
+  const latest = usable(await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID));
   const gains =
     latest &&
     typeof latest.scoreVector['marginal_gains'] === 'object' &&
@@ -99,6 +105,7 @@ export function createInvariantsPublicRoutes(
   resolveInvariants: () => InvariantPlatformServices = getInvariantServices,
   resolveForum: () => ForumServices = getForumServices,
   resolveIdentity: () => IdentityServices = getIdentityServices,
+  resolveModeration: () => ModerationServices = getModerationServices,
 ) {
   return new Hono()
     .get('/stories/:storyId/interpretations', async (c) => {
@@ -193,7 +200,10 @@ export function createInvariantsPublicRoutes(
         return c.json(deny('not_found', 'Story not found'), 404);
       }
       const events = resolveEvents();
-      const latest = await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
+      // The SAME WS-H.1.2c `usable` gate the gains read applies: a degraded
+      // batch (TIMEOUT / COMPUTE_ERROR / INSUFFICIENT_COVERAGE) contributes
+      // NOTHING to this response — neither gains nor redundancy classes.
+      const latest = usable(await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID));
       const bounds =
         latest &&
         typeof latest.scoreVector['per_class_bounds'] === 'object' &&
@@ -254,6 +264,10 @@ export function createInvariantsPublicRoutes(
         if (!(await storyReadableTo(forum, member, userId))) continue;
         coGroupStories.push({ story_id: coStoryId, title: member.title, relationship });
       }
+      // Citations an evidence steward marked as PRIMARY SOURCES on this
+      // story's conversation (STEWARD_ROLES.md ROLE_EVIDENCE) — reviewed
+      // evidence metadata, deduplicated by URL.
+      const primarySources = await primarySourcesForStory(resolveModeration(), storyId);
       return c.json({
         story_id: storyId,
         marginal_gain: gain,
@@ -267,6 +281,7 @@ export function createInvariantsPublicRoutes(
           : null,
         confirmed_syndication_count: syndication.length,
         co_group_stories: coGroupStories,
+        primary_sources: primarySources,
       });
     });
 }

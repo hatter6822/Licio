@@ -93,14 +93,6 @@ export function submissionBodyText(story: StoryRecord): string {
       return metadata.reason;
     case 'original_brief':
       return metadata.body;
-    case 'question':
-      return `${metadata.question} ${metadata.context ?? ''}`.trim();
-    case 'evidence_card':
-      return metadata.relevance_note;
-    case 'local_update':
-      return metadata.source_or_experience_disclosure;
-    case 'live_thread':
-      return metadata.event_description;
     case 'image_post':
       // The accessible alt text is the only first-party text on an image post.
       return metadata.alt_text;

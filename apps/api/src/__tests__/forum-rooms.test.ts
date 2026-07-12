@@ -3,7 +3,7 @@
 // WS-G.2 room + lens route tests: creation authorization, listing filters +
 // pagination + the no-applause recommendation contract, detail (§16.5
 // governance presence), subscription lifecycle (join/pending/approve/leave,
-// idempotency, notification preferences), lens uniqueness + the WS-G.2.4
+// idempotency), lens uniqueness + the WS-G.2.4
 // SCOI read, and restricted-room access control.
 import {
   isFinancialFieldName,
@@ -285,7 +285,7 @@ describe('WS-G.2.3b — room detail and §16.5 governance presence', () => {
 });
 
 describe('WS-G.2.3d — subscriptions', () => {
-  it('public join is immediate and idempotent; leave removes preferences', async () => {
+  it('public join is immediate and idempotent; leave removes the subscription', async () => {
     const created = (await (await createRoom(PUBLIC_ROOM)).json()) as { room_id: string };
     const reader = await seedUserWithSession(fixture.identity, { handle: 'joiner' });
     const join = roomJoinResponseSchema.parse(
@@ -306,16 +306,7 @@ describe('WS-G.2.3d — subscriptions', () => {
       ).json(),
     );
     expect(again.status).toBe('active');
-    // Preferences round-trip, then leave removes everything.
-    const prefs = await app().request(
-      jsonRequest(
-        `/v1/rooms/${created.room_id}/notifications`,
-        'PATCH',
-        { threads: 'all', new_evidence: true },
-        reader.cookie,
-      ),
-    );
-    expect(((await prefs.json()) as { threads: string }).threads).toBe('all');
+    // Leave removes the subscription row.
     const leave = await app().request(
       new Request(`http://local/v1/rooms/${created.room_id}/join`, {
         method: 'DELETE',

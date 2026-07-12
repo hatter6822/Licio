@@ -29,6 +29,7 @@ import {
 } from '@licio/invariants';
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import { domainOf } from '../forum/debate.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -38,15 +39,41 @@ import type { StoryRecord } from '../ingestion/stores.js';
 // MERI (WS-H.2): candidate exposures with grouping inputs
 // ---------------------------------------------------------------------------
 
+/** A stable evidence-lineage token for one citation URL: `cit:<registrable>`
+ *  for an http(s) citation (eTLD+1 via the debate judge's `domainOf`, so
+ *  sibling subdomains of one registrable domain cannot inflate independence),
+ *  `cit:doi:<prefix>` for a doi: reference OR a DOI-resolver URL (grouping by
+ *  DOI prefix, not by the shared resolver host); null for anything
+ *  unparseable (never throws). */
+export function citationDomainToken(url: string): string | null {
+  const doi = /^doi:(10\.\d{4,9})\//i.exec(url);
+  if (doi?.[1]) return `cit:doi:${doi[1]}`;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/\.$/, '').toLowerCase();
+    if (host === 'doi.org' || host === 'www.doi.org' || host === 'dx.doi.org') {
+      const resolver = /^\/(10\.\d{4,9})\//.exec(parsed.pathname);
+      if (resolver?.[1]) return `cit:doi:${resolver[1]}`;
+    }
+  } catch {
+    return null;
+  }
+  const registrable = domainOf(url);
+  return registrable !== null ? `cit:${registrable}` : null;
+}
+
 /**
  * Build MERI candidates for a topic (or the recent feed pool when topicId is
  * null): near-duplicate groups from MinHash signatures (union by estimated
  * Jaccard ≥ threshold over LSH-band candidates), source-lineage groups from
  * confirmed syndication edges + shared publisher lineage, evidence groups
- * from claim independence groups.
+ * from the CITATION DOMAINS of each story thread's sourced contributions
+ * (comment-centric sourcing: two stories whose discussions cite the same
+ * registrable host share an evidence lineage, §13.6).
  */
 export async function assembleMeriCandidates(
   ingestion: IngestionServices,
+  forum: Pick<ForumServices, 'contributions'> | null,
   topicId: string | null,
   limit: number,
   nearDuplicateThreshold: number,
@@ -177,10 +204,11 @@ export async function assembleMeriCandidates(
     return members.length >= 2 ? `src-${root}` : null;
   };
 
-  // Evidence/claim groups from claim independence grouping. `claimGroupsOf` /
-  // `evidenceGroupsOf` collect ALL distinct independence groups per story (the
-  // §7.4 dimensional inputs); the scalar `*GroupOf` keep the first for the
-  // matroid partition (unchanged behaviour).
+  // Claim groups from claim independence grouping; evidence groups from the
+  // CITATION DOMAINS of the story thread's sourced contributions (WS-T
+  // comment-centric sourcing). `claimGroupsOf` / `evidenceGroupsOf` collect
+  // ALL distinct groups per story (the §7.4 dimensional inputs); the scalar
+  // `*GroupOf` keep the first for the matroid partition.
   const claimGroupOf = new Map<string, string | null>();
   const evidenceGroupOf = new Map<string, string | null>();
   const claimGroupsOf = new Map<string, string[]>();
@@ -190,21 +218,52 @@ export async function assembleMeriCandidates(
     const firstClaimGroup = claims.find((c) => c.independenceGroupId)?.independenceGroupId ?? null;
     claimGroupOf.set(story.storyId, firstClaimGroup);
     const claimGroups = new Set<string>();
-    const evidenceGroups = new Set<string>();
-    let evidenceGroup: string | null = null;
     for (const claim of claims) {
       if (claim.independenceGroupId) claimGroups.add(claim.independenceGroupId);
-      const cards = await ingestion.evidence.listByClaim(claim.claimId);
-      for (const card of cards) {
-        if (card.independenceGroupId) evidenceGroups.add(card.independenceGroupId);
-      }
-      if (evidenceGroup === null) {
-        evidenceGroup = cards.find((card) => card.independenceGroupId)?.independenceGroupId ?? null;
+    }
+    claimGroupsOf.set(story.storyId, [...claimGroups]);
+    // Citation-domain evidence lineage: each cited registrable host is a
+    // stable, cross-story token (`cit:<host>`); a doi: reference maps to the
+    // DOI prefix. Sorted for determinism; bounded to keep the vector compact.
+    const citationDomains = new Set<string>();
+    if (forum !== null) {
+      const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+      if (thread !== null) {
+        // PAGE the published rows (keyset) instead of a single 500-row read:
+        // a >500-contribution thread must not lose its later sourced
+        // comments' lineage.  Early-exit once the 8-token cap is saturated
+        // (the vector is capped below anyway); a hard 20-page scan bound
+        // (10 000 rows) keeps the batch tier's cost bounded on pathological
+        // threads.
+        const LINEAGE_TOKEN_CAP = 8;
+        const PAGE = 500;
+        const MAX_PAGES = 20;
+        let after: { createdAt: string; id: string } | null = null;
+        for (
+          let page = 0;
+          page < MAX_PAGES && citationDomains.size < LINEAGE_TOKEN_CAP;
+          page += 1
+        ) {
+          const contributions = await forum.contributions.listByThread(thread.threadId, {
+            states: ['published'],
+            after,
+            limit: PAGE,
+          });
+          for (const contribution of contributions) {
+            for (const citation of contribution.citations) {
+              const token = citationDomainToken(citation.url);
+              if (token !== null) citationDomains.add(token);
+            }
+          }
+          const last = contributions[contributions.length - 1];
+          if (contributions.length < PAGE || last === undefined) break;
+          after = { createdAt: last.createdAt, id: last.contributionId };
+        }
       }
     }
-    evidenceGroupOf.set(story.storyId, evidenceGroup);
-    claimGroupsOf.set(story.storyId, [...claimGroups]);
-    evidenceGroupsOf.set(story.storyId, [...evidenceGroups]);
+    const domains = [...citationDomains].sort().slice(0, 8);
+    evidenceGroupOf.set(story.storyId, domains[0] ?? null);
+    evidenceGroupsOf.set(story.storyId, domains);
   }
 
   return stories.map((story) => {
@@ -270,7 +329,7 @@ export interface MfciActionWindow {
   rawActions: Array<{ actorRef: string; targetId: string; atMs: number }>;
 }
 
-const MFCI_TOPICS = ['contribution.created', 'evidence.added', 'content.submitted'] as const;
+const MFCI_TOPICS = ['contribution.created', 'content.submitted'] as const;
 
 /** Account-age bucket as the privacy-preserving user_group dimension. */
 function accountAgeBucket(createdAtMs: number, nowMs: number): string {
@@ -390,8 +449,8 @@ const DWELL_WEIGHT: Record<string, number> = {
  *
  * The §9.4 experience features are real: discussion depth is the story
  * thread's deepest contribution, lens keys are the lenses with tagged
- * contributions on the thread, primary evidence requires an actual
- * evidence card reachable from a claim, and topic familiarity is repeat
+ * contributions on the thread, primary evidence requires a PUBLISHED
+ * citation-bearing contribution on the conversation, and topic familiarity is repeat
  * exposure — the share of the cohort's attention weight coming from users
  * who engaged ≥ 2 distinct stories sharing one of the item's topics.
  */
@@ -474,23 +533,37 @@ export async function assembleCohorts(
     const cached = enrichmentCache.get(storyId);
     if (cached) return cached;
     let discussionDepth = 0;
+    // Comment-centric sourcing: the "evidence access" dimension reads the
+    // thread's SOURCED contributions (comments carrying ≥1 citation).
+    // PUBLISHED rows only — a held/removed contribution must not satisfy the
+    // GWEI dimension (or deepen/lens-tag it) any more than it earns
+    // participation weight: invariants never count content readers cannot see.
+    let hasPrimaryEvidence = false;
     const lensKeys = new Set<string>();
     const thread = await ingestion.stories.getThreadByStoryId(storyId);
     if (thread) {
-      const contributions = await forum.contributions.listByThread(thread.threadId, {
-        limit: 500,
-      });
-      for (const contribution of contributions) {
-        discussionDepth = Math.max(discussionDepth, contribution.path.length);
-        const lensId = contribution.metadata['lens_id'];
-        if (typeof lensId === 'string' && lensId.length > 0) lensKeys.add(lensId);
-      }
-    }
-    let hasPrimaryEvidence = false;
-    for (const claim of await ingestion.claims.listByStory(storyId)) {
-      if ((await ingestion.evidence.listByClaim(claim.claimId)).length > 0) {
-        hasPrimaryEvidence = true;
-        break;
+      // PAGE the published rows (keyset) — the same discipline as the MERI
+      // lineage scan: a busy thread whose sourced comments land beyond the
+      // first page must not under-report the evidence-access dimension (or
+      // its depth/lens features).  Bounded scan (20 pages / 10 000 rows).
+      const PAGE = 500;
+      const MAX_PAGES = 20;
+      let after: { createdAt: string; id: string } | null = null;
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const contributions = await forum.contributions.listByThread(thread.threadId, {
+          states: ['published'],
+          after,
+          limit: PAGE,
+        });
+        for (const contribution of contributions) {
+          discussionDepth = Math.max(discussionDepth, contribution.path.length);
+          if (contribution.citations.length > 0) hasPrimaryEvidence = true;
+          const lensId = contribution.metadata['lens_id'];
+          if (typeof lensId === 'string' && lensId.length > 0) lensKeys.add(lensId);
+        }
+        const last = contributions[contributions.length - 1];
+        if (contributions.length < PAGE || last === undefined) break;
+        after = { createdAt: last.createdAt, id: last.contributionId };
       }
     }
     const enriched = { discussionDepth, lensKeys: [...lensKeys].sort(), hasPrimaryEvidence };
@@ -599,17 +672,7 @@ export async function assembleScoiStructure(
 // ---------------------------------------------------------------------------
 
 const KIND_BY_TYPE: Record<string, Interaction['kind']> = {
-  question: 'attention',
-  answer: 'agreement',
-  evidence: 'agreement',
-  explanation: 'agreement',
-  synthesis: 'agreement',
-  local_context: 'agreement',
-  direct_experience: 'agreement',
   correction: 'correction',
-  counterexample: 'disagreement',
-  moderation_concern: 'disagreement',
-  meta_discussion: 'attention',
   comment: 'attention',
 };
 

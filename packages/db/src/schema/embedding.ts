@@ -41,7 +41,6 @@ export const embeddingTargetTypeEnum = pgEnum('embedding_target_type', [
   'story',
   'claim',
   'source',
-  'evidence_card',
   'community_interpretation',
 ]);
 
@@ -50,7 +49,7 @@ export const embeddings = pgTable(
   {
     embeddingId: uuid('embedding_id').primaryKey().defaultRandom(),
     targetType: embeddingTargetTypeEnum('target_type').notNull(),
-    /** Polymorphic target id (story/claim/source/evidence/interpretation). */
+    /** Polymorphic target id (story/claim/source/interpretation). */
     targetId: uuid('target_id').notNull(),
     /** Registry model version (WS-F.3.2a) — re-embedding provenance. */
     modelVersion: text('model_version').notNull(),

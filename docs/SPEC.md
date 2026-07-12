@@ -137,7 +137,7 @@ The platform has five core invariant services:
 
 Supporting invariants cover conversational tension, cascade timing, trend turbulence, attention landscapes, counterfactual recommender defects, and session wellbeing.
 
-Licio is a hybrid of social news, public forum, and civic sensemaking tool: links, original posts, evidence cards, claims, live discussion threads, topic rooms, and curated community lenses. Structurally, **rooms own content and content owns conversation**: every content item — an external link, an uploaded image or video, or a user-written post — is posted in exactly one room and anchors its own discussion thread; public content from public rooms circulates everywhere, including the front page, while in-room content never leaves its room (Section 3.4). It avoids applause mechanics and rewards contributions that make the shared information environment more intelligible. The optional **Knomosis** plane adds verifiable, compliance-gated payments and room treasuries with DAO-like governance, used for accountability — not as an applause counter. A user's civic rights never depend on crypto holdings.
+Licio is a hybrid of social news, public forum, and civic sensemaking tool: links, original posts, sourced comments, claims, live discussion threads, topic rooms, and curated community lenses. Structurally, **rooms own content and content owns conversation**: every content item — an external link, an uploaded image or video, or a user-written post — is posted in exactly one room and anchors its own discussion thread; public content from public rooms circulates everywhere, including the front page, while in-room content never leaves its room (Section 3.4). It avoids applause mechanics and rewards contributions that make the shared information environment more intelligible. The optional **Knomosis** plane adds verifiable, compliance-gated payments and room treasuries with DAO-like governance, used for accountability — not as an applause counter. A user's civic rights never depend on crypto holdings.
 
 # 2. Product north star
 
@@ -304,7 +304,7 @@ Where `B_i,t` is a time-sensitive baseline (freshness, source-reliability state,
 
 PHI (holonomy) is deliberately NOT a per-item penalty term here. Holonomy is a per-**user**/session quantity — the curvature of the reader's own topic journey, not a property of any individual story — so there is no meaningful per-item `HolonomyRisk_i`. PHI instead enters ranking as the per-user `holonomy_limits` constraint (Section 13.4): a reader whose recent recommendation sequence exceeds the holonomy threshold gets feed diversification (tightened topic balancing) for that request. (An earlier draft carried a `- pH * HolonomyRisk` per-item term whose input was never populated, so it was structurally always 0; it was removed. A genuine per-item holonomy contribution, if wanted, is a PHI-v1 item.)
 
-The product exposes only a simplified explanation, such as: "Rising because many readers opened the source, three independent evidence cards were added, and the thread has low coordination risk."
+The product exposes only a simplified explanation, such as: "Rising because many readers opened the source, three sourced comments were added, and the thread has low coordination risk."
 
 ## 5.5 Weighting philosophy
 
@@ -327,7 +327,6 @@ Because there are no likes or upvotes, the app uses descriptive labels, none of 
 |---|---|
 | Getting Attention | Active, non-idle reading is increasing. |
 | Deepening | Users are adding evidence, questions, corrections, or summaries. |
-| Well-Sourced | The thread contains independent evidence cards and primary sources. |
 | Needs Context | Interpretations differ or key context is missing. |
 | Under Review | Coordination, safety, or policy signals require review. |
 | Resolved Context | A previously ambiguous issue has a high-quality synthesis. |
@@ -339,21 +338,22 @@ the live invariant signals outrank the slower lifecycle state (Section 14.4):
 safety/coordination review (Under Review) → interpretation divergence (Needs
 Context, from SCOI or the `context_needed` state) → cross-community
 reconciliation (Bridge Active) → a resolved synthesis (Resolved Context) →
-independent evidence (Well-Sourced, requiring ≥2 **distinct independent,
-verified** evidence cards — verified cards sharing a MERI independence group
-count once, and unverified/disputed/retracted cards never count — **and** a
-MERI source-independence signal) → ongoing contribution (Deepening) → active
-reading (Getting Attention, requiring a real above-noise ActiveAttention signal)
-→ the neutral floor (New). Because Getting Attention is gated on an actual
-attention signal, the default never falsely claims that reading is increasing for
-an item nobody has read; such an item reads **New** until attention arrives.
-Well-Sourced and Under Review are reachable only
-through the live signal — the lifecycle state alone never produces them. This
-derivation is implemented once and shared by every reader-facing surface, so the
-feed card and the story page agree on every dimension; the one input that is
-surface-specific is interpretation divergence (the feed reads its profile-aware
-SCOI context card, the story page reads SCOI energy against the needs-context
-threshold), which can differ only at the SCOI margin.
+ongoing contribution (Deepening) → active reading (Getting Attention, requiring
+a real above-noise ActiveAttention signal) → the neutral floor (New). Because
+Getting Attention is gated on an actual attention signal, the default never
+falsely claims that reading is increasing for an item nobody has read; such an
+item reads **New** until attention arrives. Under Review is reachable only
+through the live signal — the lifecycle state alone never produces it. Sourcing
+is surfaced descriptively rather than as a label: the sourced-comment count
+rides the feed card as a context chip ("N sourced comments"), never a quality
+verdict. (The former "Well-Sourced" label was removed with the EvidenceCard
+entity: no production path could create or verify a card, so the label was
+unreachable outside seeded demo data.) This derivation is implemented once and
+shared by every reader-facing surface, so the feed card and the story page
+agree on every dimension; the one input that is surface-specific is
+interpretation divergence (the feed reads its profile-aware SCOI context card,
+the story page reads SCOI energy against the needs-context threshold), which
+can differ only at the SCOI margin.
 
 # 6. Progressive Web App: requirements and client architecture
 
@@ -382,7 +382,7 @@ Primary bottom navigation (at most five surfaces):
 |---|---|
 | Front Page | Ranked feed of stories and discussions. |
 | Rooms | Topic rooms, local rooms, community lenses, subscribed areas. |
-| Submit | Capture a link, write a post, upload an image or video, add evidence, ask a question — always into a chosen home room, with a visibility choice where the room permits one (Section 14.5). |
+| Submit | Capture a link, write a post, upload an image or video — always into a chosen home room, with a visibility choice where the room permits one (Section 14.5). |
 | Threads | Active conversations, replies, saved drafts, participation history. |
 | Profile | Private Signal Ledger, settings, reputation, privacy, moderation notices, and (where enabled) wallet/governance. |
 
@@ -390,7 +390,7 @@ The Submit tab is centered and persistent; it is a contribution entry point, not
 
 ## 6.3 Front Page layout
 
-Each feed card contains: story title; source; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, right to open context card, long-press to signal problem / mute source / adjust topic). The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
+Each feed card contains: story title; source; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, long-press to signal problem / mute source / adjust topic). Interpretation-divergence detail lives on the STORY surface (the "Where interpretations differ" lens map and the independent-sources drawer) rather than as a per-card overlay payload: the card carries the "Needs Context" label, and the tap-through story page carries the detail — the compact feed context-card payload had no client surface and was removed with the other unreachable planes. The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
 
 ## 6.4 Thread layout
 
@@ -402,7 +402,7 @@ Compact, swipeable overlays: What happened? Why it matters; Where interpretation
 
 ## 6.6 Participation composer
 
-The inline comment composer reduces low-information replies while keeping participation simple. A comment contains text and/or an uploaded image or GIF. Two progressive enrichments preserve the invariant-critical structure: **Cite a source** stores an evidence contribution with its evidence card, and **Mark a correction** stores a correction with supporting citation and target context. An optional lens control remains available for interpretation context. GIFs use the same same-origin media pipeline as other uploads and must include alt text.
+The inline comment composer reduces low-information replies while keeping participation simple. A comment contains text and/or an uploaded image or GIF. Two progressive enrichments preserve the invariant-critical structure: **Cite a source** attaches the linked source to the comment as a structured citation (a sourced comment — the comment-centric sourcing unit), and **Mark a correction** stores a correction with supporting citation and target context. An optional lens control remains available for interpretation context. GIFs use the same same-origin media pipeline as other uploads and must include alt text.
 
 The question/answer flag and the direct-experience acknowledgment are deliberately retired from new writes as part of the comment-section simplification; those concerns become ordinary comment text plus the general attachment/privacy warning. Moderation concerns move to the Section 18.4 report flow mounted on comments. The composer still supports voice dictation where available, citation capture from the browser share target, attachment privacy warnings, and local draft autosave. Story submission remains a separate story-submission flow that shows the destination room and visibility choice before posting — locked to in-room when the destination room is private (Section 14.5).
 
@@ -657,7 +657,7 @@ MERI powers feed deduplication; topic-page diversity; evidence-independence labe
 
 ## 7.5 Algorithm sketch
 
-1. Embed content, claims, titles, source snippets, and evidence cards.
+1. Embed content, claims, titles, and source snippets.
 2. Build a similarity graph among candidate exposures.
 3. Add hard parallel classes for identical URLs, syndicated copies, near-duplicate text.
 4. Add soft dependencies for shared source lineage, same primary evidence, same narrative frame.
@@ -676,7 +676,7 @@ Pseudo-code:
 
 ## 7.6 UI requirements
 
-The MERI exposure label ("New angle," "Independent source," "Duplicate context," "Same claim, new evidence") is computed but is NOT surfaced on feed cards — the source-independence signal drives ranking and the "Well-Sourced" rating gate instead. Topic pages include an "independent sources" drawer. Users can choose "show fewer repeats" or "show all updates" per topic. The app must never say "this is true because many outlets repeated it" — repetition is not independence.
+The MERI exposure label ("New angle," "Independent source," "Duplicate context," "Same claim, new evidence") is computed but is NOT surfaced on feed cards — the source-independence signal drives ranking and the independent-sources drawer instead. Topic pages include an "independent sources" drawer. Users can choose "show fewer repeats" or "show all updates" per topic. The app must never say "this is true because many outlets repeated it" — repetition is not independence.
 
 ## 7.7 Acceptance criteria
 
@@ -778,7 +778,7 @@ GWEI powers cross-language fairness audits, regional news parity, new-user vs es
 
 ## 9.4 Experience dimensions
 
-Source diversity; topic diversity; evidence access (probability of seeing primary sources/evidence cards); discussion depth; viewpoint geometry (relational spread of lenses and claims); novelty (balance of familiar and unfamiliar-but-relevant material); and safety state (exposure to harassment, misinformation, manipulation, or graphic content).
+Source diversity; topic diversity; evidence access (probability of seeing primary sources / sourced comments); discussion depth; viewpoint geometry (relational spread of lenses and claims); novelty (balance of familiar and unfamiliar-but-relevant material); and safety state (exposure to harassment, misinformation, manipulation, or graphic content).
 
 ## 9.5 Product constraints
 
@@ -844,7 +844,7 @@ High SCOI does not mean bad content; it means the content should travel with con
 | SCOI level | Ranking action |
 |---|---|
 | Low | Normal ranking. |
-| Medium | Require context card in feed. |
+| Medium | Surface the divergence in the feed (the "Needs Context" label) and the story-surface lens map. |
 | High | Reduce cross-community amplification until context improves. |
 | Very high | Prioritize bridge requests, expert context, or moderator review. |
 
@@ -952,7 +952,7 @@ Ranking is a constrained multi-objective optimizer. It maximizes meaningful atte
 
 ## 13.2 Candidate generation
 
-Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; cross-community bridge candidates; expert explanations and high-quality summaries; chronological catch-up. Candidate generation is **visibility-scoped**: global surfaces (front page, topic surfaces) draw only from public content; a room surface draws from that room's full pool — public and in-room — for users who pass the room's read bar (Sections 14.5, 16.2). Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
+Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; cross-community bridge candidates; expert explanations (stories from expert-led rooms); chronological catch-up. Candidate generation is **visibility-scoped**: global surfaces (front page, topic surfaces) draw only from public content; a room surface draws from that room's full pool — public and in-room — for users who pass the room's read bar (Sections 14.5, 16.2). Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
 
 ## 13.3 Ranking stages
 
@@ -1008,10 +1008,6 @@ Every submission targets exactly one home room and carries a content visibility 
 | Original brief | User-written post. | Topic, title, body, disclosure if personal experience. |
 | Image post | User-uploaded image anchoring discussion. | Image upload (allow-listed type, EXIF/GPS-stripped, scan-gated), required alt text, title, topic. |
 | Video post | User-uploaded short video anchoring discussion. | Video upload (allow-listed container, metadata-stripped, size/duration-capped, scan-gated), title, topic, captions or transcript where available. |
-| Question | A discussion-seeking prompt. | Question, context, topic. |
-| Evidence card | Source tied to an existing claim. | Citation, claim reference, relevance note. |
-| Local update | Time/place-specific update. | Location scope, time, source or experience disclosure. |
-| Live thread | Time-bounded event discussion. | Event, time, moderation mode. |
 
 **Topics: author proposal, AI validation (§24.1).** The "topic" required on every submission is an author **proposal** drawn from a canonical topic **catalog** (a finite, stable set of subject topics with fixed identifiers) — it is **untrusted** until validated. The ingestion/AI pipeline confirms each proposed topic against the story's actual content: supported proposals become the story's **trusted** topics (the only ones ranking, search, and the invariants read); unsupported proposals are rejected to steward review; and content-detected topics the author omitted are added. A story the pipeline cannot classify carries an explicit **"unclassified"** marker, which topic-similarity signals (including the PHI circling/dampening signal) exclude — so an unclassified story never groups with unrelated content. Topic identifiers are catalog-canonical and **shared across stories** (never per-story placeholders), so "the same topic" is genuinely groupable.
 
@@ -1021,7 +1017,7 @@ Normalize URL and canonical source; detect duplicates and syndicated copies with
 
 ## 14.3 Source model
 
-Source profiles contain: name and canonical domain; ownership/publisher lineage when known; typical topics; correction history within Licio; evidence-type frequency; community notes and context cards; known syndication relationships. The source model must not present simplistic "truth scores"; it exposes context and history, not a substitute for reader judgment.
+Source profiles contain: name and canonical domain; ownership/publisher lineage when known; typical topics; correction history within Licio; community notes and context cards; known syndication relationships. The source model must not present simplistic "truth scores"; it exposes context and history, not a substitute for reader judgment.
 
 ## 14.4 Story lifecycle
 
@@ -1053,7 +1049,7 @@ Conversation is owned by content: every thread belongs to the story that anchors
 
 ## 15.1 Comment contribution taxonomy
 
-A comment is the base unit of participation. New writes are ordinary comments plus two optional typed enrichments: `evidence` for cited source material and `correction` for supported corrections. The interpretation lens remains an optional metadata field because SCOI depends on it. Legacy rows with the older types remain readable, but those types are retired for new writes: question/answer become comments and replies; counterexample, explanation, local context, direct experience, and meta-discussion become comments; moderation concern becomes the Section 18.4 report flow; synthesis becomes the community-synthesis summary layer. The question/answer flag and direct-experience acknowledgment are intentionally removed from the new composer scope and recorded here as doctrine changes, not accidental omissions.
+A comment is the base unit of participation. New writes are ordinary comments plus one optional typed enrichment: `correction` for supported corrections; cited source material rides the comment itself as citations (a sourced comment). The former dedicated `evidence` contribution type and its EvidenceCard co-creation were removed — sourcing is comment-centric. The interpretation lens remains an optional metadata field because SCOI depends on it. The older WS-G-era types (question, answer, counterexample, explanation, local context, direct experience, meta-discussion, synthesis, moderation concern) are REMOVED from the schema outright — no production row ever carried them, and a migration maps stray development rows onto comments: question/answer are comments and replies; counterexample, explanation, local context, direct experience, and meta-discussion are comments; moderation concern is the Section 18.4 report flow; synthesis is the community-synthesis summary layer. The question/answer flag and direct-experience acknowledgment are intentionally removed from the composer scope and recorded here as doctrine changes, not accidental omissions.
 
 ## 15.2 Conversation quality model
 
@@ -1108,7 +1104,7 @@ A **lens** is an interpretation context, not a private echo chamber: local resid
 | Role | Capabilities |
 |---|---|
 | Community steward | Organize threads, request context, merge duplicates, escalate moderation. |
-| Evidence steward | Review evidence cards, mark primary sources, flag weak citations. |
+| Evidence steward | Review sourced comments and citations, mark primary sources, flag weak citations. |
 | Safety moderator | Enforce policy, handle reports, protect targets. |
 | Appeals reviewer | Review disputed moderation or account actions. |
 | Integrity analyst | Investigate coordination, spam, manipulation, raids. |
@@ -1362,7 +1358,7 @@ API gateway; web BFF (backend-for-frontend) for the PWA; identity and account; c
 
 ## 21.3 Event-driven processing
 
-Core topics: `content.submitted`, `content.normalized`, `content.visibility.changed`, `source.opened.aggregate`, `content.saved`, `attention.aggregate`, `contribution.created`, `evidence.added`, `claim.updated`, `thread.state.changed`, `moderation.case.created`, `integrity.signal.detected`, `invariant.run.completed`, `ranking.decision.logged`, `notification.sent`, `privacy.request.created`. Knomosis topics: `wallet.link.requested`, `wallet.linked`, `payment.intent.created`, `payment.intent.failed`, `payment.receipt.indexed`, `room.governance.mode.changed`, `governance.proposal.created`, `governance.signature.recorded`, `governance.proposal.executed`, `governance.proposal.challenged`, `treasury.deposit.indexed`, `treasury.grant.approved`, `treasury.payout.executed`, `knomosis.action.preflighted`, `knomosis.action.submitted`, `knomosis.event.indexed`, `compliance.financial.case.created`, `jurisdiction.feature.disabled`.
+Core topics: `content.submitted`, `content.normalized`, `content.visibility.changed`, `source.opened.aggregate`, `content.saved`, `attention.aggregate`, `contribution.created`, `claim.updated`, `thread.state.changed`, `moderation.case.created`, `integrity.signal.detected`, `invariant.run.completed`, `ranking.decision.logged`, `notification.sent`, `privacy.request.created`. Knomosis topics: `wallet.link.requested`, `wallet.linked`, `payment.intent.created`, `payment.intent.failed`, `payment.receipt.indexed`, `room.governance.mode.changed`, `governance.proposal.created`, `governance.signature.recorded`, `governance.proposal.executed`, `governance.proposal.challenged`, `treasury.deposit.indexed`, `treasury.grant.approved`, `treasury.payout.executed`, `knomosis.action.preflighted`, `knomosis.action.submitted`, `knomosis.event.indexed`, `compliance.financial.case.created`, `jurisdiction.feature.disabled`.
 
 ## 21.4 Invariant computation platform
 
@@ -1386,8 +1382,7 @@ Knomosis is an isolated bounded context: ranking services read only sanitized, a
 ## 22.1 Core entities
 
     User { user_id, handle, display_name, account_state, created_at, locale,
-           age_band_if_known, privacy_settings, personalization_settings,
-           reputation_summary_private }
+           age_band_if_known, privacy_settings, personalization_settings }
 
     Room { room_id, slug, name, description, room_type, visibility,
            join_model, posting_policy, governance_mode, created_at }
@@ -1403,10 +1398,6 @@ Knomosis is an isolated bounded context: ranking services read only sanitized, a
     Contribution { contribution_id, thread_id, user_id, type, body, citations,
                    target_claim_id, parent_contribution_id, edit_history_ref,
                    moderation_state, created_at }
-
-    EvidenceCard { evidence_id, claim_id, source_id, submitted_by, evidence_type,
-                   citation_url_or_ref, relevance_note, verification_state,
-                   independence_group_id }
 
     AttentionAggregate { aggregate_id, user_id_or_privacy_bucket, story_id,
                          session_bucket, active_dwell_bucket, source_opened,
@@ -1521,7 +1512,6 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 | `/v1/threads/{id}` | GET | Thread overview and branch index. |
 | `/v1/threads/{id}/branches/{branch}` | GET | Branch content. |
 | `/v1/contributions` | POST | Create structured contribution. |
-| `/v1/evidence` | POST | Add evidence card. |
 | `/v1/reports` | POST | Report content or account. |
 | `/v1/signal-ledger` | GET | Private signal explanation. |
 | `/v1/privacy/export` | POST | Request export. |
@@ -1601,7 +1591,7 @@ For **community-uploaded room-governance models** (§16.6, §24.6), additionally
 
 The reader-facing **layered thread summary / conversation Overview was removed** (no `summaries` table, `current_summary_id` pointer, summary-creation endpoint, or Overview surface). The constraints below are retained only for the **AI summarization evaluation substrate** — the pipeline still generates a draft and runs these checks to record an auditable AIOutputRecord, but the result is never published to readers.
 
-When an AI summary is generated (for governance/evaluation), it must cite source comments and evidence cards; distinguish facts, claims, and interpretations; preserve uncertainty; identify unresolved questions; avoid synthesizing harassment or slurs unnecessarily; avoid presenting the majority view as truth merely because it is common; and support correction workflows.
+When an AI summary is generated (for governance/evaluation), it must cite source comments and their citations; distinguish facts, claims, and interpretations; preserve uncertainty; identify unresolved questions; avoid synthesizing harassment or slurs unnecessarily; avoid presenting the majority view as truth merely because it is common; and support correction workflows.
 
 ## 24.4 Ranking-ML constraints
 
@@ -1836,7 +1826,7 @@ No crypto task blocks steps 1–9. The rule is: **PWAtt and MERI exist before pu
 - **D — Identity, accounts, privacy:** identity states; minimal-profile account service that records **no IP address and no location** (Section 19.1); age gate (minors excluded from wallet/governance); consent and privacy settings; new-device sign-in alerts using a coarse device descriptor only (no IP, no geolocation, no geo-IP lookup); wallet-link table isolated from profile/attention/ranking; retention/deletion/export jobs; staff access controls and audit logs that contain no IPs or locations; privacy-review workflow.
 - **E — Event pipeline and PWAtt:** event schema and classification; in-browser buffering with privacy filters; server ingestion/validation/replay protection/retention; PWAtt v0 shadow; participation-quality weighting; anti-signals; explanation logs; offline manipulation simulations; promotion to bounded ranking only after safety review.
 - **F — Ingestion, source, search:** URL canonicalization and duplicate detection; source profiles; claim extraction and evidence linking; search indexing; freshness/correction/merge workflows; crawler safety and copyright handling; MERI and SCOI hooks.
-- **G — Forum and conversation:** thread/branch/quote/evidence models; contribution taxonomy and composer; branch-quality scoring separate from popularity; moderation annotations and context patches; provenance-bearing summaries; rooms/lenses/steward roles; conversation-health metrics; Hodge and SCOI hooks; governance-discussion threads.
+- **G — Forum and conversation:** thread/branch/quote models; the comment/correction contribution taxonomy and composer; branch-quality scoring separate from popularity; moderation annotations and context patches; provenance-bearing summaries; rooms/lenses/steward roles; conversation-health metrics; Hodge and SCOI hooks; governance-discussion threads.
 - **H — Core invariant services:** Section 30.4.
 - **I — Ranking and distribution:** like/follower/wallet-independent candidate generation; feature store with allowlist/denylist; per-item decision logs; hard safety/legal/age/block filters; PWAtt as bounded input; MERI/MFCI/SCOI/PHI integration; GWEI experiment blocker; explanation service; ranking-neutrality tests (30.6); rollbacks and kill switches.
 - **J — Trust, safety, abuse ops:** policy classifiers; moderation queues with SLAs; report/block/mute/appeal/restore/notice flows; room-level tooling; coordinated-abuse workflows using MFCI evidence; wallet-drainer/scam detection; governance-capture playbook; child-safety escalation; red-team exercises.
@@ -2061,7 +2051,7 @@ No-applause PWA shell; account creation/auth/settings/basic privacy; story submi
 
 ## 36.2 Priority 1 (before closed alpha)
 
-PWAtt v0/v1 aggregation; Signal Ledger v0; MERI v0/v1 duplicate grouping; evidence cards and source metadata; moderation reason codes and appeal skeleton; MFCI v0 shadow synthetic tests; Core Web Vitals/crash observability; privacy export/delete prototype; security threat-model review; reproducible-build and provenance pipeline.
+PWAtt v0/v1 aggregation; Signal Ledger v0; MERI v0/v1 duplicate grouping; sourced comments and source metadata; moderation reason codes and appeal skeleton; MFCI v0 shadow synthetic tests; Core Web Vitals/crash observability; privacy export/delete prototype; security threat-model review; reproducible-build and provenance pipeline.
 
 ## 36.3 Priority 2 (before public beta)
 

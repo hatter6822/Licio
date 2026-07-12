@@ -34,21 +34,10 @@ import { claims } from './claim.js';
 import { threads } from './thread.js';
 import { users } from './user.js';
 
-/** The fixed contribution taxonomy (SPEC §15.1) — order mirrors @licio/shared. */
-export const contributionTypeEnum = pgEnum('contribution_type', [
-  'question',
-  'answer',
-  'evidence',
-  'correction',
-  'synthesis',
-  'counterexample',
-  'explanation',
-  'local_context',
-  'direct_experience',
-  'moderation_concern',
-  'meta_discussion',
-  'comment',
-]);
+/** The fixed contribution taxonomy (SPEC §15.1) — order mirrors @licio/shared.
+ *  The nine WS-G-era types were removed with the retired write taxonomy
+ *  (migration 0076 maps stray dev rows onto `comment`). */
+export const contributionTypeEnum = pgEnum('contribution_type', ['comment', 'correction']);
 
 export const contributionModerationStateEnum = pgEnum('contribution_moderation_state', [
   'published',
@@ -129,6 +118,13 @@ export const contributions = pgTable(
     uniqueIndex('contributions_user_draft_uq')
       .on(t.userId, t.clientDraftId)
       .where(sql`${t.userId} is not null`),
+    /** The STEWARD_ROLES.md evidence-queue scan (published citation-bearing
+     *  rows, ascending keyset) — exactly matches `listCited`'s predicate. */
+    index('contributions_cited_published_idx')
+      .on(t.createdAt, t.contributionId)
+      .where(
+        sql`coalesce(jsonb_array_length(${t.citations}), 0) > 0 and ${t.moderationState} = 'published'`,
+      ),
     check('contributions_body_len', sql`char_length(${t.body}) between 0 and 5000`),
     check('contributions_citations_array', sql`jsonb_typeof(${t.citations}) = 'array'`),
     check('contributions_metadata_object', sql`jsonb_typeof(${t.metadata}) = 'object'`),

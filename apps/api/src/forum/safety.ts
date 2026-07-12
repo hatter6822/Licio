@@ -57,7 +57,7 @@ export interface ContributionSafetyClassifier {
 
 const BARE_URL = /https?:\/\/[^\s<>"'`)]{1,2048}/gi;
 
-/** Every URL a contribution carries (citations, source_url, body autolinks). */
+/** Every URL a contribution carries (citations + body autolinks). */
 export function contributionUrls(request: ContributionCreate): string[] {
   const urls: string[] = [];
   if ('citations' in request && request.citations) {
@@ -66,7 +66,6 @@ export function contributionUrls(request: ContributionCreate): string[] {
       if (citation.archive_url) urls.push(citation.archive_url);
     }
   }
-  if ('source_url' in request && request.source_url) urls.push(request.source_url);
   for (const match of request.body.matchAll(BARE_URL)) urls.push(match[0]);
   return urls;
 }

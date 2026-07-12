@@ -138,7 +138,7 @@ const invariantServices = createInMemoryInvariantServices(
 );
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);
-registerInvariantConsumers(eventServices, ingestionServices, identityServices, invariantServices);
+registerInvariantConsumers(eventServices, ingestionServices, invariantServices);
 
 const rankingServices = createInMemoryRankingServices(
   eventServices,

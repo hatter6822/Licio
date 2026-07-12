@@ -40,9 +40,11 @@ Three constraints govern everything here:
    SCOI reduction/pause, PHI diversification, GWEI deployment gate, MERI
    effects) applies only when `effectsEnabled(invariantType)` — otherwise it
    is computed and RECORDED in the decision log with `enforced: false`
-   (observable, never a hidden sanction). The SCOI context card is the one
-   deliberate exception: it is informational ("Needs Context" never means
-   false), so it attaches regardless of promotion state.
+   (observable, never a hidden sanction). The SCOI divergence flag
+   (`scoi_context_card`) is the one deliberate exception: it is informational
+   ("Needs Context" never means false), so it attaches regardless of
+   promotion state — surfacing as the feed card's label; the lens-map detail
+   lives on the story read surface.
 
 ## Architecture
 
@@ -155,10 +157,10 @@ The eight retrievers (`apps/api/src/ranking/retrievers.ts`) implement
 | `subscribed_rooms_v1` | subscribed_room | Recent threads of the user's ACTIVE room subscriptions |
 | `local_news_v1` | local_news | Country-scoped stories matching the user's own configured locale region (never device location) |
 | `global_pwatt_v1` | global | PWAtt component threshold (never engagement counts); fresh uncovered stories enter at a LOWER cold-start score |
-| `emerging_discussions_v1` | emerging_discussion | CONSTRUCTIVE velocity (evidence/correction/synthesis/bridge counts in the latest 24h window), never raw volume |
-| `independent_additions_v1` | independent_source_addition | Previously-seen stories (the user's OWN attention rows) that gained evidence since last seen |
+| `emerging_discussions_v1` | emerging_discussion | CONSTRUCTIVE velocity (correction/bridge counts in the latest 24h window), never raw volume |
+| `independent_additions_v1` | independent_source_addition | Previously-seen stories (the user's OWN attention rows) that gained sourced comments since last seen |
 | `cross_community_bridges_v1` | cross_community_bridge | SCOI split/obstructed stories, carrying `bridge_context` metadata |
-| `expert_explanations_v1` | expert_explanation | Expert-led-room threads + threads with a human summary layer |
+| `expert_explanations_v1` | expert_explanation | Expert-led-room threads (public rooms with the experts_and_stewards posting policy) |
 | `chronological_catch_up_v1` | chronological_catch_up | Recent unseen items in time order, respecting the per-room last-seen mark |
 | `room_surface_v1` | subscribed_room | Room-surface scoper: the requested room's recent threads (inert outside room feeds — the eight ORGANIC front-page sources remain exactly SPEC §13.2's) |
 
@@ -214,14 +216,12 @@ Two derived fields deserve their formulas:
   split such chains and under-capped them). Exact matroid classes remain
   MERI's concern; this key only feeds the per-page cluster cap.
 - **`source_reliability`** uses exactly the aggregates the WS-F §14.3
-  source profile carries: `clamp01((0.5 + 0.3·types/(types+2) +
-  0.2·cites/(cites+4)) · 1/(1+corrections/10) · 1/(1+notes/8))` — a
-  saturating evidence-type-diversity bonus, a saturating summary-citation
-  bonus (callers pass 0 until WS-F aggregates summary citations onto the
-  profile; an explicit documented seam), gentle dampening for correction
-  FREQUENCY (the §14.3 record has no acknowledgment field; corrections are
-  partly a transparency virtue) and community notes. No history ⇒ exactly
-  the neutral 0.5.
+  source profile carries: `clamp01(0.5 · 1/(1+corrections/10) ·
+  1/(1+notes/8))` — gentle dampening for correction FREQUENCY (the §14.3
+  record has no acknowledgment field; corrections are partly a transparency
+  virtue) and community notes.  (The former evidence-type-diversity and
+  summary-citation bonuses were removed as never-fed inputs.)  No history ⇒
+  exactly the neutral 0.5.
 
 ## Scoring (WS-I.2.3)
 
@@ -272,7 +272,8 @@ then PHI's ranking effect is diversification only.)
   four are nonnegative; enforced penalties can drive a total below zero.
 - **Constraints (WS-I.2.3c).** MFCI at/above the profile state excludes
   cross-community distribution + flags review; SCOI medium attaches the
-  context card (always), high reduces cross-community distribution by the
+  divergence flag (always — it drives the "Needs Context" label), high
+  reduces cross-community distribution by the
   profile multiplier, very-high pauses pending review (room-internal reads
   stay feasible); PHI above threshold diversifies the REQUESTING USER's
   feed (topic caps halve) — the per-user input is the MAX holonomy over the
@@ -371,16 +372,14 @@ Two §23.3 wire fields carry the diversification/context outputs:
   profile-aware `context_card`, the detail uses SCOI energy ≥ the needs-context
   threshold — so they can differ only at the SCOI margin). It is a strict
   priority cascade in which the LIVE invariant signals outrank the slower
-  lifecycle-state mapping (the §10.5 principle generalised to all seven
-  labels): safety review → SCOI interpretation divergence → bridging →
-  resolved synthesis → MERI-verified **well-sourced** (≥2 DISTINCT
-  independent, VERIFIED evidence units — cards sharing a MERI independence
-  group count once; unverified/disputed/retracted never count — AND an
-  independent MERI exposure) → deepening → getting-attention. The
-  descriptive "N evidence cards" chip keeps the RAW total, so a reader still
-  sees that cards exist even when they are not yet independent/verified
-  enough to earn the label. `well-sourced` and `under-review` are reachable
-  ONLY through this live path — the lifecycle state alone can never produce them.
+  lifecycle-state mapping (the §10.5 principle generalised to every label):
+  safety review → SCOI interpretation divergence → bridging →
+  resolved synthesis → deepening → getting-attention → the neutral `new`
+  floor. Sourcing is descriptive, not a label: the "N sourced comments" chip
+  carries the thread's published sourced-contribution count (comments with
+  ≥1 citation). `under-review` is reachable ONLY through the live path —
+  the lifecycle state alone can never produce it. (The former `well-sourced`
+  label was removed with the EvidenceCard entity.)
 - **`safety_state`** — the §22.1 reader-facing safety posture, derived by the
   single shared `deriveStorySafetyState` (feed + story-detail), strongest
   first: a thread under an active §18.3 RESTRICTION is `restricted`

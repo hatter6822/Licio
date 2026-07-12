@@ -45,7 +45,7 @@ export function actionSeverity(action: ModerationAction): number {
  */
 export const moderationContextSchema = z.object({
   contentText: z.string(),
-  contentKind: z.enum(['comment', 'evidence', 'correction', 'story']),
+  contentKind: z.enum(['comment', 'correction']),
   contentLength: z.number().int().min(0),
   linkCount: z.number().int().min(0),
   mentionCount: z.number().int().min(0),

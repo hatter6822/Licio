@@ -115,7 +115,10 @@ export async function threadOverview(
   thread: ThreadShellRecord,
   title: string,
 ): Promise<ThreadDetail> {
-  const counts = await bundle.forum.contributions.countByType(thread.threadId, ['published']);
+  const [counts, sourced] = await Promise.all([
+    bundle.forum.contributions.countByType(thread.threadId, ['published']),
+    bundle.forum.contributions.countSourced(thread.threadId, ['published']),
+  ]);
   const total = Object.values(counts).reduce((sum, n) => sum + (n ?? 0), 0);
   const section = (types: readonly string[]): number =>
     types.reduce((sum, type) => sum + (counts[type as keyof typeof counts] ?? 0), 0);
@@ -132,11 +135,9 @@ export async function threadOverview(
     created_at: thread.createdAt,
     updated_at: thread.updatedAt,
     sections: {
-      overview: section(['synthesis']),
-      questions: section(['question', 'answer']),
-      evidence: section(['evidence', 'counterexample']),
+      // Comment-centric sourcing: the sourced-contribution count (citations).
+      sources: sourced,
       challenges: section(['correction']),
-      lenses: section(['local_context', 'direct_experience']),
       chronology: total,
     },
   };

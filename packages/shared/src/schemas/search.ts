@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Search wire contracts (WS-F.3.1b, SPEC §21.2/§23.2). Keyword search over
-// stories, claims, and evidence cards with filters (date, source, content
-// type, topic, language), keyset pagination, and a stable sort (relevance,
-// then recency, then id). Ranking is TEXTUAL relevance + recency only — no
+// stories and claims with filters (date, source, content type, topic,
+// language), keyset pagination, and a stable sort (relevance, then recency,
+// then id). Ranking is TEXTUAL relevance + recency only — no
 // financial signal participates in indexing, filtering, or ordering
 // (no-pay-to-rank, SPEC §13.6), and visibility filtering (safety-hidden /
 // takedown-removed content) is enforced server-side.
@@ -12,7 +12,7 @@ import { isSentinelTopicId } from '../constants/topics.js';
 import { cursorSchema, isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 import { bcp47Schema } from './story.js';
 
-export const SEARCH_RESULT_TYPES = ['story', 'claim', 'evidence'] as const;
+export const SEARCH_RESULT_TYPES = ['story', 'claim'] as const;
 export type SearchResultType = (typeof SEARCH_RESULT_TYPES)[number];
 export const searchResultTypeSchema = z.enum(SEARCH_RESULT_TYPES);
 
@@ -55,9 +55,9 @@ export type SearchRequest = z.infer<typeof searchRequestSchema>;
 export const searchResultSchema = z
   .object({
     result_type: searchResultTypeSchema,
-    /** story_id / claim_id / evidence_id depending on result_type. */
+    /** story_id / claim_id depending on result_type. */
     id: uuidSchema,
-    /** The story a claim/evidence hit belongs to (null for cross-story claims). */
+    /** The story a claim hit belongs to (null for cross-story claims). */
     story_id: uuidSchema.nullable(),
     title: z.string().min(1).max(1_000),
     snippet: z.string().max(2_000).nullable(),

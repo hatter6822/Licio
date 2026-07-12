@@ -13,6 +13,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AppealStatus,
+  EvidenceDecisionAction,
   ModerationNoticeKind,
   ReportCaseStatus,
   ReportContentKind,
@@ -178,6 +179,34 @@ export interface CoordinatedReportIncidentRecord {
   summary: string;
   reviewedAt: string | null;
   reviewedBy: string | null;
+  createdAt: string;
+}
+
+/**
+ * An evidence steward's audited decision on a citation-bearing contribution
+ * (STEWARD_ROLES.md ROLE_EVIDENCE).  Evidence METADATA only — never a content
+ * action.  `citationUrl` is null exactly for `clear` (contribution-level
+ * reviewed-no-annotation); the queue treats a contribution as reviewed once
+ * ANY decision row exists for it.
+ */
+export interface EvidenceDecisionRecord {
+  decisionId: string;
+  contributionId: string;
+  threadId: string;
+  /** The anchoring story (resolved at decision time; the public
+   *  primary-source surface reads by story). */
+  storyId: string | null;
+  action: EvidenceDecisionAction;
+  citationUrl: string | null;
+  /** The citation's title AT DECISION TIME (denormalized so the public
+   *  primary-source read never re-walks the contribution). */
+  citationTitle: string | null;
+  reasonCode: string | null;
+  /** Internal reviewer note — console-visible only. */
+  note: string | null;
+  /** The deciding steward; null after a hard right-to-erasure purge severs
+   *  the link (the audit-actor posture — the decision record survives). */
+  decidedBy: string | null;
   createdAt: string;
 }
 
@@ -460,6 +489,32 @@ export interface CoordinatedReportIncidentStore {
     nowIso: string,
   ): Promise<CoordinatedReportIncidentRecord | null>;
   clear(): Promise<void>;
+}
+
+export interface EvidenceDecisionStore {
+  /**
+   * Record a decision.  Duplicate protection is decision-shaped: the SAME
+   * (contribution, citation, action) — or a second `clear` on the same
+   * contribution — returns `{ ok: false, code: 'duplicate_decision' }` (a
+   * citation may legitimately carry BOTH a primary mark and a flag; those are
+   * different actions).  In-memory: synchronous check-and-insert.  Postgres:
+   * partial unique indexes are the cross-connection authority.
+   */
+  insert(
+    record: Omit<EvidenceDecisionRecord, 'decisionId' | 'createdAt'>,
+  ): Promise<
+    { ok: true; record: EvidenceDecisionRecord } | { ok: false; code: 'duplicate_decision' }
+  >;
+  /** Which of `contributionIds` already carry ≥ 1 decision (queue filtering). */
+  decidedContributionIds(contributionIds: readonly string[]): Promise<Set<string>>;
+  /** Decisions on a story's conversation, optionally one action (the public
+   *  primary-source read), newest first. */
+  listByStory(storyId: string, action?: EvidenceDecisionAction): Promise<EvidenceDecisionRecord[]>;
+  /** Newest first, keyset-paginated by (createdAt, decisionId) DESC. */
+  listRecent(opts: {
+    after?: { createdAt: string; decisionId: string } | null;
+    limit: number;
+  }): Promise<EvidenceDecisionRecord[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,5 +1271,76 @@ export class InMemoryCoordinatedReportIncidentStore implements CoordinatedReport
   }
   async clear(): Promise<void> {
     this.#rows.clear();
+  }
+}
+
+export class InMemoryEvidenceDecisionStore implements EvidenceDecisionStore {
+  readonly #rows = new Map<string, EvidenceDecisionRecord>();
+  readonly #now: Clock;
+  constructor(now: Clock = Date.now) {
+    this.#now = now;
+  }
+  async insert(
+    record: Omit<EvidenceDecisionRecord, 'decisionId' | 'createdAt'>,
+  ): Promise<
+    { ok: true; record: EvidenceDecisionRecord } | { ok: false; code: 'duplicate_decision' }
+  > {
+    // Synchronous check-and-insert (no await between scan and write).
+    for (const r of this.#rows.values()) {
+      if (r.contributionId !== record.contributionId) continue;
+      if (
+        record.action === 'clear'
+          ? r.action === 'clear'
+          : r.action === record.action && r.citationUrl === record.citationUrl
+      ) {
+        return { ok: false, code: 'duplicate_decision' };
+      }
+    }
+    const full: EvidenceDecisionRecord = {
+      ...record,
+      decisionId: randomUUID(),
+      createdAt: iso(this.#now),
+    };
+    this.#rows.set(full.decisionId, full);
+    return { ok: true, record: { ...full } };
+  }
+  async decidedContributionIds(contributionIds: readonly string[]): Promise<Set<string>> {
+    const wanted = new Set(contributionIds);
+    const out = new Set<string>();
+    for (const r of this.#rows.values()) {
+      if (wanted.has(r.contributionId)) out.add(r.contributionId);
+    }
+    return out;
+  }
+  async listByStory(
+    storyId: string,
+    action?: EvidenceDecisionAction,
+  ): Promise<EvidenceDecisionRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.storyId === storyId && (action === undefined || r.action === action))
+      .sort(
+        (a, b) =>
+          b.createdAt.localeCompare(a.createdAt) || b.decisionId.localeCompare(a.decisionId),
+      )
+      .map((r) => ({ ...r }));
+  }
+  async listRecent(opts: {
+    after?: { createdAt: string; decisionId: string } | null;
+    limit: number;
+  }): Promise<EvidenceDecisionRecord[]> {
+    const after = opts.after ?? null;
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          after === null ||
+          r.createdAt < after.createdAt ||
+          (r.createdAt === after.createdAt && r.decisionId < after.decisionId),
+      )
+      .sort(
+        (a, b) =>
+          b.createdAt.localeCompare(a.createdAt) || b.decisionId.localeCompare(a.decisionId),
+      )
+      .slice(0, opts.limit)
+      .map((r) => ({ ...r }));
   }
 }

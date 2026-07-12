@@ -46,6 +46,11 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   // WS-G forum surface (mirrors AUDIT_EVENT_TYPES in @licio/shared).
   'thread_state_change',
   'contribution_moderation_change',
+  // GRANDFATHERED: retired with the EvidenceCard removal (no writer ever
+  // existed; no rows carry it).  The label stays in the DB enum because
+  // removing it costs a full audit_event_type recreate on the append-only
+  // audit table for zero data benefit — the shared AUDIT_EVENT_TYPES zod
+  // mirror enumerates LIVE values only and deliberately omits it.
   'evidence_verification_change',
   'summary_change',
   'room_steward_change',

@@ -9,7 +9,7 @@
 // (never half-migrated, WS-C.2.2c).
 
 export const DB_NAME = 'licio';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 /** Object-store names (WS-C.2.2a object-store table). */
 export const STORE = {
@@ -105,7 +105,78 @@ export const MIGRATIONS: MigrationMap = {
     comments.createIndex('storyId', 'storyId');
     comments.createIndex('cachedAt', 'cachedAt');
   },
+  // The write taxonomy shrank to comment|correction (SPEC §15.1; the nine
+  // WS-G-era types were REMOVED, mirroring server migration 0076).  Without a
+  // rewrite, a persisted draft or queued submission carrying a retired
+  // plaintext `contributionType`/`payload.type` would fail the shrunk record
+  // schema on read and be QUARANTINED — losing the user's words.  Rewrite the
+  // PLAINTEXT type to `comment` in place (the encrypted body is untouched:
+  // its ciphertext stays valid and decrypts exactly as before), and rebuild a
+  // retired queued contribution payload onto the live comment shape, keeping
+  // only the keys the strict create schema accepts.  The user's WORDS (body,
+  // citations, attachments) are preserved; the retired per-type metadata
+  // annotations (assumptions/uncertainty notes/relevance explanations) are
+  // dropped, mirroring server migration 0076's metadata strip.
+  5: (_db, tx) => {
+    remapRetiredContributionTypes(tx.objectStore(STORE.draftContributions));
+    remapRetiredQueuedContributions(tx.objectStore(STORE.pendingQueue));
+  },
 };
+
+const LIVE_CONTRIBUTION_TYPES: ReadonlySet<string> = new Set(['comment', 'correction']);
+
+function remapRetiredContributionTypes(store: IDBObjectStore): void {
+  const request = store.openCursor();
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) return;
+    const value = cursor.value as Record<string, unknown>;
+    if (
+      typeof value['contributionType'] === 'string' &&
+      !LIVE_CONTRIBUTION_TYPES.has(value['contributionType'])
+    ) {
+      cursor.update({ ...value, contributionType: 'comment' });
+    }
+    cursor.continue();
+  };
+}
+
+/** The comment-create keys the strict wire schema accepts (client_draft_id et
+ *  al.); every retired per-type key is dropped so the rebuilt payload parses. */
+const COMMENT_PAYLOAD_KEYS = [
+  'thread_id',
+  'client_draft_id',
+  'parent_contribution_id',
+  'lens_id',
+  'attachment_ids',
+  'body',
+  'citations',
+] as const;
+
+function remapRetiredQueuedContributions(store: IDBObjectStore): void {
+  const request = store.openCursor();
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) return;
+    const record = cursor.value as Record<string, unknown>;
+    const payload = record['payload'];
+    if (
+      record['operationType'] === 'contribution' &&
+      typeof payload === 'object' &&
+      payload !== null &&
+      typeof (payload as Record<string, unknown>)['type'] === 'string' &&
+      !LIVE_CONTRIBUTION_TYPES.has((payload as Record<string, unknown>)['type'] as string)
+    ) {
+      const source = payload as Record<string, unknown>;
+      const rebuilt: Record<string, unknown> = { type: 'comment' };
+      for (const key of COMMENT_PAYLOAD_KEYS) {
+        if (source[key] !== undefined) rebuilt[key] = source[key];
+      }
+      cursor.update({ ...record, payload: rebuilt });
+    }
+    cursor.continue();
+  };
+}
 
 function applyMigrations(
   db: IDBDatabase,

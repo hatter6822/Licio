@@ -58,12 +58,12 @@ export interface CommentPageResult {
 }
 
 /**
- * Map a section filter to `listRoots` options.  The "Sources" view is NOT just
- * the `evidence` type — it is every SOURCED root (an evidence card OR a comment
- * carrying ≥1 citation), matching the client's "Sourced" badge; the store's
- * `sourced` predicate expresses that.  "Corrections" stays a plain type filter. */
+ * Map a section filter to `listRoots` options.  The "Sources" view is every
+ * SOURCED root (a comment carrying ≥1 citation), matching the client's
+ * "Sourced" badge; the store's `sourced` predicate expresses that.
+ * "Corrections" stays a plain type filter. */
 function rootFilterOptions(filter: CommentFilter | undefined): {
-  types?: readonly ('evidence' | 'correction')[];
+  types?: readonly 'correction'[];
   sourced?: boolean;
 } {
   if (filter === 'sources') return { sourced: true };

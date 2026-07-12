@@ -13,7 +13,6 @@ export type RatingLabelKind =
   | 'new'
   | 'getting-attention'
   | 'deepening'
-  | 'well-sourced'
   | 'needs-context'
   | 'under-review'
   | 'resolved-context'
@@ -49,19 +48,13 @@ export const ratingLabels: Record<RatingLabelKind, RatingLabelDescriptor> = {
     messageKey: 'rating.deepening',
     defaultText: 'Deepening',
   },
-  'well-sourced': {
-    classes: 'bg-success-soft text-success-on-soft',
-    icon: 'document-check',
-    messageKey: 'rating.wellSourced',
-    defaultText: 'Well-Sourced',
-  },
   'needs-context': {
     classes: 'bg-warning-soft text-warning-on-soft',
     icon: 'circle-question',
     messageKey: 'rating.needsContext',
     defaultText: 'Needs Context',
   },
-  // The three "distinct shade" labels share a base hue with a sibling but use a
+  // The "distinct shade" labels share a base hue with a sibling but use a
   // SOLID fill (vs the sibling's soft tint), so the two chips are ≥3:1 distinct
   // in lightness for low-vision users (WS-B.2.3) — verified in RatingLabel.test.
   'under-review': {

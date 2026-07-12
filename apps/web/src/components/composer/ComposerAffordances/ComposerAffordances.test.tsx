@@ -258,15 +258,15 @@ describe('Attachment (WS-B.2.11)', () => {
     render(<Attachment multiple onFilesChange={onFilesChange} />);
     const input = screen.getByLabelText(/Attach a file/i) as HTMLInputElement;
 
-    const file = new File(['data'], 'evidence.pdf', { type: 'application/pdf' });
+    const file = new File(['data'], 'evidence.png', { type: 'image/png' });
     await user.upload(input, file);
 
-    expect(screen.getByText('evidence.pdf')).toBeInTheDocument();
+    expect(screen.getByText('evidence.png')).toBeInTheDocument();
     expect(onFilesChange).toHaveBeenLastCalledWith([file]);
 
-    const remove = screen.getByRole('button', { name: /remove evidence\.pdf/i });
+    const remove = screen.getByRole('button', { name: /remove evidence\.png/i });
     await user.click(remove);
-    expect(screen.queryByText('evidence.pdf')).not.toBeInTheDocument();
+    expect(screen.queryByText('evidence.png')).not.toBeInTheDocument();
     expect(onFilesChange).toHaveBeenLastCalledWith([]);
   });
 

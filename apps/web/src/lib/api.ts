@@ -34,6 +34,8 @@ import {
   featureFlagsResponseSchema,
   feedPreferencesSchema,
   feedResponseSchema,
+  type IndependentSourcesResponse,
+  independentSourcesResponseSchema,
   type LensCreateRequest,
   type LensPublic,
   lensPublicSchema,
@@ -64,6 +66,7 @@ import {
   type StoryDetail,
   type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
+  storyClaimsResponseSchema,
   storyCommentsResponseSchema,
   storyCreateResponseSchema,
   storyDebatesResponseSchema,
@@ -249,6 +252,26 @@ export async function fetchStoryInterpretations(
     param: { storyId },
   });
   return parseResponse(response, storyInterpretationsResponseSchema);
+}
+
+/** The SPEC §7.6 independent-sources drawer payload (MERI lineage, WS-H.2.3a):
+ *  exposure label, publisher lineage, same-coverage group, primary sources. */
+export async function fetchIndependentSources(
+  storyId: string,
+): Promise<IndependentSourcesResponse> {
+  const response = await client.v1.stories[':storyId']['independent-sources'].$get({
+    param: { storyId },
+  });
+  return parseResponse(response, independentSourcesResponseSchema);
+}
+
+export type StoryClaimsResponse = z.infer<typeof storyClaimsResponseSchema>;
+
+/** The story's public claim projections (WS-F.1.2a; `independence_group_id`
+ *  marks lineages MERI treats as non-independent, SPEC §13.6). */
+export async function fetchStoryClaims(storyId: string): Promise<StoryClaimsResponse> {
+  const response = await client.v1.stories[':storyId'].claims.$get({ param: { storyId } });
+  return parseResponse(response, storyClaimsResponseSchema);
 }
 
 export async function fetchThread(threadId: string): Promise<ThreadDetail> {

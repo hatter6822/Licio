@@ -210,19 +210,19 @@ weaponized), the §10.5 "Bridge attempts" record, and recent context
 actions. Moderator context actions (WS-H.4.3d / SCOI-4: merge, annotate,
 separate) require a RATIFIED WS-A reason code, are audited
 (`scoi_context_action`), and record the measured SCOI before/after.
-Annotation is mathematically honest: ONE shared `local_context`
-contribution per active lens pulls every interpretation vector toward the
-same point, so the Dirichlet energy genuinely decreases — measured by
-re-computation, never asserted (the acceptance test pins the decrease on a
-synthetic split case). Merge/separate are audited records whose physical
-tree mechanics belong to WS-G/WS-J tooling. Bridge routing (WS-H.4.2d /
-SCOI-2): candidates are multi-lens participants; an open request carries
-the SCOI baseline, and the durable `invariant-scoi-bridge` consumer
-credits a contribution (single-shot) when re-computation measures a real
-decrease — credit lands in the DESCRIPTIVE reputation summary
-(`bridge_ability`), never a wallet, never a ranking input. Notification
-dispatch is a later seam; routing produces records only, so spam is
-impossible by construction.
+Annotation is mathematically honest: ONE shared system comment per active
+lens (tagged through `metadata.lens_id`, which is what the SCOI assembly
+keys on) pulls every interpretation vector toward the same point, so the
+Dirichlet energy genuinely decreases — measured by re-computation, never
+asserted (the acceptance test pins the decrease on a synthetic split
+case). Merge/separate are audited records whose physical tree mechanics
+belong to WS-G/WS-J tooling. Bridge routing (WS-H.4.2d / SCOI-2):
+candidates are multi-lens participants; an open request carries the SCOI
+baseline, and the durable `invariant-scoi-bridge` consumer credits a
+contribution (single-shot) when re-computation measures a real decrease —
+the credit is the bridge-attempt record itself (audited + metered), never
+a wallet, never a ranking input. Notification dispatch is a later seam;
+routing produces records only, so spam is impossible by construction.
 
 ### PHI — Preference Holonomy (SPEC §11)
 
@@ -408,12 +408,15 @@ STORED shadow outputs only — a page load never triggers computation.
 Client: the MERI exposure label was REMOVED as a user-facing surface — no
 `ExposureLabel` badge on feed cards, and the feed/story wire no longer
 carries an `exposure_label` field. The computed source-independence signal
-survives everywhere it does real work: the §5.6 Well-Sourced rating gate
-(`meriExposureIsIndependent`, a server-side derivation), the WS-I ranking
-features/penalty/quota, and the
-`GET /v1/stories/:id/independent-sources` lineage read — the "Same coverage
-elsewhere" co-group members (near-duplicates by MinHash + confirmed-
-syndication siblings, visibility-gated server-side) — remains available),
+survives everywhere it does real work: the WS-I ranking
+features/penalty/quota and the
+`GET /v1/stories/:id/independent-sources` lineage read — consumed by the
+story page's "Independent sources" drawer (`IndependentSourcesDrawer`, the
+SPEC §7.6 promise): exposure label, source lineage + syndication, the "Same
+coverage elsewhere" co-group members (near-duplicates by MinHash +
+confirmed-syndication siblings, visibility-gated server-side), the
+evidence-steward-marked primary sources, and the story's claims
+(`GET /v1/stories/:id/claims`) — remains available),
 `WhereInterpretationsDiffer` (+ the needs-context framing; human lens
 NAMES resolved through the room when available), the composer
 `ContextWarning` (dismissible; the user can always proceed), the

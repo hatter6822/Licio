@@ -9,15 +9,11 @@ import type { ContributionDisputeStatus } from '@licio/shared';
 import type { IconName } from '../ui/Icon/index.js';
 import type { RatingLabelKind } from './RatingLabel/index.js';
 
-/** Provenance of a story's source — feeds the origin badge, never a ranking. */
-export type StoryOrigin = 'independent' | 'wire' | 'official' | 'aggregator';
-
 export interface Story {
   id: string;
   title: string;
   /** Human-readable source/publication name. */
   source: string;
-  origin: StoryOrigin;
   /** Canonical URL (opened in the in-app reader); optional for offline drafts. */
   url?: string;
   /** Estimated active reading time in minutes (a cognitive-accessibility aid). */

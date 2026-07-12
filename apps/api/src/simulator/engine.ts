@@ -202,10 +202,11 @@ export type SimAction =
       readonly lensId: string | null;
     }
   | {
-      readonly kind: 'evidence';
+      /** A SOURCED root comment (comment-centric sourcing): the evidence
+       *  contributor posts a relevance note with an inline citation. */
+      readonly kind: 'sourced_comment';
       readonly personaUserId: string;
       readonly storyId: string;
-      readonly claimId: string;
       readonly body: string;
       readonly citationUrl: string;
     }
@@ -315,25 +316,20 @@ function storyKindFor(archetype: PersonaArchetype, prng: Prng): StoryKind {
     case 'author':
       return prng.weighted<StoryKind>([
         { value: 'link', weight: 45 },
-        { value: 'original_brief', weight: 35 },
-        { value: 'question', weight: 20 },
+        { value: 'original_brief', weight: 55 },
       ]);
     case 'local_correspondent':
-      return prng.weighted<StoryKind>([
-        { value: 'local_update', weight: 60 },
-        { value: 'original_brief', weight: 25 },
-        { value: 'question', weight: 15 },
-      ]);
+      // Correspondents write first-party briefs (the retired local_update /
+      // question kinds fold into original_brief; the draw is kept so the
+      // seeded PRNG stream stays aligned across kinds).
+      return prng.weighted<StoryKind>([{ value: 'original_brief', weight: 100 }]);
     case 'expert_author':
       return prng.weighted<StoryKind>([
         { value: 'link', weight: 55 },
         { value: 'original_brief', weight: 45 },
       ]);
     default:
-      return prng.weighted<StoryKind>([
-        { value: 'question', weight: 60 },
-        { value: 'original_brief', weight: 40 },
-      ]);
+      return prng.weighted<StoryKind>([{ value: 'original_brief', weight: 100 }]);
   }
 }
 
@@ -575,7 +571,7 @@ export function planTick(input: PlanTickInput): SimAction[] {
       }
     }
 
-    // Comments (and evidence, for the evidence contributor).
+    // Comments (sourced ones, for the evidence contributor).
     const commentCount = rate(archetype.rates.comment, scenario.rates.comment);
     for (let i = 0; i < commentCount; i += 1) {
       const story = pickStory(world, persona.spec, prng, {
@@ -592,10 +588,9 @@ export function planTick(input: PlanTickInput): SimAction[] {
       ) {
         const evidence = generateEvidence(domain, storySerial * 10 + i, prng);
         contributions.push({
-          kind: 'evidence',
+          kind: 'sourced_comment',
           personaUserId: persona.spec.userId,
           storyId: story.storyId,
-          claimId: prng.pick(story.claimIds),
           body: evidence.body,
           citationUrl: evidence.citationUrl,
         });

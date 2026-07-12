@@ -65,20 +65,14 @@ export const RETURN_BUCKET_WEIGHTS: Readonly<Record<ReturnVisitBucket, number>> 
 
 /**
  * v0 contribution-type weights (WS-E.2.1c): uniform 1 for constructive types,
- * 0 for `low_info_reply` (anti-signal volume) and `flag` (a safety action, not
- * content participation). The v1 hierarchy (WS-E.2.3b) replaces this table.
+ * 0 for `low_info_reply` (anti-signal volume). The v1 hierarchy (WS-E.2.3b)
+ * replaces this table.
  */
 export const V0_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, number>> = {
-  question: 1,
-  evidence: 1,
   correction: 1,
-  synthesis: 1,
-  counterexample: 1,
   explanation: 1,
-  experience: 1,
   bridge_comment: 1,
   steward_action: 1,
-  flag: 0,
   low_info_reply: 0,
 };
 

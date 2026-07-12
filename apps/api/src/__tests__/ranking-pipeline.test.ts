@@ -12,6 +12,7 @@ import { DeniedFinancialFieldError, EVERGREEN_PROFILE } from '@licio/ranking';
 import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import {
   DEFAULT_RANKING_CONFIG,
   loadRankingRuntimeConfig,
@@ -49,6 +50,7 @@ function featureDeps() {
     events: fixture.events,
     ingestion: fixture.ingestion,
     invariants: fixture.invariants,
+    forum: fixture.forum,
     featureStore: fixture.ranking.featureStore,
     log: fixture.ranking.log,
     now: fixture.ranking.now,
@@ -169,6 +171,41 @@ describe('feature assembly (WS-I.2.1a/c provenance)', () => {
     const vector = await assembleFeatureVector(featureDeps(), storyId);
     expect(vector?.scoi_level).toBeUndefined();
     expect(vector?.context_coherence_gain).toBeUndefined();
+  });
+
+  it('treats a degraded GLOBAL MERI row as ABSENT (no exposure_independence / meri_rank)', async () => {
+    const { storyId } = await seedStory(fixture.ingestion);
+    const meriVector = {
+      meri: 0.8,
+      marginal_gains: { [storyId]: 0.9 },
+      approximation: false,
+      per_class_bounds: { 'singleton:x': 1 },
+      group_ids: [],
+    };
+    // Positive control: a USABLE global MERI row joins gain + rank + version.
+    await seedInvariantOutput(fixture.events, {
+      invariantType: 'MERI',
+      targetType: 'feed',
+      targetId: GLOBAL_FEED_TARGET_ID,
+      scoreVector: meriVector,
+    });
+    const healthy = await assembleFeatureVector(featureDeps(), storyId);
+    expect(healthy?.exposure_independence).toBe(0.9);
+    expect(healthy?.meri_rank).toBe(1);
+    expect(healthy?.invariant_versions['MERI']).toBeDefined();
+    // The SAME row degraded (INSUFFICIENT_COVERAGE replaces it on the natural
+    // key) is ABSENT to the feature join — no stale gain, no fabricated rank.
+    await seedInvariantOutput(fixture.events, {
+      invariantType: 'MERI',
+      targetType: 'feed',
+      targetId: GLOBAL_FEED_TARGET_ID,
+      scoreVector: meriVector,
+      reasonCodes: ['INSUFFICIENT_COVERAGE'],
+    });
+    const vector = await assembleFeatureVector(featureDeps(), storyId);
+    expect(vector?.exposure_independence).toBeUndefined();
+    expect(vector?.meri_rank).toBeUndefined();
+    expect(vector?.invariant_versions['MERI']).toBeUndefined();
   });
 
   it('excludes the UNCLASSIFIED sentinel from feature topic_ids (WS-I topic logic)', async () => {

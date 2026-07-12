@@ -870,18 +870,18 @@ const publishRequestSchema = z.object({
   visibility: z.enum(['public', 'in_room', 'private']).optional(),
   encrypted: z.boolean().optional(),
   private_room_cid: z.boolean().optional(),
-  // The content entity this block was derived from (story/source/evidence) — the SAME
+  // The content entity this block was derived from (story/source) — the SAME
   // coordinate a WS-J takedown / the §22.7 review gate uses.  REQUIRED (Gate-19 finding #38):
   // the publish path records the `block_cid → (type, id)` provenance link UNCONDITIONALLY, so
   // a later actioned takedown over that entity halts republication, and the §22.7 review gate
   // resolves the block to a reviewable source — a block with no content target can never be
   // reviewed/approved, so it can never reach the public DHT (it would be refused
-  // `review_required`).  Multiple targets are supported (e.g. evidence embedded in a story).
+  // `review_required`).  Multiple targets are supported.
   content_targets: z
     .array(
       z.object({
-        target_type: z.enum(['story', 'source', 'evidence']),
-        // The story/source/evidence primary keys are uuid columns, so a non-uuid is a phantom id:
+        target_type: z.enum(['story', 'source']),
+        // The story/source primary keys are uuid columns, so a non-uuid is a phantom id:
         // reject it at the boundary (caps length AND fail-fast-rejects garbage) (PUB-API-PUBLISH-3).
         target_id: z.string().uuid(),
       }),
@@ -900,7 +900,7 @@ const republishRequestSchema = z.object({ block_cid: z.string().min(1) });
  * `(type, id)` coordinate the takedown / provenance use.
  */
 const reviewRequestSchema = z.object({
-  target_type: z.enum(['story', 'source', 'evidence']),
+  target_type: z.enum(['story', 'source']),
   target_id: z.string().min(1),
   state: z.enum(['pending', 'approved', 'rejected']),
   note: z.string().max(2000).optional(),

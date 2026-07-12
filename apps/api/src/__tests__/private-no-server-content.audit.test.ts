@@ -178,8 +178,9 @@ describe.skipIf(!DB_URL)(
 
     beforeAll(async () => {
       const { createDbClient, migrationsFolder, users } = await import('@licio/db');
-      const { defaultPersonalizationSettings, defaultPrivacySettings, emptyReputationSummary } =
-        await import('@licio/shared');
+      const { defaultPersonalizationSettings, defaultPrivacySettings } = await import(
+        '@licio/shared'
+      );
       const { migrate } = await import('drizzle-orm/postgres-js/migrator');
       db = createDbClient(DB_URL as string);
       await migrate(db, { migrationsFolder: migrationsFolder() });
@@ -192,7 +193,6 @@ describe.skipIf(!DB_URL)(
           ageBandIfKnown: 'adult',
           privacySettings: defaultPrivacySettings(),
           personalizationSettings: defaultPersonalizationSettings(),
-          reputationSummaryPrivate: emptyReputationSummary(),
         })
         .returning();
       userId = (inserted[0] as { userId: string }).userId;

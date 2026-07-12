@@ -14,11 +14,7 @@ import { sql } from 'drizzle-orm';
 import { check, index, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { users } from './user.js';
 
-export const takedownTargetTypeEnum = pgEnum('takedown_target_type', [
-  'story',
-  'source',
-  'evidence',
-]);
+export const takedownTargetTypeEnum = pgEnum('takedown_target_type', ['story', 'source']);
 
 export const takedownLegalBasisEnum = pgEnum('takedown_legal_basis', [
   'copyright',
@@ -39,7 +35,7 @@ export const takedownRequests = pgTable(
   {
     takedownId: uuid('takedown_id').primaryKey().defaultRandom(),
     targetType: takedownTargetTypeEnum('target_type').notNull(),
-    /** Polymorphic target (story/source/evidence id) — validated in service. */
+    /** Polymorphic target (story/source id) — validated in service. */
     targetId: uuid('target_id').notNull(),
     requesterContact: text('requester_contact').notNull(),
     legalBasis: takedownLegalBasisEnum('legal_basis').notNull(),

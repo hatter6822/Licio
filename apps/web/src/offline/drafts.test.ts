@@ -27,7 +27,7 @@ describe('saveDraft / loadDraft', () => {
       draftId: 'd1',
       storyId: null,
       threadId: null,
-      contributionType: 'evidence',
+      contributionType: 'comment',
       values: { headline: 'secret draft text' },
     });
 
@@ -48,7 +48,7 @@ describe('saveDraft / loadDraft', () => {
       draftId: 'd2',
       storyId: null,
       threadId: null,
-      contributionType: 'evidence',
+      contributionType: 'comment',
       values: { headline: 'plain' },
       updatedAt: Date.now(),
       encrypted: false,

@@ -16,7 +16,7 @@ export interface CohortExposureItem {
   itemId: string;
   sourceKey: string;
   topicIds: readonly string[];
-  /** Primary source / evidence card reachable from the item. */
+  /** Primary source (a published citation-bearing contribution) reachable from the item. */
   hasPrimaryEvidence: boolean;
   /** Discussion depth bucket midpoint (0 = none). */
   discussionDepth: number;

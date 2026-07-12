@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-T comment-first contribution route tests: live writes accept comments plus
-// evidence/correction enrichments, reject retired legacy write types, and keep rate limiting (429 + Retry-After), client-draft
-// dedup, depth/same-thread guards, safety holds, evidence co-creation
-// atomicity, event emission (ids only — never body text), and the
-// stored-XSS persistence half (bodies stored VERBATIM; render-time
-// sanitization is proven in @licio/shared's XSS suite against the same
-// stored value).
+// WS-T comment-first contribution route tests: live writes accept comments
+// (optionally sourced via citations) plus corrections, reject retired legacy
+// write types, and keep rate limiting (429 + Retry-After), client-draft
+// dedup, depth/same-thread guards, safety holds, event emission (ids only —
+// never body text), and the stored-XSS persistence half (bodies stored
+// VERBATIM; render-time sanitization is proven in @licio/shared's XSS suite
+// against the same stored value).
 import { randomUUID } from 'node:crypto';
 import {
   type ContributionPublic,
@@ -64,15 +64,16 @@ async function createOk(body: Record<string, unknown>): Promise<ContributionPubl
 }
 
 describe('WS-T.3.2 — comment-first write surface', () => {
-  it('creates comment, evidence, and correction writes and projects the public shape', async () => {
+  it('creates comment, sourced-comment, and correction writes and projects the public shape', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
-    const evidence = await createOk(contributionBody('evidence', threadId, { claimId }));
+    const sourced = await createOk(contributionBody('comment', threadId, { sourced: true }));
     // WS-T — a correction now challenges a comment (or the story), not a claim.
     const correction = await createOk(
       contributionBody('correction', threadId, { targetId: comment.contribution_id }),
     );
-    for (const created of [comment, evidence, correction]) {
-      expect(['comment', 'evidence', 'correction']).toContain(created.type);
+    expect(sourced.citations).toHaveLength(1);
+    for (const created of [comment, sourced, correction]) {
+      expect(['comment', 'correction']).toContain(created.type);
       expect(created.is_author).toBe(true);
       expect(created.moderation_state).toBe('published');
     }
@@ -92,24 +93,6 @@ describe('WS-T.3.2 — comment-first write surface', () => {
     );
     expect(reply.parent_contribution_id).toBe(parent.contribution_id);
     expect(reply.depth).toBe(1);
-  });
-
-  it('evidence co-creates its card atomically with shared linkage', async () => {
-    const res = await create(contributionBody('evidence', threadId, { claimId }));
-    expect(res.status).toBe(201);
-    const json = (await res.json()) as {
-      contribution: { contribution_id: string; metadata: { evidence_id?: string } };
-      evidence_card: { evidence_id: string; claim_id: string; contribution_id: string } | null;
-    };
-    expect(json.evidence_card).not.toBeNull();
-    expect(json.evidence_card?.claim_id).toBe(claimId);
-    expect(json.evidence_card?.contribution_id).toBe(json.contribution.contribution_id);
-    expect(json.contribution.metadata.evidence_id).toBe(json.evidence_card?.evidence_id);
-    const card = await fixture.ingestion.evidence.getById(json.evidence_card?.evidence_id ?? '');
-    expect(card?.relationshipType).toBe('contextualizes');
-    await fixture.settleAll();
-    const events = await fixture.events.eventStore.listByOwner(userId);
-    expect(events.some((e) => e.eventType === 'evidence.added')).toBe(true);
   });
 
   it('stores bodies VERBATIM (raw markdown; sanitization is render-time)', async () => {
@@ -174,7 +157,7 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(await errorCode(res)).toBe('target_under_debate');
   });
 
-  it('the Sources view + count include sourced comments, not just evidence', async () => {
+  it('the Sources view + count include citation-bearing comments only', async () => {
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     const storyId = thread?.storyId ?? '';
     await createOk(contributionBody('comment', threadId)); // plain — NOT sourced
@@ -182,7 +165,7 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
       ...contributionBody('comment', threadId),
       citations: [{ url: 'https://example.org/s' }],
     });
-    const evidence = await createOk(contributionBody('evidence', threadId, { claimId }));
+    const alsoSourced = await createOk(contributionBody('comment', threadId, { sourced: true }));
 
     const res = await app().request(
       new Request(`http://local/v1/stories/${storyId}/comments?filter=sources`, {
@@ -196,8 +179,8 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     };
     const ids = new Set(body.comments.map((c) => c.contribution_id));
     expect(ids.has(sourced.contribution_id)).toBe(true);
-    expect(ids.has(evidence.contribution_id)).toBe(true);
-    expect(body.overview.sources_count).toBe(2); // sourced comment + evidence
+    expect(ids.has(alsoSourced.contribution_id)).toBe(true);
+    expect(body.overview.sources_count).toBe(2); // the two sourced comments
     // The corrections filter path also resolves.
     const corr = await app().request(
       new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections`, {
@@ -258,8 +241,8 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
 describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
   it.each<[string, Record<string, unknown>]>([
     [
-      'evidence without citations',
-      { type: 'evidence', body: 'x', citations: [], target_claim_id: true },
+      'correction without citations',
+      { type: 'correction', body: 'x', citations: [], target_contribution_id: true },
     ],
     [
       'correction without a comment/story target',
@@ -286,7 +269,6 @@ describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
       client_draft_id: `draft-${_name}`,
       ...spec,
     };
-    if (spec['target_claim_id'] === true) body['target_claim_id'] = claimId;
     if (spec['target_contribution_id'] === true) {
       body['target_contribution_id'] = question.contribution_id;
     }
@@ -323,13 +305,22 @@ describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
     expect(res.status).toBe(400);
   });
 
-  it('rejects an unknown target claim (422 unknown_claim)', async () => {
-    const res = await create(
-      contributionBody('evidence', threadId, { claimId: '99999999-9999-4999-8999-999999999999' }),
-    );
+  it('rejects an unknown target claim (422 unknown_claim); a seeded claim passes', async () => {
+    // A correction's OPTIONAL claim linkage is still verified against the store.
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const res = await create({
+      ...contributionBody('correction', threadId, { storyId }),
+      target_claim_id: '99999999-9999-4999-8999-999999999999',
+    });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe('unknown_claim');
+    const ok = await create({
+      ...contributionBody('correction', threadId, { storyId }),
+      target_claim_id: claimId,
+    });
+    expect(ok.status).toBe(201);
   });
 });
 
@@ -437,7 +428,11 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
     });
     expect((await app().request(`http://local/v1/threads/${fresh.threadId}`)).status).toBe(404);
     expect(
-      (await app().request(`http://local/v1/threads/${fresh.threadId}/branches/questions`)).status,
+      (
+        await app().request(
+          `http://local/v1/threads/${fresh.threadId}/contributions?root=${randomUUID()}`,
+        )
+      ).status,
     ).toBe(404);
   });
 
@@ -457,7 +452,6 @@ describe('WS-G.3.1 — safety holds + report intake (§18.4)', () => {
     });
     const session = await seedUserWithSession(flagged.identity);
     const seeded = await seedThread(flagged);
-    const seededClaim = await seedClaim(flagged);
     const res = await app().request(
       jsonRequest(
         '/v1/contributions',
@@ -465,10 +459,9 @@ describe('WS-G.3.1 — safety holds + report intake (§18.4)', () => {
         {
           thread_id: seeded.threadId,
           client_draft_id: 'draft-flagged',
-          type: 'evidence',
+          type: 'comment',
           body: 'See this source.',
           citations: [{ url: 'https://evil.example/payload' }],
-          target_claim_id: seededClaim,
         },
         session.cookie,
       ),
@@ -495,7 +488,8 @@ describe('WS-G.3.1 — safety holds + report intake (§18.4)', () => {
       urgency: 'urgent',
     });
     expect(res.status).toBe(400);
-    const queue = await fixture.ingestion.reviewQueue.list({ kind: 'moderation_concern' }, 10);
+    // No review item of ANY kind was created by the rejected write.
+    const queue = await fixture.ingestion.reviewQueue.list({}, 10);
     expect(queue).toHaveLength(0);
   });
 });
@@ -534,8 +528,11 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     expect(res.status).toBe(404);
   });
 
-  it('edits cannot drop the evidence citation floor (422)', async () => {
-    const res = await create(contributionBody('evidence', threadId, { claimId }));
+  it('edits cannot drop the correction citation floor (422)', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    const res = await create(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
     const json = (await res.json()) as { contribution: { contribution_id: string } };
     const patch = await app().request(
       jsonRequest(

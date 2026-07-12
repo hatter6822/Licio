@@ -10,6 +10,7 @@
 // the full service container.
 import { randomUUID } from 'node:crypto';
 import {
+  type Citation,
   type ContributionPublic,
   EVENT_SCHEMA_VERSION,
   type InvariantSignal,
@@ -23,6 +24,7 @@ import {
 import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
 import {
   type AccountActionState,
+  type CitedContribution,
   type ContentSnapshot,
   type ContentVisibilityState,
   type ModerationContentPort,
@@ -101,6 +103,15 @@ export interface ContentPortDeps {
     contentKind: ReportContentKind | null,
     requesterUserId: string,
   ): Promise<boolean>;
+  /** STEWARD_ROLES.md evidence queue: published citation-bearing contributions
+   *  across all threads, `(created_at, id)` ascending keyset.  Absent ⇒ empty
+   *  queue (the in-memory seam). */
+  listCitedContributions?(opts: {
+    after: { createdAt: string; id: string } | null;
+    limit: number;
+  }): Promise<CitedContribution[]>;
+  /** One published citation-bearing contribution (decision validation). */
+  getCitedContribution?(contributionId: string): Promise<CitedContribution | null>;
   now: () => number;
 }
 
@@ -281,6 +292,118 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
       // seam in the in-memory path).
       if (deps.isContentReadable === undefined) return true;
       return deps.isContentReadable(targetId, contentKind, requesterUserId);
+    },
+
+    ...(deps.listCitedContributions ? { listCitedContributions: deps.listCitedContributions } : {}),
+    ...(deps.getCitedContribution ? { getCitedContribution: deps.getCitedContribution } : {}),
+  };
+}
+
+/** The narrow store surface the cited-contribution reads need (the WS-G
+ *  contribution store + the WS-F story/thread reads). */
+export interface CitedReadsDeps {
+  contributions: {
+    getById(contributionId: string): Promise<{
+      contributionId: string;
+      threadId: string;
+      type: 'comment' | 'correction';
+      body: string;
+      citations: Citation[];
+      moderationState: string;
+      createdAt: string;
+    } | null>;
+    listCited(opts: {
+      states?: readonly ('published' | 'under_review' | 'hidden' | 'removed')[];
+      after?: { createdAt: string; id: string } | null;
+      limit: number;
+    }): Promise<
+      Array<{
+        contributionId: string;
+        threadId: string;
+        type: 'comment' | 'correction';
+        body: string;
+        citations: Citation[];
+        createdAt: string;
+      }>
+    >;
+  };
+  stories: {
+    getThreadById(threadId: string): Promise<{ storyId: string } | null>;
+    getById(storyId: string): Promise<{ storyId: string; title: string } | null>;
+  };
+  /** WS-J thread-level removal (the WS-E item-safety row) — a removed thread's
+   *  contributions stay `published` on their own rows, but the thread's reads
+   *  are gone, so its citations must not surface in the queue or the public
+   *  primary-source list.  Absent ⇒ no thread gate (the bare test seam). */
+  threadRemoved?(threadId: string): Promise<boolean>;
+}
+
+/**
+ * The STEWARD_ROLES.md evidence-queue reads over the real WS-G/WS-F stores
+ * (boot wiring for `ContentPortDeps.listCitedContributions` /
+ * `getCitedContribution`): PUBLISHED citation-bearing contributions with the
+ * anchoring story title resolved for review context.  Extracted from the boot
+ * closure so the published-only gate and the title resolution are directly
+ * testable against real in-memory stores.
+ */
+export function createCitedContributionReads(deps: CitedReadsDeps): {
+  listCitedContributions: NonNullable<ContentPortDeps['listCitedContributions']>;
+  getCitedContribution: NonNullable<ContentPortDeps['getCitedContribution']>;
+} {
+  const resolveStory = async (
+    threadId: string,
+  ): Promise<{ storyId: string | null; storyTitle: string | null }> => {
+    const thread = await deps.stories.getThreadById(threadId);
+    const story = thread ? await deps.stories.getById(thread.storyId) : null;
+    return { storyId: story?.storyId ?? null, storyTitle: story?.title ?? null };
+  };
+  const project = async (row: {
+    contributionId: string;
+    threadId: string;
+    type: 'comment' | 'correction';
+    body: string;
+    citations: Citation[];
+    createdAt: string;
+  }): Promise<Omit<CitedContribution, 'threadRemoved'>> => {
+    const { storyId, storyTitle } = await resolveStory(row.threadId);
+    return {
+      contributionId: row.contributionId,
+      threadId: row.threadId,
+      storyId,
+      storyTitle,
+      type: row.type,
+      bodyPreview: row.body.slice(0, 280),
+      citations: row.citations,
+      createdAt: row.createdAt,
+    };
+  };
+  const threadRemoved = async (threadId: string): Promise<boolean> =>
+    deps.threadRemoved ? await deps.threadRemoved(threadId) : false;
+  return {
+    listCitedContributions: async ({ after, limit }) => {
+      const rows = await deps.contributions.listCited({ states: ['published'], after, limit });
+      const out: CitedContribution[] = [];
+      const removedByThread = new Map<string, boolean>();
+      for (const row of rows) {
+        let removed = removedByThread.get(row.threadId);
+        if (removed === undefined) {
+          removed = await threadRemoved(row.threadId);
+          removedByThread.set(row.threadId, removed);
+        }
+        // Removed-thread rows are RETURNED (flagged), never filtered: the
+        // queue skips them with its scan cursor, so a page of removed-thread
+        // rows still advances instead of reading as store exhaustion.
+        out.push({ ...(await project(row)), threadRemoved: removed });
+      }
+      return out;
+    },
+    getCitedContribution: async (contributionId) => {
+      const row = await deps.contributions.getById(contributionId);
+      if (row?.moderationState !== 'published' || row.citations.length === 0) return null;
+      // The single-row read is a hard gate (decision validation + the public
+      // primary-source projection): a removed thread's citation is ABSENT.
+      if (await threadRemoved(row.threadId)) return null;
+      return { ...(await project(row)), threadRemoved: false };
     },
   };
 }

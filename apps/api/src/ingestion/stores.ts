@@ -12,8 +12,6 @@ import type {
   ClaimRecordStatus,
   ContributionDisputeStatus,
   DisplayRestrictions,
-  EvidenceCardType,
-  EvidenceRelationshipType,
   LocationScope,
   MediaType,
   PublisherLineageEntry,
@@ -31,7 +29,6 @@ import type {
   TakedownTargetType,
   ThreadConversationState,
   ThreadSafetyState,
-  VerificationState,
 } from '@licio/shared';
 
 // ---------------------------------------------------------------------------
@@ -140,7 +137,6 @@ export interface SourceRecord {
   publisherLineage: PublisherLineageEntry[] | null;
   typicalTopics: string[];
   correctionHistory: SourceCorrection[];
-  evidenceTypeFrequency: Partial<Record<EvidenceRelationshipType, number>>;
   communityNotes: SourceCommunityNote[];
   displayRestrictions: DisplayRestrictions;
   createdAt: string;
@@ -171,27 +167,6 @@ export interface ClaimRecord {
   extractionSource: ClaimExtractionSource;
   extractionConfidence: number | null;
   modelVersion: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface EvidenceCardRecord {
-  evidenceId: string;
-  claimId: string;
-  sourceId: string | null;
-  /** The forum contribution that introduced this card (WS-G.1.3). */
-  contributionId: string | null;
-  /** Null = tombstoned submitter (account deleted; WS-G.1.3). */
-  submittedBy: string | null;
-  /** MATERIAL type (WS-G.1.3 canon: what the evidence IS). */
-  evidenceType: EvidenceCardType;
-  /** Claim relationship (the WS-F-era dimension, renamed at rest). */
-  relationshipType: EvidenceRelationshipType;
-  citationUrlOrRef: string;
-  relevanceNote: string;
-  verificationState: VerificationState;
-  independenceGroupId: string | null;
-  storyId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -247,8 +222,7 @@ export type ReviewKind =
   | 'url_safety_hold'
   | 'low_confidence_claim'
   // WS-G forum intake (the same WS-J.2 inbox).
-  | 'contribution_safety_hold'
-  | 'moderation_concern';
+  | 'contribution_safety_hold';
 
 export interface ReviewItemRecord {
   reviewId: string;
@@ -263,12 +237,7 @@ export interface ReviewItemRecord {
   createdAt: string;
 }
 
-export type EmbeddingTargetType =
-  | 'story'
-  | 'claim'
-  | 'source'
-  | 'evidence_card'
-  | 'community_interpretation';
+export type EmbeddingTargetType = 'story' | 'claim' | 'source' | 'community_interpretation';
 
 export interface EmbeddingRecord {
   targetType: EmbeddingTargetType;
@@ -439,11 +408,8 @@ export interface SourceStore {
   ): Promise<SourceRecord | null>;
   /** Append-mostly correction history (provenance preserved, WS-F.2.3a). */
   appendCorrection(sourceId: string, correction: SourceCorrection): Promise<SourceRecord | null>;
-  /** Incremental profile aggregates (WS-F.2.2a): merge topics, bump counts. */
-  recordObservation(
-    sourceId: string,
-    observation: { topicIds?: readonly string[]; evidenceType?: EvidenceRelationshipType },
-  ): Promise<void>;
+  /** Incremental profile aggregates (WS-F.2.2a): merge observed topics. */
+  recordObservation(sourceId: string, observation: { topicIds?: readonly string[] }): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -472,47 +438,6 @@ export interface ClaimStore {
    *  dedup): the SAME claim surfacing in another story shares this group so
    *  MERI never counts the copies as independent validation (Section 13.6). */
   setIndependenceGroup(claimId: string, groupId: string): Promise<ClaimRecord | null>;
-  clear(): Promise<void>;
-}
-
-/** Forum co-created card input (mirrors forum/stores.ts; unverified at birth). */
-export interface ForumEvidenceCardSinkInput {
-  evidenceId: string;
-  claimId: string;
-  sourceId: string | null;
-  contributionId: string | null;
-  submittedBy: string | null;
-  evidenceType: EvidenceCardType;
-  relationshipType: EvidenceRelationshipType;
-  citationUrlOrRef: string;
-  relevanceNote: string;
-  independenceGroupId: string | null;
-  storyId: string | null;
-}
-
-export interface EvidenceCardStore {
-  insert(record: Omit<EvidenceCardRecord, 'createdAt' | 'updatedAt'>): Promise<EvidenceCardRecord>;
-  getById(evidenceId: string): Promise<EvidenceCardRecord | null>;
-  listByClaim(claimId: string): Promise<EvidenceCardRecord[]>;
-  /** Most recent cards (search corpus). */
-  listRecent(limit: number): Promise<EvidenceCardRecord[]>;
-  /** Verification-state change (steward review / takedown actioning).
-   *  AUDITED at the call sites (WS-G.1.3: every transition writes an audit
-   *  record with actor, from, to, reason). */
-  updateVerification(
-    evidenceId: string,
-    state: VerificationState,
-  ): Promise<EvidenceCardRecord | null>;
-  /** WS-G.3.2 co-creation sink (transactional with the contribution). */
-  insertForumCard(card: ForumEvidenceCardSinkInput, createdAt: string): Promise<void>;
-  removeForumCard(evidenceId: string): Promise<void>;
-  /** DSAR export support (WS-D §19.3). */
-  listBySubmitter(userId: string): Promise<EvidenceCardRecord[]>;
-  /** WS-D.2.4 anonymize hook: tombstone the submitter. */
-  anonymizeUser(userId: string): Promise<void>;
-  /** WS-S.9 ROOM-SCOPED anonymize: tombstone the submitter ONLY on cards for the given stories
-   *  (the migrated room's). Other rooms' evidence is untouched. Returns the number detached. */
-  anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -648,7 +573,7 @@ export class InMemoryStoryStore implements StoryStore {
    *  written under one separator and read under another (room-tier dedup +
    *  canonical public linking would otherwise silently miss in this store). */
   #roomUrlKey(roomId: string, canonicalUrl: string): string {
-    return `${roomId} ${canonicalUrl}`;
+    return `${roomId}\x00${canonicalUrl}`;
   }
 
   /** The tier URL-slot key a story occupies, or null when it holds no slot
@@ -1028,7 +953,6 @@ export class InMemorySourceStore implements SourceStore {
       publisherLineage: null,
       typicalTopics: [],
       correctionHistory: [],
-      evidenceTypeFrequency: {},
       communityNotes: [],
       displayRestrictions: { noindex: false, noarchive: false, excerpt_max_chars: null },
       createdAt: at,
@@ -1076,20 +1000,15 @@ export class InMemorySourceStore implements SourceStore {
 
   async recordObservation(
     sourceId: string,
-    observation: { topicIds?: readonly string[]; evidenceType?: EvidenceRelationshipType },
+    observation: { topicIds?: readonly string[] },
   ): Promise<void> {
     const current = this.#sources.get(sourceId);
     if (!current) return;
     const topics = new Set(current.typicalTopics);
     for (const topic of observation.topicIds ?? []) topics.add(topic);
-    const frequency = { ...current.evidenceTypeFrequency };
-    if (observation.evidenceType) {
-      frequency[observation.evidenceType] = (frequency[observation.evidenceType] ?? 0) + 1;
-    }
     this.#sources.set(sourceId, {
       ...current,
       typicalTopics: [...topics].slice(0, 50),
-      evidenceTypeFrequency: frequency,
       updatedAt: nowIso(this.#now),
     });
   }
@@ -1208,90 +1127,6 @@ export class InMemoryClaimStore implements ClaimStore {
 
   async clear(): Promise<void> {
     this.#claims.clear();
-  }
-}
-
-export class InMemoryEvidenceCardStore implements EvidenceCardStore {
-  readonly #cards = new Map<string, EvidenceCardRecord>();
-  readonly #now: () => number;
-
-  constructor(now: () => number = Date.now) {
-    this.#now = now;
-  }
-
-  async insert(
-    record: Omit<EvidenceCardRecord, 'createdAt' | 'updatedAt'>,
-  ): Promise<EvidenceCardRecord> {
-    const at = nowIso(this.#now);
-    const full: EvidenceCardRecord = { ...record, createdAt: at, updatedAt: at };
-    this.#cards.set(full.evidenceId, full);
-    return full;
-  }
-
-  /** WS-G.3.2 co-creation sink (both-or-neither with the contribution). */
-  async insertForumCard(card: ForumEvidenceCardSinkInput, createdAt: string): Promise<void> {
-    this.#cards.set(card.evidenceId, {
-      ...card,
-      verificationState: 'unverified',
-      createdAt,
-      updatedAt: createdAt,
-    });
-  }
-
-  async removeForumCard(evidenceId: string): Promise<void> {
-    this.#cards.delete(evidenceId);
-  }
-
-  async listBySubmitter(userId: string): Promise<EvidenceCardRecord[]> {
-    return [...this.#cards.values()].filter((c) => c.submittedBy === userId);
-  }
-
-  async anonymizeUser(userId: string): Promise<void> {
-    for (const card of this.#cards.values()) {
-      if (card.submittedBy === userId) card.submittedBy = null;
-    }
-  }
-
-  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
-    const wanted = new Set(storyIds);
-    if (wanted.size === 0) return 0;
-    let count = 0;
-    for (const card of this.#cards.values()) {
-      if (card.submittedBy === userId && card.storyId !== null && wanted.has(card.storyId)) {
-        card.submittedBy = null;
-        count += 1;
-      }
-    }
-    return count;
-  }
-
-  async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {
-    return this.#cards.get(evidenceId) ?? null;
-  }
-
-  async listByClaim(claimId: string): Promise<EvidenceCardRecord[]> {
-    return [...this.#cards.values()].filter((c) => c.claimId === claimId);
-  }
-
-  async listRecent(limit: number): Promise<EvidenceCardRecord[]> {
-    return [...this.#cards.values()]
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, limit);
-  }
-
-  async updateVerification(
-    evidenceId: string,
-    state: VerificationState,
-  ): Promise<EvidenceCardRecord | null> {
-    const card = this.#cards.get(evidenceId);
-    if (!card) return null;
-    const updated = { ...card, verificationState: state, updatedAt: nowIso(this.#now) };
-    this.#cards.set(evidenceId, updated);
-    return updated;
-  }
-
-  async clear(): Promise<void> {
-    this.#cards.clear();
   }
 }
 

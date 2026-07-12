@@ -12,21 +12,21 @@ import { eventBaseShape } from './envelope.js';
 /**
  * The event-pipeline contribution taxonomy (WS-E.1.1c). `low_info_reply` is
  * explicitly included for anti-signal tracking (§5.3: counts as conversation
- * volume but not constructive participation). This is the SCORING taxonomy; the
- * client composer's eight modes (schemas/contribution.ts) map onto it at the
- * event-emission boundary (ask→question, explain→explanation, 1:1 otherwise).
+ * volume but not constructive participation). This is the SCORING taxonomy;
+ * the composer's two write types map onto it at the emission boundary
+ * (comment→explanation, correction→correction; the low-info classifier can
+ * downgrade a comment to low_info_reply).  `bridge_comment` and
+ * `steward_action` are SPEC-live concepts whose emitters are pending (the
+ * WS-H bridge flow / the WS-J console) — kept so their weights are ratified
+ * before the producers land; the types whose producing features were
+ * doctrinally retired (question/synthesis/counterexample/experience/flag)
+ * were removed with the WS-G-era write taxonomy.
  */
 export const EVENT_CONTRIBUTION_TYPES = [
-  'question',
-  'evidence',
   'correction',
-  'synthesis',
-  'counterexample',
   'explanation',
-  'experience',
   'bridge_comment',
   'steward_action',
-  'flag',
   'low_info_reply',
 ] as const;
 export type EventContributionType = (typeof EVENT_CONTRIBUTION_TYPES)[number];
@@ -57,43 +57,6 @@ export const contributionCreatedEventSchema = z
   })
   .strict();
 export type ContributionCreatedEvent = z.infer<typeof contributionCreatedEventSchema>;
-
-/** Evidence types carried by evidence cards (SPEC §22.1 `EvidenceCard`). */
-export const EVIDENCE_TYPES = [
-  'primary_source',
-  'dataset',
-  'transcript',
-  'legal_text',
-  'report',
-  'article',
-  'other',
-] as const;
-export type EvidenceType = (typeof EVIDENCE_TYPES)[number];
-export const evidenceTypeSchema = z.enum(EVIDENCE_TYPES);
-
-/** Emitted when an evidence card is submitted (SPEC §21.3 `evidence.added`). */
-export const evidenceAddedEventSchema = z
-  .object({
-    ...eventBaseShape,
-    event_type: z.literal('evidence.added'),
-    evidence_id: uuidSchema,
-    claim_id: uuidSchema,
-    thread_id: uuidSchema,
-    user_id: uuidSchema,
-    evidence_type: evidenceTypeSchema,
-    /**
-     * In-app source id backing the evidence (never an arbitrary URL); null
-     * for user-experience evidence with no web source (§22.1 EvidenceCard —
-     * WS-F.2.5a is the first real producer and surfaces both shapes).
-     */
-    source_id: uuidSchema.nullable(),
-    /** The contribution the card was attached to, when applicable. */
-    contribution_id: uuidSchema.nullable(),
-    privacy_classification: z.literal('public'),
-    retention_tier: z.literal('public_contribution'),
-  })
-  .strict();
-export type EvidenceAddedEvent = z.infer<typeof evidenceAddedEventSchema>;
 
 /** Claim lifecycle states (WS-E.1.1c). */
 export const CLAIM_STATUSES = [

@@ -437,3 +437,63 @@ export const coordinatedReportIncidents = pgTable(
 );
 export type CoordinatedReportIncidentRowDb = typeof coordinatedReportIncidents.$inferSelect;
 export type CoordinatedReportIncidentInsert = typeof coordinatedReportIncidents.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Evidence decisions (STEWARD_ROLES.md ROLE_EVIDENCE; SPEC §16.3).  Evidence
+// METADATA on citation-bearing contributions — never a content action.  The
+// evidence queue is DERIVED (citation-bearing published contributions with no
+// decision row), so this table needs only decisions, never queue state.
+// ---------------------------------------------------------------------------
+
+export const evidenceDecisionActionEnum = pgEnum('evidence_decision_action', [
+  'mark-primary-source',
+  'flag-citation',
+  'clear',
+]);
+
+export const evidenceDecisions = pgTable(
+  'evidence_decisions',
+  {
+    decisionId: uuid('decision_id').primaryKey().defaultRandom(),
+    // Plain uuids (no FK): moderation records must survive content-plane
+    // rewrites (the moderation_cases posture) — a decision on a since-removed
+    // contribution stays a valid accountability record.
+    contributionId: uuid('contribution_id').notNull(),
+    threadId: uuid('thread_id').notNull(),
+    storyId: uuid('story_id'),
+    action: evidenceDecisionActionEnum('action').notNull(),
+    /** NULL exactly for `clear` (contribution-level reviewed-no-annotation). */
+    citationUrl: text('citation_url'),
+    /** Decision-time citation title (denormalized for the public read). */
+    citationTitle: text('citation_title'),
+    reasonCode: text('reason_code'),
+    /** Internal reviewer note — console-visible only. */
+    note: text('note'),
+    /** The deciding steward.  The audit-actor posture is nullable + set-null
+     *  (like moderation_audit.actor_user_id): a hard right-to-erasure purge
+     *  severs the link while the decision record survives. */
+    decidedBy: uuid('decided_by').references(() => users.userId, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Shape rule: the two citation actions carry a citation; clear carries none.
+    check(
+      'evidence_decisions_citation_shape',
+      sql`(${t.action} = 'clear' and ${t.citationUrl} is null) or (${t.action} <> 'clear' and ${t.citationUrl} is not null)`,
+    ),
+    check('evidence_decisions_url_len', sql`char_length(${t.citationUrl}) <= 2048`),
+    index('evidence_decisions_contribution_idx').on(t.contributionId),
+    index('evidence_decisions_story_action_idx').on(t.storyId, t.action, t.createdAt),
+    index('evidence_decisions_created_idx').on(t.createdAt, t.decisionId),
+    // Duplicate protection (the store contract's cross-connection authority):
+    // one row per (contribution, citation, action); one `clear` per contribution.
+    uniqueIndex('evidence_decisions_citation_uq')
+      .on(t.contributionId, t.citationUrl, t.action)
+      .where(sql`${t.citationUrl} is not null`),
+    uniqueIndex('evidence_decisions_clear_uq')
+      .on(t.contributionId)
+      .where(sql`${t.action} = 'clear'`),
+  ],
+);
+export type EvidenceDecisionRowDb = typeof evidenceDecisions.$inferSelect;
+export type EvidenceDecisionInsert = typeof evidenceDecisions.$inferInsert;

@@ -139,7 +139,6 @@ import { createContractVerifier } from './identity/siwe.js';
 import {
   DrizzleClaimStore,
   DrizzleEmbeddingStore,
-  DrizzleEvidenceCardStore,
   DrizzleFreshnessStore,
   DrizzleLifecycleAuditStore,
   DrizzleReviewQueueStore,
@@ -242,6 +241,7 @@ import {
 import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
 import { noticeToView } from './moderation/notices.js';
 import {
+  createCitedContributionReads,
   createProductionContentPort,
   createProductionEventPort,
   createProductionInvariantPort,
@@ -460,7 +460,6 @@ if (db) {
   ingestionServices.sources = new DrizzleSourceStore(db);
   ingestionServices.syndications = new DrizzleSyndicationStore(db);
   ingestionServices.claims = new DrizzleClaimStore(db);
-  ingestionServices.evidence = new DrizzleEvidenceCardStore(db);
   ingestionServices.signatures = new DrizzleSignatureStore(db);
   ingestionServices.lifecycleAudits = new DrizzleLifecycleAuditStore(db);
   ingestionServices.freshness = new DrizzleFreshnessStore(db);
@@ -566,7 +565,7 @@ setInvariantServices(invariantServices);
 await seedMeriRankingEnforcement(invariantServices, makeJobLease());
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
 // closures (MERI redundancy, MFCI intake).
-registerInvariantConsumers(eventServices, ingestionServices, identityServices, invariantServices);
+registerInvariantConsumers(eventServices, ingestionServices, invariantServices);
 
 // --- WS-I ranking and distribution (SPEC §13) -------------------------------
 // The eight-stage feed pipeline: candidate generation → feature join →
@@ -612,14 +611,13 @@ setRankingServices(rankingServices);
 identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
 identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
 // The CONTENT half of the data-rights hooks (WS-F stories + WS-G forum/
-// evidence/rooms/uploads, WS-Q.3.5 tier tagging) is composed in the testable
+// rooms/uploads, WS-Q.3.5 tier tagging) is composed in the testable
 // forum/data-rights module. Export is COMPLETE (§19.3 / GDPR Art. 15) and
 // covers BOTH visibility tiers; anonymize tombstones the author across tiers
 // and removes (private-room) memberships + steward rows.
 identityServices.exportContributions = (userId) =>
   exportUserContent(ingestionServices, forumServices, userId);
-identityServices.anonymizeContributions = (userId) =>
-  anonymizeUserContent(ingestionServices, forumServices, userId);
+identityServices.anonymizeContributions = (userId) => anonymizeUserContent(forumServices, userId);
 identityServices.onPrivacyChange = (change) => {
   void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>
     logger.error({ err }, 'retention preference propagation failed'),
@@ -717,6 +715,16 @@ const moderationServices = createInMemoryModerationServices({
       const c = await forumServices.contributions.getById(id);
       return c ? { userId: c.userId } : null;
     },
+    // STEWARD_ROLES.md evidence queue: the published-only cited reads over the
+    // real WS-G/WS-F stores (the testable factory in production-ports.ts).
+    ...createCitedContributionReads({
+      contributions: forumServices.contributions,
+      stories: ingestionServices.stories,
+      // WS-J thread removal rides the WS-E item-safety row (the same read the
+      // thread routes consult) — a removed thread's citations never surface.
+      threadRemoved: async (threadId) =>
+        (await eventServices.safetyStore.get(threadId))?.safetyState === 'removed',
+    }),
     // WS-J #23: a thread report target → the thread's story owner.
     getThread: async (threadId) => {
       const thread = await ingestionServices.stories.getThreadById(threadId);
@@ -941,6 +949,7 @@ if (db) {
   moderationServices.notices = stores.notices;
   moderationServices.reviewerStatus = stores.reviewerStatus;
   moderationServices.incidents = stores.incidents;
+  moderationServices.evidenceDecisions = stores.evidenceDecisions;
   moderationServices.configStore = new DrizzlePwattConfigStore(db);
 }
 // WS-J ↔ WS-D DSAR: the user's moderation notices (statement-of-reasons +
@@ -1475,7 +1484,6 @@ if (env.NODE_ENV !== 'production') {
           ...ingestionServices,
           stories: new DrizzleStoryStore(tx),
           claims: new DrizzleClaimStore(tx),
-          evidence: new DrizzleEvidenceCardStore(tx),
           signatures: new DrizzleSignatureStore(tx),
           reviewQueue: new DrizzleReviewQueueStore(tx),
         };

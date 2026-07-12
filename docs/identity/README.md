@@ -36,7 +36,7 @@ interfaces.
 
 | File | Contents |
 |---|---|
-| `schemas/user.ts` | `userAccountStateSchema`, `ageBandSchema`, `handleSchema`, `userCreate/Update/Public/Private`, `reputationSummaryPrivate`, `deriveAgeBand` (age-gate) |
+| `schemas/user.ts` | `userAccountStateSchema`, `ageBandSchema`, `handleSchema`, `userCreate/Update/Public/Private`, `deriveAgeBand` (age-gate) |
 | `schemas/privacy-settings.ts` | `PrivacySettings`/`PersonalizationSettings`, defaults, **teen-floor** clamp (idempotent, monotone-toward-privacy), forward migration |
 | `schemas/identity-records.ts` | zod mirrors of session / user_auth / WebAuthn / auth-wallet / WalletAccount rows; unlink state machine |
 | `schemas/auth-api.ts`, `schemas/privacy-api.ts` | request/response wire contracts |
@@ -44,8 +44,8 @@ interfaces.
 
 ### `packages/db` — Drizzle schema + isolation (`tsc`-checked, gated integration tests)
 
-- Tables: `users` (+ JSONB `privacy_settings`/`personalization_settings`/
-  `reputation_summary_private`), `user_auth` (**no password column**), `sessions`
+- Tables: `users` (+ JSONB `privacy_settings`/`personalization_settings`),
+  `user_auth` (**no password column**), `sessions`
   (token stored as `sha256`; NO IP, NO location — only a coarse device descriptor),
   `webauthn_credentials`,
   `wallet_auth_credentials` (identity context), `audit_log`, `export_jobs`,
@@ -157,8 +157,8 @@ double-submit token).
 - **Deletion really deletes** — the hourly purge job anonymizes contributions,
   deletes EVERY export archive from object storage, revokes every session
   (including a grace-period cancel-only re-login), tombstones the row to a bare
-  FK stub (collision-safe `deleted_` + 22-hex handle; settings and reputation
-  reset to pristine defaults), and writes a `deletion_complete` audit carrying
+  FK stub (collision-safe `deleted_` + 22-hex handle; settings reset to
+  pristine defaults), and writes a `deletion_complete` audit carrying
   only a **hashed** user id (proof of deletion without retaining it).
 - **Suspended ⇒ no session, ever** — the account-state gate at the session-mint
   chokepoint denies a suspended/deleted account a session even after a valid

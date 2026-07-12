@@ -5,9 +5,9 @@
 // boot swaps in the Drizzle adapters from drizzle-forum-stores.ts, and the
 // gated integration tests exercise the same interfaces against live
 // Postgres).  In-memory adapters are SEMANTICALLY faithful — client-draft
-// dedup uniqueness, transactional contribution+evidence co-creation,
-// case-insensitive room-name uniqueness, `(room_id, lens_type)` uniqueness —
-// so unit tests catch contract violations, not adapter quirks.
+// dedup uniqueness, case-insensitive room-name uniqueness,
+// `(room_id, lens_type)` uniqueness — so unit tests catch contract
+// violations, not adapter quirks.
 
 import type {
   Citation,
@@ -15,12 +15,9 @@ import type {
   ContributionMetadata,
   ContributionModerationState,
   ContributionType,
-  EvidenceCardType,
-  EvidenceRelationshipType,
   GovernanceMode,
   LensType,
   RoomJoinModel,
-  RoomNotificationPreferences,
   RoomPostingPolicy,
   RoomStewardRole,
   RoomStorageMode,
@@ -116,7 +113,6 @@ export interface RoomSubscriptionRecord {
    *  state.  Set when the member joins and changed only via the room's lens
    *  control (never the reading/filter lens). */
   lensId: string | null;
-  notificationPreferences: RoomNotificationPreferences;
   requestedAt: string;
   joinedAt: string | null;
 }
@@ -147,21 +143,6 @@ export interface UploadRecord {
   createdAt: string;
 }
 
-/** The evidence-card shape the forum co-creates (mirrors ingestion's record). */
-export interface ForumEvidenceCardInput {
-  evidenceId: string;
-  claimId: string;
-  sourceId: string | null;
-  submittedBy: string | null;
-  evidenceType: EvidenceCardType;
-  relationshipType: EvidenceRelationshipType;
-  citationUrlOrRef: string;
-  relevanceNote: string;
-  independenceGroupId: string | null;
-  storyId: string | null;
-  contributionId: string | null;
-}
-
 /** Keyset cursor over `(created_at, id)` ascending.  For a comment SECTION read
  *  (roots/children) it also carries the cursor row's dispute sink so `incorrect`
  *  rows stay pinned to the bottom across pagination (WS-T); other reads leave it
@@ -183,17 +164,15 @@ export type ContributionInsertOutcome =
 
 export interface ContributionStore {
   /**
-   * Insert a contribution — atomically with its evidence card when given
-   * (WS-G.3.2: both persist or neither).  `client_draft_id` dedup is
-   * race-safe: a concurrent duplicate returns the EXISTING row with
-   * `duplicate: true` (idempotent create, WS-G.3.1).
+   * Insert a contribution.  `client_draft_id` dedup is race-safe: a
+   * concurrent duplicate returns the EXISTING row with `duplicate: true`
+   * (idempotent create, WS-G.3.1).
    */
   insert(
     record: Omit<
       ContributionRecord,
       'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
     >,
-    evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome>;
   getById(contributionId: string): Promise<ContributionRecord | null>;
   getByDraft(userId: string, clientDraftId: string): Promise<ContributionRecord | null>;
@@ -214,9 +193,8 @@ export interface ContributionStore {
     opts: {
       types?: readonly ContributionType[];
       states?: readonly ContributionModerationState[];
-      /** WS-T — restrict to SOURCED roots (an `evidence` card, or a comment that
-       *  carries ≥1 citation): the "Sources" view, which is more than just the
-       *  `evidence` type. */
+      /** WS-T — restrict to SOURCED roots (a comment carrying ≥1 citation):
+       *  the "Sources" view. */
       sourced?: boolean;
       after?: CreatedAtCursor | null;
       limit: number;
@@ -249,9 +227,18 @@ export interface ContributionStore {
   ): Promise<Partial<Record<ContributionType, number>>>;
   /** WS-T — count a thread's contributions in the given dispute status. */
   countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number>;
-  /** WS-T — count a thread's SOURCED contributions (evidence cards + comments
-   *  carrying ≥1 citation) in the given states — the "Sources" overview count. */
+  /** WS-T — count a thread's SOURCED contributions (comments carrying ≥1
+   *  citation) in the given states — the "Sources" overview count. */
   countSourced(threadId: string, states: readonly ContributionModerationState[]): Promise<number>;
+  /** Citation-bearing contributions ACROSS ALL THREADS (sourced comments +
+   *  corrections — every row carrying ≥ 1 citation), `(created_at, id)`
+   *  ascending keyset — the WS-J evidence-queue feed (STEWARD_ROLES.md
+   *  ROLE_EVIDENCE reviews sourced comments and their citations). */
+  listCited(opts: {
+    states?: readonly ContributionModerationState[];
+    after?: CreatedAtCursor | null;
+    limit: number;
+  }): Promise<ContributionRecord[]>;
   /** Child counts for the given parents (published children only). */
   childCounts(contributionIds: readonly string[]): Promise<Map<string, number>>;
   /** Update body/citations/metadata, snapshotting the previous values into
@@ -273,11 +260,11 @@ export interface ContributionStore {
     contributionId: string,
     status: ContributionDisputeStatus,
   ): Promise<ContributionRecord | null>;
-  /** WS-J.2.6 compensation: HARD-delete a just-created contribution (and its
-   *  co-created evidence card) when the safety intake that should hide it fails.
-   *  Reverses the insert — including the `client_draft_id` dedup mapping — so the
-   *  client's retry recreates BOTH the row and its intake, never leaving content
-   *  hidden with no queue item / appeal notice.  A no-op for an unknown id. */
+  /** WS-J.2.6 compensation: HARD-delete a just-created contribution when the
+   *  safety intake that should hide it fails.  Reverses the insert — including
+   *  the `client_draft_id` dedup mapping — so the client's retry recreates BOTH
+   *  the row and its intake, never leaving content hidden with no queue item /
+   *  appeal notice.  A no-op for an unknown id. */
   purgeForRollback(contributionId: string): Promise<void>;
   /** DSAR export page (WS-D §19.3): `(created_at, id)` ascending. */
   listByUser(
@@ -294,8 +281,8 @@ export interface ContributionStore {
   /**
    * WS-S.9 (PRIVATE_SPEC §24.2, phase 6 — `purge`) — IRREVERSIBLY hard-delete
    * EVERY contribution (any author, any moderation state) for the given threads,
-   * with its co-created evidence card, edit history, and `client_draft_id` dedup
-   * mapping (mirroring {@link ContributionStore.purgeForRollback} but room-wide).
+   * with its edit history and `client_draft_id` dedup mapping (mirroring
+   * {@link ContributionStore.purgeForRollback} but room-wide).
    * Unlike `anonymizeUser` (which detaches only ONE user's authorship), this
    * removes ALL members' content for a migrated room — the §24.2 minimization the
    * migration wizard promises. Returns the number of rows removed. Idempotent: a
@@ -482,12 +469,11 @@ function disputeSinkOf(record: { disputeStatus: ContributionDisputeStatus }): 0 
 }
 
 /**
- * WS-T — a row belongs to the "Sources" view when it is an `evidence` card OR a
- * comment carrying at least one citation (the exact predicate the client's
- * "Sourced" badge uses).  A sourced comment is first-class source participation,
- * not just the dedicated `evidence` type. */
+ * WS-T — a row belongs to the "Sources" view when it is a comment carrying at
+ * least one citation (the exact predicate the client's "Sourced" badge uses).
+ * A sourced comment is first-class source participation. */
 function isSourcedRow(record: Pick<ContributionRecord, 'type' | 'citations'>): boolean {
-  return record.type === 'evidence' || (record.type === 'comment' && record.citations.length > 0);
+  return record.type === 'comment' && record.citations.length > 0;
 }
 
 /**
@@ -522,26 +508,18 @@ function afterSinkCursor(
     : afterCursor(row, row.contributionId, after);
 }
 
-/** The forum's view of the evidence-card store (implemented by ingestion). */
-export interface EvidenceCardSink {
-  insertForumCard(card: ForumEvidenceCardInput, createdAt: string): Promise<void>;
-  removeForumCard(evidenceId: string): Promise<void>;
-}
-
 export class InMemoryContributionStore implements ContributionStore {
   readonly #rows = new Map<string, ContributionRecord>();
   readonly #edits = new Map<string, ContributionEditRecord[]>();
   readonly #byDraft = new Map<string, string>();
   readonly #now: Clock;
-  readonly #evidenceSink: EvidenceCardSink | null;
 
-  constructor(now: Clock = Date.now, evidenceSink: EvidenceCardSink | null = null) {
+  constructor(now: Clock = Date.now) {
     this.#now = now;
-    this.#evidenceSink = evidenceSink;
   }
 
   #draftKey(userId: string, clientDraftId: string): string {
-    return `${userId} ${clientDraftId}`;
+    return `${userId}\x00${clientDraftId}`;
   }
 
   async insert(
@@ -549,7 +527,6 @@ export class InMemoryContributionStore implements ContributionStore {
       ContributionRecord,
       'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
     >,
-    evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome> {
     if (record.userId !== null) {
       const existingId = this.#byDraft.get(this.#draftKey(record.userId, record.clientDraftId));
@@ -569,20 +546,9 @@ export class InMemoryContributionStore implements ContributionStore {
       createdAt: at,
       updatedAt: at,
     };
-    // Both-or-neither semantics for the evidence co-create (WS-G.3.2).
-    if (evidenceCard && this.#evidenceSink) {
-      await this.#evidenceSink.insertForumCard(evidenceCard, at);
-    }
-    try {
-      this.#rows.set(full.contributionId, full);
-      if (full.userId !== null) {
-        this.#byDraft.set(this.#draftKey(full.userId, full.clientDraftId), full.contributionId);
-      }
-    } catch (error) {
-      if (evidenceCard && this.#evidenceSink) {
-        await this.#evidenceSink.removeForumCard(evidenceCard.evidenceId);
-      }
-      throw error;
+    this.#rows.set(full.contributionId, full);
+    if (full.userId !== null) {
+      this.#byDraft.set(this.#draftKey(full.userId, full.clientDraftId), full.contributionId);
     }
     return { ok: true, contribution: full, duplicate: false };
   }
@@ -719,6 +685,30 @@ export class InMemoryContributionStore implements ContributionStore {
     return count;
   }
 
+  async listCited(opts: {
+    states?: readonly ContributionModerationState[];
+    after?: CreatedAtCursor | null;
+    limit: number;
+  }): Promise<ContributionRecord[]> {
+    const states = opts.states ? new Set(opts.states) : null;
+    const after = opts.after ?? null;
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.citations.length > 0 &&
+          (states === null || states.has(row.moderationState)) &&
+          (after === null ||
+            row.createdAt > after.createdAt ||
+            (row.createdAt === after.createdAt && row.contributionId > after.id)),
+      )
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.contributionId.localeCompare(b.contributionId),
+      )
+      .slice(0, opts.limit);
+  }
+
   async childCounts(contributionIds: readonly string[]): Promise<Map<string, number>> {
     const wanted = new Set(contributionIds);
     const counts = new Map<string, number>();
@@ -797,11 +787,6 @@ export class InMemoryContributionStore implements ContributionStore {
     if (row.userId !== null) {
       this.#byDraft.delete(this.#draftKey(row.userId, row.clientDraftId));
     }
-    // Reverse the co-created evidence card too (insert is both-or-neither).
-    const evidenceId = row.metadata.evidence_id;
-    if (typeof evidenceId === 'string' && this.#evidenceSink) {
-      await this.#evidenceSink.removeForumCard(evidenceId);
-    }
   }
 
   async listByUser(
@@ -846,16 +831,12 @@ export class InMemoryContributionStore implements ContributionStore {
     if (wanted.size === 0) return 0;
     const doomed = [...this.#rows.values()].filter((row) => wanted.has(row.threadId));
     for (const row of doomed) {
-      // Reverse every trace of the contribution: the row, its edit history, the
-      // client_draft_id dedup mapping, and its co-created evidence card.
+      // Reverse every trace of the contribution: the row, its edit history, and
+      // the client_draft_id dedup mapping.
       this.#rows.delete(row.contributionId);
       this.#edits.delete(row.contributionId);
       if (row.userId !== null) {
         this.#byDraft.delete(this.#draftKey(row.userId, row.clientDraftId));
-      }
-      const evidenceId = row.metadata.evidence_id;
-      if (typeof evidenceId === 'string' && this.#evidenceSink) {
-        await this.#evidenceSink.removeForumCard(evidenceId);
       }
     }
     return doomed.length;
@@ -923,7 +904,7 @@ export class InMemoryRoomStore implements RoomStore {
   }
 
   #subKey(roomId: string, userId: string): string {
-    return `${roomId} ${userId}`;
+    return `${roomId}\x00${userId}`;
   }
 
   async insert(record: RoomInsertInput): Promise<RoomCreateOutcome> {
@@ -1050,7 +1031,7 @@ export class InMemoryRoomStore implements RoomStore {
   }
 
   async upsertSubscription(record: RoomSubscriptionRecord): Promise<RoomSubscriptionRecord> {
-    const full = { ...record, notificationPreferences: { ...record.notificationPreferences } };
+    const full = { ...record };
     this.#subscriptions.set(this.#subKey(record.roomId, record.userId), full);
     return full;
   }

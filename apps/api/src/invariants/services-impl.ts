@@ -188,6 +188,7 @@ export class MeriService extends BaseInvariantService {
     for (const target of targets) {
       const candidates = await assembleMeriCandidates(
         this.deps.ingestion,
+        this.deps.forum,
         null,
         config.meriCandidateLimit,
         config.meriNearDuplicateThreshold,

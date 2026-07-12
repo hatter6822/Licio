@@ -46,6 +46,7 @@ function featureDeps() {
     events: fixture.events,
     ingestion: fixture.ingestion,
     invariants: fixture.invariants,
+    forum: fixture.forum,
     featureStore: fixture.ranking.featureStore,
     log: fixture.ranking.log,
     now: fixture.ranking.now,

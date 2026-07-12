@@ -48,7 +48,7 @@ async function createDirect(body: Record<string, unknown>) {
 
 describe('edit/remove edges (§15.5)', () => {
   it('rejects edits to removed/hidden contributions (409) and unknown ids (404)', async () => {
-    const created = await createDirect(contributionBody('question', threadId));
+    const created = await createDirect(contributionBody('comment', threadId));
     await fixture.forum.contributions.setModerationState(created.contributionId, 'removed');
     const locked = await editContribution(bundle(), userId, created.contributionId, {
       contribution_id: created.contributionId,
@@ -66,7 +66,9 @@ describe('edit/remove edges (§15.5)', () => {
   });
 
   it('enforces the per-type body cap on edits (422)', async () => {
-    const created = await createDirect(contributionBody('question', threadId));
+    // A correction's cap (2 000) is BELOW the wire max (5 000), so this proves
+    // the edit path re-validates against the STORED type's cap.
+    const created = await createDirect(contributionBody('correction', threadId));
     const tooLong = await editContribution(bundle(), userId, created.contributionId, {
       contribution_id: created.contributionId,
       body: 'q'.repeat(2_001),
@@ -97,7 +99,7 @@ describe('edit/remove edges (§15.5)', () => {
   });
 
   it('removal is idempotent and 404s for non-authors/unknown ids', async () => {
-    const created = await createDirect(contributionBody('question', threadId));
+    const created = await createDirect(contributionBody('comment', threadId));
     const first = await removeContribution(bundle(), userId, created.contributionId);
     expect(first.ok).toBe(true);
     const second = await removeContribution(bundle(), userId, created.contributionId);
@@ -157,7 +159,7 @@ describe('create-guard edges', () => {
       [altless.uploadId, 'attachment_alt_required'],
     ] as const) {
       const outcome = await createContribution(bundle(), userId, `ref-${userId}`, {
-        ...contributionBody('question', threadId),
+        ...contributionBody('comment', threadId),
         attachment_ids: [uploadId],
       } as unknown as ContributionCreate);
       expect(outcome.ok).toBe(false);
@@ -176,7 +178,7 @@ describe('create-guard edges', () => {
     expect(inserted.ok).toBe(true);
     if (!inserted.ok) return;
     const outcome = await createContribution(bundle(), userId, `ref-${userId}`, {
-      ...contributionBody('question', threadId),
+      ...contributionBody('comment', threadId),
       lens_id: inserted.lens.lensId,
     } as unknown as ContributionCreate);
     expect(outcome.ok).toBe(false);
@@ -185,8 +187,8 @@ describe('create-guard edges', () => {
 
   it('belt-and-suspenders body cap fires for direct service callers', async () => {
     const outcome = await createContribution(bundle(), userId, `ref-${userId}`, {
-      ...contributionBody('question', threadId),
-      body: 'q'.repeat(2_001),
+      ...contributionBody('comment', threadId),
+      body: 'q'.repeat(5_001),
     } as unknown as ContributionCreate);
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect([400, 422]).toContain(outcome.rejection.status);
@@ -197,7 +199,7 @@ describe('create-guard edges', () => {
       bundle(),
       userId,
       `ref-${userId}`,
-      contributionBody('question', randomUUID()) as unknown as ContributionCreate,
+      contributionBody('comment', randomUUID()) as unknown as ContributionCreate,
     );
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.rejection.status).toBe(404);
@@ -208,7 +210,7 @@ describe('WS-J.2.6 safety-intake durability (KEC1S)', () => {
   it('purges a held contribution when the intake write fails, so a retry recreates it', async () => {
     const draftId = 'draft-kec1s';
     const body = {
-      ...contributionBody('question', threadId),
+      ...contributionBody('comment', threadId),
       client_draft_id: draftId,
     } as unknown as ContributionCreate;
     // Force a BLOCK disposition (the content would be inserted `removed`).

@@ -38,10 +38,9 @@ const badgeBase =
 /** A single-line meta row: `Author · 3h` with typed-card / sourced / dispute
  *  tags.  The full localized timestamp is on the `<time>`'s `title`/`dateTime`. */
 export function CommentHeader({ comment }: { comment: CommentItemType }): React.ReactElement {
-  const typeTag =
-    comment.type === 'evidence' ? 'Source' : comment.type === 'correction' ? 'Correction' : null;
+  const typeTag = comment.type === 'correction' ? 'Correction' : null;
   // A plain comment carrying a source link is "sourced" — greater participation
-  // (never applause; the badge marks the presence of evidence, not popularity).
+  // (never applause; the badge marks the presence of sources, not popularity).
   const sourced = comment.type === 'comment' && comment.citations.length > 0;
   return (
     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm leading-tight">

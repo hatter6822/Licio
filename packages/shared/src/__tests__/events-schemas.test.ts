@@ -62,16 +62,7 @@ describe('content events (WS-E.1.1a)', () => {
 
   it('submission_type enum is exhaustive per SPEC §14.1 (+ WS-Q media)', () => {
     expect([...SUBMISSION_TYPES].sort()).toEqual(
-      [
-        'link',
-        'original_brief',
-        'question',
-        'evidence_card',
-        'local_update',
-        'live_thread',
-        'image_post',
-        'video_post',
-      ].sort(),
+      ['link', 'original_brief', 'image_post', 'video_post'].sort(),
     );
     for (const submissionType of SUBMISSION_TYPES) {
       expect(
@@ -80,6 +71,16 @@ describe('content events (WS-E.1.1a)', () => {
           submission_type: submissionType,
         }).success,
       ).toBe(true);
+    }
+    // The retired write-taxonomy discriminators must be structurally rejected.
+    for (const retired of ['question', 'local_update', 'live_thread']) {
+      expect(
+        contentSubmittedEventSchema.safeParse({
+          ...EVENT_FIXTURES['content.submitted'],
+          submission_type: retired,
+        }).success,
+        `retired submission_type ${retired} must be rejected`,
+      ).toBe(false);
     }
   });
 
@@ -234,6 +235,10 @@ describe('attention events (WS-E.1.1b) — the privacy-critical schema', () => {
 
 describe('contribution events (WS-E.1.1c)', () => {
   it('parses each contribution type; low_info_reply is present for anti-signals', () => {
+    // The post-retirement event taxonomy is exactly the five live types.
+    expect([...EVENT_CONTRIBUTION_TYPES].sort()).toEqual(
+      ['correction', 'explanation', 'bridge_comment', 'steward_action', 'low_info_reply'].sort(),
+    );
     expect(EVENT_CONTRIBUTION_TYPES).toContain('low_info_reply');
     expect(EVENT_CONTRIBUTION_TYPES).toContain('bridge_comment');
     expect(EVENT_CONTRIBUTION_TYPES).toContain('steward_action');

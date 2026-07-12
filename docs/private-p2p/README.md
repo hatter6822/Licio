@@ -485,6 +485,23 @@ for a future swap to an audited WASM build (tracked residual).
 | `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate; **and the WS-S.6.6 rendezvous suite** — the TTL clamp, the §15.3.1 no-existence-oracle (poll never 404s), re-announce-replaces, the signal queue/drain round-trip, aggregate-only metrics, the sweep, route shape-validation/oversized rejection, and the full-app CSRF-exempt mount |
 | `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 
+## Protocol-evolution note — the §13.5 op.v1 vocabulary is frozen
+
+A private room's log is IMMUTABLE SIGNED history: server rows and client
+drafts get migrations, but a sealed `licio.private.op.v1` entry can never be
+rewritten.  When the WS-G-era write taxonomy was removed, op.v1 therefore
+KEPT its historical wire vocabulary (`opV1ContributionTypeSchema` /
+`opV1SubmissionTypeSchema` in `schemas/ops.ts` — frozen protocol constants,
+deliberately independent of the living shared taxonomy): every
+historically-valid value still parses, and retired values NORMALIZE to the
+live model at parse time (retired contribution types → `comment`, retired
+submission types → `original_brief` — the same maps server migration 0076
+applies to mutable rows), so replay/convergence can never diverge across
+version skew.  New writes emit live values only (the shipped `room-manager`
+never produced the retired ones).  This matches LCAP's §12.1 retention
+choice; a future op.v2 may narrow the wire vocabulary itself behind a
+`schema` literal bump.
+
 ## Residuals (the next slices)
 
 The pure protocol core is complete through WS-S.6.5; the remaining work is the

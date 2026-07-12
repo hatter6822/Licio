@@ -1162,18 +1162,12 @@ type ContributionCreateOp = {
   type: 'contribution.create';
   contribution_id: string;
   thread_id: string;
-  contribution_type:
-    | 'question'
-    | 'answer'
-    | 'evidence'
-    | 'correction'
-    | 'synthesis'
-    | 'counterexample'
-    | 'explanation'
-    | 'local_context'
-    | 'direct_experience'
-    | 'moderation_concern'
-    | 'meta_discussion';
+  // The op.v1 WIRE vocabulary is FROZEN (an op is immutable signed history):
+  // every historically-valid value still parses; retired values NORMALIZE to
+  // the live model at parse time (retired contribution types → 'comment' —
+  // the same map server migration 0076 applies to mutable rows).  New writes
+  // emit the live two-type taxonomy only.
+  contribution_type: 'comment' | 'correction'; // normalized; wire accepts op.v1's historical set
   body_markdown_lite: string;
   citations: Citation[];
   metadata: Record<string, unknown>;
@@ -1185,7 +1179,7 @@ type ContributionCreateOp = {
 };
 ```
 
-Private contribution validation SHOULD mirror server-hosted rules: typed body caps, citations for evidence/corrections, answer-to-question parent validation, maximum tree depth, lens belongs to room, and attachment validation.
+Private contribution validation SHOULD mirror server-hosted rules: typed body caps, at least one citation on a correction, maximum tree depth, lens belongs to room, and attachment validation.
 
 ### 13.6 Attachment manifest
 

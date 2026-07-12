@@ -64,7 +64,7 @@ export async function buildSimTestGraph(): Promise<SimulatorServiceGraph> {
   registerForumConsumers(events, ingestion, forum);
   const invariants = createInMemoryInvariantServices(events, identity, ingestion, forum);
   await invariants.reloadConfig();
-  registerInvariantConsumers(events, ingestion, identity, invariants);
+  registerInvariantConsumers(events, ingestion, invariants);
   const ranking = createInMemoryRankingServices(events, identity, ingestion, forum, invariants);
   await ranking.reloadConfig();
   registerRankingConsumers(ranking);

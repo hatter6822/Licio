@@ -35,39 +35,27 @@ import { clamp01 } from './types.js';
 
 /**
  * The v1 contribution-type weighting hierarchy (WS-E.2.3b, SPEC §5.3/§15.1):
- *   evidence > correction > synthesis > question > counterexample >
- *   explanation > low_info_reply (zero).
+ *   correction > explanation > low_info_reply (zero).
+ * `explanation` is the comment-grade constructive weight (the live `comment`
+ * type maps here; sourced comments earn the citation bonus on top).
  * `bridge_comment` earns strong positive weight (placeholder constant in v1;
  * SCOI-conditioned in v2 — WS-H.4 integration point). `steward_action` counts
- * for thread health. `experience` sits with explanation-grade context.
- * `flag` is a safety action, not content participation: zero.
+ * for thread health.
  */
 export const V1_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, number>> = {
-  evidence: 1,
   correction: 0.9,
   bridge_comment: 0.85,
-  synthesis: 0.8,
-  question: 0.7,
-  counterexample: 0.6,
   explanation: 0.5,
-  experience: 0.5,
   steward_action: 0.5,
-  flag: 0,
   low_info_reply: 0,
 };
 
-/** Validate the hierarchy ordering (evidence highest … low_info_reply zero). */
+/** Validate the hierarchy ordering (correction highest … low_info_reply zero;
+ *  sourced comments earn the citation bonus on top of their type weight). */
 export function assertV1HierarchyOrder(
   weights: Readonly<Record<EventContributionType, number>> = V1_CONTRIBUTION_WEIGHTS,
 ): void {
-  const order: EventContributionType[] = [
-    'evidence',
-    'correction',
-    'synthesis',
-    'question',
-    'counterexample',
-    'explanation',
-  ];
+  const order: EventContributionType[] = ['correction', 'explanation'];
   for (let i = 1; i < order.length; i += 1) {
     const higher = order[i - 1];
     const lower = order[i];

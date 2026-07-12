@@ -132,9 +132,11 @@ export async function applyConversationTransition(
 // judgment (WS-J).
 // ---------------------------------------------------------------------------
 
-/** Citation-bearing types whose accumulation marks "evidence accumulating"
- *  (each REQUIRES citations in the shared schema). */
-const EVIDENCE_BEARING_TYPES = ['evidence', 'correction', 'counterexample'] as const;
+/** Citation-bearing TYPES whose accumulation marks "evidence accumulating"
+ *  (each REQUIRES citations in the shared schema).  Sourced comments — the
+ *  comment-centric citation carrier — are counted separately through the
+ *  store's `sourced` predicate. */
+const CITATION_BEARING_TYPES = ['correction'] as const;
 
 export interface DeepeningConfig {
   deepeningMinContributions: number;
@@ -147,17 +149,22 @@ export interface DeepeningConfig {
  * Fires only while a multi-level exchange is HAPPENING (the new
  * contribution sits at depth ≥ deepeningMinDepth) and the thread has both
  * volume (published contributions ≥ deepeningMinContributions) and
- * accumulated evidence (citation-bearing contributions ≥
- * deepeningMinEvidence).  Deterministic given store state; a no-op for any
- * thread not currently `active` (tense/under-review threads are never
- * auto-deepened).  Returns whether the transition applied.
+ * accumulated sourcing (citation-bearing contributions — sourced comments
+ * and corrections — ≥ deepeningMinEvidence).  Deterministic
+ * given store state; a no-op for any thread not currently `active`
+ * (tense/under-review threads are never auto-deepened).  Returns whether
+ * the transition applied.
  */
 export async function maybeDeepenConversation(
   deps: TransitionDeps,
-  countByType: (
-    threadId: string,
-    states: readonly ['published'],
-  ) => Promise<Partial<Record<string, number>>>,
+  counters: {
+    countByType: (
+      threadId: string,
+      states: readonly ['published'],
+    ) => Promise<Partial<Record<string, number>>>;
+    /** The store's `sourced` predicate (comments carrying ≥1 citation). */
+    countSourced: (threadId: string, states: readonly ['published']) => Promise<number>;
+  },
   config: DeepeningConfig,
   threadId: string,
   newContributionDepth: number,
@@ -165,17 +172,19 @@ export async function maybeDeepenConversation(
   if (newContributionDepth < config.deepeningMinDepth) return false;
   const thread = await deps.stories.getThreadById(threadId);
   if (thread?.conversationState !== 'active') return false;
-  const counts = await countByType(threadId, ['published']);
+  const counts = await counters.countByType(threadId, ['published']);
   const total = Object.values(counts).reduce((sum: number, n) => sum + (n ?? 0), 0);
   if (total < config.deepeningMinContributions) return false;
-  const evidence = EVIDENCE_BEARING_TYPES.reduce((sum, type) => sum + (counts[type] ?? 0), 0);
-  if (evidence < config.deepeningMinEvidence) return false;
+  const sourced = await counters.countSourced(threadId, ['published']);
+  const citationBearing =
+    sourced + CITATION_BEARING_TYPES.reduce((sum, type) => sum + (counts[type] ?? 0), 0);
+  if (citationBearing < config.deepeningMinEvidence) return false;
   const outcome = await applyConversationTransition(
     deps,
     threadId,
     'deepening',
     null,
-    `structural: ${total} published contributions, ${evidence} evidence-bearing, reply depth ${newContributionDepth}`,
+    `structural: ${total} published contributions, ${citationBearing} citation-bearing, reply depth ${newContributionDepth}`,
   );
   return outcome.ok;
 }

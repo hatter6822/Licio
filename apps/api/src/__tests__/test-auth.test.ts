@@ -4,11 +4,7 @@
 // cookie for an existing ACTIVE user and refuses anything else. This route is
 // mounted only by the in-memory e2e-server, never the production app — these
 // tests pin that boundary (no session for an unknown/absent user).
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { buildIdentityServicesFromEnv } from '../identity/services.js';
 import { SESSION_COOKIE, validateSession } from '../identity/sessions.js';
@@ -30,7 +26,6 @@ function identityWith(user?: { state: 'active' | 'suspended' }) {
       ageBand: 'adult',
       privacySettings: defaultPrivacySettings(),
       personalizationSettings: defaultPersonalizationSettings(),
-      reputationSummary: emptyReputationSummary(),
       roles: ['user'],
     });
   }

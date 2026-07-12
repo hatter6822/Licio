@@ -200,63 +200,42 @@ describe('WS-I.2.3d baseline', () => {
     expect(topicRelevance(['a'], [])).toBe(0);
   });
 
-  it('source reliability: diversity/citations raise it; correction frequency and notes dampen GENTLY', () => {
+  it('source reliability: correction frequency and notes dampen GENTLY from neutral', () => {
     // Inputs are exactly the WS-F §14.3 profile aggregates (the record has
     // no acknowledgment field — frequency is the real correction signal).
-    const diverse = sourceReliabilityFromHistory({
-      corrections: 0,
-      evidenceTypeCount: 4,
-      communityNotes: 0,
-      citationCount: 0,
-    });
-    expect(diverse).toBeGreaterThan(NEUTRAL_SOURCE_RELIABILITY);
-    const cited = sourceReliabilityFromHistory({
-      corrections: 0,
-      evidenceTypeCount: 4,
-      communityNotes: 0,
-      citationCount: 8,
-    });
-    expect(cited).toBeGreaterThan(diverse);
-    const corrected = sourceReliabilityFromHistory({
-      corrections: 6,
-      evidenceTypeCount: 4,
-      communityNotes: 0,
-      citationCount: 0,
-    });
-    expect(corrected).toBeLessThan(diverse);
-    expect(corrected).toBeGreaterThan(0.3); // corrections dampen MILDLY (transparency virtue)
-    const noted = sourceReliabilityFromHistory({
-      corrections: 0,
-      evidenceTypeCount: 4,
-      communityNotes: 16,
-      citationCount: 0,
-    });
-    expect(noted).toBeLessThan(diverse);
-    expect(noted).toBeGreaterThan(0);
     // No history at all ⇒ exactly neutral.
-    expect(
-      sourceReliabilityFromHistory({
-        corrections: 0,
-        evidenceTypeCount: 0,
-        communityNotes: 0,
-        citationCount: 0,
-      }),
-    ).toBe(NEUTRAL_SOURCE_RELIABILITY);
-    // Monotone in diversity and citations; antitone in corrections/notes.
+    expect(sourceReliabilityFromHistory({ corrections: 0, communityNotes: 0 })).toBe(
+      NEUTRAL_SOURCE_RELIABILITY,
+    );
+    const corrected = sourceReliabilityFromHistory({ corrections: 6, communityNotes: 0 });
+    // clamp01(0.5 · 1/(1 + 6/10)) = 0.3125
+    expect(corrected).toBeCloseTo(0.3125, 12);
+    expect(corrected).toBeLessThan(NEUTRAL_SOURCE_RELIABILITY);
+    expect(corrected).toBeGreaterThan(0.3); // corrections dampen MILDLY (transparency virtue)
+    const noted = sourceReliabilityFromHistory({ corrections: 0, communityNotes: 16 });
+    // clamp01(0.5 · 1/(1 + 16/8)) = 0.1666…
+    expect(noted).toBeCloseTo(0.5 / 3, 12);
+    expect(noted).toBeLessThan(NEUTRAL_SOURCE_RELIABILITY);
+    expect(noted).toBeGreaterThan(0);
+    // The two dampeners compose multiplicatively (never additively past zero).
+    const both = sourceReliabilityFromHistory({ corrections: 6, communityNotes: 16 });
+    expect(both).toBeCloseTo(0.5 * (1 / 1.6) * (1 / 3), 12);
+    expect(both).toBeLessThan(Math.min(corrected, noted));
+    // Antitone in corrections and in notes; always within (0, 0.5].
     for (let k = 0; k < 6; k += 1) {
-      const lower = sourceReliabilityFromHistory({
-        corrections: 0,
-        evidenceTypeCount: k,
+      const moreCorrections = sourceReliabilityFromHistory({
+        corrections: k + 1,
         communityNotes: 0,
-        citationCount: 0,
       });
-      const higher = sourceReliabilityFromHistory({
-        corrections: 0,
-        evidenceTypeCount: k + 1,
-        communityNotes: 0,
-        citationCount: 0,
-      });
-      expect(higher).toBeGreaterThanOrEqual(lower);
+      expect(moreCorrections).toBeLessThanOrEqual(
+        sourceReliabilityFromHistory({ corrections: k, communityNotes: 0 }),
+      );
+      const moreNotes = sourceReliabilityFromHistory({ corrections: 0, communityNotes: k + 1 });
+      expect(moreNotes).toBeLessThanOrEqual(
+        sourceReliabilityFromHistory({ corrections: 0, communityNotes: k }),
+      );
+      expect(moreCorrections).toBeGreaterThan(0);
+      expect(moreNotes).toBeGreaterThan(0);
     }
   });
 });

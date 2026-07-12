@@ -272,7 +272,7 @@ function applyContributionEdit(
   if (body.body_markdown_lite !== undefined) {
     // The edit op carries no `contribution_type`, so enforce the per-type body cap
     // (WS-S.5.3c) against the type recorded in state — otherwise an edit could grow
-    // a capped type (e.g. evidence's 500 chars) up to the comment-sized schema max.
+    // a capped type (e.g. a correction's 2000 chars) up to the comment-sized schema max.
     const cap = CONTRIBUTION_BODY_LIMITS[contribution.contributionType as ContributionType];
     if (cap !== undefined && body.body_markdown_lite.trim().length > cap) {
       reject(state, op.op_id, 'body_too_long');

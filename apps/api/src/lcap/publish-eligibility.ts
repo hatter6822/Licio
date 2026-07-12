@@ -10,7 +10,7 @@
 // catalog entry).  Fail-closed: a missing/unlinked/unknown target is NOT publishable, and a
 // resolver error refuses rather than proceeds.
 
-import { type DbExecutor, evidenceCards, rooms, sources, stories } from '@licio/db';
+import { type DbExecutor, rooms, sources, stories } from '@licio/db';
 import { eq } from 'drizzle-orm';
 import type { ProvenanceTarget } from './takedown-oracle.js';
 
@@ -84,16 +84,6 @@ export function drizzlePublishEligibility(db: DbExecutor): PublishEligibilityRes
       switch (target.targetType) {
         case 'story':
           return await resolveStory(target.targetId);
-        case 'evidence': {
-          const rows = await db
-            .select({ storyId: evidenceCards.storyId })
-            .from(evidenceCards)
-            .where(eq(evidenceCards.evidenceId, target.targetId))
-            .limit(1);
-          const storyId = rows[0]?.storyId;
-          // A card with no story link cannot be proven public ⇒ fail-closed refuse.
-          return storyId ? await resolveStory(storyId) : notFound('evidence_unlinked');
-        }
         case 'source': {
           // A source is a public global catalog entry (no room/visibility) — verify it exists.
           const rows = await db

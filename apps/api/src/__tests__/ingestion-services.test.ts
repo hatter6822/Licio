@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-F service-container + consumer + scheduler coverage: the evidence.added
-// embedding/material-update path, the sustained-participation cascade
-// (gathering_attention → deepening; stable → renewed; archived →
+// WS-F service-container + consumer + scheduler coverage: the
+// contribution.created material-update path, the sustained-participation
+// cascade (gathering_attention → deepening; stable → renewed; archived →
 // reactivation), the scheduler's lease gating and task-error isolation, the
 // backfill text resolution, the HTTP embedding provider's wire handling, and
 // the remaining in-memory store contract surfaces.
 import { randomUUID } from 'node:crypto';
-import { evidenceAddedEventSchema } from '@licio/shared';
+import { contributionCreatedEventSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryJobLeaseStore } from '../identity/job-lease.js';
@@ -53,56 +53,38 @@ async function submitBrief(cookie: string, over: Record<string, unknown> = {}): 
   return story_id;
 }
 
-function evidenceAdded(userId: string, threadId: string, evidenceId: string) {
-  return evidenceAddedEventSchema.parse({
+function contributionCreated(userId: string, threadId: string) {
+  return contributionCreatedEventSchema.parse({
     event_id: randomUUID(),
-    event_type: 'evidence.added',
+    event_type: 'contribution.created',
     timestamp: new Date(nowMs).toISOString(),
     schema_version: '1',
-    evidence_id: evidenceId,
-    claim_id: randomUUID(),
+    contribution_id: randomUUID(),
     thread_id: threadId,
     user_id: userId,
-    evidence_type: 'report',
-    source_id: null,
-    contribution_id: null,
+    contribution_type: 'correction',
+    target_claim_id: null,
+    parent_contribution_id: null,
+    has_citation: true,
+    accusation_flag: false,
     privacy_classification: 'public',
     retention_tier: 'public_contribution',
   });
 }
 
 describe('ingestion-signals consumer (WS-F.1.1c via WS-E events)', () => {
-  it('evidence.added marks a material update, refreshes freshness, embeds the card', async () => {
+  it('contribution.created marks a material update and refreshes freshness', async () => {
     const { userId, cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const storyId = await submitBrief(cookie);
     const thread = await fixture.ingestion.stories.getThreadByStoryId(storyId);
     const before = await fixture.ingestion.stories.getById(storyId);
-    const card = await fixture.ingestion.evidence.insert({
-      evidenceId: randomUUID(),
-      claimId: randomUUID(),
-      sourceId: null,
-      submittedBy: userId,
-      evidenceType: 'report',
-      relationshipType: 'supports',
-      contributionId: null,
-      citationUrlOrRef: 'https://example.com/x',
-      relevanceNote: 'supporting bulletin',
-      verificationState: 'unverified',
-      independenceGroupId: null,
-      storyId,
-    });
+    const freshnessBefore = await fixture.ingestion.freshness.get(storyId);
     nowMs += 60_000;
-    await fixture.events.router.publish(
-      evidenceAdded(userId, thread?.threadId as string, card.evidenceId),
-    );
+    await fixture.events.router.publish(contributionCreated(userId, thread?.threadId as string));
     const after = await fixture.ingestion.stories.getById(storyId);
     expect(after?.lastMaterialUpdateAt).not.toBe(before?.lastMaterialUpdateAt);
-    const vector = await fixture.ingestion.embeddings.get(
-      'evidence_card',
-      card.evidenceId,
-      fixture.ingestion.embeddingProvider.modelVersion,
-    );
-    expect(vector).not.toBeNull();
+    const freshnessAfter = await fixture.ingestion.freshness.get(storyId);
+    expect(freshnessAfter?.computedAt).not.toBe(freshnessBefore?.computedAt);
   });
 
   it('the activity threshold drives deepening / renewed / reactivation by state', async () => {
@@ -124,7 +106,7 @@ describe('ingestion-signals consumer (WS-F.1.1c via WS-E events)', () => {
     );
     const burst = async () => {
       for (let i = 0; i < 2; i += 1) {
-        await fixture.events.router.publish(evidenceAdded(userId, threadId, randomUUID()));
+        await fixture.events.router.publish(contributionCreated(userId, threadId));
       }
     };
     await burst();
@@ -263,7 +245,6 @@ describe('store contract surfaces not exercised elsewhere', () => {
       ingestion.sources.clear(),
       ingestion.syndications.clear(),
       ingestion.claims.clear(),
-      ingestion.evidence.clear(),
       ingestion.signatures.clear(),
       ingestion.lifecycleAudits.clear(),
       ingestion.freshness.clear(),

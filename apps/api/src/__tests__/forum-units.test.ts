@@ -4,6 +4,7 @@
 // events), the EXIF/metadata strippers on real binary fixtures, the forum
 // runtime config (fail-closed), the scoring-taxonomy mappings (pinned), and the
 // steward thread-state route.
+import { randomUUID } from 'node:crypto';
 import type { ContributionPublic } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -14,7 +15,7 @@ import {
   storeForumConfigValue,
   validateForumConfigValue,
 } from '../forum/config.js';
-import { FORUM_TO_EVENT_TYPE, mapCardTypeToEventType } from '../forum/contributions.js';
+import { FORUM_TO_EVENT_TYPE } from '../forum/contributions.js';
 import { InMemoryDebateBroadcaster, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import {
   matchesMagic,
@@ -682,8 +683,9 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     const png = pngWithText();
     expect(matchesMagic('image/jpeg', png)).toBe(false);
     expect(stripUploadMetadata('image/jpeg', png)).toEqual({ ok: false, reason: 'type_mismatch' });
+    // PDF uploads were retired: the sniffer no longer recognizes the type at all.
     expect(matchesMagic('application/pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]))).toBe(
-      true,
+      false,
     );
   });
 });
@@ -721,31 +723,83 @@ describe('WS-G forum runtime config (fail-closed)', () => {
 });
 
 describe('WS-G → WS-E scoring-taxonomy mappings (pinned)', () => {
-  it('maps all 12 forum types onto the WS-E enum with zero-weight safety types', () => {
+  it('maps both forum types onto the WS-E enum', () => {
     expect(FORUM_TO_EVENT_TYPE).toEqual({
-      question: 'question',
-      answer: 'explanation',
-      evidence: 'evidence',
+      comment: 'explanation', // citations carry the sourcing weight via has_citation
       correction: 'correction',
-      synthesis: 'synthesis',
-      counterexample: 'counterexample',
-      explanation: 'explanation',
-      local_context: 'experience',
-      direct_experience: 'experience',
-      moderation_concern: 'flag', // weight 0: a safety action, not participation
-      meta_discussion: 'low_info_reply', // weight 0: volume, never negative
-      comment: 'explanation',
     });
   });
+});
 
-  it('maps the 7 card material types onto the evidence.added wire enum', () => {
-    expect(mapCardTypeToEventType('primary_source')).toBe('primary_source');
-    expect(mapCardTypeToEventType('dataset')).toBe('dataset');
-    expect(mapCardTypeToEventType('transcript')).toBe('transcript');
-    expect(mapCardTypeToEventType('legal_text')).toBe('legal_text');
-    expect(mapCardTypeToEventType('report')).toBe('report');
-    expect(mapCardTypeToEventType('expert_reference')).toBe('other');
-    expect(mapCardTypeToEventType('fact_check')).toBe('article');
+describe('WS-J evidence-queue feed — listCited global keyset walk (in-memory)', () => {
+  it('walks exactly the published cited rows in (createdAt, id) order across threads', async () => {
+    const { threadId: otherThreadId } = await seedThread(fixture);
+    const insert = async (
+      thread: string,
+      over: {
+        citations?: Array<{ url: string }>;
+        moderationState?: 'published' | 'under_review';
+      } = {},
+    ) => {
+      const outcome = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId: thread,
+        userId: randomUUID(),
+        type: 'comment',
+        body: 'A row for the cited-feed walk.',
+        citations: over.citations ?? [],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: `draft-${randomUUID()}`,
+        path: [],
+        moderationState: over.moderationState ?? 'published',
+      });
+      if (!outcome.ok) throw new Error('cited-walk insert failed');
+      return outcome.contribution;
+    };
+    const cite = [{ url: 'https://example.org/source' }];
+    // Published cited rows across BOTH threads (the feed is global) — inserted
+    // back-to-back so same-millisecond createdAt exercises the id tiebreaker.
+    const citedRows = [
+      await insert(threadId, { citations: cite }),
+      await insert(otherThreadId, { citations: cite }),
+      await insert(threadId, { citations: cite }),
+    ];
+    await insert(threadId); // citation-less — never a queue candidate
+    const underReview = await insert(otherThreadId, {
+      citations: cite,
+      moderationState: 'under_review',
+    });
+
+    const expected = [...citedRows]
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.contributionId.localeCompare(b.contributionId),
+      )
+      .map((row) => row.contributionId);
+
+    // Walk pages of 1 with the after-cursor: complete, ordered, no duplicates.
+    const walked: string[] = [];
+    let after: { createdAt: string; id: string } | null = null;
+    for (;;) {
+      const page = await fixture.forum.contributions.listCited({
+        states: ['published'],
+        after,
+        limit: 1,
+      });
+      const row = page[0];
+      if (!row) break;
+      walked.push(row.contributionId);
+      after = { createdAt: row.createdAt, id: row.contributionId };
+    }
+    expect(walked).toEqual(expected);
+    expect(new Set(walked).size).toBe(walked.length);
+    expect(walked).not.toContain(underReview.contributionId);
+    // Without the states filter the under_review cited row IS a citation row.
+    const unfiltered = await fixture.forum.contributions.listCited({ limit: 10 });
+    expect(unfiltered.map((row) => row.contributionId)).toContain(underReview.contributionId);
   });
 });
 
@@ -756,8 +810,8 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       contributionId: '88888888-8888-4888-8888-888888888881',
       threadId,
       userId: session.userId,
-      type: 'question',
-      body: 'A question that must outlive the account.',
+      type: 'comment',
+      body: 'A comment that must outlive the account.',
       citations: [],
       metadata: {},
       targetClaimId: null,
@@ -787,12 +841,6 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       status: 'active',
       requestId: '88888888-8888-4888-8888-888888888883',
       lensId: null,
-      notificationPreferences: {
-        threads: 'all',
-        new_evidence: true,
-        bridge_requests: false,
-        steward_announcements: true,
-      },
       requestedAt: new Date().toISOString(),
       joinedAt: new Date().toISOString(),
     });

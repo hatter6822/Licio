@@ -85,10 +85,6 @@ export async function runIngestionTick(
           const claim = await ingestion.claims.getById(targetId);
           return claim?.canonicalText ?? null;
         }
-        if (targetType === 'evidence_card') {
-          const card = await ingestion.evidence.getById(targetId);
-          return card === null ? null : `${card.relevanceNote} ${card.citationUrlOrRef}`;
-        }
         return null; // sources/interpretations re-embed with their owners
       },
       config.embeddingBackfillBatch,

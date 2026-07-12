@@ -216,18 +216,10 @@ export function createCandidateDataPorts(
       const windows = await events.windowStore.listForItemBefore(itemId, '24h', nowIso, 1);
       return windows[0] ?? null;
     },
-    // The §24.3 thread-summary feature was removed, so no thread carries a human
-    // summary — this retriever signal is now always false (the retriever + port
-    // remain to keep the WS-I candidate-source set stable).
-    async hasHumanSummary() {
-      return false;
-    },
-    async evidenceCountByStory(storyId) {
-      let count = 0;
-      for (const claim of await ingestion.claims.listByStory(storyId)) {
-        count += (await ingestion.evidence.listByClaim(claim.claimId)).length;
-      }
-      return count;
+    async sourcedCountByStory(storyId) {
+      const thread = await ingestion.stories.getThreadByStoryId(storyId);
+      if (thread === null) return 0;
+      return forum.contributions.countSourced(thread.threadId, ['published']);
     },
     async userLocale(userId) {
       const user = await identity.store.getUser(userId);
@@ -427,6 +419,7 @@ function featureAssemblyDeps(services: RankingServices): FeatureAssemblyDeps {
     events: services.events,
     ingestion: services.ingestion,
     invariants: services.invariants,
+    forum: services.forum,
     featureStore: services.featureStore,
     log: services.log,
     now: services.now,

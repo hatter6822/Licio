@@ -96,9 +96,10 @@ export function StoryCard({
 
       {/* 2. Source (+ the WS-Q.5.3b in-room chip on non-public items in a room
           feed; public items carry no chip). The source-provenance origin badge
-          was removed — `story.origin` is a hardcoded placeholder (never a real
-          derived signal), so a card claiming every source is "Independent" was
-          misleading rather than informative. */}
+          (and the wire `origin` field behind it) was removed — it was a
+          hardcoded placeholder (never a real derived signal), so a card
+          claiming every source is "Independent" was misleading rather than
+          informative. */}
       <p className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
         <span>{story.source}</span>
         {inRoom ? (

@@ -554,7 +554,7 @@ export class InMemoryTreasuryActionStore implements TreasuryActionStore {
 export class InMemoryPendingRemoderationStore implements PendingRemoderationStore {
   private readonly pending = new Map<string, PendingRemoderationRecord>();
   private key(roomId: string, subjectRef: string) {
-    return `${roomId} ${subjectRef}`;
+    return `${roomId}\x00${subjectRef}`;
   }
   async enqueue(record: { roomId: string; subjectRef: string; enqueuedAt: string }) {
     const key = this.key(record.roomId, record.subjectRef);

@@ -147,8 +147,8 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
       ],
     });
     await fixture.events.eventStore.insertMany([
-      contributionRow(storyId, a.userId, 'question'),
-      contributionRow(storyId, a.userId, 'evidence', { hasCitation: true }),
+      contributionRow(storyId, a.userId, 'explanation'),
+      contributionRow(storyId, a.userId, 'correction', { hasCitation: true }),
       contributionRow(storyId, b.userId, 'low_info_reply'),
     ]);
     await computeAggregationWindow(fixture.events, T0, '1h');
@@ -157,7 +157,7 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
     expect(row?.sourceOpens).toBe(1);
     expect(row?.contextOpens).toBe(1);
     expect(row?.returnVisits).toBe(1);
-    expect(row?.contributionCounts).toEqual({ question: 1, evidence: 1, low_info_reply: 1 });
+    expect(row?.contributionCounts).toEqual({ explanation: 1, correction: 1, low_info_reply: 1 });
   });
 
   it('folds the §5.3 "Save for later" signal, deduped per (actor, item)', async () => {
@@ -307,7 +307,7 @@ describe('shadow scoring + Signal Ledger (WS-E.2.1b-d)', () => {
         },
       ],
     });
-    await fixture.events.eventStore.insertMany([contributionRow(storyId, userId, 'question')]);
+    await fixture.events.eventStore.insertMany([contributionRow(storyId, userId, 'explanation')]);
     const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     expect(report.itemsScored).toBe(1);
 
@@ -326,7 +326,7 @@ describe('shadow scoring + Signal Ledger (WS-E.2.1b-d)', () => {
     expect(ledger.entries).toHaveLength(1);
     expect(ledger.entries[0]?.summary).toBe(
       'You read this for a moderate duration, opened the source, read into the replies, ' +
-        'and returned to it. Your question was counted as constructive participation.',
+        'and returned to it. Your comment was counted as constructive participation.',
     );
     expect(ledger.entries[0]?.storyTitle).toBe('Water main study');
     expect(ledger.entries[0]?.pwattScore).toBe(v0?.scoreVector['score']);
@@ -522,7 +522,7 @@ describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
           ],
         });
         await fixture.events.eventStore.insertMany([
-          contributionRow(storyId, userId, 'evidence', { hasCitation: true }),
+          contributionRow(storyId, userId, 'correction', { hasCitation: true }),
         ]);
       }
       return storyId;
@@ -548,11 +548,13 @@ describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
 
 describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
   async function cascade(storyId: string): Promise<void> {
+    // Hostile counting is low_info_reply ONLY (the retired `flag` type is gone
+    // with the write-taxonomy retirement): a pile-on is a low-info-reply burst.
     for (let i = 0; i < 6; i += 1) {
       const { userId } = await seedUserWithSession(fixture.identity, { handle: `pileon${i}x` });
       await fixture.events.eventStore.insertMany([
         contributionRow(storyId, userId, 'low_info_reply'),
-        contributionRow(storyId, userId, 'flag'),
+        contributionRow(storyId, userId, 'low_info_reply'),
       ]);
     }
   }
@@ -800,37 +802,38 @@ describe('scheduler windows (WS-E.2.1a scheduling)', () => {
 
 describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
   it('the contribution hierarchy affects the STORED v1 output', async () => {
-    // Two items with identical volume; only the contribution TYPE differs.
-    // v0 weighs both constructive types uniformly, so the difference in the
-    // stored v1 totals is attributable to the hierarchy alone.
-    const evidenceItem = randomUUID();
-    const questionItem = randomUUID();
+    // Two items with identical volume; only the contribution TYPE differs
+    // (correction 0.9 vs explanation 0.5). v0 weighs both constructive types
+    // uniformly, so the difference in the stored v1 totals is attributable to
+    // the hierarchy alone.
+    const correctionItem = randomUUID();
+    const explanationItem = randomUUID();
     const { userId } = await seedUserWithSession(fixture.identity);
     await fixture.events.eventStore.insertMany([
       // BOTH sourced, so the WS-T citation bonus is identical and the only
       // difference is the contribution TYPE (isolating the hierarchy).
-      contributionRow(evidenceItem, userId, 'evidence', { hasCitation: true }),
-      contributionRow(questionItem, userId, 'question', { hasCitation: true }),
+      contributionRow(correctionItem, userId, 'correction', { hasCitation: true }),
+      contributionRow(explanationItem, userId, 'explanation', { hasCitation: true }),
     ]);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
-    const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt_v1', evidenceItem);
-    const questionV1 = await fixture.events.invariantStore.latest('PWAtt_v1', questionItem);
+    const correctionV1 = await fixture.events.invariantStore.latest('PWAtt_v1', correctionItem);
+    const explanationV1 = await fixture.events.invariantStore.latest('PWAtt_v1', explanationItem);
     // The served `participation` component (what ranking consumes) reflects the
-    // hierarchy — evidence outranks a bare question. (No composite `total` is
-    // stored: the §5.4 composition is @licio/ranking's, PR7.)
-    expect(evidenceV1?.scoreVector['participation']).toBeGreaterThan(
-      asNumber(questionV1?.scoreVector['participation'], Number.POSITIVE_INFINITY),
+    // hierarchy — a correction outranks a plain comment. (No composite `total`
+    // is stored: the §5.4 composition is @licio/ranking's, PR7.)
+    expect(correctionV1?.scoreVector['participation']).toBeGreaterThan(
+      asNumber(explanationV1?.scoreVector['participation'], Number.POSITIVE_INFINITY),
     );
     // v0 (uniform weights) sees them identically — the control assertion.
-    const evidenceV0 = await fixture.events.invariantStore.latest('PWAtt_v0', evidenceItem);
-    const questionV0 = await fixture.events.invariantStore.latest('PWAtt_v0', questionItem);
-    expect(evidenceV0?.scoreVector['score']).toBe(questionV0?.scoreVector['score']);
+    const correctionV0 = await fixture.events.invariantStore.latest('PWAtt_v0', correctionItem);
+    const explanationV0 = await fixture.events.invariantStore.latest('PWAtt_v0', explanationItem);
+    expect(correctionV0?.scoreVector['score']).toBe(explanationV0?.scoreVector['score']);
   });
 
   it('v1 runtime config from the store changes the stored v1 output', async () => {
     const itemId = randomUUID();
     const { userId } = await seedUserWithSession(fixture.identity);
-    await fixture.events.eventStore.insertMany([contributionRow(itemId, userId, 'evidence')]);
+    await fixture.events.eventStore.insertMany([contributionRow(itemId, userId, 'correction')]);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const before = await fixture.events.invariantStore.latest('PWAtt_v1', itemId);
 
@@ -838,16 +841,10 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
     const curve = { kind: 'logarithmic', scale: 4, saturationPoint: 25 };
     await fixture.events.configStore.set('v1', {
       contributionWeights: {
-        question: 0.7,
-        evidence: 1,
         correction: 0.9,
-        synthesis: 0.8,
-        counterexample: 0.6,
-        explanation: 0.5,
-        experience: 0.5,
         bridge_comment: 0.85,
+        explanation: 0.5,
         steward_action: 0.5,
-        flag: 0,
         low_info_reply: 0,
       },
       contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
@@ -907,7 +904,7 @@ describe('system-event producers (WS-E.1.1e closures)', () => {
       const { userId } = await seedUserWithSession(fixture.identity, { handle: `hostile${i}x` });
       await fixture.events.eventStore.insertMany([
         contributionRow(storyId, userId, 'low_info_reply'),
-        contributionRow(storyId, userId, 'flag'),
+        contributionRow(storyId, userId, 'low_info_reply'),
       ]);
     }
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');

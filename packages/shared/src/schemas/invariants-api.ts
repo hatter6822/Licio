@@ -8,6 +8,7 @@
 // repetition equals truth.
 import { z } from 'zod';
 import { uuidSchema } from './common.js';
+import { citationUrlSchema } from './contribution.js';
 
 /** SCOI context states (SPEC §10.4). */
 export const SCOI_CONTEXT_STATES_WIRE = [
@@ -69,6 +70,21 @@ export const independentSourcesResponseSchema = z.object({
         story_id: uuidSchema,
         title: z.string().min(1).max(300),
         relationship: z.enum(['near_duplicate', 'syndicated']),
+      }),
+    )
+    .max(8)
+    .default([]),
+  /** Citations an evidence steward marked as PRIMARY SOURCES on this story's
+   * conversation (STEWARD_ROLES.md ROLE_EVIDENCE `mark-primary-source`) —
+   * reviewed evidence metadata, deduplicated by URL. */
+  primary_sources: z
+    .array(
+      z.object({
+        /** Scheme-pinned at the trust boundary (http(s)/doi only) — this field
+         *  feeds an href on a public surface, so no other scheme may pass even
+         *  if a future writer misbehaves. */
+        url: citationUrlSchema,
+        title: z.string().min(1).max(300).optional(),
       }),
     )
     .max(8)

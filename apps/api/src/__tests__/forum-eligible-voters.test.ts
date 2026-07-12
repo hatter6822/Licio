@@ -4,7 +4,6 @@
 // `isRoomMember` admits to a ballot — active subscribers ∪ stewards, deduped — so
 // the frozen ratification/election quorum denominator matches who can actually
 // vote (a steward-role holder can vote without an active subscription).
-import { DEFAULT_ROOM_NOTIFICATION_PREFERENCES } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { InMemoryRoomStore } from '../forum/stores.js';
 
@@ -19,7 +18,6 @@ describe('RoomStore.countEligibleVoters (in-memory)', () => {
         status,
         requestId: `req-${userId}`,
         lensId: null,
-        notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
         requestedAt: 't',
         joinedAt: status === 'active' ? 't' : null,
       });

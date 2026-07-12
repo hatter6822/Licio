@@ -59,7 +59,7 @@ const submitted = (title: string, body: string): string => `${title} ${body}`;
 
 const pickDomain = (index: number) => req(DOMAIN_IDS[index % DOMAIN_IDS.length]);
 
-const KINDS: readonly StoryKind[] = ['link', 'original_brief', 'question', 'local_update'];
+const KINDS: readonly StoryKind[] = ['link', 'original_brief'];
 
 describe('simulator content generation', () => {
   it('is deterministic per seed + serial', () => {
@@ -189,16 +189,21 @@ describe('simulator content generation', () => {
     expect(maxPairwiseJaccard(texts)).toBeLessThan(0.7);
   });
 
-  it('distinct local_update stories stay below 0.7 under their SIGNED text (title + disclosure)', () => {
-    // WS-F signs `${title} ${source_or_experience_disclosure}` for a local_update
-    // (submissionBodyText reads ONLY the disclosure — the request carries no
-    // `body`), so the generator packs the diverse per-story body into the
-    // disclosure. A fixed disclosure would collide every same-template update.
-    const prng = createPrng('local');
+  it('a MIXED link + brief pool stays below 0.7 across both signing surfaces', () => {
+    // The retired question/local_update kinds fold into original_brief, so the
+    // near-dup surface is exactly the two live signing texts — the FETCHED
+    // article for a link, the submitted title+body for a brief. Both draw from
+    // the shared sentence pool, so the cross-kind pairs must stay distinct too
+    // (a link's article must never read as a near-duplicate of a brief).
+    const prng = createPrng('mixed');
     const texts: string[] = [];
-    for (let serial = 0; serial < 40; serial += 1) {
-      const story = generateStory('health', 'local_update', serial, prng);
-      texts.push(`${story.title} ${req(story.disclosure)}`);
+    for (let serial = 0; serial < 20; serial += 1) {
+      const link = generateStory('health', 'link', serial, prng);
+      texts.push(fetchedText(link.title, req(link.url)));
+    }
+    for (let serial = 20; serial < 40; serial += 1) {
+      const brief = generateStory('health', 'original_brief', serial, prng);
+      texts.push(submitted(brief.title, brief.body));
     }
     expect(maxPairwiseJaccard(texts)).toBeLessThan(0.7);
   });

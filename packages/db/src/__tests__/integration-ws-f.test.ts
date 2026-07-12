@@ -10,11 +10,7 @@
 //
 //   DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev pnpm test
 import { randomUUID } from 'node:crypto';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { sql } from 'drizzle-orm';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -25,7 +21,6 @@ import {
   claims,
   EMBEDDING_DIMENSION,
   embeddings,
-  evidenceCards,
   rooms,
   sourceSyndications,
   sources,
@@ -36,7 +31,6 @@ import {
   users,
 } from '../schema/index.js';
 import {
-  findNearestEvidenceCards,
   findSimilarClaims,
   findSimilarInterpretations,
   findSimilarStories,
@@ -81,7 +75,6 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
             ageBandIfKnown: 'adult',
             privacySettings: defaultPrivacySettings(),
             personalizationSettings: defaultPersonalizationSettings(),
-            reputationSummaryPrivate: emptyReputationSummary(),
           })
           .returning()
       )[0],
@@ -118,7 +111,6 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
     for (const version of ['v-test-1', 'v-test-2', 'v-claims-1']) {
       await db.execute(sql`delete from embeddings where model_version = ${version}`);
     }
-    await db.delete(evidenceCards).where(sql`${evidenceCards.submittedBy} = ${submitterId}`);
     const uuidArray = (ids: readonly string[]) =>
       sql`array[${sql.join(
         ids.map((id) => sql`${id}`),
@@ -367,7 +359,7 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
     await db.execute(sql`delete from rooms where room_id in (${roomA.roomId}, ${roomB.roomId})`);
   });
 
-  it('round-trips claims/evidence and navigates both directions (WS-F.1.2a/2.5a)', async () => {
+  it('round-trips claims (WS-F.1.2a)', async () => {
     const story = must((await db.insert(stories).values(storyInsert()).returning())[0]);
     const claim = must(
       (
@@ -383,39 +375,10 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
           .returning()
       )[0],
     );
-    const group = randomUUID();
-    await db.insert(evidenceCards).values([
-      {
-        claimId: claim.claimId,
-        submittedBy: submitterId,
-        evidenceType: 'report',
-        relationshipType: 'supports',
-        citationUrlOrRef: 'https://example.com/report',
-        relevanceNote: 'Official measurement bulletin.',
-        independenceGroupId: group,
-      },
-      {
-        claimId: claim.claimId,
-        submittedBy: submitterId,
-        evidenceType: 'dataset',
-        relationshipType: 'contradicts',
-        citationUrlOrRef: 'https://example.com/other',
-        relevanceNote: 'Alternative dataset disagrees.',
-        independenceGroupId: group,
-      },
-    ]);
-    // claim → cards.
-    const cards = await db.query.evidenceCards.findMany({
-      where: (e, { eq }) => eq(e.claimId, claim.claimId),
-    });
-    expect(cards).toHaveLength(2);
-    // card → claim.
     const back = await db.query.claims.findFirst({
-      where: (c, { eq }) => eq(c.claimId, must(cards[0]).claimId),
+      where: (c, { eq }) => eq(c.claimId, claim.claimId),
     });
     expect(back?.canonicalText).toContain('reservoir');
-    // Shared independence grouping (MERI, §13.6).
-    expect(new Set(cards.map((c) => c.independenceGroupId)).size).toBe(1);
     // Cross-story claims: story_id may be null.
     const free = await db
       .insert(claims)
@@ -621,7 +584,7 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
     expect(JSON.stringify(plan)).toMatch(/embeddings_hnsw_cosine_idx/);
   });
 
-  it('claim/evidence similarity helpers order by cosine and exclude retracted (WS-F.3.2d)', async () => {
+  it('claim similarity helper orders by cosine and excludes retracted (WS-F.3.2d)', async () => {
     const version = 'v-claims-1';
     const mk = async (text: string, status: 'candidate' | 'retracted' = 'candidate') => {
       const row = must(
@@ -669,33 +632,6 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
       modelVersion: version,
     });
     expect(similar.map((h) => h.targetId)).toEqual([close.claimId]);
-
-    const card = must(
-      (
-        await db
-          .insert(evidenceCards)
-          .values({
-            claimId: anchor.claimId,
-            submittedBy: submitterId,
-            evidenceType: 'report',
-            relationshipType: 'supports',
-            citationUrlOrRef: 'https://example.com/near-evidence',
-            relevanceNote: 'near evidence',
-          })
-          .returning()
-      )[0],
-    );
-    await db.insert(embeddings).values({
-      targetType: 'evidence_card',
-      targetId: card.evidenceId,
-      modelVersion: version,
-      embedding: unitVector(10, 0.2),
-    });
-    const nearest = await findNearestEvidenceCards(db, anchor.claimId, {
-      limit: 5,
-      modelVersion: version,
-    });
-    expect(nearest.map((h) => h.targetId)).toEqual([card.evidenceId]);
   });
 
   it('findSimilarInterpretations surfaces DIVERGENT pairs, lowest similarity first (SCOI)', async () => {

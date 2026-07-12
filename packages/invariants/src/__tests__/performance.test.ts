@@ -76,7 +76,7 @@ describe.skipIf(!RUN_PERF)('WS-H batch-tier performance (RUN_PERF)', () => {
     const groups = ['new', 'recent', 'established'];
     const topics = ['water', 'transit', 'zoning', 'budget'];
     const buckets = Array.from({ length: 6 }, (_, i) => `b${i}`);
-    const actions = ['contribution.created', 'evidence.added'];
+    const actions = ['contribution.created', 'content.submitted'];
     const observations = Array.from({ length: 800 }, () => ({
       labels: [
         groups[Math.floor(rng() * groups.length)] ?? 'new',

@@ -46,6 +46,7 @@ export async function runRankingTick(
         events: services.events,
         ingestion: services.ingestion,
         invariants: services.invariants,
+        forum: services.forum,
         featureStore: services.featureStore,
         log: services.log,
         now: services.now,

@@ -32,39 +32,38 @@ beforeEach(() => {
 });
 
 describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
-  it('accepts all six §14.1 types with 201, story/thread ids, and lifecycle=submitted', async () => {
+  it('accepts the two live text types with 201, story/thread ids, and lifecycle=submitted', async () => {
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
-    const claimSeed = await fixture.ingestion.claims.insert({
-      claimId: '11111111-1111-4111-8111-111111111111',
-      storyId: null,
-      canonicalText: 'Seed claim for evidence cards.',
-      normalizedTextHash: 'seedhash',
-      claimStatus: 'candidate',
-      firstSeenStoryId: null,
-      independenceGroupId: null,
-      createdBy: null,
-      extractionSource: 'steward',
-      extractionConfidence: null,
-      modelVersion: null,
-    });
+    const bodies = [linkSubmission('https://example.com/article-1'), briefSubmission()];
+    for (const body of bodies) {
+      const res = await app().request(post('/v1/stories', body, cookie));
+      expect(res.status, JSON.stringify(body)).toBe(201);
+      const json = (await res.json()) as {
+        story_id: string;
+        thread_id: string;
+        lifecycle_state: string;
+        story: { submitted_by: string };
+      };
+      expect(json.lifecycle_state).toBe('submitted');
+      expect(json.story.submitted_by).toBe(userId);
+      // Exactly one thread shell, linked to the story (WS-F.1.4d).
+      const thread = await fixture.ingestion.stories.getThreadByStoryId(json.story_id);
+      expect(thread?.threadId).toBe(json.thread_id);
+      // WS-G canon: shells are born `active` (the 0008 migration retired `empty`).
+      expect(thread?.conversationState).toBe('active');
+      expect(thread?.safetyState).toBe('normal');
+    }
+  });
+
+  it('rejects the retired question/local_update/live_thread types at the schema (400)', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
     const topic = TEST_TOPIC_ID;
-    const bodies = [
-      linkSubmission('https://example.com/article-1'),
-      briefSubmission(),
+    const retired = [
       {
         submission_type: 'question',
         room_id: COMMONS_ROOM_ID,
         question: 'What does the new bill change for renters?',
         title: 'Renters bill question',
-        topic_ids: [topic],
-      },
-      {
-        submission_type: 'evidence_card',
-        room_id: COMMONS_ROOM_ID,
-        citation_url_or_ref: 'https://example.com/study',
-        claim_id: claimSeed.claimId,
-        relevance_note: 'Replicates the headline finding',
-        title: 'Replication study',
         topic_ids: [topic],
       },
       {
@@ -85,31 +84,10 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
         topic_ids: [topic],
       },
     ];
-    for (const body of bodies) {
+    for (const body of retired) {
       const res = await app().request(post('/v1/stories', body, cookie));
-      expect(res.status, JSON.stringify(body)).toBe(201);
-      const json = (await res.json()) as {
-        story_id: string;
-        thread_id: string;
-        lifecycle_state: string;
-        story: { submitted_by: string };
-      };
-      expect(json.lifecycle_state).toBe('submitted');
-      expect(json.story.submitted_by).toBe(userId);
-      // Exactly one thread shell, linked to the story (WS-F.1.4d).
-      const thread = await fixture.ingestion.stories.getThreadByStoryId(json.story_id);
-      expect(thread?.threadId).toBe(json.thread_id);
-      // WS-G canon: shells are born `active` (the 0008 migration retired `empty`).
-      expect(thread?.conversationState).toBe('active');
-      expect(thread?.safetyState).toBe('normal');
+      expect(res.status, JSON.stringify(body)).toBe(400);
     }
-    // The evidence-card submission created a navigable card (WS-F.2.5a).
-    const cards = await fixture.ingestion.evidence.listByClaim(claimSeed.claimId);
-    expect(cards).toHaveLength(1);
-    // WS-G dual dimensions: material type defaults to `report`, the
-    // relationship keeps the WS-F neutral default `contextualizes`.
-    expect(cards[0]?.evidenceType).toBe('report');
-    expect(cards[0]?.relationshipType).toBe('contextualizes');
   });
 
   it('returns 401 unauthenticated and 400 with field detail on invalid bodies', async () => {
@@ -130,27 +108,6 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
     expect(
       (await app().request(post('/v1/stories', briefSubmission({ topic_ids: [] }), cookie))).status,
     ).toBe(400);
-  });
-
-  it('rejects an evidence card whose claim reference does not exist (WS-F.1.4b)', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
-    const res = await app().request(
-      post(
-        '/v1/stories',
-        {
-          submission_type: 'evidence_card',
-          room_id: COMMONS_ROOM_ID,
-          citation_url_or_ref: 'https://example.com/study',
-          claim_id: '99999999-9999-4999-8999-999999999999',
-          relevance_note: 'dangling reference',
-          title: 'Bad evidence card',
-          topic_ids: [TEST_TOPIC_ID],
-        },
-        cookie,
-      ),
-    );
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('unknown_claim');
   });
 
   it('rejects javascript:/data: URLs and malformed URLs with 400 (WS-F.1.3a)', async () => {
@@ -212,53 +169,6 @@ describe('POST /v1/stories — exact-URL dedup (WS-F.1.3b)', () => {
     const body = (await dup.json()) as { error: { code: string }; existing_story_id?: string };
     expect(body.error.code).toBe('held_for_review');
     expect(body.existing_story_id).toBeUndefined();
-  });
-});
-
-describe('POST /v1/stories — evidence-card routing (WS-F.2.5a)', () => {
-  it('routes evidence.added to the thread of the story CONTAINING the claim', async () => {
-    const { userId, cookie } = await seedUserWithSession(fixture.identity);
-    // A brief story whose extraction yields a claim bound to that story.
-    const briefRes = await app().request(
-      post(
-        '/v1/stories',
-        briefSubmission({ body: 'The council approved the reservoir bond on Tuesday.' }),
-        cookie,
-      ),
-    );
-    const { story_id: claimStoryId } = (await briefRes.json()) as { story_id: string };
-    await fixture.ingestion.settle();
-    const claimStoryThread = await fixture.ingestion.stories.getThreadByStoryId(claimStoryId);
-    const claims = await fixture.ingestion.claims.listByStory(claimStoryId);
-    expect(claims.length).toBeGreaterThan(0);
-
-    // An evidence card referencing that claim opens its OWN shell story/thread.
-    const evRes = await app().request(
-      post(
-        '/v1/stories',
-        {
-          submission_type: 'evidence_card',
-          room_id: COMMONS_ROOM_ID,
-          citation_url_or_ref: 'https://example.com/study',
-          claim_id: claims[0]?.claimId,
-          relevance_note: 'Independent replication of the figure',
-          title: 'Replication study',
-          topic_ids: [TEST_TOPIC_ID],
-        },
-        cookie,
-      ),
-    );
-    expect(evRes.status).toBe(201);
-    const { thread_id: shellThread } = (await evRes.json()) as { thread_id: string };
-    await fixture.ingestion.settle();
-
-    // evidence.added carries the CLAIM's story thread, not the new shell — the
-    // material-update signal must advance the discussion holding the claim.
-    const events = await fixture.events.eventStore.listByOwner(userId);
-    const evidenceAdded = events.find((e) => e.eventType === 'evidence.added');
-    const threadId = (evidenceAdded?.payload as { thread_id: string } | undefined)?.thread_id;
-    expect(threadId).toBe(claimStoryThread?.threadId);
-    expect(threadId).not.toBe(shellThread);
   });
 });
 

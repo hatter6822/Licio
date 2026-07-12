@@ -32,15 +32,13 @@ const feedWater: FeedItem = {
   story_id: STORY_1,
   title: 'Regional water board publishes the full testing dataset',
   source: 'Public Records Office',
-  origin: 'official',
   url: 'https://example.org/water-testing-dataset',
   reading_minutes: 6,
-  rating_label: 'well-sourced',
-  distribution_reason: 'Readers opened the primary dataset and added independent corroboration.',
-  context_chips: [{ id: 'c1', label: '3 primary sources', icon: 'document-check' }],
+  rating_label: 'deepening',
+  distribution_reason: 'Readers opened the primary dataset and added sourced comments.',
+  context_chips: [{ id: 'c1', label: '3 sourced comments', icon: 'document-check' }],
   safety_state: 'ok',
   more_on_this_story: [],
-  context_card: null,
   topic_ids: [topicIdForSlug('climate-environment')],
 };
 
@@ -49,7 +47,6 @@ const feedZoning: FeedItem = {
   story_id: STORY_2,
   title: 'Two neighbourhoods read the same zoning proposal very differently',
   source: 'City Desk',
-  origin: 'independent',
   url: 'https://example.org/zoning-proposal',
   reading_minutes: 9,
   rating_label: 'bridge-active',
@@ -57,7 +54,6 @@ const feedZoning: FeedItem = {
   context_chips: [{ id: 'c3', label: 'cross-community', icon: 'bridge' }],
   safety_state: 'ok',
   more_on_this_story: [],
-  context_card: null,
   topic_ids: [topicIdForSlug('local-community')],
 };
 
@@ -66,14 +62,12 @@ const feedTransit: FeedItem = {
   story_id: STORY_3,
   title: 'Claim about the new transit timetable is missing a key caveat',
   source: 'Transit Watch',
-  origin: 'aggregator',
   reading_minutes: 4,
   rating_label: 'needs-context',
   distribution_reason: 'A clarifying question identified an ambiguity awaiting evidence.',
   context_chips: [{ id: 'c4', label: 'awaiting evidence', icon: 'circle-question' }],
   safety_state: 'caution',
   more_on_this_story: [],
-  context_card: null,
   topic_ids: [topicIdForSlug('local-community')],
 };
 

@@ -4,7 +4,6 @@ import type { AgeBand } from '@licio/shared';
 import {
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
   teenFloorPrivacySettings,
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -53,7 +52,6 @@ async function seedUser(ageBand: AgeBand, email = 'p@example.com', handle = 'pus
     ageBand,
     privacySettings: ageBand === 'adult' ? defaultPrivacySettings() : teenFloorPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
   await services.store.setAuth(user.userId, {

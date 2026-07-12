@@ -22,7 +22,6 @@ export function feedItemToCard(item: FeedItem): StoryCardData {
       id: item.story_id,
       title: item.title,
       source: item.source,
-      origin: item.origin,
       ...(item.url ? { url: item.url } : {}),
       readingMinutes: item.reading_minutes,
     },

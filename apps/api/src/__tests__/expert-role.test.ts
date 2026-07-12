@@ -46,12 +46,6 @@ async function joinMember(roomId: string, userId: string): Promise<void> {
     status: 'active',
     requestId: randomUUID(),
     lensId: null,
-    notificationPreferences: {
-      threads: 'mentions',
-      new_evidence: false,
-      bridge_requests: false,
-      steward_announcements: true,
-    },
     requestedAt: new Date().toISOString(),
     joinedAt: new Date().toISOString(),
   });

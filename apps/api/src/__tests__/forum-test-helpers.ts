@@ -132,7 +132,7 @@ export async function seedThread(
   return { storyId, threadId };
 }
 
-/** Seed a claim (target for evidence/correction/counterexample). */
+/** Seed a claim (optional `target_claim_id` linkage on a correction). */
 export async function seedClaim(
   fixture: { ingestion: IngestionServices },
   storyId: string | null = null,
@@ -157,29 +157,18 @@ export async function seedClaim(
 export function contributionBody(
   type: ContributionCreate['type'],
   threadId: string,
-  extra: { claimId?: string; parentId?: string; targetId?: string; storyId?: string } = {},
+  extra: {
+    claimId?: string;
+    parentId?: string;
+    targetId?: string;
+    storyId?: string;
+    /** WS-T sourced comment: attach one citation to a `comment` create. */
+    sourced?: boolean;
+  } = {},
 ): Record<string, unknown> {
   const base = { thread_id: threadId, client_draft_id: `draft-${randomUUID()}` };
   const citation = { url: 'https://example.org/source' };
   switch (type) {
-    case 'question':
-      return { ...base, type, body: 'What evidence supports the employment claim?' };
-    case 'answer':
-      return {
-        ...base,
-        type,
-        body: 'Table 3 of the labor report.',
-        parent_contribution_id: extra.parentId,
-      };
-    case 'evidence':
-      return {
-        ...base,
-        type,
-        body: 'Primary dataset for the claim.',
-        citations: [citation],
-        target_claim_id: extra.claimId,
-        evidence_type: 'dataset',
-      };
     case 'correction':
       // WS-T — a correction targets a comment (targetId) or the story (storyId);
       // exactly one. Callers that pass neither target the story via `storyId`.
@@ -190,57 +179,18 @@ export function contributionBody(
         ...(extra.targetId !== undefined
           ? { target_contribution_id: extra.targetId }
           : { target_story_id: extra.storyId }),
+        ...(extra.claimId !== undefined ? { target_claim_id: extra.claimId } : {}),
         citations: [citation],
         target_text_excerpt: 'on Tuesday evening',
       };
-    case 'synthesis':
-      return {
-        ...base,
-        type,
-        body: 'Both branches agree the dataset is authentic.',
-        included_branch_ids: [extra.parentId, extra.targetId].filter(Boolean),
-      };
-    case 'counterexample':
-      return {
-        ...base,
-        type,
-        body: 'County B adopted the same policy with the opposite result.',
-        target_claim_id: extra.claimId,
-        relevance_explanation: 'Same policy, different outcome.',
-      };
-    case 'explanation':
-      return { ...base, type, body: 'The statute defines this term narrowly.' };
-    case 'local_context':
-      return {
-        ...base,
-        type,
-        body: 'The intersection floods every spring.',
-        scope: 'Riverside resident',
-      };
-    case 'direct_experience':
-      return {
-        ...base,
-        type,
-        body: 'I attended the hearing and the room was full.',
-        scope: 'Hearing attendee',
-        privacy_acknowledged: true,
-      };
-    case 'moderation_concern':
-      return {
-        ...base,
-        type,
-        body: 'This is targeted harassment of a named person.',
-        target_contribution_id: extra.targetId,
-        reason_code: 'MOD_HARASS_001',
-        urgency: 'normal',
-      };
-    case 'meta_discussion':
-      return { ...base, type, body: 'Should these two branches be merged?' };
     case 'comment':
       return {
         ...base,
         type,
-        body: 'This is a comment in the thread.',
+        body: extra.sourced
+          ? 'Primary dataset supporting the claim.'
+          : 'This is a comment in the thread.',
+        ...(extra.sourced ? { citations: [citation] } : {}),
         ...(extra.parentId ? { parent_contribution_id: extra.parentId } : {}),
       };
   }

@@ -110,13 +110,6 @@ Extraction failure is non-blocking: the story stays readable, an
 (5/25/125 min) schedules the retry, and the attempt that succeeds emits
 `content.normalized`.
 
-An **evidence-card submission** additionally creates the `EvidenceCard` row in
-the same request (WS-F.2.5a), resolves a WEB citation URL to an in-app source
-(so the §14.3 evidence-type frequency populates; a non-web citation stays
-source-less), and emits `evidence.added` — stored durably, published detached
-— so the `ingestion-embeddings` consumer generates the card's vector
-(WS-F.3.2c) without blocking the 201.
-
 ## Mathematics
 
 ### URL canonicalization (WS-F.1.3a)
@@ -279,8 +272,8 @@ Similarity helpers (WS-F.3.2d, `packages/db/src/similarity.ts`):
 excluded), `findSimilarInterpretations` (pairwise similarity over supplied
 interpretation ids, LOW pairs first — SCOI divergence; WS-G's lens-tagged
 contributions now provide the per-lens interpretation entity, and the
-embedding/SCOI consumption that feeds ids into this helper lands with WS-H),
-`findNearestEvidenceCards`.  All order by `<=>` so the HNSW index drives the
+embedding/SCOI consumption that feeds ids into this helper lands with WS-H).
+All order by `<=>` so the HNSW index drives the
 scan (EXPLAIN-asserted in the gated tests), all bind parameters, and all
 exclude the query target and removed content.
 
@@ -318,10 +311,7 @@ a shared-schema test pattern-matches every key, and the db column-name test
 does the same).  Profiles are created idempotently on first ingestion
 (unique-index-resolved get-or-create; concurrent first submissions yield one
 row) and updated incrementally: `typical_topics` from each ingested story's
-topics, and `evidence_type_frequency` from each web-cited evidence card's
-relationship type (an evidence-card submission whose citation resolves to a
-domain bumps that source's count — the mechanism that makes the §14.3
-frequency field actually populate).  Steward edits (WS-F.2.3a) run through
+topics.  Steward edits (WS-F.2.3a) run through
 `PATCH /v1/ingestion/admin/sources/:id` with one immutable audit record per
 edited field (before → after → reason).
 
@@ -345,10 +335,10 @@ with per-transition counters.  Trigger sources are structural: WS-E events
 legal for the current state), the hourly low-activity sweep, and the steward
 admin endpoint — no client-facing route can force a transition.  Invalid
 transitions under at-least-once redelivery are reported no-ops, never
-consumer failures.  WS-G's real `contribution.created`/`evidence.added`
-events now drive the rolling contribution counter; SCOI/evidence-gap
-triggers (`scoi_evidence_gap`, `context_added`, …) arrive with WS-H through
-the same `applyLifecycleTrigger` seam.
+consumer failures.  WS-G's real `contribution.created`
+events now drive the rolling contribution counter; the remaining
+triggers (`scoi_evidence_gap`, `context_added`, …) are fired by stewards
+through the same `applyLifecycleTrigger` seam.
 
 ## Security posture
 
@@ -406,10 +396,9 @@ the same `applyLifecycleTrigger` seam.
 |---|---|
 | URL paths keep their case | RFC 3986; lowercasing collides distinct resources and breaks link-outs (task text said lowercase). |
 | LSH (32, 4) crossover documented as ≈ 0.38, not ≈ 0.7 | The sketch's "~0.7 crossover" is mathematically incorrect; (32, 4) is kept as the high-recall retrieval stage with the estimate making the 0.7 decision. |
-| `content.normalized.source_id` and `evidence.added.source_id` became nullable | WS-F is the first real producer: non-link submissions have no web source; §22.1 user-experience evidence has none either. |
+| `content.normalized.source_id` became nullable | WS-F is the first real producer: non-link submissions have no web source. |
 | Claim ENTITY statuses (`candidate/accepted/contested/retracted`) vs the WS-E `claim.updated` EVENT vocabulary | Two distinct dimensions; the documented emission mapping is candidate→unverified, accepted→supported, contested→challenged, retracted→retracted. |
-| EvidenceCard `evidence_type` is the RELATIONSHIP taxonomy (`supports/contradicts/…`), distinct from the WS-E event's MATERIAL taxonomy | §22.3 edges require the relationship dimension; both legitimately exist and are named apart (`EVIDENCE_RELATIONSHIP_TYPES`). |
-| Evidence-card story submissions default to `contextualizes` | §14.1 carries no relationship field; asserting `supports` would fabricate a stance. WS-G's evidence flows attach explicit types. |
+| The EvidenceCard entity (and the `evidence_card` submission type, the `evidence.added` topic, and card verification states) was REMOVED | Comment-centric sourcing: every creation path was API-only with no client, and no production path could verify a card — citations on contributions are the sourcing unit (migration 0075). |
 | `stories_topics_nonempty` uses `cardinality()` | `array_length('{}', 1)` is NULL and a NULL CHECK silently passes (caught by the gated tests). |
 | docker-compose runs `pgvector/pgvector:pg16` | The stock postgres image does not bundle the `vector` extension the migration chain now requires (drop-in replacement; pin to digest on first pull per the in-file comment). |
 
@@ -455,7 +444,7 @@ the same `applyLifecycleTrigger` seam.
 - **WS-D `exportContributions`**: the DSAR export now includes ALL of the
   user's submitted stories — the hook keyset-paginates `listBySubmitter` to
   exhaustion (no truncation cap; the export must be COMPLETE, §19.3 / GDPR
-  Art. 15).  WS-G composes forum contributions, evidence cards, and room
+  Art. 15).  WS-G composes forum contributions and room
   subscriptions into the same hook, and `anonymizeContributions` is closed
   by WS-G too (`docs/forum/README.md`) — story/contribution rows carry no
   scrubbable PII: the tombstoned user row is the anonymization and public
@@ -485,6 +474,11 @@ the same `applyLifecycleTrigger` seam.
   the submission flow needs the BFF-in-the-loop harness (WS-P, the WS-D
   precedent) — the CSRF token round-trip is integration-tested at the
   full-app level meanwhile.
+- **Claims + independent-sources drawers — SHIPPED**: the story page's
+  "Independent sources" drawer (`IndependentSourcesDrawer`, lazy Sheet)
+  consumes `GET /v1/stories/:id/claims` and the WS-H `/independent-sources`
+  read: exposure label, source lineage + syndication, same-coverage
+  co-members, steward-marked primary sources, and the story's claims.
 - **Full-scale (1 M) load validation**: the latency/recall benchmarks are
   measured at N = 20 000 (operating-point table above); validating the same
   constants at the 1 M-story / 100K-embedding target is a WS-P load-harness

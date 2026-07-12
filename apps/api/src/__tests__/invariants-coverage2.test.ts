@@ -9,13 +9,14 @@
 // empty bounded maps).
 import { randomUUID } from 'node:crypto';
 import { minhashSignature } from '@licio/invariants';
-import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import { independentSourcesResponseSchema, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   assembleMeriCandidates,
   assemblePhiTopicData,
   assembleTopicCascade,
+  citationDomainToken,
 } from '../invariants/data.js';
 import {
   HealthRecorder,
@@ -25,6 +26,13 @@ import {
 } from '../invariants/runner.js';
 import { runBatchTier } from '../invariants/scheduler.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
+import type { CitedContribution, ModerationContentPort } from '../moderation/ports.js';
+import {
+  createInMemoryModerationServices,
+  getModerationServices,
+  resetModerationServicesForTests,
+  setModerationServices,
+} from '../moderation/services.js';
 import { createV1Routes } from '../routes/v1.js';
 import { attentionEvent } from './event-test-helpers.js';
 import {
@@ -134,6 +142,120 @@ describe('public surfaces with stored data', () => {
     expect((await app().request('http://local/v1/stories/nope/independent-sources')).status).toBe(
       422,
     );
+  });
+
+  it('a degraded MERI row contributes NOTHING: gains AND redundancy classes both gated', async () => {
+    const fixture = freshInvariantServices();
+    const { storyId } = await seedStory(fixture);
+    await upsertOutput(fixture, {
+      invariantType: 'MERI',
+      targetType: 'feed',
+      targetId: GLOBAL_FEED_TARGET_ID,
+      scoreVector: {
+        meri: 0.8,
+        marginal_gains: { [storyId]: 1 },
+        approximation: false,
+        per_class_bounds: { 'singleton:x': 1, 'singleton:y': 0.5 },
+        group_ids: [],
+      },
+      // The WS-H.1.2c `usable` gate: an INSUFFICIENT_COVERAGE row is ABSENT to
+      // every stored-output consumer — no stale gain, no fabricated classes.
+      reasonCodes: ['INSUFFICIENT_COVERAGE'],
+    });
+    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
+    expect(response.status).toBe(200);
+    const body = independentSourcesResponseSchema.parse(await response.json());
+    expect(body.marginal_gain).toBeNull();
+    expect(body.exposure_label).toBeNull();
+    expect(body.redundancy_classes).toBe(0);
+  });
+});
+
+describe('primary_sources on the independent-sources drawer (route surface)', () => {
+  afterEach(() => {
+    resetModerationServicesForTests();
+  });
+
+  function stubContentPort(row: CitedContribution): ModerationContentPort {
+    return {
+      async resolveTarget() {
+        return { exists: true, subjectUserId: null, contentKind: 'contribution' };
+      },
+      async applyContentState() {},
+      async applyAccountState() {},
+      async contentSnapshot() {
+        return null;
+      },
+      async threadContext() {
+        return { items: [], reportedContributionId: null };
+      },
+      async getCitedContribution(contributionId) {
+        return contributionId === row.contributionId ? row : null;
+      },
+    };
+  }
+
+  it('surfaces a steward mark through the schema-validated wire response', async () => {
+    const fixture = freshInvariantServices();
+    const { storyId, threadId } = await seedStory(fixture);
+    const contributionId = randomUUID();
+    setModerationServices(
+      createInMemoryModerationServices({
+        content: stubContentPort({
+          contributionId,
+          threadId,
+          storyId,
+          storyTitle: 'Seeded story',
+          type: 'comment',
+          bodyPreview: 'Sourced comment.',
+          citations: [{ url: 'https://example.org/primary-dataset', title: 'Primary dataset' }],
+          createdAt: new Date().toISOString(),
+          threadRemoved: false,
+        }),
+      }),
+    );
+    const inserted = await getModerationServices().evidenceDecisions.insert({
+      contributionId,
+      threadId,
+      storyId,
+      action: 'mark-primary-source',
+      citationUrl: 'https://example.org/primary-dataset',
+      citationTitle: 'Primary dataset',
+      reasonCode: null,
+      note: null,
+      decidedBy: null,
+    });
+    expect(inserted.ok).toBe(true);
+    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
+    expect(response.status).toBe(200);
+    const body = independentSourcesResponseSchema.parse(await response.json());
+    expect(body.primary_sources).toEqual([
+      { url: 'https://example.org/primary-dataset', title: 'Primary dataset' },
+    ]);
+  });
+
+  it('fail-closed: a moderation singleton without a content port surfaces nothing', async () => {
+    const fixture = freshInvariantServices();
+    const { storyId, threadId } = await seedStory(fixture);
+    // The bare in-memory seam has NO published-only `getCitedContribution`
+    // read — an unverifiable mark must surface nothing, not leak.
+    setModerationServices(createInMemoryModerationServices());
+    const inserted = await getModerationServices().evidenceDecisions.insert({
+      contributionId: randomUUID(),
+      threadId,
+      storyId,
+      action: 'mark-primary-source',
+      citationUrl: 'https://example.org/unverifiable',
+      citationTitle: null,
+      reasonCode: null,
+      note: null,
+      decidedBy: null,
+    });
+    expect(inserted.ok).toBe(true);
+    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
+    expect(response.status).toBe(200);
+    const body = independentSourcesResponseSchema.parse(await response.json());
+    expect(body.primary_sources).toEqual([]);
   });
 });
 
@@ -246,7 +368,7 @@ describe('MERI assembly through real MinHash signatures', () => {
     await sign(a.storyId, text);
     await sign(b.storyId, nearCopy);
     await sign(c.storyId, distinct);
-    const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7, 0.85);
+    const candidates = await assembleMeriCandidates(fixture.ingestion, null, null, 100, 0.7, 0.85);
     const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
     expect(byId.get(a.storyId)?.nearDuplicateGroupId).not.toBeNull();
     expect(byId.get(a.storyId)?.nearDuplicateGroupId).toBe(
@@ -255,8 +377,81 @@ describe('MERI assembly through real MinHash signatures', () => {
     expect(byId.get(c.storyId)?.nearDuplicateGroupId).toBeNull();
     // Topic filtering branch: no candidates for an unknown topic.
     expect(
-      await assembleMeriCandidates(fixture.ingestion, 'no-such-topic', 100, 0.7, 0.85),
+      await assembleMeriCandidates(fixture.ingestion, null, 'no-such-topic', 100, 0.7, 0.85),
     ).toEqual([]);
+  });
+
+  it('derives evidence lineage from the CITATION DOMAINS of each story thread', async () => {
+    const fixture = freshInvariantServices();
+    const a = await seedStory(fixture, { canonicalUrl: 'https://a.example/cite-1' });
+    const b = await seedStory(fixture, { canonicalUrl: 'https://b.example/cite-2' });
+    const c = await seedStory(fixture, { canonicalUrl: 'https://c.example/cite-3' });
+    const cite = async (threadId: string, url: string): Promise<void> => {
+      const inserted = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId,
+        userId: randomUUID(),
+        type: 'comment',
+        body: 'A sourced comment carrying the citation.',
+        citations: [{ url }],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: randomUUID(),
+        path: [],
+        moderationState: 'published',
+      });
+      expect(inserted.ok).toBe(true);
+    };
+    // a + b cite the SAME registrable host (case-insensitive, www.-stripped);
+    // c cites a DOI, which maps to the DOI-prefix token instead.
+    await cite(a.threadId, 'https://www.Journal.example/study-1');
+    await cite(b.threadId, 'https://journal.example/study-2');
+    await cite(c.threadId, 'doi:10.5555/replication.7');
+    const candidates = await assembleMeriCandidates(
+      fixture.ingestion,
+      fixture.forum,
+      null,
+      100,
+      0.7,
+      0.85,
+    );
+    const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+    expect(byId.get(a.storyId)?.evidenceGroupId).toBe('cit:journal.example');
+    expect(byId.get(b.storyId)?.evidenceGroupId).toBe('cit:journal.example');
+    expect(byId.get(c.storyId)?.evidenceGroupId).toBe('cit:doi:10.5555');
+    expect(byId.get(a.storyId)?.inputsAvailable.evidence).toBe(true);
+    expect(byId.get(a.storyId)?.independence?.evidenceGroupIds).toEqual(['cit:journal.example']);
+    // Without a forum bundle there is no citation source ⇒ no evidence lineage.
+    const withoutForum = await assembleMeriCandidates(
+      fixture.ingestion,
+      null,
+      null,
+      100,
+      0.7,
+      0.85,
+    );
+    expect(withoutForum.every((candidate) => candidate.evidenceGroupId === null)).toBe(true);
+    expect(withoutForum.every((candidate) => candidate.inputsAvailable.evidence === false)).toBe(
+      true,
+    );
+  });
+
+  it('citationDomainToken: registrable-domain grouping, DOI prefixes, junk → null', () => {
+    expect(citationDomainToken('https://WWW.Example.COM/path?x=1')).toBe('cit:example.com');
+    expect(citationDomainToken('doi:10.1234/abc.def')).toBe('cit:doi:10.1234');
+    // Sibling subdomains collapse to ONE registrable domain (eTLD+1, the
+    // debate judge's anti-gaming rule) — spreading citations across
+    // a./b.example.com cannot inflate apparent independence.
+    expect(citationDomainToken('https://a.example.com/x')).toBe('cit:example.com');
+    expect(citationDomainToken('https://b.example.com/y')).toBe('cit:example.com');
+    expect(citationDomainToken('https://news.example.co.uk/z')).toBe('cit:example.co.uk');
+    // DOI RESOLVER URLs group by DOI prefix, never by the shared resolver host.
+    expect(citationDomainToken('https://doi.org/10.1234/abc')).toBe('cit:doi:10.1234');
+    expect(citationDomainToken('https://dx.doi.org/10.5555/xyz')).toBe('cit:doi:10.5555');
+    // A resolver URL with no parseable DOI falls through to the host token.
+    expect(citationDomainToken('https://doi.org/about')).toBe('cit:doi.org');
+    expect(citationDomainToken('not a url')).toBeNull();
   });
 
   it('assembleTopicCascade returns no cascade for the UNCLASSIFIED sentinel', async () => {
