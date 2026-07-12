@@ -151,6 +151,16 @@ export interface DebateStore {
     content: DebateLockedContent,
     resolveDueAt?: string,
   ): Promise<DebateArenaRecord | null>;
+  /** ATOMICALLY replace a still-`locked` arena's content snapshot (CAS on
+   *  `state = 'locked'`).  The reconcile seam for an underlying-content edit
+   *  that raced the lock: the persisted edit re-enters the snapshot BEFORE the
+   *  queue claims it, so the judge never scores content the live row no longer
+   *  shows.  A claimed/terminal arena returns null (too late to reconcile —
+   *  the caller reverts the edit instead). */
+  refreshLockedContent(
+    debateId: string,
+    content: DebateLockedContent,
+  ): Promise<DebateArenaRecord | null>;
   /** ATOMICALLY close an `open` arena as `withdrawn` (the challenger retracted
    *  the correction) — terminal, no verdict.  Non-`open` returns null (a
    *  withdrawal racing the hour-23 lock loses: the material was locked in). */
@@ -364,6 +374,22 @@ export class InMemoryDebateStore implements DebateStore {
     row.state = 'locked';
     row.lockedAt = lockedAt;
     if (resolveDueAt !== undefined) row.resolveDueAt = resolveDueAt;
+    row.lockedContent = {
+      target: { ...content.target, citations: [...content.target.citations] },
+      correction: { ...content.correction, citations: [...content.correction.citations] },
+    };
+    row.updatedAt = this.#iso();
+    return row;
+  }
+
+  async refreshLockedContent(
+    debateId: string,
+    content: DebateLockedContent,
+  ): Promise<DebateArenaRecord | null> {
+    const row = this.#rows.get(debateId);
+    if (!row) return null;
+    // CAS: only a still-locked (unclaimed) arena's snapshot may be replaced.
+    if (row.state !== 'locked') return null;
     row.lockedContent = {
       target: { ...content.target, citations: [...content.target.citations] },
       correction: { ...content.correction, citations: [...content.correction.citations] },

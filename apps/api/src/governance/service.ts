@@ -1346,8 +1346,12 @@ export class GovernanceService {
 
   /**
    * Append a room agent's debate adjudication to the agent action log (the
-   * WS-U provenance triple).  Reversible: the room steward's 24h overrule is
-   * the human remedy over every adjudicator leg.
+   * WS-U provenance triple).  The model/prompt provenance comes from the
+   * CONDITIONING THAT ACTUALLY JUDGED (`debateConditioning`'s resolved
+   * `modelId`/`promptHash`) — never re-read here, so a binding swap while the
+   * judge was running can never attribute the verdict to a model/prompt other
+   * than the one pinned in its AIOutputRecord.  Reversible: the room
+   * steward's 24h overrule is the human remedy over every adjudicator leg.
    */
   async recordDebateAgentAction(entry: {
     roomId: string;
@@ -1355,14 +1359,16 @@ export class GovernanceService {
     verdict: string;
     winner: string;
     rationale: string | null;
+    /** The ratified model behind the conditioning that judged. */
+    modelId: string;
+    /** The binding's model+prompt digest from that same conditioning. */
+    promptHash: string;
   }): Promise<void> {
-    const binding = await this.deps.stores.bindings.get(entry.roomId);
-    if (binding === null) return;
     await this.deps.stores.agentActions.append({
       actionId: this.deps.uuid(),
       roomId: entry.roomId,
-      bindingModelId: binding.modelId,
-      promptHash: this.deps.digest(`${binding.modelId}:${binding.promptId}`),
+      bindingModelId: entry.modelId,
+      promptHash: entry.promptHash,
       actionType: 'debate.judge',
       subjectRef: entry.debateId,
       lawPackRuleRef: null, // the model is not a DSL rule; provenance is the AIOutputRecord

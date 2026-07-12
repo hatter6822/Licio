@@ -304,25 +304,47 @@ export async function postDebatePosition(
  * Reset a party's activity clock after an edit to their UNDERLYING content
  * (the correction, or the challenged comment) while its arena is open, and
  * fan the fresh material out to arena viewers.  A no-op for a contribution
- * with no live arena.  Story edits have no author edit path today, so the
- * incumbent side of a story-target arena is touched only via its rebuttal.
+ * with no live arena.  A CORRECTION row can be party to TWO arenas at once —
+ * the challenger of the arena it opened AND the incumbent of an arena
+ * challenging it — so both are touched.  Story edits have no author edit path
+ * today, so the incumbent side of a story-target arena is touched only via
+ * its rebuttal.
  */
 export async function touchDebateActivityForContribution(
   deps: DebateDeps,
   contributionId: string,
 ): Promise<void> {
-  const asTarget = await deps.debates.getActiveForComment(contributionId);
-  const asCorrection =
-    asTarget === null ? await deps.debates.getActiveForCorrection(contributionId) : null;
-  const arena = asTarget ?? asCorrection;
-  if (arena === null || arena.state !== 'open') return;
-  const side = asTarget !== null ? 'incumbent' : 'challenger';
-  const touched = await deps.debates.touchActivity(
-    arena.debateId,
-    side,
-    new Date(deps.now()).toISOString(),
-  );
-  if (touched !== null) await broadcastArena(deps, touched);
+  const nowIso = new Date(deps.now()).toISOString();
+  for (const { arena, side } of await liveArenasForContribution(deps.debates, contributionId)) {
+    if (arena.state !== 'open') continue;
+    const touched = await deps.debates.touchActivity(arena.debateId, side, nowIso);
+    if (touched !== null) await broadcastArena(deps, touched);
+  }
+}
+
+/**
+ * Every live arena a contribution is party to, with the side it plays there.
+ * A comment is at most the TARGET of one arena; a correction is the
+ * CHALLENGER of the arena it opened and may SIMULTANEOUSLY be the target of a
+ * second arena challenging it (a correction is itself correctable).
+ */
+export async function liveArenasForContribution(
+  debates: Pick<DebateStore, 'getActiveForComment' | 'getActiveForCorrection'>,
+  contributionId: string,
+): Promise<{ arena: DebateArenaRecord; side: 'incumbent' | 'challenger' }[]> {
+  const out: { arena: DebateArenaRecord; side: 'incumbent' | 'challenger' }[] = [];
+  const asTarget = await debates.getActiveForComment(contributionId);
+  if (asTarget !== null) out.push({ arena: asTarget, side: 'incumbent' });
+  const asCorrection = await debates.getActiveForCorrection(contributionId);
+  if (asCorrection !== null) out.push({ arena: asCorrection, side: 'challenger' });
+  return out;
+}
+
+/** Re-read + fan out an arena frame (e.g. after a post-close tombstone, so
+ *  live viewers see the suppressed projection, not the pre-removal body). */
+export async function rebroadcastArena(deps: DebateDeps, debateId: string): Promise<void> {
+  const arena = await deps.debates.getById(debateId);
+  if (arena !== null) await broadcastArena(deps, arena);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,8 +358,10 @@ const EMPTY_LOCKED_SIDE: DebateLockedSide = {
   updatedAt: null,
 };
 
-/** Snapshot both sides' underlying material (what the queue will judge). */
-async function snapshotDebateContent(
+/** Snapshot both sides' underlying material (what the queue will judge).
+ *  Exported for the edit-race reconcile in `editContribution` (an edit that
+ *  raced the lock re-snapshots the still-locked arena). */
+export async function snapshotDebateContent(
   deps: DebateDeps,
   arena: DebateArenaRecord,
 ): Promise<DebateLockedContent> {
@@ -946,9 +970,11 @@ function projectContent(
 /**
  * Read the material under debate for the arena projection: the LIVE underlying
  * content while the arena is `open` (either author may still be adjusting it),
- * and the locked snapshot from the lock onward.  A currently moderation-
- * removed/hidden row projects with `removed: true` and no body — the arena
- * never re-serves content the floor has taken down.
+ * and the locked snapshot from the lock onward.  A row that is currently NOT
+ * publicly served — removed, hidden, OR held `under_review` (thread rendering
+ * hides a held row from everyone but its author) — projects with
+ * `removed: true` and no body: the arena is thread-readability-gated, not
+ * moderation-gated, so it must never re-serve what moderation is holding.
  */
 export async function readDebateArenaContent(
   contributions: Pick<ContributionStore, 'getById'>,
@@ -959,8 +985,7 @@ export async function readDebateArenaContent(
 
   const correctionRow = await contributions.getById(arena.challengerContributionId);
   const correctionSuppressed =
-    correctionRow !== null &&
-    (correctionRow.moderationState === 'removed' || correctionRow.moderationState === 'hidden');
+    correctionRow !== null && correctionRow.moderationState !== 'published';
   let correction: DebateContent | null = null;
   if (locked !== null) {
     correction = projectContent('correction', locked.correction, correctionSuppressed, true);
@@ -981,9 +1006,7 @@ export async function readDebateArenaContent(
   let target: DebateContent | null = null;
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
     const targetRow = await contributions.getById(arena.targetContributionId);
-    const targetSuppressed =
-      targetRow !== null &&
-      (targetRow.moderationState === 'removed' || targetRow.moderationState === 'hidden');
+    const targetSuppressed = targetRow !== null && targetRow.moderationState !== 'published';
     if (locked !== null) {
       target = projectContent('comment', locked.target, targetSuppressed, true);
     } else if (targetRow !== null) {

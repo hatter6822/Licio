@@ -187,9 +187,11 @@ export const debateContentSchema = z
     /** The content's citations (a story's primary source URL included). */
     citations: z.array(citationSchema).max(MAX_CITATIONS),
     updated_at: isoTimestampSchema.nullable(),
-    /** True when the underlying row was tombstoned after the arena closed. */
+    /** True when the underlying row is currently NOT publicly served —
+     *  removed, hidden, or held under review.  The body/citations are empty
+     *  then: the arena never re-serves what moderation holds or removed. */
     removed: z.boolean(),
-    /** True when this is the hour-23 locked snapshot (vs. the live content). */
+    /** True when this is the locked snapshot (vs. the live content). */
     locked: z.boolean(),
   })
   .strict();

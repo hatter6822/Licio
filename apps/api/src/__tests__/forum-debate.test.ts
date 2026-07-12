@@ -24,6 +24,7 @@ import {
   domainOf,
   finalizeDebate,
   judgeDebateArena,
+  liveArenasForContribution,
   lockDebateArena,
   maybeEnterDebate,
   overrideDebateVerdict,
@@ -1044,6 +1045,67 @@ describe('WS-T lock — the material under debate is snapshotted and judged', ()
     expect(content.target?.locked).toBe(true);
     expect(content.target?.body).toBe('The vote passed 5-4.');
     expect(content.correction?.locked).toBe(true);
+  });
+
+  it('suppresses a moderation-held (under_review) body from the arena projection', async () => {
+    // Thread rendering hides an under_review row from everyone but its author;
+    // the arena is only thread-readability-gated, so it must suppress too —
+    // live AND from the locked snapshot.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    await contributions.setModerationState(targetId, 'under_review');
+    const live = await readDebateArenaContent(
+      contributions,
+      deps.storyContent,
+      (await debates.getById(debateId)) as NonNullable<Awaited<ReturnType<typeof debates.getById>>>,
+    );
+    expect(live.target?.removed).toBe(true);
+    expect(live.target?.body).toBe('');
+    expect(live.target?.citations).toEqual([]);
+    // The correction stays served (it is still published).
+    expect(live.correction?.removed).toBe(false);
+    // Locked snapshots respect a CURRENT hold the same way.
+    await lockDebateArena(deps, debateId, 'expedited');
+    const locked = await readDebateArenaContent(
+      contributions,
+      deps.storyContent,
+      (await debates.getById(debateId)) as NonNullable<Awaited<ReturnType<typeof debates.getById>>>,
+    );
+    expect(locked.target?.removed).toBe(true);
+    expect(locked.target?.body).toBe('');
+  });
+
+  it('touches BOTH arenas of a doubly-debated correction (challenger of one, incumbent of the other)', async () => {
+    // A correction is itself correctable: arena A (it challenges a comment) +
+    // arena B (a second correction challenges IT). Its author's activity must
+    // reset the clock on BOTH, and the helper reports both parties.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const arenaA = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), arenaA);
+    const counterId = await seedCorrection(correctionId);
+    const arenaB = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      {
+        ...correctionInput(counterId, correctionId),
+        metadata: { target_contribution_id: correctionId },
+      },
+      arenaB,
+    );
+
+    const parties = await liveArenasForContribution(debates, correctionId);
+    expect(new Set(parties.map((p) => `${p.arena.debateId}:${p.side}`))).toEqual(
+      new Set([`${arenaB}:incumbent`, `${arenaA}:challenger`]),
+    );
+
+    clock.ms += 30 * 60 * 1000;
+    await touchDebateActivityForContribution(deps, correctionId);
+    const nowIso = new Date(clock.ms).toISOString();
+    expect((await debates.getById(arenaA))?.challengerLastActiveAt).toBe(nowIso);
+    expect((await debates.getById(arenaB))?.incumbentLastActiveAt).toBe(nowIso);
   });
 });
 

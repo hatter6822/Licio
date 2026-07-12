@@ -291,6 +291,20 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async refreshLockedContent(
+    debateId: string,
+    content: DebateLockedContent,
+  ): Promise<DebateArenaRecord | null> {
+    // CAS: only a still-locked (unclaimed) arena's snapshot may be replaced —
+    // the reconcile seam for an underlying edit that raced the lock.
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({ lockedContent: content, updatedAt: new Date() })
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'locked')))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
   async withdraw(debateId: string, closedAt: string): Promise<DebateArenaRecord | null> {
     // CAS: a withdrawal racing the lock loses (the material was locked in).
     const rows = await this.#db

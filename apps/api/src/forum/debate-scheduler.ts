@@ -60,7 +60,7 @@ export function buildDebateJudgeRunner(now: () => number): DebateJudgeRunner {
     // A room-agent verdict lands in the WS-U agent action log (the provenance
     // triple; reversible — the steward's 24h overrule is the human remedy).
     if (outcome.viaRoomAgent && room !== null) {
-      await recordRoomDebateAction(room.roomId, context.debateId, outcome.verdict);
+      await recordRoomDebateAction(room, context.debateId, outcome.verdict);
     }
     return { verdict: outcome.verdict, outputId: outcome.outputId };
   };
@@ -78,20 +78,24 @@ async function resolveRoomDebateConditioning(roomId: string) {
 }
 
 /** Best-effort agent-action append (the verdict itself is already durable on
- *  the arena row + its AIOutputRecord; a log fault must not void it). */
+ *  the arena row + its AIOutputRecord; a log fault must not void it).  The
+ *  provenance comes from the CONDITIONING that judged, never a re-read — a
+ *  binding swapped mid-judgement must not be credited with this verdict. */
 async function recordRoomDebateAction(
-  roomId: string,
+  room: { roomId: string; modelId: string; promptHash: string },
   debateId: string,
   verdict: { verdict: string; winner: string; rationale: string },
 ): Promise<void> {
   try {
     const { getGovernanceService } = await import('../governance/services.js');
     await getGovernanceService().recordDebateAgentAction({
-      roomId,
+      roomId: room.roomId,
       debateId,
       verdict: verdict.verdict,
       winner: verdict.winner,
       rationale: verdict.rationale,
+      modelId: room.modelId,
+      promptHash: room.promptHash,
     });
   } catch {
     // Best-effort by design.

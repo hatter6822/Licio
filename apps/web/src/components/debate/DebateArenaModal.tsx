@@ -179,7 +179,7 @@ function ContentCard({
         <p className="text-sm text-ink-muted italic">This content is no longer available.</p>
       ) : content.removed ? (
         <p className="text-sm text-ink-muted italic">
-          This content was removed and is no longer shown.
+          This content is not currently shown (removed or held for review).
         </p>
       ) : (
         <ClampedContent

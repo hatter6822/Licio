@@ -43,8 +43,10 @@ import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import {
   concedeDebate,
+  liveArenasForContribution,
   maybeEnterDebate,
-  touchDebateActivityForContribution,
+  rebroadcastArena,
+  snapshotDebateContent,
   withdrawDebate,
 } from './debate.js';
 import { buildDebateDeps } from './debate-scheduler.js';
@@ -775,19 +777,19 @@ export type ContributionEditOutcome =
  * citations/metadata only — `type` is structurally absent from the contract.
  * The previous values are snapshotted into the append-only edit history.
  */
-/** The live debate arena this contribution is a party to — as the challenged
- *  target (`incumbent`) or as the correction that opened it (`challenger`) —
- *  or null when it is not debated. */
-async function liveArenaForContribution(
-  forum: ForumServices,
-  contributionId: string,
-): Promise<{ arena: DebateArenaRecord; side: 'incumbent' | 'challenger' } | null> {
-  const asTarget = await forum.debates.getActiveForComment(contributionId);
-  if (asTarget !== null) return { arena: asTarget, side: 'incumbent' };
-  const asCorrection = await forum.debates.getActiveForCorrection(contributionId);
-  if (asCorrection !== null) return { arena: asCorrection, side: 'challenger' };
-  return null;
+/** True when any of the contribution's live arenas has its material locked in
+ *  (post-lock, pre-verdict) — every party-driven change is refused then. */
+function anyDebateLockedIn(parties: readonly { arena: DebateArenaRecord }[]): boolean {
+  return parties.some(
+    ({ arena }) => arena.state === 'locked' || arena.state === 'awaiting_verdict',
+  );
 }
+
+const DEBATE_LOCKED_REJECTION = {
+  status: 409,
+  code: 'debate_locked',
+  message: 'This content is locked in a live debate awaiting AI resolution.',
+} as const;
 
 export async function editContribution(
   bundle: ServiceBundle,
@@ -816,22 +818,16 @@ export async function editContribution(
   }
   // WS-T — once a debate's material is locked in (the hour-23 schedule or the
   // both-sides-idle expedite), neither party may change the debated content
-  // until the verdict lands (§15.4: "locked in").  While the arena is `open`
+  // until the verdict lands (§15.4: "locked in").  While the arenas are `open`
   // the edit proceeds — the arena shows the live content — and counts as the
-  // side's activity (below).
-  const debateParty = await liveArenaForContribution(forum, contributionId);
-  if (
-    debateParty !== null &&
-    (debateParty.arena.state === 'locked' || debateParty.arena.state === 'awaiting_verdict')
-  ) {
-    return {
-      ok: false,
-      rejection: {
-        status: 409,
-        code: 'debate_locked',
-        message: 'This content is locked in a live debate awaiting AI resolution.',
-      },
-    };
+  // side's activity (below).  A CORRECTION row can be party to TWO arenas at
+  // once (challenger of the one it opened, incumbent of one challenging it);
+  // a lock on EITHER freezes it.  This early read is the fast reject; the
+  // race against a lock landing DURING the safety passes is closed atomically
+  // right before the write (below).
+  const debateParties = await liveArenasForContribution(forum.debates, contributionId);
+  if (anyDebateLockedIn(debateParties)) {
+    return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
   }
   if (update.body !== undefined && update.body.length > CONTRIBUTION_BODY_LIMITS[existing.type]) {
     return {
@@ -886,12 +882,63 @@ export async function editContribution(
     roomId: editThread?.roomId ?? existing.threadId,
   });
 
+  // WS-T — close the lock race ATOMICALLY at the write boundary.  The gate at
+  // the top read `open`, but the safety/agent passes above can take real time
+  // (an LLM call) and a lifecycle sweep may have locked + snapshotted the
+  // arena meanwhile — persisting the edit then would change the live row out
+  // from under the snapshot the verdict judges.  `touchActivity` is a
+  // store-level `state = 'open'` CAS, so it doubles as the permission check:
+  // a loser here is told `debate_locked` BEFORE anything is written (and a
+  // winner has its side-activity clock reset atomically with the permission).
+  const debateDeps =
+    debateParties.length > 0 ? buildDebateDeps(bundle.forum, bundle.ingestion) : null;
+  const touchAt = new Date(forum.now()).toISOString();
+  for (const { arena, side } of debateParties) {
+    if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
+      return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+    }
+  }
+
   const edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
   if (!edited) {
     return {
       ok: false,
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
+  }
+
+  // WS-T — the residual sliver: a lock that lands BETWEEN the touch-CAS and
+  // `applyEdit`.  Reconcile forward while the arena is still `locked`
+  // (re-snapshot the now-current content — the queue has not claimed it, so
+  // the judge scores exactly what the live row shows); once claimed/judged it
+  // is too late to reconcile, so the edit is REVERTED (an honest edit-history
+  // entry) and the writer told `debate_locked` — never a silently unjudged
+  // live change.
+  if (debateDeps !== null) {
+    for (const { arena } of debateParties) {
+      const current = await forum.debates.getById(arena.debateId);
+      if (current === null || current.state === 'open') continue;
+      if (current.state === 'locked') {
+        const snapshot = await snapshotDebateContent(debateDeps, current);
+        if ((await forum.debates.refreshLockedContent(current.debateId, snapshot)) !== null) {
+          continue; // the judged snapshot now includes this edit
+        }
+      }
+      // Claimed or judged mid-race: put the previous material back.
+      await forum.contributions.applyEdit(
+        contributionId,
+        { body: existing.body, citations: existing.citations },
+        userId,
+        randomUUID(),
+      );
+      return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+    }
+    // Fan the fresh material out to arena viewers (the activity clocks were
+    // already reset by the pre-write touch-CAS above).  The projection reads
+    // the CURRENT row, so a moderation-held edit broadcasts suppressed.
+    for (const { arena } of debateParties) {
+      await rebroadcastArena(debateDeps, arena.debateId);
+    }
   }
   // The WS-U in-room agent RE-MODERATES the edited content (parity with the
   // create path, WS-U §24.6): an edit-to-violate-the-community-policy is caught
@@ -974,15 +1021,6 @@ export async function editContribution(
     forum.metrics.increment('contributions.edited');
     return { ok: true, contribution: held ?? edited };
   }
-  // WS-T — a published edit to a debated contribution resets the editor's
-  // side-activity clock (the both-sides-idle expedited path) and fans the
-  // fresh material out to arena viewers.
-  if (debateParty !== null && debateParty.arena.state === 'open') {
-    await touchDebateActivityForContribution(
-      buildDebateDeps(bundle.forum, bundle.ingestion),
-      contributionId,
-    );
-  }
   forum.metrics.increment('contributions.edited');
   return { ok: true, contribution: edited };
 }
@@ -1007,47 +1045,36 @@ export async function removeContribution(
   if (existing.moderationState === 'removed') {
     return { ok: true, contribution: existing }; // idempotent
   }
-  // WS-T — removing content that is party to a live debate:
+  // WS-T — removing content that is party to a live debate (a correction row
+  // may be party to TWO arenas: challenger of the one it opened AND incumbent
+  // of one challenging it — every live arena gets its matching exit):
   //   • `open`: the removal IS the party's exit — the challenger removing the
-  //     correction WITHDRAWS the debate (no verdict, the target's tag clears);
-  //     the incumbent removing the challenged comment CONCEDES (the challenger
-  //     prevails without adjudication).  Then the tombstone proceeds.
-  //   • `locked`/`awaiting_verdict`: refused — the material is locked in
-  //     until the AI resolution queue renders the verdict.
+  //     correction WITHDRAWS that debate (no verdict, the target's tag clears);
+  //     the incumbent removing the challenged content CONCEDES that debate
+  //     (the challenger prevails without adjudication).  Then the tombstone
+  //     proceeds.
+  //   • `locked`/`awaiting_verdict` on ANY of them: refused — the material is
+  //     locked in until the AI resolution queue renders the verdict.
   //   • `judged`/terminal: the outcome already stands; removal proceeds.
-  const debateParty = await liveArenaForContribution(forum, contributionId);
-  if (debateParty !== null) {
-    const { arena, side } = debateParty;
-    if (arena.state === 'locked' || arena.state === 'awaiting_verdict') {
-      return {
-        ok: false,
-        rejection: {
-          status: 409,
-          code: 'debate_locked',
-          message: 'This content is locked in a live debate awaiting AI resolution.',
-        },
-      };
+  const debateParties = await liveArenasForContribution(forum.debates, contributionId);
+  const closedArenaIds: string[] = [];
+  if (anyDebateLockedIn(debateParties)) {
+    return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+  }
+  const debateDeps = debateParties.length > 0 ? buildDebateDeps(forum, bundle.ingestion) : null;
+  for (const { arena, side } of debateParties) {
+    if (arena.state !== 'open' || debateDeps === null) continue;
+    const outcome =
+      side === 'challenger'
+        ? await withdrawDebate(debateDeps, arena.debateId, userId)
+        : await concedeDebate(debateDeps, arena.debateId, userId);
+    // A close racing the lock loses (`window_closed`): the material just
+    // locked in, so the removal is refused too.  A stale party record
+    // (`not_found`/`not_*`) has nothing to close — the removal proceeds.
+    if (!outcome.ok && outcome.reason === 'window_closed') {
+      return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
     }
-    if (arena.state === 'open') {
-      const deps = buildDebateDeps(forum, bundle.ingestion);
-      const outcome =
-        side === 'challenger'
-          ? await withdrawDebate(deps, arena.debateId, userId)
-          : await concedeDebate(deps, arena.debateId, userId);
-      // A close racing the lock loses (`window_closed`): the material just
-      // locked in, so the removal is refused too.  A stale party record
-      // (`not_found`/`not_*`) has nothing to close — the removal proceeds.
-      if (!outcome.ok && outcome.reason === 'window_closed') {
-        return {
-          ok: false,
-          rejection: {
-            status: 409,
-            code: 'debate_locked',
-            message: 'This content is locked in a live debate awaiting AI resolution.',
-          },
-        };
-      }
-    }
+    if (outcome.ok) closedArenaIds.push(arena.debateId);
   }
   const removed = await forum.contributions.setModerationState(contributionId, 'removed');
   if (!removed) {
@@ -1055,6 +1082,15 @@ export async function removeContribution(
       ok: false,
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
+  }
+  // The close above broadcast its terminal frame BEFORE the tombstone landed —
+  // and a client stops streaming a terminal arena, so without this it would
+  // keep the pre-removal body forever.  Re-broadcast now: the projection reads
+  // the tombstoned row and serves the suppressed content.
+  if (debateDeps !== null) {
+    for (const debateId of closedArenaIds) {
+      await rebroadcastArena(debateDeps, debateId);
+    }
   }
   forum.metrics.increment('contributions.removed');
   return { ok: true, contribution: removed };

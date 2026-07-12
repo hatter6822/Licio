@@ -315,6 +315,38 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect((await store.claimForVerdict(id))?.state).toBe('awaiting_verdict');
   });
 
+  it('refreshLockedContent replaces a still-locked snapshot and refuses once claimed', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const side = (body: string): DebateLockedContent['target'] => ({
+      title: null,
+      body,
+      citations: [],
+      updatedAt: null,
+    });
+    await store.lock(id, '2026-07-05T01:00:00.000Z', {
+      target: side('pre-race body'),
+      correction: side('the correction'),
+    });
+    // The edit-race reconcile: while still `locked`, the snapshot is replaceable.
+    const refreshed = await store.refreshLockedContent(id, {
+      target: side('post-edit body'),
+      correction: side('the correction'),
+    });
+    expect(refreshed?.lockedContent?.target.body).toBe('post-edit body');
+    // Once the queue claims the arena, the snapshot is frozen for the judge.
+    await store.claimForVerdict(id);
+    expect(
+      await store.refreshLockedContent(id, {
+        target: side('too late'),
+        correction: side('the correction'),
+      }),
+    ).toBeNull();
+    expect((await store.getById(id))?.lockedContent?.target.body).toBe('post-edit body');
+  });
+
   it('withdraws an OPEN arena (terminal, frees the per-target slot)', async () => {
     const store = makeStore();
     const ctx = await freshCtx();
