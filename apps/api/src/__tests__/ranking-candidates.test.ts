@@ -8,7 +8,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Candidate, RankingProfileConfig } from '@licio/ranking';
 import { EVERGREEN_PROFILE } from '@licio/ranking';
-import { DEFAULT_ROOM_NOTIFICATION_PREFERENCES } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
 import { assembleCandidatePool, type ClassificationPorts } from '../ranking/orchestrator.js';
@@ -115,7 +114,6 @@ describe('WS-I.1.1a retrievers', () => {
       status: 'active',
       requestId: randomUUID(),
       lensId: null,
-      notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
       requestedAt: new Date().toISOString(),
       joinedAt: new Date().toISOString(),
     });
@@ -264,7 +262,7 @@ describe('WS-I.1.1a retrievers', () => {
     await fixture.events.windowStore.upsert({
       ...windowBase,
       itemId: constructive.storyId,
-      contributionCounts: { synthesis: 2, correction: 1 },
+      contributionCounts: { correction: 1, bridge_comment: 1 },
       eventCount: 10,
     });
     await fixture.events.windowStore.upsert({
@@ -336,14 +334,33 @@ describe('WS-I.1.1a retrievers', () => {
     });
   });
 
-  it('expert-explanation retriever surfaces nothing (human summaries were removed)', async () => {
-    // The §24.3 thread-summary feature was removed, so `hasHumanSummary` is now
-    // always false and this retriever never surfaces a candidate (the retriever +
-    // port remain to keep the WS-I candidate-source set stable).
-    await seedStory(fixture.ingestion);
-    await seedStory(fixture.ingestion);
+  it('expert explanations surface stories from PUBLIC experts_and_stewards rooms only', async () => {
+    // The retriever's single remaining leg (the human-summary leg was removed
+    // with the §24.3 thread-summary feature): stories in public rooms whose
+    // posting policy is `experts_and_stewards` — the WS-Q successor to legacy
+    // expert_led rooms. Ordinary-room stories never enter through this source.
+    const expertRoomId = randomUUID();
+    await fixture.forum.rooms.insert({
+      roomId: expertRoomId,
+      name: 'Expert desk',
+      slug: 'expert-desk',
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'experts_and_stewards',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const expertStory = await seedStory(fixture.ingestion, { roomId: expertRoomId });
+    await seedStory(fixture.ingestion); // Commons (all_members) — not expert-led
     const candidates = await new ExpertExplanationsRetriever(ports()).retrieve(retrieveContext());
-    expect(candidates).toEqual([]);
+    expect(candidates.map((c) => c.item_id)).toEqual([expertStory.storyId]);
+    expect(candidates[0]?.source_type).toBe('expert_explanation');
+    expect(candidates[0]?.retrieval_origins).toEqual(['expert_explanations_v1']);
   });
 
   it('chronological catch-up skips seen stories and respects the per-room mark', async () => {

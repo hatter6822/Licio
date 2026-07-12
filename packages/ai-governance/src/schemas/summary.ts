@@ -30,7 +30,6 @@ export const summaryStatementSchema = z
     /** Required (non-null) for claims, null for facts/interpretations. */
     attribution: shortTextSchema.nullable(),
     cited_contribution_ids: z.array(refIdSchema).max(50),
-    cited_evidence_ids: z.array(refIdSchema).max(50),
   })
   .strict()
   .refine((s) => (s.kind === 'claim') === (s.attribution !== null), {

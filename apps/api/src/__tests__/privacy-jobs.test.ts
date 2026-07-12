@@ -8,11 +8,7 @@
 // or location (§19.1/§19.5).
 
 import type { AgeBand, SecurityActivityEntry } from '@licio/shared';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type AuditEntryInput, type AuditStore, InMemoryAuditStore } from '../identity/audit.js';
 import { sha256Hex } from '../identity/crypto.js';
@@ -89,7 +85,6 @@ async function seedFullUser(ageBand: AgeBand = 'adult') {
     ageBand,
     privacySettings: defaultPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
   await services.store.setAuth(user.userId, { emailVerified: true, mfaEnabled: true });
@@ -166,7 +161,6 @@ describe('assembleExport', () => {
       ageBand: 'adult',
       privacySettings: defaultPrivacySettings(),
       personalizationSettings: defaultPersonalizationSettings(),
-      reputationSummary: emptyReputationSummary(),
       roles: ['user'],
     });
     const archive = await assembleExport(services, user.userId);
@@ -400,10 +394,9 @@ describe('runDeletionPurge', () => {
     expect(await services.store.getAuth(user.userId)).toBeNull();
     expect(await services.store.listWebauthn(user.userId)).toEqual([]);
     expect(await services.store.listWalletAuth(user.userId)).toEqual([]);
-    // Settings + reputation are personal data: reset to pristine defaults.
+    // Settings are personal data: reset to pristine defaults.
     expect(tomb?.privacySettings).toEqual(defaultPrivacySettings());
     expect(tomb?.personalizationSettings).toEqual(defaultPersonalizationSettings());
-    expect(tomb?.reputationSummary).toEqual(emptyReputationSummary());
 
     expect(anonymized).toBe(user.userId);
     expect(purged).toEqual({ id: user.userId, mode: 'delete' });

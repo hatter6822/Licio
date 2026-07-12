@@ -162,6 +162,15 @@ describe('PWAtt runtime config loader (WS-E.2.3a-d fail-closed)', () => {
       scale: 2,
       saturationPoint: 9,
     }); // preserved
+    // The retired write-taxonomy weight keys are STRIPPED by the upgrader; the
+    // five live weights survive.
+    expect(Object.keys(config.v1.contributionWeights).sort()).toEqual([
+      'bridge_comment',
+      'correction',
+      'explanation',
+      'low_info_reply',
+      'steward_action',
+    ]);
     expect(rejections).toHaveLength(0); // upgraded, not discarded
   });
 });
@@ -573,15 +582,10 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
   };
   const validV1 = {
     contributionWeights: {
-      question: 0.7,
       correction: 0.9,
-      synthesis: 0.8,
-      counterexample: 0.6,
-      explanation: 0.5,
-      experience: 0.5,
       bridge_comment: 0.85,
+      explanation: 0.5,
       steward_action: 0.5,
-      flag: 0,
       low_info_reply: 0,
     },
     contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },

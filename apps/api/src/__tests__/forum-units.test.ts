@@ -682,8 +682,9 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     const png = pngWithText();
     expect(matchesMagic('image/jpeg', png)).toBe(false);
     expect(stripUploadMetadata('image/jpeg', png)).toEqual({ ok: false, reason: 'type_mismatch' });
+    // PDF uploads were retired: the sniffer no longer recognizes the type at all.
     expect(matchesMagic('application/pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]))).toBe(
-      true,
+      false,
     );
   });
 });
@@ -721,19 +722,10 @@ describe('WS-G forum runtime config (fail-closed)', () => {
 });
 
 describe('WS-G → WS-E scoring-taxonomy mappings (pinned)', () => {
-  it('maps all 11 forum types onto the WS-E enum with zero-weight safety types', () => {
+  it('maps both forum types onto the WS-E enum', () => {
     expect(FORUM_TO_EVENT_TYPE).toEqual({
-      question: 'question',
-      answer: 'explanation',
+      comment: 'explanation', // citations carry the sourcing weight via has_citation
       correction: 'correction',
-      synthesis: 'synthesis',
-      counterexample: 'counterexample',
-      explanation: 'explanation',
-      local_context: 'experience',
-      direct_experience: 'experience',
-      moderation_concern: 'flag', // weight 0: a safety action, not participation
-      meta_discussion: 'low_info_reply', // weight 0: volume, never negative
-      comment: 'explanation',
     });
   });
 });
@@ -745,8 +737,8 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       contributionId: '88888888-8888-4888-8888-888888888881',
       threadId,
       userId: session.userId,
-      type: 'question',
-      body: 'A question that must outlive the account.',
+      type: 'comment',
+      body: 'A comment that must outlive the account.',
       citations: [],
       metadata: {},
       targetClaimId: null,
@@ -776,11 +768,6 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       status: 'active',
       requestId: '88888888-8888-4888-8888-888888888883',
       lensId: null,
-      notificationPreferences: {
-        threads: 'all',
-        bridge_requests: false,
-        steward_announcements: true,
-      },
       requestedAt: new Date().toISOString(),
       joinedAt: new Date().toISOString(),
     });

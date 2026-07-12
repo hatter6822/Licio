@@ -58,12 +58,12 @@ describe('buildLedgerSummary (WS-E.2.1d)', () => {
       savedForLater: false,
       replyDepthBucket: 'none',
       returnVisitBucket: 'few',
-      contributions: { question: 1 },
+      contributions: { explanation: 1 },
       annotations: [],
     });
     expect(summary).toBe(
       'You read this for a moderate duration, opened the source, and returned to it. ' +
-        'Your question was counted as constructive participation.',
+        'Your comment was counted as constructive participation.',
     );
   });
 

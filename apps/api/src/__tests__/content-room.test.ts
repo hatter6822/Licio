@@ -41,11 +41,6 @@ async function joinAsMember(roomId: string, userId: string): Promise<void> {
     status: 'active',
     requestId: randomUUID(),
     lensId: null,
-    notificationPreferences: {
-      threads: 'mentions',
-      bridge_requests: false,
-      steward_announcements: true,
-    },
     requestedAt: new Date().toISOString(),
     joinedAt: new Date().toISOString(),
   });
@@ -102,11 +97,6 @@ describe('WS-Q.2.1 submission guards', () => {
       status: 'active',
       requestId: randomUUID(),
       lensId: null,
-      notificationPreferences: {
-        threads: 'mentions',
-        bridge_requests: false,
-        steward_announcements: true,
-      },
       requestedAt: new Date().toISOString(),
       joinedAt: new Date().toISOString(),
     });
@@ -248,11 +238,6 @@ describe('WS-Q.3.2 item read bar', () => {
       status: 'active',
       requestId: randomUUID(),
       lensId: null,
-      notificationPreferences: {
-        threads: 'mentions',
-        bridge_requests: false,
-        steward_announcements: true,
-      },
       requestedAt: new Date().toISOString(),
       joinedAt: new Date().toISOString(),
     });
@@ -934,11 +919,6 @@ describe('WS-Q.3.3b/3.4 room governance + visibility cascade (steward)', () => {
       status: 'active',
       requestId: randomUUID(),
       lensId: null,
-      notificationPreferences: {
-        threads: 'mentions',
-        bridge_requests: false,
-        steward_announcements: true,
-      },
       requestedAt: new Date().toISOString(),
       joinedAt: new Date().toISOString(),
     });

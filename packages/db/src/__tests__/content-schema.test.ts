@@ -75,9 +75,12 @@ describe('WS-F.2.5b content-schema financial denylist', () => {
         ...collectZodFieldNames(displayRestrictionsSchema),
       ],
     };
-    // Sanity: the walker actually extracted the nested shapes.
+    // Sanity: the walker actually extracted the nested shapes — one key per
+    // live submission_metadata branch (link / original_brief / image_post).
     expect(jsonbFields.stories).toContain('url');
-    expect(jsonbFields.stories).toContain('question');
+    expect(jsonbFields.stories).toContain('reason');
+    expect(jsonbFields.stories).toContain('body');
+    expect(jsonbFields.stories).toContain('alt_text');
     expect(jsonbFields.sources).toContain('noindex');
     expect(checkContentFinancialDenylist(WS_F_CONTENT_TABLES, jsonbFields)).toEqual([]);
   });

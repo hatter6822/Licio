@@ -37,8 +37,8 @@ function actor(overrides: Partial<ActorItemSummary> = {}): ActorItemSummary {
 }
 
 describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
-  it('the hierarchy affects output: correction > … > explanation', () => {
-    const order = ['correction', 'synthesis', 'question', 'counterexample', 'explanation'] as const;
+  it('the hierarchy affects output: correction > explanation', () => {
+    const order = ['correction', 'explanation'] as const;
     const values = order.map(
       (type) => actorV1Contribution(actor({ contributions: { [type]: 1 } })).value,
     );
@@ -46,7 +46,6 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
       expect(values[i - 1]).toBeGreaterThan(values[i] ?? Number.POSITIVE_INFINITY);
     }
     expect(actorV1Contribution(actor({ contributions: { low_info_reply: 5 } })).value).toBe(0);
-    expect(actorV1Contribution(actor({ contributions: { flag: 5 } })).value).toBe(0);
   });
 
   it('WS-T — a SOURCED contribution outscores an identical UNSOURCED one', () => {
@@ -98,14 +97,14 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
   });
 
   it('dampens rapid repetition and never rewards low-info volume', () => {
-    const calm = actorV1Contribution(actor({ contributions: { question: 3 } }));
-    const rapid = actorV1Contribution(actor({ contributions: { question: 9 } }));
+    const calm = actorV1Contribution(actor({ contributions: { explanation: 3 } }));
+    const rapid = actorV1Contribution(actor({ contributions: { explanation: 9 } }));
     expect(rapid.value).toBeLessThan(calm.value);
     expect(rapid.annotations).toContain('rapid_repetition_dampened');
   });
 
   it('property: adding any contribution never lowers the pre-dampening score', () => {
-    const types = ['correction', 'synthesis', 'question'] as const;
+    const types = ['correction', 'explanation', 'bridge_comment'] as const;
     forAll(
       1101,
       300,
@@ -226,12 +225,6 @@ describe('validatePwattV1ComponentsConfig (config-time rejection)', () => {
         contributionWeights: { ...V1_CONTRIBUTION_WEIGHTS, low_info_reply: 0.5 },
       }),
     ).toThrow(/low_info_reply/);
-    expect(() =>
-      validatePwattV1ComponentsConfig({
-        ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
-        contributionWeights: { ...V1_CONTRIBUTION_WEIGHTS, flag: 0.2 },
-      }),
-    ).toThrow(/flag must carry zero/);
     expect(() =>
       validatePwattV1ComponentsConfig({
         ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG,

@@ -106,7 +106,7 @@ export const EVENT_FIXTURES: Readonly<Record<EventTopic, Record<string, unknown>
     contribution_id: U2,
     thread_id: U3,
     user_id: U4,
-    contribution_type: 'question',
+    contribution_type: 'explanation',
     target_claim_id: null,
     parent_contribution_id: null,
     has_citation: false,

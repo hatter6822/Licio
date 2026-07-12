@@ -409,22 +409,23 @@ describe('WS-S.5.3c reducer hardening (integrity)', () => {
         type: 'contribution.create',
         contribution_id: 'c1',
         thread_id: 't1',
-        contribution_type: 'question', // cap 2000
-        body_markdown_lite: 'short question?',
-        citations: [],
+        contribution_type: 'correction', // cap 2000
+        body_markdown_lite: 'short correction',
+        citations: [{ url: 'https://example.com/evidence' }],
         metadata: {},
+        target_claim_id: 'claim-1',
         client_draft_id: 'd1',
       },
       { op_id: 'cc1', lamport: '3', parents: ['create-s1'] },
     );
     // The edit op schema permits up to comment's 5000-char cap; the reducer must
-    // reject against question's 2000-char cap (the type is not on the edit op).
+    // reject against correction's 2000-char cap (the type is not on the edit op).
     const oversized = mkOp(
       { type: 'contribution.edit', contribution_id: 'c1', body_markdown_lite: 'x'.repeat(3_000) },
       { op_id: 'ce1', lamport: '4' },
     );
     const state = reduceRoom([...storyBase(), create, oversized]);
-    expect(state.contributions.get('c1')?.bodyMarkdownLite).toBe('short question?');
+    expect(state.contributions.get('c1')?.bodyMarkdownLite).toBe('short correction');
     expect(state.contributions.get('c1')?.editCount).toBe(0);
     expect(state.rejected.some((r) => r.reason === 'body_too_long')).toBe(true);
   });
@@ -435,10 +436,11 @@ describe('WS-S.5.3c reducer hardening (integrity)', () => {
         type: 'contribution.create',
         contribution_id: 'c1',
         thread_id: 't1',
-        contribution_type: 'question',
+        contribution_type: 'correction',
         body_markdown_lite: 'q',
-        citations: [],
+        citations: [{ url: 'https://example.com/evidence' }],
         metadata: {},
+        target_claim_id: 'claim-1',
         client_draft_id: 'd1',
       },
       { op_id: 'cc1', lamport: '3', parents: ['create-s1'] },

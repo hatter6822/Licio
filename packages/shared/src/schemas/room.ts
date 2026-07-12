@@ -492,21 +492,6 @@ export type RoomJoinRequestBody = z.infer<typeof roomJoinRequestBodySchema>;
 export const roomLensSelectionSchema = z.object({ lens_id: uuidSchema.nullable() }).strict();
 export type RoomLensSelection = z.infer<typeof roomLensSelectionSchema>;
 
-export const roomNotificationPreferencesSchema = z
-  .object({
-    threads: z.enum(['all', 'mentions', 'none']),
-    bridge_requests: z.boolean(),
-    steward_announcements: z.boolean(),
-  })
-  .strict();
-export type RoomNotificationPreferences = z.infer<typeof roomNotificationPreferencesSchema>;
-
-export const DEFAULT_ROOM_NOTIFICATION_PREFERENCES: RoomNotificationPreferences = {
-  threads: 'mentions',
-  bridge_requests: false,
-  steward_announcements: true,
-};
-
 export const roomJoinRequestDecisionSchema = z
   .object({ decision: z.enum(['approve', 'deny']) })
   .strict();

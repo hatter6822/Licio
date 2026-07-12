@@ -10,7 +10,6 @@ const sample: StoryCardData = {
     id: 's1',
     title: 'River levels stabilize after upstream coordination',
     source: 'Delta Observer',
-    origin: 'independent',
     url: 'https://example.org/story',
     readingMinutes: 4,
   },
@@ -57,7 +56,6 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
         id: 's2',
         title: 'Quiet update',
         source: 'Wire Co',
-        origin: 'wire',
         readingMinutes: 1,
       },
       ratingLabel: 'getting-attention',
@@ -133,10 +131,10 @@ describe('StoryCard distribution-reason guard (no-applause)', () => {
 
 describe('origin badge', () => {
   it('renders no source-origin badge (the hardcoded "Independent" placeholder is gone)', () => {
-    // `story.origin` was never a real derived signal — the feed and detail reads
-    // hardcode it to 'independent', so the badge claimed every source was
-    // "Independent". The badge was removed; only the lowercase word inside the
-    // distribution reason ("independent source opens") remains, never the badge.
+    // The `origin` field was never a real derived signal — the feed and detail
+    // reads hardcoded it to 'independent', so the badge claimed every source was
+    // "Independent". The field and badge were removed; only the lowercase word
+    // inside the distribution reason ("independent source opens") remains.
     render(<StoryCard {...sample} />);
     expect(screen.queryByText('Independent')).not.toBeInTheDocument();
   });

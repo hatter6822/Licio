@@ -17,12 +17,7 @@ import {
   MINHASH_SHINGLE_K,
 } from '@licio/invariants';
 import { EVERGREEN_PROFILE, rankingDecisionLogSchema } from '@licio/ranking';
-import {
-  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
-  feedResponseSchema,
-  topicIdForSlug,
-  UNCLASSIFIED_TOPIC_ID,
-} from '@licio/shared';
+import { feedResponseSchema, topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { signatureStory } from '../ingestion/dedup.js';
@@ -89,7 +84,6 @@ async function subscribe(
     status,
     requestId: randomUUID(),
     lensId: null,
-    notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
     requestedAt: new Date().toISOString(),
     joinedAt: status === 'active' ? new Date().toISOString() : null,
   });
@@ -100,7 +94,7 @@ async function addLensContribution(threadId: string, lensId: string): Promise<vo
     contributionId: randomUUID(),
     threadId,
     userId: randomUUID(),
-    type: 'explanation',
+    type: 'comment',
     body: 'A lens-tagged reading of the source material for this thread.',
     citations: [],
     metadata: { lens_id: lensId },

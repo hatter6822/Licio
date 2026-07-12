@@ -19,8 +19,6 @@
 //   GIF  — drop Comment extensions and XMP Application extensions while
 //          preserving rendering/animation blocks (GCE, NETSCAPE loop control,
 //          image descriptors/tables/data) byte-for-byte.
-//   PDF  — documents are stored verbatim (the §15.5 warning covers IMAGE
-//          metadata; PDF sanitization is a WS-J.2.6b concern).
 //
 // Magic-byte validation runs FIRST: the declared content type must match the
 // actual container (polyglot uploads are rejected with a typed error).
@@ -51,8 +49,6 @@ export function matchesMagic(contentType: string, bytes: Uint8Array): boolean {
       return ascii(0, 'GIF8') && (ascii(4, '7a') || ascii(4, '9a'));
     case 'image/avif':
       return bytes.length > 12 && ascii(4, 'ftyp');
-    case 'application/pdf':
-      return ascii(0, '%PDF-');
     case 'text/vtt':
       // WebVTT files begin with the "WEBVTT" signature (optionally BOM-prefixed).
       return ascii(0, 'WEBVTT') || (bytes.length > 3 && ascii(3, 'WEBVTT'));
@@ -351,8 +347,6 @@ export function stripUploadMetadata(contentType: string, bytes: Uint8Array): Str
       return stripGif(bytes);
     case 'image/avif':
       return checkAvif(bytes);
-    case 'application/pdf':
-      return { ok: true, bytes, stripped: false };
     case 'text/vtt':
       // Plain text — no container metadata to strip (the magic check ran above).
       return { ok: true, bytes, stripped: false };

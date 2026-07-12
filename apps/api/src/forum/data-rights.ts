@@ -86,7 +86,6 @@ export async function exportUserContent(
       room_ref: sub.roomId,
       room_visibility: room?.visibility ?? null,
       status: sub.status,
-      notification_preferences: sub.notificationPreferences,
       requested_at: sub.requestedAt,
     });
   }

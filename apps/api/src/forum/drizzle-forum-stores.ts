@@ -607,8 +607,6 @@ export class DrizzleRoomStore implements RoomStore {
       status: row.status,
       requestId: row.requestId,
       lensId: row.lensId ?? null,
-      notificationPreferences:
-        row.notificationPreferences as RoomSubscriptionRecord['notificationPreferences'],
       requestedAt: iso(row.requestedAt),
       joinedAt: isoOrNull(row.joinedAt),
     };
@@ -840,20 +838,18 @@ export class DrizzleRoomStore implements RoomStore {
         status: record.status,
         requestId: record.requestId,
         lensId: record.lensId,
-        notificationPreferences: record.notificationPreferences,
         requestedAt: new Date(record.requestedAt),
         joinedAt: record.joinedAt !== null ? new Date(record.joinedAt) : null,
       })
       // Full replace on conflict (mirrors the in-memory store): every caller
-      // passes the intended lensId (the join sets it, notifications/approval
-      // preserve the read-back value), so overwriting is correct.  Dedicated
-      // lens CHANGES flow through setSubscriptionLens.
+      // passes the intended lensId (the join sets it, approval preserves the
+      // read-back value), so overwriting is correct.  Dedicated lens CHANGES
+      // flow through setSubscriptionLens.
       .onConflictDoUpdate({
         target: [roomSubscriptionsTable.roomId, roomSubscriptionsTable.userId],
         set: {
           status: record.status,
           lensId: record.lensId,
-          notificationPreferences: record.notificationPreferences,
           joinedAt: record.joinedAt !== null ? new Date(record.joinedAt) : null,
         },
       })

@@ -13,7 +13,6 @@ import { randomUUID } from 'node:crypto';
 import type {
   RoomCreateRequest,
   RoomJoinModel,
-  RoomNotificationPreferences,
   RoomPostingPolicy,
   RoomStewardRole,
   RoomSummary,
@@ -21,11 +20,7 @@ import type {
   RoomVisibility,
   StoryVisibility,
 } from '@licio/shared';
-import {
-  COMMONS_ROOM_ID,
-  COMMONS_SLUG,
-  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
-} from '@licio/shared';
+import { COMMONS_ROOM_ID, COMMONS_SLUG } from '@licio/shared';
 import type { Role } from '../identity/rbac.js';
 import type { ForumServices } from './services.js';
 import type { RoomRecord, RoomSubscriptionRecord } from './stores.js';
@@ -373,7 +368,6 @@ export async function joinRoom(
     status,
     lensId: effectiveLensId,
     requestId: randomUUID(),
-    notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES },
     requestedAt: nowIso,
     joinedAt: status === 'active' ? nowIso : null,
   });
@@ -425,18 +419,6 @@ export async function isRoomSteward(
   if (roles.length === 0) return false;
   if (!requiredRoles) return true;
   return roles.some((role) => requiredRoles.includes(role));
-}
-
-/** Merge a partial notification-preferences patch over the stored values. */
-export function mergeNotificationPreferences(
-  current: RoomNotificationPreferences,
-  patch: { [K in keyof RoomNotificationPreferences]?: RoomNotificationPreferences[K] | undefined },
-): RoomNotificationPreferences {
-  return {
-    threads: patch.threads ?? current.threads,
-    bridge_requests: patch.bridge_requests ?? current.bridge_requests,
-    steward_announcements: patch.steward_announcements ?? current.steward_announcements,
-  };
 }
 
 /** List filter for GET /v1/rooms (WS-G.2.3a). */

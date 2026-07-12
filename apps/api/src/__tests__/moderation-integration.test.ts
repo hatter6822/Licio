@@ -10,11 +10,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createDbClient, migrationsFolder } from '@licio/db';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -59,7 +55,6 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
         ageBandIfKnown: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummaryPrivate: emptyReputationSummary(),
       })
       .returning();
     const id = (inserted[0] as { userId: string }).userId;

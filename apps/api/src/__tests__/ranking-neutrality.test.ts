@@ -28,11 +28,7 @@ import {
   validateFeatureVector,
   violatesProhibitedLanguage,
 } from '@licio/ranking';
-import {
-  collectZodFieldNames,
-  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
-  isFinancialFieldName,
-} from '@licio/shared';
+import { collectZodFieldNames, isFinancialFieldName } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
@@ -249,7 +245,6 @@ describe('Test 1 — feed replay with/without wallet links is identical (WS-I.3.
         status: 'active',
         requestId: randomUUID(),
         lensId: null,
-        notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
         requestedAt: new Date().toISOString(),
         joinedAt: new Date().toISOString(),
       });

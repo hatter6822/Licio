@@ -12,20 +12,21 @@ import { eventBaseShape } from './envelope.js';
 /**
  * The event-pipeline contribution taxonomy (WS-E.1.1c). `low_info_reply` is
  * explicitly included for anti-signal tracking (§5.3: counts as conversation
- * volume but not constructive participation). This is the SCORING taxonomy; the
- * client composer's eight modes (schemas/contribution.ts) map onto it at the
- * event-emission boundary (ask→question, explain→explanation, 1:1 otherwise).
+ * volume but not constructive participation). This is the SCORING taxonomy;
+ * the composer's two write types map onto it at the emission boundary
+ * (comment→explanation, correction→correction; the low-info classifier can
+ * downgrade a comment to low_info_reply).  `bridge_comment` and
+ * `steward_action` are SPEC-live concepts whose emitters are pending (the
+ * WS-H bridge flow / the WS-J console) — kept so their weights are ratified
+ * before the producers land; the types whose producing features were
+ * doctrinally retired (question/synthesis/counterexample/experience/flag)
+ * were removed with the WS-G-era write taxonomy.
  */
 export const EVENT_CONTRIBUTION_TYPES = [
-  'question',
   'correction',
-  'synthesis',
-  'counterexample',
   'explanation',
-  'experience',
   'bridge_comment',
   'steward_action',
-  'flag',
   'low_info_reply',
 ] as const;
 export type EventContributionType = (typeof EVENT_CONTRIBUTION_TYPES)[number];

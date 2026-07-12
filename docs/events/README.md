@@ -317,8 +317,9 @@ All transitions are audit-logged (`safety_state_change`).
 bounded ranking input since the WS-I §30.5 lift). `computePwattV1Components` is the
 pipeline stage: each actor's per-type contribution counts pass through a
 per-user diminishing-returns curve at the contribution hierarchy's weights
-(evidence > correction > synthesis > question > counterexample > explanation >
-low_info_reply=0; bridge comments strong, steward actions thread-health; the
+(correction > explanation > low_info_reply=0, where `explanation` is the
+comment-grade weight the live `comment` type maps to; bridge comments strong,
+steward actions thread-health; the
 source-free downweight applies at the accusing type's own weight), then item
 dimensions compose through `applySaturation` — configurable curves
 (logarithmic with an exact cap, and tanh — both total, monotone, concave;
@@ -411,8 +412,8 @@ REDIS_URL=redis://localhost:6379 pnpm test
 - **WS-G (CLOSED)** — forum contributions emit `contribution.created`
   with real correlation ids (`docs/forum/README.md`), so
   the accusation downweight and the lifecycle activity triggers run on real
-  conversation data; user-filed `moderation_concern` contributions carry
-  ratified WS-A reason codes into the review queue.
+  conversation data; moderation concerns reach stewards through the WS-J
+  report flow.
 - **WS-H** — MERI/SCOI/PHI/Hodge feed the served §5.4 composite through the
   WS-I feature store (the wE/wS/wC terms + the pM/pH/pT/pR penalties), NOT the
   batch engine: the engine persists only the two CONTENT components it can

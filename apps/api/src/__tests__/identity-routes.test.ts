@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createSiweMessage } from 'viem/siwe';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -52,7 +48,6 @@ async function seedVerifiedUser(overrides: { email?: string; handle?: string } =
     ageBand: 'adult',
     privacySettings: defaultPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
   await services.store.setAuth(user.userId, {

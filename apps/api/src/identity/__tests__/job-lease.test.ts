@@ -8,7 +8,6 @@ import {
   type AuditEntry,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
 } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { type AuditEntryInput, type AuditStore, buildAuditEntry } from '../audit.js';
@@ -65,7 +64,6 @@ async function servicesWithDuePurge(): Promise<{
     ageBand: 'adult',
     privacySettings: defaultPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
   await services.store.setDeletion({

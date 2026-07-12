@@ -3,9 +3,9 @@
 // Development demo seed (NEVER runs in production): creates the demo forum
 // content through the REAL WS-G/WS-F stores — rooms, lenses, stories with
 // their thread shells (the same fixed ids the DEMO_FEED fixtures reference),
-// typed contributions across the structured sections, and a community
-// synthesis — so the PWA renders real end-to-end data the moment the dev
-// server boots, through exactly the production read paths.
+// and threaded multi-author comments (with cited corrections) — so the PWA
+// renders real end-to-end data the moment the dev server boots, through
+// exactly the production read paths.
 
 import { randomUUID } from 'node:crypto';
 import {
@@ -17,11 +17,10 @@ import {
 } from '@licio/invariants';
 import {
   attentionAggregateEventSchema,
+  type ContributionMetadata,
   type ContributionType,
-  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
   type LocationScope,
   type StewardRoleId,
   type StoryLifecycleState,
@@ -147,7 +146,6 @@ export async function seedForumDemoData(
         ageBand: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummary: emptyReputationSummary(),
         roles: ['user'],
       },
       backdated,
@@ -171,7 +169,6 @@ export async function seedForumDemoData(
         ageBand: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummary: emptyReputationSummary(),
         roles: [...account.roles],
         ...(account.stewardRoles ? { stewardRoles: [...account.stewardRoles] } : {}),
       },
@@ -247,7 +244,6 @@ export async function seedForumDemoData(
     status: 'active',
     lensId: null,
     requestId: '5f5e8000-0000-4000-8000-000000000001',
-    notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES },
     requestedAt: new Date(forum.now()).toISOString(),
     joinedAt: new Date(forum.now()).toISOString(),
   });
@@ -332,13 +328,14 @@ export async function seedForumDemoData(
     }
   }
 
-  // Typed contributions across the structured sections of thread 1.
+  // Comments on threads 1 and 2: a cited Q&A exchange, a measurement note, and
+  // a lens-tagged local observation.
   const author = SEED_USER.userId;
   await forum.contributions.insert({
     contributionId: C(1),
     threadId: DEMO_IDS.THREAD_1,
     userId: author,
-    type: 'question',
+    type: 'comment',
     body: 'Was the sampling window representative of seasonal variation?',
     citations: [],
     metadata: {},
@@ -352,7 +349,7 @@ export async function seedForumDemoData(
     contributionId: C(2),
     threadId: DEMO_IDS.THREAD_1,
     userId: author,
-    type: 'answer',
+    type: 'comment',
     body: 'The methodology appendix covers May through October — both wet and dry seasons.',
     citations: [{ url: 'https://example.org/methodology' }],
     metadata: {},
@@ -366,10 +363,10 @@ export async function seedForumDemoData(
     contributionId: C(3),
     threadId: DEMO_IDS.THREAD_1,
     userId: author,
-    type: 'explanation',
+    type: 'comment',
     body: 'Nitrate figures are reported in mg/L; the legal limit is 50 mg/L in this region.',
     citations: [],
-    metadata: { assumptions: 'Current regional regulation.' },
+    metadata: {},
     targetClaimId: null,
     parentContributionId: null,
     clientDraftId: 'demo-3',
@@ -380,10 +377,10 @@ export async function seedForumDemoData(
     contributionId: C(4),
     threadId: DEMO_IDS.THREAD_2,
     userId: author,
-    type: 'local_context',
+    type: 'comment',
     body: 'The intersection floods every spring, which the proposal map does not show.',
     citations: [],
-    metadata: { scope: 'Riverside resident', lens_id: LENS_LOCAL },
+    metadata: { lens_id: LENS_LOCAL },
     targetClaimId: null,
     parentContributionId: null,
     clientDraftId: 'demo-4',
@@ -430,7 +427,6 @@ export async function seedForumDemoData(
         ageBand: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummary: emptyReputationSummary(),
         roles: a.steward ? ['user', 'steward'] : ['user'],
       },
       backdated,
@@ -569,7 +565,6 @@ export async function seedForumDemoData(
       status: 'active',
       lensId: null,
       requestId,
-      notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES },
       requestedAt: nowIso,
       joinedAt: nowIso,
     });
@@ -669,16 +664,6 @@ export async function seedForumDemoData(
     reason,
   });
   const brief = (body: string): SubmissionMetadata => ({ submission_type: 'original_brief', body });
-  const question = (q: string, context: string): SubmissionMetadata => ({
-    submission_type: 'question',
-    question: q,
-    context,
-  });
-  const localUpdate = (location_scope: LocationScope, disclosure: string): SubmissionMetadata => ({
-    submission_type: 'local_update',
-    location_scope,
-    source_or_experience_disclosure: disclosure,
-  });
 
   await seedStory({
     n: 4,
@@ -717,10 +702,9 @@ export async function seedForumDemoData(
     visibility: 'room_only',
     author: demo,
     title: 'Members: how should we read the lead-testing footnotes?',
-    submissionType: 'question',
-    submissionMetadata: question(
-      'The footnotes change the denominator. How should the room interpret the headline figure?',
-      'Asking members before this goes to a wider audience.',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'The footnotes change the denominator. How should the room interpret the headline figure? Asking members before this goes to a wider audience.',
     ),
     excerpt: 'An in-room question (room_only in a public room — carries the in-room chip).',
     topicIds: [topics.water],
@@ -731,10 +715,9 @@ export async function seedForumDemoData(
     visibility: 'public',
     author: lena,
     title: 'Riverside bridge closure extended through spring',
-    submissionType: 'local_update',
-    submissionMetadata: localUpdate(
-      { type: 'city', value: 'Riverside' },
-      'First-hand: I attended the public works briefing on Tuesday.',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'The closure now runs through spring. First-hand: I attended the public works briefing on Tuesday.',
     ),
     locationScope: { type: 'city', value: 'Riverside' },
     excerpt: 'The detour adds roughly ten minutes; transit reroutes start Monday.',
@@ -777,10 +760,9 @@ export async function seedForumDemoData(
     visibility: 'public',
     author: theo,
     title: 'Is the new tariff actually lowering emissions?',
-    submissionType: 'question',
-    submissionMetadata: question(
-      'Early numbers look mixed. What evidence would settle whether the tariff is working?',
-      'Looking for measurable, falsifiable indicators.',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'Early numbers look mixed. What evidence would settle whether the tariff is working? Looking for measurable, falsifiable indicators.',
     ),
     excerpt: 'An open question inviting evidence on the tariff’s emissions effect.',
     topicIds: [topics.climate],
@@ -837,10 +819,9 @@ export async function seedForumDemoData(
     visibility: 'public',
     author: lena,
     title: 'Harbor cleanup schedule for the quarter',
-    submissionType: 'local_update',
-    submissionMetadata: localUpdate(
-      { type: 'city', value: 'Harbor District' },
-      'Source: the district sanitation office calendar.',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'The pier-by-pier cleanup rotation for the quarter. Source: the district sanitation office calendar.',
     ),
     locationScope: { type: 'city', value: 'Harbor District' },
     excerpt: 'Which piers are cleaned when, and how to report a missed collection.',
@@ -866,10 +847,9 @@ export async function seedForumDemoData(
     visibility: 'room_only',
     author: nadia,
     title: 'Which records requests are still outstanding?',
-    submissionType: 'question',
-    submissionMetadata: question(
-      'Tracking what we have asked for and what is overdue.',
-      'Members-only coordination question.',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'Tracking what we have asked for and what is overdue. Members-only coordination.',
     ),
     excerpt: 'A coordination question inside the private Newsroom Desk.',
     topicIds: [topics.water],
@@ -982,15 +962,14 @@ export async function seedForumDemoData(
     visibility: 'public',
     author: expert,
     title: 'What measurement would distinguish weather noise from a real demand shift?',
-    submissionType: 'question',
-    submissionMetadata: question(
-      'Looking for a falsifiable indicator the room could agree on in advance.',
-      'Methodology question, posted before the next data release.',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'Looking for a falsifiable indicator the room could agree on in advance — a methodology question, posted before the next data release.',
     ),
     excerpt: 'An open methodological question inviting evidence.',
     topicIds: [topics.climate],
   });
-  // S24 — a steward's local update ⇒ "Deepening".
+  // S24 — a steward's local service-change brief ⇒ "Deepening".
   await seedStory({
     n: 24,
     lifecycle: 'deepening',
@@ -998,10 +977,9 @@ export async function seedForumDemoData(
     visibility: 'public',
     author: steward,
     title: 'Harbor ferry adds a second morning sailing',
-    submissionType: 'local_update',
-    submissionMetadata: localUpdate(
-      { type: 'city', value: 'Harbor District' },
-      'Source: the port authority service bulletin.',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'A second morning sailing starts this month. Source: the port authority service bulletin.',
     ),
     locationScope: { type: 'city', value: 'Harbor District' },
     excerpt: 'Schedule change with the bulletin attached; the room is adding context.',
@@ -1105,7 +1083,7 @@ export async function seedForumDemoData(
   // steward/admin review surface is non-empty for testing. Ratified WS-A reason
   // codes; descriptive, never pre-judged.
   await ingestion.reviewQueue.insert({
-    kind: 'moderation_concern',
+    kind: 'contribution_safety_hold',
     storyId: S(19),
     context: {
       thread_id: T(19),
@@ -1120,7 +1098,7 @@ export async function seedForumDemoData(
     notBefore: null,
   });
   await ingestion.reviewQueue.insert({
-    kind: 'moderation_concern',
+    kind: 'contribution_safety_hold',
     storyId: S(8),
     context: {
       thread_id: T(8),
@@ -1190,9 +1168,7 @@ export async function seedForumDemoData(
     body: string;
     parent?: number;
     citations?: Cite[];
-    metadata?: Record<string, unknown>;
-    /** Indices (within this thread's specs) of branches a synthesis includes. */
-    includeIdx?: number[];
+    metadata?: ContributionMetadata;
   };
   /** Insert a thread's contributions, computing ids + materialized paths. */
   const tree = async (threadId: string, startN: number, specs: readonly CSpec[]): Promise<void> => {
@@ -1205,8 +1181,6 @@ export async function seedForumDemoData(
     for (let i = 0; i < specs.length; i += 1) {
       const s = at(specs, i);
       const parentId = s.parent !== undefined ? at(ids, s.parent) : null;
-      const metadata: Record<string, unknown> = { ...(s.metadata ?? {}) };
-      if (s.includeIdx) metadata['included_branch_ids'] = s.includeIdx.map((j) => at(ids, j));
       await forum.contributions.insert({
         contributionId: at(ids, i),
         threadId,
@@ -1214,7 +1188,7 @@ export async function seedForumDemoData(
         type: s.type,
         body: s.body,
         citations: s.citations ?? [],
-        metadata,
+        metadata: s.metadata ?? {},
         targetClaimId: null,
         parentContributionId: parentId,
         clientDraftId: `seed-${at(ids, i)}`,
@@ -1224,16 +1198,16 @@ export async function seedForumDemoData(
     }
   };
 
-  // Hospital-readmission link (public): a question answered with a cited answer,
-  // a sourced comment, a clarifying sub-question, and a meta note.
+  // Hospital-readmission link (public): a question answered with a cited reply,
+  // a sourced comment, a clarifying sub-question, and a housekeeping note.
   await tree(T(4), 100, [
     {
-      type: 'question',
+      type: 'comment',
       author: maya,
       body: 'Are readmissions risk-adjusted, or are these raw counts per facility?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: theo,
       parent: 0,
       body: 'Risk-adjusted — the appendix describes the model and the covariates used.',
@@ -1254,64 +1228,62 @@ export async function seedForumDemoData(
       ],
     },
     {
-      type: 'question',
+      type: 'comment',
       author: lena,
       parent: 1,
       body: 'Does the adjustment account for seasonal admission surges?',
     },
     {
-      type: 'explanation',
+      type: 'comment',
       author: maya,
       parent: 3,
-      body: 'Partly: it includes a winter indicator but not a facility-level surge term.',
-      metadata: { assumptions: 'Reading the appendix at face value.' },
+      body: 'Partly: reading the appendix at face value, it includes a winter indicator but not a facility-level surge term.',
     },
     {
-      type: 'meta_discussion',
+      type: 'comment',
       author: nadia,
       body: 'Keeping this thread to measurement; policy debate belongs in a separate branch.',
     },
   ]);
 
-  // Bridge closure (public local): direct experience + local context + a counterexample.
+  // Bridge closure (public local): first-hand residents' reports + a
+  // direction-specific counterpoint.
   await tree(T(7), 120, [
     {
-      type: 'direct_experience',
+      type: 'comment',
       author: lena,
       body: 'I drove the detour this morning; the added time was closer to fifteen minutes at peak.',
-      metadata: { privacy_acknowledged: true, scope: 'Riverside resident', location: 'Riverside' },
     },
     {
-      type: 'local_context',
+      type: 'comment',
       author: raj,
       parent: 0,
       body: 'The detour overlaps the school-run corridor, which the briefing did not mention.',
-      metadata: { scope: 'Riverside resident', location: 'Riverside' },
     },
     {
-      type: 'counterexample',
+      type: 'comment',
       author: theo,
       parent: 0,
       body: 'The northbound detour was clear at 9am — congestion may be direction-specific.',
-      metadata: { relevance_explanation: 'Shows the delay is not uniform across directions.' },
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: lena,
       parent: 2,
       body: 'Agreed — southbound is the slow leg; northbound is fine outside the school window.',
     },
   ]);
 
-  // Grid-demand brief (public climate): a sourced comment, a correction with citations, a synthesis.
+  // Grid-demand brief (public climate): a sourced reply, a correction with
+  // citations, and a summing-up comment.
   await tree(T(9), 140, [
     {
-      type: 'question',
+      type: 'comment',
       author: theo,
       body: 'Is this normalized for the warm spell, or are these absolute peaks?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: samd,
       parent: 0,
       body: 'Absolute. Weather-normalized, the second peak is roughly flat year-on-year.',
@@ -1333,54 +1305,51 @@ export async function seedForumDemoData(
       citations: [{ url: 'https://example.org/iso/demand' }],
     },
     {
-      type: 'synthesis',
+      type: 'comment',
       author: nadia,
-      body: 'Net: two absolute peaks, flat once normalized, with a one-day labeling fix.',
-      includeIdx: [1, 3],
-      metadata: { uncertainty_note: 'Normalization method is sensitive to the chosen baseline.' },
+      body: 'Net: two absolute peaks, flat once normalized, with a one-day labeling fix — though the normalization is sensitive to the chosen baseline.',
     },
   ]);
 
-  // Tariff question (public climate): a couple of cited answers, PLUS two
-  // lens-tagged readings that genuinely diverge (skeptical vs industry) — the
+  // Tariff story (public climate): a couple of cited replies, PLUS two
+  // lens-tagged comments that genuinely diverge (skeptical vs industry) — the
   // raw material for the SCOI "Where interpretations differ" drawer on S10.
   await tree(T(10), 160, [
     {
-      type: 'answer',
+      type: 'comment',
       author: samd,
       body: 'Emissions intensity is the cleaner indicator than total emissions here.',
       citations: [{ url: 'https://example.org/climate/intensity-vs-total' }],
     },
     {
-      type: 'counterexample',
+      type: 'comment',
       author: theo,
       parent: 0,
-      body: 'A neighboring market saw intensity fall WITHOUT a tariff — confounding the read.',
-      metadata: { relevance_explanation: 'Suggests other factors may drive the change.' },
+      body: 'A neighboring market saw intensity fall WITHOUT a tariff — confounding the read; other factors may drive the change.',
     },
     {
-      type: 'local_context',
+      type: 'comment',
       author: maya,
       body: 'Skeptical read: the early drop is within normal year-to-year noise; the tariff has not been shown to do anything yet.',
-      metadata: { lens_id: LENS(2), scope: 'Skeptical read' },
+      metadata: { lens_id: LENS(2) },
     },
     {
-      type: 'local_context',
+      type: 'comment',
       author: raj,
       body: 'Industry read: the tariff is already raising input costs and forcing real operational changes on the ground.',
-      metadata: { lens_id: LENS(4), scope: 'Industry lens' },
+      metadata: { lens_id: LENS(4) },
     },
   ]);
 
-  // Elections turnout (public): a question + answer + a sourced comment.
+  // Elections turnout (public): a Q&A exchange + a sourced comment.
   await tree(T(11), 180, [
     {
-      type: 'question',
+      type: 'comment',
       author: lena,
       body: 'Is turnout reported as a share of registered voters or of eligible population?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: raj,
       parent: 0,
       body: 'Registered voters — the data dictionary defines the denominator explicitly.',
@@ -1398,34 +1367,33 @@ export async function seedForumDemoData(
   // Newsroom Desk (PRIVATE, room_only): a coordination thread the demo member can read.
   await tree(T(15), 200, [
     {
-      type: 'question',
+      type: 'comment',
       author: nadia,
       body: 'Do we have the second FOIA response in hand, or only the acknowledgment?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: theo,
       parent: 0,
       body: 'Only the acknowledgment so far; the response is due next week.',
     },
     {
-      type: 'local_context',
+      type: 'comment',
       author: demo,
       parent: 1,
       body: 'The clerk’s office is short-staffed this month, which may slow the response.',
-      metadata: { scope: 'Newsroom coordination' },
     },
   ]);
 
   // Lighter threads on the remaining new stories so every story has discussion.
   await tree(T(5), 220, [
     {
-      type: 'question',
+      type: 'comment',
       author: theo,
       body: 'Do the sensors report ozone at all, or is that a separate network?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: maya,
       parent: 0,
       body: 'Separate network entirely — these units have no ozone channel.',
@@ -1441,12 +1409,12 @@ export async function seedForumDemoData(
   ]);
   await tree(T(12), 240, [
     {
-      type: 'question',
+      type: 'comment',
       author: lena,
       body: 'What happens to a ballot whose later choices are all eliminated?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: nadia,
       parent: 0,
       body: 'It becomes "exhausted" and is set aside in subsequent rounds.',
@@ -1462,7 +1430,7 @@ export async function seedForumDemoData(
   ]);
   await tree(T(16), 260, [
     {
-      type: 'answer',
+      type: 'comment',
       author: theo,
       body: 'Two requests are overdue; I will escalate both this week.',
     },
@@ -1470,18 +1438,18 @@ export async function seedForumDemoData(
   // The DEVELOPMENT-account stories get discussion too.
   await tree(T(19), 270, [
     {
-      type: 'meta_discussion',
+      type: 'comment',
       author: steward,
       body: 'Holding this for a coordination check: same wording, many new accounts, all within a few minutes. No action taken yet.',
     },
     {
-      type: 'question',
+      type: 'comment',
       author: maya,
       parent: 0,
       body: 'Is there an original source for the closure claim, or only the reposts?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: steward,
       parent: 1,
       body: 'No primary source so far. If one appears the review clears; if not, the burst pattern stands on its own.',
@@ -1495,7 +1463,7 @@ export async function seedForumDemoData(
       citations: [{ url: 'https://example.org/science/aquifer-drawdown-multilab#methods' }],
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: samd,
       parent: 0,
       body: 'Independent replication across labs is exactly what raises confidence here.',
@@ -1503,12 +1471,12 @@ export async function seedForumDemoData(
   ]);
   await tree(T(24), 290, [
     {
-      type: 'question',
+      type: 'comment',
       author: lena,
       body: 'Does the second sailing run on weekends too, or weekdays only?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: steward,
       parent: 0,
       body: 'Weekdays only for now; the bulletin says weekend service is under review for spring.',
@@ -1517,35 +1485,33 @@ export async function seedForumDemoData(
 
   // Discussion on the remaining stories so EVERY story has a populated thread
   // (delivering the "every story has discussion" intent above): a clarifying
-  // exchange on the room_only questions (S3, S6), civic Q&A (S14, S21, S26), the
+  // exchange on the room_only stories (S3, S6), civic Q&A (S14, S21, S26), the
   // archived recall write-up's method trail (S20), the expert methodology
   // exchange (S23), and a note folding the verbatim repost to the original (S25).
   // Transit timetable caveat (PRIVATE Transit room, room_only): the demo member
   // (the room's only member) pins the missing caveat behind the "Needs Context".
   await tree(T(3), 300, [
     {
-      type: 'question',
+      type: 'comment',
       author: demo,
       body: 'Which caveat is missing — that the higher frequency is peak-hours only?',
     },
     {
-      type: 'explanation',
+      type: 'comment',
       author: demo,
       parent: 0,
-      body: 'Yes: the headline frequency holds 7–9am and 4–6pm; midday service is unchanged. The timetable should say so.',
-      metadata: { assumptions: 'Reading the published timetable at face value.' },
+      body: 'Yes: reading the published timetable at face value, the headline frequency holds 7–9am and 4–6pm; midday service is unchanged. The timetable should say so.',
     },
   ]);
-  // Lead-testing footnotes (room_only question in a public room).
+  // Lead-testing footnotes (the room_only story in a public room).
   await tree(T(6), 310, [
     {
-      type: 'explanation',
+      type: 'comment',
       author: maya,
       body: 'The footnotes switch the denominator from sampled homes to all service connections, so the headline rate reads lower than the per-home figure.',
-      metadata: { assumptions: 'Comparing the two denominators named in the footnotes.' },
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: demo,
       parent: 0,
       body: 'That matches my read. We should lead with the per-home rate and footnote the connection-level one, not the reverse.',
@@ -1554,12 +1520,12 @@ export async function seedForumDemoData(
   // Harbor cleanup schedule (public local).
   await tree(T(14), 320, [
     {
-      type: 'question',
+      type: 'comment',
       author: theo,
       body: 'Is the pier rotation the same as last quarter, or did any piers swap weeks?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: lena,
       parent: 0,
       body: 'Two piers swapped weeks; the rest is unchanged. The bulletin has the updated calendar.',
@@ -1569,12 +1535,12 @@ export async function seedForumDemoData(
   // trail behind the certified total.
   await tree(T(20), 330, [
     {
-      type: 'question',
+      type: 'comment',
       author: raj,
       body: 'How were duplicate signatures detected — by name, or by registered-voter id?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: admin,
       parent: 0,
       body: 'By registered-voter id against the voter file, so two distinct voters who share a name were never merged.',
@@ -1591,33 +1557,30 @@ export async function seedForumDemoData(
   // question, kept light because no interpretation has formed yet.
   await tree(T(21), 340, [
     {
-      type: 'question',
+      type: 'comment',
       author: samd,
       body: 'Does the filing ask for a flat winter surcharge, or a tiered rate by usage?',
     },
   ]);
-  // Expert methodology question (public): a falsifiable-indicator exchange.
+  // Expert methodology story (public): a falsifiable-indicator exchange.
   await tree(T(23), 350, [
     {
-      type: 'answer',
+      type: 'comment',
       author: samd,
       body: 'A pre-registered threshold on weather-normalized demand would separate noise from a real shift.',
     },
     {
-      type: 'counterexample',
+      type: 'comment',
       author: theo,
       parent: 0,
       body: 'Only if the normalization baseline is fixed in advance — otherwise the threshold moves with the data.',
-      metadata: {
-        relevance_explanation: 'Shows the indicator depends on a pre-committed baseline.',
-      },
     },
   ]);
   // Verbatim repost of the winter-rate filing (public): a note folding it back to
   // the original so the discussion stays in one place (the dedup demonstration).
   await tree(T(25), 360, [
     {
-      type: 'meta_discussion',
+      type: 'comment',
       author: maya,
       body: 'This is the same filing already posted; keeping the discussion on the original rather than splitting it here.',
     },
@@ -1625,12 +1588,12 @@ export async function seedForumDemoData(
   // Harbor water-clarity image post (public): seasonal trend or real improvement?
   await tree(T(26), 370, [
     {
-      type: 'question',
+      type: 'comment',
       author: theo,
       body: 'Is the clarity trend seasonal, or a real improvement after the cleanup?',
     },
     {
-      type: 'answer',
+      type: 'comment',
       author: lena,
       parent: 0,
       body: 'Partly seasonal, but the post-cleanup readings are above the same months last year.',

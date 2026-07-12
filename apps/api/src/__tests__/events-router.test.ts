@@ -33,7 +33,7 @@ function contributionEvent(): LicioEvent {
     contribution_id: randomUUID(),
     thread_id: U1,
     user_id: U2,
-    contribution_type: 'question',
+    contribution_type: 'explanation',
     target_claim_id: null,
     parent_contribution_id: null,
     has_citation: false,

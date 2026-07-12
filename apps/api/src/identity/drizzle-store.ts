@@ -34,7 +34,6 @@ import {
   auditEntrySchema,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
   isStewardRoleId,
   migratePersonalizationSettings,
   migratePrivacySettings,
@@ -89,7 +88,6 @@ function rowToUser(r: typeof users.$inferSelect): StoredUser {
     // downstream consumer ever sees a missing field at runtime.
     privacySettings: migratePrivacySettings(r.privacySettings),
     personalizationSettings: migratePersonalizationSettings(r.personalizationSettings),
-    reputationSummary: r.reputationSummaryPrivate,
     roles: r.roles.filter((x): x is Role => ROLE_SET.has(x)),
     stewardRoles: r.stewardRoles.filter((x): x is StewardRoleId => isStewardRoleId(x)),
     createdAt: iso(r.createdAt),
@@ -182,7 +180,6 @@ export class DrizzleIdentityStore implements IdentityStore {
           stewardRoles: input.stewardRoles ?? [],
           privacySettings: input.privacySettings,
           personalizationSettings: input.personalizationSettings,
-          reputationSummaryPrivate: input.reputationSummary,
           createdAt: at,
           updatedAt: at,
         })
@@ -244,8 +241,6 @@ export class DrizzleIdentityStore implements IdentityStore {
     if (patch.privacySettings !== undefined) set.privacySettings = patch.privacySettings;
     if (patch.personalizationSettings !== undefined)
       set.personalizationSettings = patch.personalizationSettings;
-    if (patch.reputationSummary !== undefined)
-      set.reputationSummaryPrivate = patch.reputationSummary;
     // createdAt is normally immutable and no product flow patches it; honoring
     // it here (parity with the in-memory store, which applies the whole patch)
     // lets an explicit re-stamp take effect on Postgres — the dev traffic
@@ -573,11 +568,10 @@ export class DrizzleIdentityStore implements IdentityStore {
           accountState: 'deleted',
           locale: null,
           ageBandIfKnown: null,
-          // Settings and reputation are PERSONAL data: reset to pristine
+          // Settings are PERSONAL data: reset to pristine
           // defaults — nothing user-derived survives (WS-D.2.4c).
           privacySettings: defaultPrivacySettings(),
           personalizationSettings: defaultPersonalizationSettings(),
-          reputationSummaryPrivate: emptyReputationSummary(),
           updatedAt: new Date(now),
         })
         .where(eq(users.userId, userId));

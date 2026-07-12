@@ -7,7 +7,6 @@ import {
 import {
   type AgeBand,
   deriveAgeBand,
-  emptyReputationSummary,
   HANDLE_PATTERN,
   handleSchema,
   isMinorBand,
@@ -220,7 +219,7 @@ describe('userPublicSchema leak guard', () => {
     age_band_if_known: 'adult' as const,
     privacy_settings: defaultPrivacySettings(),
     personalization_settings: defaultPersonalizationSettings(),
-    reputation_summary_private: emptyReputationSummary(),
+    steward_roles: [],
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-02T00:00:00.000Z',
   };
@@ -235,7 +234,7 @@ describe('userPublicSchema leak guard', () => {
       'email',
       'privacy_settings',
       'personalization_settings',
-      'reputation_summary_private',
+      'steward_roles',
       'age_band_if_known',
       'updated_at',
     ]) {

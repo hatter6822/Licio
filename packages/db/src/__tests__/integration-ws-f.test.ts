@@ -10,11 +10,7 @@
 //
 //   DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev pnpm test
 import { randomUUID } from 'node:crypto';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { sql } from 'drizzle-orm';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -79,7 +75,6 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
             ageBandIfKnown: 'adult',
             privacySettings: defaultPrivacySettings(),
             personalizationSettings: defaultPersonalizationSettings(),
-            reputationSummaryPrivate: emptyReputationSummary(),
           })
           .returning()
       )[0],

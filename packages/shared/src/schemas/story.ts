@@ -144,33 +144,6 @@ export const originalBriefMetadataSchema = z
   })
   .strict();
 
-export const questionMetadataSchema = z
-  .object({
-    submission_type: z.literal('question'),
-    question: z.string().min(1).max(2_000),
-    context: z.string().min(1).max(4_000).optional(),
-  })
-  .strict();
-
-export const localUpdateMetadataSchema = z
-  .object({
-    submission_type: z.literal('local_update'),
-    location_scope: locationScopeSchema,
-    time_reference: z.string().min(1).max(200).optional(),
-    /** Source citation or first-hand experience disclosure (§14.1). */
-    source_or_experience_disclosure: z.string().min(1).max(2_000),
-  })
-  .strict();
-
-export const liveThreadMetadataSchema = z
-  .object({
-    submission_type: z.literal('live_thread'),
-    event_description: z.string().min(1).max(2_000),
-    time_reference: z.string().min(1).max(200),
-    moderation_mode: z.enum(['standard', 'breaking', 'sensitive']),
-  })
-  .strict();
-
 // WS-Q.1.3c — native media posts. Both reference a previously-uploaded,
 // EXIF-stripped, scan-gated object (the WS-G.4.4 upload pipeline) and carry NO
 // canonical_url (exempt from URL normalization and crawling). Image posts
@@ -218,9 +191,6 @@ export const videoMetadataSchema = z
 export const submissionMetadataSchema = z.discriminatedUnion('submission_type', [
   linkMetadataSchema,
   originalBriefMetadataSchema,
-  questionMetadataSchema,
-  localUpdateMetadataSchema,
-  liveThreadMetadataSchema,
   imageMetadataSchema,
   videoMetadataSchema,
 ]);
@@ -258,13 +228,6 @@ const storyCreateBaseShape = {
 export const storyCreateRequestSchema = z.discriminatedUnion('submission_type', [
   linkMetadataSchema.extend(storyCreateBaseShape),
   originalBriefMetadataSchema.extend(storyCreateBaseShape),
-  questionMetadataSchema.extend(storyCreateBaseShape),
-  // `location_scope` is REQUIRED for local updates (the base makes it
-  // optional, so it is re-tightened after the extend).
-  localUpdateMetadataSchema.extend(storyCreateBaseShape).extend({
-    location_scope: locationScopeSchema,
-  }),
-  liveThreadMetadataSchema.extend(storyCreateBaseShape),
   imageMetadataSchema.extend(storyCreateBaseShape),
   // The video branch is a refined object (captions XOR); `.extend` on a
   // ZodEffects is unavailable, so the base shape is spread before the refine.

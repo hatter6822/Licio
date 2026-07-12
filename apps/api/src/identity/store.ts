@@ -16,10 +16,8 @@ import {
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   type ExportJobState,
-  emptyReputationSummary,
   type PersonalizationSettings,
   type PrivacySettings,
-  type ReputationSummaryPrivate,
   type UserAccountState,
 } from '@licio/shared';
 import { sha256Hex } from './crypto.js';
@@ -35,7 +33,6 @@ export interface StoredUser {
   ageBand: AgeBand | null;
   privacySettings: PrivacySettings;
   personalizationSettings: PersonalizationSettings;
-  reputationSummary: ReputationSummaryPrivate;
   roles: Role[];
   /** Doctrine steward-role grants (WS-J / STEWARD_ROLES.md); [] for non-stewards. */
   stewardRoles: StewardRoleId[];
@@ -360,7 +357,7 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   /**
    * Complete deletion (WS-D.2.4c): remove ALL personal data — credentials,
-   * user_auth (MFA secret + recovery codes), export jobs, settings, reputation —
+   * user_auth (MFA secret + recovery codes), export jobs, settings —
    * keeping only a minimal `user_id` + `account_state = deleted` tombstone so
    * anonymized contributions retain FK integrity.  The tombstone handle is
    * derived from sha256(user_id) (22 hex chars ⇒ 88 bits), so it fits the 30-char
@@ -382,11 +379,10 @@ export class InMemoryIdentityStore implements IdentityStore {
         accountState: 'deleted',
         locale: null,
         ageBand: null,
-        // Settings and reputation are PERSONAL data (topic preferences, scores):
+        // Settings are PERSONAL data (topic preferences):
         // reset to pristine defaults — nothing user-derived survives (WS-D.2.4c).
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummary: emptyReputationSummary(),
         updatedAt: new Date(now).toISOString(),
       });
     }

@@ -226,7 +226,7 @@ licio/
 │   │       │   │                           join + governance; default "Undecided") + RoomMembership
 │   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership; picks
 │   │       │   │                           the posting lens on join)
-│   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
+│   │       │   ├── story/               -- StoryCard, RatingLabel,
 │   │       │   │                           ExposureLabel, TopicRepeatsButton,
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)

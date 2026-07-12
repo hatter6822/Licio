@@ -240,10 +240,6 @@ export const roomSubscriptions = pgTable(
     lensId: uuid('lens_id').references(() => lenses.lensId, { onDelete: 'set null' }),
     /** Stable id so stewards can address PATCH /join-requests/:requestId. */
     requestId: uuid('request_id').notNull().defaultRandom(),
-    /** WS-G.2.3d per-room notification preferences. */
-    notificationPreferences: jsonb('notification_preferences')
-      .$type<Record<string, unknown>>()
-      .notNull(),
     requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
     joinedAt: timestamp('joined_at', { withTimezone: true }),
   },

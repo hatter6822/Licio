@@ -135,13 +135,9 @@ export async function threadOverview(
     created_at: thread.createdAt,
     updated_at: thread.updatedAt,
     sections: {
-      overview: section(['synthesis']),
-      questions: section(['question', 'answer']),
-      // Comment-centric sourcing: the sourced-contribution count (citations),
-      // plus the legacy counterexample rows under challenges below.
+      // Comment-centric sourcing: the sourced-contribution count (citations).
       sources: sourced,
-      challenges: section(['correction', 'counterexample']),
-      lenses: section(['local_context', 'direct_experience']),
+      challenges: section(['correction']),
       chronology: total,
     },
   };

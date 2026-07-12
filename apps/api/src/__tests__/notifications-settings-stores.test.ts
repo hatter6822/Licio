@@ -158,8 +158,9 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
       '../lib/drizzle-reply-notification-store.js'
     );
     const { DrizzleUserSettingsStore } = await import('../lib/drizzle-settings-store.js');
-    const { defaultPersonalizationSettings, defaultPrivacySettings, emptyReputationSummary } =
-      await import('@licio/shared');
+    const { defaultPersonalizationSettings, defaultPrivacySettings } = await import(
+      '@licio/shared'
+    );
     const db = createDbClient(DB_URL as string);
     await migrate(db, { migrationsFolder: migrationsFolder() });
     const store = new DrizzleReplyNotificationStore(db);
@@ -176,7 +177,6 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
           ageBandIfKnown: 'adult',
           privacySettings: defaultPrivacySettings(),
           personalizationSettings: defaultPersonalizationSettings(),
-          reputationSummaryPrivate: emptyReputationSummary(),
         })
         .returning();
       userId = (inserted[0] as { userId: string }).userId;
@@ -205,7 +205,6 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
           ageBandIfKnown: 'adult',
           privacySettings: defaultPrivacySettings(),
           personalizationSettings: defaultPersonalizationSettings(),
-          reputationSummaryPrivate: emptyReputationSummary(),
         })
         .returning();
       actorId = (actorInserted[0] as { userId: string }).userId;

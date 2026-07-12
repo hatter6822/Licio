@@ -22,7 +22,6 @@ import {
   debatePositionUpdateSchema,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
   type LensType,
   type SimulatorActivityEntry,
   type SimulatorConfigureRequest,
@@ -767,11 +766,11 @@ export class DevTrafficSimulator {
           contributionId: row.contributionId,
           depth: row.path.length,
           // A reply "answers" a question-shaped parent and "follows up" on a
-          // statement. Live contributions are all type 'comment', so detect the
-          // question shape from the body (a trailing/embedded '?') rather than
-          // treating EVERY comment as a question — otherwise every reply would
-          // pick the answer flavor and the follow-up flavor would never surface.
-          isQuestion: row.type === 'question' || (row.type === 'comment' && row.body.includes('?')),
+          // statement. Detect the question shape from the body (a trailing/
+          // embedded '?') rather than treating EVERY comment as a question —
+          // otherwise every reply would pick the answer flavor and the
+          // follow-up flavor would never surface.
+          isQuestion: row.type === 'comment' && row.body.includes('?'),
           authorUserId: row.userId,
           disputeStatus: row.disputeStatus ?? 'none',
         })),
@@ -1076,27 +1075,6 @@ export class DevTrafficSimulator {
           submission_type: 'link',
           url: story.url,
           reason: story.reason ?? 'A link to the release.',
-        };
-        break;
-      case 'question':
-        candidate = {
-          ...base,
-          submission_type: 'question',
-          question: story.question ?? story.title,
-          context: story.questionContext ?? undefined,
-        };
-        break;
-      case 'local_update':
-        candidate = {
-          ...base,
-          submission_type: 'local_update',
-          location_scope: { type: 'city', value: story.locationValue ?? 'Riverside' },
-          // Cap at the schema's 2 000-char disclosure limit (the generator packs
-          // the diverse per-story body in here so near-dup signing stays honest).
-          source_or_experience_disclosure: truncate(
-            story.disclosure ?? 'Source: the public briefing.',
-            2_000,
-          ),
         };
         break;
       default:
@@ -1887,7 +1865,6 @@ export class DevTrafficSimulator {
         ageBand: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummary: emptyReputationSummary(),
         roles: archetype.expertRole === true ? ['user', 'expert'] : ['user'],
       },
       createdAtMs,

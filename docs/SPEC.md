@@ -382,7 +382,7 @@ Primary bottom navigation (at most five surfaces):
 |---|---|
 | Front Page | Ranked feed of stories and discussions. |
 | Rooms | Topic rooms, local rooms, community lenses, subscribed areas. |
-| Submit | Capture a link, write a post, upload an image or video, add evidence, ask a question — always into a chosen home room, with a visibility choice where the room permits one (Section 14.5). |
+| Submit | Capture a link, write a post, upload an image or video — always into a chosen home room, with a visibility choice where the room permits one (Section 14.5). |
 | Threads | Active conversations, replies, saved drafts, participation history. |
 | Profile | Private Signal Ledger, settings, reputation, privacy, moderation notices, and (where enabled) wallet/governance. |
 
@@ -952,7 +952,7 @@ Ranking is a constrained multi-objective optimizer. It maximizes meaningful atte
 
 ## 13.2 Candidate generation
 
-Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; cross-community bridge candidates; expert explanations and high-quality summaries; chronological catch-up. Candidate generation is **visibility-scoped**: global surfaces (front page, topic surfaces) draw only from public content; a room surface draws from that room's full pool — public and in-room — for users who pass the room's read bar (Sections 14.5, 16.2). Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
+Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; cross-community bridge candidates; expert explanations (stories from expert-led rooms); chronological catch-up. Candidate generation is **visibility-scoped**: global surfaces (front page, topic surfaces) draw only from public content; a room surface draws from that room's full pool — public and in-room — for users who pass the room's read bar (Sections 14.5, 16.2). Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
 
 ## 13.3 Ranking stages
 
@@ -1008,10 +1008,6 @@ Every submission targets exactly one home room and carries a content visibility 
 | Original brief | User-written post. | Topic, title, body, disclosure if personal experience. |
 | Image post | User-uploaded image anchoring discussion. | Image upload (allow-listed type, EXIF/GPS-stripped, scan-gated), required alt text, title, topic. |
 | Video post | User-uploaded short video anchoring discussion. | Video upload (allow-listed container, metadata-stripped, size/duration-capped, scan-gated), title, topic, captions or transcript where available. |
-| Question | A discussion-seeking prompt. | Question, context, topic. |
-| Evidence card | Source tied to an existing claim. | Citation, claim reference, relevance note. |
-| Local update | Time/place-specific update. | Location scope, time, source or experience disclosure. |
-| Live thread | Time-bounded event discussion. | Event, time, moderation mode. |
 
 **Topics: author proposal, AI validation (§24.1).** The "topic" required on every submission is an author **proposal** drawn from a canonical topic **catalog** (a finite, stable set of subject topics with fixed identifiers) — it is **untrusted** until validated. The ingestion/AI pipeline confirms each proposed topic against the story's actual content: supported proposals become the story's **trusted** topics (the only ones ranking, search, and the invariants read); unsupported proposals are rejected to steward review; and content-detected topics the author omitted are added. A story the pipeline cannot classify carries an explicit **"unclassified"** marker, which topic-similarity signals (including the PHI circling/dampening signal) exclude — so an unclassified story never groups with unrelated content. Topic identifiers are catalog-canonical and **shared across stories** (never per-story placeholders), so "the same topic" is genuinely groupable.
 
@@ -1053,7 +1049,7 @@ Conversation is owned by content: every thread belongs to the story that anchors
 
 ## 15.1 Comment contribution taxonomy
 
-A comment is the base unit of participation. New writes are ordinary comments plus one optional typed enrichment: `correction` for supported corrections; cited source material rides the comment itself as citations (a sourced comment). The former dedicated `evidence` contribution type and its EvidenceCard co-creation were removed — sourcing is comment-centric. The interpretation lens remains an optional metadata field because SCOI depends on it. Legacy rows with the older types remain readable, but those types are retired for new writes: question/answer become comments and replies; counterexample, explanation, local context, direct experience, and meta-discussion become comments; moderation concern becomes the Section 18.4 report flow; synthesis becomes the community-synthesis summary layer. The question/answer flag and direct-experience acknowledgment are intentionally removed from the new composer scope and recorded here as doctrine changes, not accidental omissions.
+A comment is the base unit of participation. New writes are ordinary comments plus one optional typed enrichment: `correction` for supported corrections; cited source material rides the comment itself as citations (a sourced comment). The former dedicated `evidence` contribution type and its EvidenceCard co-creation were removed — sourcing is comment-centric. The interpretation lens remains an optional metadata field because SCOI depends on it. The older WS-G-era types (question, answer, counterexample, explanation, local context, direct experience, meta-discussion, synthesis, moderation concern) are REMOVED from the schema outright — no production row ever carried them, and a migration maps stray development rows onto comments: question/answer are comments and replies; counterexample, explanation, local context, direct experience, and meta-discussion are comments; moderation concern is the Section 18.4 report flow; synthesis is the community-synthesis summary layer. The question/answer flag and direct-experience acknowledgment are intentionally removed from the composer scope and recorded here as doctrine changes, not accidental omissions.
 
 ## 15.2 Conversation quality model
 
@@ -1386,8 +1382,7 @@ Knomosis is an isolated bounded context: ranking services read only sanitized, a
 ## 22.1 Core entities
 
     User { user_id, handle, display_name, account_state, created_at, locale,
-           age_band_if_known, privacy_settings, personalization_settings,
-           reputation_summary_private }
+           age_band_if_known, privacy_settings, personalization_settings }
 
     Room { room_id, slug, name, description, room_type, visibility,
            join_model, posting_policy, governance_mode, created_at }
@@ -1831,7 +1826,7 @@ No crypto task blocks steps 1–9. The rule is: **PWAtt and MERI exist before pu
 - **D — Identity, accounts, privacy:** identity states; minimal-profile account service that records **no IP address and no location** (Section 19.1); age gate (minors excluded from wallet/governance); consent and privacy settings; new-device sign-in alerts using a coarse device descriptor only (no IP, no geolocation, no geo-IP lookup); wallet-link table isolated from profile/attention/ranking; retention/deletion/export jobs; staff access controls and audit logs that contain no IPs or locations; privacy-review workflow.
 - **E — Event pipeline and PWAtt:** event schema and classification; in-browser buffering with privacy filters; server ingestion/validation/replay protection/retention; PWAtt v0 shadow; participation-quality weighting; anti-signals; explanation logs; offline manipulation simulations; promotion to bounded ranking only after safety review.
 - **F — Ingestion, source, search:** URL canonicalization and duplicate detection; source profiles; claim extraction and evidence linking; search indexing; freshness/correction/merge workflows; crawler safety and copyright handling; MERI and SCOI hooks.
-- **G — Forum and conversation:** thread/branch/quote/evidence models; contribution taxonomy and composer; branch-quality scoring separate from popularity; moderation annotations and context patches; provenance-bearing summaries; rooms/lenses/steward roles; conversation-health metrics; Hodge and SCOI hooks; governance-discussion threads.
+- **G — Forum and conversation:** thread/branch/quote models; the comment/correction contribution taxonomy and composer; branch-quality scoring separate from popularity; moderation annotations and context patches; provenance-bearing summaries; rooms/lenses/steward roles; conversation-health metrics; Hodge and SCOI hooks; governance-discussion threads.
 - **H — Core invariant services:** Section 30.4.
 - **I — Ranking and distribution:** like/follower/wallet-independent candidate generation; feature store with allowlist/denylist; per-item decision logs; hard safety/legal/age/block filters; PWAtt as bounded input; MERI/MFCI/SCOI/PHI integration; GWEI experiment blocker; explanation service; ranking-neutrality tests (30.6); rollbacks and kill switches.
 - **J — Trust, safety, abuse ops:** policy classifiers; moderation queues with SLAs; report/block/mute/appeal/restore/notice flows; room-level tooling; coordinated-abuse workflows using MFCI evidence; wallet-drainer/scam detection; governance-capture playbook; child-safety escalation; red-team exercises.

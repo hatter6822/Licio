@@ -24,7 +24,6 @@ import {
   feedPreferencesSchema,
   linkBlocklistResponseSchema,
   MAX_CAPTION_BYTES,
-  MAX_DOCUMENT_BYTES,
   MAX_GIF_BYTES,
   MAX_IMAGE_BYTES,
   MAX_VIDEO_BYTES,
@@ -41,7 +40,6 @@ import {
   threadSafetyStateSchema,
   threadSummarySchema,
   UPLOAD_CAPTION_TYPES,
-  UPLOAD_DOCUMENT_TYPES,
   UPLOAD_IMAGE_TYPES,
   UPLOAD_VIDEO_TYPES,
   uploadPublicSchema,
@@ -935,12 +933,11 @@ export function createForumRoutes() {
           const altText = typeof altTextRaw === 'string' ? altTextRaw.trim() : '';
           const contentType = file.type;
           const isImage = (UPLOAD_IMAGE_TYPES as readonly string[]).includes(contentType);
-          const isDocument = (UPLOAD_DOCUMENT_TYPES as readonly string[]).includes(contentType);
           const isVideo = (UPLOAD_VIDEO_TYPES as readonly string[]).includes(contentType);
           const isCaption = (UPLOAD_CAPTION_TYPES as readonly string[]).includes(contentType);
-          if (!isImage && !isDocument && !isVideo && !isCaption) {
+          if (!isImage && !isVideo && !isCaption) {
             return c.json(
-              deny('unsupported_type', 'Allowed: JPEG, PNG, WebP, AVIF, PDF, MP4, WebM, VTT'),
+              deny('unsupported_type', 'Allowed: JPEG, PNG, WebP, AVIF, GIF, MP4, WebM, VTT'),
               415,
             );
           }
@@ -954,14 +951,12 @@ export function createForumRoutes() {
               : MAX_IMAGE_BYTES
             : isVideo
               ? maxVideoBytes
-              : isCaption
-                ? MAX_CAPTION_BYTES
-                : MAX_DOCUMENT_BYTES;
+              : MAX_CAPTION_BYTES;
           if (file.size > maxBytes) {
             return c.json(deny('payload_too_large', 'Upload exceeds the size limit'), 413);
           }
           // Alt text is REQUIRED for images (WCAG; WS-G.3.7b acceptance);
-          // videos/documents carry none (captions are a separate post field).
+          // videos carry none (captions are a separate post field).
           if (isImage && altText.length === 0) {
             return c.json(deny('alt_text_required', 'Images require alt text'), 422);
           }
@@ -969,8 +964,8 @@ export function createForumRoutes() {
             return c.json(deny('alt_text_too_long', 'Alt text is limited to 500 characters'), 422);
           }
           const bytes = new Uint8Array(await file.arrayBuffer());
-          // Video rides the validate-only container probe (WS-Q.2.3d); images and
-          // documents ride the metadata-stripping path (WS-G.3.7b).
+          // Video rides the validate-only container probe (WS-Q.2.3d); images
+          // ride the metadata-stripping path (WS-G.3.7b).
           let storedBytes: Uint8Array;
           let metadataStripped: boolean;
           if (isVideo) {
@@ -1092,13 +1087,7 @@ export function createForumRoutes() {
             'Cache-Control',
             restricted ? 'private, no-store' : 'public, max-age=31536000, immutable',
           );
-          // PDFs download rather than render inline (embedded-JS viewers).
-          c.header(
-            'Content-Disposition',
-            record.contentType === 'application/pdf'
-              ? `attachment; filename="${uploadId}.pdf"`
-              : 'inline',
-          );
+          c.header('Content-Disposition', 'inline');
           // Range requests (WS-Q.2.3e): native <video> seeks via `Range`, so the
           // gated path advertises and honors single-range byte serving.
           c.header('Accept-Ranges', 'bytes');

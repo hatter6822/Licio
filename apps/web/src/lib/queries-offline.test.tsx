@@ -48,7 +48,6 @@ const SAVED_STORY = {
   story_id: '11111111-1111-4111-8111-111111111111',
   title: 'Saved offline',
   source: 'example.org',
-  origin: 'independent' as const,
   url: 'https://example.org/a',
   reading_minutes: 3,
   rating_label: 'deepening' as const,

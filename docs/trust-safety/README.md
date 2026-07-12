@@ -301,6 +301,11 @@ These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
   senior queue (today `escalate` sets the case status and seniors pull it);
   room-report room-steward-layer-first routing; and the on-call paging PROVIDER
   (a WS-O binding — alerts log today).
+- **ROLE_EVIDENCE console surface**: the doctrine role, its
+  `mark-primary-source`/`flag-citation` actions, and the `evidence-queue` are
+  ratified in `steward-roles.ts` (the validator pins all five roles), but the
+  moderation console does not yet render that queue or those two actions —
+  a console panel gap, not a doctrine change (the role ids must not change).
 
 ## Room-class scope (honest boundary)
 

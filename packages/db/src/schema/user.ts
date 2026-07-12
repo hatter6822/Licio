@@ -11,11 +11,7 @@
 //     identity schema, by construction (WS-D overview).
 //   • `updated_at` auto-maintenance uses a Postgres trigger created in the
 //     migration (Drizzle emits no on-update clause for pg timestamps).
-import type {
-  PersonalizationSettings,
-  PrivacySettings,
-  ReputationSummaryPrivate,
-} from '@licio/shared';
+import type { PersonalizationSettings, PrivacySettings } from '@licio/shared';
 import { sql } from 'drizzle-orm';
 import {
   check,
@@ -61,9 +57,6 @@ export const users = pgTable(
     privacySettings: jsonb('privacy_settings').$type<PrivacySettings>().notNull(),
     personalizationSettings: jsonb('personalization_settings')
       .$type<PersonalizationSettings>()
-      .notNull(),
-    reputationSummaryPrivate: jsonb('reputation_summary_private')
-      .$type<ReputationSummaryPrivate>()
       .notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

@@ -71,7 +71,6 @@ function buildDraft(
       text: firstSentence(root.body),
       attribution: isFact ? null : 'A participant',
       cited_contribution_ids: [root.contributionId],
-      cited_evidence_ids: [],
     };
   });
   const unresolved = roots

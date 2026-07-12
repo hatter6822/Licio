@@ -59,8 +59,6 @@ export interface CandidateDataPorts {
   ): Promise<{ activeAttention: number; participation: number } | null>;
   /** Latest 24h aggregation window for an item (participation velocity). */
   latestDayWindow(itemId: string): Promise<AggregationWindowRecord | null>;
-  /** Whether a thread currently carries a human summary layer. */
-  hasHumanSummary(threadId: string): Promise<boolean>;
   /** SOURCED contributions on a story's thread (comments carrying ≥1 citation). */
   sourcedCountByStory(storyId: string): Promise<number>;
   /** The requesting user's locale (BCP 47) or null. */
@@ -280,7 +278,7 @@ export class GlobalCandidatesRetriever implements CandidateRetriever {
 }
 
 /** 4. Emerging discussions: threads with high CONSTRUCTIVE participation
- *  velocity (correction/synthesis/bridge additions, never raw volume). */
+ *  velocity (correction/bridge additions, never raw volume). */
 export class EmergingDiscussionsRetriever implements CandidateRetriever {
   readonly origin = 'emerging_discussions_v1';
   readonly sourceType = 'emerging_discussion' as const;
@@ -297,8 +295,7 @@ export class EmergingDiscussionsRetriever implements CandidateRetriever {
       const window = await this.ports.latestDayWindow(story.storyId);
       if (window === null) continue;
       const counts = window.contributionCounts;
-      const constructive =
-        (counts['correction'] ?? 0) + (counts['synthesis'] ?? 0) + (counts['bridge_comment'] ?? 0);
+      const constructive = (counts['correction'] ?? 0) + (counts['bridge_comment'] ?? 0);
       if (constructive < this.minConstructive) continue;
       out.push(
         await storyToCandidate(
@@ -385,8 +382,8 @@ export class CrossCommunityBridgesRetriever implements CandidateRetriever {
   }
 }
 
-/** 7. Expert explanations: stories from expert-led rooms and threads that
- *  carry a human (steward/community) summary layer. */
+/** 7. Expert explanations: stories from expert-led rooms (public rooms with
+ *  the `experts_and_stewards` posting policy). */
 export class ExpertExplanationsRetriever implements CandidateRetriever {
   readonly origin = 'expert_explanations_v1';
   readonly sourceType = 'expert_explanation' as const;
@@ -414,23 +411,6 @@ export class ExpertExplanationsRetriever implements CandidateRetriever {
         );
         if (out.length >= context.limit) return out;
       }
-    }
-    // Steward-curated summaries outside expert rooms.
-    for (const story of await this.ports.recentStories(context.limit * 2)) {
-      if (seen.has(story.storyId) || !(await globallyRetrievable(this.ports, story))) continue;
-      const thread = await this.ports.threadByStoryId(story.storyId);
-      if (thread === null || !(await this.ports.hasHumanSummary(thread.threadId))) continue;
-      seen.add(story.storyId);
-      out.push(
-        await storyToCandidate(
-          this.ports,
-          story,
-          this.sourceType,
-          this.origin,
-          recencyScore(storyFreshnessIso(story), context.nowMs, 168) * 0.9,
-        ),
-      );
-      if (out.length >= context.limit) break;
     }
     return out;
   }

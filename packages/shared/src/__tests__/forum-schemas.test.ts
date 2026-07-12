@@ -179,12 +179,12 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     }
   });
 
-  it('keeps legacy contribution types readable on the public projection', () => {
+  it('projects exactly the two-type union publicly (legacy types are fully retired)', () => {
     const publicRow = {
       contribution_id: uuidOf(9),
       thread_id: THREAD,
-      type: 'question',
-      body: 'A legacy question remains readable.',
+      type: 'comment',
+      body: 'A migrated legacy row reads as a comment.',
       citations: [],
       metadata: {},
       target_claim_id: null,
@@ -199,7 +199,36 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
       created_at: '2026-06-11T00:00:00.000Z',
       updated_at: '2026-06-11T00:00:00.000Z',
     };
+    // Both live types parse on the public projection…
     expect(contributionPublicSchema.safeParse(publicRow).success).toBe(true);
+    expect(
+      contributionPublicSchema.safeParse({
+        ...publicRow,
+        type: 'correction',
+        body: 'The date is wrong.',
+        citations: [citation],
+        metadata: { target_story_id: TARGET_STORY },
+      }).success,
+    ).toBe(true);
+    // …and NO legacy type survives even on the read path — migration 0076
+    // rewrote every stray row to 'comment', so the projection enum is closed.
+    for (const legacy of [
+      'question',
+      'answer',
+      'evidence',
+      'synthesis',
+      'counterexample',
+      'explanation',
+      'local_context',
+      'direct_experience',
+      'moderation_concern',
+      'meta_discussion',
+    ]) {
+      expect(
+        contributionPublicSchema.safeParse({ ...publicRow, type: legacy }).success,
+        `legacy public type ${legacy} must be rejected`,
+      ).toBe(false);
+    }
   });
 
   it('models resolved media and nested comment items separately from the flat projection', () => {

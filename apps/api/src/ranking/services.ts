@@ -216,12 +216,6 @@ export function createCandidateDataPorts(
       const windows = await events.windowStore.listForItemBefore(itemId, '24h', nowIso, 1);
       return windows[0] ?? null;
     },
-    // The §24.3 thread-summary feature was removed, so no thread carries a human
-    // summary — this retriever signal is now always false (the retriever + port
-    // remain to keep the WS-I candidate-source set stable).
-    async hasHumanSummary() {
-      return false;
-    },
     async sourcedCountByStory(storyId) {
       const thread = await ingestion.stories.getThreadByStoryId(storyId);
       if (thread === null) return 0;

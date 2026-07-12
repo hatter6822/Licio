@@ -6,7 +6,7 @@
 // Everything here is OBSERVATIONAL or additive: annotations are real
 // contributions (shared context genuinely pulls lens interpretations
 // together — the energy decrease is measured, never assumed), bridge
-// credit lands in the user's DESCRIPTIVE reputation summary (never a
+// credit is recorded on the single-shot bridge-attempt record (never a
 // wallet, never a ranking input — the pay-to-rank firewall and the shadow
 // discipline both stand), and merge/separate are audited records whose
 // physical tree mechanics belong to WS-G/WS-J tooling.
@@ -14,7 +14,6 @@
 import { randomUUID } from 'node:crypto';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
-import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import { hourWindow, persistComputations, runGuarded } from './runner.js';
 import { configSnapshotFor } from './scheduler.js';
@@ -81,9 +80,10 @@ export async function latestScoiFor(
 }
 
 /**
- * Steward context annotation (WS-H.4.3d): ONE `local_context` contribution
- * per lens that currently carries interpretations on the thread, all with
- * the same shared body. Mathematically honest mechanism: each lens's
+ * Steward context annotation (WS-H.4.3d): ONE system comment per lens that
+ * currently carries interpretations on the thread, all with the same shared
+ * body (tagged with the lens through `metadata.lens_id`, which is what the
+ * SCOI assembly keys on). Mathematically honest mechanism: each lens's
  * interpretation vector is the mean embedding of its contributions, so a
  * SHARED text pulls every vector toward the same point and the Dirichlet
  * energy genuinely decreases — the effect is measured by re-computation,
@@ -109,7 +109,7 @@ export async function annotateThreadLenses(
       contributionId: randomUUID(),
       threadId,
       userId: null,
-      type: 'local_context',
+      type: 'comment',
       body: annotation,
       citations: [],
       metadata: { lens_id: lensId },
@@ -166,13 +166,11 @@ export const BRIDGE_CREDIT_MIN_DECREASE = 0.02;
  * The bridge-credit consumer (WS-H.4.2d / SCOI-2): a contribution arriving
  * on a thread with an OPEN bridge request triggers SCOI re-computation;
  * when the energy measurably decreases below the request's baseline, the
- * attempt is credited (single-shot) and the contributor's DESCRIPTIVE
- * reputation summary records the bridge. Held/system contributions never
- * credit.
+ * attempt is credited (single-shot) on the bridge-attempt record.
+ * Held/system contributions never credit.
  */
 export function registerScoiBridgeConsumer(
   events: EventPipelineServices,
-  identity: IdentityServices,
   invariants: InvariantPlatformServices,
 ): void {
   events.router.register({
@@ -200,18 +198,6 @@ export function registerScoiBridgeConsumer(
         resolvedAt: new Date(invariants.now()).toISOString(),
       });
       if (!credited) return; // someone else credited first (single-shot)
-      // SCOI-2 participation credit: the DESCRIPTIVE reputation summary —
-      // never a wallet field, never a ranking input.
-      const user = await identity.store.getUser(payload.user_id);
-      if (user) {
-        await identity.store.updateUser(payload.user_id, {
-          reputationSummary: {
-            ...user.reputationSummary,
-            bridge_ability: (user.reputationSummary.bridge_ability ?? 0) + 1,
-            computed_at: new Date(invariants.now()).toISOString(),
-          },
-        });
-      }
       events.metrics.increment('invariants.scoi.bridge_credited');
       invariants.log('invariants.scoi.bridge_credited', {
         attempt_id: open.attemptId,

@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type { AgeBand, UserAccountState } from '@licio/shared';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Role } from '../identity/rbac.js';
@@ -61,7 +57,6 @@ async function seedSessionCookie(opts: SeedOpts = {}): Promise<string> {
     ageBand: opts.ageBand === undefined ? 'adult' : opts.ageBand,
     privacySettings: defaultPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
     roles: opts.roles ?? ['user'],
   });
   // A "verified" account needs a credential; simulate a passkey unless verified===false.

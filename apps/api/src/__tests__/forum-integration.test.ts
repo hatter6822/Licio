@@ -9,12 +9,7 @@
 //   DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev pnpm test
 import { randomUUID } from 'node:crypto';
 import { createDbClient, migrationsFolder } from '@licio/db';
-import {
-  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -57,7 +52,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         ageBandIfKnown: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummaryPrivate: emptyReputationSummary(),
       })
       .returning();
     return (inserted[0] as { userId: string }).userId;
@@ -112,7 +106,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       contributionId: randomUUID(),
       threadId,
       userId: authorId,
-      type: 'question',
+      type: 'comment',
       body: 'What evidence supports the employment claim?',
       citations: [],
       metadata: {},
@@ -227,8 +221,9 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
 
     const child = await contributions.insert(
       contributionInput({
-        type: 'answer',
-        body: 'Table 3 of the labor report.',
+        type: 'correction',
+        body: 'The date is wrong; the vote was on Wednesday.',
+        citations: [{ url: 'https://example.org/source' }],
         parentContributionId: rootId,
         path: [rootId],
         // The OPTIONAL claim linkage round-trips through the live FK.
@@ -242,7 +237,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     );
     const grandchild = await contributions.insert(
       contributionInput({
-        type: 'question',
+        type: 'comment',
         body: 'Which edition of the report?',
         userId: secondUserId,
         parentContributionId: child.contribution.contributionId,
@@ -275,13 +270,18 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     }
     expect(subtreeWalk).toEqual(descendants.map((row) => row.contributionId));
 
-    // Filtered + keyset-paginated thread reads.
-    const questionsOnly = await contributions.listByThread(threadId, {
-      types: ['question'],
+    // Filtered + keyset-paginated thread reads (the correction row proves the
+    // type filter actually discriminates).
+    const commentsOnly = await contributions.listByThread(threadId, {
+      types: ['comment'],
       states: ['published'],
       limit: 100,
     });
-    expect(questionsOnly.every((row) => row.type === 'question')).toBe(true);
+    expect(commentsOnly.length).toBeGreaterThanOrEqual(2);
+    expect(commentsOnly.every((row) => row.type === 'comment')).toBe(true);
+    expect(
+      commentsOnly.some((row) => row.contributionId === child.contribution.contributionId),
+    ).toBe(false);
     // Keyset completeness: walking 1-row pages visits every row exactly once
     // (this is the microsecond-precision regression guard — rows are written
     // in the same millisecond, and the cursor must still round-trip exactly).
@@ -303,8 +303,8 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
 
     // Aggregates: per-type counts and published-only child counts.
     const counts = await contributions.countByType(threadId, ['published']);
-    expect(counts.question ?? 0).toBeGreaterThanOrEqual(2);
-    expect(counts.answer ?? 0).toBeGreaterThanOrEqual(1);
+    expect(counts.comment ?? 0).toBeGreaterThanOrEqual(2);
+    expect(counts.correction ?? 0).toBeGreaterThanOrEqual(1);
     const childCounts = await contributions.childCounts([
       rootId,
       child.contribution.contributionId,
@@ -492,7 +492,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       status: 'pending',
       requestId,
       lensId: null,
-      notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
       requestedAt,
       joinedAt: null,
     });
@@ -509,13 +508,11 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       status: 'active',
       requestId: randomUUID(), // ignored on conflict — the original survives
       lensId: null,
-      notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES, bridge_requests: true },
       requestedAt,
       joinedAt: new Date().toISOString(),
     });
     expect(activated.status).toBe('active');
     expect(activated.requestId).toBe(requestId);
-    expect(activated.notificationPreferences.bridge_requests).toBe(true);
     expect(await roomsStore.countMembers(room.roomId)).toBe(1);
     // Eligible voters = active subscribers ∪ stewards: authorId (active sub) +
     // secondUserId (community_steward, no active subscription) = 2 distinct, so a
@@ -528,7 +525,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
 
     // WS-G.2.2 — the member's POSTING lens round-trips through the store, and
     // setSubscriptionLens changes ONLY the lens (null returns to Undecided),
-    // leaving status/preferences untouched; a non-member yields null.
+    // leaving status untouched; a non-member yields null.
     const lensCreate = await lenses.insert({
       lensId: randomUUID(),
       roomId: room.roomId,
@@ -541,7 +538,6 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     const withLens = await roomsStore.setSubscriptionLens(room.roomId, authorId, lensId);
     expect(withLens?.lensId).toBe(lensId);
     expect(withLens?.status).toBe('active');
-    expect(withLens?.notificationPreferences.bridge_requests).toBe(true);
     expect((await roomsStore.getSubscription(room.roomId, authorId))?.lensId).toBe(lensId);
     expect((await roomsStore.setSubscriptionLens(room.roomId, authorId, null))?.lensId).toBeNull();
     expect(await roomsStore.setSubscriptionLens(room.roomId, secondUserId, lensId)).toBeNull();

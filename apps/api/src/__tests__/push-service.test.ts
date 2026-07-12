@@ -3,7 +3,6 @@ import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
   type PushSubscriptionJson,
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -110,7 +109,6 @@ describe.skipIf(!DB_URL)('DrizzlePushStateStore (live Postgres)', () => {
           ageBandIfKnown: 'adult',
           privacySettings: defaultPrivacySettings(),
           personalizationSettings: defaultPersonalizationSettings(),
-          reputationSummaryPrivate: emptyReputationSummary(),
         })
         .returning();
       userId = (inserted[0] as { userId: string }).userId;

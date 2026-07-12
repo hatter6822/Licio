@@ -35,9 +35,6 @@ export const RATING_LABEL_KINDS = [
 export const ratingLabelKindSchema = z.enum(RATING_LABEL_KINDS);
 export type RatingLabelKind = (typeof RATING_LABEL_KINDS)[number];
 
-/** Source provenance — feeds the origin badge, never a ranking input. */
-export const storyOriginSchema = z.enum(['independent', 'wire', 'official', 'aggregator']);
-
 /** Story-level safety posture surfaced to readers (SPEC §22.1 safety_state). */
 export const safetyStateSchema = z.enum(['ok', 'caution', 'under-review', 'restricted']);
 export type StorySafetyState = z.infer<typeof safetyStateSchema>;
@@ -102,7 +99,6 @@ export const feedItemSchema = z.object({
   story_id: uuidSchema,
   title: z.string().min(1),
   source: z.string().min(1),
-  origin: storyOriginSchema,
   url: httpUrlSchema.optional(),
   /** WS-Q.5.3b — item visibility tier; lets a room feed mark non-public items
    *  with the in-room chip. Absent ⇒ public (global feeds carry only public). */

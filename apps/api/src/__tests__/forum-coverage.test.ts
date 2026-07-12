@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-G route + edge coverage: the uploads endpoint (type/size/alt/polyglot
-// rejections, metadata-stripped serving, PDF download disposition), feed
+// rejections, metadata-stripped serving, the retired-PDF 415), feed
 // preferences round-trip, anchors and
 // subtree 404s, the admin config surface, the demo seed (runs against the
 // REAL stores), and store edge branches.
@@ -204,16 +204,21 @@ describe('WS-G.3.7b — uploads route', () => {
     );
   });
 
-  it('accepts a PDF without alt text and serves it as a download', async () => {
+  it('rejects a PDF (415) — document uploads are retired; live media serves inline', async () => {
     const pdf = new Uint8Array([...'%PDF-1.4 minimal'].map((c) => c.charCodeAt(0)));
     const res = await app().request(
       uploadRequest({ bytes: pdf, type: 'application/pdf', name: 'doc.pdf' }, {}),
     );
-    expect(res.status).toBe(201);
-    const body = uploadPublicSchema.parse(await res.json());
-    expect(body.alt_text).toBeNull();
+    expect(res.status).toBe(415);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('unsupported_type');
+    // The surviving media types never serve as a download (always inline).
+    const img = await app().request(
+      uploadRequest({ bytes: jpegBytes(), type: 'image/jpeg', name: 'ok.jpg' }, { alt_text: 'x' }),
+    );
+    expect(img.status).toBe(201);
+    const body = uploadPublicSchema.parse(await img.json());
     const served = await app().request(`http://local${body.url}`);
-    expect(served.headers.get('content-disposition')).toContain('attachment');
+    expect(served.headers.get('content-disposition')).toBe('inline');
   });
 
   it('never serves a non-cleared upload (404, no oracle)', async () => {
@@ -424,8 +429,13 @@ describe('Dev demo seed (real stores, idempotent)', () => {
     expect(room?.name).toBe('Public Health');
     const thread = await app().request(`http://local/v1/threads/${DEMO_IDS.THREAD_1}`);
     expect(thread.status).toBe(200);
-    const detail = (await thread.json()) as { sections: { questions: number } };
-    expect(detail.sections.questions).toBeGreaterThan(0);
+    const detail = (await thread.json()) as {
+      sections: { sources: number; challenges: number; chronology: number };
+    };
+    // THREAD_1 seeds three published comments (one sourced) and no corrections.
+    expect(detail.sections.chronology).toBe(3);
+    expect(detail.sections.sources).toBe(1);
+    expect(detail.sections.challenges).toBe(0);
     const rooms = await app().request('http://local/v1/rooms');
     const { items } = (await rooms.json()) as { items: Array<{ name: string }> };
     expect(items.map((r) => r.name)).toContain('Riverside');

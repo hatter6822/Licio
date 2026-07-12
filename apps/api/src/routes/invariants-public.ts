@@ -27,6 +27,7 @@ import { getIngestionServices, type IngestionServices } from '../ingestion/servi
 import type { StoryRecord } from '../ingestion/stores.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
+import { usable } from '../pwatt/shadow.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
 
@@ -42,11 +43,14 @@ export function exposureLabelForGain(gain: number | null): MeriExposureLabelWire
   return 'duplicate_context';
 }
 
-/** Marginal gains from the latest stored MERI output (null when absent). */
+/** Marginal gains from the latest stored MERI output (empty when absent or
+ *  degraded — the WS-H.1.2c `usable` rule every stored-output consumer applies:
+ *  a TIMEOUT/COMPUTE_ERROR fallback row or a zero-coverage row is ABSENT, so a
+ *  degraded batch can never label exposure off stale/fabricated gains). */
 export async function latestMeriGains(
   events: EventPipelineServices,
 ): Promise<Record<string, number>> {
-  const latest = await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
+  const latest = usable(await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID));
   const gains =
     latest &&
     typeof latest.scoreVector['marginal_gains'] === 'object' &&

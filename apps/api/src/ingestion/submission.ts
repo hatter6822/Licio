@@ -79,26 +79,6 @@ function metadataOf(request: StoryCreateRequest): StoryRecord['submissionMetadat
           ? { personal_experience_disclosure: request.personal_experience_disclosure }
           : {}),
       };
-    case 'question':
-      return {
-        submission_type: 'question',
-        question: request.question,
-        ...(request.context !== undefined ? { context: request.context } : {}),
-      };
-    case 'local_update':
-      return {
-        submission_type: 'local_update',
-        location_scope: request.location_scope,
-        ...(request.time_reference !== undefined ? { time_reference: request.time_reference } : {}),
-        source_or_experience_disclosure: request.source_or_experience_disclosure,
-      };
-    case 'live_thread':
-      return {
-        submission_type: 'live_thread',
-        event_description: request.event_description,
-        time_reference: request.time_reference,
-        moderation_mode: request.moderation_mode,
-      };
     case 'image_post':
       return {
         submission_type: 'image_post',

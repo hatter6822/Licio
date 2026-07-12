@@ -36,15 +36,10 @@ const RETURN_PHRASES: Readonly<Record<ReturnVisitBucket, string | null>> = {
 };
 
 const CONTRIBUTION_PHRASES: Readonly<Record<EventContributionType, string | null>> = {
-  question: 'Your question was counted as constructive participation.',
   correction: 'Your correction was counted as constructive participation.',
-  synthesis: 'Your synthesis was counted as constructive participation.',
-  counterexample: 'Your counterexample was counted as constructive participation.',
-  explanation: 'Your explanation was counted as constructive participation.',
-  experience: 'Your first-hand account was counted as constructive participation.',
+  explanation: 'Your comment was counted as constructive participation.',
   bridge_comment: 'Your bridge comment was counted as constructive participation.',
   steward_action: 'Your steward action was counted toward thread health.',
-  flag: null,
   low_info_reply: null,
 };
 

@@ -11,7 +11,6 @@ const sample: StoryCardData = {
     id: 's1',
     title: 'River levels stabilize after upstream coordination',
     source: 'Delta Observer',
-    origin: 'independent',
     url: 'https://example.org/story',
     readingMinutes: 4,
   },

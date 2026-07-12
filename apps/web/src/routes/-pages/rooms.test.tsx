@@ -97,7 +97,6 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     story_id: 's1',
     title: 'River levels',
     source: 'Delta Observer',
-    origin: 'independent',
     reading_minutes: 3,
     rating_label: 'deepening',
     distribution_reason: 'Recent in this room',

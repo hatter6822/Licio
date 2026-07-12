@@ -81,11 +81,11 @@ async function safetyState(): Promise<string> {
   return thread.safetyState;
 }
 
-/** Root question + answer; returns both ids (the depth-2 anchor points). */
+/** Root comment + reply; returns both ids (the depth-2 anchor points). */
 async function seedExchange(): Promise<{ rootId: string; answerId: string }> {
-  const root = await createOk(contributionBody('question', threadId));
+  const root = await createOk(contributionBody('comment', threadId));
   const answer = await createOk(
-    contributionBody('answer', threadId, { parentId: root.contributionId }),
+    contributionBody('comment', threadId, { parentId: root.contributionId }),
   );
   return { rootId: root.contributionId, answerId: answer.contributionId };
 }
@@ -111,10 +111,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
     await createOk(contributionBody('comment', threadId, { sourced: true })); // 3 published
     expect(await conversationState()).toBe('active'); // below volume threshold
     // The 4th contribution is a depth-2 reply — every condition now holds.
-    await createOk({
-      ...contributionBody('explanation', threadId),
-      parent_contribution_id: answerId,
-    });
+    await createOk(contributionBody('comment', threadId, { parentId: answerId }));
     await fixture.settleAll();
     expect(await conversationState()).toBe('deepening');
   });
@@ -122,7 +119,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
   it('never fires from shallow volume alone (depth condition)', async () => {
     await createOk(contributionBody('comment', threadId, { sourced: true }));
     for (let i = 0; i < 5; i += 1) {
-      await createOk(contributionBody('question', threadId));
+      await createOk(contributionBody('comment', threadId));
     }
     await fixture.settleAll();
     expect(await conversationState()).toBe('active');
@@ -130,11 +127,8 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
 
   it('never fires without accumulated sourcing (citation condition)', async () => {
     const { answerId } = await seedExchange();
-    await createOk(contributionBody('question', threadId));
-    await createOk({
-      ...contributionBody('explanation', threadId),
-      parent_contribution_id: answerId,
-    });
+    await createOk(contributionBody('comment', threadId));
+    await createOk(contributionBody('comment', threadId, { parentId: answerId }));
     await fixture.settleAll();
     expect(await conversationState()).toBe('active');
   });
@@ -151,10 +145,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
     };
     const marked = await applyConversationTransition(deps, threadId, 'tense', null, 'test');
     expect(marked.ok).toBe(true);
-    await createOk({
-      ...contributionBody('explanation', threadId),
-      parent_contribution_id: answerId,
-    });
+    await createOk(contributionBody('comment', threadId, { parentId: answerId }));
     await fixture.settleAll();
     expect(await conversationState()).toBe('tense');
   });
@@ -162,10 +153,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
   it('emits the audited thread.state.changed event for the transition', async () => {
     const { answerId } = await seedExchange();
     await createOk(contributionBody('comment', threadId, { sourced: true }));
-    await createOk({
-      ...contributionBody('explanation', threadId),
-      parent_contribution_id: answerId,
-    });
+    await createOk(contributionBody('comment', threadId, { parentId: answerId }));
     await fixture.settleAll();
     const events = await fixture.events.eventStore.listByTopicsBetween(
       ['thread.state.changed'],
@@ -249,23 +237,22 @@ describe('integrity escalation (the forum-thread-posture consumer)', () => {
 
 describe('subtree keyset pagination (WS-G.1.2d-2 / WS-G.3.3)', () => {
   async function buildTree(): Promise<{ rootId: string; allIds: string[] }> {
-    const root = await createOk(contributionBody('question', threadId));
+    const root = await createOk(contributionBody('comment', threadId));
     const allIds = [root.contributionId];
-    // Three answers, each with two depth-2 explanations: 1 + 3 + 6 = 10 rows.
+    // Three replies, each with two depth-2 replies: 1 + 3 + 6 = 10 rows.
     for (let i = 0; i < 3; i += 1) {
       const answer = await createOk(
-        contributionBody('answer', threadId, { parentId: root.contributionId }),
+        contributionBody('comment', threadId, { parentId: root.contributionId }),
       );
       allIds.push(answer.contributionId);
       for (let j = 0; j < 2; j += 1) {
-        const reply = await createOk({
-          ...contributionBody('explanation', threadId),
-          parent_contribution_id: answer.contributionId,
-        });
+        const reply = await createOk(
+          contributionBody('comment', threadId, { parentId: answer.contributionId }),
+        );
         allIds.push(reply.contributionId);
       }
     }
-    await createOk(contributionBody('question', threadId)); // outside the subtree
+    await createOk(contributionBody('comment', threadId)); // outside the subtree
     return { rootId: root.contributionId, allIds };
   }
 
@@ -396,7 +383,7 @@ describe('upload scanner seam (WS-J.2.6b) + DSAR upload listing', () => {
       new Uint8Array([1]),
     );
     const outcome = await createContribution(bundle(), userId, `ref-${userId}`, {
-      ...contributionBody('question', threadId),
+      ...contributionBody('comment', threadId),
       attachment_ids: [pending.uploadId],
     } as unknown as ContributionCreate);
     expect(outcome.ok).toBe(false);

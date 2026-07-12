@@ -1162,17 +1162,8 @@ type ContributionCreateOp = {
   type: 'contribution.create';
   contribution_id: string;
   thread_id: string;
-  contribution_type:
-    | 'question'
-    | 'answer'
-    | 'correction'
-    | 'synthesis'
-    | 'counterexample'
-    | 'explanation'
-    | 'local_context'
-    | 'direct_experience'
-    | 'moderation_concern'
-    | 'meta_discussion';
+  // WS-G parity: the live two-type taxonomy (the shared `contributionTypeSchema`).
+  contribution_type: 'comment' | 'correction';
   body_markdown_lite: string;
   citations: Citation[];
   metadata: Record<string, unknown>;
@@ -1184,7 +1175,7 @@ type ContributionCreateOp = {
 };
 ```
 
-Private contribution validation SHOULD mirror server-hosted rules: typed body caps, citations for evidence/corrections, answer-to-question parent validation, maximum tree depth, lens belongs to room, and attachment validation.
+Private contribution validation SHOULD mirror server-hosted rules: typed body caps, at least one citation on a correction, maximum tree depth, lens belongs to room, and attachment validation.
 
 ### 13.6 Attachment manifest
 

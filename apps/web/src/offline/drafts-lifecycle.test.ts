@@ -37,21 +37,21 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-a1',
       storyId: null,
       threadId: THREAD_A,
-      contributionType: 'question',
+      contributionType: 'comment',
       values: { body: 'older' },
     });
     await saveDraft({
       draftId: 'draft-a2',
       storyId: null,
       threadId: THREAD_A,
-      contributionType: 'explanation',
+      contributionType: 'correction',
       values: { body: 'newer' },
     });
     await saveDraft({
       draftId: 'draft-b1',
       storyId: null,
       threadId: THREAD_B,
-      contributionType: 'question',
+      contributionType: 'comment',
       values: { body: 'other thread' },
     });
     const forA = await listDraftsForThread(THREAD_A);
@@ -67,7 +67,7 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-x',
       storyId: null,
       threadId: THREAD_A,
-      contributionType: 'question',
+      contributionType: 'comment',
       values: { body: 'x' },
     });
     await deleteDraft('draft-x');
@@ -79,14 +79,14 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-fresh',
       storyId: null,
       threadId: THREAD_A,
-      contributionType: 'question',
+      contributionType: 'comment',
       values: { body: 'fresh' },
     });
     await saveDraft({
       draftId: 'draft-stale',
       storyId: null,
       threadId: THREAD_A,
-      contributionType: 'question',
+      contributionType: 'comment',
       values: { body: 'stale' },
     });
     // Age the stale draft past the bound by sweeping from the future.
@@ -97,7 +97,7 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-now',
       storyId: null,
       threadId: THREAD_A,
-      contributionType: 'question',
+      contributionType: 'comment',
       values: { body: 'now' },
     });
     expect(await expireOldDrafts()).toBe(0);

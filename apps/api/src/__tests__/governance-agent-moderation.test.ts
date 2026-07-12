@@ -62,7 +62,7 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
   it('holds clean content the in-room agent flags (under_review + review queue, no emission)', async () => {
     fixture.forum.agentModerator = fixedAgent('under_review');
     const { threadId } = await seedThread(fixture);
-    const res = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
+    const res = await post(contributionCreateSchema.parse(contributionBody('comment', threadId)));
     expect(res.ok && res.contribution.moderationState).toBe('under_review');
     expect(metric('contributions.agent_moderated')).toBeGreaterThanOrEqual(1);
     expect(metric('contributions.agent_flagged')).toBeGreaterThanOrEqual(1);
@@ -79,9 +79,7 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
   it('removes content the in-room agent removes (removed + agent_blocked)', async () => {
     fixture.forum.agentModerator = fixedAgent('removed');
     const { threadId } = await seedThread(fixture);
-    const res = await post(
-      contributionCreateSchema.parse(contributionBody('explanation', threadId)),
-    );
+    const res = await post(contributionCreateSchema.parse(contributionBody('comment', threadId)));
     expect(res.ok && res.contribution.moderationState).toBe('removed');
     expect(metric('contributions.agent_blocked')).toBeGreaterThanOrEqual(1);
   });
@@ -89,7 +87,7 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
   it('publishes normally when no agent governs the room (null recommendation)', async () => {
     fixture.forum.agentModerator = fixedAgent(null);
     const { threadId } = await seedThread(fixture);
-    const res = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
+    const res = await post(contributionCreateSchema.parse(contributionBody('comment', threadId)));
     expect(res.ok && res.contribution.moderationState).toBe('published');
     expect(metric('contributions.agent_moderated')).toBe(0);
   });
@@ -97,7 +95,7 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
   it('publishes when the agent allows (state published) without a review hold', async () => {
     fixture.forum.agentModerator = fixedAgent('published');
     const { threadId } = await seedThread(fixture);
-    const res = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
+    const res = await post(contributionCreateSchema.parse(contributionBody('comment', threadId)));
     expect(res.ok && res.contribution.moderationState).toBe('published');
     // No escalation ⇒ no agent hold recorded.
     expect(metric('contributions.agent_moderated')).toBe(0);
@@ -112,7 +110,7 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
     // Created with no agent ⇒ published; an agent then governs and flags on edit.
     const { threadId } = await seedThread(fixture);
     const created = await post(
-      contributionCreateSchema.parse(contributionBody('explanation', threadId)),
+      contributionCreateSchema.parse(contributionBody('comment', threadId)),
     );
     if (!created.ok) throw new Error('create failed');
     expect(created.contribution.moderationState).toBe('published');
@@ -137,7 +135,7 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
     };
     fixture.forum.agentModerator = fixedAgent('published');
     const { threadId } = await seedThread(fixture);
-    const res = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
+    const res = await post(contributionCreateSchema.parse(contributionBody('comment', threadId)));
     expect(res.ok && res.contribution.moderationState).toBe('removed');
     // The agent did not escalate (it tried to lower), so no agent metric fired.
     expect(metric('contributions.agent_moderated')).toBe(0);
@@ -327,7 +325,7 @@ describe('WS-U buildDeferredRemoderationApplier (deferred re-seam, floor-dominan
   async function publishedContribution(): Promise<string> {
     const { threadId } = await seedThread(fixture);
     const created = await post(
-      contributionCreateSchema.parse(contributionBody('question', threadId)),
+      contributionCreateSchema.parse(contributionBody('comment', threadId)),
     );
     if (!created.ok) throw new Error('create failed');
     expect(created.contribution.moderationState).toBe('published');
@@ -429,7 +427,7 @@ describe('WS-U buildModerationContextLoader (content-free reconstruction + moot 
   async function published(): Promise<string> {
     const { threadId } = await seedThread(fixture);
     const created = await post(
-      contributionCreateSchema.parse(contributionBody('question', threadId)),
+      contributionCreateSchema.parse(contributionBody('comment', threadId)),
     );
     if (!created.ok) throw new Error('create failed');
     return created.contribution.contributionId;

@@ -8,7 +8,6 @@ import { randomUUID } from 'node:crypto';
 import {
   defaultPersonalizationSettings,
   defaultPrivacySettings,
-  emptyReputationSummary,
   type StewardRoleId,
 } from '@licio/shared';
 import { Hono } from 'hono';
@@ -101,7 +100,6 @@ async function seedUser(opts: {
     ageBand: 'adult',
     privacySettings: defaultPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
     roles: opts.platformRoles ?? ['user'],
     stewardRoles: opts.stewardRoles ?? [],
   });

@@ -25,7 +25,6 @@ const STORY: StoryDetail = {
   story_id: '33333333-3333-4333-8333-333333333333',
   title: 'Regional water board publishes the full testing dataset',
   source: 'Public Records Office',
-  origin: 'official',
   url: 'https://example.org/water-testing-dataset',
   reading_minutes: 6,
   rating_label: 'deepening',

@@ -333,7 +333,9 @@ export function createV1Routes() {
       .get('/feed', zValidator('query', feedQuerySchema), async (c) => {
         const ingestion = getIngestionServices();
         const hasStories = (await ingestion.stories.listRecent(1)).length > 0;
-        if (!hasStories) {
+        // Fixture serving is a DEV/TEST affordance only: a production boot with
+        // an empty store serves an empty feed, never demo data.
+        if (!hasStories && process.env['NODE_ENV'] !== 'production') {
           const response: FeedResponse = { items: [...DEMO_FEED], nextCursor: null };
           return c.json(feedResponseSchema.parse(response));
         }
@@ -456,7 +458,9 @@ export function createV1Routes() {
               ),
             );
           }
-          const story = demoStory(storyId);
+          // The demo-fixture read is a DEV/TEST affordance only (parity with
+          // the /feed fixture gate above): production reads 404 on a miss.
+          const story = process.env['NODE_ENV'] !== 'production' ? demoStory(storyId) : null;
           return story ? c.json(storyDetailSchema.parse(story)) : c.json(notFound, 404);
         },
       )

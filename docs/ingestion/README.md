@@ -474,6 +474,10 @@ through the same `applyLifecycleTrigger` seam.
   the submission flow needs the BFF-in-the-loop harness (WS-P, the WS-D
   precedent) — the CSRF token round-trip is integration-tested at the
   full-app level meanwhile.
+- **Claims + independent-sources drawers**: `GET /v1/stories/:id/claims` and
+  the WS-H `/independent-sources` read serve real, tested data but have no
+  client consumer yet — the SPEC promises the independent-sources drawer on
+  topic surfaces.  Implement the drawer (WS-C follow-up); the reads stay.
 - **Full-scale (1 M) load validation**: the latency/recall benchmarks are
   measured at N = 20 000 (operating-point table above); validating the same
   constants at the 1 M-story / 100K-embedding target is a WS-P load-harness

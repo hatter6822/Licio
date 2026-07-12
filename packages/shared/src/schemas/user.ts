@@ -59,32 +59,6 @@ export const emailSchema = z.string().email().max(254);
 export const localeSchema = z.string().min(2).max(35);
 
 // ---------------------------------------------------------------------------
-// Reputation summary (WS-D.1.1b) — private to the user, never in any public
-// response.  Each domain score is a probability in [0,1] or null (uncomputed).
-// ---------------------------------------------------------------------------
-export const reputationSummaryPrivateSchema = z
-  .object({
-    schema_version: z.literal(1),
-    evidence_reliability: z.number().min(0).max(1).nullable(),
-    correction_accuracy: z.number().min(0).max(1).nullable(),
-    bridge_ability: z.number().min(0).max(1).nullable(),
-    computed_at: isoTimestampSchema.nullable(),
-  })
-  .strict();
-export type ReputationSummaryPrivate = z.infer<typeof reputationSummaryPrivateSchema>;
-
-/** A fresh, never-computed reputation summary (all scores null). */
-export function emptyReputationSummary(): ReputationSummaryPrivate {
-  return {
-    schema_version: 1,
-    evidence_reliability: null,
-    correction_accuracy: null,
-    bridge_ability: null,
-    computed_at: null,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Age-gate derivation (WS-D.1.7a).  The raw date of birth is used transiently
 // to compute a band and then discarded — it is NEVER stored (§19.4).  Under-13
 // is a hard BLOCK: no User row is created.  The function is total: every input,
@@ -222,7 +196,6 @@ export const userRecordSchema = z
     age_band_if_known: ageBandSchema.nullable(),
     privacy_settings: privacySettingsSchema,
     personalization_settings: personalizationSettingsSchema,
-    reputation_summary_private: reputationSummaryPrivateSchema,
     /** Doctrine steward-role grants (WS-J / STEWARD_ROLES.md); empty for a
      *  non-steward.  Private — excluded from `userPublicSchema` by allowlist. */
     steward_roles: z.array(stewardRoleIdSchema).default([]),
@@ -235,8 +208,7 @@ export type UserRecord = z.infer<typeof userRecordSchema>;
 /**
  * Fields safe to expose to OTHER users.  Built by allowlisting via `.pick()` so a
  * future private field is excluded by default (fail-closed leak prevention).
- * Explicitly excludes email, privacy_settings, personalization_settings, and
- * reputation_summary_private.
+ * Explicitly excludes email, privacy_settings, and personalization_settings.
  */
 export const userPublicSchema = userRecordSchema
   .pick({

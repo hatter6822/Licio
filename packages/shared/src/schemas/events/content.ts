@@ -21,21 +21,11 @@ import { z } from 'zod';
 import { httpUrlSchema, uuidSchema } from '../common.js';
 import { eventBaseShape } from './envelope.js';
 
-/** The submission types (SPEC §14.1; WS-Q.1.3c added the two media types).
- *  `evidence_card` was removed with the EvidenceCard entity — the PG enum
- *  keeps the value as documented dead weight (PostgreSQL cannot drop enum
- *  values in place), but no row can be written with it. */
-export const SUBMISSION_TYPES = [
-  'link',
-  'original_brief',
-  'question',
-  'local_update',
-  'live_thread',
-  // WS-Q.1.3c — native media posts (appended; existing values keep their order
-  // so the DB enum `ADD VALUE`s line up).
-  'image_post',
-  'video_post',
-] as const;
+/** The four §14.1 submission types (WS-Q.1.3c added the two media types).
+ *  The retired types (`evidence_card`, `question`, `local_update`,
+ *  `live_thread`) were removed with their client-unreachable creation paths;
+ *  migrations 0075/0076 map stray dev rows onto the survivors. */
+export const SUBMISSION_TYPES = ['link', 'original_brief', 'image_post', 'video_post'] as const;
 export type SubmissionType = (typeof SUBMISSION_TYPES)[number];
 export const submissionTypeSchema = z.enum(SUBMISSION_TYPES);
 
@@ -120,9 +110,9 @@ export const contentNormalizedEventSchema = z
     event_type: z.literal('content.normalized'),
     /**
      * Resolved source profile (WS-F.2.2a). Null for non-link submission types
-     * (original brief, question, local update, live thread, media): the author
-     * IS the submitter and no web source exists to resolve — normalization
-     * still runs (language, sensitivity, claims) and still emits this event.
+     * (original brief, media): the author IS the submitter and no web source
+     * exists to resolve — normalization still runs (language, sensitivity,
+     * claims) and still emits this event.
      */
     source_id: uuidSchema.nullable(),
     /** BCP-47 language tag of the normalized content. */

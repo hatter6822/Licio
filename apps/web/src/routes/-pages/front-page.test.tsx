@@ -49,7 +49,6 @@ function feedItem(id: string) {
     story_id: id,
     title: `Story ${id}`,
     source: 'Community submission',
-    origin: 'independent',
     visibility: 'public',
     reading_minutes: 1,
     rating_label: 'getting-attention',

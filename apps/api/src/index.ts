@@ -564,7 +564,7 @@ setInvariantServices(invariantServices);
 await seedMeriRankingEnforcement(invariantServices, makeJobLease());
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
 // closures (MERI redundancy, MFCI intake).
-registerInvariantConsumers(eventServices, ingestionServices, identityServices, invariantServices);
+registerInvariantConsumers(eventServices, ingestionServices, invariantServices);
 
 // --- WS-I ranking and distribution (SPEC §13) -------------------------------
 // The eight-stage feed pipeline: candidate generation → feature join →

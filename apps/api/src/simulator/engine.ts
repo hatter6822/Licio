@@ -316,25 +316,20 @@ function storyKindFor(archetype: PersonaArchetype, prng: Prng): StoryKind {
     case 'author':
       return prng.weighted<StoryKind>([
         { value: 'link', weight: 45 },
-        { value: 'original_brief', weight: 35 },
-        { value: 'question', weight: 20 },
+        { value: 'original_brief', weight: 55 },
       ]);
     case 'local_correspondent':
-      return prng.weighted<StoryKind>([
-        { value: 'local_update', weight: 60 },
-        { value: 'original_brief', weight: 25 },
-        { value: 'question', weight: 15 },
-      ]);
+      // Correspondents write first-party briefs (the retired local_update /
+      // question kinds fold into original_brief; the draw is kept so the
+      // seeded PRNG stream stays aligned across kinds).
+      return prng.weighted<StoryKind>([{ value: 'original_brief', weight: 100 }]);
     case 'expert_author':
       return prng.weighted<StoryKind>([
         { value: 'link', weight: 55 },
         { value: 'original_brief', weight: 45 },
       ]);
     default:
-      return prng.weighted<StoryKind>([
-        { value: 'question', weight: 60 },
-        { value: 'original_brief', weight: 40 },
-      ]);
+      return prng.weighted<StoryKind>([{ value: 'original_brief', weight: 100 }]);
   }
 }
 

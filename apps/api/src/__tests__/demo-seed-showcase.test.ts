@@ -339,7 +339,7 @@ describe('demo seed — media + moderation surfaces', () => {
   it('seeds pending moderation items for the steward/admin review queue', async () => {
     const pending = await fx.ingestion.reviewQueue.list({ status: 'pending' }, 50);
     expect(pending.length).toBeGreaterThanOrEqual(2);
-    expect(pending.every((r) => r.kind === 'moderation_concern')).toBe(true);
+    expect(pending.every((r) => r.kind === 'contribution_safety_hold')).toBe(true);
   });
 });
 

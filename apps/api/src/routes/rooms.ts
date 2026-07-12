@@ -4,13 +4,12 @@
 // Listing/discovery (filters; recommendation ordered by RECENCY inputs only
 // — no popularity, WS-G.2.3a), detail (lenses, stewards, §16.5 governance
 // info only for non-ordinary rooms), creation (per-type authorization),
-// subscription management (join/leave/notification preferences, restricted-
+// subscription management (join/leave, restricted-
 // room join requests with steward decisions), and the SCOI lens read
 // (WS-G.2.4 — interpretation contexts, never scoreboards).
 import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
-  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   lensCreateRequestSchema,
   lensPublicSchema,
   migrationExportResponseSchema,
@@ -29,7 +28,6 @@ import {
   roomJoinResponseSchema,
   roomLensSelectionSchema,
   roomListResponseSchema,
-  roomNotificationPreferencesSchema,
   roomSummarySchema,
   roomTypeSchema,
   roomVisibilityChangeRequestSchema,
@@ -50,7 +48,6 @@ import {
   compareRecommended,
   isRoomSteward,
   joinRoom,
-  mergeNotificationPreferences,
   resolveRoomCreateAxes,
   roomContentVisibleToUser,
   roomMatchesQuery,
@@ -341,7 +338,6 @@ export function createRoomsRoutes() {
             // posting lens later via the room's lens control).
             lensId: null,
             requestId: randomUUID(),
-            notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES },
             requestedAt: new Date(forum.now()).toISOString(),
             joinedAt: new Date(forum.now()).toISOString(),
           });
@@ -555,34 +551,6 @@ export function createRoomsRoutes() {
           await forum.rooms.deleteSubscription(roomId, auth.userId);
           forum.metrics.increment('rooms.left');
           return c.json({ left: true });
-        },
-      )
-
-      .patch(
-        '/rooms/:roomId/notifications',
-        authMiddleware(),
-        requireVerifiedAccount(),
-        zValidator('param', z.object({ roomId: uuidSchema })),
-        zValidator('json', roomNotificationPreferencesSchema.partial()),
-        async (c) => {
-          const auth = getAuth(c);
-          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-          const { roomId } = c.req.valid('param');
-          const forum = getForumServices();
-          const subscription = await forum.rooms.getSubscription(roomId, auth.userId);
-          if (!subscription) return c.json(notFound, 404);
-          const merged = mergeNotificationPreferences(
-            roomNotificationPreferencesSchema.parse({
-              ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
-              ...subscription.notificationPreferences,
-            }),
-            c.req.valid('json'),
-          );
-          await forum.rooms.upsertSubscription({
-            ...subscription,
-            notificationPreferences: merged,
-          });
-          return c.json(roomNotificationPreferencesSchema.parse(merged));
         },
       )
 

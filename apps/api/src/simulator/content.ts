@@ -46,7 +46,6 @@ interface DomainBank {
   /** A sentence carrying ≥2 catalog keywords for the primary topic. */
   readonly keywordSentences: readonly string[];
   readonly outlets: readonly string[];
-  readonly localValue?: string;
 }
 
 const BANKS: Readonly<Record<DomainId, DomainBank>> = {
@@ -129,7 +128,6 @@ const BANKS: Readonly<Record<DomainId, DomainBank>> = {
       'The county schedule shows which neighborhood meetings cover each docket item.',
     ],
     outlets: ['harbor-signal', 'riverside-post', 'district-notes', 'city-gazette'],
-    localValue: 'Riverside',
   },
   climate: {
     topicSlug: 'climate-environment',
@@ -341,13 +339,6 @@ const TITLE_TEMPLATES: readonly [TitleTemplate, ...TitleTemplate[]] = [
   (e, s, p) => `${e} adds line-level detail to the ${s} covering ${p}`,
 ];
 
-type QuestionTemplate = (subject: string, period: string) => string;
-const QUESTION_TEMPLATES: readonly [QuestionTemplate, ...QuestionTemplate[]] = [
-  (s, p) => `What does the new ${s} for ${p} actually measure?`,
-  (s, p) => `How should readers interpret the ${s} covering ${p}?`,
-  (s, p) => `Which parts of the ${s} for ${p} are comparable to last cycle?`,
-];
-
 const PERIODS = [
   'week 8',
   'week 15',
@@ -361,7 +352,7 @@ const PERIODS = [
   'the winter cycle',
 ] as const;
 
-export type StoryKind = 'link' | 'original_brief' | 'question' | 'local_update';
+export type StoryKind = 'link' | 'original_brief';
 
 /** A fully generated story submission, minus the room decision (engine adds
  *  room_id/visibility and parses through storyCreateRequestSchema). */
@@ -374,10 +365,6 @@ export interface GeneratedStory {
   /** Present for link stories only. */
   readonly url: string | null;
   readonly reason: string | null;
-  readonly question: string | null;
-  readonly questionContext: string | null;
-  readonly locationValue: string | null;
-  readonly disclosure: string | null;
 }
 
 function domainBank(domain: DomainId): DomainBank {
@@ -446,29 +433,11 @@ export function generateStory(
   const subject = uniqueSubject(serial);
   const period = PERIODS[Math.floor(serial / 25) % PERIODS.length] ?? PERIODS[0];
   const titleTemplate = TITLE_TEMPLATES[serial % TITLE_TEMPLATES.length] ?? TITLE_TEMPLATES[0];
-  const questionTemplate =
-    QUESTION_TEMPLATES[serial % QUESTION_TEMPLATES.length] ?? QUESTION_TEMPLATES[0];
   const slugs =
     bank.secondarySlug !== undefined && prng.chance(0.35)
       ? [bank.topicSlug, bank.secondarySlug]
       : [bank.topicSlug];
   const body = storyBody(bank, subject, prng);
-  if (kind === 'question') {
-    const question = questionTemplate(subject, period);
-    return {
-      kind,
-      title: question,
-      topicSlugs: slugs,
-      topicIds: slugs.map(topicIdForSlug),
-      body,
-      url: null,
-      reason: null,
-      question,
-      questionContext: `Asking about the ${subject} before interpretations settle. ${prng.pick(bank.keywordSentences)}`,
-      locationValue: null,
-      disclosure: null,
-    };
-  }
   const title = titleTemplate(entity, subject, period);
   if (kind === 'link') {
     const outlet = prng.pick(bank.outlets);
@@ -484,30 +453,6 @@ export function generateStory(
       body,
       url,
       reason: `A link to the ${subject}.`,
-      question: null,
-      questionContext: null,
-      locationValue: null,
-      disclosure: null,
-    };
-  }
-  if (kind === 'local_update') {
-    return {
-      kind,
-      title,
-      topicSlugs: slugs,
-      topicIds: slugs.map(topicIdForSlug),
-      body,
-      url: null,
-      reason: null,
-      question: null,
-      questionContext: null,
-      locationValue: bank.localValue ?? 'Riverside',
-      // The disclosure IS the local_update's content text (what WS-F signs for
-      // near-dup, alongside the title — submissionBodyText reads only this
-      // field). Carry the per-story diverse `body` so distinct local updates
-      // stay below the 0.7 threshold, exactly as original_brief signs its body;
-      // a fixed disclosure here would collide every same-template update.
-      disclosure: `${body} Source: the public briefing calendar and the posted agenda.`,
     };
   }
   return {
@@ -518,10 +463,6 @@ export function generateStory(
     body,
     url: null,
     reason: null,
-    question: null,
-    questionContext: null,
-    locationValue: null,
-    disclosure: null,
   };
 }
 
@@ -553,10 +494,6 @@ export function generateRepost(
     body: originalBody,
     url: `https://${outlet}.example/${domain}/repost-${slugify(originalTitle)}-${serial}`,
     reason: 'The same release, reposted.',
-    question: null,
-    questionContext: null,
-    locationValue: null,
-    disclosure: null,
   };
 }
 

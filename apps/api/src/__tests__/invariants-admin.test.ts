@@ -444,7 +444,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
         contributionId: randomUUID(),
         threadId,
         userId: bridgeUser.userId, // posts under BOTH lenses → bridge candidate
-        type: 'explanation',
+        type: 'comment',
         body: bodies[lensId] ?? 'Reading.',
         citations: [],
         metadata: { lens_id: lensId },
@@ -614,7 +614,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
         contributionId: randomUUID(),
         threadId,
         userId: bridgeUserId,
-        type: 'local_context',
+        type: 'comment',
         body: 'Both readings reference the same scheduled maintenance bulletin from the city.',
         citations: [],
         metadata: { lens_id: lensId },
@@ -634,7 +634,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
           thread_id: threadId,
           contribution_id: inserted.contribution.contributionId,
           user_id: bridgeUserId,
-          contribution_type: 'local_context',
+          contribution_type: 'explanation',
           privacy_classification: 'public',
           retention_tier: 'public_contribution',
         } as never);
@@ -645,9 +645,11 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     expect(credited).toBeDefined();
     expect(credited?.bridgeUserId).toBe(bridgeUserId);
     expect(credited?.scoiAfter).toBeLessThan(request.scoi_baseline);
-    // SCOI-2 participation credit: the DESCRIPTIVE reputation summary.
-    const user = await fixture.identity.store.getUser(bridgeUserId);
-    expect(user?.reputationSummary.bridge_ability).toBe(1);
+    // SCOI-2 participation credit lands ON the bridge-attempt record itself
+    // (the private reputation summary was retired) — the crediting
+    // contribution and resolution instant are pinned there.
+    expect(credited?.contributionId).not.toBeNull();
+    expect(credited?.resolvedAt).not.toBeNull();
     // Single-shot: only one credit even though two contributions arrived.
     expect(attempts.filter((a) => a.status === 'credited')).toHaveLength(1);
   });
@@ -687,7 +689,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
       contributionId: randomUUID(),
       threadId,
       userId: bridgeUserId,
-      type: 'explanation',
+      type: 'comment',
       body: 'Routine harmless maintenance notice nothing unusual here at all.',
       citations: [],
       metadata: { lens_id: lensIds[0] ?? '' },
@@ -714,8 +716,8 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     }
     const after = await fixture.invariants.bridgeAttempts.openForThread(threadId);
     expect(after?.status).toBe('requested'); // still open — no inherited credit
-    const user = await fixture.identity.store.getUser(bridgeUserId);
-    expect(user?.reputationSummary.bridge_ability).toBeNull();
+    expect(after?.bridgeUserId).toBeNull(); // …and no credit landed on the record
+    expect(after?.contributionId).toBeNull();
   });
 
   it('merge requires the actor to steward the RELATED thread too', async () => {
@@ -840,7 +842,7 @@ describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => 
           contributionId: randomUUID(),
           threadId: seeded.threadId,
           userId: steward.userId,
-          type: 'explanation',
+          type: 'comment',
           body: lensId === lensIds[0] ? 'Reads as routine here.' : 'Figures look anomalous.',
           citations: [],
           metadata: { lens_id: lensId },

@@ -164,9 +164,6 @@ export const DEFAULT_PWATT_V1_COMPONENTS_CONFIG: PwattV1ComponentsConfig = {
 /** Config-time rejection (WS-E.2.3a/b): every violation named. */
 export function validatePwattV1ComponentsConfig(config: PwattV1ComponentsConfig): void {
   assertV1HierarchyOrder(config.contributionWeights);
-  if (config.contributionWeights.flag !== 0) {
-    throw new Error('flag must carry zero constructive weight');
-  }
   for (const [type, weight] of Object.entries(config.contributionWeights)) {
     if (!(weight >= 0 && weight <= 1)) {
       throw new Error(`contribution weight ${type} must be in [0, 1]`);

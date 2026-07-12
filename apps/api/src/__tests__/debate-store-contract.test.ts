@@ -8,11 +8,7 @@
 // arena (via `freshCtx`); the in-memory leg uses arbitrary ids.
 import { randomUUID } from 'node:crypto';
 import { createDbClient, debateArenas, migrationsFolder } from '@licio/db';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -310,7 +306,6 @@ describe.skipIf(!DB_URL)('DrizzleDebateStore (contract, live Postgres)', () => {
         ageBandIfKnown: 'adult',
         privacySettings: defaultPrivacySettings(),
         personalizationSettings: defaultPersonalizationSettings(),
-        reputationSummaryPrivate: emptyReputationSummary(),
       })
       .returning();
     user = (inserted[0] as { userId: string }).userId;

@@ -12,11 +12,7 @@
 //   DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev pnpm test
 import { randomUUID } from 'node:crypto';
 import { createDbClient, migrationsFolder } from '@licio/db';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -102,7 +98,6 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
       ageBand: 'adult',
       privacySettings: defaultPrivacySettings(),
       personalizationSettings: defaultPersonalizationSettings(),
-      reputationSummary: emptyReputationSummary(),
       roles: ['user'],
     });
     ownerId = user.userId;

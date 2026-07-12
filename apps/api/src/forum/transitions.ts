@@ -136,7 +136,7 @@ export async function applyConversationTransition(
  *  (each REQUIRES citations in the shared schema).  Sourced comments — the
  *  comment-centric citation carrier — are counted separately through the
  *  store's `sourced` predicate. */
-const CITATION_BEARING_TYPES = ['correction', 'counterexample'] as const;
+const CITATION_BEARING_TYPES = ['correction'] as const;
 
 export interface DeepeningConfig {
   deepeningMinContributions: number;
@@ -149,8 +149,8 @@ export interface DeepeningConfig {
  * Fires only while a multi-level exchange is HAPPENING (the new
  * contribution sits at depth ≥ deepeningMinDepth) and the thread has both
  * volume (published contributions ≥ deepeningMinContributions) and
- * accumulated sourcing (citation-bearing contributions — sourced comments,
- * corrections, counterexamples — ≥ deepeningMinEvidence).  Deterministic
+ * accumulated sourcing (citation-bearing contributions — sourced comments
+ * and corrections — ≥ deepeningMinEvidence).  Deterministic
  * given store state; a no-op for any thread not currently `active`
  * (tense/under-review threads are never auto-deepened).  Returns whether
  * the transition applied.

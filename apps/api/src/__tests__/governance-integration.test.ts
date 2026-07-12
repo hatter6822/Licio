@@ -25,11 +25,7 @@ import {
   users,
 } from '@licio/db';
 import type { GovernancePolicyBundle, Verdict } from '@licio/governance';
-import {
-  defaultPersonalizationSettings,
-  defaultPrivacySettings,
-  emptyReputationSummary,
-} from '@licio/shared';
+import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { eq } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -75,7 +71,6 @@ async function makeUser(db: Db, handle: string): Promise<string> {
       ageBandIfKnown: 'adult',
       privacySettings: defaultPrivacySettings(),
       personalizationSettings: defaultPersonalizationSettings(),
-      reputationSummaryPrivate: emptyReputationSummary(),
     })
     .returning();
   return (inserted[0] as { userId: string }).userId;

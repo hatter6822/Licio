@@ -526,6 +526,13 @@
       "when": 1783727000000,
       "tag": "0075_remove_evidence_cards",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1783728000000,
+      "tag": "0076_retire_legacy_write_taxonomy",
+      "breakpoints": true
     }
   ]
 }

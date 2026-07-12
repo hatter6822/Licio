@@ -63,7 +63,7 @@ describe('WS-J.2.6 contribution auto-block', () => {
 
     const res = await post(
       contributionCreateSchema.parse({
-        ...contributionBody('explanation', threadId),
+        ...contributionBody('comment', threadId),
         body: spamText,
       }),
     );
@@ -104,7 +104,7 @@ describe('WS-J.2.6 contribution auto-block', () => {
     const { threadId } = await seedThread(fixture);
     const res = await post(
       contributionCreateSchema.parse({
-        ...contributionBody('explanation', threadId),
+        ...contributionBody('comment', threadId),
         body: "You're worthless and nobody wants you here.",
       }),
     );
@@ -113,7 +113,7 @@ describe('WS-J.2.6 contribution auto-block', () => {
 
   it('publishes clean content normally', async () => {
     const { threadId } = await seedThread(fixture);
-    const res = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
+    const res = await post(contributionCreateSchema.parse(contributionBody('comment', threadId)));
     expect(res.ok && res.contribution.moderationState).toBe('published');
   });
 
@@ -127,7 +127,7 @@ describe('WS-J.2.6 contribution auto-block', () => {
         reason: 'Off-topic for this room.',
       }),
     };
-    const held = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
+    const held = await post(contributionCreateSchema.parse(contributionBody('comment', threadId)));
     expect(held.ok && held.contribution.moderationState).toBe('under_review');
 
     // (b) The in-room agent removes a different contribution.
@@ -135,7 +135,7 @@ describe('WS-J.2.6 contribution auto-block', () => {
       moderateContribution: async () => ({ state: 'removed', reason: 'Prohibited content.' }),
     };
     const removed = await post(
-      contributionCreateSchema.parse(contributionBody('explanation', threadId)),
+      contributionCreateSchema.parse(contributionBody('comment', threadId)),
     );
     expect(removed.ok && removed.contribution.moderationState).toBe('removed');
 
@@ -165,7 +165,7 @@ describe('WS-J.2.6 contribution auto-block', () => {
     const t3 = await seedThread(fixture, { roomId: '00000000-0000-4000-8000-00000000ee03' });
     const body = 'A perfectly ordinary cross-posted note about the topic at hand.';
     const mk = (threadId: string) =>
-      contributionCreateSchema.parse({ ...contributionBody('explanation', threadId), body });
+      contributionCreateSchema.parse({ ...contributionBody('comment', threadId), body });
     const r1 = await post(mk(t1.threadId));
     expect(r1.ok && r1.contribution.moderationState).toBe('published');
     // The 2nd identical post across a 2nd room must NOT yet be a flood — the
@@ -188,7 +188,7 @@ describe('WS-J.2.6 contribution auto-block', () => {
     const t3 = await seedThread(fixture, { roomId: ROOM });
     const body = 'A perfectly ordinary same-room note repeated across threads.';
     const mk = (threadId: string) =>
-      contributionCreateSchema.parse({ ...contributionBody('explanation', threadId), body });
+      contributionCreateSchema.parse({ ...contributionBody('comment', threadId), body });
     for (const t of [t1, t2, t3]) {
       const r = await post(mk(t.threadId));
       expect(r.ok && r.contribution.moderationState).toBe('published');

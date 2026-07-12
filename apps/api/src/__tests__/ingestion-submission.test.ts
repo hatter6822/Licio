@@ -32,12 +32,33 @@ beforeEach(() => {
 });
 
 describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
-  it('accepts the five text §14.1 types with 201, story/thread ids, and lifecycle=submitted', async () => {
+  it('accepts the two live text types with 201, story/thread ids, and lifecycle=submitted', async () => {
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const bodies = [linkSubmission('https://example.com/article-1'), briefSubmission()];
+    for (const body of bodies) {
+      const res = await app().request(post('/v1/stories', body, cookie));
+      expect(res.status, JSON.stringify(body)).toBe(201);
+      const json = (await res.json()) as {
+        story_id: string;
+        thread_id: string;
+        lifecycle_state: string;
+        story: { submitted_by: string };
+      };
+      expect(json.lifecycle_state).toBe('submitted');
+      expect(json.story.submitted_by).toBe(userId);
+      // Exactly one thread shell, linked to the story (WS-F.1.4d).
+      const thread = await fixture.ingestion.stories.getThreadByStoryId(json.story_id);
+      expect(thread?.threadId).toBe(json.thread_id);
+      // WS-G canon: shells are born `active` (the 0008 migration retired `empty`).
+      expect(thread?.conversationState).toBe('active');
+      expect(thread?.safetyState).toBe('normal');
+    }
+  });
+
+  it('rejects the retired question/local_update/live_thread types at the schema (400)', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
     const topic = TEST_TOPIC_ID;
-    const bodies = [
-      linkSubmission('https://example.com/article-1'),
-      briefSubmission(),
+    const retired = [
       {
         submission_type: 'question',
         room_id: COMMONS_ROOM_ID,
@@ -63,23 +84,9 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
         topic_ids: [topic],
       },
     ];
-    for (const body of bodies) {
+    for (const body of retired) {
       const res = await app().request(post('/v1/stories', body, cookie));
-      expect(res.status, JSON.stringify(body)).toBe(201);
-      const json = (await res.json()) as {
-        story_id: string;
-        thread_id: string;
-        lifecycle_state: string;
-        story: { submitted_by: string };
-      };
-      expect(json.lifecycle_state).toBe('submitted');
-      expect(json.story.submitted_by).toBe(userId);
-      // Exactly one thread shell, linked to the story (WS-F.1.4d).
-      const thread = await fixture.ingestion.stories.getThreadByStoryId(json.story_id);
-      expect(thread?.threadId).toBe(json.thread_id);
-      // WS-G canon: shells are born `active` (the 0008 migration retired `empty`).
-      expect(thread?.conversationState).toBe('active');
-      expect(thread?.safetyState).toBe('normal');
+      expect(res.status, JSON.stringify(body)).toBe(400);
     }
   });
 

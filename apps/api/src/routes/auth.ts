@@ -19,7 +19,6 @@ import {
   deriveAgeBand,
   emailStartRequestSchema,
   emailVerifyRequestSchema,
-  emptyReputationSummary,
   isMinorBand,
   securityActivityResponseSchema,
   sessionListResponseSchema,
@@ -374,7 +373,6 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           ageBand: 'adult',
           privacySettings: defaultPrivacySettings(),
           personalizationSettings: defaultPersonalizationSettings(),
-          reputationSummary: emptyReputationSummary(),
           roles: ['user'],
         });
         await services.store.addWalletAuth({

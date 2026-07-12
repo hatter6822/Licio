@@ -251,7 +251,6 @@ export function phiSessionTargetId(ownerUserId: string, sessionBucket: string): 
 export function registerInvariantConsumers(
   events: EventPipelineServices,
   ingestion: IngestionServices,
-  identity: IdentityServices,
   invariants: InvariantPlatformServices,
 ): void {
   // WS-E seam closure: MERI redundancy for the PWAtt redundancy penalty.
@@ -439,7 +438,7 @@ export function registerInvariantConsumers(
 
   // SCOI bridge credit (WS-H.4.2d): contributions on bridge-requested
   // threads trigger re-computation; measured decreases credit the bridger.
-  registerScoiBridgeConsumer(events, identity, invariants);
+  registerScoiBridgeConsumer(events, invariants);
 }
 
 // ---------------------------------------------------------------------------

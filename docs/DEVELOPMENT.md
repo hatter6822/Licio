@@ -727,7 +727,7 @@ reader-facing surface has something meaningful to render:
 
 - Public topic rooms, local rooms, an expert-gated public room, and private
   rooms with request-to-join or invite join models.
-- Link, original-brief, question, local-update, and native-image stories across
+- Link, original-brief, and native-image stories across
   public and `room_only` visibility tiers. Upload a video through the composer
   when you need to test the native-video path.
 - A populated inline comment section on every story, including nested

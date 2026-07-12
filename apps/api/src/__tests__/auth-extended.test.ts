@@ -305,7 +305,6 @@ describe('account-state login gate (fail closed at the session mint)', () => {
       ageBand: 'adult',
       privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
       personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
-      reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
       roles: ['user'],
     });
     await services.store.setAuth(user.userId, { emailVerified: true });
@@ -340,7 +339,6 @@ describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
       ageBand: 'adult',
       privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
       personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
-      reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
       roles: ['user'],
     });
     await services.store.setAuth(user.userId, { emailVerified: true });
@@ -372,7 +370,6 @@ describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
       ageBand: 'adult',
       privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
       personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
-      reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
       roles: ['user'],
     });
     const mailer = services.mailer as RecordingMailer;
@@ -410,7 +407,6 @@ describe('step-up email send cooldown', () => {
       ageBand: 'adult',
       privacySettings: shared.defaultPrivacySettings(),
       personalizationSettings: shared.defaultPersonalizationSettings(),
-      reputationSummary: shared.emptyReputationSummary(),
       roles: ['user'],
     });
     await services.store.setAuth(user.userId, { emailVerified: true });

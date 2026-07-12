@@ -639,17 +639,7 @@ export async function assembleScoiStructure(
 // ---------------------------------------------------------------------------
 
 const KIND_BY_TYPE: Record<string, Interaction['kind']> = {
-  question: 'attention',
-  answer: 'agreement',
-  evidence: 'agreement',
-  explanation: 'agreement',
-  synthesis: 'agreement',
-  local_context: 'agreement',
-  direct_experience: 'agreement',
   correction: 'correction',
-  counterexample: 'disagreement',
-  moderation_concern: 'disagreement',
-  meta_discussion: 'attention',
   comment: 'attention',
 };
 

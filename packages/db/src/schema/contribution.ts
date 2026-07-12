@@ -34,20 +34,10 @@ import { claims } from './claim.js';
 import { threads } from './thread.js';
 import { users } from './user.js';
 
-/** The fixed contribution taxonomy (SPEC §15.1) — order mirrors @licio/shared. */
-export const contributionTypeEnum = pgEnum('contribution_type', [
-  'question',
-  'answer',
-  'correction',
-  'synthesis',
-  'counterexample',
-  'explanation',
-  'local_context',
-  'direct_experience',
-  'moderation_concern',
-  'meta_discussion',
-  'comment',
-]);
+/** The fixed contribution taxonomy (SPEC §15.1) — order mirrors @licio/shared.
+ *  The nine WS-G-era types were removed with the retired write taxonomy
+ *  (migration 0076 maps stray dev rows onto `comment`). */
+export const contributionTypeEnum = pgEnum('contribution_type', ['comment', 'correction']);
 
 export const contributionModerationStateEnum = pgEnum('contribution_moderation_state', [
   'published',

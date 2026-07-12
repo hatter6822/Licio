@@ -7,7 +7,7 @@
 //   freshness_decay   exponential half-life decay, curve per content type
 //                     (breaking news decays faster than evergreen analysis)
 //   source_reliability  Licio-INTERNAL source history only (corrections,
-//                     evidence mix, community notes) — never follower counts,
+//                     community notes) — never follower counts,
 //                     popularity, or any external social metric (SPEC §14.3)
 //   topic_relevance   match between item topics and the requesting user's own
 //                     configured interests; DISABLED (renormalized away) when
@@ -118,35 +118,27 @@ export function computeBaseline(inputs: BaselineInputs): BaselineBreakdown {
  *     is the real signal available, and corrections are partly a transparency
  *     virtue, so the dampening is deliberately mild);
  *   - communityNotes: `community_notes.length` — heavily-noted sources are
- *     slightly dampened (notes flag missing context, not falsity);
- *   - citationCount: citations of this source's material by later summaries
- *     (the third §13.3 input). The WS-F source profile does not aggregate
- *     summary citations yet, so callers pass 0 until that aggregate exists —
- *     an explicit, documented seam, not a hidden default.
+ *     slightly dampened (notes flag missing context, not falsity).
  *
- * (The former evidence-type-diversity bonus was removed with the EvidenceCard
- * entity — no production path ever populated `evidence_type_frequency`.)
+ * (The former evidence-type-diversity and summary-citation bonuses were
+ * removed as never-fed inputs: no production path populated either.)
  *
  * All inputs are COUNTS from Licio-internal data; none is a popularity or
  * financial metric. Output ∈ [0, 1]; a source with no history ⇒ neutral 0.5.
  *
- *   reliability = clamp01((0.5 + 0.2·cite) · corrDamp · noteDamp)
- *     cite = citations/(citations+4)  (saturating citation bonus)
+ *   reliability = clamp01(0.5 · corrDamp · noteDamp)
  *     corrDamp = 1/(1 + corrections/10), noteDamp = 1/(1 + notes/8)
  */
 export function sourceReliabilityFromHistory(history: {
   corrections: number;
   communityNotes: number;
-  citationCount: number;
 }): number {
   const corrections = Math.max(0, history.corrections);
   const communityNotes = Math.max(0, history.communityNotes);
-  const citationCount = Math.max(0, history.citationCount);
-  if (corrections === 0 && communityNotes === 0 && citationCount === 0) {
+  if (corrections === 0 && communityNotes === 0) {
     return NEUTRAL_SOURCE_RELIABILITY;
   }
-  const citationBonus = 0.2 * (citationCount / (citationCount + 4));
   const correctionDampening = 1 / (1 + corrections / 10);
   const noteDampening = 1 / (1 + communityNotes / 8);
-  return clamp01((0.5 + citationBonus) * correctionDampening * noteDampening);
+  return clamp01(0.5 * correctionDampening * noteDampening);
 }

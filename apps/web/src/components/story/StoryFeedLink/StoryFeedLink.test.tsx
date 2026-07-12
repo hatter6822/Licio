@@ -37,7 +37,6 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     story_id: '5f5e1000-0000-4000-8000-000000000004',
     title: 'River levels stabilize after upstream coordination',
     source: 'Delta Observer',
-    origin: 'independent',
     reading_minutes: 4,
     rating_label: 'deepening',
     distribution_reason: 'Rising from independent source opens',

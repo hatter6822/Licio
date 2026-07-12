@@ -155,10 +155,10 @@ The eight retrievers (`apps/api/src/ranking/retrievers.ts`) implement
 | `subscribed_rooms_v1` | subscribed_room | Recent threads of the user's ACTIVE room subscriptions |
 | `local_news_v1` | local_news | Country-scoped stories matching the user's own configured locale region (never device location) |
 | `global_pwatt_v1` | global | PWAtt component threshold (never engagement counts); fresh uncovered stories enter at a LOWER cold-start score |
-| `emerging_discussions_v1` | emerging_discussion | CONSTRUCTIVE velocity (evidence/correction/synthesis/bridge counts in the latest 24h window), never raw volume |
-| `independent_additions_v1` | independent_source_addition | Previously-seen stories (the user's OWN attention rows) that gained evidence since last seen |
+| `emerging_discussions_v1` | emerging_discussion | CONSTRUCTIVE velocity (correction/bridge counts in the latest 24h window), never raw volume |
+| `independent_additions_v1` | independent_source_addition | Previously-seen stories (the user's OWN attention rows) that gained sourced comments since last seen |
 | `cross_community_bridges_v1` | cross_community_bridge | SCOI split/obstructed stories, carrying `bridge_context` metadata |
-| `expert_explanations_v1` | expert_explanation | Expert-led-room threads + threads with a human summary layer |
+| `expert_explanations_v1` | expert_explanation | Expert-led-room threads (public rooms with the experts_and_stewards posting policy) |
 | `chronological_catch_up_v1` | chronological_catch_up | Recent unseen items in time order, respecting the per-room last-seen mark |
 | `room_surface_v1` | subscribed_room | Room-surface scoper: the requested room's recent threads (inert outside room feeds — the eight ORGANIC front-page sources remain exactly SPEC §13.2's) |
 
@@ -214,14 +214,12 @@ Two derived fields deserve their formulas:
   split such chains and under-capped them). Exact matroid classes remain
   MERI's concern; this key only feeds the per-page cluster cap.
 - **`source_reliability`** uses exactly the aggregates the WS-F §14.3
-  source profile carries: `clamp01((0.5 + 0.3·types/(types+2) +
-  0.2·cites/(cites+4)) · 1/(1+corrections/10) · 1/(1+notes/8))` — a
-  saturating evidence-type-diversity bonus, a saturating summary-citation
-  bonus (callers pass 0 until WS-F aggregates summary citations onto the
-  profile; an explicit documented seam), gentle dampening for correction
-  FREQUENCY (the §14.3 record has no acknowledgment field; corrections are
-  partly a transparency virtue) and community notes. No history ⇒ exactly
-  the neutral 0.5.
+  source profile carries: `clamp01(0.5 · 1/(1+corrections/10) ·
+  1/(1+notes/8))` — gentle dampening for correction FREQUENCY (the §14.3
+  record has no acknowledgment field; corrections are partly a transparency
+  virtue) and community notes.  (The former evidence-type-diversity and
+  summary-citation bonuses were removed as never-fed inputs.)  No history ⇒
+  exactly the neutral 0.5.
 
 ## Scoring (WS-I.2.3)
 

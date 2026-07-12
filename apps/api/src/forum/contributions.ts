@@ -9,9 +9,9 @@
 //      restricted-room thread → 404 to non-members; archived conversation or
 //      restricted thread-safety → 409/403 typed),
 //   3. client_draft_id dedup (idempotent create: the existing row returns),
-//   4. per-type cross-record validation (WS-G.1.2b: answer→question parent,
-//      same-thread parent + ≤10 depth, synthesis branch roots, known claims,
-//      lens belongs to the thread's room, attachments owned + scanned),
+//   4. cross-record validation (same-thread parent + ≤10 depth, correction
+//      target existence/consistency, known claims, lens belongs to the
+//      thread's room, attachments owned + scanned),
 //   5. safety pre-checks (WS-J.2.6 seam) — flagged content persists as
 //      under_review (default-hidden, §18.4) and enters the review queue,
 //   6. insert,
@@ -85,22 +85,12 @@ export class ContributionRateLimiter {
 }
 
 /** WS-G forum types → the WS-E scoring taxonomy (the emission boundary).
- *  `moderation_concern → flag` and `meta_discussion → low_info_reply` both
- *  carry ZERO constructive weight (§5.3: volume, not participation — and
- *  never negative).  `answer`/`local_context`/`direct_experience` fold into
- *  their closest scoring semantics. */
+ *  A comment scores as `explanation` (its citations carry the sourcing
+ *  weight via `has_citation`); the low-info classifier can downgrade it to
+ *  `low_info_reply` at emission. */
 export const FORUM_TO_EVENT_TYPE: Readonly<Record<ContributionType, EventContributionType>> = {
-  question: 'question',
-  answer: 'explanation',
-  correction: 'correction',
-  synthesis: 'synthesis',
-  counterexample: 'counterexample',
-  explanation: 'explanation',
-  local_context: 'experience',
-  direct_experience: 'experience',
-  moderation_concern: 'flag',
-  meta_discussion: 'low_info_reply',
   comment: 'explanation',
+  correction: 'correction',
 };
 
 /** Contribution moderation states ordered by restrictiveness (higher wins when
@@ -142,58 +132,19 @@ export function metadataFromRequest(request: ContributionCreate): ContributionMe
   if (request.attachment_ids !== undefined && request.attachment_ids.length > 0) {
     metadata.attachment_ids = [...request.attachment_ids];
   }
-  switch (request.type) {
-    case 'correction':
-      // WS-T — a correction targets EXACTLY ONE of a comment or the story root
-      // (the create guard validates existence/same-thread); the target's author
-      // becomes the incumbent when the debate arena opens.
-      if (request.target_contribution_id !== undefined) {
-        metadata.target_contribution_id = request.target_contribution_id;
-      }
-      if (request.target_story_id !== undefined) {
-        metadata.target_story_id = request.target_story_id;
-      }
-      if (request.target_text_excerpt !== undefined) {
-        metadata.target_text_excerpt = request.target_text_excerpt;
-      }
-      break;
-    case 'synthesis':
-      metadata.included_branch_ids = [...request.included_branch_ids];
-      if (request.uncertainty_note !== undefined) {
-        metadata.uncertainty_note = request.uncertainty_note;
-      }
-      break;
-    case 'counterexample':
-      metadata.relevance_explanation = request.relevance_explanation;
-      if (request.source_url !== undefined) metadata.source_url = request.source_url;
-      break;
-    case 'explanation':
-      if (request.assumptions !== undefined) metadata.assumptions = request.assumptions;
-      if (request.caveats !== undefined) metadata.caveats = request.caveats;
-      break;
-    case 'local_context':
-      metadata.scope = request.scope;
-      if (request.location !== undefined) metadata.location = request.location;
-      if (request.time_context !== undefined) metadata.time_context = request.time_context;
-      break;
-    case 'direct_experience':
-      metadata.scope = request.scope;
-      if (request.location !== undefined) metadata.location = request.location;
-      if (request.time_context !== undefined) metadata.time_context = request.time_context;
-      metadata.privacy_acknowledged = true;
-      break;
-    case 'moderation_concern':
-      metadata.reason_code = request.reason_code;
-      metadata.urgency = request.urgency ?? 'normal';
+  if (request.type === 'correction') {
+    // WS-T — a correction targets EXACTLY ONE of a comment or the story root
+    // (the create guard validates existence/same-thread); the target's author
+    // becomes the incumbent when the debate arena opens.
+    if (request.target_contribution_id !== undefined) {
       metadata.target_contribution_id = request.target_contribution_id;
-      break;
-    case 'meta_discussion':
-      if (request.target_contribution_id !== undefined) {
-        metadata.target_contribution_id = request.target_contribution_id;
-      }
-      break;
-    default:
-      break;
+    }
+    if (request.target_story_id !== undefined) {
+      metadata.target_story_id = request.target_story_id;
+    }
+    if (request.target_text_excerpt !== undefined) {
+      metadata.target_text_excerpt = request.target_text_excerpt;
+    }
   }
   return metadata;
 }
@@ -389,16 +340,8 @@ export async function createContribution(
     if (parent.path.length + 1 > MAX_CONTRIBUTION_DEPTH) {
       return invalid('max_depth_exceeded', 'Maximum thread depth exceeded.');
     }
-    if (request.type === 'answer' && parent.type !== 'question') {
-      return invalid('answer_requires_question', 'Answers must respond to a question.');
-    }
     parentPath = [...parent.path, parent.contributionId];
   } else {
-    if (request.type === 'answer') {
-      // Unreachable through the schema (parent is required there); kept as a
-      // defense-in-depth guard for direct service callers.
-      return invalid('answer_requires_question', 'Answers must respond to a question.');
-    }
     // WS-J.1.2a — a TOP-LEVEL contribution interacts with the thread's story
     // owner; a blocked user cannot post into the blocker's thread (bilateral,
     // server-side authorization — the block is not just a viewing filter).  The
@@ -421,40 +364,6 @@ export async function createContribution(
   if ('target_claim_id' in request && request.target_claim_id !== undefined) {
     const claim = await ingestion.claims.getById(request.target_claim_id);
     if (!claim) return invalid('unknown_claim', 'The referenced claim does not exist.');
-  }
-
-  if (request.type === 'synthesis') {
-    const seen = new Set<string>();
-    for (const branchId of request.included_branch_ids) {
-      const branch = await forum.contributions.getById(branchId);
-      if (!branch || branch.threadId !== request.thread_id) {
-        return invalid(
-          'invalid_branch',
-          'Synthesis branches must be contributions in the same thread.',
-        );
-      }
-      if (branch.parentContributionId !== null) {
-        return invalid('invalid_branch', 'Synthesis branches must be top-level branch roots.');
-      }
-      seen.add(branchId);
-    }
-    if (seen.size < 2) {
-      return invalid('synthesis_branches', 'Synthesis requires at least two branches.');
-    }
-  }
-
-  if (request.type === 'moderation_concern' || request.type === 'meta_discussion') {
-    const targetId =
-      'target_contribution_id' in request ? request.target_contribution_id : undefined;
-    if (targetId !== undefined) {
-      const target = await forum.contributions.getById(targetId);
-      if (!target || target.threadId !== request.thread_id) {
-        return invalid(
-          'invalid_target',
-          'The targeted contribution must belong to the same thread.',
-        );
-      }
-    }
   }
 
   // WS-T — a correction targets EXACTLY ONE of a comment (same thread) or the
@@ -712,25 +621,6 @@ export async function createContribution(
         });
       }
     }
-    if (request.type === 'moderation_concern') {
-      forum.metrics.increment('contributions.moderation_concern');
-      await ingestion.reviewQueue.insert({
-        kind: 'moderation_concern',
-        storyId: thread.storyId,
-        context: {
-          contribution_id: contribution.contributionId,
-          thread_id: contribution.threadId,
-          target_contribution_id: request.target_contribution_id,
-          reason_code: request.reason_code,
-          urgency: request.urgency ?? 'normal',
-        },
-        status: 'pending',
-        resolution: null,
-        resolvedBy: null,
-        resolvedAt: null,
-        notBefore: null,
-      });
-    }
   } catch (error) {
     forum.metrics.increment('contributions.safety_intake_rollback');
     await forum.contributions.purgeForRollback(contribution.contributionId);
@@ -760,8 +650,7 @@ export async function createContribution(
   const hasCitation = citations.length > 0;
   const baseType = FORUM_TO_EVENT_TYPE[request.type];
   const eventType: EventContributionType =
-    (request.type === 'answer' || request.type === 'explanation' || request.type === 'comment') &&
-    classifyLowInfoReplyV0(request.body, hasCitation)
+    request.type === 'comment' && classifyLowInfoReplyV0(request.body, hasCitation)
       ? 'low_info_reply'
       : baseType;
   const created = contributionCreatedEventSchema.parse({
@@ -965,9 +854,6 @@ export async function editContribution(
     client_draft_id: existing.clientDraftId,
     body: patch.body ?? existing.body,
     citations: patch.citations ?? existing.citations,
-    ...(typeof existing.metadata['source_url'] === 'string'
-      ? { source_url: existing.metadata['source_url'] }
-      : {}),
   } as unknown as ContributionCreate;
   // Re-screen against the thread's real home room (WS-Q), so the flood detector
   // counts distinct rooms — not thread ids.  The thread exists (the contribution

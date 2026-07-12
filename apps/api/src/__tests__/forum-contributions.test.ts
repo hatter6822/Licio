@@ -428,7 +428,11 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
     });
     expect((await app().request(`http://local/v1/threads/${fresh.threadId}`)).status).toBe(404);
     expect(
-      (await app().request(`http://local/v1/threads/${fresh.threadId}/branches/questions`)).status,
+      (
+        await app().request(
+          `http://local/v1/threads/${fresh.threadId}/contributions?root=${randomUUID()}`,
+        )
+      ).status,
     ).toBe(404);
   });
 
@@ -484,7 +488,8 @@ describe('WS-G.3.1 — safety holds + report intake (§18.4)', () => {
       urgency: 'urgent',
     });
     expect(res.status).toBe(400);
-    const queue = await fixture.ingestion.reviewQueue.list({ kind: 'moderation_concern' }, 10);
+    // No review item of ANY kind was created by the rejected write.
+    const queue = await fixture.ingestion.reviewQueue.list({}, 10);
     expect(queue).toHaveLength(0);
   });
 });

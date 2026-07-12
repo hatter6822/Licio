@@ -18,7 +18,6 @@ import type {
   GovernanceMode,
   LensType,
   RoomJoinModel,
-  RoomNotificationPreferences,
   RoomPostingPolicy,
   RoomStewardRole,
   RoomStorageMode,
@@ -114,7 +113,6 @@ export interface RoomSubscriptionRecord {
    *  state.  Set when the member joins and changed only via the room's lens
    *  control (never the reading/filter lens). */
   lensId: string | null;
-  notificationPreferences: RoomNotificationPreferences;
   requestedAt: string;
   joinedAt: string | null;
 }
@@ -512,7 +510,7 @@ export class InMemoryContributionStore implements ContributionStore {
   }
 
   #draftKey(userId: string, clientDraftId: string): string {
-    return `${userId} ${clientDraftId}`;
+    return `${userId}\x00${clientDraftId}`;
   }
 
   async insert(
@@ -873,7 +871,7 @@ export class InMemoryRoomStore implements RoomStore {
   }
 
   #subKey(roomId: string, userId: string): string {
-    return `${roomId} ${userId}`;
+    return `${roomId}\x00${userId}`;
   }
 
   async insert(record: RoomInsertInput): Promise<RoomCreateOutcome> {
@@ -1000,7 +998,7 @@ export class InMemoryRoomStore implements RoomStore {
   }
 
   async upsertSubscription(record: RoomSubscriptionRecord): Promise<RoomSubscriptionRecord> {
-    const full = { ...record, notificationPreferences: { ...record.notificationPreferences } };
+    const full = { ...record };
     this.#subscriptions.set(this.#subKey(record.roomId, record.userId), full);
     return full;
   }

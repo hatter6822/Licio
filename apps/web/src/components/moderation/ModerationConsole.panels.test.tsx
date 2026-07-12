@@ -101,7 +101,7 @@ const caseReview: CaseReviewResponse = {
     {
       contribution_id: '00000000-0000-4000-8000-0000000000d1',
       thread_id: '00000000-0000-4000-8000-0000000000e1',
-      type: 'answer',
+      type: 'comment',
       body: 'the reported contribution text',
       citations: [],
       metadata: {},

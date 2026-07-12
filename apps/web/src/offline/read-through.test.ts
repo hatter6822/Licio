@@ -18,7 +18,6 @@ const STORY: StoryDetail = {
   story_id: '11111111-1111-4111-8111-111111111111',
   title: 'A measured headline',
   source: 'example.org',
-  origin: 'independent',
   url: 'https://example.org/a',
   reading_minutes: 4,
   rating_label: 'deepening',
@@ -59,7 +58,7 @@ const THREAD: ThreadDetail = {
   contribution_count: 2,
   created_at: '2026-06-09T12:00:00.000Z',
   updated_at: '2026-06-09T12:00:00.000Z',
-  sections: { overview: 1, questions: 0, sources: 1, challenges: 0, lenses: 0, chronology: 2 },
+  sections: { sources: 1, challenges: 0, chronology: 2 },
 };
 
 beforeEach(async () => {

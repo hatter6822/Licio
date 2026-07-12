@@ -222,8 +222,7 @@ export type ReviewKind =
   | 'url_safety_hold'
   | 'low_confidence_claim'
   // WS-G forum intake (the same WS-J.2 inbox).
-  | 'contribution_safety_hold'
-  | 'moderation_concern';
+  | 'contribution_safety_hold';
 
 export interface ReviewItemRecord {
   reviewId: string;
@@ -574,7 +573,7 @@ export class InMemoryStoryStore implements StoryStore {
    *  written under one separator and read under another (room-tier dedup +
    *  canonical public linking would otherwise silently miss in this store). */
   #roomUrlKey(roomId: string, canonicalUrl: string): string {
-    return `${roomId} ${canonicalUrl}`;
+    return `${roomId}\x00${canonicalUrl}`;
   }
 
   /** The tier URL-slot key a story occupies, or null when it holds no slot

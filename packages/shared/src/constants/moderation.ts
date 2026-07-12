@@ -3,9 +3,9 @@
 // Moderation reason codes (WS-A.1.2, `docs/policy/MODERATION_TAXONOMY.md`).
 // This constant MIRRORS the policy document's canonical machine-readable
 // enumeration — 36 core reason codes across 12 categories plus 15
-// crypto-abuse codes (51 total).  WS-G `moderation_concern` contributions
-// must carry one of these codes; a unit test pins the counts and namespaces
-// against the ratified taxonomy so silent drift fails CI.
+// crypto-abuse codes (51 total).  WS-J reports and steward actions carry
+// these codes; a unit test pins the counts and namespaces against the
+// ratified taxonomy so silent drift fails CI.
 
 /** The 12 core policy categories (SPEC §18.1). */
 export const MODERATION_CATEGORIES = [

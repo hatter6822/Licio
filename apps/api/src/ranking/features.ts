@@ -272,14 +272,11 @@ export async function assembleFeatureVector(
     const source = await ingestion.sources.getById(story.sourceId);
     if (source !== null) {
       // Inputs are exactly the aggregates the WS-F profile carries
-      // (correction FREQUENCY, community notes). citationCount (citations by
-      // later summaries, the third §13.3 input) stays 0 until WS-F aggregates
-      // summary citations onto the source profile — an explicit seam,
-      // documented on the pure function.
+      // (correction FREQUENCY, community notes — see the pure function's
+      // rationale for the removed never-fed bonuses).
       vector.source_reliability = sourceReliabilityFromHistory({
         corrections: source.correctionHistory.length,
         communityNotes: source.communityNotes.length,
-        citationCount: 0,
       });
     }
   }

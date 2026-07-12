@@ -11,7 +11,6 @@ import type { AiSummaryDraft } from './schemas/summary.js';
 export interface RenderedSummary {
   body: string;
   cited_contribution_ids: string[];
-  cited_evidence_ids: string[];
   /** Non-empty when the draft lists open questions (§24.3). */
   unresolved_uncertainty: string | null;
   /** Non-empty when the draft carries minority views (§15.4). */
@@ -50,14 +49,12 @@ export function renderSummaryDraft(draft: AiSummaryDraft): RenderedSummary {
     ...draft.statements.flatMap((s) => s.cited_contribution_ids),
     ...draft.minority_views.flatMap((m) => m.cited_contribution_ids),
   ]);
-  const citedEvidence = uniq(draft.statements.flatMap((s) => s.cited_evidence_ids));
 
   return {
     // A draft with no statements still renders a non-empty placeholder body so
     // the WS-G summary store (body min length 1) accepts it.
     body: body.length > 0 ? body : 'No summary content could be generated for this thread yet.',
     cited_contribution_ids: citedContributions,
-    cited_evidence_ids: citedEvidence,
     unresolved_uncertainty: unresolved,
     minority_views_note: minority,
   };
