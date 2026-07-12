@@ -610,4 +610,30 @@ describe('primarySourcesForStory (the independent-sources drawer read)', () => {
     // A different story reads nothing.
     expect(await primarySourcesForStory(getModerationServices(), randomUUID())).toEqual([]);
   });
+
+  it('withdraws a mark when the author edits the marked citation away', async () => {
+    const target = cited[0];
+    if (!target) throw new Error('fixture missing');
+    const markedUrl = target.citations[0]?.url ?? '';
+    const res = await app().fetch(
+      post(
+        '/v1/moderation/evidence-decisions',
+        {
+          contribution_id: target.contributionId,
+          action: 'mark-primary-source',
+          citation_url: markedUrl,
+        },
+        evidenceSteward.cookie,
+      ),
+    );
+    expect(res.status).toBe(201);
+    expect(
+      (await primarySourcesForStory(getModerationServices(), STORY)).map((s) => s.url),
+    ).toEqual([markedUrl]);
+    // The author replaces the marked URL but keeps the comment cited: the
+    // contribution stays published AND cited, yet the mark must withdraw —
+    // the steward reviewed the OLD destination, not the new one.
+    target.citations = [{ url: 'https://example.org/replacement' }];
+    expect(await primarySourcesForStory(getModerationServices(), STORY)).toEqual([]);
+  });
 });

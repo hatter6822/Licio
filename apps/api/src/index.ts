@@ -720,6 +720,10 @@ const moderationServices = createInMemoryModerationServices({
     ...createCitedContributionReads({
       contributions: forumServices.contributions,
       stories: ingestionServices.stories,
+      // WS-J thread removal rides the WS-E item-safety row (the same read the
+      // thread routes consult) — a removed thread's citations never surface.
+      threadRemoved: async (threadId) =>
+        (await eventServices.safetyStore.get(threadId))?.safetyState === 'removed',
     }),
     // WS-J #23: a thread report target → the thread's story owner.
     getThread: async (threadId) => {

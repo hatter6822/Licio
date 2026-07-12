@@ -229,15 +229,35 @@ export async function assembleMeriCandidates(
     if (forum !== null) {
       const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
       if (thread !== null) {
-        const contributions = await forum.contributions.listByThread(thread.threadId, {
-          states: ['published'],
-          limit: 500,
-        });
-        for (const contribution of contributions) {
-          for (const citation of contribution.citations) {
-            const token = citationDomainToken(citation.url);
-            if (token !== null) citationDomains.add(token);
+        // PAGE the published rows (keyset) instead of a single 500-row read:
+        // a >500-contribution thread must not lose its later sourced
+        // comments' lineage.  Early-exit once the 8-token cap is saturated
+        // (the vector is capped below anyway); a hard 20-page scan bound
+        // (10 000 rows) keeps the batch tier's cost bounded on pathological
+        // threads.
+        const LINEAGE_TOKEN_CAP = 8;
+        const PAGE = 500;
+        const MAX_PAGES = 20;
+        let after: { createdAt: string; id: string } | null = null;
+        for (
+          let page = 0;
+          page < MAX_PAGES && citationDomains.size < LINEAGE_TOKEN_CAP;
+          page += 1
+        ) {
+          const contributions = await forum.contributions.listByThread(thread.threadId, {
+            states: ['published'],
+            after,
+            limit: PAGE,
+          });
+          for (const contribution of contributions) {
+            for (const citation of contribution.citations) {
+              const token = citationDomainToken(citation.url);
+              if (token !== null) citationDomains.add(token);
+            }
           }
+          const last = contributions[contributions.length - 1];
+          if (contributions.length < PAGE || last === undefined) break;
+          after = { createdAt: last.createdAt, id: last.contributionId };
         }
       }
     }

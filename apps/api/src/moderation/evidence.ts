@@ -268,16 +268,19 @@ export async function primarySourcesForStory(
   if (!getCited) return [];
   const marks = await mod.evidenceDecisions.listByStory(storyId, 'mark-primary-source');
   const seen = new Set<string>();
-  const liveByContribution = new Map<string, boolean>();
+  const liveByContribution = new Map<string, Awaited<ReturnType<typeof getCited>>>();
   const out: Array<{ url: string; title?: string }> = [];
   for (const mark of marks) {
     if (mark.citationUrl === null || seen.has(mark.citationUrl)) continue;
     let live = liveByContribution.get(mark.contributionId);
     if (live === undefined) {
-      live = (await getCited(mark.contributionId)) !== null;
+      live = await getCited(mark.contributionId);
       liveByContribution.set(mark.contributionId, live);
     }
-    if (!live) continue;
+    // The mark must survive an EDIT too: the author removing/replacing the
+    // marked URL (while keeping the comment otherwise cited) withdraws it
+    // from the public list — the decision row remains the audit record.
+    if (live === null || !live.citations.some((c) => c.url === mark.citationUrl)) continue;
     seen.add(mark.citationUrl);
     out.push({
       url: mark.citationUrl,

@@ -1162,8 +1162,12 @@ type ContributionCreateOp = {
   type: 'contribution.create';
   contribution_id: string;
   thread_id: string;
-  // WS-G parity: the live two-type taxonomy (the shared `contributionTypeSchema`).
-  contribution_type: 'comment' | 'correction';
+  // The op.v1 WIRE vocabulary is FROZEN (an op is immutable signed history):
+  // every historically-valid value still parses; retired values NORMALIZE to
+  // the live model at parse time (retired contribution types → 'comment' —
+  // the same map server migration 0076 applies to mutable rows).  New writes
+  // emit the live two-type taxonomy only.
+  contribution_type: 'comment' | 'correction'; // normalized; wire accepts op.v1's historical set
   body_markdown_lite: string;
   citations: Citation[];
   metadata: Record<string, unknown>;

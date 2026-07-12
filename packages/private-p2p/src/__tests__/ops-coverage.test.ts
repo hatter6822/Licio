@@ -153,3 +153,71 @@ describe('WS-S.2.3 every op-body type validates through the op envelope', () => 
     ).toBe(false);
   });
 });
+
+describe('op.v1 frozen wire vocabulary (immutable signed history)', () => {
+  const contribution = (contribution_type: string) => ({
+    type: 'contribution.create',
+    contribution_id: 'c-legacy',
+    thread_id: 't-1',
+    contribution_type,
+    body_markdown_lite: 'A historically-sealed op must keep parsing.',
+    client_draft_id: 'd-legacy',
+  });
+
+  it('parses every historically-valid contribution type, normalized to the live model', () => {
+    for (const retired of [
+      'question',
+      'answer',
+      'evidence',
+      'synthesis',
+      'counterexample',
+      'explanation',
+      'local_context',
+      'direct_experience',
+      'moderation_concern',
+      'meta_discussion',
+    ]) {
+      const parsed = privateOpBodySchema.safeParse(contribution(retired));
+      expect(parsed.success).toBe(true);
+      if (parsed.success && parsed.data.type === 'contribution.create') {
+        expect(parsed.data.contribution_type).toBe('comment');
+      }
+    }
+    // Live values pass through unchanged.
+    for (const live of ['comment', 'correction'] as const) {
+      const body =
+        live === 'correction'
+          ? {
+              ...contribution(live),
+              citations: [{ url: 'https://example.org/src' }],
+              target_claim_id: 'claim-1',
+            }
+          : contribution(live);
+      const parsed = privateOpBodySchema.safeParse(body);
+      expect(parsed.success).toBe(true);
+      if (parsed.success && parsed.data.type === 'contribution.create') {
+        expect(parsed.data.contribution_type).toBe(live);
+      }
+    }
+    // A value op.v1 NEVER accepted still rejects (frozen ≠ open-ended).
+    expect(privateOpBodySchema.safeParse(contribution('applause')).success).toBe(false);
+  });
+
+  it('parses retired story submission types, normalized to original_brief', () => {
+    for (const retired of ['question', 'evidence_card', 'local_update', 'live_thread']) {
+      const parsed = privateOpBodySchema.safeParse({
+        type: 'story.create',
+        story_id: 's-legacy',
+        thread_id: 't-legacy',
+        title: 'Sealed under the old vocabulary',
+        submission_type: retired,
+        topic_ids: [],
+        submission_metadata: {},
+      });
+      expect(parsed.success).toBe(true);
+      if (parsed.success && parsed.data.type === 'story.create') {
+        expect(parsed.data.submission_type).toBe('original_brief');
+      }
+    }
+  });
+});

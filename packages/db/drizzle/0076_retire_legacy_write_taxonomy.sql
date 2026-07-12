@@ -38,7 +38,17 @@ UPDATE "stories" SET "submission_metadata" = jsonb_build_object(
       nullif("submission_metadata"->>'context', ''),
       nullif("submission_metadata"->>'source_or_experience_disclosure', ''),
       nullif("submission_metadata"->>'event_description', ''),
-      nullif("submission_metadata"->>'time_reference', '')))
+      nullif("submission_metadata"->>'time_reference', ''),
+      -- The retired STRUCTURED fields ride the body as labelled lines so the
+      -- author's context stays readable/exportable after the shape change
+      -- (location_scope ALSO survives verbatim on the stories.location_scope
+      -- column — the live LocalNewsRetriever input; this is the human-readable
+      -- copy).  moderation_mode had no column, so this line is its only carry.
+      case when "submission_metadata" ? 'location_scope'
+           then concat('Location: ', "submission_metadata"#>>'{location_scope,value}',
+                       ' (', "submission_metadata"#>>'{location_scope,type}', ')') end,
+      case when "submission_metadata" ? 'moderation_mode'
+           then concat('Moderation mode: ', "submission_metadata"->>'moderation_mode') end))
   WHERE "submission_metadata"->>'submission_type' IN ('question', 'local_update', 'live_thread');--> statement-breakpoint
 ALTER TYPE "story_submission_type" RENAME TO "story_submission_type_old";--> statement-breakpoint
 CREATE TYPE "story_submission_type" AS ENUM('link', 'original_brief', 'image_post', 'video_post');--> statement-breakpoint

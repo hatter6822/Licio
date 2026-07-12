@@ -587,6 +587,60 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   });
 });
 
+describe('MERI citation lineage pages past the first 500 contributions', () => {
+  it('a sourced comment beyond page one still contributes its lineage token', async () => {
+    const fixture = freshInvariantServices();
+    const { threadId } = await seedStory(fixture);
+    const author = randomUUID();
+    // 501 citation-less comments occupy the first page…
+    const base = Date.now() - 601_000;
+    for (let i = 0; i < 501; i += 1) {
+      const inserted = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId,
+        userId: author,
+        type: 'comment',
+        body: `Filler ${i}`,
+        citations: [],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: `fill-${i}`,
+        path: [],
+        moderationState: 'published',
+      });
+      if (!inserted.ok) throw new Error('seed failed');
+      void base;
+    }
+    // …and the ONLY sourced comment lands beyond it.
+    const cited = await fixture.forum.contributions.insert({
+      contributionId: randomUUID(),
+      threadId,
+      userId: author,
+      type: 'comment',
+      body: 'The registry copy confirms it.',
+      citations: [{ url: 'https://records.example.org/registry' }],
+      metadata: {},
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: 'cited-tail',
+      path: [],
+      moderationState: 'published',
+    });
+    if (!cited.ok) throw new Error('seed failed');
+    const candidates = await assembleMeriCandidates(
+      fixture.ingestion,
+      fixture.forum,
+      null,
+      100,
+      0.7,
+      0.85,
+    );
+    const withLineage = candidates.find((c) => (c.independence?.evidenceGroupIds.length ?? 0) > 0);
+    expect(withLineage?.independence?.evidenceGroupIds).toContain('cit:example.org');
+  });
+});
+
 describe('supporting invariant services (WS-H.7)', () => {
   it('Hodge labels a seeded conversation without hostility penalty', async () => {
     const fixture = freshInvariantServices();

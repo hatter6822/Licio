@@ -331,6 +331,11 @@ export interface CitedReadsDeps {
     getThreadById(threadId: string): Promise<{ storyId: string } | null>;
     getById(storyId: string): Promise<{ storyId: string; title: string } | null>;
   };
+  /** WS-J thread-level removal (the WS-E item-safety row) — a removed thread's
+   *  contributions stay `published` on their own rows, but the thread's reads
+   *  are gone, so its citations must not surface in the queue or the public
+   *  primary-source list.  Absent ⇒ no thread gate (the bare test seam). */
+  threadRemoved?(threadId: string): Promise<boolean>;
 }
 
 /**
@@ -372,16 +377,28 @@ export function createCitedContributionReads(deps: CitedReadsDeps): {
       createdAt: row.createdAt,
     };
   };
+  const threadRemoved = async (threadId: string): Promise<boolean> =>
+    deps.threadRemoved ? await deps.threadRemoved(threadId) : false;
   return {
     listCitedContributions: async ({ after, limit }) => {
       const rows = await deps.contributions.listCited({ states: ['published'], after, limit });
       const out: CitedContribution[] = [];
-      for (const row of rows) out.push(await project(row));
+      const removedByThread = new Map<string, boolean>();
+      for (const row of rows) {
+        let removed = removedByThread.get(row.threadId);
+        if (removed === undefined) {
+          removed = await threadRemoved(row.threadId);
+          removedByThread.set(row.threadId, removed);
+        }
+        if (removed) continue;
+        out.push(await project(row));
+      }
       return out;
     },
     getCitedContribution: async (contributionId) => {
       const row = await deps.contributions.getById(contributionId);
       if (row?.moderationState !== 'published' || row.citations.length === 0) return null;
+      if (await threadRemoved(row.threadId)) return null;
       return project(row);
     },
   };

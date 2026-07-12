@@ -540,3 +540,38 @@ describe('production user port', () => {
     expect(many.get(AUTHOR)?.contributionCount).toBe(0);
   });
 });
+
+describe('createCitedContributionReads — WS-J thread-removal gate', () => {
+  const row = {
+    contributionId: '11111111-1111-4111-8111-111111111111',
+    threadId: '22222222-2222-4222-8222-222222222222',
+    type: 'comment' as const,
+    body: 'Cited on a thread WS-J later removed.',
+    citations: [{ url: 'https://example.org/source' }],
+    moderationState: 'published',
+    createdAt: new Date(1_700_000_000_000).toISOString(),
+  };
+  const deps = (removed: boolean) => ({
+    contributions: {
+      getById: async () => row,
+      listCited: async () => [row],
+    },
+    stories: {
+      getThreadById: async () => ({ storyId: '33333333-3333-4333-8333-333333333333' }),
+      getById: async () => ({
+        storyId: '33333333-3333-4333-8333-333333333333',
+        title: 'Anchor story',
+      }),
+    },
+    threadRemoved: async () => removed,
+  });
+
+  it("a removed thread's citations leave both reads (queue + primary sources)", async () => {
+    const live = createCitedContributionReads(deps(false));
+    expect(await live.getCitedContribution(row.contributionId)).not.toBeNull();
+    expect(await live.listCitedContributions({ after: null, limit: 10 })).toHaveLength(1);
+    const gated = createCitedContributionReads(deps(true));
+    expect(await gated.getCitedContribution(row.contributionId)).toBeNull();
+    expect(await gated.listCitedContributions({ after: null, limit: 10 })).toHaveLength(0);
+  });
+});

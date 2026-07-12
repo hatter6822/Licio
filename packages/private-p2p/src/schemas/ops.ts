@@ -4,7 +4,7 @@
 // (PRIVATE_SPEC §13.2–§13.6).  Content ops mirror Licio's taxonomy LOCALLY;
 // contribution ops enforce the SAME typed requirements as the shipped WS-G
 // server schema by REUSING the shared constants (`CONTRIBUTION_BODY_LIMITS`,
-// `MAX_CITATIONS`, `citationSchema`, `contributionTypeSchema`,
+// `MAX_CITATIONS`, `citationSchema`, `CONTRIBUTION_TYPES`,
 // `submissionTypeSchema`, the thread state machines), so the two can never
 // drift.  The structural reducer rules that need thread/room state
 // (answer→question parent, depth ≤ 10, lens-in-room, client_draft dedup) are
@@ -12,11 +12,12 @@
 // SHAPE + the schema-checkable body caps / citation rules.
 import {
   CONTRIBUTION_BODY_LIMITS,
+  CONTRIBUTION_TYPES,
   type ContributionType,
   citationSchema,
-  contributionTypeSchema,
   MAX_CITATIONS,
-  submissionTypeSchema,
+  SUBMISSION_TYPES,
+  type SubmissionType,
   threadConversationStateSchema,
   threadSafetyStateSchema,
 } from '@licio/shared';
@@ -117,6 +118,61 @@ export const memberInviteCreateOpSchema = z
   })
   .strict();
 
+// ---------------------------------------------------------------------------
+// op.v1 legacy vocabulary (FROZEN protocol constants — deliberately NOT the
+// living shared taxonomy).  A private room's log is IMMUTABLE SIGNED history:
+// server rows and IndexedDB drafts get migrations, but a sealed op cannot be
+// rewritten, so op.v1 must keep accepting every value it ever accepted.
+// Retired values NORMALIZE at parse time onto the live model (the same map
+// server migration 0076 applies to mutable rows): retired contribution types
+// read as `comment`; retired submission types read as `original_brief`.  New
+// writes emit live values only (the composer/room-manager never produced the
+// retired ones, but a conforming v1 peer must replay any historically-valid
+// op byte-for-byte).  A future op.v2 may narrow the wire vocabulary itself.
+// ---------------------------------------------------------------------------
+
+const OP_V1_RETIRED_CONTRIBUTION_TYPES = [
+  'question',
+  'answer',
+  'evidence',
+  'synthesis',
+  'counterexample',
+  'explanation',
+  'local_context',
+  'direct_experience',
+  'moderation_concern',
+  'meta_discussion',
+] as const;
+
+const OP_V1_RETIRED_SUBMISSION_TYPES = [
+  'question',
+  'evidence_card',
+  'local_update',
+  'live_thread',
+] as const;
+
+/** op.v1 contribution type: live values pass through; retired values (an
+ *  already-signed historical op) normalize to `comment`. */
+export const opV1ContributionTypeSchema = z
+  .enum([...CONTRIBUTION_TYPES, ...OP_V1_RETIRED_CONTRIBUTION_TYPES])
+  .transform(
+    (value): ContributionType =>
+      (CONTRIBUTION_TYPES as readonly string[]).includes(value)
+        ? (value as ContributionType)
+        : 'comment',
+  );
+
+/** op.v1 submission type: live values pass through; retired values normalize
+ *  to `original_brief` (the 0076 map). */
+export const opV1SubmissionTypeSchema = z
+  .enum([...SUBMISSION_TYPES, ...OP_V1_RETIRED_SUBMISSION_TYPES])
+  .transform(
+    (value): SubmissionType =>
+      (SUBMISSION_TYPES as readonly string[]).includes(value)
+        ? (value as SubmissionType)
+        : 'original_brief',
+  );
+
 /** §12.6.1 — one of M distinct admin authorizations toward a capability-based
  *  threshold recovery (NOT secret-sharing; no key material is reconstructed). */
 export const recoveryAuthorizeOpSchema = z
@@ -141,7 +197,7 @@ export const storyCreateOpSchema = z
      *  story has none).  Bound mirrors the WS-G server story body (`max(20_000)`); rendered
      *  through the same sanitizing pipeline. */
     body_markdown_lite: z.string().max(20_000).optional(),
-    submission_type: submissionTypeSchema,
+    submission_type: opV1SubmissionTypeSchema,
     topic_ids: z.array(z.string().min(1).max(64)).max(10),
     language: z.string().min(2).max(35).optional(),
     sensitivity_labels: z.array(z.string().min(1).max(64)).max(16).optional(),
@@ -197,7 +253,7 @@ export const contributionCreateOpSchema = z
     type: z.literal('contribution.create'),
     contribution_id: privateIdSchema,
     thread_id: privateIdSchema,
-    contribution_type: contributionTypeSchema,
+    contribution_type: opV1ContributionTypeSchema,
     body_markdown_lite: z.string().default(''),
     citations: z.array(citationSchema).max(MAX_CITATIONS).default([]),
     metadata: z.record(z.string(), z.unknown()).default({}),
