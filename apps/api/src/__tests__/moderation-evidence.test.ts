@@ -54,6 +54,7 @@ function citedFixture(n: number): CitedContribution {
       { url: `doi:10.1000/demo.${n}` },
     ],
     createdAt: new Date(1_700_000_000_000 + n * 60_000).toISOString(),
+    threadRemoved: false,
   };
 }
 
@@ -302,6 +303,25 @@ describe('GET /v1/moderation/evidence-queue (ROLE_EVIDENCE)', () => {
     expect(res.status).toBe(200);
     const body = evidenceQueueResponseSchema.parse(await res.json());
     expect(body.items.map((i) => i.body_preview)).toEqual(['Sourced comment 27']);
+  });
+
+  it('removed-thread rows are skipped without reading as exhaustion', async () => {
+    // The first two candidates sit on WS-J-removed threads; the third is
+    // visible.  A port-side FILTER would return a short first batch and the
+    // queue would treat the store as exhausted — the flag keeps the scan
+    // cursor advancing to the visible row.
+    const first = cited[0];
+    const second = cited[1];
+    if (!first || !second) throw new Error('fixture missing');
+    first.threadRemoved = true;
+    second.threadRemoved = true;
+    const res = await app().fetch(
+      get('/v1/moderation/evidence-queue?limit=2', evidenceSteward.cookie),
+    );
+    const body = evidenceQueueResponseSchema.parse(await res.json());
+    expect(body.items.map((i) => i.body_preview)).toEqual(['Sourced comment 3']);
+    first.threadRemoved = false;
+    second.threadRemoved = false;
   });
 
   it('a malformed cursor restarts from page 1 instead of erroring', async () => {

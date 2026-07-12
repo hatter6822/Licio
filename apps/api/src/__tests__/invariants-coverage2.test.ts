@@ -210,6 +210,7 @@ describe('primary_sources on the independent-sources drawer (route surface)', ()
           bodyPreview: 'Sourced comment.',
           citations: [{ url: 'https://example.org/primary-dataset', title: 'Primary dataset' }],
           createdAt: new Date().toISOString(),
+          threadRemoved: false,
         }),
       }),
     );

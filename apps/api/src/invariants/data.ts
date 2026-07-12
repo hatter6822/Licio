@@ -542,15 +542,28 @@ export async function assembleCohorts(
     const lensKeys = new Set<string>();
     const thread = await ingestion.stories.getThreadByStoryId(storyId);
     if (thread) {
-      const contributions = await forum.contributions.listByThread(thread.threadId, {
-        states: ['published'],
-        limit: 500,
-      });
-      for (const contribution of contributions) {
-        discussionDepth = Math.max(discussionDepth, contribution.path.length);
-        if (contribution.citations.length > 0) hasPrimaryEvidence = true;
-        const lensId = contribution.metadata['lens_id'];
-        if (typeof lensId === 'string' && lensId.length > 0) lensKeys.add(lensId);
+      // PAGE the published rows (keyset) — the same discipline as the MERI
+      // lineage scan: a busy thread whose sourced comments land beyond the
+      // first page must not under-report the evidence-access dimension (or
+      // its depth/lens features).  Bounded scan (20 pages / 10 000 rows).
+      const PAGE = 500;
+      const MAX_PAGES = 20;
+      let after: { createdAt: string; id: string } | null = null;
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const contributions = await forum.contributions.listByThread(thread.threadId, {
+          states: ['published'],
+          after,
+          limit: PAGE,
+        });
+        for (const contribution of contributions) {
+          discussionDepth = Math.max(discussionDepth, contribution.path.length);
+          if (contribution.citations.length > 0) hasPrimaryEvidence = true;
+          const lensId = contribution.metadata['lens_id'];
+          if (typeof lensId === 'string' && lensId.length > 0) lensKeys.add(lensId);
+        }
+        const last = contributions[contributions.length - 1];
+        if (contributions.length < PAGE || last === undefined) break;
+        after = { createdAt: last.createdAt, id: last.contributionId };
       }
     }
     const enriched = { discussionDepth, lensKeys: [...lensKeys].sort(), hasPrimaryEvidence };

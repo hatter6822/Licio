@@ -23,7 +23,7 @@ UPDATE "takedown_requests" tr SET
     "resolution_note" = concat_ws(E'\n', tr."resolution_note",
       concat('[migration 0075] originally target_type=evidence target_id=', tr."target_id"::text))
   FROM (
-    SELECT tr2."takedown_id" AS tid, COALESCE(ec."story_id", c."story_id") AS "mapped"
+    SELECT tr2."takedown_id" AS tid, COALESCE(ec."story_id", c."story_id", c."first_seen_story_id") AS "mapped"
     FROM "takedown_requests" tr2
     LEFT JOIN "evidence_cards" ec ON ec."evidence_id" = tr2."target_id"
     LEFT JOIN "claims" c ON c."claim_id" = ec."claim_id"
@@ -60,12 +60,12 @@ UPDATE "takedown_requests" tr SET
 -- ---------------------------------------------------------------------------
 INSERT INTO "lcap_block_provenance" ("block_cid", "target_type", "target_id", "created_at")
   SELECT p."block_cid", 'story'::"takedown_target_type",
-         COALESCE(ec."story_id", c."story_id")::text, min(p."created_at")
+         COALESCE(ec."story_id", c."story_id", c."first_seen_story_id")::text, min(p."created_at")
   FROM "lcap_block_provenance" p
   JOIN "evidence_cards" ec ON ec."evidence_id"::text = p."target_id"
   LEFT JOIN "claims" c ON c."claim_id" = ec."claim_id"
-  WHERE p."target_type" = 'evidence' AND COALESCE(ec."story_id", c."story_id") IS NOT NULL
-  GROUP BY p."block_cid", COALESCE(ec."story_id", c."story_id")
+  WHERE p."target_type" = 'evidence' AND COALESCE(ec."story_id", c."story_id", c."first_seen_story_id") IS NOT NULL
+  GROUP BY p."block_cid", COALESCE(ec."story_id", c."story_id", c."first_seen_story_id")
   ON CONFLICT DO NOTHING;--> statement-breakpoint
 DELETE FROM "lcap_block_provenance" WHERE "target_type" = 'evidence';--> statement-breakpoint
 DELETE FROM "lcap_block_publish_review" WHERE "target_type" = 'evidence';--> statement-breakpoint
@@ -149,7 +149,11 @@ DROP TYPE "contribution_type_old";--> statement-breakpoint
 --     instead.  Runs AFTER the enum recreate so the `comment`
 --     label is a same-transaction CREATE TYPE value (fresh-bootstrap-safe);
 --     co-created cards already live on as their (just remapped) comment.
---     The entity table + its enums then drop.
+--     Anchor resolution walks card → claim story → claim FIRST-SEEN story;
+--     a card whose claim resolves to no story at all has no conversational
+--     home in the comment-centric model and is preserved in the archive
+--     (there is no live storyless-claim read to migrate into).  The entity
+--     table + its enums then drop.
 -- ---------------------------------------------------------------------------
 INSERT INTO "contributions" ("contribution_id", "thread_id", "user_id", "type", "body",
     "citations", "metadata", "target_claim_id", "parent_contribution_id", "client_draft_id",
@@ -173,7 +177,7 @@ INSERT INTO "contributions" ("contribution_id", "thread_id", "user_id", "type", 
       ec."created_at", ec."updated_at"
   FROM "evidence_cards" ec
   LEFT JOIN "claims" c ON c."claim_id" = ec."claim_id"
-  JOIN "threads" t ON t."story_id" = COALESCE(ec."story_id", c."story_id")
+  JOIN "threads" t ON t."story_id" = COALESCE(ec."story_id", c."story_id", c."first_seen_story_id")
     AND t."branch_index" = 0
   CROSS JOIN LATERAL (
     SELECT coalesce(nullif(concat_ws(E'\n\n',
@@ -184,6 +188,10 @@ INSERT INTO "contributions" ("contribution_id", "thread_id", "user_id", "type", 
       concat('Source reference: ', ec."citation_url_or_ref")) AS body
   ) body_composed
   WHERE ec."contribution_id" IS NULL
+    -- A RETRACTED card was withdrawn from every public read by the old
+    -- takedown/verification flow — it must not resurface as a published
+    -- comment.  Retracted cards are preserved in the archive only.
+    AND ec."verification_state" <> 'retracted'
   ON CONFLICT DO NOTHING;--> statement-breakpoint
 DROP TABLE IF EXISTS "evidence_cards";--> statement-breakpoint
 DROP TYPE IF EXISTS "evidence_card_type";--> statement-breakpoint

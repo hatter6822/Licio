@@ -39,6 +39,12 @@ export interface CitedContribution {
   bodyPreview: string;
   citations: Citation[];
   createdAt: string;
+  /** WS-J thread-level removal (the WS-E item-safety row).  Carried as a FLAG
+   *  rather than filtered out port-side, so the queue's scan cursor keeps
+   *  advancing over removed-thread rows exactly like decided rows — a silent
+   *  filter would make a short batch read as store exhaustion and strand the
+   *  later visible candidates. */
+  threadRemoved: boolean;
 }
 
 export interface ContentSnapshot {

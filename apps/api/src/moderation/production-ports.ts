@@ -364,7 +364,7 @@ export function createCitedContributionReads(deps: CitedReadsDeps): {
     body: string;
     citations: Citation[];
     createdAt: string;
-  }): Promise<CitedContribution> => {
+  }): Promise<Omit<CitedContribution, 'threadRemoved'>> => {
     const { storyId, storyTitle } = await resolveStory(row.threadId);
     return {
       contributionId: row.contributionId,
@@ -390,16 +390,20 @@ export function createCitedContributionReads(deps: CitedReadsDeps): {
           removed = await threadRemoved(row.threadId);
           removedByThread.set(row.threadId, removed);
         }
-        if (removed) continue;
-        out.push(await project(row));
+        // Removed-thread rows are RETURNED (flagged), never filtered: the
+        // queue skips them with its scan cursor, so a page of removed-thread
+        // rows still advances instead of reading as store exhaustion.
+        out.push({ ...(await project(row)), threadRemoved: removed });
       }
       return out;
     },
     getCitedContribution: async (contributionId) => {
       const row = await deps.contributions.getById(contributionId);
       if (row?.moderationState !== 'published' || row.citations.length === 0) return null;
+      // The single-row read is a hard gate (decision validation + the public
+      // primary-source projection): a removed thread's citation is ABSENT.
       if (await threadRemoved(row.threadId)) return null;
-      return project(row);
+      return { ...(await project(row)), threadRemoved: false };
     },
   };
 }

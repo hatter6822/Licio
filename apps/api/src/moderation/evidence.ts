@@ -77,7 +77,7 @@ export async function buildEvidenceQueue(
       batch.map((c) => c.contributionId),
     );
     for (const candidate of batch) {
-      if (decided.has(candidate.contributionId)) continue;
+      if (decided.has(candidate.contributionId) || candidate.threadRemoved) continue;
       items.push({
         contribution_id: candidate.contributionId,
         thread_id: candidate.threadId,

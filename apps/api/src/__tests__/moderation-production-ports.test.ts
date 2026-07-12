@@ -566,12 +566,20 @@ describe('createCitedContributionReads — WS-J thread-removal gate', () => {
     threadRemoved: async () => removed,
   });
 
-  it("a removed thread's citations leave both reads (queue + primary sources)", async () => {
+  it("a removed thread's citations gate the single-row read and FLAG the list", async () => {
     const live = createCitedContributionReads(deps(false));
     expect(await live.getCitedContribution(row.contributionId)).not.toBeNull();
-    expect(await live.listCitedContributions({ after: null, limit: 10 })).toHaveLength(1);
+    const liveList = await live.listCitedContributions({ after: null, limit: 10 });
+    expect(liveList).toHaveLength(1);
+    expect(liveList[0]?.threadRemoved).toBe(false);
     const gated = createCitedContributionReads(deps(true));
+    // Hard gate on the single-row read (decision validation + the public
+    // primary-source projection)…
     expect(await gated.getCitedContribution(row.contributionId)).toBeNull();
-    expect(await gated.listCitedContributions({ after: null, limit: 10 })).toHaveLength(0);
+    // …but the LIST returns the row FLAGGED — the queue skips it with its
+    // scan cursor, so a removed-thread page never reads as store exhaustion.
+    const gatedList = await gated.listCitedContributions({ after: null, limit: 10 });
+    expect(gatedList).toHaveLength(1);
+    expect(gatedList[0]?.threadRemoved).toBe(true);
   });
 });
