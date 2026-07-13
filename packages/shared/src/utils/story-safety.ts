@@ -16,7 +16,8 @@
 // one dimension of the old cascade that survives, because "Under review" is a
 // transparency signal (WS-J), not a conversation-state summary.
 
-import type { StorySafetyState } from '../schemas/feed.js';
+import type { LegacyRatingLabel, StorySafetyState } from '../schemas/feed.js';
+import type { StoryLifecycleState } from './story-lifecycle.js';
 
 /** MFCI durable risk state (matches the ranking feature + the risk-state store). */
 export type MfciRiskLevel = 'normal' | 'elevated' | 'high' | 'severe';
@@ -55,4 +56,35 @@ export function deriveStorySafetyState(input: StorySafetyStateInputs): StorySafe
     return 'caution';
   }
   return 'ok';
+}
+
+/**
+ * DEPRECATED — rollout compatibility only (see LEGACY_RATING_LABELS in
+ * schemas/feed.ts). A pre-redesign cached PWA bundle requires `rating_label`
+ * on every feed/detail item, so the server keeps emitting this legacy
+ * APPROXIMATION of the retired §5.6 cascade until those bundles age out. It
+ * intentionally reproduces the old priority order over the inputs both
+ * producers still hold (safety posture → lifecycle → attention); the removed
+ * live-SCOI divergence input is not consulted, so the one legacy value that
+ * can differ from the pre-redesign label is `needs-context` at the SCOI
+ * margin (an acceptable degradation for a deprecated field no new client
+ * reads). Delete together with the field and the emitters.
+ */
+export function legacyRatingLabel(input: {
+  lifecycleState: StoryLifecycleState;
+  safetyState: StorySafetyState;
+  /** The served ActiveAttention component when the producer holds it (the
+   *  feed's feature join); absent ⇒ the neutral `new` floor. */
+  activeAttention?: number;
+}): LegacyRatingLabel {
+  if (input.safetyState === 'under-review' || input.safetyState === 'restricted') {
+    return 'under-review';
+  }
+  if (input.lifecycleState === 'context_needed') return 'needs-context';
+  if (input.lifecycleState === 'bridging') return 'bridge-active';
+  if (input.lifecycleState === 'stable' || input.lifecycleState === 'archived') {
+    return 'resolved-context';
+  }
+  if (input.lifecycleState === 'deepening') return 'deepening';
+  return (input.activeAttention ?? 0) > 0 ? 'getting-attention' : 'new';
 }

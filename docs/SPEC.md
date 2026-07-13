@@ -336,7 +336,13 @@ Every chip pairs a distinct icon with a visible count or text plus a full
 screen-reader expansion ("3 sourced comments", never a bare number), so colour
 is never the sole differentiator. Chips render only when they have something
 to say: a story with no signals carries **no chip row at all** — the honest
-neutral floor is empty, never a fabricated status.
+neutral floor is empty, never a fabricated status. The counts are
+removal-aware: a story whose thread has been moderation-removed (the
+unreadable state of Section 15.4/WS-J — its comments routes 404) serves the
+neutral signals, so a card never advertises sources or corrections for a
+conversation the reader cannot open, and never leaks hidden-thread activity.
+The steward `restricted` review lock keeps the thread readable and keeps its
+honest counts.
 
 These signals replaced the earlier prose **rating labels** ("Getting
 Attention", "Deepening", "Needs Context", "Under Review", "Resolved Context",
@@ -354,6 +360,14 @@ signal derivations are implemented once and shared by every reader-facing
 surface (the feed card and the story page read the same batched
 `storyCardSignals` and `deriveStorySafetyState`), so the surfaces agree by
 construction.
+
+**Rollout compatibility.** Pre-redesign cached PWA bundles require a
+`rating_label` field on every feed/detail item, so the wire keeps a
+DEPRECATED, always-emitted `rating_label` compat field carrying a legacy
+approximation of the retired cascade (safety → lifecycle → attention; the
+removed live-SCOI input is not consulted). New clients ignore it. The field,
+its emitters, and the `legacyRatingLabel` helper are tracked for removal once
+pre-redesign bundles have aged out (see `docs/ranking/README.md`).
 
 # 6. Progressive Web App: requirements and client architecture
 

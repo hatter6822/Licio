@@ -38,6 +38,8 @@ const feedWater: FeedItem = {
   // upheld (validated) — the cross-checked lab report.
   sources_count: 3,
   corrections: { active: 0, validated: 1, incorrect: 0 },
+  // DEPRECATED rollout compat (see LEGACY_RATING_LABELS in @licio/shared).
+  rating_label: 'deepening',
   distribution_reason: 'Readers opened the primary dataset and added sourced comments.',
   context_chips: [],
   safety_state: 'ok',
@@ -54,6 +56,7 @@ const feedZoning: FeedItem = {
   reading_minutes: 9,
   sources_count: 1,
   corrections: { active: 0, validated: 0, incorrect: 0 },
+  rating_label: 'bridge-active',
   distribution_reason: 'A bridge comment reduced cross-community confusion between two rooms.',
   context_chips: [{ id: 'c3', label: 'cross-community', icon: 'bridge' }],
   safety_state: 'ok',
@@ -70,6 +73,7 @@ const feedTransit: FeedItem = {
   // A live correction debate is running over one comment (hourglass tally).
   sources_count: 0,
   corrections: { active: 1, validated: 0, incorrect: 0 },
+  rating_label: 'needs-context',
   distribution_reason: 'A clarifying question identified an ambiguity awaiting evidence.',
   context_chips: [{ id: 'c4', label: 'awaiting evidence', icon: 'circle-question' }],
   safety_state: 'caution',

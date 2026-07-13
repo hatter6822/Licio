@@ -59,6 +59,7 @@ import {
   type FeedMode,
   feedItemSchema,
   isSentinelTopicId,
+  legacyRatingLabel,
   rankingDecisionLoggedEventSchema,
   TOPIC_ID_BY_SLUG,
   TOPIC_REGISTRY,
@@ -188,7 +189,7 @@ async function cardSignalsForPage(
   for (const storyId of storyIds) {
     threadByStory.set(storyId, threads.get(storyId)?.threadId ?? null);
   }
-  return storyCardSignals(services.forum, threadByStory);
+  return storyCardSignals(services.forum, services.events.safetyStore, threadByStory);
 }
 
 /** One selected entry on its way to the wire. */
@@ -255,6 +256,16 @@ async function buildFeedItems(
         // view) and the WS-T corrections tally for the comment section.
         sources_count: entry.signals.sourced,
         corrections: entry.signals.corrections,
+        // DEPRECATED rollout compat: pre-redesign cached bundles REQUIRE
+        // rating_label; emit the legacy approximation until they age out
+        // (see LEGACY_RATING_LABELS in @licio/shared).
+        rating_label: legacyRatingLabel({
+          lifecycleState: story.lifecycleState,
+          safetyState,
+          ...(entry.features?.active_attention !== undefined
+            ? { activeAttention: entry.features.active_attention }
+            : {}),
+        }),
         distribution_reason: entry.explanation.distributionReason,
         context_chips: chips,
         safety_state: safetyState,

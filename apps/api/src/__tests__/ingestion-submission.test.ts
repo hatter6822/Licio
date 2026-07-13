@@ -331,6 +331,7 @@ describe('POST /v1/stories — emission + sync near-duplicate (WS-F.1.3c)', () =
       sources_count: number;
       corrections: { active: number; validated: number; incorrect: number };
       safety_state: string;
+      rating_label: string;
     };
     expect(detail.thread_id).toBe(thread_id);
     // A freshly-ingested story carries the neutral §5.6 card signals: no
@@ -338,6 +339,8 @@ describe('POST /v1/stories — emission + sync near-duplicate (WS-F.1.3c)', () =
     expect(detail.sources_count).toBe(0);
     expect(detail.corrections).toEqual({ active: 0, validated: 0, incorrect: 0 });
     expect(detail.safety_state).toBe('ok');
+    // The DEPRECATED rollout-compat label floors at the honest `new`.
+    expect(detail.rating_label).toBe('new');
     // The thread shell serves through the thread contract too.
     const thread = await app().request(new Request(`http://localhost/v1/threads/${thread_id}`));
     expect(thread.status).toBe(200);

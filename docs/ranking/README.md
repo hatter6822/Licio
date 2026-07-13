@@ -373,15 +373,30 @@ Two §23.3 wire fields carry the diversification/context outputs:
   section's "Sources" view) and the WS-T corrections tally for the comment
   section (`active` live comment arenas / `validated` / `incorrect` tagged
   rows, published-only). The story's OWN posture rides `dispute_status`
-  separately, so one debate is never double-reported. The serve path batches
-  the counts per page (one grouped contribution-tally read + one grouped
-  live-arena read through `cardSignalCounts` / `countActiveCommentArenas`) —
-  never per-item round trips; the WS-I.4.1b fallback serves the same honest
-  signals. (These replaced the former §5.6 `rating_label` prose cascade —
-  removed with the story-card signal redesign; the earlier `well-sourced`
-  label had already been removed with the EvidenceCard entity. The served
-  SCOI divergence volume still increments the `ranking.context_gate.card`
-  counter via `recordInterpretationDivergence`.)
+  separately, so one debate is never double-reported. REMOVAL-AWARE: a story
+  whose thread's WS-E item-safety row is `removed` (the unreadable
+  `threadReadableToUser` state — its comments routes 404) serves the neutral
+  signals, so a card never advertises counts for a conversation the reader
+  cannot open; the steward `restricted` review lock keeps its honest counts.
+  The serve path batches the counts per page (one grouped thread-safety read
+  + one grouped contribution-tally read + one grouped live-arena read through
+  `cardSignalCounts` / `countActiveCommentArenas`) — never per-item round
+  trips; the WS-I.4.1b fallback serves the same honest signals. (These
+  replaced the former §5.6 `rating_label` prose cascade — removed with the
+  story-card signal redesign; the earlier `well-sourced` label had already
+  been removed with the EvidenceCard entity. The served SCOI divergence
+  volume still increments the `ranking.context_gate.card` counter via
+  `recordInterpretationDivergence`.)
+- **`rating_label` (DEPRECATED compat — tracked residual)** — pre-redesign
+  cached PWA bundles validate feed/detail responses against a schema that
+  REQUIRES `rating_label`, so both producers keep emitting a legacy
+  approximation (`legacyRatingLabel` in `@licio/shared`: the retired
+  safety → lifecycle → attention cascade, without the removed live-SCOI
+  input) and the field stays declared optional in `feedItemSchema` so the
+  route-level response validation does not strip it. New clients never read
+  it. **Removal target:** delete the field, both emitters, and
+  `legacyRatingLabel` once pre-redesign bundles have aged out of service-
+  worker caches (one release cycle after this redesign ships to production).
 - **`safety_state`** — the §22.1 reader-facing safety posture, derived by the
   single shared `deriveStorySafetyState` (feed + story-detail), strongest
   first: a thread under an active §18.3 RESTRICTION is `restricted`

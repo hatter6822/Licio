@@ -44,6 +44,29 @@ export const EMPTY_STORY_CORRECTIONS: StoryCorrections = Object.freeze({
   incorrect: 0,
 });
 
+/**
+ * DEPRECATED — rollout compatibility only. The §5.6 rating-label pill was
+ * removed (see `storyCorrectionsSchema` above), but a pre-redesign cached PWA
+ * bundle still validates feed/detail responses against a schema that REQUIRES
+ * `rating_label`; omitting it would hard-fail every stale bundle until its
+ * service worker updates. The server therefore keeps emitting a legacy
+ * approximation (`legacyRatingLabel` in utils/story-safety.ts) and the field
+ * stays declared here as OPTIONAL so the route-level response validation does
+ * not strip it. New clients never read it. Remove the field, the emitters,
+ * and `legacyRatingLabel` once pre-redesign bundles have aged out (tracked in
+ * docs/ranking/README.md).
+ */
+export const LEGACY_RATING_LABELS = [
+  'new',
+  'getting-attention',
+  'deepening',
+  'needs-context',
+  'under-review',
+  'resolved-context',
+  'bridge-active',
+] as const;
+export type LegacyRatingLabel = (typeof LEGACY_RATING_LABELS)[number];
+
 /** Story-level safety posture surfaced to readers (SPEC §22.1 safety_state). */
 export const safetyStateSchema = z.enum(['ok', 'caution', 'under-review', 'restricted']);
 export type StorySafetyState = z.infer<typeof safetyStateSchema>;
@@ -104,6 +127,9 @@ export const feedItemSchema = z.object({
   sources_count: z.number().int().min(0).default(0),
   /** WS-T corrections tally for the comment section (see storyCorrectionsSchema). */
   corrections: storyCorrectionsSchema.default(EMPTY_STORY_CORRECTIONS),
+  /** DEPRECATED — emitted for pre-redesign cached bundles only (see
+   *  LEGACY_RATING_LABELS). New clients ignore it. */
+  rating_label: z.enum(LEGACY_RATING_LABELS).optional(),
   /** Human-readable distribution reason; never a raw numeric score. */
   distribution_reason: z.string().min(1),
   context_chips: z.array(contextChipSchema).default([]),

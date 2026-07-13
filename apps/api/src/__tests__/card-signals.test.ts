@@ -9,6 +9,7 @@
 // the honest neutral signals.
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { InMemoryItemSafetyStateStore } from '../events/stores.js';
 import { EMPTY_CARD_SIGNALS, storyCardSignals } from '../forum/card-signals.js';
 import { type DebateArenaRecord, InMemoryDebateStore } from '../forum/debate-store.js';
 import { type ContributionRecord, InMemoryContributionStore } from '../forum/stores.js';
@@ -19,6 +20,7 @@ function makeStores() {
   return {
     contributions: new InMemoryContributionStore(() => NOW),
     debates: new InMemoryDebateStore(() => NOW),
+    safety: new InMemoryItemSafetyStateStore(),
   };
 }
 
@@ -94,7 +96,7 @@ function arena(
 
 describe('storyCardSignals — the shared §5.6 derivation', () => {
   it('composes the sourced count, dispute tallies, and live comment arenas per story', async () => {
-    const { contributions, debates } = makeStores();
+    const { contributions, debates, safety } = makeStores();
     const storyId = randomUUID();
     const threadId = randomUUID();
     const cite = [{ url: 'https://example.org/source' }];
@@ -114,6 +116,7 @@ describe('storyCardSignals — the shared §5.6 derivation', () => {
 
     const signals = await storyCardSignals(
       { contributions, debates },
+      safety,
       new Map([[storyId, threadId]]),
     );
     expect(signals.get(storyId)).toEqual({
@@ -125,7 +128,7 @@ describe('storyCardSignals — the shared §5.6 derivation', () => {
   });
 
   it('excludes story-target and terminal arenas from the active tally', async () => {
-    const { contributions, debates } = makeStores();
+    const { contributions, debates, safety } = makeStores();
     const storyId = randomUUID();
     const threadId = randomUUID();
     // A live STORY-target arena rides dispute_status, not the tally.
@@ -148,21 +151,28 @@ describe('storyCardSignals — the shared §5.6 derivation', () => {
     ).not.toBeNull();
     const signals = await storyCardSignals(
       { contributions, debates },
+      safety,
       new Map([[storyId, threadId]]),
     );
     expect(signals.get(storyId)).toEqual(EMPTY_CARD_SIGNALS);
   });
 
   it('serves the honest neutral signals for a story with no thread', async () => {
-    const { contributions, debates } = makeStores();
+    const { contributions, debates, safety } = makeStores();
     const storyId = randomUUID();
-    const signals = await storyCardSignals({ contributions, debates }, new Map([[storyId, null]]));
+    const signals = await storyCardSignals(
+      { contributions, debates },
+      safety,
+      new Map([[storyId, null]]),
+    );
     expect(signals.get(storyId)).toBe(EMPTY_CARD_SIGNALS);
-    expect(await storyCardSignals({ contributions, debates }, new Map())).toEqual(new Map());
+    expect(await storyCardSignals({ contributions, debates }, safety, new Map())).toEqual(
+      new Map(),
+    );
   });
 
   it('batches many stories in one pass — every requested id is present', async () => {
-    const { contributions, debates } = makeStores();
+    const { contributions, debates, safety } = makeStores();
     const a = { storyId: randomUUID(), threadId: randomUUID() };
     const b = { storyId: randomUUID(), threadId: randomUUID() };
     await insertRow(contributions, a.threadId, {
@@ -171,6 +181,7 @@ describe('storyCardSignals — the shared §5.6 derivation', () => {
     expect(await debates.open(arena(b.storyId, b.threadId))).not.toBeNull();
     const signals = await storyCardSignals(
       { contributions, debates },
+      safety,
       new Map([
         [a.storyId, a.threadId],
         [b.storyId, b.threadId],
@@ -184,5 +195,53 @@ describe('storyCardSignals — the shared §5.6 derivation', () => {
       sourced: 0,
       corrections: { active: 1, validated: 0, incorrect: 0 },
     });
+  });
+
+  it('serves the neutral signals for a moderation-REMOVED thread (WS-J #8)', async () => {
+    // A removed thread is unreadable (threadReadableToUser): the card must not
+    // advertise sources or corrections for a conversation the reader cannot
+    // open — that would leak hidden-thread activity and disagree with the
+    // comments surface (which 404s).
+    const { contributions, debates, safety } = makeStores();
+    const storyId = randomUUID();
+    const threadId = randomUUID();
+    await insertRow(contributions, threadId, { citations: [{ url: 'https://example.org/x' }] });
+    const tagged = await insertRow(contributions, threadId);
+    await contributions.setDisputeStatus(tagged, 'incorrect');
+    expect(await debates.open(arena(storyId, threadId))).not.toBeNull();
+    await safety.set({
+      itemId: threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'moderator',
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    const signals = await storyCardSignals(
+      { contributions, debates },
+      safety,
+      new Map([[storyId, threadId]]),
+    );
+    expect(signals.get(storyId)).toEqual(EMPTY_CARD_SIGNALS);
+
+    // The steward `restricted`-analogue (a FROZEN item row) keeps its honest
+    // counts — only the terminal `removed` state suppresses them.
+    const frozenStory = randomUUID();
+    const frozenThread = randomUUID();
+    await insertRow(contributions, frozenThread, { citations: [{ url: 'https://example.org/y' }] });
+    await safety.set({
+      itemId: frozenThread,
+      safetyState: 'frozen',
+      frozenScore: 1,
+      caseId: null,
+      updatedBy: 'moderator',
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    const frozenSignals = await storyCardSignals(
+      { contributions, debates },
+      safety,
+      new Map([[frozenStory, frozenThread]]),
+    );
+    expect(frozenSignals.get(frozenStory)?.sourced).toBe(1);
   });
 });

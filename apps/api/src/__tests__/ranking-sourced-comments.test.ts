@@ -169,5 +169,31 @@ describe('WS-I — comment-centric sourcing (the EvidenceCard successor)', () =>
     expect(byId.get(rich.storyId)?.sources_count).toBe(5);
     expect(byId.get(reviewed.storyId)?.safety_state).toBe('under-review');
     expect(byId.get(reviewed.storyId)?.sources_count).toBe(5);
+    // The DEPRECATED rollout-compat rating_label is still emitted for
+    // pre-redesign cached bundles (a REQUIRED field in their schema).
+    expect(byId.get(quiet.storyId)?.rating_label).toBe('deepening');
+    expect(byId.get(reviewed.storyId)?.rating_label).toBe('under-review');
+    for (const item of items) expect(item.rating_label).toBeDefined();
+  });
+
+  it('a moderation-REMOVED thread serves the neutral card signals (WS-J #8)', async () => {
+    // The reader cannot open the conversation (the comments route 404s), so
+    // the feed card must not advertise its sources or corrections.
+    const removed = await seedStory(fixture.ingestion, { title: 'Removed thread' });
+    await seedSourcedComments(removed.threadId, 4);
+    await fixture.events.safetyStore.set({
+      itemId: removed.threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'moderator',
+      updatedAt: new Date().toISOString(),
+    });
+    await runFeatureBatch(featureDeps(), 50, 6);
+    const items = await fullFrontPage();
+    const item = items.find((i) => i.story_id === removed.storyId);
+    expect(item).toBeDefined();
+    expect(item?.sources_count).toBe(0);
+    expect(item?.corrections).toEqual({ active: 0, validated: 0, incorrect: 0 });
   });
 });

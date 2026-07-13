@@ -27,6 +27,7 @@ import {
   feedQuerySchema,
   feedResponseSchema,
   isSentinelTopicId,
+  legacyRatingLabel,
   notificationPreferencesSchema,
   notificationsResponseSchema,
   okAckSchema,
@@ -207,6 +208,14 @@ function realStoryToDetail(
     // the sourced-comment count and the WS-T corrections tally.
     sources_count: cardSignals.sourced,
     corrections: cardSignals.corrections,
+    // DEPRECATED rollout compat: pre-redesign cached bundles REQUIRE
+    // rating_label; emit the legacy approximation until they age out (the
+    // detail path no longer reads PWAtt, so the attention gate floors at
+    // `new` — no pre-redesign detail surface ever rendered the label).
+    rating_label: legacyRatingLabel({
+      lifecycleState: story.lifecycleState,
+      safetyState: signals.safetyState,
+    }),
     distribution_reason: 'Recently submitted to Licio',
     context_chips: [],
     safety_state: signals.safetyState,
@@ -401,15 +410,22 @@ export function createV1Routes() {
               return c.json(notFound, 404);
             }
             const thread = await ingestion.stories.getThreadByStoryId(storyId);
+            const events = getEventPipelineServices();
+            // The card signals share the removal-aware derivation with the
+            // feed: a moderation-removed thread yields the neutral signals
+            // (never counts for a conversation the reader cannot open).
             const [signals, cardSignalsByStory] = await Promise.all([
               assembleStoryReadSignals(real, thread),
-              storyCardSignals(forum, new Map([[storyId, thread?.threadId ?? null]])),
+              storyCardSignals(
+                forum,
+                events.safetyStore,
+                new Map([[storyId, thread?.threadId ?? null]]),
+              ),
             ]);
             // WS-G.3.3 — a WS-J moderation removal makes the thread routes 404
             // (threadReadableToUser) and drops it from the directory; suppress
             // the id here too so the story page renders no conversation link to a
             // guaranteed-404 thread.
-            const events = getEventPipelineServices();
             const linkThread =
               thread !== null &&
               (await events.safetyStore.get(thread.threadId))?.safetyState === 'removed'
