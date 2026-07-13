@@ -474,11 +474,12 @@ through the same `applyLifecycleTrigger` seam.
   the submission flow needs the BFF-in-the-loop harness (WS-P, the WS-D
   precedent) — the CSRF token round-trip is integration-tested at the
   full-app level meanwhile.
-- **Claims + independent-sources drawers — SHIPPED**: the story page's
-  "Independent sources" drawer (`IndependentSourcesDrawer`, lazy Sheet)
-  consumes `GET /v1/stories/:id/claims` and the WS-H `/independent-sources`
-  read: exposure label, source lineage + syndication, same-coverage
-  co-members, steward-marked primary sources, and the story's claims.
+- **Claims stay an INTERNAL model**: the story page's "Independent sources"
+  drawer and its two reads (`GET /v1/stories/:id/claims` + the WS-H
+  `/independent-sources` lineage read) were REMOVED — comment-centric
+  sourcing superseded story-level lineage as the reader-facing surface.
+  Claims + independence groups remain MERI/WS-K inputs (dedup still mints
+  the groups; the batch still computes exposure over them).
 - **Full-scale (1 M) load validation**: the latency/recall benchmarks are
   measured at N = 20 000 (operating-point table above); validating the same
   constants at the 1 M-story / 100K-embedding target is a WS-P load-harness

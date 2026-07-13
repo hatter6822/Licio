@@ -63,9 +63,6 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
         json: { story_id: STORY, context_state: null, interpretations: [], needs_context: false },
       });
     });
-    await page.route(`**/v1/stories/${STORY}/independent-sources`, async (route) => {
-      await route.fulfill({ json: { sources: [] } });
-    });
     await page.route(`**/v1/stories/${STORY}/comments**`, async (route) => {
       await route.fulfill({
         json: {

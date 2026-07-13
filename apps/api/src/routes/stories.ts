@@ -1,23 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-F public ingestion surface: POST /v1/stories (WS-F.1.4a), the
-// claim read path (WS-F.1.2a navigability), the public source
-// profile (§14.3 context-and-history — no truth score exists to expose),
-// GET /v1/search (WS-F.3.1b), and the public takedown intake (WS-F.1.4f).
+// WS-F public ingestion surface: POST /v1/stories (WS-F.1.4a), the public
+// source profile (§14.3 context-and-history — no truth score exists to
+// expose), GET /v1/search (WS-F.3.1b), and the public takedown intake
+// (WS-F.1.4f).
 // Every response is re-validated against its shared schema on egress (the
 // stated boundary guarantee), and all error bodies use the house
 // `{ error: { code, message } }` shape.
 import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
-  type ClaimPublic,
   isSentinelTopicId,
   type SourcePublic,
   type StoryPublic,
   searchRequestSchema,
   searchResponseSchema,
   sourcePublicSchema,
-  storyClaimsResponseSchema,
   storyCreateRequestSchema,
   storyCreateResponseSchema,
   storyDuplicateResponseSchema,
@@ -30,46 +28,18 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
-import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
+import { roomContentVisibleToUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
-import type { ClaimRecord, SourceRecord, StoryRecord } from '../ingestion/stores.js';
+import type { SourceRecord, StoryRecord } from '../ingestion/stores.js';
 import { submitStory } from '../ingestion/submission.js';
 import { changeStoryVisibility } from '../ingestion/visibility.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, getAuth, requireUnrestricted } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
-
-/** Soft session resolution (anonymous on any failure; never an error/access). */
-async function softUserId(cookieHeader: string | undefined): Promise<string | null> {
-  const token = readSessionToken(cookieHeader);
-  if (!token) return null;
-  try {
-    const identity = getIdentityServices();
-    return (await validateSession(identity.sessions, token))?.record.user_id ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * WS-Q.3.2 — the item read bar for a story-scoped read: 404 unless the story is
- * readable (not hidden AND the reader passes the room content bar). A story-less
- * (cross-story) claim row is public. Returns true when the read may
- * proceed.
- */
-async function storyReadGate(
-  story: StoryRecord,
-  cookieHeader: string | undefined,
-): Promise<boolean> {
-  const forum = getForumServices();
-  const room = await forum.rooms.getById(story.roomId);
-  if (room === null) return false; // fail closed
-  return storyReadableByUser(forum, story, room, await softUserId(cookieHeader));
-}
 
 /** Map a stored story to the public projection (the ONLY read shape). */
 export function toStoryPublic(story: StoryRecord, threadId: string | null): StoryPublic {
@@ -107,20 +77,6 @@ export function toStoryPublic(story: StoryRecord, threadId: string | null): Stor
     created_at: story.createdAt,
     updated_at: story.updatedAt,
   });
-}
-
-function toClaimPublic(claim: ClaimRecord): ClaimPublic {
-  return {
-    claim_id: claim.claimId,
-    story_id: claim.storyId,
-    canonical_text: claim.canonicalText,
-    claim_status: claim.claimStatus,
-    first_seen_story_id: claim.firstSeenStoryId,
-    independence_group_id: claim.independenceGroupId,
-    extraction_source: claim.extractionSource,
-    created_at: claim.createdAt,
-    updated_at: claim.updatedAt,
-  };
 }
 
 function toSourcePublic(source: SourceRecord): SourcePublic {
@@ -237,24 +193,11 @@ export function createStoriesRoutes() {
         },
       )
 
-      // --- Claim navigability (WS-F.1.2a) ---------------------------------
-      .get(
-        '/stories/:storyId/claims',
-        zValidator('param', z.object({ storyId: uuidSchema })),
-        async (c) => {
-          const ingestion = getIngestionServices();
-          const story = await ingestion.stories.getById(c.req.valid('param').storyId);
-          // WS-Q.3.2 — the story's claims inherit its read bar (room_only in a
-          // private room ⇒ 404 to outsiders).
-          if (story === null || !(await storyReadGate(story, c.req.header('cookie')))) {
-            return c.json(deny('not_found', 'Resource not found'), 404);
-          }
-          const claims = await ingestion.claims.listByStory(story.storyId);
-          return c.json(
-            storyClaimsResponseSchema.parse({ items: claims.slice(0, 100).map(toClaimPublic) }),
-          );
-        },
-      )
+      // (The former GET /stories/:storyId/claims public projection — WS-F.1.2a
+      // claim navigability — was removed with the independent-sources drawer:
+      // comment-centric sourcing superseded it and no client remained. The
+      // claim MODEL is unchanged; claims + independence groups stay MERI/WS-K
+      // inputs.)
       // --- Public source profile (§14.3: context + history) ---------------
       .get(
         '/sources/:sourceId',

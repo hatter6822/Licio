@@ -8,9 +8,10 @@
 //
 // Decisions are evidence METADATA, never content actions: this module holds
 // no content-removal power by construction (it never touches a moderation
-// state, only the append-only decision store + the audit log).  The public
-// consumer is the independent-sources drawer, which surfaces the
-// `mark-primary-source` annotations on the story's lineage panel.
+// state, only the append-only decision store + the audit log).  Decisions
+// surface through the moderation console's evidence panels (the former
+// public independent-sources drawer projection was removed — comment-centric
+// sourcing superseded story-level lineage).
 //
 // The queue is DERIVED, not intake-driven: pending = citation-bearing
 // PUBLISHED contributions with no decision row yet.  Deriving from the store
@@ -248,45 +249,8 @@ export function decisionToView(
   };
 }
 
-/**
- * The public primary-source read (the independent-sources drawer): citations
- * an evidence steward marked primary on the story's conversation, deduplicated
- * by URL, newest mark first, capped.
- */
-export async function primarySourcesForStory(
-  mod: ModerationServices,
-  storyId: string,
-  cap = 8,
-): Promise<Array<{ url: string; title?: string }>> {
-  // A mark surfaces ONLY while its contribution is still PUBLISHED: a
-  // moderation-removed/hidden comment must not keep projecting its citation
-  // onto a public surface (the decision row itself persists — it is the audit
-  // record, not the public projection).  The check rides the content port's
-  // published-only `getCitedContribution` read; a port without it (the bare
-  // in-memory seam) surfaces nothing rather than leaking unverifiable marks.
-  const getCited = mod.content.getCitedContribution?.bind(mod.content);
-  if (!getCited) return [];
-  const marks = await mod.evidenceDecisions.listByStory(storyId, 'mark-primary-source');
-  const seen = new Set<string>();
-  const liveByContribution = new Map<string, Awaited<ReturnType<typeof getCited>>>();
-  const out: Array<{ url: string; title?: string }> = [];
-  for (const mark of marks) {
-    if (mark.citationUrl === null || seen.has(mark.citationUrl)) continue;
-    let live = liveByContribution.get(mark.contributionId);
-    if (live === undefined) {
-      live = await getCited(mark.contributionId);
-      liveByContribution.set(mark.contributionId, live);
-    }
-    // The mark must survive an EDIT too: the author removing/replacing the
-    // marked URL (while keeping the comment otherwise cited) withdraws it
-    // from the public list — the decision row remains the audit record.
-    if (live === null || !live.citations.some((c) => c.url === mark.citationUrl)) continue;
-    seen.add(mark.citationUrl);
-    out.push({
-      url: mark.citationUrl,
-      ...(mark.citationTitle ? { title: mark.citationTitle } : {}),
-    });
-    if (out.length >= cap) break;
-  }
-  return out;
-}
+// (The former `primarySourcesForStory` public projection was removed with the
+// independent-sources drawer, its only consumer — comment-centric sourcing
+// superseded story-level lineage. The steward mark-primary-source DECISIONS
+// are unchanged: they persist as audited evidence metadata and stay visible
+// through the moderation console's evidence surfaces.)

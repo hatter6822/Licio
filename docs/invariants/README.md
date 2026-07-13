@@ -397,28 +397,23 @@ health, reason-code-filterable outputs, WS-H.1.1b version comparison
 controls) + case resolution, GWEI dashboards + the transparency export,
 promotion apply/history, validated config writes, on-demand regression.
 
-Public reads (`/v1/stories/:id/interpretations`,
-`/v1/stories/:id/independent-sources`, and the SCOI `/v1/stories/:id/lenses`
-read): each gates on the WS-Q item read bar (`storyReadableByUser`, soft
-session resolution, fail-closed on an unknown room) — a `room_only` story in
-a private room is 404 to non-members (404-over-403, no existence oracle),
-and every independent-sources lineage co-member is ITSELF read-bar-filtered
-so a public story never surfaces a contained near-duplicate's id/title (the
-raw MinHash/syndication candidate sets are not tier-scoped). Served from
-STORED shadow outputs only — a page load never triggers computation.
+Public reads (`/v1/stories/:id/interpretations` and the SCOI
+`/v1/stories/:id/lenses` read): each gates on the WS-Q item read bar
+(`storyReadableByUser`, soft session resolution, fail-closed on an unknown
+room) — a `room_only` story in a private room is 404 to non-members
+(404-over-403, no existence oracle). Served from STORED shadow outputs only —
+a page load never triggers computation. (The former
+`/v1/stories/:id/independent-sources` lineage read was removed with the
+drawer below.)
 
-Client: the MERI exposure label was REMOVED as a user-facing surface — no
-`ExposureLabel` badge on feed cards, and the feed/story wire no longer
-carries an `exposure_label` field. The computed source-independence signal
-survives everywhere it does real work: the WS-I ranking
-features/penalty/quota and the
-`GET /v1/stories/:id/independent-sources` lineage read — consumed by the
-story page's "Independent sources" drawer (`IndependentSourcesDrawer`, the
-SPEC §7.6 promise): exposure label, source lineage + syndication, the "Same
-coverage elsewhere" co-group members (near-duplicates by MinHash +
-confirmed-syndication siblings, visibility-gated server-side), the
-evidence-steward-marked primary sources, and the story's claims
-(`GET /v1/stories/:id/claims`) — remains available),
+Client: MERI has NO reader-facing surface — the exposure label was removed
+from feed cards, and the story page's "Independent sources" lineage drawer
+(with its `GET /v1/stories/:id/independent-sources` and
+`GET /v1/stories/:id/claims` reads) was removed outright: comment-centric
+sourcing (citations on contributions, the Sources view, the §5.6 sources
+count) superseded story-level lineage. The computed source-independence
+signal survives everywhere it does real work: the WS-I ranking
+features/penalty/quota. The remaining client surfaces are
 `WhereInterpretationsDiffer` (+ the needs-context framing; human lens
 NAMES resolved through the room when available), the composer
 `ContextWarning` (dismissible; the user can always proceed), the
