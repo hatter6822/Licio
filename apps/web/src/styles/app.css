@@ -219,7 +219,7 @@
  * Focus mode (WS-C.2.4 / SPEC §26.2). The "calmer, distraction-reduced
  * layout": hide the secondary metadata furniture (`[data-focus-hide]` —
  * context-chip rows, thread-branch previews) so the essential content
- * (title, rating label, distribution reason, media) stays. Applied at the
+ * (title, signal row, distribution reason, media) stays. Applied at the
  * root via `data-focus="on"` so one rule covers every surface.
  * ===================================================================== */
 :root[data-focus="on"] [data-focus-hide] {

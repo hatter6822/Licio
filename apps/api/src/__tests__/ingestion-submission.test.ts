@@ -326,10 +326,20 @@ describe('POST /v1/stories — emission + sync near-duplicate (WS-F.1.3c)', () =
     };
     const read = await app().request(new Request(`http://localhost/v1/stories/${story_id}`));
     expect(read.status).toBe(200);
-    const detail = (await read.json()) as { thread_id: string; rating_label: string };
+    const detail = (await read.json()) as {
+      thread_id: string;
+      sources_count: number;
+      corrections: { active: number; validated: number; incorrect: number };
+      safety_state: string;
+      rating_label: string;
+    };
     expect(detail.thread_id).toBe(thread_id);
-    // A freshly-ingested story has no active-reading signal yet ⇒ the neutral
-    // "New" floor (§5.6), never a false "Getting Attention".
+    // A freshly-ingested story carries the neutral §5.6 card signals: no
+    // sourced comments, an all-zero corrections tally, and an `ok` posture.
+    expect(detail.sources_count).toBe(0);
+    expect(detail.corrections).toEqual({ active: 0, validated: 0, incorrect: 0 });
+    expect(detail.safety_state).toBe('ok');
+    // The DEPRECATED rollout-compat label floors at the honest `new`.
     expect(detail.rating_label).toBe('new');
     // The thread shell serves through the thread contract too.
     const thread = await app().request(new Request(`http://localhost/v1/threads/${thread_id}`));
@@ -357,7 +367,7 @@ describe('link pipeline smoke through submission (WS-F.1.4e)', () => {
     expect(story?.language).toBe('en');
     expect(story?.extractionState).toBe('completed');
     expect(story?.excerpt).toBeTruthy();
-    expect((story?.excerpt as string).length).toBeLessThanOrEqual(501); // bound + ellipsis
+    expect((story?.excerpt as string | undefined)?.length).toBeLessThanOrEqual(501); // bound + ellipsis
     expect(story?.sourceId).not.toBeNull();
     const source = await fixture.ingestion.sources.getById(story?.sourceId as string);
     expect(source?.canonicalDomain).toBe('news.example');

@@ -319,41 +319,55 @@ The product exposes only a simplified explanation, such as: "Rising because many
 
 The five positive-value weights (`wA, wP, wE, wS, wC`) are **normalized to sum to 100%** per ranking profile; the ranges are per-component guardrails, and a deployed profile must choose shares within those ranges that sum to 100% (jointly satisfiable, e.g. 30/40/15/10/5). The penalties (`pM, pH, pT, pR`) are **not** part of this convex combination: they are separate nonnegative coefficients on the risk terms, so a high-risk item's penalties can drive its score below any positive contribution. The baseline `B_i,t` is on the same scale as the normalized positive score. Weights are not one global constant; they vary by surface, topic sensitivity, freshness, age group, jurisdiction, and risk state. Breaking disaster news emphasizes timeliness and verified source context; evergreen science discussion emphasizes evidence, synthesis, and nonredundancy.
 
-## 5.6 User-facing rating labels
+## 5.6 User-facing story-card signals
 
-Because there are no likes or upvotes, the app uses descriptive labels, none of which imply a majority "likes" or "agrees" with the content:
+Because there are no likes or upvotes, the card surfaces a compact row of
+**descriptive, content-integrity signals** — concrete counts and adjudicated
+postures, none of which imply a majority "likes" or "agrees" with the content:
 
-| Label | Meaning |
-|---|---|
-| Getting Attention | Active, non-idle reading is increasing. |
-| Deepening | Users are adding evidence, questions, corrections, or summaries. |
-| Needs Context | Interpretations differ or key context is missing. |
-| Under Review | Coordination, safety, or policy signals require review. |
-| Resolved Context | A previously ambiguous issue has a high-quality synthesis. |
-| Bridge Active | Multiple communities are engaging with improving coherence. |
-| New | No active-reading signal yet — the neutral floor (a freshly surfaced item nobody has actively read). |
+| Signal | Rendering | Meaning |
+|---|---|---|
+| Dispute badge | "Challenged" / "Incorrect" / "Validated" pill | The story's own WS-T posture: a sourced correction's debate is live; a correction prevailed (the story is demoted but kept for the record); or a challenge was adjudicated and the story stood as accurate. Hidden when undisputed. |
+| Under review | Eye icon + "Under review" chip | The Section 22.1 `safety_state` is `under-review`/`restricted`: coordination, safety, or policy signals require review (or access is restricted). Descriptive, never a verdict; the `caution` posture renders nothing (parity with the retired label cascade). |
+| Sources | Link icon + count | Published comments carrying at least one citation — exactly the count the comment section's "Sources" view resolves, so the card number always matches what the reader finds inside. |
+| Corrections tally | Hourglass / check / X icons + counts | The comment section's WS-T adjudication record: corrections currently under debate (hourglass), comments challenged and **validated** (check), and comments a correction prevailed against — **incorrect** (X). The story's own posture is excluded (it rides the dispute badge), so one debate is never double-reported. |
 
-Exactly one label is shown per item, derived as a **priority cascade** in which
-the live invariant signals outrank the slower lifecycle state (Section 14.4):
-safety/coordination review (Under Review) → interpretation divergence (Needs
-Context, from SCOI or the `context_needed` state) → cross-community
-reconciliation (Bridge Active) → a resolved synthesis (Resolved Context) →
-ongoing contribution (Deepening) → active reading (Getting Attention, requiring
-a real above-noise ActiveAttention signal) → the neutral floor (New). Because
-Getting Attention is gated on an actual attention signal, the default never
-falsely claims that reading is increasing for an item nobody has read; such an
-item reads **New** until attention arrives. Under Review is reachable only
-through the live signal — the lifecycle state alone never produces it. Sourcing
-is surfaced descriptively rather than as a label: the sourced-comment count
-rides the feed card as a context chip ("N sourced comments"), never a quality
-verdict. (The former "Well-Sourced" label was removed with the EvidenceCard
-entity: no production path could create or verify a card, so the label was
-unreachable outside seeded demo data.) This derivation is implemented once and
-shared by every reader-facing surface, so the feed card and the story page
-agree on every dimension; the one input that is surface-specific is
-interpretation divergence (the feed reads its profile-aware SCOI context card,
-the story page reads SCOI energy against the needs-context threshold), which
-can differ only at the SCOI margin.
+Every chip pairs a distinct icon with a visible count or text plus a full
+screen-reader expansion ("3 sourced comments", never a bare number), so colour
+is never the sole differentiator. Chips render only when they have something
+to say: a story with no signals carries **no chip row at all** — the honest
+neutral floor is empty, never a fabricated status. The counts are
+removal-aware: a story whose thread has been moderation-removed (the
+unreadable state of Section 15.4/WS-J — its comments routes 404) serves the
+neutral signals, so a card never advertises sources or corrections for a
+conversation the reader cannot open, and never leaks hidden-thread activity.
+The steward `restricted` review lock keeps the thread readable and keeps its
+honest counts.
+
+These signals replaced the earlier prose **rating labels** ("Getting
+Attention", "Deepening", "Needs Context", "Under Review", "Resolved Context",
+"Bridge Active", "New"): a single derived label compressed several orthogonal
+dimensions into one vague word, while the signal row shows the underlying
+facts — how sourced the discussion is, what the adjudication record says, and
+whether safety review is active — in less space. The removal follows the same
+doctrine as the earlier "Well-Sourced"/EvidenceCard removal: sourcing and
+correctness are surfaced as descriptive counts and adjudicated outcomes, never
+as a quality verdict. The Section 14.4 lifecycle machine is unchanged (it
+still gates retrieval and archival); interpretation-divergence detail lives on
+the story surface ("Where interpretations differ"), and the served-item
+divergence volume still feeds the context-gate observability counter. The
+signal derivations are implemented once and shared by every reader-facing
+surface (the feed card and the story page read the same batched
+`storyCardSignals` and `deriveStorySafetyState`), so the surfaces agree by
+construction.
+
+**Rollout compatibility.** Pre-redesign cached PWA bundles require a
+`rating_label` field on every feed/detail item, so the wire keeps a
+DEPRECATED, always-emitted `rating_label` compat field carrying a legacy
+approximation of the retired cascade (safety → lifecycle → attention; the
+removed live-SCOI input is not consulted). New clients ignore it. The field,
+its emitters, and the `legacyRatingLabel` helper are tracked for removal once
+pre-redesign bundles have aged out (see `docs/ranking/README.md`).
 
 # 6. Progressive Web App: requirements and client architecture
 
@@ -390,7 +404,7 @@ The Submit tab is centered and persistent; it is a contribution entry point, not
 
 ## 6.3 Front Page layout
 
-Each feed card contains: story title; source; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, long-press to signal problem / mute source / adjust topic). Interpretation-divergence detail lives on the STORY surface (the "Where interpretations differ" lens map and the independent-sources drawer) rather than as a per-card overlay payload: the card carries the "Needs Context" label, and the tap-through story page carries the detail — the compact feed context-card payload had no client surface and was removed with the other unreachable planes. The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
+Each feed card contains: story title; source; home-room chip (where the conversation lives); the Section 5.6 signal row (the dispute badge, the "Under review" safety chip, the sources count, and the corrections tally — rendered only when non-empty); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, long-press to signal problem / mute source / adjust topic). Interpretation-divergence detail lives on the STORY surface (the "Where interpretations differ" lens map and the independent-sources drawer) rather than as a per-card overlay or label — the tap-through story page carries the detail; the compact feed context-card payload had no client surface and was removed with the other unreachable planes. The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
 
 ## 6.4 Thread layout
 
@@ -835,7 +849,7 @@ SCOI powers context cards, cross-community sharing warnings, ranking dampening f
 
 ## 10.5 UI requirements
 
-Feed-card label "Needs Context" when SCOI is elevated; context-card section "Where interpretations differ"; thread branch "Bridge attempts"; composer warning "People in another room are reading this differently. Add context before replying."; share dialog "This item is context-sensitive. Include origin context?". "Needs Context" means interpretations differ — never false, bad, or banned.
+Story-surface section "Where interpretations differ" when SCOI is elevated; thread branch "Bridge attempts"; composer warning "People in another room are reading this differently. Add context before replying."; share dialog "This item is context-sensitive. Include origin context?". A needs-context state means interpretations differ — never false, bad, or banned. (Divergence is a story-surface detail, not a feed-card label; the served-item divergence volume feeds the Section 10.6 context-gate observability counter.)
 
 ## 10.6 Ranking integration
 
@@ -844,7 +858,7 @@ High SCOI does not mean bad content; it means the content should travel with con
 | SCOI level | Ranking action |
 |---|---|
 | Low | Normal ranking. |
-| Medium | Surface the divergence in the feed (the "Needs Context" label) and the story-surface lens map. |
+| Medium | Surface the divergence on the story surface (the "Where interpretations differ" lens map). |
 | High | Reduce cross-community amplification until context improves. |
 | Very high | Prioritize bridge requests, expert context, or moderator review. |
 
@@ -1530,7 +1544,8 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 ## 23.3 Representative payload shapes
 
     FeedItem { story_id, room_ref, visibility, title, source_summary,
-               rating_label, distribution_reason, context_chips[], reader_state,
+               sources_count, corrections { active, validated, incorrect },
+               dispute_status, distribution_reason, context_chips[], reader_state,
                thread_preview, safety_state, user_controls }
 
     CreateContributionRequest { thread_id, type, body, parent_id_optional,
@@ -1786,7 +1801,7 @@ MFCI or tropical cascade detects an unusual pattern → integrity service assign
 
 ## 29.4 Context obstruction
 
-SCOI detects split/obstructed interpretations → feed cards show "Needs Context" → the thread requests bridge/synthesis contributions → users in relevant lenses are invited → a steward creates or approves a context patch → SCOI is recomputed → distribution expands when context is sufficiently repaired.
+SCOI detects split/obstructed interpretations → the story surface shows "Where interpretations differ" → the thread requests bridge/synthesis contributions → users in relevant lenses are invited → a steward creates or approves a context patch → SCOI is recomputed → distribution expands when context is sufficiently repaired.
 
 ## 29.5 Wallet and payment
 
@@ -2022,7 +2037,7 @@ Before any production launch, confirm: the user can use the social product witho
 
 ## 35.1 Reader opens a breaking story
 
-Sees a card labeled "Getting Attention"; the reason reads "Readers are opening the source and local room activity is rising"; taps to see the source preview; the context card says evidence is preliminary; opens the source, reads, and saves for later; the app counts bounded active attention, not endorsement; no public badge or score appears.
+Sees a card whose reason reads "Readers are opening the source and local room activity is rising"; taps to see the source preview; the context card says evidence is preliminary; opens the source, reads, and saves for later; the app counts bounded active attention, not endorsement; no public badge or score appears.
 
 ## 35.2 User adds a correction
 
@@ -2030,7 +2045,7 @@ Sees a comment repeating an incorrect date; taps Correct; the composer requires 
 
 ## 35.3 Content crosses communities
 
-A joke from one room spreads to a political room; SCOI rises because local interpretations conflict; the card changes to "Needs Context"; the share sheet suggests including origin context; bridge comments are invited; a user explains the original meaning and limits; SCOI decreases and distribution resumes with a context card attached.
+A joke from one room spreads to a political room; SCOI rises because local interpretations conflict; the story page surfaces "Where interpretations differ"; the share sheet suggests including origin context; bridge comments are invited; a user explains the original meaning and limits; SCOI decreases and distribution resumes with a context card attached.
 
 ## 35.4 Coordinated reporting attempt
 

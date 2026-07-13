@@ -3,12 +3,11 @@
 // WS-I comment-centric sourcing: with the EvidenceCard entity removed, a
 // story's sourcing signal is the SOURCED COMMENTS on its thread — published
 // `comment` contributions carrying ≥1 citation. This proves the successor
-// behaviors end-to-end: the descriptive "N sourced comments" context chip
-// counts exactly the published sourced comments; the §5.4 wE input
-// `source_evidence_completeness` saturates as n/(n+3); and the §5.6
-// rating-label cascade has NO well-sourced branch — sourced-comment volume
-// never changes the label (a deepening story stays "Deepening"; a story under
-// safety review reads "Under Review").
+// behaviors end-to-end: the §5.6 card signal `sources_count` counts exactly
+// the published sourced comments; the §5.4 wE input
+// `source_evidence_completeness` saturates as n/(n+3); and sourced-comment
+// volume never changes the safety posture (a story under safety review reads
+// `under-review` whatever its sourcing record).
 
 import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -89,7 +88,7 @@ async function fullFrontPage() {
 }
 
 describe('WS-I — comment-centric sourcing (the EvidenceCard successor)', () => {
-  it('the "sources" chip counts PUBLISHED sourced comments — and only them', async () => {
+  it('sources_count counts PUBLISHED sourced comments — and only them', async () => {
     const sourced = await seedStory(fixture.ingestion, { title: 'Three sourced comments' });
     const single = await seedStory(fixture.ingestion, { title: 'One sourced comment' });
     const bare = await seedStory(fixture.ingestion, { title: 'No sourced comments' });
@@ -107,18 +106,15 @@ describe('WS-I — comment-centric sourcing (the EvidenceCard successor)', () =>
 
     const items = await fullFrontPage();
     const byId = new Map(items.map((i) => [i.story_id, i]));
-    // Pluralised on the published sourced count alone.
-    expect(byId.get(sourced.storyId)?.context_chips.find((c) => c.id === 'sources')?.label).toBe(
-      '3 sourced comments',
-    );
-    expect(byId.get(single.storyId)?.context_chips.find((c) => c.id === 'sources')?.label).toBe(
-      '1 sourced comment',
-    );
-    // A story with no sourced comments carries no chip at all.
-    expect(byId.get(bare.storyId)?.context_chips.some((c) => c.id === 'sources')).toBe(false);
-    // The removed evidence-card chip id never reappears.
+    // The card signal counts the published sourced comments alone.
+    expect(byId.get(sourced.storyId)?.sources_count).toBe(3);
+    expect(byId.get(single.storyId)?.sources_count).toBe(1);
+    expect(byId.get(bare.storyId)?.sources_count).toBe(0);
+    // Neither the removed evidence-card chip nor the superseded wordy
+    // sources chip reappears (sources ride the first-class field now).
     for (const item of items) {
       expect(item.context_chips.some((c) => c.id === 'evidence')).toBe(false);
+      expect(item.context_chips.some((c) => c.id === 'sources')).toBe(false);
     }
   });
 
@@ -137,10 +133,11 @@ describe('WS-I — comment-centric sourcing (the EvidenceCard successor)', () =>
     expect(vNine?.source_evidence_completeness).toBe(0.75); // 9 / (9 + 3)
   });
 
-  it('the rating label has NO well-sourced branch — sourcing never changes it', async () => {
-    // A deepening story stays "Deepening" whether it carries zero or many
-    // sourced comments (formerly the ≥2-independent-verified gate would have
-    // promoted it to the removed "Well-Sourced" label).
+  it('sourcing volume never changes the safety posture', async () => {
+    // Sourcing is a descriptive count, not a quality verdict: a richly sourced
+    // story and an unsourced one both read `ok`, and a story under live safety
+    // review reads `under-review` even with a rich sourced-comment record —
+    // the review posture is independent of sourcing by construction.
     const quiet = await seedStory(fixture.ingestion, {
       title: 'Deepening, unsourced',
       lifecycleState: 'deepening',
@@ -151,8 +148,6 @@ describe('WS-I — comment-centric sourcing (the EvidenceCard successor)', () =>
     });
     await seedSourcedComments(rich.threadId, 5);
 
-    // A story under live safety review reads "Under Review" even with the
-    // same sourced-comment record — the review posture outranks everything.
     const reviewed = await seedStory(fixture.ingestion, {
       title: 'Under review, sourced',
       lifecycleState: 'deepening',
@@ -169,12 +164,36 @@ describe('WS-I — comment-centric sourcing (the EvidenceCard successor)', () =>
     await runFeatureBatch(featureDeps(), 50, 6);
     const items = await fullFrontPage();
     const byId = new Map(items.map((i) => [i.story_id, i]));
+    expect(byId.get(quiet.storyId)?.safety_state).toBe('ok');
+    expect(byId.get(rich.storyId)?.safety_state).toBe('ok');
+    expect(byId.get(rich.storyId)?.sources_count).toBe(5);
+    expect(byId.get(reviewed.storyId)?.safety_state).toBe('under-review');
+    expect(byId.get(reviewed.storyId)?.sources_count).toBe(5);
+    // The DEPRECATED rollout-compat rating_label is still emitted for
+    // pre-redesign cached bundles (a REQUIRED field in their schema).
     expect(byId.get(quiet.storyId)?.rating_label).toBe('deepening');
-    expect(byId.get(rich.storyId)?.rating_label).toBe('deepening');
     expect(byId.get(reviewed.storyId)?.rating_label).toBe('under-review');
-    // The removed label never reaches the wire.
-    for (const item of items) {
-      expect(item.rating_label).not.toBe('well-sourced');
-    }
+    for (const item of items) expect(item.rating_label).toBeDefined();
+  });
+
+  it('a moderation-REMOVED thread serves the neutral card signals (WS-J #8)', async () => {
+    // The reader cannot open the conversation (the comments route 404s), so
+    // the feed card must not advertise its sources or corrections.
+    const removed = await seedStory(fixture.ingestion, { title: 'Removed thread' });
+    await seedSourcedComments(removed.threadId, 4);
+    await fixture.events.safetyStore.set({
+      itemId: removed.threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'moderator',
+      updatedAt: new Date().toISOString(),
+    });
+    await runFeatureBatch(featureDeps(), 50, 6);
+    const items = await fullFrontPage();
+    const item = items.find((i) => i.story_id === removed.storyId);
+    expect(item).toBeDefined();
+    expect(item?.sources_count).toBe(0);
+    expect(item?.corrections).toEqual({ active: 0, validated: 0, incorrect: 0 });
   });
 });

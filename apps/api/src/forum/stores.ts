@@ -158,6 +158,17 @@ export interface CreatedAtCursor {
 // Store interfaces.
 // ---------------------------------------------------------------------------
 
+/** Per-thread story-card signal counts (published rows only; see
+ *  `ContributionStore.cardSignalCounts`). */
+export interface ThreadSignalCounts {
+  /** Published comments carrying ≥1 citation (the "Sources" view count). */
+  sourced: number;
+  /** Published rows challenged and UPHELD by a WS-T debate (`validated`). */
+  validated: number;
+  /** Published rows a sourced correction PREVAILED against (`incorrect`). */
+  incorrect: number;
+}
+
 export type ContributionInsertOutcome =
   | { ok: true; contribution: ContributionRecord; duplicate: boolean }
   | { ok: false; reason: 'storage_conflict' };
@@ -230,6 +241,13 @@ export interface ContributionStore {
   /** WS-T — count a thread's SOURCED contributions (comments carrying ≥1
    *  citation) in the given states — the "Sources" overview count. */
   countSourced(threadId: string, states: readonly ContributionModerationState[]): Promise<number>;
+  /** Story-card signals — ONE batched read per feed page (SPEC §5.6).  For
+   *  each given thread: the sourced-comment count (the `countSourced`
+   *  predicate) and the dispute tallies (`validated` / `incorrect` rows).
+   *  PUBLISHED rows only, by design: the card describes what a reader can
+   *  actually find in the comment section, so a moderator-hidden row never
+   *  counts.  Threads with no matching rows are absent from the map. */
+  cardSignalCounts(threadIds: readonly string[]): Promise<Map<string, ThreadSignalCounts>>;
   /** Citation-bearing contributions ACROSS ALL THREADS (sourced comments +
    *  corrections — every row carrying ≥ 1 citation), `(created_at, id)`
    *  ascending keyset — the WS-J evidence-queue feed (STEWARD_ROLES.md
@@ -683,6 +701,23 @@ export class InMemoryContributionStore implements ContributionStore {
       }
     }
     return count;
+  }
+
+  async cardSignalCounts(threadIds: readonly string[]): Promise<Map<string, ThreadSignalCounts>> {
+    const wanted = new Set(threadIds);
+    const counts = new Map<string, ThreadSignalCounts>();
+    for (const row of this.#rows.values()) {
+      if (!wanted.has(row.threadId) || row.moderationState !== 'published') continue;
+      let entry = counts.get(row.threadId);
+      if (!entry) {
+        entry = { sourced: 0, validated: 0, incorrect: 0 };
+        counts.set(row.threadId, entry);
+      }
+      if (isSourcedRow(row)) entry.sourced += 1;
+      if (row.disputeStatus === 'validated') entry.validated += 1;
+      else if (row.disputeStatus === 'incorrect') entry.incorrect += 1;
+    }
+    return counts;
   }
 
   async listCited(opts: {

@@ -791,6 +791,45 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(walked).not.toContain(hidden.contributionId); // states filter bites
   });
 
+  it('cardSignalCounts batches the §5.6 signals with one grouped read, published-only', async () => {
+    const stories = new DrizzleStoryStore(db);
+    const signalThreadId = await seedThread(stories);
+    const quietThreadId = await seedThread(stories);
+    const insertRow = async (
+      over: Partial<Pick<ContributionRecord, 'type' | 'citations' | 'moderationState'>> = {},
+    ): Promise<ContributionRecord> => {
+      const outcome = await contributions.insert(
+        contributionInput({ threadId: signalThreadId, ...over }),
+      );
+      if (!outcome.ok) throw new Error('card-signal insert failed');
+      return outcome.contribution;
+    };
+    const cite = [{ url: 'https://example.org/signal-source' }];
+    await insertRow({ citations: cite }); // sourced
+    const validated = await insertRow(); // challenged and upheld
+    const incorrect = await insertRow({ citations: cite }); // sourced AND incorrect
+    await insertRow({ type: 'correction', citations: cite }); // corrections are never "sourced"
+    const hidden = await insertRow({ citations: cite, moderationState: 'under_review' });
+    await contributions.setDisputeStatus(validated.contributionId, 'validated');
+    await contributions.setDisputeStatus(incorrect.contributionId, 'incorrect');
+    // A hidden row's dispute tag never reaches the tallies (published-only).
+    await contributions.setDisputeStatus(hidden.contributionId, 'validated');
+
+    const counts = await contributions.cardSignalCounts([
+      signalThreadId,
+      quietThreadId,
+      randomUUID(),
+    ]);
+    // The dispute tags are ORTHOGONAL to the sourced predicate: the incorrect
+    // row still carries its citation, so it counts in BOTH tallies.
+    expect(counts.get(signalThreadId)).toEqual({ sourced: 2, validated: 1, incorrect: 1 });
+    // A thread with no matching rows — and an unknown id — is simply absent.
+    expect(counts.has(quietThreadId)).toBe(false);
+    // …and the batched sourced count agrees with the single-thread read.
+    expect(await contributions.countSourced(signalThreadId, ['published'])).toBe(2);
+    expect(await contributions.cardSignalCounts([])).toEqual(new Map());
+  });
+
   it('listThreadsByRoom pages by the descending keyset exactly once', async () => {
     const room = roomInput();
     expect((await roomsStore.insert(room)).ok).toBe(true);

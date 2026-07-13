@@ -226,8 +226,9 @@ licio/
 │   │       │   │                           join + governance; default "Undecided") + RoomMembership
 │   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership; picks
 │   │       │   │                           the posting lens on join)
-│   │       │   ├── story/               -- StoryCard, RatingLabel,
-│   │       │   │                           ExposureLabel, TopicRepeatsButton,
+│   │       │   ├── story/               -- StoryCard, StorySignals (§5.6 signal
+│   │       │   │                           row: sources count + corrections tally +
+│   │       │   │                           safety chip), DisputeBadge, TopicRepeatsButton,
 │   │       │   │                           IndependentSourcesDrawer (WS-H §7.6),
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)

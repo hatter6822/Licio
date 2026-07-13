@@ -5,7 +5,7 @@
 // an icon always meets the same 3:1 non-text contrast as its surrounding text.
 // Decorative dots use an explicit fill; everything else is stroked by the
 // parent <svg>. This registry is the single source for the status-icon
-// vocabulary reused by rating labels, badges, semantic colours and validation.
+// vocabulary reused by story signals, badges, semantic colours and validation.
 import type { ReactElement } from 'react';
 
 export const iconPaths = {
@@ -243,6 +243,15 @@ export const iconPaths = {
     <>
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v5l3 2" />
+    </>
+  ),
+  // A correction debate in progress (the §5.6 corrections tally, WS-T).
+  hourglass: (
+    <>
+      <path d="M6 3h12" />
+      <path d="M6 21h12" />
+      <path d="M7 3v3.5a5 5 0 0 0 2.2 4.15L12 12l-2.8 1.35A5 5 0 0 0 7 17.5V21" />
+      <path d="M17 3v3.5a5 5 0 0 1-2.2 4.15L12 12l2.8 1.35a5 5 0 0 1 2.2 4.15V21" />
     </>
   ),
   // ---- Rich-text composer toolbar (WS-Q.5.2a) ----

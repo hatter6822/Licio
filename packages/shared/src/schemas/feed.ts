@@ -19,11 +19,44 @@ export const FEED_MODES = [
 export type FeedMode = (typeof FEED_MODES)[number];
 export const feedModeSchema = z.enum(FEED_MODES);
 
-/** Rating labels describe conversation STATE, never popularity (WS-B.2.3).
- *  `new` is the neutral floor (SPEC §5.6): a story with no active-reading signal
- *  yet — so the default never falsely claims "Getting Attention" (reading is
- *  increasing) for a story nobody has read. */
-export const RATING_LABEL_KINDS = [
+/**
+ * Per-story corrections tally (SPEC §5.6) — the WS-T adjudication record of the
+ * story's COMMENT section, surfaced as compact card signals. Counts describe
+ * content-integrity outcomes, never popularity:
+ *   `active`    — live debate arenas over the story's comments (corrections
+ *                 currently being argued).
+ *   `validated` — comments that were challenged and UPHELD (proven accurate).
+ *   `incorrect` — comments a sourced correction PREVAILED against (kept
+ *                 visible, demoted, tagged).
+ * The story's OWN posture is deliberately excluded — it is carried separately
+ * by `dispute_status`, so the two signals never double-report one debate.
+ */
+export const storyCorrectionsSchema = z.object({
+  active: z.number().int().min(0),
+  validated: z.number().int().min(0),
+  incorrect: z.number().int().min(0),
+});
+export type StoryCorrections = z.infer<typeof storyCorrectionsSchema>;
+
+export const EMPTY_STORY_CORRECTIONS: StoryCorrections = Object.freeze({
+  active: 0,
+  validated: 0,
+  incorrect: 0,
+});
+
+/**
+ * DEPRECATED — rollout compatibility only. The §5.6 rating-label pill was
+ * removed (see `storyCorrectionsSchema` above), but a pre-redesign cached PWA
+ * bundle still validates feed/detail responses against a schema that REQUIRES
+ * `rating_label`; omitting it would hard-fail every stale bundle until its
+ * service worker updates. The server therefore keeps emitting a legacy
+ * approximation (`legacyRatingLabel` in utils/story-safety.ts) and the field
+ * stays declared here as OPTIONAL so the route-level response validation does
+ * not strip it. New clients never read it. Remove the field, the emitters,
+ * and `legacyRatingLabel` once pre-redesign bundles have aged out (tracked in
+ * docs/ranking/README.md).
+ */
+export const LEGACY_RATING_LABELS = [
   'new',
   'getting-attention',
   'deepening',
@@ -32,8 +65,7 @@ export const RATING_LABEL_KINDS = [
   'resolved-context',
   'bridge-active',
 ] as const;
-export const ratingLabelKindSchema = z.enum(RATING_LABEL_KINDS);
-export type RatingLabelKind = (typeof RATING_LABEL_KINDS)[number];
+export type LegacyRatingLabel = (typeof LEGACY_RATING_LABELS)[number];
 
 /** Story-level safety posture surfaced to readers (SPEC §22.1 safety_state). */
 export const safetyStateSchema = z.enum(['ok', 'caution', 'under-review', 'restricted']);
@@ -88,7 +120,16 @@ export const feedItemSchema = z.object({
   /** WS-Q.5.2c native media (image/video posts); absent for non-media stories. */
   media: feedMediaSchema.nullish(),
   reading_minutes: z.number().int().nonnegative(),
-  rating_label: ratingLabelKindSchema,
+  /** Published comments carrying ≥1 citation — the same count as the comment
+   *  section's "Sources" view (`sources_count` on the WS-T overview), so the
+   *  card number always matches what the reader finds inside. Defaults to 0 so
+   *  producers/caches predating the signal stay valid on the wire. */
+  sources_count: z.number().int().min(0).default(0),
+  /** WS-T corrections tally for the comment section (see storyCorrectionsSchema). */
+  corrections: storyCorrectionsSchema.default(EMPTY_STORY_CORRECTIONS),
+  /** DEPRECATED — emitted for pre-redesign cached bundles only (see
+   *  LEGACY_RATING_LABELS). New clients ignore it. */
+  rating_label: z.enum(LEGACY_RATING_LABELS).optional(),
   /** Human-readable distribution reason; never a raw numeric score. */
   distribution_reason: z.string().min(1),
   context_chips: z.array(contextChipSchema).default([]),

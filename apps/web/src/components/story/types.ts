@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { ContributionDisputeStatus } from '@licio/shared';
+import type { ContributionDisputeStatus, StoryCorrections, StorySafetyState } from '@licio/shared';
 //
 // Presentation types for the story surface (WS-B.2.1a). These are no-applause-
 // safe BY CONSTRUCTION: there is deliberately no `likeCount`, `voteCount`,
 // `score`, `reactions`, `followerCount`, or `shareCount` field anywhere. The
 // type system is the first line of the no-applause guarantee (Sections 2.4, 5.1);
 // the absence is also asserted at runtime in StoryCard.no-applause.test.tsx.
+// The §5.6 signal counts below (sources, corrections) are content-INTEGRITY
+// counts — citation- and adjudication-derived — never engagement counts.
 import type { IconName } from '../ui/Icon/index.js';
-import type { RatingLabelKind } from './RatingLabel/index.js';
 
 export interface Story {
   id: string;
@@ -49,7 +50,15 @@ export interface StoryMediaData {
 
 export interface StoryCardData {
   story: Story;
-  ratingLabel: RatingLabelKind;
+  /** Published comments carrying ≥1 citation — the same count the comment
+   *  section's "Sources" view shows (SPEC §5.6 card signal). */
+  sourcesCount: number;
+  /** WS-T corrections tally for the comment section (live/validated/incorrect).
+   *  The story's OWN posture rides `disputeStatus` separately. */
+  corrections: StoryCorrections;
+  /** §22.1 safety posture; the card surfaces a compact "Under review" chip for
+   *  `under-review`/`restricted`. Absent ⇒ `ok`. Descriptive, not a sanction. */
+  safetyState?: StorySafetyState;
   /** WS-T dispute posture (SPEC §15.4): drives the "Challenged"/"Incorrect"
    *  badge. Absent ⇒ undisputed. A content-integrity signal, never applause. */
   disputeStatus?: ContributionDisputeStatus;

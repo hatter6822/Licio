@@ -54,18 +54,23 @@ import {
   topicRelevance,
 } from '@licio/ranking';
 import {
-  deriveRatingLabel,
   deriveStorySafetyState,
   type FeedItem,
   type FeedMode,
   feedItemSchema,
   isSentinelTopicId,
+  legacyRatingLabel,
   rankingDecisionLoggedEventSchema,
   TOPIC_ID_BY_SLUG,
   TOPIC_REGISTRY,
   uuidSchema,
 } from '@licio/shared';
 import type { NewStoredEvent } from '../events/stores.js';
+import {
+  EMPTY_CARD_SIGNALS,
+  type StoryCardSignals,
+  storyCardSignals,
+} from '../forum/card-signals.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
 import type { ThreadShellRecord } from '../ingestion/stores.js';
 import { makeMediaUrlMinter } from '../lib/media-urls.js';
@@ -168,6 +173,25 @@ function feedSafetyState(
   });
 }
 
+/**
+ * Batch the SPEC §5.6 story-card signals for a feed page — the shared forum
+ * derivation over this page's story→thread map.  Both the ranked path and the
+ * WS-I.4.1b fallback serve through this, so a degraded feed still carries
+ * honest signals.
+ */
+async function cardSignalsForPage(
+  services: RankingServices,
+  storyIds: readonly string[],
+): Promise<Map<string, StoryCardSignals>> {
+  if (storyIds.length === 0) return new Map();
+  const threads = await services.ingestion.stories.getThreadsByStoryIds([...storyIds]);
+  const threadByStory = new Map<string, string | null>();
+  for (const storyId of storyIds) {
+    threadByStory.set(storyId, threads.get(storyId)?.threadId ?? null);
+  }
+  return storyCardSignals(services.forum, services.events.safetyStore, threadByStory);
+}
+
 /** One selected entry on its way to the wire. */
 interface SelectedEntry {
   itemId: string;
@@ -176,16 +200,15 @@ interface SelectedEntry {
   features: FeatureVector | undefined;
   /** Same-cluster items demoted by dedup ("more on this story"). */
   moreOnThisStory: readonly string[];
-  /** §10.6 divergence signal for the §5.6 label: the item carries the
-   *  `scoi_context_card` constraint flag at a non-low stored SCOI level. */
-  interpretationsDiverge: boolean;
+  /** The batched §5.6 card signals (sourced comments + corrections tally). */
+  signals: StoryCardSignals;
 }
 
 /**
  * Map selected entries onto §23.3 FeedItems with BATCHED reads: one bulk
- * story read, one bulk thread read, one bulk safety read, one lens listing
- * per distinct room, and parallel sourced-comment counts — never per-item serial
- * round trips on the serving path.
+ * story read, one bulk thread read, one bulk safety read — never per-item
+ * serial round trips on the serving path.  The §5.6 card signals (sourced
+ * comments + corrections tally) arrive pre-batched on each entry.
  */
 async function buildFeedItems(
   services: RankingServices,
@@ -198,21 +221,13 @@ async function buildFeedItems(
     services.ingestion.stories.getThreadsByStoryIds(ids),
     services.events.safetyStore.getMany(ids),
   ]);
-  const sourcedCounts = await Promise.all(ids.map((id) => sourcedCountOf(services, id)));
   const items: FeedItem[] = [];
-  for (const [index, entry] of entries.entries()) {
+  for (const entry of entries) {
     const story = stories.get(entry.itemId);
     if (story === undefined) continue;
     const thread = threads.get(entry.itemId);
-    const sourced = sourcedCounts[index] ?? 0;
     const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
     const chips: Array<{ id: string; label: string }> = [];
-    if (sourced > 0) {
-      chips.push({
-        id: 'sources',
-        label: `${sourced} sourced ${sourced === 1 ? 'comment' : 'comments'}`,
-      });
-    }
     if (entry.features?.mfci_risk_state === 'normal') {
       chips.push({ id: 'coordination', label: 'low coordination risk' });
     }
@@ -227,21 +242,6 @@ async function buildFeedItems(
       thread,
       safeties.get(entry.itemId)?.safetyState === 'frozen',
     );
-    // SPEC §5.6 — the SINGLE rating-label derivation (shared with the
-    // story-detail read). Live invariant signals — safety review, SCOI
-    // interpretation divergence — outrank the slow lifecycle state (the §10.5
-    // principle generalised to every label), so e.g. a thread under
-    // coordination review reads "Under Review".
-    const ratingLabel = deriveRatingLabel({
-      lifecycleState: story.lifecycleState,
-      safetyState,
-      interpretationsDiverge: entry.interpretationsDiverge,
-      // The served ActiveAttention component keeps the default label truthful:
-      // "Getting Attention" only when there is a real signal, else "New".
-      ...(entry.features?.active_attention !== undefined
-        ? { activeAttention: entry.features.active_attention }
-        : {}),
-    });
     items.push(
       feedItemSchema.parse({
         story_id: story.storyId,
@@ -251,7 +251,21 @@ async function buildFeedItems(
         visibility: story.visibility,
         media: feedMediaOf(story, makeMediaUrlMinter()),
         reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
-        rating_label: ratingLabel,
+        // SPEC §5.6 — the compact card signals that replaced the rating label:
+        // the sourced-comment count (matches the comment section's "Sources"
+        // view) and the WS-T corrections tally for the comment section.
+        sources_count: entry.signals.sourced,
+        corrections: entry.signals.corrections,
+        // DEPRECATED rollout compat: pre-redesign cached bundles REQUIRE
+        // rating_label; emit the legacy approximation until they age out
+        // (see LEGACY_RATING_LABELS in @licio/shared).
+        rating_label: legacyRatingLabel({
+          lifecycleState: story.lifecycleState,
+          safetyState,
+          ...(entry.features?.active_attention !== undefined
+            ? { activeAttention: entry.features.active_attention }
+            : {}),
+        }),
         distribution_reason: entry.explanation.distributionReason,
         context_chips: chips,
         safety_state: safetyState,
@@ -418,28 +432,27 @@ async function lensAssignments(
 }
 
 /**
- * §10.6 interpretation-divergence flags (WS-I.2.4c) for the §5.6 label: an
- * item diverges when the constraint stage flagged it (`scoi_context_card`)
- * and its stored SCOI level is non-low.  Derived from the ALREADY-JOINED
- * features — no extra store reads; the lens-map detail lives on the story
- * read surface (`GET /v1/stories/{id}/interpretations`), which is where the
- * client actually consumes it (the compact feed card payload had no client
- * and was removed with the other unreachable planes).
+ * §10.6 interpretation-divergence observability (WS-I.2.4c): an item diverges
+ * when the constraint stage flagged it (`scoi_context_card`) and its stored
+ * SCOI level is non-low.  Derived from the ALREADY-JOINED features — no extra
+ * store reads.  This is a metrics-only pass (it feeds the context-gate
+ * dashboard that resources the bridge/expert queue); the reader-facing
+ * divergence surface is the story read's "Where interpretations differ"
+ * drawer (`GET /v1/stories/{id}/interpretations`), not a feed-card label —
+ * the §5.6 rating label that used to consume this flag was removed with the
+ * story-card signal redesign.
  */
-function interpretationDivergenceFor(
+function recordInterpretationDivergence(
   selected: readonly ScoredItem[],
   featuresById: ReadonlyMap<string, FeatureVector>,
   metrics: RankingServices['events']['metrics'],
-): Map<string, boolean> {
-  const out = new Map<string, boolean>();
+): void {
   for (const item of selected) {
     const diverges =
       item.constraint_flags.includes('scoi_context_card') &&
       (featuresById.get(item.item_id)?.scoi_level ?? 'low') !== 'low';
-    out.set(item.item_id, diverges);
     if (diverges) metrics.increment('ranking.context_gate.card');
   }
-  return out;
 }
 
 /**
@@ -795,14 +808,11 @@ export async function serveFeed(
     request.userId === null
       ? new Map<string, string>()
       : await collectSeen(services, request.userId);
-  const sourcedCounts = await Promise.all(
-    ranked.selected.map((scored) => sourcedCountOf(services, scored.item_id)),
+  const signalsByStory = await cardSignalsForPage(
+    services,
+    ranked.selected.map((scored) => scored.item_id),
   );
-  const divergenceById = interpretationDivergenceFor(
-    ranked.selected,
-    featuresById,
-    services.events.metrics,
-  );
+  recordInterpretationDivergence(ranked.selected, featuresById, services.events.metrics);
   // "More on this story" (WS-I.2.4a): the selected cluster representative
   // carries its demoted same-cluster siblings.
   const moreByItem = new Map<string, string[]>();
@@ -817,11 +827,11 @@ export async function serveFeed(
   const explanationIds: Record<string, string> = {};
   const scoreComponents: Record<string, ScoredItem> = {};
   const entries: SelectedEntry[] = [];
-  for (const [index, scored] of ranked.selected.entries()) {
+  for (const scored of ranked.selected) {
     const features = featuresById.get(scored.item_id);
     // The "{n} sourced comments" template — fed the thread's published
     // sourced-contribution count so the wording is literally true.
-    const sourcedCount = sourcedCounts[index] ?? 0;
+    const sourcedCount = signalsByStory.get(scored.item_id)?.sourced ?? 0;
     const explanation = explainItem(
       scored,
       {
@@ -849,7 +859,7 @@ export async function serveFeed(
       explanation,
       features,
       moreOnThisStory: moreByItem.get(scored.item_id) ?? [],
-      interpretationsDiverge: divergenceById.get(scored.item_id) ?? false,
+      signals: signalsByStory.get(scored.item_id) ?? EMPTY_CARD_SIGNALS,
     });
   }
   const items = await buildFeedItems(services, entries);
@@ -929,15 +939,6 @@ async function collectSeen(
   return seen;
 }
 
-/** The story thread's SOURCED contribution count (published comments carrying
- *  ≥1 citation) — the comment-centric input behind the "N sourced comments"
- *  chip and the sources-rising explanation. */
-async function sourcedCountOf(services: RankingServices, storyId: string): Promise<number> {
-  const thread = await services.ingestion.stories.getThreadByStoryId(storyId);
-  if (thread === null) return 0;
-  return services.forum.contributions.countSourced(thread.threadId, ['published']);
-}
-
 interface FallbackArgs {
   requestId: string;
   parentRequestId: string | null;
@@ -969,13 +970,19 @@ async function serveFallback(
 ): Promise<ServedFeed> {
   const ordered = chronologicalOrder(args.feasible).slice(0, args.profile.page_size);
   const explanation = fallbackExplanation(args.reason, SERVED_EXPLANATION_LOCALE);
+  // The degraded feed still carries honest §5.6 card signals — one batched
+  // read, same as the ranked path.
+  const signalsByStory = await cardSignalsForPage(
+    services,
+    ordered.map((candidate) => candidate.item_id),
+  );
   const entries: SelectedEntry[] = ordered.map((candidate) => ({
     itemId: candidate.item_id,
     score: 0,
     explanation,
     features: undefined,
     moreOnThisStory: [],
-    interpretationsDiverge: false,
+    signals: signalsByStory.get(candidate.item_id) ?? EMPTY_CARD_SIGNALS,
   }));
   const items = await buildFeedItems(services, entries);
   const servedIds = new Set(items.map((item) => item.story_id));

@@ -316,7 +316,7 @@ describe('topic feed surface (GET /v1/feed?topic=…)', () => {
 });
 
 describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
-  it('SCOI-flagged items carry the context card and the needs-context label', async () => {
+  it('SCOI-flagged items are still counted by the context-gate metric', async () => {
     const { storyId } = await seedStory(fixture.ingestion);
     await seedInvariantOutput(fixture.events, {
       invariantType: 'SCOI',
@@ -324,6 +324,7 @@ describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
       scoreVector: { scoi: 0.45, context_state: 'split', lens_count: 3 },
     });
     await runFeatureBatch(featureDeps(), 50, 6);
+    const before = fixture.events.metrics.counter('ranking.context_gate.card');
     const served = await serveFeed(fixture.ranking, {
       userId: null,
       surface: 'front_page',
@@ -331,15 +332,16 @@ describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    const item = served.items.find((i) => i.story_id === storyId);
-    // §10.5: the live SCOI divergence signal (the scoi_context_card constraint
-    // flag at a non-low stored level) outranks the lifecycle label mapping.
-    // The compact card payload itself left the wire with the other
-    // client-unreachable planes — the label IS the feed's divergence surface;
-    // the lens map lives on GET /v1/stories/:id/interpretations.
-    expect(item?.rating_label).toBe('needs-context');
-    // An unflagged item keeps its lifecycle-derived label (no divergence).
+    expect(served.items.some((i) => i.story_id === storyId)).toBe(true);
+    // §10.6 observability survives the rating-label removal: a served item
+    // carrying the scoi_context_card constraint flag at a non-low stored level
+    // still increments the context-gate dashboard counter.  The reader-facing
+    // divergence surface is the story page's "Where interpretations differ"
+    // drawer (GET /v1/stories/:id/interpretations), not a feed-card label.
+    expect(fixture.events.metrics.counter('ranking.context_gate.card')).toBe(before + 1);
+    // An unflagged item does not move the counter.
     const clean = await seedStory(fixture.ingestion);
+    const mid = fixture.events.metrics.counter('ranking.context_gate.card');
     const second = await serveFeed(fixture.ranking, {
       userId: null,
       surface: 'front_page',
@@ -347,8 +349,10 @@ describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(second.items.find((i) => i.story_id === clean.storyId)?.rating_label).not.toBe(
-      'needs-context',
+    expect(second.items.some((i) => i.story_id === clean.storyId)).toBe(true);
+    // Only the still-served SCOI-flagged item increments it on the second page.
+    expect(fixture.events.metrics.counter('ranking.context_gate.card')).toBe(
+      mid + (second.items.some((i) => i.story_id === storyId) ? 1 : 0),
     );
   });
 
