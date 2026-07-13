@@ -19,8 +19,11 @@
 import {
   SIMULATOR_CONTROL_HEADER,
   simulatorConfigureRequestSchema,
+  simulatorDebateFastForwardRequestSchema,
+  simulatorDebateFastForwardResponseSchema,
   simulatorStartRequestSchema,
   simulatorStatusSchema,
+  uuidSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { rateLimit } from '../lib/rate-limit.js';
@@ -89,6 +92,23 @@ export function createSimulatorRoutes(sim: DevTrafficSimulator) {
         if (!parsed.success) return c.json({ ok: false, code: 'invalid_request' }, 400);
         sim.configure(parsed.data);
         return c.json(simulatorStatusSchema.parse(sim.status()));
+      })
+      // WS-T fast-forward: jump a debate to its next lifecycle milestone by
+      // shifting ITS deadlines into the past and running the REAL lifecycle
+      // sweep (snapshot + governed adjudicator + broadcasts + dispute tags),
+      // so a developer can watch a real spec-window (24h) arena resolve on
+      // demand. Works whether or not the simulator loop runs.
+      .post('/debates/:debateId/fast-forward', controlLimiter, async (c) => {
+        const denied = controlGuard(c.req.header(SIMULATOR_CONTROL_HEADER), c.req.header('origin'));
+        if (denied !== null) return c.json({ ok: false, ...denied }, 403);
+        const debateId = uuidSchema.safeParse(c.req.param('debateId'));
+        if (!debateId.success) return c.json({ ok: false, code: 'invalid_request' }, 400);
+        const raw = await c.req.json().catch(() => ({}));
+        const parsed = simulatorDebateFastForwardRequestSchema.safeParse(raw);
+        if (!parsed.success) return c.json({ ok: false, code: 'invalid_request' }, 400);
+        const outcome = await sim.fastForwardDebate(debateId.data, parsed.data.to);
+        if (!outcome.ok) return c.json({ ok: false, code: outcome.code }, 404);
+        return c.json(simulatorDebateFastForwardResponseSchema.parse(outcome));
       })
   );
 }

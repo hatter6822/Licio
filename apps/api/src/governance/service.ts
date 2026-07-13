@@ -1309,6 +1309,79 @@ export class GovernanceService {
     return this.deps.stores.agentActions.listByRoom(roomId, limit);
   }
 
+  /**
+   * WS-U `debate.judge` routing (SPEC §24.6; docs/forum/DEBATE-ARENA.md): a
+   * governed room whose ratified agent holds the `debate.judge` capability
+   * adjudicates its own debate queue — the room's community-ratified prompt
+   * conditions the governed LLM debate leg (subordinate to the platform
+   * rules).  Deny-by-default, all fail-closed to the platform legs: an
+   * inactive/frozen binding, a descriptor without the capability, a missing
+   * model or prompt, or a model admitted under a DIFFERENT backend than the
+   * live one (the same admission pin as `classify`/`agentOperative`) all
+   * resolve null.
+   */
+  async debateConditioning(roomId: string): Promise<DebateRoomConditioning | null> {
+    const binding = await this.deps.stores.bindings.get(roomId);
+    if (binding === null || !binding.active) return null;
+    if (!hasCapability(binding.capabilityDescriptor, 'debate.judge')) return null;
+    const model = await this.deps.stores.models.get(binding.modelId);
+    if (!model) return null;
+    const proposer = this.deps.moderationProposer;
+    if (
+      proposer !== undefined &&
+      proposer.backendId !== undefined &&
+      proposer.backendId !== model.admittedBackendId
+    ) {
+      return null;
+    }
+    const prompt = await this.deps.stores.prompts.get(binding.promptId);
+    if (prompt === null) return null;
+    return {
+      roomId,
+      prompt: prompt.promptText,
+      modelId: binding.modelId,
+      promptHash: this.deps.digest(`${binding.modelId}:${binding.promptId}`),
+    };
+  }
+
+  /**
+   * Append a room agent's debate adjudication to the agent action log (the
+   * WS-U provenance triple).  The model/prompt provenance comes from the
+   * CONDITIONING THAT ACTUALLY JUDGED (`debateConditioning`'s resolved
+   * `modelId`/`promptHash`) — never re-read here, so a binding swap while the
+   * judge was running can never attribute the verdict to a model/prompt other
+   * than the one pinned in its AIOutputRecord.  Reversible: the room
+   * steward's 24h overrule is the human remedy over every adjudicator leg.
+   */
+  async recordDebateAgentAction(entry: {
+    roomId: string;
+    debateId: string;
+    verdict: string;
+    winner: string;
+    rationale: string | null;
+    /** The ratified model behind the conditioning that judged. */
+    modelId: string;
+    /** The binding's model+prompt digest from that same conditioning. */
+    promptHash: string;
+  }): Promise<void> {
+    await this.deps.stores.agentActions.append({
+      actionId: this.deps.uuid(),
+      roomId: entry.roomId,
+      bindingModelId: entry.modelId,
+      promptHash: entry.promptHash,
+      actionType: 'debate.judge',
+      subjectRef: entry.debateId,
+      lawPackRuleRef: null, // the model is not a DSL rule; provenance is the AIOutputRecord
+      statementOfReasons: `${entry.verdict} (${entry.winner})${
+        entry.rationale !== null && entry.rationale.length > 0
+          ? ` — ${entry.rationale.slice(0, 500)}`
+          : ''
+      }`,
+      reversible: true, // the steward's 24h overrule is the human remedy
+      createdAt: this.iso(),
+    });
+  }
+
   // --- Stage 4/5: law-pack + kernel-backed treasury (behind the crypto flag) ---
 
   /**
@@ -1554,6 +1627,23 @@ function stableBundle(bundle: GovernancePolicyBundle): string {
 }
 
 /** A moderation-only default law-pack (no treasury) for crypto-off rooms. */
+/**
+ * The room-conditioning block `GovernanceService.debateConditioning` resolves
+ * for a governed room whose ratified agent holds `debate.judge`: the governed
+ * LLM debate leg folds `prompt` into its system prompt (subordinate to the
+ * platform rules) and pins `modelId`/`promptHash` into the verdict's
+ * provenance (AIOutputRecord input refs + the agent action log).
+ */
+export interface DebateRoomConditioning {
+  roomId: string;
+  /** The community-ratified in-room prompt text. */
+  prompt: string;
+  /** The ratified model behind the binding (provenance). */
+  modelId: string;
+  /** The binding's model+prompt digest (provenance). */
+  promptHash: string;
+}
+
 export function defaultModerationLawPack(roomId: string): LawPack {
   return {
     lawPackId: `default-mod:${roomId}`,
@@ -1569,6 +1659,11 @@ export function defaultModerationLawPack(roomId: string): LawPack {
       'moderate.warn',
       'moderate.restrict',
       'moderate.remove',
+      // WS-T/WS-U — the room's AI resolution queue: a ratified agent that
+      // requests it adjudicates the room's own correction debates (the
+      // deterministic shell + the steward's 24h overrule bound it; a room
+      // that never requests it falls to the platform adjudicator).
+      'debate.judge',
       'lawmaking.summarize',
     ],
     treasury: {

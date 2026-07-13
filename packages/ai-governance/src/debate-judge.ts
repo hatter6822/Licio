@@ -17,8 +17,9 @@
 //     WS-K "real model backend is a seam" contract.
 //
 // The inputs are CONTENT-STRUCTURAL ONLY — source count, independent-domain
-// count, link-safety pass rate, source reliability (WS-F), evidence substance,
-// and direct rebuttal.  There is NO author, topic, viewpoint, wealth, or payment
+// count, link-safety pass rate, source reliability (WS-F), evidence substance
+// (over the side's LOCKED underlying content + its rebuttal statement), and
+// direct rebuttal.  There is NO author, topic, viewpoint, wealth, or payment
 // feature, so the adjudicator cannot encode viewpoint preference (neutrality)
 // and is not a member vote/tally (no-applause; the verdict is an adjudication).
 //
@@ -49,7 +50,8 @@ export interface DebateSideFeatures {
   linkSafeRate: number;
   /** Mean known WS-F reliability × the fraction of sources with a known signal. */
   effectiveReliability: number;
-  /** Normalized summary substance (min(tokens/200, 1)). */
+  /** Normalized substance of the side's material — the locked underlying
+   *  content PLUS the rebuttal statement (min(tokens/200, 1)). */
   substance: number;
   /** 1 when this side directly rebuts the opponent, else 0. */
   rebuts: number;
@@ -112,7 +114,9 @@ export function extractSideFeatures(side: DebateJudgeSideInput): DebateSideFeatu
     independentDomains: clamp01(domains.size / SOURCE_SATURATION),
     linkSafeRate: n > 0 ? clamp01(safe / n) : 0,
     effectiveReliability: clamp01(meanReliability * coverage),
-    substance: clamp01(tokenCount(side.summary) / SUBSTANCE_SATURATION_TOKENS),
+    substance: clamp01(
+      (tokenCount(side.content) + tokenCount(side.summary)) / SUBSTANCE_SATURATION_TOKENS,
+    ),
     rebuts: side.rebuts_opponent ? 1 : 0,
   };
 }
@@ -173,7 +177,11 @@ const ZERO_ROW = [0, 0, 0, 0, 0, 0] as const;
 const K_RUBRIC = RUBRIC_ROW.map((v) => K * v);
 const K_NEG_RUBRIC = RUBRIC_ROW.map((v) => -K * v);
 
-export const DEBATE_JUDGE_WEIGHTS_VERSION = '1.0.0';
+// 1.1.0: the substance feature now spans the side's LOCKED underlying content
+// + its rebuttal statement (the 24h live-window redesign) — same rubric, same
+// architecture; the version bump re-pins the decision surface in every
+// AIOutputRecord config hash.
+export const DEBATE_JUDGE_WEIGHTS_VERSION = '1.1.0';
 
 export const DEBATE_JUDGE_WEIGHTS: DebateJudgeWeights = {
   version: DEBATE_JUDGE_WEIGHTS_VERSION,

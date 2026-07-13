@@ -12,11 +12,12 @@
 // buttons.  When a thread continues past the view's depth budget the node links
 // into the dedicated page re-rooted at that comment instead of nesting further.
 import { type CommentItem as CommentItemType, resolveLegacyBareCitations } from '@licio/shared';
-import { Link, useNavigate } from '@tanstack/react-router';
+import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { cn } from '../../lib/cn.js';
 import { formatSourceUrl } from '../../lib/format-source-url.js';
+import { useOpenDebate } from '../debate/open-debate.js';
 import { ReportSheet } from '../safety/ReportSheet.js';
 import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { UgcBody } from '../ugc/UgcBody.js';
@@ -76,7 +77,7 @@ export function CommentNode({
   const [replying, setReplying] = useState(false);
   const [correcting, setCorrecting] = useState(false);
   const [reporting, setReporting] = useState(false);
-  const navigate = useNavigate();
+  const openDebate = useOpenDebate();
   // "Disputed" for dimming + blocking a new correction means an ACTIVE debate or
   // a settled-incorrect outcome. A `validated` comment (challenged and proven
   // accurate) is neither dimmed nor blocked — it stays re-challengeable on new
@@ -178,17 +179,19 @@ export function CommentNode({
           <Icon name="flag" className="size-4" aria-hidden />
         </button>
         {/* An open arena is challenging this comment: anyone — especially the
-            incumbent author returning to post their 12-hour position — reaches it
-            here (the `Correct` button is disabled while under debate). */}
+            incumbent author returning to adjust their content and post their
+            rebuttal — opens the arena MODAL here (the `Correct` button is
+            disabled while under debate). */}
         {comment.active_debate_id ? (
-          <Link
-            to="/stories/$storyId/debate/$debateId"
-            params={{ storyId, debateId: comment.active_debate_id }}
+          <button
+            type="button"
+            aria-haspopup="dialog"
             className={commentActionClass}
+            onClick={() => comment.active_debate_id && openDebate(comment.active_debate_id)}
           >
             <Icon name="chevron-right" className="size-3.5" aria-hidden />
             View debate
-          </Link>
+          </button>
         ) : null}
         {!canNestDeeper && replyCount > 0 ? (
           <ContinueThreadLink
@@ -217,10 +220,7 @@ export function CommentNode({
           onCancel={() => setCorrecting(false)}
           onOpened={(debateId) => {
             setCorrecting(false);
-            void navigate({
-              to: '/stories/$storyId/debate/$debateId',
-              params: { storyId, debateId },
-            });
+            openDebate(debateId);
           }}
         />
       </Dialog>

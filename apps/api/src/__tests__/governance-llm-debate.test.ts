@@ -39,11 +39,13 @@ const GOOD_ASSESSMENT = JSON.stringify({
 
 const INPUT: DebateJudgeInput = {
   incumbent: {
+    content: 'The disputed figure was 40% according to the original report.',
     summary: 'The original claim stands as written.',
     sources: [],
     rebuts_opponent: false,
   },
   challenger: {
+    content: 'The actual figure was 4%, per three independent measurements.',
     summary:
       'The correction cites three independent reports contradicting the claimed figure and quotes the original passage directly.',
     sources: [
@@ -238,8 +240,9 @@ describe('adjudicateDebate — LLM primary, deterministic MLP fail-closed fallba
     );
     expect(outcome.ok).toBe(true);
     if (outcome.ok) {
-      // The pinned-weights MLP rendered the verdict (its weights version).
-      expect(outcome.verdict.model_version).toBe('1.0.0');
+      // The pinned-weights MLP rendered the verdict (its weights version —
+      // 1.1.0: the substance feature spans the locked underlying content).
+      expect(outcome.verdict.model_version).toBe('1.1.0');
       // The strongly-sourced challenger still prevails on structural features.
       expect(outcome.verdict.verdict).toBe('corrected');
     }

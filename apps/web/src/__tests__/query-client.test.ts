@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { ApiClientError } from '../lib/api.js';
+import { storyDebatesPollInterval } from '../lib/queries.js';
 import { cachePolicy, createAppQueryClient } from '../lib/query-client.js';
 
 describe('createAppQueryClient', () => {
@@ -61,5 +62,14 @@ describe('cachePolicy', () => {
     expect(cachePolicy.walletGate.refetchInterval).toBeGreaterThan(0);
     // A pause must never be masked for as long as the profile cache would (5 min).
     expect(cachePolicy.walletGate.refetchInterval).toBeLessThan(cachePolicy.profile.staleTime);
+  });
+
+  it('WS-T — the story debate-discovery poll never STOPS on an empty story', () => {
+    // A challenge filed while a reader sits on a debate-less story must still
+    // surface: the empty state polls slower, but always (a `false` interval
+    // would hide every new debate until an unrelated refetch).
+    expect(storyDebatesPollInterval(2)).toBe(60_000);
+    expect(storyDebatesPollInterval(0)).toBeGreaterThan(0);
+    expect(storyDebatesPollInterval(0)).toBe(120_000);
   });
 });

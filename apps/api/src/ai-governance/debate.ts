@@ -18,29 +18,39 @@
 // TWO adjudicator backends run behind this ONE shell (production defaults to
 // the LLM; the MLP is the per-call fail-closed fallback):
 //   - the governed LLM leg (`llmJudge`, ai-governance/llm/debate.ts) — reads
-//     both positions' substance and emits class probabilities; the
-//     deterministic shell maps them to the outcome;
+//     both sides' locked material and emits class probabilities; the
+//     deterministic shell maps them to the outcome.  In a governed room whose
+//     ratified agent holds the WS-U `debate.judge` capability, the SAME leg
+//     runs ROOM-CONDITIONED: the room's community-ratified prompt is folded
+//     into the system prompt (subordinate to the platform rules) — that is
+//     "the room's AI resolution queue";
 //   - the pinned-weights MLP (`judgeDebate`) — content-structural features
 //     only; runs whenever no LLM is configured OR the LLM leg is unavailable
 //     (transport/refusal/schema/budget/breaker/record failure), so a verdict
 //     is always rendered at at least the deterministic quality floor.
 import { type DebateJudgeVerdict, judgeDebate } from '@licio/ai-governance';
 import type { DebateJudgeInput } from '@licio/shared';
+import type { DebateRoomConditioning } from '../governance/service.js';
 import type { ProhibitedUseGuard } from './guard.js';
 import { DEBATE_ADJUDICATOR } from './models.js';
 import { recordAiOutput } from './output-records.js';
 import type { AiOutputRecordStore } from './stores.js';
+
+export type { DebateRoomConditioning } from '../governance/service.js';
 
 /**
  * The governed LLM debate-adjudicator leg (WS-T; built at boot when an LLM
  * backend is enabled). Runs AFTER the shell's ProhibitedUseGuard. NEVER throws:
  * a null result means the LLM was unavailable and the shell falls back to the
  * deterministic MLP. A non-null result carries its own immutable
- * AIOutputRecord id (the LLM identity's provenance).
+ * AIOutputRecord id (the LLM identity's provenance).  `room`, when present,
+ * conditions the call on the governed room's ratified prompt (WS-U
+ * `debate.judge`).
  */
 export type LlmDebateJudge = (
   debateId: string,
   input: DebateJudgeInput,
+  room?: DebateRoomConditioning,
 ) => Promise<{ verdict: DebateJudgeVerdict; outputId: string } | null>;
 
 export interface AdjudicateDebateDeps {
@@ -49,10 +59,13 @@ export interface AdjudicateDebateDeps {
   now: () => number;
   /** The LLM leg (absent ⇒ the deterministic MLP adjudicates directly). */
   llmJudge?: LlmDebateJudge | undefined;
+  /** The governed room's resolved `debate.judge` conditioning (null/absent ⇒
+   *  the platform legs adjudicate). */
+  roomConditioning?: DebateRoomConditioning | null | undefined;
 }
 
 export type AdjudicateOutcome =
-  | { ok: true; verdict: DebateJudgeVerdict; outputId: string }
+  | { ok: true; verdict: DebateJudgeVerdict; outputId: string; viaRoomAgent: boolean }
   | { ok: false; reason: 'blocked' };
 
 /**
@@ -77,14 +90,22 @@ export async function adjudicateDebate(
   });
   if (decision.decision === 'block') return { ok: false, reason: 'blocked' };
 
-  // 2a. The governed LLM leg (production default). Fire-safe by contract: a
-  // null result means unavailable ⇒ fall through to the deterministic MLP, so
-  // an LLM outage degrades the verdict quality, never the verdict itself. A
-  // successful LLM verdict carries its own AIOutputRecord (the LLM identity).
+  // 2a. The governed LLM leg (production default) — ROOM-CONDITIONED when the
+  // arena's governed room holds `debate.judge` (the room's AI resolution
+  // queue). Fire-safe by contract: a null result means unavailable ⇒ fall
+  // through to the deterministic MLP, so an LLM outage degrades the verdict
+  // quality, never the verdict itself. A successful LLM verdict carries its
+  // own AIOutputRecord (the LLM identity).
   if (deps.llmJudge) {
-    const llmOutcome = await deps.llmJudge(debateId, input);
+    const room = deps.roomConditioning ?? undefined;
+    const llmOutcome = await deps.llmJudge(debateId, input, room);
     if (llmOutcome !== null) {
-      return { ok: true, verdict: llmOutcome.verdict, outputId: llmOutcome.outputId };
+      return {
+        ok: true,
+        verdict: llmOutcome.verdict,
+        outputId: llmOutcome.outputId,
+        viaRoomAgent: room !== undefined,
+      };
     }
   }
 
@@ -104,5 +125,5 @@ export async function adjudicateDebate(
     useCaseId: 'debate_adjudication',
     nowIso,
   });
-  return { ok: true, verdict, outputId: record.output_id };
+  return { ok: true, verdict, outputId: record.output_id, viaRoomAgent: false };
 }

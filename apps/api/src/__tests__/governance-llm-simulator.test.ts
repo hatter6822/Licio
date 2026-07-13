@@ -353,11 +353,13 @@ describe('lawmaking summariser — the simulated model through the governed prov
 describe('debate adjudication — the simulated model through the governed judge + shell', () => {
   const DEBATE_INPUT: DebateJudgeInput = {
     incumbent: {
+      content: 'The disputed figure was 40% according to the original report.',
       summary: 'The original claim stands as written.',
       sources: [],
       rebuts_opponent: false,
     },
     challenger: {
+      content: 'The actual figure was 4%, per three independent measurements.',
       summary:
         'The correction cites three independent reports contradicting the claimed figure and quotes the original passage directly.',
       sources: [
@@ -426,7 +428,7 @@ describe('debate adjudication — the simulated model through the governed judge
       poisoned,
     );
     expect(outcome.ok).toBe(true);
-    if (outcome.ok) expect(outcome.verdict.model_version).toBe('1.0.0'); // the MLP leg
+    if (outcome.ok) expect(outcome.verdict.model_version).toBe('1.1.0'); // the MLP leg
   });
 });
 

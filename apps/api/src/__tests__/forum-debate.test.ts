@@ -1,26 +1,44 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-T debate arena service — the full lifecycle: a sourced correction opens an
-// arena, both sides post co-visible positions within the 12h window, the
-// governed adjudicator renders a verdict + opens the 24h override window, the
-// steward fully overrules, and finalize tags the loser `incorrect` (visible, not
-// hidden).  Uses in-memory stores + a fake judge runner (the neural model is
-// tested in @licio/ai-governance).
+// WS-T debate arena service — the full lifecycle: a sourced correction opens a
+// live arena, both sides adjust their underlying content + co-visible rebuttal
+// statements while it is open, the material locks in by the EARLIER of the
+// both-sides-idle expedite or the 23h/24h schedule, the governed adjudicator
+// renders a verdict over the LOCKED material + opens the 24h override window,
+// the steward fully overrules, and finalize tags the loser `incorrect`
+// (visible, not hidden).  Withdrawal (challenger) and concession (incumbent)
+// close the arena early while it is open.  Uses in-memory stores + a fake
+// judge runner (the neural model is tested in @licio/ai-governance).
 import { randomUUID } from 'node:crypto';
-import { DEBATE_EDIT_WINDOW_MS, DEBATE_OVERRIDE_WINDOW_MS } from '@licio/shared';
+import {
+  DEBATE_EDIT_WINDOW_MS,
+  DEBATE_INACTIVITY_WINDOW_MS,
+  DEBATE_LIVE_WINDOW_MS,
+  DEBATE_OVERRIDE_WINDOW_MS,
+  type DebateJudgeInput,
+  MAX_CITATIONS,
+} from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  assembleJudgeInput,
+  closeDebatesForRemoval,
+  concedeDebate,
   type DebateDeps,
   type DebateJudgeRunner,
   domainOf,
   finalizeDebate,
   judgeDebateArena,
+  liveArenasForContribution,
+  lockDebateArena,
   maybeEnterDebate,
   overrideDebateVerdict,
   postDebatePosition,
+  readDebateArenaContent,
   runDebateLifecycle,
   toDebateArenaPublic,
   toDebateArenaSummary,
+  touchDebateActivityForContribution,
+  withdrawDebate,
 } from '../forum/debate.js';
 import { InMemoryDebateStore } from '../forum/debate-store.js';
 import { InMemoryContributionStore } from '../forum/stores.js';
@@ -116,6 +134,12 @@ beforeEach(() => {
     debates,
     contributions,
     storyAuthor: async () => INCUMBENT,
+    storyContent: async () => ({
+      title: 'The challenged story',
+      body: 'The story body under debate.',
+      citations: [{ url: 'https://story.example/source' }],
+      updatedAt: new Date(clock.ms).toISOString(),
+    }),
     isSteward: async (roomId, userId) => roomId === ROOM && userId === STEWARD,
     setStoryDispute: async (storyId, status) => {
       storyDisputes.set(storyId, status);
@@ -129,8 +153,15 @@ beforeEach(() => {
   };
 });
 
+/** Advance the clock past the arena's queue entry: the scheduled 24h resolve
+ *  instant (well past the 1h idle expedite too — direct `judgeDebateArena`
+ *  calls don't care, but lifecycle-driven tests do). */
+function pastResolveDue(): void {
+  clock.ms += DEBATE_LIVE_WINDOW_MS + 1000;
+}
+
 describe('WS-T debate arena lifecycle', () => {
-  it('opens an arena from a correction, seeding the challenger + marking the target under_debate', async () => {
+  it('opens an arena from a correction, stamping the deadlines + activity clocks and marking the target under_debate', async () => {
     const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
     const correctionId = await seedCorrection(targetId);
     const debateId = randomUUID();
@@ -139,10 +170,17 @@ describe('WS-T debate arena lifecycle', () => {
     expect(arena?.state).toBe('open');
     expect(arena?.incumbentUserId).toBe(INCUMBENT);
     expect(arena?.challengerUserId).toBe(CHALLENGER);
-    expect(arena?.positions.challenger.summary).toContain('wrong');
-    expect(arena?.positions.challenger.citations).toHaveLength(1);
+    // The correction ITSELF is the challenger's material (shown live as arena
+    // content); both rebuttal statements start empty.
+    expect(arena?.positions.challenger.summary).toBe('');
     expect(arena?.positions.incumbent.summary).toBe('');
     expect(arena?.editDeadlineAt).toBe(new Date(clock.ms + DEBATE_EDIT_WINDOW_MS).toISOString());
+    expect(arena?.resolveDueAt).toBe(new Date(clock.ms + DEBATE_LIVE_WINDOW_MS).toISOString());
+    expect(arena?.lockedAt).toBeNull();
+    expect(arena?.lockedContent).toBeNull();
+    // Both activity clocks start at open (the no-show fast path measures from here).
+    expect(arena?.incumbentLastActiveAt).toBe(new Date(clock.ms).toISOString());
+    expect(arena?.challengerLastActiveAt).toBe(new Date(clock.ms).toISOString());
     const target = await contributions.getById(targetId);
     expect(target?.disputeStatus).toBe('under_debate');
     // Second correction on the SAME target does not open a duplicate arena.
@@ -150,7 +188,7 @@ describe('WS-T debate arena lifecycle', () => {
     expect(dup).toBeNull();
   });
 
-  it('lets both parties post within the 12h window and rejects outsiders + late edits', async () => {
+  it('lets both parties post rebuttals while open and rejects outsiders + post-deadline edits', async () => {
     const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
     const debateId = randomUUID();
     await maybeEnterDebate(
@@ -159,11 +197,16 @@ describe('WS-T debate arena lifecycle', () => {
       debateId,
     );
 
+    clock.ms += 60_000; // a minute in: the rebuttal resets the activity clock
     const incumbentPost = await postDebatePosition(deps, debateId, INCUMBENT, {
       summary: 'The official transcript confirms 5-4.',
       citations: [{ url: 'https://court.gov/transcript' }],
     });
     expect(incumbentPost.ok).toBe(true);
+
+    // A rebuttal post resets the side's activity clock (the expedite input).
+    const posted = await debates.getById(debateId);
+    expect(posted?.incumbentLastActiveAt).toBe(new Date(clock.ms).toISOString());
 
     // A non-party cannot post.
     const outsider = await postDebatePosition(deps, debateId, STEWARD, {
@@ -172,7 +215,7 @@ describe('WS-T debate arena lifecycle', () => {
     });
     expect(outsider).toEqual({ ok: false, reason: 'not_a_party' });
 
-    // After the 12h window, edits are rejected.
+    // After the 23h edit deadline, edits are rejected.
     clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
     const late = await postDebatePosition(deps, debateId, CHALLENGER, {
       summary: 'Last-minute edit.',
@@ -274,7 +317,7 @@ describe('WS-T debate arena lifecycle', () => {
     expect(target?.disputeStatus).toBe('none'); // nothing tagged
   });
 
-  it('drives judge + finalize from the scheduler tick at each deadline', async () => {
+  it('EXPEDITES a both-sides-idle arena: locked + judged one inactivity window after the last edit', async () => {
     const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
     const debateId = randomUUID();
     await maybeEnterDebate(
@@ -283,19 +326,101 @@ describe('WS-T debate arena lifecycle', () => {
       debateId,
     );
 
-    // Before the edit deadline: the tick does nothing.
-    expect(await runDebateLifecycle(deps)).toEqual({ judged: 0, finalized: 0 });
+    // Before the inactivity window elapses: the tick does nothing.
+    clock.ms += DEBATE_INACTIVITY_WINDOW_MS - 60_000;
+    expect(await runDebateLifecycle(deps)).toEqual({
+      locked: 0,
+      expedited: 0,
+      judged: 0,
+      finalized: 0,
+    });
 
-    // After 12h: the tick judges (but does not yet finalize).
-    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
-    expect(await runDebateLifecycle(deps)).toEqual({ judged: 1, finalized: 0 });
-    expect((await debates.getById(debateId))?.state).toBe('judged');
+    // One inactivity window after open (nobody edited — the no-show path):
+    // the SAME tick locks the material, pulls the queue entry forward, and
+    // judges — the debate resolves ~1h after the challenge, not 24h later.
+    clock.ms += 61_000;
+    expect(await runDebateLifecycle(deps)).toEqual({
+      locked: 0,
+      expedited: 1,
+      judged: 1,
+      finalized: 0,
+    });
+    const judged = await debates.getById(debateId);
+    expect(judged?.state).toBe('judged');
+    expect(judged?.lockedAt).toBe(new Date(clock.ms).toISOString());
+    expect(judged?.resolveDueAt).toBe(new Date(clock.ms).toISOString()); // pulled forward
+    expect(judged?.lockedContent?.target.body).toBe('The vote passed 5-4.');
+    expect(judged?.lockedContent?.correction.body).toContain('wrong');
 
     // After a further 24h: the tick finalizes and the target is tagged incorrect.
     clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
-    expect(await runDebateLifecycle(deps)).toEqual({ judged: 0, finalized: 1 });
+    expect(await runDebateLifecycle(deps)).toEqual({
+      locked: 0,
+      expedited: 0,
+      judged: 0,
+      finalized: 1,
+    });
     expect((await debates.getById(debateId))?.state).toBe('resolved');
     expect((await contributions.getById(targetId))?.disputeStatus).toBe('incorrect');
+  });
+
+  it('an edit postpones the expedite; a continuously active arena locks on the 23h schedule and queues at 24h', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+
+    // Keep the arena alive: some side edits at least once per inactivity
+    // window until just past the 23h edit deadline.
+    const step = DEBATE_INACTIVITY_WINDOW_MS - 60_000;
+    let elapsed = 0;
+    while (elapsed + step < DEBATE_EDIT_WINDOW_MS) {
+      clock.ms += step;
+      elapsed += step;
+      const post = await postDebatePosition(deps, debateId, INCUMBENT, {
+        summary: `Still standing by it (${elapsed}ms in).`,
+        citations: [citation],
+      });
+      expect(post.ok).toBe(true);
+      expect(await runDebateLifecycle(deps)).toEqual({
+        locked: 0,
+        expedited: 0,
+        judged: 0,
+        finalized: 0,
+      });
+    }
+
+    // Past the 23h edit deadline: the tick LOCKS the material (the frozen
+    // final countdown) but does not judge yet — the queue opens at hour 24.
+    clock.ms += DEBATE_EDIT_WINDOW_MS - elapsed + 1000;
+    expect(await runDebateLifecycle(deps)).toEqual({
+      locked: 1,
+      expedited: 0,
+      judged: 0,
+      finalized: 0,
+    });
+    const locked = await debates.getById(debateId);
+    expect(locked?.state).toBe('locked');
+    expect(locked?.lockedContent?.correction.body).toContain('wrong');
+    // Locked-in: no further rebuttal edits.
+    const late = await postDebatePosition(deps, debateId, INCUMBENT, {
+      summary: 'Too late.',
+      citations: [citation],
+    });
+    expect(late).toEqual({ ok: false, reason: 'window_closed' });
+
+    // At hour 24 the debate enters the AI resolution queue and is judged.
+    clock.ms += 60 * 60 * 1000;
+    expect(await runDebateLifecycle(deps)).toEqual({
+      locked: 0,
+      expedited: 0,
+      judged: 1,
+      finalized: 0,
+    });
+    expect((await debates.getById(debateId))?.state).toBe('judged');
   });
 
   it('sinks an incorrect root to the bottom of the section, both orderings + paged', async () => {
@@ -490,13 +615,32 @@ describe('WS-T debate arena lifecycle', () => {
     if (arena === null) throw new Error('arena not opened');
     const resolveAuthor = async (userId: string | null) =>
       userId === null ? null : { handle: `u-${userId.slice(0, 4)}`, displayName: 'User' };
-    const asChallenger = await toDebateArenaPublic(arena, CHALLENGER, resolveAuthor, false);
+    const content = await readDebateArenaContent(contributions, deps.storyContent, arena);
+    const asChallenger = await toDebateArenaPublic(
+      arena,
+      CHALLENGER,
+      resolveAuthor,
+      false,
+      content,
+    );
     expect(asChallenger.viewer_role).toBe('challenger');
     expect(asChallenger.challenger.is_author).toBe(true);
     expect(asChallenger.incumbent.is_author).toBe(false);
-    const asSteward = await toDebateArenaPublic(arena, STEWARD, resolveAuthor, true);
+    // The arena carries the REAL material under debate — LIVE while open.
+    expect(asChallenger.target_content?.kind).toBe('comment');
+    expect(asChallenger.target_content?.body).toBe('The vote passed 5-4.');
+    expect(asChallenger.target_content?.locked).toBe(false);
+    expect(asChallenger.correction_content?.kind).toBe('correction');
+    expect(asChallenger.correction_content?.body).toContain('wrong');
+    const asSteward = await toDebateArenaPublic(arena, STEWARD, resolveAuthor, true, content);
     expect(asSteward.viewer_role).toBe('steward');
-    const asObserver = await toDebateArenaPublic(arena, randomUUID(), resolveAuthor, false);
+    const asObserver = await toDebateArenaPublic(
+      arena,
+      randomUUID(),
+      resolveAuthor,
+      false,
+      content,
+    );
     expect(asObserver.viewer_role).toBe('observer');
   });
 
@@ -641,14 +785,18 @@ describe('WS-T sourced roots — filter + count include sourced comments', () =>
 });
 
 describe('window-policy override (the dev-simulator / test seam)', () => {
+  const SHORT = {
+    editWindowMs: 1_000,
+    lockWindowMs: 500,
+    inactivityWindowMs: 10_000,
+    overrideWindowMs: 2_000,
+  };
+
   it('stamps the injected windows; absent ⇒ the §15.4 spec constants', async () => {
-    // Injected windows drive both deadlines.
+    // Injected windows drive every deadline.
     const target = await seedComment(INCUMBENT, 'The figure is 42.');
     const correction = await seedCorrection(target);
-    const shortened: DebateDeps = {
-      ...deps,
-      windows: { editWindowMs: 1_000, overrideWindowMs: 2_000 },
-    };
+    const shortened: DebateDeps = { ...deps, windows: { windows: SHORT } };
     const arena = await maybeEnterDebate(
       shortened,
       correctionInput(correction, target),
@@ -656,7 +804,8 @@ describe('window-policy override (the dev-simulator / test seam)', () => {
     );
     expect(arena).not.toBeNull();
     expect(Date.parse(arena?.editDeadlineAt ?? '')).toBe(clock.ms + 1_000);
-    clock.ms += 1_000;
+    expect(Date.parse(arena?.resolveDueAt ?? '')).toBe(clock.ms + 1_500);
+    clock.ms += 1_500;
     const judged = await judgeDebateArena(shortened, arena?.debateId ?? '');
     expect(Date.parse(judged?.overrideDeadlineAt ?? '')).toBe(clock.ms + 2_000);
     // And the full lifecycle resolves on the shortened cadence.
@@ -664,7 +813,7 @@ describe('window-policy override (the dev-simulator / test seam)', () => {
     const { finalized } = await runDebateLifecycle(shortened);
     expect(finalized).toBe(1);
 
-    // Without the override, a fresh arena carries the SPEC deadline.
+    // Without the override, a fresh arena carries the SPEC deadlines.
     const target2 = await seedComment(INCUMBENT, 'A second figure is 7.');
     const correction2 = await seedCorrection(target2);
     const arena2 = await maybeEnterDebate(
@@ -673,11 +822,40 @@ describe('window-policy override (the dev-simulator / test seam)', () => {
       randomUUID(),
     );
     expect(Date.parse(arena2?.editDeadlineAt ?? '')).toBe(clock.ms + DEBATE_EDIT_WINDOW_MS);
-    clock.ms += DEBATE_EDIT_WINDOW_MS;
+    expect(Date.parse(arena2?.resolveDueAt ?? '')).toBe(clock.ms + DEBATE_LIVE_WINDOW_MS);
+    clock.ms += DEBATE_LIVE_WINDOW_MS;
     const judged2 = await judgeDebateArena(deps, arena2?.debateId ?? '');
     expect(Date.parse(judged2?.overrideDeadlineAt ?? '')).toBe(
       clock.ms + DEBATE_OVERRIDE_WINDOW_MS,
     );
+  });
+
+  it('SCOPES the override via appliesToUser: only a both-parties-match arena shortens', async () => {
+    // The simulator scopes its shortened windows to both-synthetic arenas; a
+    // debate a real user is party to keeps the spec windows.
+    const simUsers = new Set<string>([CHALLENGER]);
+    const scoped: DebateDeps = {
+      ...deps,
+      windows: { windows: SHORT, appliesToUser: (uid) => uid !== null && simUsers.has(uid) },
+    };
+    // The incumbent is NOT in the sim roster ⇒ spec windows.
+    const target = await seedComment(INCUMBENT, 'Real-user content.');
+    const arena = await maybeEnterDebate(
+      scoped,
+      correctionInput(await seedCorrection(target), target),
+      randomUUID(),
+    );
+    expect(Date.parse(arena?.editDeadlineAt ?? '')).toBe(clock.ms + DEBATE_EDIT_WINDOW_MS);
+
+    // Both parties in the roster ⇒ the shortened windows apply.
+    simUsers.add(INCUMBENT);
+    const target2 = await seedComment(INCUMBENT, 'Synthetic content.');
+    const arena2 = await maybeEnterDebate(
+      scoped,
+      correctionInput(await seedCorrection(target2), target2),
+      randomUUID(),
+    );
+    expect(Date.parse(arena2?.editDeadlineAt ?? '')).toBe(clock.ms + 1_000);
   });
 });
 
@@ -696,15 +874,15 @@ describe('lifecycle fan-out — per-arena failure isolation', () => {
     const logged: string[] = [];
     const flaky: DebateDeps = {
       ...deps,
-      runJudge: async (debateId, input) => {
-        if (debateId === poisoned) throw new Error('adjudicator store fault');
-        return corrected(debateId, input);
+      runJudge: async (ctx, input) => {
+        if (ctx.debateId === poisoned) throw new Error('adjudicator store fault');
+        return corrected(ctx, input);
       },
       log: (event) => {
         logged.push(event);
       },
     };
-    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    pastResolveDue();
     const { judged } = await runDebateLifecycle(flaky);
     expect(judged).toBe(2); // the poisoned arena is isolated, not batch-fatal
     expect(logged).toContain('forum.debate_judge_failed');
@@ -721,7 +899,7 @@ describe('lease-bounded judging (judgeDeadlineMs)', () => {
       const correction = await seedCorrection(target);
       await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
     }
-    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    pastResolveDue();
     // Deadline already elapsed ⇒ nothing judged, nothing lost.
     const bounded = await runDebateLifecycle(deps, 100, 4, clock.ms - 1);
     expect(bounded.judged).toBe(0);
@@ -740,26 +918,30 @@ describe('claim-before-judge (the last-second-position TOCTOU)', () => {
     clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
 
     let judgedSummary = '';
+    let judgedContext: { debateId: string; roomId: string | null } | null = null;
     let midJudgeAttempt: Awaited<ReturnType<typeof postDebatePosition>> | null = null;
     const racingDeps: DebateDeps = {
       ...deps,
-      runJudge: async (debateId, input) => {
+      runJudge: async (ctx, input) => {
         judgedSummary = input.incumbent.summary;
+        judgedContext = ctx;
         // The incumbent tries to post WHILE the (slow) judge is computing —
         // the claim already froze the arena, so the write is refused loudly.
-        midJudgeAttempt = await postDebatePosition(deps, debateId, INCUMBENT, {
+        midJudgeAttempt = await postDebatePosition(deps, ctx.debateId, INCUMBENT, {
           summary: 'a mid-adjudication rebuttal',
           citations: [citation],
         });
-        return corrected(debateId, input);
+        return corrected(ctx, input);
       },
     };
     const judged = await judgeDebateArena(racingDeps, id);
     expect(judged?.state).toBe('judged');
     expect(midJudgeAttempt).toEqual({ ok: false, reason: 'window_closed' });
     // The verdict was computed on the claimed snapshot — which the racer never
-    // mutated (empty incumbent position, exactly what the judge saw).
+    // mutated (empty incumbent rebuttal, exactly what the judge saw).
     expect(judgedSummary).toBe('');
+    // The judge runner receives the ROOM context (WS-U debate.judge routing).
+    expect(judgedContext).toEqual({ debateId: id, roomId: ROOM });
     expect((await debates.getById(id))?.positions.incumbent.summary).toBe('');
   });
 
@@ -768,7 +950,7 @@ describe('claim-before-judge (the last-second-position TOCTOU)', () => {
     const correction = await seedCorrection(target);
     const arena = await maybeEnterDebate(deps, correctionInput(correction, target), randomUUID());
     const id = arena?.debateId ?? '';
-    clock.ms += DEBATE_EDIT_WINDOW_MS + 1;
+    pastResolveDue();
     const crashing: DebateDeps = {
       ...deps,
       runJudge: async () => {
@@ -781,5 +963,663 @@ describe('claim-before-judge (the last-second-position TOCTOU)', () => {
     const { judged } = await runDebateLifecycle(deps);
     expect(judged).toBe(1);
     expect((await debates.getById(id))?.state).toBe('judged');
+  });
+});
+
+describe('WS-T lock — the material under debate is snapshotted and judged', () => {
+  it('locks the CURRENT content (post-edit) and the judge scores the locked material', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+
+    // The incumbent fixes their comment while the arena is open — the arena
+    // shows (and later locks) the LIVE content.
+    await contributions.applyEdit(
+      targetId,
+      { body: 'Corrected during the debate: the vote passed 6-3.' },
+      INCUMBENT,
+      randomUUID(),
+    );
+
+    let judgedIncumbentContent = '';
+    const capturing: DebateDeps = {
+      ...deps,
+      runJudge: async (ctx, input) => {
+        judgedIncumbentContent = input.incumbent.content;
+        return corrected(ctx, input);
+      },
+    };
+    const locked = await lockDebateArena(capturing, debateId, 'scheduled');
+    expect(locked?.state).toBe('locked');
+    expect(locked?.lockedContent?.target.body).toContain('6-3');
+    // A post-lock underlying edit can no longer change what the judge sees.
+    await judgeDebateArena(capturing, debateId);
+    expect(judgedIncumbentContent).toContain('6-3');
+  });
+
+  it('judging an OPEN arena past its due instant locks first (lock-sweep catch-up)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    pastResolveDue();
+    const judged = await judgeDebateArena(deps, debateId);
+    expect(judged?.state).toBe('judged');
+    expect(judged?.lockedAt).not.toBeNull();
+    expect(judged?.lockedContent?.target.body).toBe('The vote passed 5-4.');
+  });
+
+  it('an underlying-content edit resets the editor side activity clock (touch + broadcast)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    clock.ms += 30 * 60 * 1000; // 30 minutes in
+    broadcasts = [];
+    // The target-comment author edited (the contribution hook calls this).
+    await touchDebateActivityForContribution(deps, targetId);
+    let arena = await debates.getById(debateId);
+    expect(arena?.incumbentLastActiveAt).toBe(new Date(clock.ms).toISOString());
+    expect(broadcasts).toContain(debateId);
+    // The correction author edited: the CHALLENGER clock resets.
+    clock.ms += 60_000;
+    await touchDebateActivityForContribution(deps, correctionId);
+    arena = await debates.getById(debateId);
+    expect(arena?.challengerLastActiveAt).toBe(new Date(clock.ms).toISOString());
+    // A contribution with no live arena is a no-op.
+    await touchDebateActivityForContribution(deps, randomUUID());
+  });
+
+  it('projects the locked snapshot (not the live row) once locked', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    await lockDebateArena(deps, debateId, 'scheduled');
+    const arena = await debates.getById(debateId);
+    if (arena === null) throw new Error('arena missing');
+    const content = await readDebateArenaContent(contributions, deps.storyContent, arena);
+    expect(content.target?.locked).toBe(true);
+    expect(content.target?.body).toBe('The vote passed 5-4.');
+    expect(content.correction?.locked).toBe(true);
+  });
+
+  it('suppresses a moderation-held (under_review) body from the arena projection', async () => {
+    // Thread rendering hides an under_review row from everyone but its author;
+    // the arena is only thread-readability-gated, so it must suppress too —
+    // live AND from the locked snapshot.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    await contributions.setModerationState(targetId, 'under_review');
+    const live = await readDebateArenaContent(
+      contributions,
+      deps.storyContent,
+      (await debates.getById(debateId)) as NonNullable<Awaited<ReturnType<typeof debates.getById>>>,
+    );
+    expect(live.target?.removed).toBe(true);
+    expect(live.target?.body).toBe('');
+    expect(live.target?.citations).toEqual([]);
+    // The correction stays served (it is still published).
+    expect(live.correction?.removed).toBe(false);
+    // Locked snapshots respect a CURRENT hold the same way.
+    await lockDebateArena(deps, debateId, 'expedited');
+    const locked = await readDebateArenaContent(
+      contributions,
+      deps.storyContent,
+      (await debates.getById(debateId)) as NonNullable<Awaited<ReturnType<typeof debates.getById>>>,
+    );
+    expect(locked.target?.removed).toBe(true);
+    expect(locked.target?.body).toBe('');
+  });
+
+  it('touches BOTH arenas of a doubly-debated correction (challenger of one, incumbent of the other)', async () => {
+    // A correction is itself correctable: arena A (it challenges a comment) +
+    // arena B (a second correction challenges IT). Its author's activity must
+    // reset the clock on BOTH, and the helper reports both parties.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const arenaA = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), arenaA);
+    const counterId = await seedCorrection(correctionId);
+    const arenaB = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      {
+        ...correctionInput(counterId, correctionId),
+        metadata: { target_contribution_id: correctionId },
+      },
+      arenaB,
+    );
+
+    const parties = await liveArenasForContribution(debates, correctionId);
+    expect(new Set(parties.map((p) => `${p.arena.debateId}:${p.side}`))).toEqual(
+      new Set([`${arenaB}:incumbent`, `${arenaA}:challenger`]),
+    );
+
+    clock.ms += 30 * 60 * 1000;
+    await touchDebateActivityForContribution(deps, correctionId);
+    const nowIso = new Date(clock.ms).toISOString();
+    expect((await debates.getById(arenaA))?.challengerLastActiveAt).toBe(nowIso);
+    expect((await debates.getById(arenaB))?.incumbentLastActiveAt).toBe(nowIso);
+  });
+});
+
+describe('WS-T withdraw / concede — party-driven early closes', () => {
+  it('the challenger withdraws while open: state withdrawn, tag cleared, target re-challengeable', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+
+    // Only the challenger may withdraw.
+    const denied = await withdrawDebate(deps, debateId, INCUMBENT);
+    expect(denied).toEqual({ ok: false, reason: 'not_challenger' });
+
+    const withdrawn = await withdrawDebate(deps, debateId, CHALLENGER);
+    expect(withdrawn.ok).toBe(true);
+    if (withdrawn.ok) {
+      expect(withdrawn.arena.state).toBe('withdrawn');
+      expect(withdrawn.arena.verdict).toBeNull();
+      expect(withdrawn.arena.resolvedAt).toBe(new Date(clock.ms).toISOString());
+    }
+    // The target's Challenged tag clears — and the slot frees for a NEW arena.
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('none');
+    const fresh = await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      randomUUID(),
+    );
+    expect(fresh).not.toBeNull();
+  });
+
+  it('the incumbent concedes while open: resolved corrected-by-concession, target tagged incorrect', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+
+    const denied = await concedeDebate(deps, debateId, CHALLENGER);
+    expect(denied).toEqual({ ok: false, reason: 'not_incumbent' });
+
+    const conceded = await concedeDebate(deps, debateId, INCUMBENT);
+    expect(conceded.ok).toBe(true);
+    if (conceded.ok) {
+      expect(conceded.arena.state).toBe('resolved');
+      expect(conceded.arena.verdict).toBe('corrected');
+      expect(conceded.arena.winner).toBe('challenger');
+      expect(conceded.arena.decidedBy).toBe('concession');
+    }
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('incorrect');
+    // No verdict to judge/finalize later — the lifecycle no-ops.
+    pastResolveDue();
+    const pass = await runDebateLifecycle(deps);
+    expect(pass.judged).toBe(0);
+  });
+
+  it('a story-target concession tags the STORY incorrect', async () => {
+    const correctionId = randomUUID();
+    await contributions.insert({
+      contributionId: correctionId,
+      threadId: THREAD,
+      userId: CHALLENGER,
+      type: 'correction',
+      body: 'The headline is wrong.',
+      citations: [citation],
+      metadata: { target_story_id: STORY },
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: `draft-${correctionId}`,
+      path: [],
+      moderationState: 'published',
+    });
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      {
+        contributionId: correctionId,
+        threadId: THREAD,
+        storyId: STORY,
+        roomId: ROOM,
+        userId: CHALLENGER,
+        body: 'The headline is wrong.',
+        citations: [citation],
+        metadata: { target_story_id: STORY },
+      },
+      debateId,
+    );
+    const conceded = await concedeDebate(deps, debateId, INCUMBENT);
+    expect(conceded.ok).toBe(true);
+    expect(storyDisputes.get(STORY)).toBe('incorrect');
+  });
+
+  it('a moderation-held side snapshots EMPTY — the judge never scores withheld material', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    // The floor holds the target mid-debate; the correction stays published.
+    await contributions.setModerationState(targetId, 'under_review');
+    await lockDebateArena(deps, debateId, 'expedited');
+    const locked = await debates.getById(debateId);
+    expect(locked?.lockedContent?.target.body).toBe('');
+    expect(locked?.lockedContent?.target.citations).toEqual([]);
+    expect(locked?.lockedContent?.correction.body).toContain('wrong');
+    // The judge input mirrors the snapshot: the held side is empty for the
+    // adjudicator exactly as it is suppressed for clients.
+    let judgedTarget = 'unset';
+    const capturing: DebateDeps = {
+      ...deps,
+      runJudge: async (ctx, input) => {
+        judgedTarget = input.incumbent.content;
+        return corrected(ctx, input);
+      },
+    };
+    await judgeDebateArena(capturing, debateId);
+    expect(judgedTarget).toBe('');
+  });
+
+  it('rebuttals, withdrawal, and concession are refused from the idle-DUE instant (before any sweep)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // Both sides idle a full inactivity window; NO lifecycle sweep has run,
+    // so the stored state is still `open` — but the expedite is already owed
+    // and every party-driven change must refuse rather than reset the clock.
+    clock.ms += DEBATE_INACTIVITY_WINDOW_MS + 1000;
+    expect((await debates.getById(debateId))?.state).toBe('open');
+    const late = await postDebatePosition(deps, debateId, INCUMBENT, {
+      summary: 'A rebuttal that would dodge the owed expedite.',
+      citations: [citation],
+    });
+    expect(late).toEqual({ ok: false, reason: 'window_closed' });
+    expect(await withdrawDebate(deps, debateId, CHALLENGER)).toEqual({
+      ok: false,
+      reason: 'window_closed',
+    });
+    expect(await concedeDebate(deps, debateId, INCUMBENT)).toEqual({
+      ok: false,
+      reason: 'window_closed',
+    });
+    // The activity clocks were never reset — the next sweep expedites.
+    const { expedited, judged } = await runDebateLifecycle(deps);
+    expect(expedited).toBe(1);
+    expect(judged).toBe(1);
+  });
+
+  it('an expedited arena is judged in the SAME pass under a real advancing clock', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    clock.ms += DEBATE_INACTIVITY_WINDOW_MS + 1000;
+    // A wall clock that advances a few milliseconds per read: the expedited
+    // lock stamps its resolve-due AFTER the sweep-start instant, so a
+    // sweep-start cutoff would push the row to the NEXT tick. The queue pass
+    // must use a fresh cutoff and judge it in this pass.
+    const base = clock.ms;
+    let reads = 0;
+    const ticking: DebateDeps = {
+      ...deps,
+      now: () => base + reads++ * 7,
+    };
+    const { expedited, judged } = await runDebateLifecycle(ticking);
+    expect(expedited).toBe(1);
+    expect(judged).toBe(1);
+    expect((await debates.getById(debateId))?.state).toBe('judged');
+  });
+
+  it('judging a claimed-but-never-locked arena BACKFILLS the snapshot (never judges empty sides)', async () => {
+    // A pre-live-window legacy row / crash-recovered claim: the arena reached
+    // `awaiting_verdict` without ever locking, so `lockedContent` is null.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    await debates.claimForVerdict(debateId); // straight from `open` — no lock
+    expect((await debates.getById(debateId))?.lockedContent).toBeNull();
+
+    let judgedContent = '';
+    const capturing: DebateDeps = {
+      ...deps,
+      runJudge: async (ctx, input) => {
+        judgedContent = input.incumbent.content;
+        return corrected(ctx, input);
+      },
+    };
+    const judged = await judgeDebateArena(capturing, debateId);
+    expect(judged?.state).toBe('judged');
+    // The snapshot was backfilled from the live rows before scoring.
+    expect(judgedContent).toBe('The vote passed 5-4.');
+    expect((await debates.getById(debateId))?.lockedContent?.target.body).toBe(
+      'The vote passed 5-4.',
+    );
+  });
+
+  it('a hidden story suppresses even the LOCKED snapshot in the projection', async () => {
+    const correctionId = randomUUID();
+    await contributions.insert({
+      contributionId: correctionId,
+      threadId: THREAD,
+      userId: CHALLENGER,
+      type: 'correction',
+      body: 'The headline is wrong.',
+      citations: [citation],
+      metadata: { target_story_id: STORY },
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: `draft-${correctionId}`,
+      path: [],
+      moderationState: 'published',
+    });
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      {
+        contributionId: correctionId,
+        threadId: THREAD,
+        storyId: STORY,
+        roomId: ROOM,
+        userId: CHALLENGER,
+        body: 'The headline is wrong.',
+        citations: [citation],
+        metadata: { target_story_id: STORY },
+      },
+      debateId,
+    );
+    await lockDebateArena(deps, debateId, 'expedited');
+    // The story is now hidden (takedown/safety): the reader returns null, and
+    // even the LOCKED snapshot must project suppressed — a live SSE
+    // subscriber's later lifecycle frames never re-carry the hidden body.
+    const hiddenDeps: DebateDeps = { ...deps, storyContent: async () => null };
+    const arena = await debates.getById(debateId);
+    if (arena === null) throw new Error('arena missing');
+    const content = await readDebateArenaContent(contributions, hiddenDeps.storyContent, arena);
+    expect(content.target?.removed).toBe(true);
+    expect(content.target?.body).toBe('');
+    expect(content.target?.title).toBeNull();
+  });
+
+  it('closeDebatesForRemoval closes every open arena atomically — or none on a lock race', async () => {
+    // The dual-arena correction: challenger of arena A, incumbent of arena B.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const arenaA = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), arenaA);
+    const counterId = await seedCorrection(correctionId);
+    const arenaB = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      {
+        ...correctionInput(counterId, correctionId),
+        metadata: { target_contribution_id: correctionId },
+      },
+      arenaB,
+    );
+    const parties = await liveArenasForContribution(debates, correctionId);
+
+    // Race: arena B locks AFTER the parties were read — the atomic close must
+    // refuse and leave arena A untouched (no half-closed removal).
+    await lockDebateArena(deps, arenaB, 'expedited');
+    const refused = await closeDebatesForRemoval(deps, parties, CHALLENGER);
+    expect(refused).toEqual({ ok: false, reason: 'window_closed' });
+    expect((await debates.getById(arenaA))?.state).toBe('open');
+
+    // With B resolved out of the way, the close succeeds: A withdraws (this
+    // author is its challenger) and the target's tag clears.
+    await judgeDebateArena(deps, arenaB);
+    await finalizeDebate(deps, arenaB);
+    const partiesNow = await liveArenasForContribution(debates, correctionId);
+    const closed = await closeDebatesForRemoval(deps, partiesNow, CHALLENGER);
+    expect(closed.ok).toBe(true);
+    if (closed.ok) expect(closed.closedIds).toEqual([arenaA]);
+    expect((await debates.getById(arenaA))?.state).toBe('withdrawn');
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('none');
+  });
+
+  it('withdraw and concede are refused once the material is locked in', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    await lockDebateArena(deps, debateId, 'expedited');
+    expect(await withdrawDebate(deps, debateId, CHALLENGER)).toEqual({
+      ok: false,
+      reason: 'window_closed',
+    });
+    expect(await concedeDebate(deps, debateId, INCUMBENT)).toEqual({
+      ok: false,
+      reason: 'window_closed',
+    });
+  });
+});
+
+describe('WS-T — verdict-CAS-gated provenance + the open-vs-removal void', () => {
+  it('runs the runner onCommitted hook ONLY after the verdict CAS lands', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    pastResolveDue();
+    let committed = 0;
+    const withHook: DebateJudgeRunner = async (ctx, input) => {
+      const res = await corrected(ctx, input);
+      if (res === null) return null;
+      return {
+        ...res,
+        onCommitted: async () => {
+          committed += 1;
+        },
+      };
+    };
+    const judged = await judgeDebateArena({ ...deps, runJudge: withHook }, debateId);
+    expect(judged?.state).toBe('judged');
+    expect(committed).toBe(1);
+  });
+
+  it('does NOT run onCommitted when the verdict CAS loses (a stale concurrent judge)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    pastResolveDue();
+    let committed = 0;
+    const withHook: DebateJudgeRunner = async (ctx, input) => {
+      const res = await corrected(ctx, input);
+      if (res === null) return null;
+      return {
+        ...res,
+        onCommitted: async () => {
+          committed += 1;
+        },
+      };
+    };
+    // Simulate the supported re-claim race: another holder's verdict landed
+    // first, so THIS runner's recordVerdict CAS returns null.  The provenance
+    // hook must never fire for a verdict the arena row discarded.
+    const realRecord = debates.recordVerdict.bind(debates);
+    debates.recordVerdict = async () => null;
+    const judged = await judgeDebateArena({ ...deps, runJudge: withHook }, debateId);
+    debates.recordVerdict = realRecord;
+    expect(judged).toBeNull();
+    expect(committed).toBe(0);
+  });
+
+  it('VOIDS an arena opened against an already-tombstoned target (open-vs-removal race)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'About to vanish.');
+    const correctionId = await seedCorrection(targetId);
+    // The author's removal tombstones the target BETWEEN the correction's
+    // create-guard read and the arena open: the post-open recheck must void
+    // the arena (withdrawn, no dispute tag) rather than leave a live debate
+    // around content its author already removed.
+    await contributions.setModerationState(targetId, 'removed');
+    const debateId = randomUUID();
+    const arena = await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    expect(arena).toBeNull();
+    expect((await debates.getById(debateId))?.state).toBe('withdrawn');
+    expect((await contributions.getById(targetId))?.disputeStatus).not.toBe('under_debate');
+  });
+
+  it('VOIDS an arena opened against a target held under_review (any non-published state)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'Held for review.');
+    const correctionId = await seedCorrection(targetId);
+    // A transient hold is withheld too: the projection and the lock snapshot
+    // suppress every non-published row, so an arena surviving here would be
+    // judged against an EMPTY incumbent side (the create guard refuses held
+    // targets for the same reason).
+    await contributions.setModerationState(targetId, 'under_review');
+    const debateId = randomUUID();
+    const arena = await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    expect(arena).toBeNull();
+    expect((await debates.getById(debateId))?.state).toBe('withdrawn');
+    expect((await contributions.getById(targetId))?.disputeStatus).not.toBe('under_debate');
+  });
+});
+
+describe('WS-T catch-up lock classification (earlier-of-idle-or-schedule)', () => {
+  it('a long-idle arena found past hour 23 locks EXPEDITED and judges in the same pass', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // Scheduler down for the whole window: both sides idle since open, so the
+    // idle trigger fired at open+1h — LONG before the 23h schedule.  A healthy
+    // scheduler would have expedited at that instant; the catch-up must not
+    // park the queue entry at hour 24.
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 30 * 60 * 1000;
+    const result = await runDebateLifecycle(deps);
+    expect(result.expedited).toBe(1);
+    expect(result.locked).toBe(0);
+    expect(result.judged).toBe(1);
+    expect((await debates.getById(debateId))?.state).toBe('judged');
+  });
+
+  it('an arena whose idle instant fired AFTER the 23h schedule locks SCHEDULED (queue at 24h)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // A side stays active until 22h45m: the idle instant (23h45m) fires AFTER
+    // the schedule (23h), so the schedule fired first — the hour-24 queue
+    // entry stands even on a late catch-up at 23h30m.
+    clock.ms += DEBATE_EDIT_WINDOW_MS - 15 * 60 * 1000;
+    await debates.touchActivity(debateId, 'incumbent', new Date(clock.ms).toISOString());
+    clock.ms += 45 * 60 * 1000;
+    const result = await runDebateLifecycle(deps);
+    expect(result.locked).toBe(1);
+    expect(result.expedited).toBe(0);
+    expect(result.judged).toBe(0);
+    expect((await debates.getById(debateId))?.state).toBe('locked');
+  });
+});
+
+describe('WS-T judge-time re-suppression + the judge source cap', () => {
+  it('the adjudicator re-suppresses a side held AFTER the lock (floor dominance at judge time)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    await lockDebateArena(deps, debateId, 'scheduled');
+    // The snapshot froze the published target — then a moderation hold lands
+    // during the frozen hour.  The verdict must not be grounded in material
+    // the floor is currently withholding, even though it sits in the snapshot.
+    await contributions.setModerationState(targetId, 'under_review');
+    const captured: DebateJudgeInput[] = [];
+    const capturing: DebateJudgeRunner = async (ctx, input) => {
+      captured.push(input);
+      return corrected(ctx, input);
+    };
+    pastResolveDue();
+    const judgedArena = await judgeDebateArena({ ...deps, runJudge: capturing }, debateId);
+    expect(judgedArena?.state).toBe('judged');
+    expect(captured[0]?.incumbent.content).toBe('');
+    expect(captured[0]?.incumbent.sources).toEqual([]);
+    // The STORED snapshot is untouched — a lifted hold un-suppresses reads.
+    expect((await debates.getById(debateId))?.lockedContent?.target.body).toBe(
+      'The vote passed 5-4.',
+    );
+  });
+
+  it('caps the judge source union at MAX_CITATIONS, locked-content citations first', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    const arena = await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    expect(arena).not.toBeNull();
+    if (arena === null) throw new Error('unreachable');
+    const contentCitations = Array.from({ length: MAX_CITATIONS }, (_, i) => ({
+      url: `https://content.example/${i}`,
+    }));
+    const rebuttalCitations = Array.from({ length: MAX_CITATIONS }, (_, i) => ({
+      url: `https://rebuttal.example/${i}`,
+    }));
+    const crafted = {
+      ...arena,
+      lockedContent: {
+        target: { title: null, body: 'The target.', citations: [], updatedAt: null },
+        correction: {
+          title: null,
+          body: 'The correction.',
+          citations: contentCitations,
+          updatedAt: null,
+        },
+      },
+      positions: {
+        ...arena.positions,
+        challenger: { summary: 'Rebuttal.', citations: rebuttalCitations, updatedAt: null },
+      },
+    };
+    const input = assembleJudgeInput(crafted);
+    // Each layer is schema-capped at MAX_CITATIONS, but the union could reach
+    // 2×; the judge contract caps sources, prioritizing the material's own.
+    expect(input.challenger.sources).toHaveLength(MAX_CITATIONS);
+    expect(
+      input.challenger.sources.every((s) => s.url.startsWith('https://content.example/')),
+    ).toBe(true);
   });
 });

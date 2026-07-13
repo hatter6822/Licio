@@ -4,15 +4,33 @@
 //
 // A sourced CORRECTION against a comment or story opens a live, open debate
 // arena.  The target's author is the INCUMBENT; the correction's author is the
-// CHALLENGER.  For 12 hours both sides post and edit a co-visible position
-// (summary + sources) — each can SEE the other's current draft as they write,
-// so each offers their most powerful argument.  At the deadline the room's
-// governed AI adjudicator renders a verdict (a probabilistic neural model inside
-// a deterministic, auditable, verifiable shell — see @licio/ai-governance
-// debate-judge); the room STEWARD may fully overrule that verdict, either
-// direction, for 24 hours (audited, subordinate to the platform legal floor).
-// A `corrected` outcome tags the loser `incorrect` and sinks it to the bottom of
-// its comment section / the feed — visible, never hidden.
+// CHALLENGER.  The arena stays LIVE for up to 24 hours: while it is open both
+// sides may adjust their underlying content (the challenged story/comment and
+// the correction) and post + edit a co-visible rebuttal statement (summary +
+// sources) — each can SEE the other's current material as they write, so each
+// offers their most powerful argument.  During the open window the challenger
+// may WITHDRAW the correction (the arena closes with no verdict) and the
+// incumbent may CONCEDE (the challenger prevails without adjudication).
+//
+// Two paths lead to the AI resolution queue:
+//   • INACTIVITY (the common, expedited path) — once BOTH sides have gone a
+//     full hour without an edit (content or rebuttal), the material is
+//     considered settled: it is locked in (snapshotted) and the debate enters
+//     the queue immediately.  A no-show incumbent therefore resolves ~1h
+//     after the challenge, not 24h later.
+//   • THE SCHEDULE (the outer maximum, for continuously active debates) — at
+//     hour 23 the material is locked in regardless; the final hour is a
+//     frozen countdown, and at hour 24 the debate enters the queue.
+//
+// In the queue the room's governed adjudicator renders a verdict (a
+// probabilistic model inside a deterministic, auditable, verifiable shell —
+// see @licio/ai-governance debate-judge; a governed room whose ratified agent
+// holds the WS-U `debate.judge` capability adjudicates its own queue — the
+// room's AI resolution queue).  The room STEWARD may
+// fully overrule that verdict, either direction, for 24 hours (audited,
+// subordinate to the platform legal floor).  A `corrected` outcome tags the
+// loser `incorrect` and sinks it to the bottom of its comment section / the
+// feed — visible, never hidden.
 //
 // This is NOT a vote: there is no member up/down count anywhere (no-applause,
 // ADR-8).  The adjudication is a content-structural judgement over sources and
@@ -25,8 +43,20 @@ import { citationSchema, MAX_CITATIONS } from './contribution.js';
 // Window durations (SSOT for both the client countdown and the server clamp).
 // ---------------------------------------------------------------------------
 
-/** The co-visible editing window: positions are editable for 12h after open. */
-export const DEBATE_EDIT_WINDOW_MS = 12 * 60 * 60 * 1000;
+/** The co-visible editing window (the outer maximum): for up to 23h after
+ *  open, both sides may adjust their underlying content and their rebuttal
+ *  statement (and the challenger may withdraw / the incumbent concede). */
+export const DEBATE_EDIT_WINDOW_MS = 23 * 60 * 60 * 1000;
+/** The scheduled lock window: the final hour of a maximally contested 24h
+ *  arena.  Both sides' material is locked in (snapshotted) and nothing may
+ *  change before the AI resolution queue picks the debate up. */
+export const DEBATE_LOCK_WINDOW_MS = 1 * 60 * 60 * 1000;
+/** The full live-arena span: open → locked → the AI resolution queue at 24h. */
+export const DEBATE_LIVE_WINDOW_MS = DEBATE_EDIT_WINDOW_MS + DEBATE_LOCK_WINDOW_MS;
+/** The expedited path: once BOTH sides have gone this long without an edit
+ *  (underlying content or rebuttal), the material is locked in at that
+ *  instant and the debate enters the AI resolution queue immediately. */
+export const DEBATE_INACTIVITY_WINDOW_MS = 1 * 60 * 60 * 1000;
 /** The steward-override window: the verdict is overrulable for 24h after it renders. */
 export const DEBATE_OVERRIDE_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Position-summary body cap (Markdown-lite; rendered through the UGC sink). */
@@ -36,24 +66,42 @@ export const DEBATE_POSITION_BODY_LIMIT = 5_000;
 // State machine (the arena lifecycle; distinct from the thread state machines).
 // ---------------------------------------------------------------------------
 
-export const DEBATE_STATES = ['open', 'awaiting_verdict', 'judged', 'resolved'] as const;
+export const DEBATE_STATES = [
+  'open',
+  'locked',
+  'awaiting_verdict',
+  'judged',
+  'resolved',
+  'withdrawn',
+] as const;
 export type DebateState = (typeof DEBATE_STATES)[number];
 export const debateStateSchema = z.enum(DEBATE_STATES);
 
 /**
  * The legal arena graph:
- *   open            → {awaiting_verdict}   (the 12h edit deadline elapses)
+ *   open             → {locked}            (the 23h edit deadline elapses; both
+ *                                            sides' material is snapshotted)
+ *   open             → {withdrawn}         (the challenger withdraws — no
+ *                                            verdict, nothing tagged; terminal)
+ *   open             → {resolved}          (the incumbent concedes — the
+ *                                            challenger prevails without
+ *                                            adjudication)
+ *   locked           → {awaiting_verdict}  (hour 24: the debate enters the
+ *                                            room's AI resolution queue)
  *   awaiting_verdict → {judged}            (the AI adjudicator renders a verdict)
- *   judged          → {resolved}           (the 24h override window elapses or a
+ *   judged           → {resolved}          (the 24h override window elapses or a
  *                                            steward finalizes)
- * `resolved` is terminal.  A steward override does NOT change `state` (it stays
- * `judged` until the window closes) — it re-decides `winner`/`verdict` in place.
+ * `resolved` and `withdrawn` are terminal.  A steward override does NOT change
+ * `state` (it stays `judged` until the window closes) — it re-decides
+ * `winner`/`verdict` in place.
  */
 const DEBATE_GRAPH: Readonly<Record<DebateState, readonly DebateState[]>> = {
-  open: ['awaiting_verdict'],
+  open: ['locked', 'withdrawn', 'resolved'],
+  locked: ['awaiting_verdict'],
   awaiting_verdict: ['judged'],
   judged: ['resolved'],
   resolved: [],
+  withdrawn: [],
 };
 
 /** Whether `from → to` is a legal arena transition. */
@@ -79,8 +127,9 @@ export const DEBATE_WINNERS = ['incumbent', 'challenger', 'none'] as const;
 export type DebateWinner = (typeof DEBATE_WINNERS)[number];
 export const debateWinnerSchema = z.enum(DEBATE_WINNERS);
 
-/** Who set the CURRENT outcome — the AI adjudicator or a steward override. */
-export const DEBATE_DECIDERS = ['ai', 'steward'] as const;
+/** Who set the CURRENT outcome — the AI adjudicator, a steward override, or the
+ *  incumbent's own concession during the open window. */
+export const DEBATE_DECIDERS = ['ai', 'steward', 'concession'] as const;
 export type DebateDecider = (typeof DEBATE_DECIDERS)[number];
 export const debateDeciderSchema = z.enum(DEBATE_DECIDERS);
 
@@ -120,6 +169,35 @@ export const debatePositionSchema = z
 export type DebatePosition = z.infer<typeof debatePositionSchema>;
 
 // ---------------------------------------------------------------------------
+// Underlying-content projection (the material actually under debate).  The
+// arena page shows the REAL challenged story/comment and the REAL correction
+// comment — live while the arena is `open` (either author may still adjust
+// their content through the normal edit paths), and the hour-23 locked
+// snapshot from `locked` onward (what the AI resolution queue judges).
+// ---------------------------------------------------------------------------
+
+export const debateContentSchema = z
+  .object({
+    kind: z.enum(['story', 'comment', 'correction']),
+    /** The story title; null for comment/correction content. */
+    title: z.string().max(500).nullable(),
+    /** The comment/correction body (Markdown-lite, rendered via renderUGC) or
+     *  the story's excerpt ('' when the story carries no body text). */
+    body: z.string(),
+    /** The content's citations (a story's primary source URL included). */
+    citations: z.array(citationSchema).max(MAX_CITATIONS),
+    updated_at: isoTimestampSchema.nullable(),
+    /** True when the underlying row is currently NOT publicly served —
+     *  removed, hidden, or held under review.  The body/citations are empty
+     *  then: the arena never re-serves what moderation holds or removed. */
+    removed: z.boolean(),
+    /** True when this is the locked snapshot (vs. the live content). */
+    locked: z.boolean(),
+  })
+  .strict();
+export type DebateContent = z.infer<typeof debateContentSchema>;
+
+// ---------------------------------------------------------------------------
 // Arena projection (GET /v1/debates/:id).
 // ---------------------------------------------------------------------------
 
@@ -137,8 +215,24 @@ export const debateArenaPublicSchema = z
     state: debateStateSchema,
     incumbent: debatePositionSchema,
     challenger: debatePositionSchema,
-    /** open + 12h; positions are rejected after this instant. */
+    /** The challenged story/comment as the arena shows + judges it (live while
+     *  `open`, the locked snapshot after).  Null only for a missing row. */
+    target_content: debateContentSchema.nullable(),
+    /** The challenger's correction comment (live while `open`, locked after). */
+    correction_content: debateContentSchema.nullable(),
+    /** The outer edit deadline (open + 23h); edits/withdrawal/concession are
+     *  rejected after this instant even in a continuously active debate. */
     edit_deadline_at: isoTimestampSchema,
+    /** When the debate enters (or entered) the AI resolution queue: open + 24h
+     *  scheduled, pulled EARLIER to the lock instant on the inactivity path. */
+    resolve_due_at: isoTimestampSchema,
+    /** The instant the material was locked in; null while still `open`. */
+    locked_at: isoTimestampSchema.nullable(),
+    /** Each side's last edit (underlying content or rebuttal).  Once BOTH are
+     *  older than the inactivity window, the debate locks + queues early —
+     *  the client derives the expedited-resolution countdown from these. */
+    incumbent_last_active_at: isoTimestampSchema,
+    challenger_last_active_at: isoTimestampSchema,
     /** Null until judged. */
     verdict: debateVerdictSchema.nullable(),
     winner: debateWinnerSchema.nullable(),
@@ -185,6 +279,9 @@ export const debateArenaSummarySchema = z
     challenger_contribution_id: uuidSchema,
     state: debateStateSchema,
     edit_deadline_at: isoTimestampSchema,
+    /** When the debate enters (or entered) the AI resolution queue: open + 24h
+     *  scheduled, pulled earlier on the both-sides-idle expedited path. */
+    resolve_due_at: isoTimestampSchema,
     /** verdict + 24h; null until judged. */
     override_deadline_at: isoTimestampSchema.nullable(),
     verdict: debateVerdictSchema.nullable(),
@@ -210,7 +307,8 @@ export type StoryDebatesResponse = z.infer<typeof storyDebatesResponseSchema>;
 // is no explicit open request.)
 // ---------------------------------------------------------------------------
 
-/** POST /v1/debates/:id/position — post/replace the caller's side (12h window). */
+/** POST /v1/debates/:id/position — post/replace the caller's rebuttal
+ *  statement (allowed while the arena is `open`, i.e. the first 23h). */
 export const debatePositionUpdateSchema = z
   .object({
     summary: z
@@ -235,6 +333,9 @@ export const debateOverrideRequestSchema = z
   .strict();
 export type DebateOverrideRequest = z.infer<typeof debateOverrideRequestSchema>;
 
+// POST /v1/debates/:id/withdraw (challenger) and /concede (incumbent) carry no
+// body — the debate id + the session are the whole request (open-window only).
+
 // ---------------------------------------------------------------------------
 // Adjudicator input (the content-structural features the AI judge scores).
 // Shared so the server assembler and the pure model agree on the contract.
@@ -243,6 +344,12 @@ export type DebateOverrideRequest = z.infer<typeof debateOverrideRequestSchema>;
 /** One side's material as handed to the adjudicator (no author/topic identity). */
 export const debateJudgeSideInputSchema = z
   .object({
+    /** The side's LOCKED underlying content — the challenged story/comment
+     *  text for the incumbent, the correction body for the challenger (the
+     *  hour-23 snapshot; what the debate is actually ABOUT). */
+    content: z.string(),
+    /** The side's locked rebuttal statement ('' when the side never posted
+     *  one; the in-arena argument layered over the underlying content). */
     summary: z.string().max(DEBATE_POSITION_BODY_LIMIT),
     /** Each source URL with an OPTIONAL reputation signal from the WS-F source
      *  model (correction history), 0..1; absent ⇒ unknown. */

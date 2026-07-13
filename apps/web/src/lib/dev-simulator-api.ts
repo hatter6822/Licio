@@ -13,8 +13,11 @@
 import {
   SIMULATOR_CONTROL_HEADER,
   type SimulatorConfigureRequest,
+  type SimulatorDebateFastForwardRequest,
+  type SimulatorDebateFastForwardResponse,
   type SimulatorStartRequest,
   type SimulatorStatus,
+  simulatorDebateFastForwardResponseSchema,
   simulatorStatusSchema,
 } from '@licio/shared';
 
@@ -84,4 +87,26 @@ export async function configureSimulator(
     body: JSON.stringify(request),
   });
   return readStatus(response);
+}
+
+/**
+ * WS-T fast-forward: jump a debate to its next lifecycle milestone (lock /
+ * verdict / final resolution) so a developer can watch a REAL spec-window
+ * (24h) arena resolve on demand. DEV-only, like the rest of this surface.
+ */
+export async function fastForwardDebate(
+  debateId: string,
+  request: SimulatorDebateFastForwardRequest,
+): Promise<SimulatorDebateFastForwardResponse> {
+  const response = await fetch(`${BASE}/debates/${encodeURIComponent(debateId)}/fast-forward`, {
+    method: 'POST',
+    headers: controlHeaders,
+    body: JSON.stringify(request),
+  }).catch(() => {
+    throw new SimulatorUnavailableError();
+  });
+  if (response.status === 404) throw new SimulatorUnavailableError();
+  if (!response.ok) throw new Error(`simulator request failed: ${response.status}`);
+  const data: unknown = await response.json();
+  return simulatorDebateFastForwardResponseSchema.parse(data);
 }

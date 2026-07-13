@@ -36,9 +36,11 @@ import { users } from './user.js';
 
 export const debateStateEnum = pgEnum('debate_state', [
   'open',
+  'locked',
   'awaiting_verdict',
   'judged',
   'resolved',
+  'withdrawn',
 ]);
 
 export const debateTargetTypeEnum = pgEnum('debate_target_type', ['comment', 'story']);
@@ -47,7 +49,7 @@ export const debateVerdictEnum = pgEnum('debate_verdict', ['upheld', 'corrected'
 
 export const debateWinnerEnum = pgEnum('debate_winner', ['incumbent', 'challenger', 'none']);
 
-export const debateDeciderEnum = pgEnum('debate_decider', ['ai', 'steward']);
+export const debateDeciderEnum = pgEnum('debate_decider', ['ai', 'steward', 'concession']);
 
 /** One side's live, editable position (summary + sources) at rest in JSONB. */
 export interface DebateSidePositionAtRest {
@@ -62,6 +64,25 @@ export interface DebateSidePositionAtRest {
 export interface DebatePositionsAtRest {
   incumbent: DebateSidePositionAtRest;
   challenger: DebateSidePositionAtRest;
+}
+
+/** One side's locked underlying-content snapshot at rest in JSONB. */
+export interface DebateLockedSideAtRest {
+  /** Story title for a story target; null for comment/correction content. */
+  title: string | null;
+  /** The comment/correction body or the story excerpt at lock time. */
+  body: string;
+  /** Citation objects (validated at the application layer). */
+  citations: unknown[];
+  /** ISO instant of the content's last edit before the lock; null if never. */
+  updatedAt: string | null;
+}
+
+/** The locked snapshot of the material under debate (what the AI resolution
+ *  queue judges); null while the arena is still `open`. */
+export interface DebateLockedContentAtRest {
+  target: DebateLockedSideAtRest;
+  correction: DebateLockedSideAtRest;
 }
 
 export const debateArenas = pgTable(
@@ -94,10 +115,26 @@ export const debateArenas = pgTable(
       onDelete: 'set null',
     }),
     state: debateStateEnum('state').notNull().default('open'),
-    /** The two sides' co-visible drafts. */
+    /** The two sides' co-visible rebuttal drafts. */
     positions: jsonb('positions').$type<DebatePositionsAtRest>().notNull(),
-    /** open + 12h; positions are rejected after this instant. */
+    /** The outer edit deadline (open + 23h); edits/withdrawal/concession are
+     *  rejected after this instant even in a continuously active debate. */
     editDeadlineAt: timestamp('edit_deadline_at', { withTimezone: true }).notNull(),
+    /** When the debate enters the AI resolution queue: open + 24h scheduled,
+     *  pulled EARLIER to the lock instant on the both-sides-idle path. */
+    resolveDueAt: timestamp('resolve_due_at', { withTimezone: true }).notNull(),
+    /** The instant the material was locked in; null while still `open`. */
+    lockedAt: timestamp('locked_at', { withTimezone: true }),
+    /** The locked snapshot of both sides' underlying content. */
+    lockedContent: jsonb('locked_content').$type<DebateLockedContentAtRest>(),
+    /** Each side's last edit (underlying content or rebuttal).  Once BOTH are
+     *  older than the inactivity window, the arena locks + queues early. */
+    incumbentLastActiveAt: timestamp('incumbent_last_active_at', {
+      withTimezone: true,
+    }).notNull(),
+    challengerLastActiveAt: timestamp('challenger_last_active_at', {
+      withTimezone: true,
+    }).notNull(),
     verdict: debateVerdictEnum('verdict'),
     winner: debateWinnerEnum('winner'),
     decidedBy: debateDeciderEnum('decided_by'),
@@ -123,18 +160,27 @@ export const debateArenas = pgTable(
     index('debate_arenas_thread_idx').on(t.threadId),
     index('debate_arenas_target_contribution_idx').on(t.targetContributionId),
     index('debate_arenas_challenger_idx').on(t.challengerContributionId),
-    /** The scheduler sweep: open arenas past their edit deadline, then judged
-     *  arenas past their override deadline. */
+    /** The scheduler sweeps: open arenas past their edit deadline (→ lock),
+     *  due arenas past their resolve-due instant (→ the AI resolution
+     *  queue), then judged arenas past their override deadline (→ finalize). */
     index('debate_arenas_state_edit_deadline_idx').on(t.state, t.editDeadlineAt),
+    index('debate_arenas_state_resolve_due_idx').on(t.state, t.resolveDueAt),
     index('debate_arenas_state_override_deadline_idx').on(t.state, t.overrideDeadlineAt),
-    // At most ONE non-resolved arena per comment target (no duplicate debates).
+    /** The both-sides-idle expedited sweep: open arenas whose LATEST side
+     *  activity is older than the inactivity window. */
+    index('debate_arenas_open_idle_idx')
+      .using('btree', sql`greatest(${t.incumbentLastActiveAt}, ${t.challengerLastActiveAt})`)
+      .where(sql`${t.state} = 'open'`),
+    // At most ONE live (non-terminal) arena per comment target (no duplicate debates).
     uniqueIndex('debate_arenas_open_comment_uq')
       .on(t.targetContributionId)
-      .where(sql`${t.targetContributionId} is not null and ${t.state} <> 'resolved'`),
-    // At most ONE non-resolved arena per story target.
+      .where(
+        sql`${t.targetContributionId} is not null and ${t.state} not in ('resolved', 'withdrawn')`,
+      ),
+    // At most ONE live (non-terminal) arena per story target.
     uniqueIndex('debate_arenas_open_story_uq')
       .on(t.storyId)
-      .where(sql`${t.targetType} = 'story' and ${t.state} <> 'resolved'`),
+      .where(sql`${t.targetType} = 'story' and ${t.state} not in ('resolved', 'withdrawn')`),
     check(
       'debate_arenas_confidence_range',
       sql`${t.confidence} is null or (${t.confidence} >= 0 and ${t.confidence} <= 1)`,

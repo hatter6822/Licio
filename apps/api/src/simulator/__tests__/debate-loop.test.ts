@@ -31,7 +31,7 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
     const graph = await buildSimTestGraph();
     // The real deterministic MLP adjudicator (the sim graph's default judge is
     // the fail-closed null runner; the dev boot wires the governed LLM leg).
-    graph.forum.debateJudge = async (_debateId, input) => ({
+    graph.forum.debateJudge = async (_context, input) => ({
       verdict: judgeDebate(input),
       outputId: null,
     });
@@ -45,8 +45,19 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
     await sim.start();
     expect(graph.forum.debateWindowsOverride).not.toBeNull(); // the sim shortens the windows
     // Shrink further so the loop resolves in test time: ~1.2s of rebuttal
-    // window, instant finalize once judged.
-    graph.forum.debateWindowsOverride = { editWindowMs: 1_200, overrideWindowMs: 1 };
+    // window, then a zero-length lock hop so the SAME sweep pass locks and
+    // queues (judged right at the edit deadline, the timing this test always
+    // asserted), instant finalize once judged.  The both-sides-idle expedite
+    // is parked far beyond the test span so the scheduled path drives the
+    // timing (unscoped: every arena).
+    graph.forum.debateWindowsOverride = {
+      windows: {
+        editWindowMs: 1_200,
+        lockWindowMs: 0,
+        inactivityWindowMs: 600_000,
+        overrideWindowMs: 1,
+      },
+    };
 
     for (let i = 0; i < 200; i += 1) {
       await sim.tick();
@@ -81,7 +92,7 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
     timeout: 120_000,
   }, async () => {
     const graph = await buildSimTestGraph();
-    graph.forum.debateJudge = async (_debateId, input) => ({
+    graph.forum.debateJudge = async (_context, input) => ({
       verdict: judgeDebate(input),
       outputId: null,
     });
@@ -93,10 +104,19 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
       autoLoop: false,
     });
     await sim.start();
-    // Compressed windows: arenas judge ~1.2s after opening; the override
-    // window spans ~8s so judged arenas linger long enough for the steward
-    // persona's one-shot overrule roll AND still finalize inside the test.
-    graph.forum.debateWindowsOverride = { editWindowMs: 1_200, overrideWindowMs: 8_000 };
+    // Compressed windows: arenas lock ~1.2s after opening and the zero-length
+    // lock hop puts them into the queue on the same sweep pass (the idle
+    // expedite is parked beyond the test span); the override window spans ~8s
+    // so judged arenas linger long enough for the steward persona's one-shot
+    // overrule roll AND still finalize inside the test.
+    graph.forum.debateWindowsOverride = {
+      windows: {
+        editWindowMs: 1_200,
+        lockWindowMs: 0,
+        inactivityWindowMs: 600_000,
+        overrideWindowMs: 8_000,
+      },
+    };
 
     const done = (): boolean => {
       const s = sim ? sim.status() : null;
@@ -139,7 +159,7 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
     timeout: 120_000,
   }, async () => {
     const graph = await buildSimTestGraph();
-    graph.forum.debateJudge = async (_debateId, input) => ({
+    graph.forum.debateJudge = async (_context, input) => ({
       verdict: judgeDebate(input),
       outputId: null,
     });
@@ -151,7 +171,14 @@ describe('WS-T challenge-resolution loop (corrections → arenas → verdicts)',
       autoLoop: false,
     });
     await sim.start();
-    graph.forum.debateWindowsOverride = { editWindowMs: 1_200, overrideWindowMs: 8_000 };
+    graph.forum.debateWindowsOverride = {
+      windows: {
+        editWindowMs: 1_200,
+        lockWindowMs: 0,
+        inactivityWindowMs: 600_000,
+        overrideWindowMs: 8_000,
+      },
+    };
     // A moderation experiment restricts the steward AFTER provisioning. The
     // real route chain (authMiddleware + requireVerifiedAccount +
     // requireUnrestricted) would deny the overrule; the simulator calls

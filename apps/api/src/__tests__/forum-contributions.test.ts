@@ -12,6 +12,7 @@ import {
   type ContributionPublic,
   contributionPublicSchema,
   DEBATE_EDIT_WINDOW_MS,
+  DEBATE_LOCK_WINDOW_MS,
   DEBATE_OVERRIDE_WINDOW_MS,
 } from '@licio/shared';
 import { Hono } from 'hono';
@@ -223,9 +224,21 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
       throw err;
     };
 
-    // Past the 12h edit window: the tick judges (fail-closed inconclusive — no AI
-    // governance is booted in this fixture, so the runner returns null).
-    nowMs += DEBATE_EDIT_WINDOW_MS + 1000;
+    // Keep a side active at 22h30m so the SCHEDULE fires first (the idle
+    // instant would land at 23h30m): the tick then LOCKS the material at the
+    // 23h deadline (the frozen final countdown) and the AI resolution queue
+    // opens at hour 24.  (A NO-SHOW arena — idle since open — instead
+    // expedites on catch-up: the earlier-of-idle-or-schedule classification,
+    // covered in forum-debate.test.ts.)
+    nowMs += DEBATE_EDIT_WINDOW_MS - 30 * 60 * 1000;
+    await fixture.forum.debates.touchActivity(debateId, 'incumbent', new Date(nowMs).toISOString());
+    nowMs += 30 * 60 * 1000 + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('locked');
+
+    // At hour 24 the tick judges (fail-closed inconclusive — no AI governance
+    // is booted in this fixture, so the runner returns null).
+    nowMs += DEBATE_LOCK_WINDOW_MS + 1000;
     await runDebateSchedulerTick(rethrow);
     expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
 
@@ -528,6 +541,73 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     expect(res.status).toBe(404);
   });
 
+  it('WS-T — a debated edit is refused from the DUE instant, before any sweep flips the state', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // The edit deadline has passed but NO scheduler tick ran — the stored
+    // state is still `open`. The gate must freeze from the due instant.
+    await fixture.forum.debates.shiftDeadlines(debateId, {
+      editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+    });
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('open');
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A post-deadline slip.' },
+        cookie,
+      ),
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('debate_locked');
+  });
+
+  it('WS-T — the debated-content freeze covers ONLY locked/awaiting: judged frees the edit', async () => {
+    const rethrow = (err: unknown): never => {
+      throw err;
+    };
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // Lock the arena (the pre-verdict freeze): the target's edit is refused.
+    await fixture.forum.debates.shiftDeadlines(debateId, {
+      editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+    });
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('locked');
+    const frozen = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A mid-lock fix.' },
+        cookie,
+      ),
+    );
+    expect(frozen.status).toBe(409);
+    expect(((await frozen.json()) as { error: { code: string } }).error.code).toBe('debate_locked');
+    // Once JUDGED (the 24h override window running), the author edits freely —
+    // the freeze never outlives the verdict.
+    await fixture.forum.debates.shiftDeadlines(debateId, {
+      resolveDueAt: new Date(nowMs - 1000).toISOString(),
+    });
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+    const freed = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A post-verdict fix.' },
+        cookie,
+      ),
+    );
+    expect(freed.status).toBe(200);
+  });
+
   it('edits cannot drop the correction citation floor (422)', async () => {
     const target = await createOk(contributionBody('comment', threadId));
     const res = await create(
@@ -564,5 +644,382 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     // retained so back-compat subtree/comment reads can continue from visible descendants.
     const child = await fixture.forum.contributions.getById(answer.contribution_id);
     expect(child?.parentContributionId).toBe(question.contribution_id);
+  });
+});
+
+describe('WS-T — lock/removal races, activity gaming, and debate-write access gates', () => {
+  const rethrow = (err: unknown): never => {
+    throw err;
+  };
+
+  async function openArena(): Promise<{ targetId: string; debateId: string }> {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    return {
+      targetId: target.contribution_id,
+      debateId: correction.metadata.debate_arena_id ?? '',
+    };
+  }
+
+  it('a NO-OP edit (identical body) does not reset the debate activity clocks', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    const before = await fixture.forum.debates.getById(debateId);
+    nowMs += 60_000;
+    // Identical body → immaterial: the side's clock must NOT move, or a party
+    // could ping contentless PATCHes to dodge the both-sides-idle expedite.
+    const noop = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: target.body },
+        cookie,
+      ),
+    );
+    expect(noop.status).toBe(200);
+    let after = await fixture.forum.debates.getById(debateId);
+    expect(after?.incumbentLastActiveAt).toBe(before?.incumbentLastActiveAt);
+    // A MATERIAL edit still counts as activity.
+    const real = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'Genuinely new material.' },
+        cookie,
+      ),
+    );
+    expect(real.status).toBe(200);
+    after = await fixture.forum.debates.getById(debateId);
+    expect(after?.incumbentLastActiveAt).toBe(new Date(nowMs).toISOString());
+  });
+
+  it('a FLAGGED edit racing the lock refreshes the snapshot as the SUPPRESSED side', async () => {
+    // A fixture whose safety classifier flags a malware-domain citation.
+    const flagged = freshForumServices({
+      now: () => nowMs,
+      config: { malwareDomains: ['evil.example'] },
+      forumConfig: { contributionsPerMinute: 100 },
+    });
+    const session = await seedUserWithSession(flagged.identity);
+    const seeded = await seedThread(flagged);
+    const mk = async (body: Record<string, unknown>) => {
+      const res = await app().request(
+        jsonRequest('/v1/contributions', 'POST', body, session.cookie),
+      );
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { contribution: ContributionPublic }).contribution;
+    };
+    const target = await mk(contributionBody('comment', seeded.threadId));
+    const correction = await mk(
+      contributionBody('correction', seeded.threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // The lock lands BETWEEN the edit's touch-CAS and its applyEdit — simulated
+    // by locking inside the store write itself.
+    const store = flagged.forum.contributions;
+    const realApplyEdit = store.applyEdit.bind(store);
+    let raced = false;
+    store.applyEdit = async (...args: Parameters<typeof realApplyEdit>) => {
+      if (!raced) {
+        raced = true;
+        await flagged.forum.debates.shiftDeadlines(debateId, {
+          editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+        });
+        await runDebateSchedulerTick(rethrow);
+        expect((await flagged.forum.debates.getById(debateId))?.state).toBe('locked');
+      }
+      return realApplyEdit(...args);
+    };
+    // The edit introduces a malware citation: the floor HOLDS it (under_review).
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        {
+          contribution_id: target.contribution_id,
+          body: 'Actually see this.',
+          citations: [{ url: 'https://evil.example/payload' }],
+        },
+        session.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(
+      (await flagged.forum.contributions.getById(target.contribution_id))?.moderationState,
+    ).toBe('under_review');
+    // The reconcile refreshed the snapshot AFTER the hold applied: the judged
+    // side is the SUPPRESSED content — never the held body or its citation.
+    const arena = await flagged.forum.debates.getById(debateId);
+    expect(arena?.state).toBe('locked');
+    expect(arena?.lockedContent?.target.body).toBe('');
+    expect(arena?.lockedContent?.target.citations).toEqual([]);
+  });
+
+  it("an arena that opens DURING a removal is closed by the removal's late pass", async () => {
+    const { targetId, debateId } = await openArena();
+    // Simulate the interleave: the removal's FIRST party snapshot misses the
+    // just-opened arena; the post-tombstone re-read must still see and close it.
+    const store = fixture.forum.debates;
+    const real = store.getActiveForComment.bind(store);
+    let first = true;
+    store.getActiveForComment = async (contributionId: string) => {
+      if (first && contributionId === targetId) {
+        first = false;
+        return null;
+      }
+      return real(contributionId);
+    };
+    const res = await app().request(
+      new Request(`http://local/v1/contributions/${targetId}`, {
+        method: 'DELETE',
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect((await fixture.forum.contributions.getById(targetId))?.moderationState).toBe('removed');
+    // The late pass closed the arena with the incumbent's exit (concession).
+    const arena = await fixture.forum.debates.getById(debateId);
+    expect(arena?.state).toBe('resolved');
+    expect(arena?.decidedBy).toBe('concession');
+  });
+
+  it('debate WRITES are gated on thread readability (position/withdraw/concede 404 once pulled)', async () => {
+    const { debateId } = await openArena();
+    // While readable, the party posts a rebuttal normally.
+    const okRes = await app().request(
+      jsonRequest(
+        `/v1/debates/${debateId}/position`,
+        'POST',
+        { summary: 'A live rebuttal.', citations: [{ url: 'https://example.org/live' }] },
+        cookie,
+      ),
+    );
+    expect(okRes.status).toBe(200);
+    // The floor pulls the thread (WS-J item-safety `removed`): every debate
+    // WRITE now 404s exactly like the reads — party status never outlives
+    // access to the conversation.
+    await fixture.events.safetyStore.set({
+      itemId: threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'mod-1',
+      updatedAt: new Date(nowMs).toISOString(),
+    });
+    const position = await app().request(
+      jsonRequest(
+        `/v1/debates/${debateId}/position`,
+        'POST',
+        { summary: 'Should be unreachable.', citations: [{ url: 'https://example.org/x' }] },
+        cookie,
+      ),
+    );
+    expect(position.status).toBe(404);
+    const withdraw = await app().request(
+      jsonRequest(`/v1/debates/${debateId}/withdraw`, 'POST', {}, cookie),
+    );
+    expect(withdraw.status).toBe(404);
+    const concede = await app().request(
+      jsonRequest(`/v1/debates/${debateId}/concede`, 'POST', {}, cookie),
+    );
+    expect(concede.status).toBe(404);
+  });
+
+  it('refuses a correction against a moderation-held (under_review) target', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    // The arena judges publicly-served material only: a held target would be
+    // scored as an EMPTY incumbent side, so the challenge is refused until
+    // the hold clears.
+    await fixture.forum.contributions.setModerationState(target.contribution_id, 'under_review');
+    const res = await create(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('invalid_target');
+  });
+
+  it('an edit racing a verdict that lands BEFORE the touch-CAS still succeeds (judged frees it)', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // The verdict lands BETWEEN the edit's early gate (arena open, deadlines
+    // in the future) and the write-boundary touch: simulated by judging the
+    // arena inside the first touchActivity call.  The failed touch must NOT
+    // leave the arena in the reconcile set — a judged arena frees the edit,
+    // so reverting it as a mid-race claim would 409 a legitimate
+    // post-verdict edit.
+    const store = fixture.forum.debates;
+    const realTouch = store.touchActivity.bind(store);
+    let raced = false;
+    store.touchActivity = async (...args: Parameters<typeof realTouch>) => {
+      if (!raced) {
+        raced = true;
+        await store.shiftDeadlines(debateId, {
+          editDeadlineAt: new Date(nowMs - 2000).toISOString(),
+          resolveDueAt: new Date(nowMs - 1000).toISOString(),
+        });
+        await runDebateSchedulerTick(rethrow);
+        expect((await store.getById(debateId))?.state).toBe('judged');
+      }
+      return realTouch(...args);
+    };
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A legitimate post-verdict fix.' },
+        cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((await fixture.forum.contributions.getById(target.contribution_id))?.body).toBe(
+      'A legitimate post-verdict fix.',
+    );
+    expect((await store.getById(debateId))?.state).toBe('judged');
+  });
+
+  it('an edit whose safety pass outlives the due instant is refused at the write boundary', async () => {
+    const { targetId, debateId } = await openArena();
+    // The 23h deadline elapses DURING the (slow) safety pass, with no sweep
+    // run yet — the stored state is still `open`, so a state-only CAS would
+    // accept the edit and reset the activity clock past the due instant.
+    const safety = fixture.forum.safety;
+    const realClassify = safety.classify.bind(safety);
+    safety.classify = async (...args: Parameters<typeof realClassify>) => {
+      safety.classify = realClassify;
+      await fixture.forum.debates.shiftDeadlines(debateId, {
+        editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+      });
+      return realClassify(...args);
+    };
+    const before = await fixture.forum.debates.getById(debateId);
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Slipped past the due instant?' },
+        cookie,
+      ),
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('debate_locked');
+    const after = await fixture.forum.debates.getById(debateId);
+    expect(after?.state).toBe('open');
+    // Neither the edit nor the activity reset landed.
+    expect(after?.incumbentLastActiveAt).toBe(before?.incumbentLastActiveAt);
+    expect((await fixture.forum.contributions.getById(targetId))?.body).not.toBe(
+      'Slipped past the due instant?',
+    );
+  });
+
+  it('editing/removing LIVE debate material requires thread readability (404 once pulled)', async () => {
+    const { targetId, debateId } = await openArena();
+    const plain = await createOk(contributionBody('comment', threadId));
+    await fixture.events.safetyStore.set({
+      itemId: threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'mod-1',
+      updatedAt: new Date(nowMs).toISOString(),
+    });
+    // The debated row: the contribution paths are debate writes too, so a
+    // party who lost access can neither edit the material nor exit the arena
+    // through a removal.
+    const patched = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Changed from outside.' },
+        cookie,
+      ),
+    );
+    expect(patched.status).toBe(404);
+    const removed = await app().request(
+      new Request(`http://local/v1/contributions/${targetId}`, {
+        method: 'DELETE',
+        headers: { cookie },
+      }),
+    );
+    expect(removed.status).toBe(404);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('open');
+    expect((await fixture.forum.contributions.getById(targetId))?.moderationState).toBe(
+      'published',
+    );
+    // A row with NO live arena keeps the ordinary edit policy.
+    const plainEdit = await app().request(
+      jsonRequest(
+        `/v1/contributions/${plain.contribution_id}`,
+        'PATCH',
+        { contribution_id: plain.contribution_id, body: 'Ordinary edit still works.' },
+        cookie,
+      ),
+    );
+    expect(plainEdit.status).toBe(200);
+  });
+
+  it('an edit the lock ALREADY captured is accepted even when the claim beats the reconcile', async () => {
+    const { targetId, debateId } = await openArena();
+    const store = fixture.forum.contributions;
+    const realApplyEdit = store.applyEdit.bind(store);
+    let first = true;
+    store.applyEdit = async (...args: Parameters<typeof realApplyEdit>) => {
+      const row = await realApplyEdit(...args);
+      if (first) {
+        first = false;
+        // The whole lifecycle races in AFTER the write but BEFORE the
+        // reconcile: the lock snapshots the EDITED row, the claim freezes it,
+        // and the verdict lands on it.
+        await fixture.forum.debates.shiftDeadlines(debateId, {
+          editDeadlineAt: new Date(nowMs - 2000).toISOString(),
+          resolveDueAt: new Date(nowMs - 1000).toISOString(),
+        });
+        await runDebateSchedulerTick(rethrow);
+        expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+      }
+      return row;
+    };
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'The judged edit.' },
+        cookie,
+      ),
+    );
+    // The snapshot carries the edit, so the edit IS the judged material —
+    // accepted, never reverted into divergence from the verdict's basis.
+    expect(res.status).toBe(200);
+    const arena = await fixture.forum.debates.getById(debateId);
+    expect(arena?.state).toBe('judged');
+    expect(arena?.lockedContent?.target.body).toBe('The judged edit.');
+    expect((await store.getById(targetId))?.body).toBe('The judged edit.');
+  });
+
+  it('suppresses a moderation-held target body from the story debate summaries', async () => {
+    const { targetId, debateId } = await openArena();
+    const storyId = await fixture.ingestion.stories.getStoryIdByThreadId(threadId);
+    const summaries = async () => {
+      const res = await app().request(
+        new Request(`http://local/v1/stories/${storyId}/debates`, { headers: { cookie } }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        debates: { debate_id: string; target_excerpt: string | null }[];
+      };
+      return body.debates.find((d) => d.debate_id === debateId);
+    };
+    // Published target: the excerpt serves the body.
+    expect((await summaries())?.target_excerpt).not.toBeNull();
+    // Held target: the discovery list must not leak the withheld text.
+    await fixture.forum.contributions.setModerationState(targetId, 'under_review');
+    expect((await summaries())?.target_excerpt).toBeNull();
   });
 });

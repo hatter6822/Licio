@@ -14,12 +14,14 @@ import {
 
 function side(
   overrides: Partial<{
+    content: string;
     summary: string;
     sources: DebateJudgeSideInput['sources'];
     rebuts: boolean;
   }> = {},
 ): DebateJudgeSideInput {
   return {
+    content: overrides.content ?? '',
     summary: overrides.summary ?? '',
     sources: overrides.sources ?? [],
     rebuts_opponent: overrides.rebuts ?? false,

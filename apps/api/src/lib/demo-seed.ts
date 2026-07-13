@@ -2008,9 +2008,11 @@ export async function seedGovernanceDemo(
       'Route link-heavy, spammy, or otherwise suspicious contributions to human review; allow civil, on-topic content.',
     promptTemplates: { summary: 'Summarize the discussion neutrally and briefly.' },
     config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
-    // moderation + the Stage 4 lawmaking summary (both permitted by the default
-    // law-pack) so the dev "governed by" panel shows real facilitation activity.
-    requestedCapabilities: ['moderate.flag', 'lawmaking.summarize'],
+    // moderation + the Stage 4 lawmaking summary + the WS-T debate queue (all
+    // permitted by the default law-pack) so the dev "governed by" panel shows
+    // real facilitation activity and the demo room adjudicates its own
+    // correction debates through its ratified agent.
+    requestedCapabilities: ['moderate.flag', 'lawmaking.summarize', 'debate.judge'],
   };
   const proposed = await governance.proposeModel(
     GOVERNANCE_DEMO_ROOM_ID,

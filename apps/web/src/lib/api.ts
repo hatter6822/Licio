@@ -446,6 +446,22 @@ export async function overrideDebate(
   return parseResponse(response, debateArenaResponseSchema);
 }
 
+/** The party-driven early closes (open window only): the challenger WITHDRAWS
+ *  the correction (closes `withdrawn` — no verdict; the target's Challenged
+ *  tag clears) or the incumbent CONCEDES (the challenger prevails without
+ *  adjudication). */
+export async function closeDebate(
+  debateId: string,
+  action: 'withdraw' | 'concede',
+): Promise<DebateArenaResponse> {
+  const target = client.v1.debates[':debateId'];
+  const response =
+    action === 'withdraw'
+      ? await target.withdraw.$post({ param: { debateId } })
+      : await target.concede.$post({ param: { debateId } });
+  return parseResponse(response, debateArenaResponseSchema);
+}
+
 export async function createReport(request: CreateReportRequest): Promise<ReportCreatedResponse> {
   const response = await client.v1.reports.$post({ json: request });
   return parseResponse(response, reportCreatedResponseSchema);

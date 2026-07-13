@@ -301,14 +301,21 @@ describe('WS-T debate arena contracts', () => {
     );
   });
 
-  it('enforces the arena state graph (open→awaiting_verdict→judged→resolved, terminal)', () => {
-    expect(isLegalDebateTransition('open', 'awaiting_verdict')).toBe(true);
+  it('enforces the arena state graph (open→locked→awaiting_verdict→judged→resolved; withdrawn/concession early closes; terminal)', () => {
+    expect(isLegalDebateTransition('open', 'locked')).toBe(true);
+    expect(isLegalDebateTransition('locked', 'awaiting_verdict')).toBe(true);
     expect(isLegalDebateTransition('awaiting_verdict', 'judged')).toBe(true);
     expect(isLegalDebateTransition('judged', 'resolved')).toBe(true);
-    // Illegal skips and terminal state.
+    // Party-driven early closes while open: withdrawal and concession.
+    expect(isLegalDebateTransition('open', 'withdrawn')).toBe(true);
+    expect(isLegalDebateTransition('open', 'resolved')).toBe(true);
+    // Illegal skips, locked-in states, and the two terminal states.
     expect(isLegalDebateTransition('open', 'judged')).toBe(false);
-    expect(isLegalDebateTransition('open', 'resolved')).toBe(false);
+    expect(isLegalDebateTransition('open', 'awaiting_verdict')).toBe(false);
+    expect(isLegalDebateTransition('locked', 'withdrawn')).toBe(false);
+    expect(isLegalDebateTransition('locked', 'resolved')).toBe(false);
     expect(isLegalDebateTransition('resolved', 'open')).toBe(false);
+    expect(isLegalDebateTransition('withdrawn', 'open')).toBe(false);
   });
 });
 

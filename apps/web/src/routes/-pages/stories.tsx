@@ -5,9 +5,11 @@
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
 import { isSentinelTopicId, type StoryDetail } from '@licio/shared';
-import { useNavigate, useParams } from '@tanstack/react-router';
+import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { CommentSection, CorrectionComposer } from '../../components/comments/index.js';
+import { DebateArenaModal } from '../../components/debate/DebateArenaModal.js';
+import { useCloseDebate, useOpenDebate } from '../../components/debate/open-debate.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
@@ -58,7 +60,7 @@ function SaveStoryButton({ story }: { story: StoryDetail }): React.ReactElement 
 }
 
 /** Raise a sourced correction against the STORY itself (WS-T story-root
- *  challenge) — opens the debate arena on success. */
+ *  challenge) — opens the debate-arena modal on success. */
 function StoryCorrectionButton({
   storyId,
   threadId,
@@ -68,7 +70,7 @@ function StoryCorrectionButton({
 }): React.ReactElement {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const navigate = useNavigate();
+  const openDebate = useOpenDebate();
   return (
     <>
       <Button variant="secondary" aria-haspopup="dialog" onClick={() => setOpen(true)}>
@@ -87,10 +89,7 @@ function StoryCorrectionButton({
           onCancel={() => setOpen(false)}
           onOpened={(debateId) => {
             setOpen(false);
-            void navigate({
-              to: '/stories/$storyId/debate/$debateId',
-              params: { storyId, debateId },
-            });
+            openDebate(debateId);
           }}
         />
       </Dialog>
@@ -105,6 +104,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const [readerOpen, setReaderOpen] = useState(false);
   const openId = useRef(`source-${storyId}`);
   const navigate = useNavigate();
+  // WS-T — the debate-arena modal opens over this page exactly while the
+  // `?debate=<id>` deep link is present (the legacy arena route redirects
+  // here); closing clears the param, so back/refresh behave honestly.
+  const debateParam = useSearch({ from: '/stories/$storyId' }).debate;
+  const closeDebate = useCloseDebate();
   // Return to wherever the story was opened from (front page, topic, room); a
   // cold-loaded deep link falls back (replacing) to the front page.
   const goBack = useGoBack(() => void navigate({ to: '/', replace: true }));
@@ -227,6 +231,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
             ) : null}
             {/* WS-H "Where interpretations differ" renders inside CommentSection,
                 right after the composer (not here at the page bottom). */}
+            {/* WS-T — the debate-arena modal (deep-linked via ?debate=<id>). */}
+            <DebateArenaModal debateId={debateParam ?? null} onClose={closeDebate} />
           </article>
         )
       }

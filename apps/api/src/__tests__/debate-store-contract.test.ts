@@ -3,9 +3,10 @@
 // WS-T — the `DebateStore` contract, run against BOTH adapters: the in-memory
 // adapter (always) verifies the semantics locally, and the gated Drizzle adapter
 // (DATABASE_URL) runs the SAME assertions against live Postgres + the real
-// migration chain (0056).  Unlike the CID-opaque LCAP store, `debate_arenas` has
-// FK edges, so the Drizzle leg seeds a fresh story→thread→contribution graph per
-// arena (via `freshCtx`); the in-memory leg uses arbitrary ids.
+// migration chain (0056/0078/0079).  Unlike the CID-opaque LCAP store,
+// `debate_arenas` has FK edges, so the Drizzle leg seeds a fresh
+// story→thread→contribution graph per arena (via `freshCtx`); the in-memory leg
+// uses arbitrary ids.
 import { randomUUID } from 'node:crypto';
 import { createDbClient, debateArenas, migrationsFolder } from '@licio/db';
 import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
@@ -13,6 +14,7 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   type DebateArenaRecord,
+  type DebateLockedContent,
   type DebateStore,
   InMemoryDebateStore,
 } from '../forum/debate-store.js';
@@ -56,7 +58,12 @@ function makeArena(
         updatedAt: '2026-07-05T00:00:00.000Z',
       },
     },
-    editDeadlineAt: '2026-07-05T12:00:00.000Z',
+    editDeadlineAt: '2026-07-05T23:00:00.000Z',
+    resolveDueAt: '2026-07-06T00:00:00.000Z',
+    lockedAt: null,
+    lockedContent: null,
+    incumbentLastActiveAt: '2026-07-05T00:00:00.000Z',
+    challengerLastActiveAt: '2026-07-05T00:00:00.000Z',
     verdict: null,
     winner: null,
     decidedBy: null,
@@ -150,8 +157,8 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect((await store.getById(id))?.positions.incumbent.summary).not.toContain('last-second');
     // Re-claiming succeeds (crash recovery for a judge that never returned) …
     expect((await store.claimForVerdict(id))?.state).toBe('awaiting_verdict');
-    // … and the awaiting arena stays LISTED as due (never stranded).
-    const due = await store.listPastEditDeadline('2027-01-01T00:00:00.000Z', 10);
+    // … and the awaiting arena stays LISTED as due for resolution (never stranded).
+    const due = await store.listPastResolveDeadline('2027-01-01T00:00:00.000Z', 10);
     expect(due.some((row) => row.debateId === id)).toBe(true);
     // A judged arena refuses the claim.
     await store.recordVerdict(id, {
@@ -220,13 +227,22 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(await store.getActiveForComment(ctx.targetId)).toBeNull();
   });
 
-  it('sweeps arenas past their edit + override deadlines', async () => {
+  it('sweeps arenas due for lock, resolution, and finalize', async () => {
     const store = makeStore();
     const ctx = await freshCtx();
-    // An OPEN arena whose 12h edit window already closed.
-    const open = await store.open(makeArena(ctx, { editDeadlineAt: '2026-07-05T00:00:00.000Z' }));
-    const pastEdit = await store.listPastEditDeadline('2026-07-05T06:00:00.000Z', 10);
-    expect(pastEdit.map((a) => a.debateId)).toContain(open?.debateId);
+    // An OPEN arena whose 23h edit window already closed → due for LOCK.
+    const open = await store.open(
+      makeArena(ctx, {
+        editDeadlineAt: '2026-07-05T00:00:00.000Z',
+        resolveDueAt: '2026-07-05T01:00:00.000Z',
+      }),
+    );
+    const dueLock = await store.listDueForLock('2026-07-05T00:30:00.000Z', 10);
+    expect(dueLock.map((a) => a.debateId)).toContain(open?.debateId);
+    // Past its resolve-due instant it is due for the AI resolution queue
+    // (still `open` — the lock-sweep catch-up path is listed too).
+    const dueResolve = await store.listPastResolveDeadline('2026-07-05T06:00:00.000Z', 10);
+    expect(dueResolve.map((a) => a.debateId)).toContain(open?.debateId);
     // A JUDGED arena whose 24h override window already closed.
     await store.recordVerdict(open?.debateId ?? '', {
       verdict: 'inconclusive',
@@ -239,8 +255,274 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
       overrideDeadlineAt: '2026-07-05T01:00:00.000Z',
       state: 'judged',
     });
+    // A judged arena is no longer due for lock/resolution.
+    expect(
+      (await store.listDueForLock('2027-01-01T00:00:00.000Z', 10)).map((a) => a.debateId),
+    ).not.toContain(open?.debateId);
+    expect(
+      (await store.listPastResolveDeadline('2027-01-01T00:00:00.000Z', 10)).map((a) => a.debateId),
+    ).not.toContain(open?.debateId);
     const pastOverride = await store.listPastOverrideDeadline('2026-07-06T00:00:00.000Z', 10);
     expect(pastOverride.map((a) => a.debateId)).toContain(open?.debateId);
+  });
+
+  it('locks in the content snapshot (state CAS; the expedite pulls resolveDueAt forward)', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const snapshot: DebateLockedContent = {
+      target: {
+        title: null,
+        body: 'the challenged text',
+        citations: [],
+        updatedAt: '2026-07-05T00:30:00.000Z',
+      },
+      correction: {
+        title: null,
+        body: 'the correction text',
+        citations: [citation],
+        updatedAt: '2026-07-05T00:00:00.000Z',
+      },
+    };
+    // The expedited lock pulls the queue entry forward to the lock instant.
+    const locked = await store.lock(
+      id,
+      '2026-07-05T01:00:00.000Z',
+      snapshot,
+      '2026-07-05T01:00:00.000Z',
+    );
+    expect(locked?.state).toBe('locked');
+    expect(locked?.lockedAt).toBe('2026-07-05T01:00:00.000Z');
+    expect(locked?.resolveDueAt).toBe('2026-07-05T01:00:00.000Z');
+    expect(locked?.lockedContent?.target.body).toBe('the challenged text');
+    expect(locked?.lockedContent?.correction.citations).toHaveLength(1);
+    // A second lock is refused (CAS: only `open` locks) — and so are position
+    // writes, withdrawal, and concession from this instant.
+    expect(await store.lock(id, '2026-07-05T02:00:00.000Z', snapshot)).toBeNull();
+    expect(await store.withdraw(id, '2026-07-05T02:00:00.000Z')).toBeNull();
+    expect(
+      await store.concede(id, {
+        verdict: 'corrected',
+        winner: 'challenger',
+        decidedBy: 'concession',
+        rationale: 'conceded',
+        verdictAt: '2026-07-05T02:00:00.000Z',
+        resolvedAt: '2026-07-05T02:00:00.000Z',
+      }),
+    ).toBeNull();
+    // A locked arena claims for verdict (locked → awaiting_verdict).
+    expect((await store.claimForVerdict(id))?.state).toBe('awaiting_verdict');
+  });
+
+  it('refreshLockedContent replaces a still-locked snapshot and refuses once claimed', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const side = (body: string): DebateLockedContent['target'] => ({
+      title: null,
+      body,
+      citations: [],
+      updatedAt: null,
+    });
+    await store.lock(id, '2026-07-05T01:00:00.000Z', {
+      target: side('pre-race body'),
+      correction: side('the correction'),
+    });
+    // The edit-race reconcile: while still `locked`, the snapshot is replaceable.
+    const refreshed = await store.refreshLockedContent(id, {
+      target: side('post-edit body'),
+      correction: side('the correction'),
+    });
+    expect(refreshed?.lockedContent?.target.body).toBe('post-edit body');
+    // Once the queue claims the arena, the snapshot is frozen for the judge.
+    await store.claimForVerdict(id);
+    expect(
+      await store.refreshLockedContent(id, {
+        target: side('too late'),
+        correction: side('the correction'),
+      }),
+    ).toBeNull();
+    expect((await store.getById(id))?.lockedContent?.target.body).toBe('post-edit body');
+  });
+
+  it('backfills a MISSING snapshot on a claimed arena but never replaces one', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const side = (body: string): DebateLockedContent['target'] => ({
+      title: null,
+      body,
+      citations: [],
+      updatedAt: null,
+    });
+    // A legacy/crash claim: straight from `open`, no lock, no snapshot.
+    await store.claimForVerdict(id);
+    const filled = await store.backfillLockedContent(id, '2026-07-05T01:00:00.000Z', {
+      target: side('the challenged text'),
+      correction: side('the correction'),
+    });
+    expect(filled?.lockedContent?.target.body).toBe('the challenged text');
+    expect(filled?.lockedAt).toBe('2026-07-05T01:00:00.000Z');
+    // An existing snapshot is frozen for the judge — the backfill CAS refuses.
+    expect(
+      await store.backfillLockedContent(id, '2026-07-05T02:00:00.000Z', {
+        target: side('overwrite attempt'),
+        correction: side('x'),
+      }),
+    ).toBeNull();
+    expect((await store.getById(id))?.lockedContent?.target.body).toBe('the challenged text');
+  });
+
+  it('closeForRemoval closes every arena atomically — or NONE when any left `open`', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    // Two live arenas: a comment-target one (this row as challenger) and a
+    // story-target one (this row's author as incumbent).
+    const a = await store.open(makeArena(ctx));
+    const b = await store.open(
+      makeArena(ctx, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: ctx.challenger2Id,
+      }),
+    );
+    const aId = a?.debateId ?? '';
+    const bId = b?.debateId ?? '';
+    const patch = {
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'concession',
+      rationale: 'The incumbent conceded the challenge.',
+      verdictAt: '2026-07-05T01:00:00.000Z',
+      resolvedAt: '2026-07-05T01:00:00.000Z',
+    } as const;
+    // One of the pair locks concurrently: the WHOLE close rolls back.
+    await store.lock(bId, '2026-07-05T00:30:00.000Z', {
+      target: { title: null, body: 'x', citations: [], updatedAt: null },
+      correction: { title: null, body: 'y', citations: [], updatedAt: null },
+    });
+    expect(
+      await store.closeForRemoval([
+        { debateId: aId, kind: 'withdraw', closedAt: '2026-07-05T01:00:00.000Z' },
+        { debateId: bId, kind: 'concede', patch },
+      ]),
+    ).toBeNull();
+    expect((await store.getById(aId))?.state).toBe('open'); // untouched
+    // With every arena OPEN (a fresh pair on a fresh graph), the set closes.
+    const ctx2 = await freshCtx();
+    const a2 = await store.open(makeArena(ctx2));
+    const b2 = await store.open(
+      makeArena(ctx2, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: ctx2.challenger2Id,
+      }),
+    );
+    if (!a2 || !b2) throw new Error('fresh arenas not opened');
+    const closed = await store.closeForRemoval([
+      { debateId: a2.debateId, kind: 'withdraw', closedAt: '2026-07-05T02:00:00.000Z' },
+      { debateId: b2.debateId, kind: 'concede', patch },
+    ]);
+    expect(closed?.map((row) => row.state)).toEqual(['withdrawn', 'resolved']);
+    expect(closed?.[1]?.decidedBy).toBe('concession');
+  });
+
+  it('withdraws an OPEN arena (terminal, frees the per-target slot)', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const withdrawn = await store.withdraw(id, '2026-07-05T01:00:00.000Z');
+    expect(withdrawn?.state).toBe('withdrawn');
+    expect(withdrawn?.resolvedAt).toBe('2026-07-05T01:00:00.000Z');
+    expect(withdrawn?.verdict).toBeNull();
+    // Terminal: not active, not sweepable, and the target slot is FREE again.
+    expect(await store.getActiveForComment(ctx.targetId)).toBeNull();
+    expect(
+      (await store.listPastResolveDeadline('2027-01-01T00:00:00.000Z', 10)).map((a) => a.debateId),
+    ).not.toContain(id);
+    const fresh = await store.open(makeArena(ctx, { challengerContributionId: ctx.challenger2Id }));
+    expect(fresh).not.toBeNull();
+  });
+
+  it('concedes an OPEN arena (resolved with the concession outcome)', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const conceded = await store.concede(id, {
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'concession',
+      rationale: 'The incumbent conceded the challenge.',
+      verdictAt: '2026-07-05T01:00:00.000Z',
+      resolvedAt: '2026-07-05T01:00:00.000Z',
+    });
+    expect(conceded?.state).toBe('resolved');
+    expect(conceded?.verdict).toBe('corrected');
+    expect(conceded?.winner).toBe('challenger');
+    expect(conceded?.decidedBy).toBe('concession');
+    // Terminal: a verdict can no longer land.
+    expect(await store.claimForVerdict(id)).toBeNull();
+  });
+
+  it('tracks side activity: position writes + touches feed the idle sweep', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    // Both clocks start at open → the arena is idle-listed one window later.
+    const idleAtOpen = await store.listIdleSince('2026-07-05T01:00:00.000Z', 10);
+    expect(idleAtOpen.map((a) => a.debateId)).toContain(id);
+    // A rebuttal write resets the WRITER's clock and un-lists the arena.
+    await store.updatePosition(id, 'incumbent', {
+      summary: 'the transcript confirms it',
+      citations: [citation],
+      updatedAt: '2026-07-05T02:00:00.000Z',
+    });
+    expect(
+      (await store.listIdleSince('2026-07-05T01:30:00.000Z', 10)).map((a) => a.debateId),
+    ).not.toContain(id);
+    // An underlying-content touch resets the other side's clock too.
+    const touched = await store.touchActivity(id, 'challenger', '2026-07-05T03:00:00.000Z');
+    expect(touched?.challengerLastActiveAt).toBe('2026-07-05T03:00:00.000Z');
+    // Idle again one window after the LATEST side activity.
+    expect(
+      (await store.listIdleSince('2026-07-05T03:00:00.000Z', 10)).map((a) => a.debateId),
+    ).toContain(id);
+    // Only OPEN arenas idle-list; a locked arena never re-lists.
+    await store.lock(
+      id,
+      '2026-07-05T04:00:00.000Z',
+      {
+        target: { title: null, body: 'x', citations: [], updatedAt: null },
+        correction: { title: null, body: 'y', citations: [], updatedAt: null },
+      },
+      '2026-07-05T04:00:00.000Z',
+    );
+    expect(
+      (await store.listIdleSince('2027-01-01T00:00:00.000Z', 10)).map((a) => a.debateId),
+    ).not.toContain(id);
+    // touchActivity on a non-open arena is a no-op (null).
+    expect(await store.touchActivity(id, 'incumbent', '2026-07-05T05:00:00.000Z')).toBeNull();
+  });
+
+  it('finds the live arena by its CORRECTION contribution and shifts deadlines (the dev seam)', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    expect((await store.getActiveForCorrection(ctx.challengerId))?.debateId).toBe(id);
+    expect(await store.getActiveForCorrection(randomUUID())).toBeNull();
+    const shifted = await store.shiftDeadlines(id, {
+      editDeadlineAt: '2026-07-05T00:10:00.000Z',
+      resolveDueAt: '2026-07-05T00:20:00.000Z',
+    });
+    expect(shifted?.editDeadlineAt).toBe('2026-07-05T00:10:00.000Z');
+    expect(shifted?.resolveDueAt).toBe('2026-07-05T00:20:00.000Z');
   });
 
   it('handles story-target arenas + active counts + the contribution→debate map', async () => {

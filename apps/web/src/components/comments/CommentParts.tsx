@@ -308,8 +308,16 @@ export function CorrectionComposer({
     mutation.mutate(payload, {
       onSuccess: (response) => {
         const debateId = response.contribution.metadata.debate_arena_id;
-        if (debateId) onOpened(debateId);
-        else onCancel();
+        if (debateId) {
+          onOpened(debateId);
+          return;
+        }
+        // The correction posted but no arena opened (held for review, or a
+        // concurrent challenge won the one-arena-per-target slot).  Say so
+        // instead of silently closing the composer.
+        setError(
+          'Your correction was posted, but no debate opened — it may be held for review, or another challenge is already live for this target.',
+        );
       },
     });
   };
@@ -324,8 +332,9 @@ export function CorrectionComposer({
       aria-label="Raise a correction"
     >
       <p className="text-sm text-ink-muted">
-        A correction is a <strong className="text-ink">sourced</strong> challenge. It opens an open
-        debate the room's AI judges — you and the author each make your case for 12 hours.
+        A correction is a <strong className="text-ink">sourced</strong> challenge. It opens a live
+        debate the room's AI resolves — you and the author can each adjust your case for up to 24
+        hours, and the debate queues for resolution an hour after you both stop editing.
       </p>
       <MarkdownEditor
         id="correction-body"
