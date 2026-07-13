@@ -24,7 +24,7 @@ apps/web/src/
   components/
     ui/              Primitives: Icon, Button, Input, …, Tabs, AppShell     (WS-B.1.x)
     a11y/            SkipToContent, RouteAnnouncer, useSpaFocus             (WS-B.1.6)
-    story/           StoryCard, RatingLabel, ContextCard, swipe layer       (WS-B.2.1–4)
+    story/           StoryCard, StorySignals, DisputeBadge, ContextCard, swipes (WS-B.2.1–4)
     feed/            SectionEndpoint, DiminishingReturnsPrompt, FeedMode     (WS-B.2.8–9)
     wellbeing/       FocusModeToggle, QuietHoursSetting, NotificationBudget  (WS-B.2.8c)
     profile/         SignalLedger                                           (WS-B.2.6)
@@ -68,8 +68,8 @@ Tailwind utility names map to tokens via `tailwindColorMap` in `css.ts`
 (`canvas`, `surface`, `surface-strong`, `surface-sunken`, `ink`, `ink-muted`,
 `line`, `line-strong`, `focus`,
 `primary`/`success`/`warning`/`error`/`info` with `-fg`/`-soft`/`-on-soft`
-variants). Rating labels reuse the status palette (solid vs `-soft` chips for
-≥3:1 distinctness) rather than dedicated shade tokens. The named
+variants). The story-signal chips reuse the status palette (solid vs `-soft`
+chips for ≥3:1 distinctness) rather than dedicated shade tokens. The named
 z-index utilities (`z-dropdown`…`z-toast`) are the only source of stacking
 values; touch targets are exposed as `min-h-touch` / `min-w-touch` (48px).
 
@@ -235,7 +235,7 @@ and in the e2e suite, which is the stronger guarantee.
 | 1.6 | `SkipToContent`, `RouteAnnouncer`, `useSpaFocus` | router integration for WS-C |
 | 2.1a–c | `StoryCard` + no-applause + SR-order suites | |
 | 2.2 | `SwipeableStoryCard`, `useStoryCardSwipe` | gesture layer over StoryCard |
-| 2.3 | `RatingLabel` | seven labels, colour + icon + text; same-hue pairs ≥3:1 distinct (solid vs soft) |
+| 2.3 | `StorySignals` | the §5.6 signal row (sources count, corrections tally, safety chip): icon + count/text + sr-only expansion; same-hue solid/soft pair ≥3:1 distinct. Replaced the seven-label `RatingLabel` |
 | 2.4a–b | `ContextCard` | seven sections in a `Sheet`, horizontal swipe + pager |
 | 2.5 | `EmptyState`, `LoadingState`, `ErrorState`, `OfflineState`, `RestrictedState` | |
 | 2.6 | `SignalLedger` | private, read-only, no numeric score |

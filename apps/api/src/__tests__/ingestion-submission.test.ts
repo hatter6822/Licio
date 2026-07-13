@@ -326,11 +326,18 @@ describe('POST /v1/stories — emission + sync near-duplicate (WS-F.1.3c)', () =
     };
     const read = await app().request(new Request(`http://localhost/v1/stories/${story_id}`));
     expect(read.status).toBe(200);
-    const detail = (await read.json()) as { thread_id: string; rating_label: string };
+    const detail = (await read.json()) as {
+      thread_id: string;
+      sources_count: number;
+      corrections: { active: number; validated: number; incorrect: number };
+      safety_state: string;
+    };
     expect(detail.thread_id).toBe(thread_id);
-    // A freshly-ingested story has no active-reading signal yet ⇒ the neutral
-    // "New" floor (§5.6), never a false "Getting Attention".
-    expect(detail.rating_label).toBe('new');
+    // A freshly-ingested story carries the neutral §5.6 card signals: no
+    // sourced comments, an all-zero corrections tally, and an `ok` posture.
+    expect(detail.sources_count).toBe(0);
+    expect(detail.corrections).toEqual({ active: 0, validated: 0, incorrect: 0 });
+    expect(detail.safety_state).toBe('ok');
     // The thread shell serves through the thread contract too.
     const thread = await app().request(new Request(`http://localhost/v1/threads/${thread_id}`));
     expect(thread.status).toBe(200);

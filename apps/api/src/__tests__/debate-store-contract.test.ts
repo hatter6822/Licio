@@ -546,6 +546,13 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(active.every((a) => a.state !== 'resolved')).toBe(true);
     // …and a different story sees none of them.
     expect(await store.listActiveForStory(randomUUID(), 10)).toHaveLength(0);
+    // The batched §5.6 card-signal read counts COMMENT-target arenas ONLY: the
+    // story-target arena rides the story's own dispute_status instead, so one
+    // debate is never double-reported on a card. Unknown stories are absent.
+    const arenaCounts = await store.countActiveCommentArenas([ctx.storyId, randomUUID()]);
+    expect(arenaCounts.get(ctx.storyId)).toBe(1);
+    expect(arenaCounts.size).toBe(1);
+    expect(await store.countActiveCommentArenas([])).toEqual(new Map());
   });
 }
 

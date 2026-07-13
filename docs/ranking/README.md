@@ -42,9 +42,9 @@ Three constraints govern everything here:
    is computed and RECORDED in the decision log with `enforced: false`
    (observable, never a hidden sanction). The SCOI divergence flag
    (`scoi_context_card`) is the one deliberate exception: it is informational
-   ("Needs Context" never means false), so it attaches regardless of
-   promotion state — surfacing as the feed card's label; the lens-map detail
-   lives on the story read surface.
+   (a needs-context state never means false), so it attaches regardless of
+   promotion state — feeding the context-gate observability counter; the
+   lens-map detail lives on the story read surface.
 
 ## Architecture
 
@@ -272,7 +272,7 @@ then PHI's ranking effect is diversification only.)
   four are nonnegative; enforced penalties can drive a total below zero.
 - **Constraints (WS-I.2.3c).** MFCI at/above the profile state excludes
   cross-community distribution + flags review; SCOI medium attaches the
-  divergence flag (always — it drives the "Needs Context" label), high
+  divergence flag (always — it feeds the context-gate counter), high
   reduces cross-community distribution by the
   profile multiplier, very-high pauses pending review (room-internal reads
   stay feasible); PHI above threshold diversifies the REQUESTING USER's
@@ -365,21 +365,23 @@ Two §23.3 wire fields carry the diversification/context outputs:
   `scoi_context_card`: the SCOI level, lens count from the stored row,
   open bridge attempts, and the "Where interpretations differ" pointer.
   Cards are built from STORED rows only — never computed on request.
-- **`rating_label`** — the §5.6 conversation-state label, derived by the
-  single shared `deriveRatingLabel` (`@licio/shared`, also used by the
-  story-detail read so the surfaces agree on every dimension; the SCOI
-  interpretation-divergence input is surface-specific — the feed uses this
-  profile-aware `context_card`, the detail uses SCOI energy ≥ the needs-context
-  threshold — so they can differ only at the SCOI margin). It is a strict
-  priority cascade in which the LIVE invariant signals outrank the slower
-  lifecycle-state mapping (the §10.5 principle generalised to every label):
-  safety review → SCOI interpretation divergence → bridging →
-  resolved synthesis → deepening → getting-attention → the neutral `new`
-  floor. Sourcing is descriptive, not a label: the "N sourced comments" chip
-  carries the thread's published sourced-contribution count (comments with
-  ≥1 citation). `under-review` is reachable ONLY through the live path —
-  the lifecycle state alone can never produce it. (The former `well-sourced`
-  label was removed with the EvidenceCard entity.)
+- **`sources_count` + `corrections`** — the §5.6 story-card signals,
+  derived by the single shared `storyCardSignals`
+  (`apps/api/src/forum/card-signals.ts`, also used by the story-detail read
+  so the surfaces agree by construction): the published sourced-comment
+  count (comments with ≥1 citation — the same count as the comment
+  section's "Sources" view) and the WS-T corrections tally for the comment
+  section (`active` live comment arenas / `validated` / `incorrect` tagged
+  rows, published-only). The story's OWN posture rides `dispute_status`
+  separately, so one debate is never double-reported. The serve path batches
+  the counts per page (one grouped contribution-tally read + one grouped
+  live-arena read through `cardSignalCounts` / `countActiveCommentArenas`) —
+  never per-item round trips; the WS-I.4.1b fallback serves the same honest
+  signals. (These replaced the former §5.6 `rating_label` prose cascade —
+  removed with the story-card signal redesign; the earlier `well-sourced`
+  label had already been removed with the EvidenceCard entity. The served
+  SCOI divergence volume still increments the `ranking.context_gate.card`
+  counter via `recordInterpretationDivergence`.)
 - **`safety_state`** — the §22.1 reader-facing safety posture, derived by the
   single shared `deriveStorySafetyState` (feed + story-detail), strongest
   first: a thread under an active §18.3 RESTRICTION is `restricted`
@@ -387,8 +389,8 @@ Two §23.3 wire fields carry the diversification/context outputs:
   MFCI risk is `under-review`; an elevated MFCI/thread signal is `caution`;
   otherwise `ok`. Descriptive, never a sanction. The thread §15.4 safety
   machine's terminal `restricted` state reaches the wire `restricted` posture
-  (it never silently collapses to `ok`); the §5.6 label for any review/restricted
-  posture is the descriptive "Under Review".
+  (it never silently collapses to `ok`); the card renders any review/restricted
+  posture as the descriptive "Under review" chip.
 
 ## Kill switch and fallback (WS-I.4)
 

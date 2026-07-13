@@ -34,9 +34,12 @@ const feedWater: FeedItem = {
   source: 'Public Records Office',
   url: 'https://example.org/water-testing-dataset',
   reading_minutes: 6,
-  rating_label: 'deepening',
+  // §5.6 card signals: three sourced comments; one comment was challenged and
+  // upheld (validated) — the cross-checked lab report.
+  sources_count: 3,
+  corrections: { active: 0, validated: 1, incorrect: 0 },
   distribution_reason: 'Readers opened the primary dataset and added sourced comments.',
-  context_chips: [{ id: 'c1', label: '3 sourced comments', icon: 'document-check' }],
+  context_chips: [],
   safety_state: 'ok',
   more_on_this_story: [],
   topic_ids: [topicIdForSlug('climate-environment')],
@@ -49,7 +52,8 @@ const feedZoning: FeedItem = {
   source: 'City Desk',
   url: 'https://example.org/zoning-proposal',
   reading_minutes: 9,
-  rating_label: 'bridge-active',
+  sources_count: 1,
+  corrections: { active: 0, validated: 0, incorrect: 0 },
   distribution_reason: 'A bridge comment reduced cross-community confusion between two rooms.',
   context_chips: [{ id: 'c3', label: 'cross-community', icon: 'bridge' }],
   safety_state: 'ok',
@@ -63,7 +67,9 @@ const feedTransit: FeedItem = {
   title: 'Claim about the new transit timetable is missing a key caveat',
   source: 'Transit Watch',
   reading_minutes: 4,
-  rating_label: 'needs-context',
+  // A live correction debate is running over one comment (hourglass tally).
+  sources_count: 0,
+  corrections: { active: 1, validated: 0, incorrect: 0 },
   distribution_reason: 'A clarifying question identified an ambiguity awaiting evidence.',
   context_chips: [{ id: 'c4', label: 'awaiting evidence', icon: 'circle-question' }],
   safety_state: 'caution',
@@ -91,7 +97,7 @@ const STORY_DETAILS: Record<string, StoryDetail> = {
   [STORY_3]: {
     ...feedTransit,
     body_summary:
-      'The timetable claim omits a service-frequency caveat. A clarifying question is awaiting a cited source before the label changes.',
+      'The timetable claim omits a service-frequency caveat. A clarifying question is awaiting a cited source before the record settles.',
     thread_id: null,
     topic_ids: [topicIdForSlug('local-community')],
   },

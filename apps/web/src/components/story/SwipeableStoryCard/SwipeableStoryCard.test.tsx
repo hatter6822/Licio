@@ -14,7 +14,8 @@ const sample: StoryCardData = {
     url: 'https://example.org/story',
     readingMinutes: 4,
   },
-  ratingLabel: 'deepening',
+  sourcesCount: 2,
+  corrections: { active: 0, validated: 0, incorrect: 0 },
   distributionReason: 'Rising from independent source opens and sourced comments',
 };
 
