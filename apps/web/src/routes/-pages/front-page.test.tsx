@@ -53,7 +53,6 @@ function feedItem(id: string) {
     reading_minutes: 1,
     sources_count: 0,
     corrections: { active: 0, validated: 0, incorrect: 0 },
-    distribution_reason: 'Shown chronologically.',
     context_chips: [],
     safety_state: 'ok',
     more_on_this_story: [],

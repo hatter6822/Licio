@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // SCOI context surfaces (WS-H.4.1c steward reports, WS-H.4.2d bridge
-// routing/credit, WS-H.4.3d moderator context actions).
+// routing/credit).
 //
-// Everything here is OBSERVATIONAL or additive: annotations are real
-// contributions (shared context genuinely pulls lens interpretations
-// together — the energy decrease is measured, never assumed), bridge
-// credit is recorded on the single-shot bridge-attempt record (never a
-// wallet, never a ranking input — the pay-to-rank firewall and the shadow
-// discipline both stand), and merge/separate are audited records whose
-// physical tree mechanics belong to WS-G/WS-J tooling.
+// Everything here is OBSERVATIONAL or additive: bridge credit is recorded on
+// the single-shot bridge-attempt record (never a wallet, never a ranking
+// input — the pay-to-rank firewall stands). The former WS-H.4.3d moderator
+// context actions (merge/annotate/separate) were removed with their steward
+// surface.
 
-import { randomUUID } from 'node:crypto';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -77,51 +74,6 @@ export async function latestScoiFor(
   const contextState = row?.scoreVector['context_state'];
   if (typeof scoi !== 'number' || typeof contextState !== 'string') return null;
   return { scoi, contextState };
-}
-
-/**
- * Steward context annotation (WS-H.4.3d): ONE system comment per lens that
- * currently carries interpretations on the thread, all with the same shared
- * body (tagged with the lens through `metadata.lens_id`, which is what the
- * SCOI assembly keys on). Mathematically honest mechanism: each lens's
- * interpretation vector is the mean embedding of its contributions, so a
- * SHARED text pulls every vector toward the same point and the Dirichlet
- * energy genuinely decreases — the effect is measured by re-computation,
- * never asserted.
- */
-export async function annotateThreadLenses(
-  forum: ForumServices,
-  threadId: string,
-  annotation: string,
-): Promise<number> {
-  const contributions = await forum.contributions.listByThread(threadId, { limit: 500 });
-  const lensIds = new Set<string>();
-  for (const contribution of contributions) {
-    const lensId = contribution.metadata['lens_id'];
-    if (typeof lensId === 'string' && lensId.length > 0) lensIds.add(lensId);
-  }
-  let inserted = 0;
-  for (const lensId of [...lensIds].sort()) {
-    // System action (null author); the acting steward is attributed on the
-    // audit record and the scoi_context_actions row, which carry the
-    // action id this contribution traces back to.
-    const result = await forum.contributions.insert({
-      contributionId: randomUUID(),
-      threadId,
-      userId: null,
-      type: 'comment',
-      body: annotation,
-      citations: [],
-      metadata: { lens_id: lensId },
-      targetClaimId: null,
-      parentContributionId: null,
-      clientDraftId: randomUUID(),
-      path: [],
-      moderationState: 'published',
-    });
-    if (result.ok) inserted += 1;
-  }
-  return inserted;
 }
 
 /**

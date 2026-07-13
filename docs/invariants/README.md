@@ -36,7 +36,7 @@ Two constraints govern everything here (SPEC §30.4, the M2 gate):
 | Platform contracts | `packages/invariants/src/platform/` | `InvariantService` interface, promotion checklist logic, envelope builders, synthetic datasets, the regression harness + pinned baselines |
 | Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the eleven service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
 | Routes | `apps/api/src/routes/invariants-admin.ts`, `invariants-public.ts` | Steward/analyst surface; public SCOI/MERI reads |
-| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `scoi_context_actions` (WS-H.4.3d), `bridge_attempts` (WS-H.4.2d) |
+| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `bridge_attempts` (WS-H.4.2d) |
 | Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `signals/topic-loops.ts`, `signals/topic-dampening.ts` | Interpretation differences, the composer context warning, PHI v0 topic-frequency feed dampening + wellbeing controls (the MERI exposure label is no longer surfaced on feed cards) |
 
 ## The numeric kernels (`packages/invariants/src/math/`)
@@ -204,19 +204,17 @@ change.
 
 **Context surfaces** (`scoi-actions.ts`): room stewards get per-room
 reports (WS-H.4.1c; scope is the room's OWN steward roster, 404-over-403)
-with context state, per-lens interpretation summaries, recommended actions
-(invite-bridge/annotate for split/obstructed, safety review for
-weaponized), the §10.5 "Bridge attempts" record, and recent context
-actions. Moderator context actions (WS-H.4.3d / SCOI-4: merge, annotate,
-separate) require a RATIFIED WS-A reason code, are audited
-(`scoi_context_action`), and record the measured SCOI before/after.
-Annotation is mathematically honest: ONE shared system comment per active
-lens (tagged through `metadata.lens_id`, which is what the SCOI assembly
-keys on) pulls every interpretation vector toward the same point, so the
-Dirichlet energy genuinely decreases — measured by re-computation, never
-asserted (the acceptance test pins the decrease on a synthetic split
-case). Merge/separate are audited records whose physical tree mechanics
-belong to WS-G/WS-J tooling. Bridge routing (WS-H.4.2d / SCOI-2):
+with context state, per-lens interpretation summaries, and the §10.5
+"Bridge attempts" record. (The WS-H.4.3d moderator context actions —
+merge/annotate/separate, the `scoi_context_actions` table, and the
+per-state recommended-action strings — were REMOVED with their steward
+surface; historic `scoi_context_action` audit rows survive in the
+append-only audit log, and migration 0081 drops the operational table.
+The SCOI ranking-constraint ladder and the cross-community-bridge
+retriever were removed on the WS-I side at the same time — SCOI's
+reader-facing surface is the story page's "Where interpretations differ"
+drawer plus the room lens read, both fed straight from the invariant
+store.) Bridge routing (WS-H.4.2d / SCOI-2):
 candidates are multi-lens participants; an open request carries the SCOI
 baseline, and the durable `invariant-scoi-bridge` consumer credits a
 contribution (single-shot) when re-computation measures a real decrease —
@@ -508,11 +506,9 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   override remain consumable through the same surfaces.
 - **WS-J** takes ownership of the analyst queue UX and supplies the
   hostility signal behind the Hodge seam (defaults to 0) and the appeals
-  flow that surfaces `mfci_cases.appeal_summary` and the
-  `scoi_context_actions` records (every moderator context action is
-  already reason-coded and audited for it). Physical thread merge/split
-  tree mechanics ride WS-G/WS-J moderation tooling; until then merge/
-  separate are audited records surfaced on the steward report.
+  flow that surfaces `mfci_cases.appeal_summary`. (The former
+  merge/annotate/separate context-action records were removed with the
+  WS-H.4.3d surface; historic audit rows remain in the append-only log.)
 - **WS-K** owns learned restriction maps (SCOI v2 estimation), the
   framing/misleading classifiers MERI's semantic dimension awaits, and
   governed summary generation.

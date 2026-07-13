@@ -172,39 +172,6 @@ export const mfciRiskStates = pgTable(
 );
 
 /**
- * SCOI moderator context actions (WS-H.4.3d / SCOI-4): merge, annotate,
- * separate — recorded with the ratified reason code, the acting steward
- * reference, and the SCOI score before/after re-computation, so every
- * action is auditable and appealable (WS-J owns the appeal flow).
- */
-export const scoiContextActions = pgTable(
-  'scoi_context_actions',
-  {
-    actionId: uuid('action_id').primaryKey().defaultRandom(),
-    action: text('action').notNull(),
-    threadId: uuid('thread_id').notNull(),
-    /** Merge target / separate sibling, when the action involves one. */
-    relatedThreadId: uuid('related_thread_id'),
-    storyId: uuid('story_id').notNull(),
-    roomId: uuid('room_id'),
-    /** Ratified WS-A moderation reason code. */
-    reasonCode: text('reason_code').notNull(),
-    /** Annotation body (annotate only; rendered through the UGC pipeline). */
-    annotation: text('annotation'),
-    /** `steward:<uuid>` — never a raw identity. */
-    actorRef: text('actor_ref').notNull(),
-    scoiBefore: doublePrecision('scoi_before'),
-    scoiAfter: doublePrecision('scoi_after'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    index('scoi_context_actions_thread_idx').on(t.threadId, t.createdAt),
-    check('scoi_context_actions_action', sql`${t.action} in ('merge', 'annotate', 'separate')`),
-    check('scoi_context_actions_reason_len', sql`char_length(${t.reasonCode}) between 1 and 64`),
-  ],
-);
-
-/**
  * Bridge requests/attempts (WS-H.4.2d / SCOI-2): routing records for
  * multi-community participants, the SCOI baseline at request time, and the
  * credit decision when a bridge contribution measurably reduces the
@@ -241,5 +208,4 @@ export type InvariantRunMetadataRow = typeof invariantRunMetadata.$inferSelect;
 export type MfciCaseRow = typeof mfciCases.$inferSelect;
 export type MfciMarginsRow = typeof mfciMargins.$inferSelect;
 export type MfciRiskStateRow = typeof mfciRiskStates.$inferSelect;
-export type ScoiContextActionRow = typeof scoiContextActions.$inferSelect;
 export type BridgeAttemptRow = typeof bridgeAttempts.$inferSelect;

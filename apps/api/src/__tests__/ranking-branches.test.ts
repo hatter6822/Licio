@@ -695,7 +695,7 @@ describe('admin route edge branches', () => {
     );
     resetRankingServices();
     const lazy = getRankingServices();
-    expect(lazy.retrievers.origins()).toHaveLength(9);
+    expect(lazy.retrievers.origins()).toHaveLength(8);
     expect(getRankingServices()).toBe(lazy);
     // Restore the fixture singleton for the rest of the suite.
     setRankingServices(fixture.ranking);

@@ -20,7 +20,6 @@ import {
   logFactorial,
   MFCI_AXES,
   randomPick,
-  rankingLevelForState,
   roundToCoupling,
   type SheafStructure,
   sampleFiber,
@@ -245,7 +244,7 @@ describe('SCOI guard rails and degenerate structures', () => {
       /satisfy/,
     );
     expect(validateMfciRiskThresholds({ elevated: -1, high: 2, severe: 3 })).toMatch(/positive/);
-    expect(rankingLevelForState(contextStateForScore(0.95, true))).toBe('very_high');
+    expect(contextStateForScore(0.95, true)).toBe('weaponized');
   });
 });
 

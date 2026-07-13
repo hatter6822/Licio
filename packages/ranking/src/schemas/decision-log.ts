@@ -18,6 +18,16 @@ import { scoredItemSchema } from './scored-item.js';
 export const DECISION_LOG_RETENTION_MIN_DAYS = 180;
 export const DECISION_LOG_RETENTION_MAX_DAYS = 365;
 
+/** Reasons the fallback ranker can serve (WS-I.4.1b). */
+export const FALLBACK_REASONS = [
+  'kill_switch',
+  'pipeline_error',
+  'user_mode',
+  'empty_pool',
+  'gwei_gate',
+] as const;
+export type FallbackReason = (typeof FALLBACK_REASONS)[number];
+
 const uuid = z.string().uuid();
 
 /**
@@ -72,7 +82,9 @@ export const quotaOutcomeSchema = z
   .strict();
 export type QuotaOutcome = z.infer<typeof quotaOutcomeSchema>;
 
-/** Promotion-enforcement flags in force at decision time (WS-H.1.2e). */
+/** Promotion-enforcement flags in force at decision time (WS-H.1.2e).
+ *  `scoi` is DEPRECATED — the SCOI constraint ladder was removed; the key
+ *  stays optional so pre-removal snapshots keep parsing on replay. */
 export const enforcementSnapshotSchema = z
   .object({
     mfci: z.boolean(),
@@ -80,7 +92,7 @@ export const enforcementSnapshotSchema = z
     hodge: z.boolean(),
     meri: z.boolean(),
     tropical: z.boolean(),
-    scoi: z.boolean(),
+    scoi: z.boolean().optional(),
     gwei: z.boolean(),
   })
   .strict();
@@ -137,8 +149,9 @@ export const rankingDecisionLogSchema = z
      *  still parse and replay. */
     visibility_excluded_count: z.number().int().nonnegative().default(0),
     quota_outcomes: z.array(quotaOutcomeSchema),
-    /** item id → explanation template id (WS-I.2.6). */
-    explanation_ids: z.record(uuid, z.string().min(1).max(64)),
+    /** DEPRECATED — the per-item explanation system was removed; the field
+     *  stays optional so pre-removal logs keep parsing. Never written now. */
+    explanation_ids: z.record(uuid, z.string().min(1).max(64)).optional(),
     experiment_ids: z.array(z.string().min(1).max(64)),
     timestamp: z.string(),
     /** Replay keys (in addition to §23.3): profile + feature versions. */
@@ -148,9 +161,7 @@ export const rankingDecisionLogSchema = z
     /** True when served by the safe fallback ranker (WS-I.4.1b). */
     fallback: z.boolean(),
     /** Why the fallback served, when it did. */
-    fallback_reason: z
-      .enum(['kill_switch', 'pipeline_error', 'user_mode', 'empty_pool', 'gwei_gate'])
-      .nullable(),
+    fallback_reason: z.enum(FALLBACK_REASONS).nullable(),
     /** Replay inputs (WS-I.2.5b); null only on fallback decisions. */
     replay_inputs: replayInputsSchema.nullable(),
     /** §22.4 retention deadline (180–365 days after `timestamp`). */

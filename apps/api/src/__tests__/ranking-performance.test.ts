@@ -62,7 +62,6 @@ const FULL_ENFORCEMENT: RankingEnforcement = {
   hodge: true,
   meri: true,
   tropical: true,
-  scoi: true,
   gwei: true,
 };
 
@@ -93,7 +92,6 @@ function buildPool(n: number): {
       freshness_timestamp: createdAt,
       retrieval_score: rng(),
       retrieval_origins: ['global_pwatt_v1'],
-      bridge_context: null,
     });
     const vector: FeatureVector = {
       item_id: itemId,

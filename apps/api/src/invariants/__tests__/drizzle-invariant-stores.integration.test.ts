@@ -24,7 +24,6 @@ import {
   DrizzleMfciRiskStateStore,
   DrizzlePromotionStore,
   DrizzleRunMetadataStore,
-  DrizzleScoiContextActionStore,
 } from '../drizzle-invariant-stores.js';
 import { rebuildMfciCalibrations } from '../scheduler.js';
 import type { InvariantPlatformServices } from '../services.js';
@@ -247,61 +246,6 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
       }),
     ).rejects.toThrow();
     expect(await store.get(randomUUID())).toBeNull();
-    await store.clear();
-  });
-
-  it('scoi context actions: insert + thread listing (both sides) + action CHECK', async () => {
-    const store = new DrizzleScoiContextActionStore(db);
-    await store.clear();
-    const threadId = randomUUID();
-    const relatedId = randomUUID();
-    await store.insert({
-      actionId: randomUUID(),
-      action: 'annotate',
-      threadId,
-      relatedThreadId: null,
-      storyId: randomUUID(),
-      roomId: randomUUID(),
-      reasonCode: 'MOD_MISINFO_001',
-      annotation: 'Shared context.',
-      actorRef: 'steward:test',
-      scoiBefore: 0.8,
-      scoiAfter: 0.4,
-      createdAt: '2026-06-11T10:00:00.000Z',
-    });
-    await store.insert({
-      actionId: randomUUID(),
-      action: 'merge',
-      threadId: relatedId,
-      relatedThreadId: threadId, // listed from BOTH sides
-      storyId: randomUUID(),
-      roomId: null,
-      reasonCode: 'MOD_SPAM_001',
-      annotation: null,
-      actorRef: 'steward:test',
-      scoiBefore: null,
-      scoiAfter: null,
-      createdAt: '2026-06-11T11:00:00.000Z',
-    });
-    const rows = await store.listForThread(threadId, 10);
-    expect(rows).toHaveLength(2);
-    expect(rows[0]?.action).toBe('merge'); // newest first
-    await expect(
-      store.insert({
-        actionId: randomUUID(),
-        action: 'obliterate' as never,
-        threadId,
-        relatedThreadId: null,
-        storyId: randomUUID(),
-        roomId: null,
-        reasonCode: 'MOD_SPAM_001',
-        annotation: null,
-        actorRef: 'steward:test',
-        scoiBefore: null,
-        scoiAfter: null,
-        createdAt: new Date().toISOString(),
-      }),
-    ).rejects.toThrow();
     await store.clear();
   });
 

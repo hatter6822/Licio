@@ -28,7 +28,6 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { INVARIANT_TYPE_NAMES, nextRiskState, runRegressionSuite } from '@licio/invariants';
-import { MODERATION_REASON_CODES } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
@@ -41,7 +40,6 @@ import {
   validateInvariantsConfigValue,
 } from '../invariants/config.js';
 import {
-  annotateThreadLenses,
   bridgeCandidatesFor,
   latestScoiFor,
   recomputeScoiFor,
@@ -75,17 +73,6 @@ const configBodySchema = z.object({ key: z.string().min(1).max(128), value: z.un
 
 const resolveBodySchema = z
   .object({ action: z.enum(['confirmed', 'cleared', 'escalated']) })
-  .strict();
-
-const REASON_CODE_SET: ReadonlySet<string> = new Set(MODERATION_REASON_CODES);
-
-const contextActionBodySchema = z
-  .object({
-    action: z.enum(['merge', 'annotate', 'separate']),
-    reason_code: z.string().min(1).max(64),
-    annotation: z.string().min(1).max(4_000).optional(),
-    related_thread_id: z.string().uuid().optional(),
-  })
   .strict();
 
 export function createInvariantsAdminRoutes(
@@ -287,14 +274,6 @@ export function createInvariantsAdminRoutes(
           if (typeof lensId !== 'string') continue;
           perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
         }
-        const recommended =
-          scoi.contextState === 'split' || scoi.contextState === 'obstructed'
-            ? ['invite_bridge', 'annotate_context']
-            : scoi.contextState === 'weaponized'
-              ? ['safety_review']
-              : scoi.contextState === 'ambiguous'
-                ? ['monitor']
-                : [];
         entries.push({
           story_id: story.storyId,
           thread_id: thread.threadId,
@@ -306,122 +285,12 @@ export function createInvariantsAdminRoutes(
             name: lensNames.get(lensId) ?? lensId,
             contribution_count: count,
           })),
-          recommended_actions: recommended,
-          // The §10.5 "Bridge attempts" branch + recent context actions.
+          // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
           bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
-          context_actions: await invariants.scoiActions.listForThread(thread.threadId, 10),
         });
       }
       return c.json({ room_id: roomId, reports: entries });
     })
-
-    .post(
-      '/scoi/threads/:threadId/actions',
-      zValidator('json', contextActionBodySchema),
-      async (c) => {
-        // WS-H.4.3d moderator context actions (SCOI-4): merge / annotate /
-        // separate — ratified reason code, steward room scope, audited,
-        // and (for annotate/merge) SCOI re-computation with the measured
-        // before/after on the record.
-        const auth = getAuth(c);
-        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-        const threadId = c.req.param('threadId');
-        if (!z.string().uuid().safeParse(threadId).success) {
-          return c.json(deny('invalid_thread', 'threadId must be a UUID'), 422);
-        }
-        const body = c.req.valid('json');
-        if (!REASON_CODE_SET.has(body.reason_code)) {
-          return c.json(deny('invalid_reason', 'reason_code must be a ratified WS-A code'), 422);
-        }
-        if (body.action === 'annotate' && !body.annotation) {
-          return c.json(deny('missing_annotation', 'annotate requires an annotation body'), 422);
-        }
-        if (body.action === 'merge' && !body.related_thread_id) {
-          return c.json(deny('missing_related', 'merge requires related_thread_id'), 422);
-        }
-        const forum = resolveForum();
-        const ingestion = resolveIngestion();
-        const thread = await ingestion.stories.getThreadById(threadId);
-        if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
-        const roles = thread.roomId
-          ? await forum.rooms.stewardRolesFor(thread.roomId, auth.userId)
-          : [];
-        if (roles.length === 0) return c.json(deny('not_found', 'No such thread'), 404);
-        // The RELATED thread is persisted on the record and surfaces in
-        // ITS thread's reports (listForThread matches both sides), so it
-        // gets the same scope bar as the primary: it must exist and the
-        // actor must steward its room. ONE error shape for missing and
-        // out-of-scope — no existence oracle across rooms.
-        if (body.related_thread_id) {
-          const related = await ingestion.stories.getThreadById(body.related_thread_id);
-          const relatedRoles = related?.roomId
-            ? await forum.rooms.stewardRolesFor(related.roomId, auth.userId)
-            : [];
-          if (!related || relatedRoles.length === 0) {
-            return c.json(
-              deny('invalid_related', 'related_thread_id is not a thread you steward'),
-              422,
-            );
-          }
-        }
-        const events = resolveEvents();
-        const invariants = resolveInvariants();
-        const before = await latestScoiFor(events, thread.storyId);
-        const actionId = crypto.randomUUID();
-        if (body.action === 'annotate' && body.annotation) {
-          const inserted = await annotateThreadLenses(forum, threadId, body.annotation);
-          if (inserted === 0) {
-            return c.json(deny('no_lenses', 'No lens-tagged interpretations to annotate'), 422);
-          }
-        }
-        // Re-computation reflects the action in context state (annotate/
-        // merge); separate records the incompatibility for WS-G tooling.
-        const after =
-          body.action === 'separate'
-            ? before
-            : await recomputeScoiFor(invariants, events, thread.storyId);
-        // A moderator intervention that lowered SCOI must not be inherited
-        // by the next contribution as bridge credit: rebaseline any OPEN
-        // bridge attempt to the post-action energy.
-        if (body.action !== 'separate' && after) {
-          const open = await invariants.bridgeAttempts.openForThread(threadId);
-          if (open) await invariants.bridgeAttempts.rebaseline(open.attemptId, after.scoi);
-        }
-        await invariants.scoiActions.insert({
-          actionId,
-          action: body.action,
-          threadId,
-          relatedThreadId: body.related_thread_id ?? null,
-          storyId: thread.storyId,
-          roomId: thread.roomId,
-          reasonCode: body.reason_code,
-          annotation: body.annotation ?? null,
-          actorRef: `steward:${auth.userId}`,
-          scoiBefore: before?.scoi ?? null,
-          scoiAfter: after?.scoi ?? null,
-          createdAt: new Date(invariants.now()).toISOString(),
-        });
-        const identity = resolveIdentity();
-        await identity.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'scoi_context_action',
-          targetRef: threadId,
-          context: {
-            action: body.action,
-            reason_code: body.reason_code,
-            related_thread_id: body.related_thread_id ?? null,
-            scoi_before: before?.scoi ?? null,
-            scoi_after: after?.scoi ?? null,
-          },
-        });
-        return c.json({
-          action_id: actionId,
-          scoi_before: before?.scoi ?? null,
-          scoi_after: after?.scoi ?? null,
-          context_state: after?.contextState ?? before?.contextState ?? null,
-        });
-      },
-    )
 
     .post('/scoi/threads/:threadId/bridge-requests', async (c) => {
       // WS-H.4.2d bridge routing: identify multi-lens participants and open

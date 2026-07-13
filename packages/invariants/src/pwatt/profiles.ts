@@ -20,7 +20,7 @@ export interface RankingProfileWeights {
   wE: number;
   /** Evidence/source completeness (guardrail 5-15%). */
   wS: number;
-  /** Context coherence gain, SCOI-derived (guardrail 5-15%). */
+  /** Context coherence gain (guardrail 5-15%; no production provider). */
   wC: number;
 }
 

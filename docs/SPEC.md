@@ -300,7 +300,7 @@ For item `i` in context `c` during time window `t`:
                 - pT * HarmfulTensionRisk_i,c,t
                 - pR * RedundancyPenalty_i,c,t
 
-Where `B_i,t` is a time-sensitive baseline (freshness, source-reliability state, topic relevance); `ActiveAttention` is bounded, privacy-preserving, and deduplicated; `ConstructiveParticipation` measures contribution quality and downstream thread improvements; `ExposureIndependence` is derived from MERI; `ContextCoherenceGain` is derived partly from SCOI reduction; `CoordinationPenalty` is derived from MFCI and tropical cascade signals; `HarmfulTensionRisk` from Hodge tension combined with safety classifiers; and `RedundancyPenalty` prevents repeated copies from accumulating distribution power.
+Where `B_i,t` is a time-sensitive baseline (freshness, source-reliability state, topic relevance); `ActiveAttention` is bounded, privacy-preserving, and deduplicated; `ConstructiveParticipation` measures contribution quality and downstream thread improvements; `ExposureIndependence` is derived from MERI; `ContextCoherenceGain` is a reserved slot with no current provider (an absent component contributes 0; the SCOI-derived coupling was removed); `CoordinationPenalty` is derived from MFCI and tropical cascade signals; `HarmfulTensionRisk` from Hodge tension combined with safety classifiers; and `RedundancyPenalty` prevents repeated copies from accumulating distribution power.
 
 PHI (holonomy) is deliberately NOT a per-item penalty term here. Holonomy is a per-**user**/session quantity — the curvature of the reader's own topic journey, not a property of any individual story — so there is no meaningful per-item `HolonomyRisk_i`. PHI instead enters ranking as the per-user `holonomy_limits` constraint (Section 13.4): a reader whose recent recommendation sequence exceeds the holonomy threshold gets feed diversification (tightened topic balancing) for that request. (An earlier draft carried a `- pH * HolonomyRisk` per-item term whose input was never populated, so it was structurally always 0; it was removed. A genuine per-item holonomy contribution, if wanted, is a PHI-v1 item.)
 
@@ -412,7 +412,7 @@ The comment section is embedded directly in the content page. Comments are light
 
 ## 6.5 Context cards
 
-Compact, swipeable overlays: What happened? Why it matters; Where interpretations differ (SCOI-powered); Evidence status; Conversation state (deepening, fragmented, bridged, tense, under review); Distribution reason (why this is shown to the user); and User controls (see less/more, mute topic, inspect ranking signals).
+Compact, swipeable overlays: What happened? Why it matters; Where interpretations differ (SCOI-powered); Evidence status; Conversation state (deepening, fragmented, bridged, tense, under review); and User controls (see less/more, mute topic, inspect ranking signals).
 
 ## 6.6 Participation composer
 
@@ -835,7 +835,7 @@ normalized to [0, 1] by the energy of a maximally-disagreeing configuration on t
 
 ## 10.3 Product interpretation
 
-SCOI powers context cards, cross-community sharing warnings, ranking dampening for context-fragile content, bridge-comment rewards, thread-summary generation, moderator triage, and community-lens design.
+SCOI powers the story-surface divergence section, bridge-comment rewards (measured-decrease credit), steward context reports, and community-lens design. (The former cross-community sharing warning, composer warning, ranking dampening, and moderator merge/annotate/separate actions were removed: the warnings and the constraint ladder keyed on states that production calibration made effectively unreachable, and the context actions had no reader-facing consumer.)
 
 ## 10.4 Context states
 
@@ -849,27 +849,28 @@ SCOI powers context cards, cross-community sharing warnings, ranking dampening f
 
 ## 10.5 UI requirements
 
-Story-surface section "Where interpretations differ" when SCOI is elevated; thread branch "Bridge attempts"; composer warning "People in another room are reading this differently. Add context before replying."; share dialog "This item is context-sensitive. Include origin context?". A needs-context state means interpretations differ — never false, bad, or banned. (Divergence is a story-surface detail, not a feed-card label; the served-item divergence volume feeds the Section 10.6 context-gate observability counter.)
+Story-surface section "Where interpretations differ" when SCOI is elevated; the steward report's "Bridge attempts" record. A needs-context state means interpretations differ — never false, bad, or banned. Divergence is a story-surface detail, not a feed-card label. (The former composer warning and share-dialog origin-context prompt were removed with the ranking coupling.)
 
 ## 10.6 Ranking integration
 
-High SCOI does not mean bad content; it means the content should travel with context:
-
-| SCOI level | Ranking action |
-|---|---|
-| Low | Normal ranking. |
-| Medium | Surface the divergence on the story surface (the "Where interpretations differ" lens map). |
-| High | Reduce cross-community amplification until context improves. |
-| Very high | Prioritize bridge requests, expert context, or moderator review. |
+High SCOI does not mean bad content; it means the content benefits from
+context. SCOI is NOT a ranking input: the former level ladder (context-card
+flag, reduced cross-community amplification, very-high pause) was removed —
+it was promotion-gated, never enforced, and its upper levels were
+effectively unreachable under production calibration. SCOI's consumers are
+the story-surface divergence section (10.5), the steward per-room context
+reports, and the bridge-credit loop (a bridge request pins the SCOI
+baseline; a contribution that measurably reduces the energy earns the
+single-shot credit).
 
 ## 10.7 Acceptance criteria
 
 | ID | Requirement |
 |---|---|
-| SCOI-1 | Cross-community distribution includes context when SCOI is elevated. |
+| SCOI-1 | (Retired.) The elevated-SCOI distribution coupling was removed with the ranking ladder; the story surface carries the divergence context instead. |
 | SCOI-2 | Bridge comments receive participation credit when obstruction decreases. |
 | SCOI-3 | Users can inspect major interpretation differences in plain language. |
-| SCOI-4 | Moderators can merge, annotate, or separate threads based on context state. |
+| SCOI-4 | (Retired.) The moderator merge/annotate/separate context actions were removed; steward reports remain. |
 | SCOI-5 | SCOI features are validated against human-labeled context-collapse cases. |
 
 # 11. Core invariant 5: Preference Holonomy Invariant (PHI)
@@ -962,11 +963,11 @@ Session events form a path; iterated integrals (the path signature) encode order
 
 ## 13.1 Objectives and constraints
 
-Ranking is a constrained multi-objective optimizer. It maximizes meaningful attention, constructive participation, nonredundant exposure, evidence completeness, context coherence, topic relevance, civic importance, user agency, and conversation health — subject to constraints: coordination risk below threshold (MFCI), holonomy risk below threshold (PHI), GWEI cohort disparity below threshold, redundancy bounded by MERI, context obstruction handled by context cards or dampening (SCOI), safety-policy compliance, privacy/age-appropriate limits, and content-visibility containment (in-room content never leaves its room, Section 14.5).
+Ranking is a constrained multi-objective optimizer. It maximizes meaningful attention, constructive participation, nonredundant exposure, evidence completeness, context coherence, topic relevance, civic importance, user agency, and conversation health — subject to constraints: coordination risk below threshold (MFCI), holonomy risk below threshold (PHI), GWEI cohort disparity below threshold, redundancy bounded by MERI, safety-policy compliance, privacy/age-appropriate limits, and content-visibility containment (in-room content never leaves its room, Section 14.5).
 
 ## 13.2 Candidate generation
 
-Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; cross-community bridge candidates; expert explanations (stories from expert-led rooms); chronological catch-up. Candidate generation is **visibility-scoped**: global surfaces (front page, topic surfaces) draw only from public content; a room surface draws from that room's full pool — public and in-room — for users who pass the room's read bar (Sections 14.5, 16.2). Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
+Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; expert explanations (stories from expert-led rooms); chronological catch-up. Candidate generation is **visibility-scoped**: global surfaces (front page, topic surfaces) draw only from public content; a room surface draws from that room's full pool — public and in-room — for users who pass the room's read bar (Sections 14.5, 16.2). Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
 
 ## 13.3 Ranking stages
 
@@ -974,12 +975,11 @@ Sources: subscribed rooms; local and regional news; global front-page candidates
 |---|---|
 | Ingest | Normalize links, extract metadata, classify topics, detect duplicates. |
 | Candidate retrieval | Retrieve visibility-eligible stories/threads relevant to user, room, and global context (public content for global surfaces; the room pool for room surfaces). |
-| Invariant feature join | Add MERI, MFCI, GWEI, SCOI, PHI, and support-invariant features. |
+| Invariant feature join | Add MERI, MFCI, GWEI, PHI, and support-invariant features. |
 | Safety filter | Remove or restrict policy-violating content. |
 | Multi-objective rank | Score with PWAtt and constraints. |
 | Diversification | Apply nonredundancy, source, lens, and topic balancing. |
-| Explanation generation | Produce a short user-facing distribution reason. |
-| Logging | Record features, decision, and explanation for audit. |
+| Logging | Record features and decision for audit. |
 
 ## 13.4 Ranking pseudo-code
 
@@ -998,15 +998,23 @@ Sources: subscribed rooms; local and regional news; global front-page candidates
             constraints = [cohort_parity, context_requirements, holonomy_limits]
         )
         feed = diversify_with_matroid_rank(ordered)
-        return attach_explanations(feed)
+        return feed
 
-## 13.5 Explanation examples
+## 13.5 Explanation surfaces (removed)
 
-"Shown because readers in three rooms opened the source and added independent evidence." "Shown with context because communities are interpreting the quote differently." "Lower in your feed because it repeats a claim you have already seen from the same source lineage." "Shown from outside your usual topics to preserve source diversity." "Distribution is slowed because synchronized activity is under review."
+The per-item "distribution reason" explanation system (a template registry
+rendering one user-facing line per served card) was removed as a product
+decision: the line carried near-zero information on most cards (its floor
+template was unconditional) and duplicated the story-surface context
+signals (Section 5.6, Section 10.5). Decision logging (13.3) remains the
+complete audit record of every ranking decision. For rollout
+compatibility, servers keep emitting a single legacy `distribution_reason`
+constant until pre-removal cached client bundles age out; new clients
+never render it.
 
 ## 13.6 Ranking prohibitions
 
-The ranking system must not: use likes or upvotes (they do not exist); optimize only for total dwell time; treat controversy as quality; reward repeated hostile returns; count duplicate claims as independent validation; boost content solely because a high-reputation user posted it; infer sensitive attributes unnecessarily; read wallet connection, token balance, donation amount, treasury contribution, payment receipt, governance vote, or paid membership as a positive visibility feature; or hide explanations behind vague terms such as "because of the algorithm." A continuously enforced ranking-neutrality test suite (Section 30.6) proves the financial-feature exclusion.
+The ranking system must not: use likes or upvotes (they do not exist); optimize only for total dwell time; treat controversy as quality; reward repeated hostile returns; count duplicate claims as independent validation; boost content solely because a high-reputation user posted it; infer sensitive attributes unnecessarily; read wallet connection, token balance, donation amount, treasury contribution, payment receipt, governance vote, or paid membership as a positive visibility feature; or describe ranking outcomes anywhere in user-facing copy with engagement-bait or endorsement vocabulary ("trending", "popular", "boosted", "because of the algorithm" — the Section 30.6 prohibited list, enforced by neutrality test 9 over the client copy catalog). A continuously enforced ranking-neutrality test suite (Section 30.6) proves the financial-feature exclusion.
 
 # 14. Social news aggregation model
 
@@ -1527,7 +1535,7 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/feed` | GET | Ranked front-page feed of public content, with explanations (`?topic=` scopes to a topic surface). |
+| `/v1/feed` | GET | Ranked front-page feed of public content (`?topic=` scopes to a topic surface). |
 | `/v1/rooms` | GET | List joined and recommended rooms. |
 | `/v1/rooms/{room_id}/feed` | GET | Room feed (public + in-room content of that room) for users who pass the room read bar. |
 | `/v1/stories` | POST | Submit a content item (link, image, video, or written post) to a home room, with a visibility choice where the room permits one. |
@@ -1545,8 +1553,9 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 
     FeedItem { story_id, room_ref, visibility, title, source_summary,
                sources_count, corrections { active, validated, incorrect },
-               dispute_status, distribution_reason, context_chips[], reader_state,
-               thread_preview, safety_state, user_controls }
+               dispute_status, context_chips[], reader_state,
+               thread_preview, safety_state, user_controls,
+               distribution_reason_legacy_compat_optional }
 
     CreateContributionRequest { thread_id, type, body, parent_id_optional,
                                 target_claim_id_optional, citations[], attachments[],
@@ -1554,8 +1563,7 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 
     RankingDecisionLog { request_id, user_privacy_bucket, candidate_ids,
                          selected_ids, score_components, invariant_versions,
-                         constraints_applied, explanation_ids, experiment_ids,
-                         timestamp }
+                         constraints_applied, experiment_ids, timestamp }
 
 ## 23.4 Knomosis, wallet, treasury, and governance endpoints
 

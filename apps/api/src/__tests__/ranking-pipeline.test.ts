@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { DeniedFinancialFieldError, EVERGREEN_PROFILE } from '@licio/ranking';
-import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import { LEGACY_DISTRIBUTION_REASON, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
@@ -148,11 +148,14 @@ describe('feature assembly (WS-I.2.1a/c provenance)', () => {
     expect(vector?.mfci_risk_state).toBe('high');
     expect(vector?.mfci_score).toBe(3.2);
     expect(vector?.coordination_penalty).toBe(0.5);
-    expect(vector?.scoi_level).toBe('high'); // obstructed → high
-    expect(vector?.context_coherence_gain).toBeCloseTo(0.7, 12);
+    // The SCOI→ranking coupling was removed: a stored SCOI row populates no
+    // feature and pins no version entry.
+    expect(vector?.scoi_level).toBeUndefined();
+    expect(vector?.context_coherence_gain).toBeUndefined();
+    expect(vector?.invariant_versions['SCOI']).toBeUndefined();
     expect(vector?.hodge_harmonic_tension).toBe(0.4);
     expect(vector?.harmful_tension_risk).toBe(0);
-    for (const name of ['MFCI', 'SCOI', 'hodge_tension']) {
+    for (const name of ['MFCI', 'hodge_tension']) {
       const entry = vector?.invariant_versions[name];
       expect(entry?.version_string).toBe('1.0.0');
       expect(entry?.config_hash.length).toBe(16);
@@ -250,7 +253,10 @@ describe('feature assembly (WS-I.2.1a/c provenance)', () => {
       retention_tier: 'ranking_log',
     } as never);
     const stored = await fixture.ranking.featureStore.getLatest(storyId);
-    expect(stored?.scoi_level).toBe('medium');
+    // The refresh ran (a revision exists); the SCOI row itself populates no
+    // feature since the SCOI→ranking coupling was removed.
+    expect(stored).not.toBeNull();
+    expect(stored?.scoi_level).toBeUndefined();
   });
 
   it('the batch path covers recent stories (WS-I.2.1d)', async () => {
@@ -302,7 +308,6 @@ describe('safety filter (WS-I.2.2a, non-overridable)', () => {
       freshness_timestamp: new Date().toISOString(),
       retrieval_score: 0.5,
       retrieval_origins: ['global_pwatt_v1'],
-      bridge_context: null,
     }));
     const result = await applySafetyFilter(candidates, provider, {
       ageBand: 'adult',
@@ -343,7 +348,6 @@ describe('safety filter (WS-I.2.2a, non-overridable)', () => {
       freshness_timestamp: new Date().toISOString(),
       retrieval_score: 0.5,
       retrieval_origins: ['global_pwatt_v1'],
-      bridge_context: null,
     }));
     const result = await applySafetyFilter(candidates, provider, {
       ageBand: 'adult',
@@ -376,7 +380,6 @@ describe('safety filter (WS-I.2.2a, non-overridable)', () => {
       freshness_timestamp: new Date().toISOString(),
       retrieval_score: 0.5,
       retrieval_origins: ['global_pwatt_v1'],
-      bridge_context: null,
     };
     for (const ageBand of ['teen_13_15', 'teen_16_17', null] as const) {
       const filtered = await applySafetyFilter([candidate], provider, {
@@ -419,7 +422,9 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
     expect(served.fallback).toBe(false);
     expect(served.items.map((i) => i.story_id)).toEqual([strong.storyId, weak.storyId]);
     for (const item of served.items) {
-      expect(item.distribution_reason.length).toBeGreaterThan(0);
+      // Rollout compat: the removed per-card reason still rides the wire as
+      // the one legacy constant for pre-removal cached bundles.
+      expect(item.distribution_reason).toBe(LEGACY_DISTRIBUTION_REASON);
     }
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
     expect(log).not.toBeNull();
@@ -428,7 +433,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
     expect(log?.selected_ids).toEqual([strong.storyId, weak.storyId]);
     expect(log?.candidate_ids).toContain(strong.storyId);
     expect(Object.keys(log?.score_components ?? {})).toHaveLength(2);
-    expect(log?.explanation_ids[strong.storyId]).toBeDefined();
+    expect(log?.explanation_ids).toBeUndefined();
     expect(log?.replay_inputs?.profile_snapshot.profile_id).toBe(log?.profile_id);
     expect(await fixture.ranking.decisionLogs.count()).toBe(1);
     // §21.3: one ranking.decision.logged event per selected item.
@@ -531,9 +536,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
     });
     expect(served.fallback).toBe(true);
     expect(served.items.map((i) => i.story_id)).toEqual([newer.storyId, older.storyId]);
-    expect(served.items[0]?.distribution_reason).toBe(
-      'Shown in time order while ranking is paused.',
-    );
+    expect(served.items[0]?.distribution_reason).toBe(LEGACY_DISTRIBUTION_REASON);
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
     expect(log?.fallback).toBe(true);
     expect(log?.fallback_reason).toBe('kill_switch');
@@ -587,7 +590,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
     );
   });
 
-  it('the user-chosen chronological mode serves time order with its own reason', async () => {
+  it('the user-chosen chronological mode serves time order', async () => {
     await seedStory(fixture.ingestion);
     const served = await serveFeed(fixture.ranking, {
       userId: null,
@@ -597,9 +600,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       mode: 'chronological',
     });
     expect(served.fallback).toBe(true);
-    expect(served.items[0]?.distribution_reason).toBe(
-      'Shown in time order, as your feed mode requests.',
-    );
+    expect(served.items[0]?.distribution_reason).toBe(LEGACY_DISTRIBUTION_REASON);
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
     expect(log?.fallback_reason).toBe('user_mode');
   });
@@ -986,8 +987,8 @@ describe('admin surface (WS-I.2.5c / WS-I.4.1a; steward + MFA, meta-audited)', (
       killswitch_engaged: boolean;
     };
     expect(healthBody.decision_logs).toBe(1);
-    // Eight organic SPEC §13.2 sources + the room-surface scoper.
-    expect(healthBody.retrievers).toHaveLength(9);
+    // Seven organic SPEC §13.2 sources + the room-surface scoper.
+    expect(healthBody.retrievers).toHaveLength(8);
     expect(healthBody.killswitch_engaged).toBe(false);
   });
 });

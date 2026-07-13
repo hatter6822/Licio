@@ -210,7 +210,6 @@ function Gallery(): React.ReactElement {
             }}
             sourcesCount={3}
             corrections={{ active: 1, validated: 0, incorrect: 0 }}
-            distributionReason="Rising from independent source opens and sourced comments"
             contextChips={[{ id: 'c2', label: '2 primary sources' }]}
             onSave={() => undefined}
             onOpenContext={() => undefined}

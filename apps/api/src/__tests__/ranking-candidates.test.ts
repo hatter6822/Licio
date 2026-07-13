@@ -15,7 +15,6 @@ import { applyQuotas } from '../ranking/quotas.js';
 import {
   type CandidateRetriever,
   ChronologicalCatchUpRetriever,
-  CrossCommunityBridgesRetriever,
   createDefaultRetrievers,
   EmergingDiscussionsRetriever,
   ExpertExplanationsRetriever,
@@ -304,36 +303,6 @@ describe('WS-I.1.1a retrievers', () => {
     expect(candidates.map((c) => c.item_id)).toEqual([seen.storyId]);
   });
 
-  it('cross-community bridges require SCOI divergence and carry context metadata', async () => {
-    const split = await seedStory(fixture.ingestion);
-    await seedStory(fixture.ingestion);
-    await fixture.events.invariantStore.upsert({
-      invariantType: 'SCOI',
-      targetType: 'story',
-      targetId: split.storyId,
-      timeWindow: { start: '2026-06-10T00:00:00.000Z', end: '2026-06-10T01:00:00.000Z' },
-      version: '1.0.0',
-      scoreVector: { scoi: 0.6, context_state: 'split', lens_count: 3 },
-      explanationSummary: null,
-      confidence: 1,
-      coverage: 1,
-      reasonCodes: [],
-      fallbackUsed: false,
-      versionMetadata: null,
-      shadowMode: true,
-      createdAt: new Date().toISOString(),
-    });
-    const candidates = await new CrossCommunityBridgesRetriever(ports()).retrieve(
-      retrieveContext(),
-    );
-    expect(candidates.map((c) => c.item_id)).toEqual([split.storyId]);
-    expect(candidates[0]?.bridge_context).toEqual({
-      scoi: 0.6,
-      context_state: 'split',
-      lens_count: 3,
-    });
-  });
-
   it('expert explanations surface stories from PUBLIC experts_and_stewards rooms only', async () => {
     // The retriever's single remaining leg (the human-summary leg was removed
     // with the §24.3 thread-summary feature): stories in public rooms whose
@@ -412,7 +381,6 @@ describe('WS-I.1.1b quotas', () => {
       freshness_timestamp: new Date().toISOString(),
       retrieval_score: score,
       retrieval_origins: ['global_pwatt_v1'],
-      bridge_context: null,
     };
   }
 
@@ -571,7 +539,7 @@ describe('WS-I.1.1d orchestrator', () => {
     expect(result.pool.length).toBeLessThanOrEqual(10);
   });
 
-  it('the registry holds the eight organic origins + the room scoper, and rejects duplicates', () => {
+  it('the registry holds the seven organic origins + the room scoper, and rejects duplicates', () => {
     const origins = createDefaultRetrievers(ports()).origins();
     expect(origins.sort()).toEqual(
       [
@@ -580,11 +548,10 @@ describe('WS-I.1.1d orchestrator', () => {
         'global_pwatt_v1',
         'emerging_discussions_v1',
         'independent_additions_v1',
-        'cross_community_bridges_v1',
         'expert_explanations_v1',
         'chronological_catch_up_v1',
         // Room-surface scoping (inert outside room feeds; not an organic
-        // front-page source — those remain exactly the SPEC §13.2 eight).
+        // front-page source — those remain exactly the SPEC §13.2 seven).
         'room_surface_v1',
       ].sort(),
     );

@@ -288,55 +288,6 @@ export class InMemoryMfciRiskStateStore implements MfciRiskStateStore {
 }
 
 // ---------------------------------------------------------------------------
-// SCOI moderator context actions (WS-H.4.3d / SCOI-4)
-// ---------------------------------------------------------------------------
-
-export type ScoiContextActionKind = 'merge' | 'annotate' | 'separate';
-
-export interface ScoiContextActionRecord {
-  actionId: string;
-  action: ScoiContextActionKind;
-  threadId: string;
-  relatedThreadId: string | null;
-  storyId: string;
-  roomId: string | null;
-  /** Ratified WS-A moderation reason code. */
-  reasonCode: string;
-  annotation: string | null;
-  /** `steward:<uuid>` — never a raw identity. */
-  actorRef: string;
-  scoiBefore: number | null;
-  scoiAfter: number | null;
-  createdAt: string;
-}
-
-export interface ScoiContextActionStore {
-  insert(record: ScoiContextActionRecord): Promise<void>;
-  listForThread(threadId: string, limit: number): Promise<ScoiContextActionRecord[]>;
-  clear(): Promise<void>;
-}
-
-export class InMemoryScoiContextActionStore implements ScoiContextActionStore {
-  readonly #rows: ScoiContextActionRecord[] = [];
-
-  async insert(record: ScoiContextActionRecord): Promise<void> {
-    this.#rows.push({ ...record });
-  }
-
-  async listForThread(threadId: string, limit: number): Promise<ScoiContextActionRecord[]> {
-    return this.#rows
-      .filter((r) => r.threadId === threadId || r.relatedThreadId === threadId)
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
-  }
-
-  async clear(): Promise<void> {
-    this.#rows.length = 0;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Bridge requests/attempts (WS-H.4.2d / SCOI-2)
 // ---------------------------------------------------------------------------
 

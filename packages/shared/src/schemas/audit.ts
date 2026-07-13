@@ -58,12 +58,13 @@ export const AUDIT_EVENT_TYPES = [
   'forum_config_change',
   // WS-H invariant platform: validated invariants runtime-config writes,
   // shadow-status promotions/demotions (WS-H.1.2e), MFCI analyst case
-  // resolutions (WS-H.3.4b), SCOI moderator context actions (WS-H.4.3d),
-  // and bridge-request routing (WS-H.4.2d).
+  // resolutions (WS-H.3.4b), and bridge-request routing (WS-H.4.2d).
+  // (`scoi_context_action` was retired with the WS-H.4.3d moderator
+  // merge/annotate/separate surface; historic rows keep the label in the
+  // append-only DB enum — this LIVE mirror deliberately omits it.)
   'invariant_config_change',
   'invariant_promotion_change',
   'mfci_case_action',
-  'scoi_context_action',
   'bridge_request',
   // WS-I ranking: validated ranking runtime-config writes (WS-I.2.3f),
   // kill-switch engage/release (WS-I.4.1a), decision-log queries (the

@@ -4,8 +4,7 @@
 //
 //   candidate generation (orchestrator) → feature join (feature store +
 //   per-request relevance) → safety filter → constrained scoring →
-//   diversification → decision logging → explanation generation → feed
-//   response
+//   diversification → decision logging → card signals → feed response
 //
 // Serving and replay (WS-I.2.5b) execute the SAME pure core
 // (`rankFeasibleSet` from @licio/ranking) over the same pinned inputs: the
@@ -32,14 +31,10 @@ import {
   candidateSchema,
   chronologicalOrder,
   diffRankings,
-  type ExplanationLocale,
   emptyFeatureVector,
-  explainItem,
   type FallbackReason,
   FEATURE_SCHEMA_VERSION,
   type FeatureVector,
-  fallbackExplanation,
-  type GeneratedExplanation,
   gweiDeploymentGate,
   type RankingDecisionLog,
   type RankingProfileConfig,
@@ -59,6 +54,7 @@ import {
   type FeedMode,
   feedItemSchema,
   isSentinelTopicId,
+  LEGACY_DISTRIBUTION_REASON,
   legacyRatingLabel,
   rankingDecisionLoggedEventSchema,
   TOPIC_ID_BY_SLUG,
@@ -78,15 +74,7 @@ import { feedMediaOf } from '../lib/story-media.js';
 import { killSwitchDecision } from './killswitch.js';
 import { assembleCandidatePool } from './orchestrator.js';
 import { applySafetyFilter } from './safety-filter.js';
-import { type RankingServices, refreshStoryFeatures, SEEN_HISTORY_WINDOW_MS } from './services.js';
-
-/**
- * The locale explanations are served in. The renderer is catalog-ready
- * (`renderTemplate(id, params, locale)` with the `x-pseudo` readiness proof
- * exercised in tests); real translation catalogs slot into the @licio/ranking
- * `LOCALE_CATALOGS` map, after which this derives from the user's locale.
- */
-const SERVED_EXPLANATION_LOCALE: ExplanationLocale = 'en';
+import { type RankingServices, refreshStoryFeatures } from './services.js';
 
 export interface FeedServeRequest {
   userId: string | null;
@@ -196,7 +184,6 @@ async function cardSignalsForPage(
 interface SelectedEntry {
   itemId: string;
   score: number;
-  explanation: GeneratedExplanation;
   features: FeatureVector | undefined;
   /** Same-cluster items demoted by dedup ("more on this story"). */
   moreOnThisStory: readonly string[];
@@ -266,7 +253,10 @@ async function buildFeedItems(
             ? { activeAttention: entry.features.active_attention }
             : {}),
         }),
-        distribution_reason: entry.explanation.distributionReason,
+        // DEPRECATED rollout compat: the per-card distribution reason was
+        // removed; pre-removal cached bundles REQUIRE a non-empty string
+        // (see LEGACY_DISTRIBUTION_REASON in @licio/shared).
+        distribution_reason: LEGACY_DISTRIBUTION_REASON,
         context_chips: chips,
         safety_state: safetyState,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
@@ -295,7 +285,7 @@ interface DecisionLogDraft {
 async function commitDecision(
   services: RankingServices,
   draft: DecisionLogDraft,
-  selected: ReadonlyArray<{ itemId: string; score: number; explanation: GeneratedExplanation }>,
+  selected: ReadonlyArray<{ itemId: string; score: number }>,
   surface: 'front_page' | 'room' | 'topic',
 ): Promise<boolean> {
   try {
@@ -333,7 +323,6 @@ async function commitDecision(
       score: entry.score,
       position,
       signals_used: signalNamesOf(draft.log, entry.itemId),
-      explanation_summary: entry.explanation.distributionReason.slice(0, 500),
       privacy_classification: 'sensitive',
       retention_tier: 'ranking_log',
     }),
@@ -429,30 +418,6 @@ async function lensAssignments(
     if (best !== undefined) out.set(storyId, best[0]);
   }
   return out;
-}
-
-/**
- * §10.6 interpretation-divergence observability (WS-I.2.4c): an item diverges
- * when the constraint stage flagged it (`scoi_context_card`) and its stored
- * SCOI level is non-low.  Derived from the ALREADY-JOINED features — no extra
- * store reads.  This is a metrics-only pass (it feeds the context-gate
- * dashboard that resources the bridge/expert queue); the reader-facing
- * divergence surface is the story read's "Where interpretations differ"
- * drawer (`GET /v1/stories/{id}/interpretations`), not a feed-card label —
- * the §5.6 rating label that used to consume this flag was removed with the
- * story-card signal redesign.
- */
-function recordInterpretationDivergence(
-  selected: readonly ScoredItem[],
-  featuresById: ReadonlyMap<string, FeatureVector>,
-  metrics: RankingServices['events']['metrics'],
-): void {
-  for (const item of selected) {
-    const diverges =
-      item.constraint_flags.includes('scoi_context_card') &&
-      (featuresById.get(item.item_id)?.scoi_level ?? 'low') !== 'low';
-    if (diverges) metrics.increment('ranking.context_gate.card');
-  }
 }
 
 /**
@@ -793,26 +758,12 @@ export async function serveFeed(
     }
   }
   if (gwei.application !== null) ranked.applications.push(gwei.application);
-  // Context-gate observability (WS-I.2.4c): the volume of reduced/paused
-  // items feeds the dashboard that resources the bridge/expert queue.
-  for (const application of ranked.applications) {
-    if (application.constraint === 'scoi_reduced_distribution') {
-      services.events.metrics.increment('ranking.context_gate.reduced');
-    } else if (application.constraint === 'scoi_paused_pending_review') {
-      services.events.metrics.increment('ranking.context_gate.paused');
-    }
-  }
 
-  // --- Stage 7: explanations ------------------------------------------------
-  const seen =
-    request.userId === null
-      ? new Map<string, string>()
-      : await collectSeen(services, request.userId);
+  // --- Stage 7: card signals + entry assembly -------------------------------
   const signalsByStory = await cardSignalsForPage(
     services,
     ranked.selected.map((scored) => scored.item_id),
   );
-  recordInterpretationDivergence(ranked.selected, featuresById, services.events.metrics);
   // "More on this story" (WS-I.2.4a): the selected cluster representative
   // carries its demoted same-cluster siblings.
   const moreByItem = new Map<string, string[]>();
@@ -824,39 +775,14 @@ export async function serveFeed(
       moreByItem.set(scored.item_id, expansion);
     }
   }
-  const explanationIds: Record<string, string> = {};
   const scoreComponents: Record<string, ScoredItem> = {};
   const entries: SelectedEntry[] = [];
   for (const scored of ranked.selected) {
     const features = featuresById.get(scored.item_id);
-    // The "{n} sourced comments" template — fed the thread's published
-    // sourced-contribution count so the wording is literally true.
-    const sourcedCount = signalsByStory.get(scored.item_id)?.sourced ?? 0;
-    const explanation = explainItem(
-      scored,
-      {
-        ...(features?.scoi_level !== undefined ? { scoi_level: features.scoi_level } : {}),
-        ...(features?.mfci_risk_state !== undefined
-          ? { mfci_risk_state: features.mfci_risk_state }
-          : {}),
-      },
-      {
-        roomCount: 1,
-        sourcedCount,
-        fromDiversityQuota:
-          relevanceByItem !== null &&
-          user.topicPreferences.length > 0 &&
-          (relevanceByItem.get(scored.item_id) ?? 0) === 0,
-        previouslySeen: seen.has(scored.item_id),
-      },
-      SERVED_EXPLANATION_LOCALE,
-    );
-    explanationIds[scored.item_id] = explanation.templateId;
     scoreComponents[scored.item_id] = scored;
     entries.push({
       itemId: scored.item_id,
       score: scored.pwatt_score,
-      explanation,
       features,
       moreOnThisStory: moreByItem.get(scored.item_id) ?? [],
       signals: signalsByStory.get(scored.item_id) ?? EMPTY_CARD_SIGNALS,
@@ -866,7 +792,7 @@ export async function serveFeed(
   const servedIds = new Set(items.map((item) => item.story_id));
   const selectedForEvents = entries
     .filter((entry) => servedIds.has(entry.itemId))
-    .map((entry) => ({ itemId: entry.itemId, score: entry.score, explanation: entry.explanation }));
+    .map((entry) => ({ itemId: entry.itemId, score: entry.score }));
 
   // --- Stage 6: decision logging -------------------------------------------
   const featureRevisions: Record<string, number> = {};
@@ -892,7 +818,6 @@ export async function serveFeed(
     safety_exclusions: safety.exclusions,
     visibility_excluded_count: visibilityExcludedCount,
     quota_outcomes: assembled.quotaOutcomes,
-    explanation_ids: explanationIds,
     experiment_ids: [],
     timestamp: nowIso,
     profile_id: profile.profile_id,
@@ -924,21 +849,6 @@ export async function serveFeed(
   return { requestId, items, fallback: false, nextCursor: hasMore ? requestId : null };
 }
 
-async function collectSeen(
-  services: RankingServices,
-  userId: string,
-): Promise<Map<string, string>> {
-  const sinceIso = new Date(services.now() - SEEN_HISTORY_WINDOW_MS).toISOString();
-  const seen = new Map<string, string>();
-  for (const aggregate of await services.events.attentionStore.listByUserSince(userId, sinceIso)) {
-    const current = seen.get(aggregate.story_id);
-    if (current === undefined || aggregate.created_at > current) {
-      seen.set(aggregate.story_id, aggregate.created_at);
-    }
-  }
-  return seen;
-}
-
 interface FallbackArgs {
   requestId: string;
   parentRequestId: string | null;
@@ -960,8 +870,8 @@ interface FallbackArgs {
 /**
  * WS-I.4.1b — the safe fallback ranker: chronological ordering over the
  * SAFETY-FILTERED set (the filter is never bypassed), no PWAtt, no
- * personalization, no financial anything; an honest "time order"
- * explanation; and a decision log marked `fallback: true`.
+ * personalization, no financial anything; and a decision log marked
+ * `fallback: true` with the honest fallback reason.
  */
 async function serveFallback(
   services: RankingServices,
@@ -969,7 +879,6 @@ async function serveFallback(
   args: FallbackArgs,
 ): Promise<ServedFeed> {
   const ordered = chronologicalOrder(args.feasible).slice(0, args.profile.page_size);
-  const explanation = fallbackExplanation(args.reason, SERVED_EXPLANATION_LOCALE);
   // The degraded feed still carries honest §5.6 card signals — one batched
   // read, same as the ranked path.
   const signalsByStory = await cardSignalsForPage(
@@ -979,7 +888,6 @@ async function serveFallback(
   const entries: SelectedEntry[] = ordered.map((candidate) => ({
     itemId: candidate.item_id,
     score: 0,
-    explanation,
     features: undefined,
     moreOnThisStory: [],
     signals: signalsByStory.get(candidate.item_id) ?? EMPTY_CARD_SIGNALS,
@@ -988,9 +896,7 @@ async function serveFallback(
   const servedIds = new Set(items.map((item) => item.story_id));
   const selectedForEvents = entries
     .filter((entry) => servedIds.has(entry.itemId))
-    .map((entry) => ({ itemId: entry.itemId, score: entry.score, explanation: entry.explanation }));
-  const explanationIds: Record<string, string> = {};
-  for (const entry of selectedForEvents) explanationIds[entry.itemId] = explanation.templateId;
+    .map((entry) => ({ itemId: entry.itemId, score: entry.score }));
   const log = rankingDecisionLogSchema.parse({
     request_id: args.requestId,
     parent_request_id: args.parentRequestId,
@@ -1005,7 +911,6 @@ async function serveFallback(
     safety_exclusions: [...args.safetyExclusions],
     visibility_excluded_count: args.visibilityExcludedCount,
     quota_outcomes: [...args.quotaOutcomes],
-    explanation_ids: explanationIds,
     experiment_ids: [],
     timestamp: args.nowIso,
     profile_id: args.profile.profile_id,
@@ -1106,7 +1011,6 @@ export async function replayDecision(
         freshness_timestamp: snapshot.created_at,
         retrieval_score: 0,
         retrieval_origins: ['replay'],
-        bridge_context: null,
       }),
     );
   }

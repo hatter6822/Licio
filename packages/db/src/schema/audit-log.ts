@@ -58,6 +58,10 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'invariant_config_change',
   'invariant_promotion_change',
   'mfci_case_action',
+  // GRANDFATHERED: retired with the WS-H.4.3d moderator context-action
+  // surface (merge/annotate/separate). Historic rows carry it; the label
+  // stays in the DB enum for the same append-only reason as
+  // `evidence_verification_change` above — the shared zod mirror omits it.
   'scoi_context_action',
   'bridge_request',
   // WS-I ranking surface (mirrors AUDIT_EVENT_TYPES in @licio/shared).

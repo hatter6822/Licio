@@ -33,23 +33,12 @@ function isLensCountChip(chip: { id: string; label: string }): boolean {
   return chip.id === 'lenses' || /^\s*\d+\s+lens(?:es)?\b/i.test(chip.label);
 }
 
-/** Reject a distribution reason that leaks a raw numeric score (dev-only). */
-function warnIfScoreLike(reason: string): void {
-  if (!import.meta.env.DEV) return;
-  if (/\b\d+(?:\.\d+)?\s*(?:points?|pts?|score|rank(?:ed)?|%)\b/i.test(reason)) {
-    console.warn(
-      `StoryCard: distributionReason looks like a raw score ("${reason}"). It must be human-readable and never expose a numeric score (no-applause doctrine).`,
-    );
-  }
-}
-
 export function StoryCard({
   story,
   sourcesCount,
   corrections,
   safetyState,
   disputeStatus = 'none',
-  distributionReason,
   contextChips,
   branchPreview,
   inRoom,
@@ -64,8 +53,6 @@ export function StoryCard({
   const titleId = useId();
   const Heading = `h${headingLevel}` as 'h2' | 'h3' | 'h4';
 
-  warnIfScoreLike(distributionReason);
-
   // Drop any lens-count chip at the boundary (see isLensCountChip) so the
   // removed "N lenses" affordance can never render, whatever the producer.
   const visibleChips = contextChips?.filter((chip) => !isLensCountChip(chip));
@@ -75,8 +62,8 @@ export function StoryCard({
   );
 
   return (
-    // DOM order == visual order (WS-B.2.1c / WCAG 1.3.2): title, source, rating,
-    // reason, chips, estimate, branch preview, then interactive actions last.
+    // DOM order == visual order (WS-B.2.1c / WCAG 1.3.2): title, source, signal
+    // row, chips, estimate, branch preview, then interactive actions last.
     <article
       aria-labelledby={titleId}
       className={cn(
@@ -150,10 +137,7 @@ export function StoryCard({
         </div>
       ) : null}
 
-      {/* 4. One-line distribution reason (human-readable, no raw score) */}
-      <p className="text-sm text-ink">{distributionReason}</p>
-
-      {/* 5. Context chips (lenses, primary sources, coordination-risk band).
+      {/* 4. Context chips (lenses, primary sources, coordination-risk band).
           Secondary metadata: hidden in focus mode for a calmer layout. */}
       {visibleChips && visibleChips.length > 0 ? (
         <ul className="flex flex-wrap gap-2" data-focus-hide>
@@ -169,10 +153,10 @@ export function StoryCard({
         </ul>
       ) : null}
 
-      {/* 6. Reading estimate (a cognitive-accessibility aid; never a score) */}
+      {/* 5. Reading estimate (a cognitive-accessibility aid; never a score) */}
       <p className="text-xs text-ink-muted">{readingEstimate}</p>
 
-      {/* 7. Thread-branch preview (secondary: hidden in focus mode) */}
+      {/* 6. Thread-branch preview (secondary: hidden in focus mode) */}
       {branchPreview && branchPreview.length > 0 ? (
         <div data-focus-hide>
           <p className="text-xs font-medium text-ink-muted">

@@ -580,7 +580,6 @@ describe('Test 8 — sponsored content cannot enter organic ranking (WS-I.3.1h)'
       'global',
       'emerging_discussion',
       'independent_source_addition',
-      'cross_community_bridge',
       'expert_explanation',
       'chronological_catch_up',
     ]);
@@ -595,7 +594,6 @@ describe('Test 8 — sponsored content cannot enter organic ranking (WS-I.3.1h)'
         freshness_timestamp: new Date().toISOString(),
         retrieval_score: 1,
         retrieval_origins: ['sponsored_v1'],
-        bridge_context: null,
       }).success,
     ).toBe(false);
   });
@@ -619,7 +617,7 @@ describe('Test 8 — sponsored content cannot enter organic ranking (WS-I.3.1h)'
     ).toThrow();
   });
 
-  it('served decision logs carry only the eight registered organic origins', async () => {
+  it('served decision logs carry only the seven registered organic origins', async () => {
     await seedStory(fixture.ingestion);
     const served = await serveFeed(fixture.ranking, {
       userId: null,
@@ -631,7 +629,7 @@ describe('Test 8 — sponsored content cannot enter organic ranking (WS-I.3.1h)'
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
     expect(log).not.toBeNull();
     const registered = new Set(fixture.ranking.retrievers.origins());
-    expect(registered.size).toBe(9); // eight organic + the room scoper
+    expect(registered.size).toBe(8); // seven organic + the room scoper
     // (Origins are recorded per candidate at retrieval; the registry is the
     // closed set every origin must come from.)
     for (const origin of registered) {

@@ -1,0 +1,13 @@
+-- WS-H.4.3d retirement: drop the SCOI moderator context-action store.
+--
+-- The merge/annotate/separate steward surface was removed (it had no
+-- reader-facing consumer; its SCOI before/after measurement fed nothing but
+-- its own rows), so the operational table goes with it.  Accountability is
+-- NOT lost: every action ever taken also wrote an append-only audit row
+-- (`audit_log.event_type = 'scoi_context_action'`), and that label stays in
+-- the audit enum as a grandfathered historic value (see
+-- packages/db/src/schema/audit-log.ts).  The WS-H.4.2d bridge-attempt store
+-- (`bridge_attempts`) is unrelated and remains — bridge credit survives.
+--
+-- NO wallet/payment/treasury/financial column appears here (SPEC §21.5/§13.6).
+DROP TABLE IF EXISTS "scoi_context_actions";
