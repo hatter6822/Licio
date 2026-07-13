@@ -36,6 +36,7 @@ import {
   type DebateWinner,
   debateArenaPublicSchema,
   debateArenaSummarySchema,
+  MAX_CITATIONS,
 } from '@licio/shared';
 import { mapBounded } from '../lib/concurrency.js';
 import type {
@@ -550,7 +551,7 @@ export async function judgeDebateArena(
   // Co-viewers see the arena enter the resolution queue immediately.
   await broadcastArena(deps, arena);
 
-  const input = assembleJudgeInput(arena);
+  const input = assembleJudgeInput(await suppressWithheldForJudging(deps, arena));
   const result = await deps.runJudge({ debateId, roomId: arena.roomId }, input);
   const nowMs = deps.now();
   const verdictAt = new Date(nowMs).toISOString();
@@ -903,13 +904,38 @@ export async function runDebateLifecycle(
   let finalized = 0;
   let skippedForDeadline = 0;
 
-  // 1. The scheduled hour-23 lock sweep.
+  // 1. The scheduled hour-23 lock sweep — CLASSIFIED by which trigger fired
+  //    first.  A catch-up after scheduler downtime can find an arena that is
+  //    past its edit deadline AND whose both-sides-idle instant fired hours
+  //    ago (a no-show debate a healthy scheduler would have expedited long
+  //    before hour 23): locking that as 'scheduled' would park its queue
+  //    entry at hour 24, delaying a resolution that was already owed.  The
+  //    earlier-of-idle-or-schedule rule decides the mode: idle fired first ⇒
+  //    'expedited' (queue NOW), else 'scheduled' (the hour-24 entry stands).
   const dueLock = await deps.debates.listDueForLock(nowIso, limit);
-  for (const outcome of await mapBounded(dueLock, concurrency, (arena) =>
-    lockDebateArena(deps, arena.debateId, 'scheduled'),
-  )) {
-    if (outcome.ok && outcome.value?.state === 'locked') locked += 1;
-    else if (!outcome.ok) deps.log('forum.debate_lock_failed', { error: String(outcome.error) });
+  for (const outcome of await mapBounded(dueLock, concurrency, async (arena) => {
+    const windows = resolveDebateWindows(
+      deps.windows,
+      arena.incumbentUserId,
+      arena.challengerUserId,
+    );
+    const lastActiveIso =
+      arena.incumbentLastActiveAt > arena.challengerLastActiveAt
+        ? arena.incumbentLastActiveAt
+        : arena.challengerLastActiveAt;
+    const idleDueMs = Date.parse(lastActiveIso) + windows.inactivityWindowMs;
+    const mode =
+      idleDueMs <= nowMs && idleDueMs <= Date.parse(arena.editDeadlineAt)
+        ? ('expedited' as const)
+        : ('scheduled' as const);
+    return { mode, arena: await lockDebateArena(deps, arena.debateId, mode) };
+  })) {
+    if (outcome.ok && outcome.value.arena?.state === 'locked') {
+      if (outcome.value.mode === 'expedited') expedited += 1;
+      else locked += 1;
+    } else if (!outcome.ok) {
+      deps.log('forum.debate_lock_failed', { error: String(outcome.error) });
+    }
   }
 
   // 2. The both-sides-idle expedited sweep.  The store query uses the
@@ -1041,13 +1067,51 @@ export function domainOf(url: string): string | null {
   }
 }
 
+/**
+ * Judge-time re-suppression (the floor-dominance doctrine): the verdict must
+ * never be grounded in material the moderation floor is CURRENTLY
+ * withholding — even when a race got it into the frozen snapshot (a lock +
+ * claim landing inside an edit's moderation pass), or a hold landed after
+ * the lock.  The display projections re-suppress the same way on every read
+ * (`readDebateArenaContent`); this applies the identical rule to the
+ * adjudicator's input.  The STORED snapshot is untouched — a hold that is
+ * later lifted lifts the suppression on the next read, and the judge scored
+ * the conservative (empty) side, never the withheld text.
+ */
+async function suppressWithheldForJudging(
+  deps: DebateDeps,
+  arena: DebateArenaRecord,
+): Promise<DebateArenaRecord> {
+  const locked = arena.lockedContent;
+  if (locked === null) return arena;
+  let target = locked.target;
+  if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
+    const row = await deps.contributions.getById(arena.targetContributionId);
+    if (row === null || row.moderationState !== 'published') target = EMPTY_LOCKED_SIDE;
+  } else if ((await deps.storyContent(arena.storyId)) === null) {
+    target = EMPTY_LOCKED_SIDE;
+  }
+  const correctionRow = await deps.contributions.getById(arena.challengerContributionId);
+  const correction =
+    correctionRow === null || correctionRow.moderationState !== 'published'
+      ? EMPTY_LOCKED_SIDE
+      : locked.correction;
+  if (target === locked.target && correction === locked.correction) return arena;
+  return { ...arena, lockedContent: { target, correction } };
+}
+
 function toJudgeSide(
   side: 'incumbent' | 'challenger',
   content: DebateLockedSide,
   position: DebateSidePosition,
 ): DebateJudgeSideInput {
   // The judge weighs the UNION of the side's sourcing: the locked underlying
-  // content's citations plus the rebuttal statement's (deduped by URL).
+  // content's citations plus the rebuttal statement's (deduped by URL).  The
+  // union is CAPPED at the shared judge contract's MAX_CITATIONS — the
+  // locked material's own citations enter first, so overflow drops rebuttal
+  // extras, never the material's sourcing (each layer is itself schema-capped
+  // at MAX_CITATIONS, but their union could otherwise reach 2× the cap and
+  // overfeed the governed prompt beyond the validated request limit).
   const byUrl = new Map<string, Citation>();
   for (const c of [...content.citations, ...position.citations]) {
     if (!byUrl.has(c.url)) byUrl.set(c.url, c);
@@ -1059,7 +1123,7 @@ function toJudgeSide(
   return {
     content: contentText,
     summary: position.summary,
-    sources: [...byUrl.values()].map((c) => ({
+    sources: [...byUrl.values()].slice(0, MAX_CITATIONS).map((c) => ({
       url: c.url,
       domain: domainOf(c.url),
       // The citation schema already rejects dangerous schemes; an http(s) URL is

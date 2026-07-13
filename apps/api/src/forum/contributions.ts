@@ -844,6 +844,25 @@ export async function editContribution(
   if (anyDebateLockedIn(forum, debateParties)) {
     return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
   }
+  // The thread is read here for BOTH the live-arena access gate and the
+  // safety re-screen's room scoping (further down).
+  const editThread = await ingestion.stories.getThreadById(existing.threadId);
+  // WS-T — editing LIVE DEBATE MATERIAL carries the same thread-readability
+  // gate as every debate write (404-over-403): while this row is party to a
+  // live arena its edits are rebroadcast and judged as debate material, so a
+  // party who lost access to the conversation (left a restricted room, or the
+  // thread was pulled by the floor) cannot keep changing it through the
+  // contribution path either.  A row with NO live arena keeps the ordinary
+  // edit policy.
+  if (
+    debateParties.length > 0 &&
+    (editThread === null || !(await threadReadableToUser(bundle, editThread, userId)))
+  ) {
+    return {
+      ok: false,
+      rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
+    };
+  }
   if (update.body !== undefined && update.body.length > CONTRIBUTION_BODY_LIMITS[existing.type]) {
     return {
       ok: false,
@@ -898,10 +917,10 @@ export async function editContribution(
     body: patch.body ?? existing.body,
     citations: patch.citations ?? existing.citations,
   } as unknown as ContributionCreate;
-  // Re-screen against the thread's real home room (WS-Q), so the flood detector
-  // counts distinct rooms — not thread ids.  The thread exists (the contribution
-  // does); fall back to the thread id only for an unreachable missing-thread case.
-  const editThread = await ingestion.stories.getThreadById(existing.threadId);
+  // Re-screen against the thread's real home room (WS-Q; `editThread` was read
+  // at the gate above), so the flood detector counts distinct rooms — not
+  // thread ids.  Fall back to the thread id only for an unreachable
+  // missing-thread case.
   const verdict = await forum.safety.classify(editedShape, {
     userId,
     roomId: editThread?.roomId ?? existing.threadId,
@@ -928,8 +947,21 @@ export async function editContribution(
   // An IMMATERIAL patch skips the touch entirely (no activity to record, no
   // snapshot content to change — see `materialChange` above).
   if (materialChange) {
+    const dueDeps = { windows: forum.debateWindowsOverride ?? undefined, now: forum.now };
     for (const { arena, side } of debateParties) {
       if (arena.state !== 'open') continue;
+      // The early gate saw the arena BEFORE the safety/agent passes; those
+      // can take real time (an LLM call), and the 23h deadline or the
+      // both-sides-idle instant may have elapsed meanwhile with no sweep run
+      // yet — the state-only CAS below would still succeed against the
+      // stored `open`, reset the activity clock, and persist post-due
+      // material.  Re-read and re-apply the due predicate AT the boundary:
+      // due ⇒ frozen, exactly like the fast gate (and like every other
+      // party action, the freeze binds from the due instant, not the sweep).
+      const fresh = await forum.debates.getById(arena.debateId);
+      if (fresh !== null && fresh.state === 'open' && debateDueToLock(dueDeps, fresh)) {
+        return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+      }
       if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
         // The CAS lost: the arena left `open` during the passes above.  Only a
         // pre-verdict freeze rejects; a debate that ENDED meanwhile (withdrawn,
@@ -1070,8 +1102,9 @@ export async function editContribution(
         randomUUID(),
       );
     };
-    // Pass 1: read the RACED arenas' current states (only those that were
-    // `open` at the write gate); classify.
+    // Pass 1: read the RACED arenas' current states (only those whose touch
+    // won at the write gate); classify.
+    const sideByArena = new Map(debateParties.map(({ arena, side }) => [arena.debateId, side]));
     const toRefresh: string[] = [];
     let mustRevert = false;
     for (const debateId of racedArenaIds) {
@@ -1079,8 +1112,27 @@ export async function editContribution(
       if (current === null) continue;
       if (current.state === 'locked') toRefresh.push(current.debateId);
       else if (current.state === 'awaiting_verdict' || current.state === 'judged') {
-        // Claimed or judged mid-race: the snapshot is frozen without this edit.
-        mustRevert = true;
+        // Claimed or judged mid-race.  The frozen snapshot is now what the
+        // adjudicator scores, and it cannot be replaced post-claim — so the
+        // live row must MATCH it, whichever way the lock/write race fell:
+        //   • the lock landed AFTER applyEdit ⇒ the snapshot ALREADY carries
+        //     this edit — the edit IS the judged material, so it is ACCEPTED
+        //     (reverting would make the served row diverge from the verdict's
+        //     basis, and the API would reject an edit the judge then scores);
+        //   • the lock landed BEFORE applyEdit ⇒ the snapshot froze the
+        //     pre-edit content — the edit is REVERTED so the live row matches
+        //     the judged material, and the writer told `debate_locked`.
+        // (A moderation-HELD edit that reached a snapshot this way is defused
+        // at judge time: the adjudicator re-suppresses any currently-withheld
+        // side before scoring, and the projections do the same on every read.)
+        const side = sideByArena.get(debateId);
+        const snap =
+          side === 'incumbent' ? current.lockedContent?.target : current.lockedContent?.correction;
+        const editInSnapshot =
+          snap !== undefined &&
+          snap.body === edited.body &&
+          JSON.stringify(snap.citations) === JSON.stringify(edited.citations);
+        if (!editInSnapshot) mustRevert = true;
       }
       // `open` (no race), `withdrawn`, `resolved`: nothing to reconcile.
     }
@@ -1162,6 +1214,21 @@ export async function removeContribution(
   let closedArenaIds: string[] = [];
   if (anyDebateLockedIn(forum, debateParties)) {
     return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+  }
+  // WS-T — removing content that is party to a live arena IS a debate write
+  // (the withdraw/concede exit below), so it carries the same
+  // thread-readability gate as the route-level exits (404-over-403): a party
+  // who lost access to the conversation cannot close its arena through the
+  // contribution path either.  A row with NO live arena keeps the ordinary
+  // removal policy.
+  if (debateParties.length > 0) {
+    const removalThread = await bundle.ingestion.stories.getThreadById(existing.threadId);
+    if (removalThread === null || !(await threadReadableToUser(bundle, removalThread, userId))) {
+      return {
+        ok: false,
+        rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
+      };
+    }
   }
   const debateDeps = debateParties.length > 0 ? buildDebateDeps(forum, bundle.ingestion) : null;
   if (debateDeps !== null) {

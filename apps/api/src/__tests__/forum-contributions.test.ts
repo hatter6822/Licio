@@ -224,9 +224,15 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
       throw err;
     };
 
-    // Past the 23h edit deadline: the tick LOCKS the material in (the frozen
-    // final countdown) — the AI resolution queue opens at hour 24.
-    nowMs += DEBATE_EDIT_WINDOW_MS + 1000;
+    // Keep a side active at 22h30m so the SCHEDULE fires first (the idle
+    // instant would land at 23h30m): the tick then LOCKS the material at the
+    // 23h deadline (the frozen final countdown) and the AI resolution queue
+    // opens at hour 24.  (A NO-SHOW arena — idle since open — instead
+    // expedites on catch-up: the earlier-of-idle-or-schedule classification,
+    // covered in forum-debate.test.ts.)
+    nowMs += DEBATE_EDIT_WINDOW_MS - 30 * 60 * 1000;
+    await fixture.forum.debates.touchActivity(debateId, 'incumbent', new Date(nowMs).toISOString());
+    nowMs += 30 * 60 * 1000 + 1000;
     await runDebateSchedulerTick(rethrow);
     expect((await fixture.forum.debates.getById(debateId))?.state).toBe('locked');
 
@@ -877,6 +883,124 @@ describe('WS-T — lock/removal races, activity gaming, and debate-write access 
       'A legitimate post-verdict fix.',
     );
     expect((await store.getById(debateId))?.state).toBe('judged');
+  });
+
+  it('an edit whose safety pass outlives the due instant is refused at the write boundary', async () => {
+    const { targetId, debateId } = await openArena();
+    // The 23h deadline elapses DURING the (slow) safety pass, with no sweep
+    // run yet — the stored state is still `open`, so a state-only CAS would
+    // accept the edit and reset the activity clock past the due instant.
+    const safety = fixture.forum.safety;
+    const realClassify = safety.classify.bind(safety);
+    safety.classify = async (...args: Parameters<typeof realClassify>) => {
+      safety.classify = realClassify;
+      await fixture.forum.debates.shiftDeadlines(debateId, {
+        editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+      });
+      return realClassify(...args);
+    };
+    const before = await fixture.forum.debates.getById(debateId);
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Slipped past the due instant?' },
+        cookie,
+      ),
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('debate_locked');
+    const after = await fixture.forum.debates.getById(debateId);
+    expect(after?.state).toBe('open');
+    // Neither the edit nor the activity reset landed.
+    expect(after?.incumbentLastActiveAt).toBe(before?.incumbentLastActiveAt);
+    expect((await fixture.forum.contributions.getById(targetId))?.body).not.toBe(
+      'Slipped past the due instant?',
+    );
+  });
+
+  it('editing/removing LIVE debate material requires thread readability (404 once pulled)', async () => {
+    const { targetId, debateId } = await openArena();
+    const plain = await createOk(contributionBody('comment', threadId));
+    await fixture.events.safetyStore.set({
+      itemId: threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'mod-1',
+      updatedAt: new Date(nowMs).toISOString(),
+    });
+    // The debated row: the contribution paths are debate writes too, so a
+    // party who lost access can neither edit the material nor exit the arena
+    // through a removal.
+    const patched = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Changed from outside.' },
+        cookie,
+      ),
+    );
+    expect(patched.status).toBe(404);
+    const removed = await app().request(
+      new Request(`http://local/v1/contributions/${targetId}`, {
+        method: 'DELETE',
+        headers: { cookie },
+      }),
+    );
+    expect(removed.status).toBe(404);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('open');
+    expect((await fixture.forum.contributions.getById(targetId))?.moderationState).toBe(
+      'published',
+    );
+    // A row with NO live arena keeps the ordinary edit policy.
+    const plainEdit = await app().request(
+      jsonRequest(
+        `/v1/contributions/${plain.contribution_id}`,
+        'PATCH',
+        { contribution_id: plain.contribution_id, body: 'Ordinary edit still works.' },
+        cookie,
+      ),
+    );
+    expect(plainEdit.status).toBe(200);
+  });
+
+  it('an edit the lock ALREADY captured is accepted even when the claim beats the reconcile', async () => {
+    const { targetId, debateId } = await openArena();
+    const store = fixture.forum.contributions;
+    const realApplyEdit = store.applyEdit.bind(store);
+    let first = true;
+    store.applyEdit = async (...args: Parameters<typeof realApplyEdit>) => {
+      const row = await realApplyEdit(...args);
+      if (first) {
+        first = false;
+        // The whole lifecycle races in AFTER the write but BEFORE the
+        // reconcile: the lock snapshots the EDITED row, the claim freezes it,
+        // and the verdict lands on it.
+        await fixture.forum.debates.shiftDeadlines(debateId, {
+          editDeadlineAt: new Date(nowMs - 2000).toISOString(),
+          resolveDueAt: new Date(nowMs - 1000).toISOString(),
+        });
+        await runDebateSchedulerTick(rethrow);
+        expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+      }
+      return row;
+    };
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'The judged edit.' },
+        cookie,
+      ),
+    );
+    // The snapshot carries the edit, so the edit IS the judged material —
+    // accepted, never reverted into divergence from the verdict's basis.
+    expect(res.status).toBe(200);
+    const arena = await fixture.forum.debates.getById(debateId);
+    expect(arena?.state).toBe('judged');
+    expect(arena?.lockedContent?.target.body).toBe('The judged edit.');
+    expect((await store.getById(targetId))?.body).toBe('The judged edit.');
   });
 
   it('suppresses a moderation-held target body from the story debate summaries', async () => {

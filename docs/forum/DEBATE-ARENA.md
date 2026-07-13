@@ -38,8 +38,8 @@ optional co-visible **rebuttal statement** (summary + sources) on top.
 | Phase | Duration | What happens |
 |-------|----------|--------------|
 | `open` | up to 23h | Both sides adjust their underlying content + rebuttal statements (live co-visibility). The challenger may **withdraw** the correction; the incumbent may **concede**. Every **material** content/rebuttal edit resets the editor's side-activity clock — a no-op PATCH (body/citations identical to the stored row) does NOT count as activity, so the both-sides-idle expedite can't be dodged with contentless pings. |
-| `locked` | ≤1h | The material is **locked in** (a content snapshot is stamped). Two paths lead here: the **both-sides-idle expedite** — once BOTH sides have gone 1h without an edit, the arena locks at that instant and its queue entry pulls forward to *now* (a no-show incumbent therefore resolves ~1h after the challenge); or the **schedule** — at hour 23 the material locks regardless and the final hour is a frozen countdown. |
-| `awaiting_verdict` → `judged` | — | At `resolve_due_at` the debate enters the **room's AI resolution queue**: the lease-guarded scheduler (`debate-scheduler.ts`) runs the governed adjudicator over the LOCKED snapshot (due arenas fan out 4-wide per pass — independent verdicts, per-arena failure isolation); a verdict + the 24h override window are recorded. |
+| `locked` | ≤1h | The material is **locked in** (a content snapshot is stamped). Two paths lead here: the **both-sides-idle expedite** — once BOTH sides have gone 1h without an edit, the arena locks at that instant and its queue entry pulls forward to *now* (a no-show incumbent therefore resolves ~1h after the challenge); or the **schedule** — at hour 23 the material locks regardless and the final hour is a frozen countdown. The earlier-of rule survives scheduler downtime: a catch-up sweep classifies each due arena by which trigger FIRED FIRST, so a long-idle no-show found past hour 23 still locks expedited and queues immediately rather than parking at hour 24. The due instants also bind directly: every party action (rebuttal, content edit, withdraw, concede) re-applies the due predicate at its own write boundary, so a slow safety/agent pass can never carry an edit across the deadline into a still-`open` row. |
+| `awaiting_verdict` → `judged` | — | At `resolve_due_at` the debate enters the **room's AI resolution queue**: the lease-guarded scheduler (`debate-scheduler.ts`) runs the governed adjudicator over the LOCKED snapshot (due arenas fan out 4-wide per pass — independent verdicts, per-arena failure isolation); a verdict + the 24h override window are recorded. At judge time the input is **re-suppressed**: any side whose row the moderation floor CURRENTLY withholds enters as the empty side even if a race got its text into the frozen snapshot (the stored snapshot is untouched — a lifted hold un-suppresses reads). Each side's judged sources are the URL-deduped union of the locked material's citations + the rebuttal's, CAPPED at the shared `MAX_CITATIONS` contract (material's own citations first). |
 | `judged` | 24h | The room **steward may fully overrule** the verdict either direction (audited, subordinate to the platform floor). |
 | `resolved` | — | On `corrected` the loser is tagged `incorrect`; on `upheld` the challenged target is tagged `validated`. |
 | `withdrawn` | — | Terminal early close: the challenger retracted the correction while the arena was open — no verdict, the target's tag clears to `none`, and the target stays re-challengeable. |
@@ -165,20 +165,30 @@ renders in the dev panel and at `GET /v1/dev/simulator/status` (see
   WRITE carries the same thread-readability gate as the reads** (404-over-403):
   a party or steward who has since lost access to the conversation — left a
   restricted room, or the thread was pulled by the moderation floor — can no
-  longer post to, close, or overrule its arena.  The story discovery list
+  longer post to, close, or overrule its arena — and the gate covers the
+  CONTRIBUTION paths too: while a row is party to a live arena, editing it is
+  a debate write (rebroadcast + judged material) and removing it is a party
+  exit (withdraw/concede), so both 404 for a party who lost readability,
+  while a row with no live arena keeps the ordinary edit/removal policy.
+  The story discovery list
   (`GET /v1/stories/:id/debates`) suppresses a moderation-withheld target's
   `target_excerpt` (null, exactly like the arena projection).  Contribution
   edit/removal of debated content is gated: allowed while `open` (a
   **material** edit counts as side activity and fans out live), refused with
-  `debate_locked` while `locked`/`awaiting_verdict`.  Two race seams are
+  `debate_locked` while `locked`/`awaiting_verdict`.  The race seams are
   closed structurally: the edit-race snapshot refresh runs AFTER the edit's
   moderation decision (a held edit refreshes into the locked snapshot as the
-  SUPPRESSED side, never as material the floor is withholding), and
+  SUPPRESSED side, never as material the floor is withholding);
   removal-vs-open is closed from BOTH sides (the arena open re-checks the
   target after opening and voids itself against a tombstone; the removal
   re-reads live arenas after the tombstone and closes any late-opened arena
   with the party's exit — each side writes before it reads, so one of the two
-  always observes the other).
+  always observes the other); and when a claim beats the edit reconcile, the
+  live row is made to MATCH the frozen snapshot whichever way the race fell —
+  a snapshot that already carries the edit means the edit IS the judged
+  material (accepted), a snapshot without it reverts the edit (`debate_locked`)
+  — with judge-time re-suppression defusing any withheld text a race got into
+  a snapshot.
 - **Web:** source capture + render + a "Sourced" badge on comments
   (`CommentParts`/`CommentNode`).  Sources render **inline as clickable links in
   the comment body itself** (the `.ugc-body a` affordance — click-intercepted by

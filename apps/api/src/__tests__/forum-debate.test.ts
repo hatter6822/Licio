@@ -15,9 +15,12 @@ import {
   DEBATE_INACTIVITY_WINDOW_MS,
   DEBATE_LIVE_WINDOW_MS,
   DEBATE_OVERRIDE_WINDOW_MS,
+  type DebateJudgeInput,
+  MAX_CITATIONS,
 } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  assembleJudgeInput,
   closeDebatesForRemoval,
   concedeDebate,
   type DebateDeps,
@@ -1503,5 +1506,120 @@ describe('WS-T — verdict-CAS-gated provenance + the open-vs-removal void', () 
     expect(arena).toBeNull();
     expect((await debates.getById(debateId))?.state).toBe('withdrawn');
     expect((await contributions.getById(targetId))?.disputeStatus).not.toBe('under_debate');
+  });
+});
+
+describe('WS-T catch-up lock classification (earlier-of-idle-or-schedule)', () => {
+  it('a long-idle arena found past hour 23 locks EXPEDITED and judges in the same pass', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // Scheduler down for the whole window: both sides idle since open, so the
+    // idle trigger fired at open+1h — LONG before the 23h schedule.  A healthy
+    // scheduler would have expedited at that instant; the catch-up must not
+    // park the queue entry at hour 24.
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 30 * 60 * 1000;
+    const result = await runDebateLifecycle(deps);
+    expect(result.expedited).toBe(1);
+    expect(result.locked).toBe(0);
+    expect(result.judged).toBe(1);
+    expect((await debates.getById(debateId))?.state).toBe('judged');
+  });
+
+  it('an arena whose idle instant fired AFTER the 23h schedule locks SCHEDULED (queue at 24h)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // A side stays active until 22h45m: the idle instant (23h45m) fires AFTER
+    // the schedule (23h), so the schedule fired first — the hour-24 queue
+    // entry stands even on a late catch-up at 23h30m.
+    clock.ms += DEBATE_EDIT_WINDOW_MS - 15 * 60 * 1000;
+    await debates.touchActivity(debateId, 'incumbent', new Date(clock.ms).toISOString());
+    clock.ms += 45 * 60 * 1000;
+    const result = await runDebateLifecycle(deps);
+    expect(result.locked).toBe(1);
+    expect(result.expedited).toBe(0);
+    expect(result.judged).toBe(0);
+    expect((await debates.getById(debateId))?.state).toBe('locked');
+  });
+});
+
+describe('WS-T judge-time re-suppression + the judge source cap', () => {
+  it('the adjudicator re-suppresses a side held AFTER the lock (floor dominance at judge time)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    await lockDebateArena(deps, debateId, 'scheduled');
+    // The snapshot froze the published target — then a moderation hold lands
+    // during the frozen hour.  The verdict must not be grounded in material
+    // the floor is currently withholding, even though it sits in the snapshot.
+    await contributions.setModerationState(targetId, 'under_review');
+    const captured: DebateJudgeInput[] = [];
+    const capturing: DebateJudgeRunner = async (ctx, input) => {
+      captured.push(input);
+      return corrected(ctx, input);
+    };
+    pastResolveDue();
+    const judgedArena = await judgeDebateArena({ ...deps, runJudge: capturing }, debateId);
+    expect(judgedArena?.state).toBe('judged');
+    expect(captured[0]?.incumbent.content).toBe('');
+    expect(captured[0]?.incumbent.sources).toEqual([]);
+    // The STORED snapshot is untouched — a lifted hold un-suppresses reads.
+    expect((await debates.getById(debateId))?.lockedContent?.target.body).toBe(
+      'The vote passed 5-4.',
+    );
+  });
+
+  it('caps the judge source union at MAX_CITATIONS, locked-content citations first', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    const arena = await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    expect(arena).not.toBeNull();
+    if (arena === null) throw new Error('unreachable');
+    const contentCitations = Array.from({ length: MAX_CITATIONS }, (_, i) => ({
+      url: `https://content.example/${i}`,
+    }));
+    const rebuttalCitations = Array.from({ length: MAX_CITATIONS }, (_, i) => ({
+      url: `https://rebuttal.example/${i}`,
+    }));
+    const crafted = {
+      ...arena,
+      lockedContent: {
+        target: { title: null, body: 'The target.', citations: [], updatedAt: null },
+        correction: {
+          title: null,
+          body: 'The correction.',
+          citations: contentCitations,
+          updatedAt: null,
+        },
+      },
+      positions: {
+        ...arena.positions,
+        challenger: { summary: 'Rebuttal.', citations: rebuttalCitations, updatedAt: null },
+      },
+    };
+    const input = assembleJudgeInput(crafted);
+    // Each layer is schema-capped at MAX_CITATIONS, but the union could reach
+    // 2×; the judge contract caps sources, prioritizing the material's own.
+    expect(input.challenger.sources).toHaveLength(MAX_CITATIONS);
+    expect(
+      input.challenger.sources.every((s) => s.url.startsWith('https://content.example/')),
+    ).toBe(true);
   });
 });

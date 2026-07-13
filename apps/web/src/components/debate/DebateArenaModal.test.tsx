@@ -331,6 +331,37 @@ describe('DebateArenaContent', () => {
     expect(postMutate).toHaveBeenCalledTimes(1);
   });
 
+  it('reseeds the edit draft from the CURRENT position at edit-entry (cross-tab update)', () => {
+    const mine = (summary: string) =>
+      arena({
+        viewer_role: 'incumbent',
+        incumbent: position('incumbent', {
+          is_author: true,
+          submitted: true,
+          summary,
+          citations: [{ url: 'https://example.org/old' }],
+          updated_at: RECENT,
+        }) as DebateArenaPublic['incumbent'],
+      });
+    queryState = { data: { debate: mine('The original argument.') } };
+    const { rerender } = renderArena();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByLabelText('Your incumbent rebuttal case')).toHaveValue(
+      'The original argument.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    // The same author saves a newer argument from ANOTHER tab/device; the
+    // stream/poll refetch updates the mounted card.  Re-entering edit must
+    // seed from the CURRENT position, not the first render's snapshot —
+    // otherwise saving would silently overwrite the newer argument.
+    queryState = { data: { debate: mine('The newer argument from another tab.') } };
+    rerender(<DebateArenaContent debateId="00000000-0000-4000-8000-0000000000d1" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByLabelText('Your incumbent rebuttal case')).toHaveValue(
+      'The newer argument from another tab.',
+    );
+  });
+
   it('shows a corrected verdict + the steward override control within the window', () => {
     queryState = {
       data: {

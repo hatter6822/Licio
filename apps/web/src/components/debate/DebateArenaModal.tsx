@@ -216,6 +216,19 @@ function ArgumentCard({
 
   const heading = position.side === 'incumbent' ? 'Incumbent rebuttal' : 'Challenger argument';
 
+  // Seed the draft from the CURRENT position at edit-entry, not only at first
+  // mount: the position can change under a mounted card (a save from another
+  // tab/device arriving via the stream/poll refetch), and reopening the form
+  // over the first render's snapshot would silently overwrite the newer
+  // argument on save.
+  const startEditing = (): void => {
+    setSummary(position.summary);
+    setSources(position.citations.map((c) => c.url));
+    setDraft('');
+    setError(null);
+    setEditing(true);
+  };
+
   const addSource = (): void => {
     const url = draft.trim();
     if (!url) return;
@@ -251,7 +264,7 @@ function ArgumentCard({
       <header className="flex items-baseline justify-between gap-2">
         <h4 className="text-sm font-semibold uppercase tracking-wide text-ink-muted">{heading}</h4>
         {editable && windowOpen && !editing ? (
-          <Button type="button" variant="ghost" onClick={() => setEditing(true)}>
+          <Button type="button" variant="ghost" onClick={startEditing}>
             {position.submitted ? 'Edit' : 'Post your case'}
           </Button>
         ) : null}
