@@ -363,7 +363,11 @@ profile (`/profile/signal-ledger`).
   `explanation_ids` (and the enforcement snapshot's `scoi` key, the
   `scoi_*` constraint flags, `scoi_level`, and the profile's three
   `scoi_*` constraint keys) stay schema-OPTIONAL so pre-removal logs and
-  feature revisions replay; nothing writes them.
+  feature revisions replay; nothing writes them. `FEATURE_SCHEMA_VERSION`
+  bumped 3 → 4 so already-stored v3 vectors (which may still carry a
+  populated `context_coherence_gain`) rebuild on first serve via the
+  migration-on-read path instead of contributing `wC·C` until the next
+  batch refresh.
 
 The §23.3 wire fields that carry the diversification/context outputs:
 

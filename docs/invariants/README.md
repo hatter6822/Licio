@@ -209,7 +209,11 @@ with context state, per-lens interpretation summaries, and the §10.5
 merge/annotate/separate, the `scoi_context_actions` table, and the
 per-state recommended-action strings — were REMOVED with their steward
 surface; historic `scoi_context_action` audit rows survive in the
-append-only audit log, and migration 0081 drops the operational table.
+append-only audit log — parseable on read via `RETIRED_AUDIT_EVENT_TYPES`
+— and migration 0081 archives a POPULATED operational table as
+`scoi_context_actions_retired` (the identity-audit context allowlist never
+carried the action details, so the table is the only durable copy) and
+drops only an empty one.
 The SCOI ranking-constraint ladder and the cross-community-bridge
 retriever were removed on the WS-I side at the same time — SCOI's
 reader-facing surface is the story page's "Where interpretations differ"

@@ -47,7 +47,16 @@ import { findDeniedFields } from '../denylist.js';
 // the stored field set + the score for validated stories, so the version bumps —
 // stale v2 rows self-heal via the migration-on-read rebuild (service.ts) and
 // decision logs stay distinguishable, rather than silently mixing field sets.
-export const FEATURE_SCHEMA_VERSION = 3;
+// v4: the SCOI→ranking decoupling — `context_coherence_gain` and `scoi_level`
+// are no longer populated. Without the bump, already-stored v3 rows would keep
+// contributing `wC·C` to live scores until the next batch refresh touched
+// them; the bump forces the migration-on-read rebuild on first serve, so the
+// removal takes effect deterministically and serve cohorts stay
+// distinguishable. (Store reads return persisted payloads raw — validation
+// is write-side — so v3 rows flow into the version gate and replay still
+// joins them by pinned revision; the two fields stay deprecated-optional so
+// any future re-validation of historic rows stays tolerant.)
+export const FEATURE_SCHEMA_VERSION = 4;
 
 /** MFCI risk states as ranking features (SPEC §8.5). */
 export const MFCI_RISK_STATE_FEATURES = ['normal', 'elevated', 'high', 'severe'] as const;
