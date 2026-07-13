@@ -1323,6 +1323,17 @@ export function createForumRoutes() {
                   // Already closed by the client.
                 }
               };
+              // Re-check thread readability before EVERY live frame (parity
+              // with the comments stream): a member who left the room — or a
+              // thread the floor removed — must stop receiving arena material
+              // mid-stream, not only on the next fresh GET.
+              const emitLive = async (frame: DebateFrame): Promise<void> => {
+                if (!(await threadReadableToUser(bundle, streamThread, auth.userId))) {
+                  close();
+                  return;
+                }
+                write(sseDebateFrame(frame));
+              };
               heartbeat = setInterval(() => write(': heartbeat\n\n'), SSE_HEARTBEAT_MS);
               cleanup = close;
               c.req.raw.signal.addEventListener('abort', close, { once: true });
@@ -1331,8 +1342,10 @@ export function createForumRoutes() {
               const initial = await observer();
               if (initial) write(sseDebateFrame({ eventId: initial.updated_at, arena: initial }));
               // Flush anything that arrived during setup, then go write-through.
-              for (const frame of bufferedFrames) write(sseDebateFrame(frame));
-              deliver = (frame) => write(sseDebateFrame(frame));
+              for (const frame of bufferedFrames) void emitLive(frame).catch(() => {});
+              deliver = (frame) => {
+                void emitLive(frame).catch(() => {});
+              };
             },
             cancel() {
               cleanup();

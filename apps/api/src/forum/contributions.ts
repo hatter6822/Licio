@@ -43,6 +43,7 @@ import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import {
   closeDebatesForRemoval,
+  debateDueToLock,
   liveArenasForContribution,
   maybeEnterDebate,
   rebroadcastArena,
@@ -777,10 +778,21 @@ export type ContributionEditOutcome =
  * The previous values are snapshotted into the append-only edit history.
  */
 /** True when any of the contribution's live arenas has its material locked in
- *  (post-lock, pre-verdict) — every party-driven change is refused then. */
-function anyDebateLockedIn(parties: readonly { arena: DebateArenaRecord }[]): boolean {
+ *  (post-lock, pre-verdict) — OR is already DUE to lock (the 23h deadline or
+ *  the both-sides-idle instant elapsed while the periodic sweep has not yet
+ *  flipped the state).  Every party-driven change is refused from the DUE
+ *  instant, never from the sweep — otherwise edits in the scheduler-lag gap
+ *  would keep resetting the idle clock and dodge an expedite already owed. */
+function anyDebateLockedIn(
+  forum: ForumServices,
+  parties: readonly { arena: DebateArenaRecord }[],
+): boolean {
+  const dueDeps = { windows: forum.debateWindowsOverride ?? undefined, now: forum.now };
   return parties.some(
-    ({ arena }) => arena.state === 'locked' || arena.state === 'awaiting_verdict',
+    ({ arena }) =>
+      arena.state === 'locked' ||
+      arena.state === 'awaiting_verdict' ||
+      debateDueToLock(dueDeps, arena),
   );
 }
 
@@ -825,7 +837,7 @@ export async function editContribution(
   // race against a lock landing DURING the safety passes is closed atomically
   // right before the write (below).
   const debateParties = await liveArenasForContribution(forum.debates, contributionId);
-  if (anyDebateLockedIn(debateParties)) {
+  if (anyDebateLockedIn(forum, debateParties)) {
     return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
   }
   if (update.body !== undefined && update.body.length > CONTRIBUTION_BODY_LIMITS[existing.type]) {
@@ -1122,7 +1134,7 @@ export async function removeContribution(
   //   • `judged`/terminal: the outcome already stands; removal proceeds.
   const debateParties = await liveArenasForContribution(forum.debates, contributionId);
   let closedArenaIds: string[] = [];
-  if (anyDebateLockedIn(debateParties)) {
+  if (anyDebateLockedIn(forum, debateParties)) {
     return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
   }
   const debateDeps = debateParties.length > 0 ? buildDebateDeps(forum, bundle.ingestion) : null;

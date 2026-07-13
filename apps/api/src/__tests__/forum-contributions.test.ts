@@ -535,6 +535,30 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     expect(res.status).toBe(404);
   });
 
+  it('WS-T — a debated edit is refused from the DUE instant, before any sweep flips the state', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // The edit deadline has passed but NO scheduler tick ran — the stored
+    // state is still `open`. The gate must freeze from the due instant.
+    await fixture.forum.debates.shiftDeadlines(debateId, {
+      editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+    });
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('open');
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A post-deadline slip.' },
+        cookie,
+      ),
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('debate_locked');
+  });
+
   it('WS-T — the debated-content freeze covers ONLY locked/awaiting: judged frees the edit', async () => {
     const rethrow = (err: unknown): never => {
       throw err;

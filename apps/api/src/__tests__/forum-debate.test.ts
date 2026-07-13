@@ -1204,6 +1204,89 @@ describe('WS-T withdraw / concede — party-driven early closes', () => {
     expect(storyDisputes.get(STORY)).toBe('incorrect');
   });
 
+  it('a moderation-held side snapshots EMPTY — the judge never scores withheld material', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    // The floor holds the target mid-debate; the correction stays published.
+    await contributions.setModerationState(targetId, 'under_review');
+    await lockDebateArena(deps, debateId, 'expedited');
+    const locked = await debates.getById(debateId);
+    expect(locked?.lockedContent?.target.body).toBe('');
+    expect(locked?.lockedContent?.target.citations).toEqual([]);
+    expect(locked?.lockedContent?.correction.body).toContain('wrong');
+    // The judge input mirrors the snapshot: the held side is empty for the
+    // adjudicator exactly as it is suppressed for clients.
+    let judgedTarget = 'unset';
+    const capturing: DebateDeps = {
+      ...deps,
+      runJudge: async (ctx, input) => {
+        judgedTarget = input.incumbent.content;
+        return corrected(ctx, input);
+      },
+    };
+    await judgeDebateArena(capturing, debateId);
+    expect(judgedTarget).toBe('');
+  });
+
+  it('rebuttals, withdrawal, and concession are refused from the idle-DUE instant (before any sweep)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    // Both sides idle a full inactivity window; NO lifecycle sweep has run,
+    // so the stored state is still `open` — but the expedite is already owed
+    // and every party-driven change must refuse rather than reset the clock.
+    clock.ms += DEBATE_INACTIVITY_WINDOW_MS + 1000;
+    expect((await debates.getById(debateId))?.state).toBe('open');
+    const late = await postDebatePosition(deps, debateId, INCUMBENT, {
+      summary: 'A rebuttal that would dodge the owed expedite.',
+      citations: [citation],
+    });
+    expect(late).toEqual({ ok: false, reason: 'window_closed' });
+    expect(await withdrawDebate(deps, debateId, CHALLENGER)).toEqual({
+      ok: false,
+      reason: 'window_closed',
+    });
+    expect(await concedeDebate(deps, debateId, INCUMBENT)).toEqual({
+      ok: false,
+      reason: 'window_closed',
+    });
+    // The activity clocks were never reset — the next sweep expedites.
+    const { expedited, judged } = await runDebateLifecycle(deps);
+    expect(expedited).toBe(1);
+    expect(judged).toBe(1);
+  });
+
+  it('an expedited arena is judged in the SAME pass under a real advancing clock', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    clock.ms += DEBATE_INACTIVITY_WINDOW_MS + 1000;
+    // A wall clock that advances a few milliseconds per read: the expedited
+    // lock stamps its resolve-due AFTER the sweep-start instant, so a
+    // sweep-start cutoff would push the row to the NEXT tick. The queue pass
+    // must use a fresh cutoff and judge it in this pass.
+    const base = clock.ms;
+    let reads = 0;
+    const ticking: DebateDeps = {
+      ...deps,
+      now: () => base + reads++ * 7,
+    };
+    const { expedited, judged } = await runDebateLifecycle(ticking);
+    expect(expedited).toBe(1);
+    expect(judged).toBe(1);
+    expect((await debates.getById(debateId))?.state).toBe('judged');
+  });
+
   it('judging a claimed-but-never-locked arena BACKFILLS the snapshot (never judges empty sides)', async () => {
     // A pre-live-window legacy row / crash-recovered claim: the arena reached
     // `awaiting_verdict` without ever locking, so `lockedContent` is null.

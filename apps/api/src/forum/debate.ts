@@ -150,6 +150,31 @@ export function resolveDebateWindows(
     : SPEC_DEBATE_WINDOWS;
 }
 
+/**
+ * True when an `open` arena's material is ALREADY DUE to lock — the 23h edit
+ * deadline has passed, or BOTH sides have been idle a full inactivity window.
+ * The lifecycle sweep flips the state on a periodic tick, so a gap exists
+ * between the due instant and the stored `locked` state; every party-driven
+ * change (content edit, rebuttal, removal, withdrawal, concession) is refused
+ * from the DUE INSTANT, never from the sweep — otherwise a party could keep
+ * editing (and keep resetting the idle clock, dodging the expedite entirely)
+ * during every scheduler-lag window.
+ */
+export function debateDueToLock(
+  deps: Pick<DebateDeps, 'windows' | 'now'>,
+  arena: DebateArenaRecord,
+): boolean {
+  if (arena.state !== 'open') return false;
+  const nowMs = deps.now();
+  if (new Date(nowMs).toISOString() > arena.editDeadlineAt) return true;
+  const windows = resolveDebateWindows(deps.windows, arena.incumbentUserId, arena.challengerUserId);
+  const lastActiveIso =
+    arena.incumbentLastActiveAt > arena.challengerLastActiveAt
+      ? arena.incumbentLastActiveAt
+      : arena.challengerLastActiveAt;
+  return Date.parse(lastActiveIso) + windows.inactivityWindowMs <= nowMs;
+}
+
 export interface DebateDeps {
   debates: DebateStore;
   contributions: ContributionStore;
@@ -285,9 +310,11 @@ export async function postDebatePosition(
   if (arena === null) return { ok: false, reason: 'not_found' };
   const side = sideOf(arena, userId);
   if (side === null) return { ok: false, reason: 'not_a_party' };
-  // Rejected once the material is locked in (the expedited/scheduled lock or
-  // the outer edit deadline), or the arena is past `open` for any other reason.
-  if (arena.state !== 'open' || new Date(deps.now()).toISOString() > arena.editDeadlineAt) {
+  // Rejected once the material is locked in — or already DUE to lock (the
+  // 23h deadline or the both-sides-idle instant elapsed while the sweep has
+  // not flipped the state yet): a rebuttal in that gap would reset the idle
+  // clock and dodge an expedite that is already owed.
+  if (arena.state !== 'open' || debateDueToLock(deps, arena)) {
     return { ok: false, reason: 'window_closed' };
   }
   const position: DebateSidePosition = {
@@ -367,10 +394,15 @@ export async function snapshotDebateContent(
   deps: DebateDeps,
   arena: DebateArenaRecord,
 ): Promise<DebateLockedContent> {
+  // The arena judges PUBLICLY-SERVED material only: a row the moderation
+  // floor is currently withholding (under_review/removed/hidden) snapshots
+  // EMPTY, exactly as the client projection suppresses it — a verdict must
+  // never be grounded in (or leak, via a quoting rationale) material the
+  // floor has pulled.  The story reader already returns null when hidden.
   let target: DebateLockedSide = EMPTY_LOCKED_SIDE;
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
     const row = await deps.contributions.getById(arena.targetContributionId);
-    if (row !== null) {
+    if (row !== null && row.moderationState === 'published') {
       target = {
         title: null,
         body: row.body,
@@ -391,7 +423,7 @@ export async function snapshotDebateContent(
   }
   const correctionRow = await deps.contributions.getById(arena.challengerContributionId);
   const correction: DebateLockedSide =
-    correctionRow === null
+    correctionRow === null || correctionRow.moderationState !== 'published'
       ? EMPTY_LOCKED_SIDE
       : {
           title: null,
@@ -603,7 +635,8 @@ export async function withdrawDebate(
   if (arena === null) return { ok: false, reason: 'not_found' };
   if (arena.challengerUserId !== userId) return { ok: false, reason: 'not_challenger' };
   const nowIso = new Date(deps.now()).toISOString();
-  if (arena.state !== 'open' || nowIso > arena.editDeadlineAt) {
+  // Refused from the DUE instant (deadline or both-sides-idle), not the sweep.
+  if (arena.state !== 'open' || debateDueToLock(deps, arena)) {
     return { ok: false, reason: 'window_closed' };
   }
   // The store CAS (`open` only): a withdrawal racing the lock loses.
@@ -655,7 +688,8 @@ export async function concedeDebate(
   if (arena === null) return { ok: false, reason: 'not_found' };
   if (arena.incumbentUserId !== userId) return { ok: false, reason: 'not_incumbent' };
   const nowIso = new Date(deps.now()).toISOString();
-  if (arena.state !== 'open' || nowIso > arena.editDeadlineAt) {
+  // Refused from the DUE instant (deadline or both-sides-idle), not the sweep.
+  if (arena.state !== 'open' || debateDueToLock(deps, arena)) {
     return { ok: false, reason: 'window_closed' };
   }
   // The store CAS (`open` only): a concession racing the lock loses.
@@ -689,7 +723,11 @@ export async function closeDebatesForRemoval(
     // whole removal; a debate that ENDED meanwhile simply needs no exit.
     const arena = await deps.debates.getById(listed.debateId);
     if (arena === null) continue;
-    if (arena.state === 'locked' || arena.state === 'awaiting_verdict') {
+    if (
+      arena.state === 'locked' ||
+      arena.state === 'awaiting_verdict' ||
+      debateDueToLock(deps, arena)
+    ) {
       return { ok: false, reason: 'window_closed' };
     }
     if (arena.state !== 'open') continue;
@@ -864,7 +902,11 @@ export async function runDebateLifecycle(
   }
 
   // 3. Drain the AI resolution queue (includes everything pass 2 expedited).
-  const due = await deps.debates.listPastResolveDeadline(nowIso, limit);
+  //    A FRESH cutoff, not the sweep-start one: an expedited lock stamps its
+  //    resolve-due a few real-clock milliseconds AFTER the sweep began, and
+  //    the sweep-start cutoff would push those rows to the NEXT tick despite
+  //    the expedite's whole point being same-pass queueing.
+  const due = await deps.debates.listPastResolveDeadline(new Date(deps.now()).toISOString(), limit);
   for (const outcome of await mapBounded(due, concurrency, async (arena) => {
     if (judgeDeadlineMs !== undefined && deps.now() > judgeDeadlineMs) {
       skippedForDeadline += 1;
@@ -879,8 +921,11 @@ export async function runDebateLifecycle(
     deps.log('forum.debate_judge_deadline', { skipped: skippedForDeadline });
   }
 
-  // 4. Finalize past the steward-override window.
-  const closable = await deps.debates.listPastOverrideDeadline(nowIso, limit);
+  // 4. Finalize past the steward-override window (fresh cutoff, as above).
+  const closable = await deps.debates.listPastOverrideDeadline(
+    new Date(deps.now()).toISOString(),
+    limit,
+  );
   for (const outcome of await mapBounded(closable, concurrency, (arena) =>
     finalizeDebate(deps, arena.debateId),
   )) {
