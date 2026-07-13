@@ -372,6 +372,35 @@ describe('public WS-H read surfaces', () => {
     const missing = await app().request(`http://local/v1/stories/${randomUUID()}/interpretations`);
     expect(missing.status).toBe(404);
   });
+
+  it('the removed drawer paths serve the constant honest-absence compat stubs', async () => {
+    // Rollout compat: a pre-removal cached bundle's independent-sources
+    // drawer still fires both lazy reads on open; the stubs serve the OLD
+    // response schemas' honest-absence shapes UNIFORMLY for any UUID (no
+    // story lookup ⇒ no existence oracle, no content). Remove together with
+    // the drawer's other compat artifacts (docs/ranking/README.md).
+    freshInvariantServices();
+    const storyId = randomUUID();
+    const drawer = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
+    expect(drawer.status).toBe(200);
+    expect(await drawer.json()).toEqual({
+      story_id: storyId,
+      marginal_gain: null,
+      exposure_label: null,
+      redundancy_classes: 0,
+      source: null,
+      confirmed_syndication_count: 0,
+      co_group_stories: [],
+      primary_sources: [],
+    });
+    const claims = await app().request(`http://local/v1/stories/${storyId}/claims`);
+    expect(claims.status).toBe(200);
+    expect(await claims.json()).toEqual({ items: [] });
+    // Malformed ids still 422 exactly as the old routes did.
+    expect((await app().request('http://local/v1/stories/nope/independent-sources')).status).toBe(
+      422,
+    );
+  });
 });
 
 describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {

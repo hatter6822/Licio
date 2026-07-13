@@ -470,8 +470,11 @@ emitted on `/v1/privacy/settings`, `/v1/feed/preferences`, and
 validates those responses against the old enum — a canonical default
 would break every settings read on stale bundles (a shared test pins
 this). **Removal target:** drop `LEGACY_FEED_MODES` +
-`feedModeCompatSchema` acceptance, and flip both defaults to
-`DEFAULT_FEED_MODE`, together with `rating_label` (below) once
+`feedModeCompatSchema` acceptance, flip both defaults to
+`DEFAULT_FEED_MODE`, and delete the two inert independent-sources-drawer
+compat stubs (`GET /v1/stories/:id/independent-sources` +
+`GET /v1/stories/:id/claims` — constant honest-absence payloads for
+pre-removal bundles), together with `rating_label` (below) once
 pre-redesign bundles have aged out of service-worker caches.
 
 ## Kill switch and fallback (WS-I.4)

@@ -404,7 +404,9 @@ room) — a `room_only` story in a private room is 404 to non-members
 (404-over-403, no existence oracle). Served from STORED shadow outputs only —
 a page load never triggers computation. (The former
 `/v1/stories/:id/independent-sources` lineage read was removed with the
-drawer below.)
+drawer below; the path survives only as an inert rollout-compat stub —
+constant honest-absence payload, no story lookup — for pre-removal cached
+bundles.)
 
 Client: MERI has NO reader-facing surface — the exposure label was removed
 from feed cards, and the story page's "Independent sources" lineage drawer

@@ -193,11 +193,20 @@ export function createStoriesRoutes() {
         },
       )
 
-      // (The former GET /stories/:storyId/claims public projection — WS-F.1.2a
-      // claim navigability — was removed with the independent-sources drawer:
-      // comment-centric sourcing superseded it and no client remained. The
-      // claim MODEL is unchanged; claims + independence groups stay MERI/WS-K
-      // inputs.)
+      // DEPRECATED — rollout compatibility only. The public claim projection
+      // (WS-F.1.2a claim navigability) was removed with the
+      // independent-sources drawer — comment-centric sourcing superseded it —
+      // but pre-removal cached bundles still call this path when the stale
+      // drawer opens, so it keeps serving the CONSTANT empty payload (uniform
+      // for any UUID — no existence oracle, no content) until those bundles
+      // age out (remove with the drawer's other compat artifacts, tracked in
+      // docs/ranking/README.md). The claim MODEL is unchanged; claims +
+      // independence groups stay MERI/WS-K inputs.
+      .get(
+        '/stories/:storyId/claims',
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        (c) => c.json({ items: [] }),
+      )
       // --- Public source profile (§14.3: context + history) ---------------
       .get(
         '/sources/:sourceId',

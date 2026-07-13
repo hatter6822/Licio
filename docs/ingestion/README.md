@@ -478,8 +478,11 @@ through the same `applyLifecycleTrigger` seam.
   drawer and its two reads (`GET /v1/stories/:id/claims` + the WS-H
   `/independent-sources` lineage read) were REMOVED — comment-centric
   sourcing superseded story-level lineage as the reader-facing surface.
-  Claims + independence groups remain MERI/WS-K inputs (dedup still mints
-  the groups; the batch still computes exposure over them).
+  Both paths survive only as inert rollout-compat stubs (constant
+  honest-absence payloads for pre-removal cached bundles; removal tracked
+  in docs/ranking/README.md). Claims + independence groups remain MERI/WS-K
+  inputs (dedup still mints the groups; the batch still computes exposure
+  over them).
 - **Full-scale (1 M) load validation**: the latency/recall benchmarks are
   measured at N = 20 000 (operating-point table above); validating the same
   constants at the 1 M-story / 100K-embedding target is a WS-P load-harness

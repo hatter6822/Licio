@@ -481,10 +481,14 @@ describe('public reads (source profile) + the internal claim model', () => {
       body: 'The reservoir level fell by 12 percent in May according to the published utility report.',
     });
     // Claims remain an INTERNAL model (MERI/WS-K inputs) — the public
-    // per-story projection was removed with the independent-sources drawer.
+    // per-story projection was removed with the independent-sources drawer;
+    // the path survives ONLY as the rollout-compat stub serving the constant
+    // empty payload to pre-removal cached bundles.
     const claims = await fixture.ingestion.claims.listByStory(storyId);
     expect(claims.length).toBeGreaterThanOrEqual(1);
-    expect((await app().request(`http://localhost/v1/stories/${storyId}/claims`)).status).toBe(404);
+    const stub = await app().request(`http://localhost/v1/stories/${storyId}/claims`);
+    expect(stub.status).toBe(200);
+    expect(await stub.json()).toEqual({ items: [] });
 
     const source = await fixture.ingestion.sources.upsertByDomain('profile.example', {
       name: 'Profile Test',
