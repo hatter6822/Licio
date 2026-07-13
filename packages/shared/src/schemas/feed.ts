@@ -89,6 +89,26 @@ export function normalizeFeedMode(mode: string | null | undefined): FeedMode {
 }
 
 /**
+ * The at-rest spelling for a DURABLE feed-mode write (rollout compat): the
+ * settings responses echo the stored value, and a pre-redesign cached bundle
+ * on the SAME account (another device, an un-refreshed tab) validates them
+ * against the old mode enum alone. `best` and `new` have LOSSLESS legacy
+ * spellings (`balanced` / `chronological` — {@link normalizeFeedMode} maps
+ * them straight back), so durable writes store those and stale bundles keep
+ * parsing. The three genuinely NEW sorts (`rising`/`sources`/`debates`) have
+ * no legacy spelling — any downgrade would LOSE the preference for updated
+ * devices — so they store canonically, and a stale sibling bundle's settings
+ * read fails until its service worker updates (narrow, self-healing;
+ * documented in docs/ranking/README.md). Every write boundary that persists
+ * a feed mode applies this; remove together with {@link LEGACY_FEED_MODES}.
+ */
+export function legacyPreservingFeedMode(mode: FeedModeCompat): FeedModeCompat {
+  if (mode === 'best') return 'balanced';
+  if (mode === 'new') return 'chronological';
+  return mode;
+}
+
+/**
  * Per-story corrections tally (SPEC §5.6) — the WS-T adjudication record of the
  * story's COMMENT section, surfaced as compact card signals. Counts describe
  * content-integrity outcomes, never popularity:

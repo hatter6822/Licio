@@ -121,7 +121,9 @@ describe('v1 auth + settings + flags', () => {
 
     const patched = await a.request(jsonRequest('/v1/settings', 'PATCH', { feed_mode: 'new' }));
     const body = userSettingsSchema.parse(await patched.json());
-    expect(body.feed_mode).toBe('new');
+    // Durable writes store/echo the LEGACY-preserving spelling (rollout
+    // compat: stale bundles keep parsing; normalizeFeedMode maps it back).
+    expect(body.feed_mode).toBe('chronological');
     expect(body.personalization_enabled).toBe(true);
   });
 

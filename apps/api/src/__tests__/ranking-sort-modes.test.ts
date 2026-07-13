@@ -4,11 +4,14 @@
 // `new` / `sources` / `debates` / `rising` are COMPLETE deterministic
 // user-selected orderings over the same safety-filtered pool (logged
 // `fallback: true, fallback_reason: 'user_mode'` with the honest
-// `user_ordering`). The legacy wire values (pre-redesign cached bundles)
-// normalize per LEGACY_FEED_MODES: `balanced`→`best`, `chronological`→`new`,
-// the removed pipeline modulations (`source-diverse` override, `local` quota
-// boost) are gone, and a live legacy `low-personalization` request keeps its
-// personalization suppression. The kill switch outranks every mode.
+// `user_ordering`, carrying the ranked path's per-item feature row so the
+// card posture agrees across surfaces, and never attributing the GWEI gate
+// to a serve it did not shape). The legacy wire values (pre-redesign cached
+// bundles) normalize per LEGACY_FEED_MODES: `balanced`→`best`,
+// `chronological`→`new`, `low-personalization`→`new` (the non-personalized
+// sort — the intent survives), and the removed pipeline modulations
+// (`source-diverse` override, `local` quota boost) are gone. The kill switch
+// outranks every mode.
 
 import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -18,6 +21,7 @@ import { serveFeed } from '../ranking/service.js';
 import { seedUserWithSession } from './event-test-helpers.js';
 import {
   freshRankingServices,
+  promoteInvariant,
   type RankingFixture,
   seedInvariantOutput,
   seedStory,
@@ -259,6 +263,65 @@ describe('feed sort modes (SPEC §11.6)', () => {
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
     expect(log?.fallback_reason).toBe('kill_switch');
     expect(log?.user_ordering).toBeNull();
+  });
+
+  it('user-sorted cards carry the MFCI safety posture (parity with ranked)', async () => {
+    // A high-MFCI story that stays distributable must read "under-review" on
+    // a user-sorted feed exactly as it does on the ranked feed and the story
+    // detail — a user-selected sort changes the ORDER, never the honesty of
+    // the card posture.
+    const risky = await seedStory(fixture.ingestion, {
+      publishedAt: new Date(Date.now() - 2 * HOUR).toISOString(),
+    });
+    const calm = await seedStory(fixture.ingestion, {
+      publishedAt: new Date(Date.now() - 1 * HOUR).toISOString(),
+    });
+    await fixture.invariants.mfciRiskStates.set({
+      targetId: risky.storyId,
+      state: 'high',
+      score: 6,
+      reason: 'score',
+      updatedAt: new Date().toISOString(),
+    });
+    await runFeatureBatch(featureDeps(), 50, 6);
+
+    for (const mode of ['new', 'sources', 'debates', 'rising'] as const) {
+      const served = await serve(mode);
+      const byId = new Map(served.items.map((i) => [i.story_id, i]));
+      expect(byId.get(risky.storyId)?.safety_state).toBe('under-review');
+      expect(byId.get(calm.storyId)?.safety_state).toBe('ok');
+    }
+    // The ranked feed agrees (the parity being asserted).
+    const ranked = await serve('best');
+    const rankedById = new Map(ranked.items.map((i) => [i.story_id, i]));
+    expect(rankedById.get(risky.storyId)?.safety_state).toBe('under-review');
+  });
+
+  it('a user sort never logs a GWEI gate application it did not serve under', async () => {
+    // A promoted, over-threshold GWEI gate blocks RANKED deployment — but a
+    // user-selected ordering is not a deployment of the ranked objective, so
+    // its decision log must not claim a gate exclusion was applied.
+    await seedStory(fixture.ingestion);
+    await promoteInvariant(fixture.invariants, 'GWEI');
+    await seedInvariantOutput(fixture.events, {
+      invariantType: 'GWEI',
+      targetId: randomUUID(),
+      targetType: 'cohort',
+      scoreVector: { gw2: 0.9 },
+    });
+    const userSorted = await serve('sources');
+    const userLog = await fixture.ranking.decisionLogs.getByRequestId(userSorted.requestId);
+    expect(userLog?.fallback_reason).toBe('user_mode');
+    expect(userLog?.constraints_applied.some((c) => c.constraint === 'gwei_deployment_gate')).toBe(
+      false,
+    );
+    // The gate still bites the ranked objective — and THAT log records it.
+    const gated = await serve('best');
+    const gatedLog = await fixture.ranking.decisionLogs.getByRequestId(gated.requestId);
+    expect(gatedLog?.fallback_reason).toBe('gwei_gate');
+    expect(gatedLog?.constraints_applied.some((c) => c.constraint === 'gwei_deployment_gate')).toBe(
+      true,
+    );
   });
 });
 

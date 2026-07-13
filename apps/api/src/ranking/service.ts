@@ -754,7 +754,13 @@ export async function serveFeed(
       quotaOutcomes: assembled.quotaOutcomes,
       reason: fallbackReason,
       userOrdering,
-      gweiApplication: gwei.application,
+      // The gate application is recorded ONLY on the serve it actually
+      // shaped: a `gwei_gate` fallback. A user-sorted or kill-switch serve
+      // is not a deployment of the ranked objective the gate governs —
+      // logging an `excluded` application there would misattribute an
+      // enforcement to a decision the gate never touched (the ranked path
+      // records its own application separately, enforced or shadow).
+      gweiApplication: fallbackReason === 'gwei_gate' ? gwei.application : null,
       retentionDays: config.decisionLogRetentionDays,
       visibilityExcludedCount,
     });
@@ -939,7 +945,13 @@ interface FallbackArgs {
 async function orderFeasibleForFallback(
   services: RankingServices,
   args: FallbackArgs,
-): Promise<{ ordered: Candidate[]; feasibleSignals: Map<string, StoryCardSignals> | null }> {
+): Promise<{
+  ordered: Candidate[];
+  feasibleSignals: Map<string, StoryCardSignals> | null;
+  /** The rising ordering's feature join, handed back so the page assembly
+   *  reuses the same read instead of re-fetching. */
+  feasibleFeatures: Map<string, FeatureVector> | null;
+}> {
   if (args.userOrdering === 'sources' || args.userOrdering === 'debates') {
     const feasibleSignals = await cardSignalsForPage(
       services,
@@ -958,18 +970,22 @@ async function orderFeasibleForFallback(
               signals.corrections.incorrect,
       );
     }
-    return { ordered: metricOrder(args.feasible, metric), feasibleSignals };
+    return { ordered: metricOrder(args.feasible, metric), feasibleSignals, feasibleFeatures: null };
   }
   if (args.userOrdering === 'rising') {
-    const features = await currentFeaturesFor(services, args.feasible, args.nowMs);
+    const feasibleFeatures = await currentFeaturesFor(services, args.feasible, args.nowMs);
     const metric = new Map<string, number>();
     for (const candidate of args.feasible) {
-      const velocity = features.get(candidate.item_id)?.attention_velocity;
+      const velocity = feasibleFeatures.get(candidate.item_id)?.attention_velocity;
       if (velocity !== undefined) metric.set(candidate.item_id, velocity);
     }
-    return { ordered: metricOrder(args.feasible, metric), feasibleSignals: null };
+    return { ordered: metricOrder(args.feasible, metric), feasibleSignals: null, feasibleFeatures };
   }
-  return { ordered: chronologicalOrder(args.feasible), feasibleSignals: null };
+  return {
+    ordered: chronologicalOrder(args.feasible),
+    feasibleSignals: null,
+    feasibleFeatures: null,
+  };
 }
 
 /**
@@ -995,10 +1011,24 @@ async function serveFallback(
       services,
       ordered.map((candidate) => candidate.item_id),
     ));
+  // USER-SORTED serves carry the same per-item feature row as the ranked
+  // path, so the card POSTURE (the MFCI-derived safety state, the
+  // coordination chip, the legacy label approximation) agrees across
+  // surfaces — a high/severe-MFCI story must read "under review" here
+  // exactly as it does on the ranked feed and the story detail. The
+  // DEGRADATION fallbacks (kill switch / GWEI gate / empty pool) stay
+  // feature-blind: §30.5 requires an engaged kill switch to let no
+  // PWAtt-derived value (the legacy label reads `active_attention`) reach a
+  // served field, and `deriveStorySafetyState` degrades gracefully.
+  const featuresByStory =
+    args.userOrdering === null
+      ? null
+      : (orderedFeasible.feasibleFeatures ??
+        (await services.featureStore.getLatestMany(ordered.map((c) => c.item_id))));
   const entries: SelectedEntry[] = ordered.map((candidate) => ({
     itemId: candidate.item_id,
     score: 0,
-    features: undefined,
+    features: featuresByStory?.get(candidate.item_id),
     moreOnThisStory: [],
     signals: signalsByStory.get(candidate.item_id) ?? EMPTY_CARD_SIGNALS,
   }));

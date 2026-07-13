@@ -22,6 +22,7 @@ import {
   debatePositionUpdateSchema,
   feedPreferencesPatchSchema,
   feedPreferencesSchema,
+  legacyPreservingFeedMode,
   linkBlocklistResponseSchema,
   MAX_CAPTION_BYTES,
   MAX_GIF_BYTES,
@@ -857,10 +858,15 @@ export function createForumRoutes() {
 
           // Single source of truth: the WS-D settings blobs (clamped/audited
           // exactly like /v1/privacy/settings — this endpoint is the §23.2
-          // canonical veneer, not a second store).
+          // canonical veneer, not a second store). Feed-mode writes store the
+          // legacy-preserving spelling (rollout compat: stale bundles on the
+          // same account keep parsing the echoed value; lossless for
+          // best/new — see legacyPreservingFeedMode).
           const nextPersonalization = personalizationSettingsSchema.parse({
             ...user.personalizationSettings,
-            ...(patch.feed_mode !== undefined ? { feed_mode: patch.feed_mode } : {}),
+            ...(patch.feed_mode !== undefined
+              ? { feed_mode: legacyPreservingFeedMode(patch.feed_mode) }
+              : {}),
             ...(patch.topic_preferences !== undefined
               ? { topic_preferences: patch.topic_preferences }
               : {}),

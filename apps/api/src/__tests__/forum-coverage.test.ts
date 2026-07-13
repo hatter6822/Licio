@@ -354,6 +354,27 @@ describe('WS-G.3.8 — feed preferences round-trip', () => {
     );
     expect(reread.feed_mode).toBe('chronological');
     expect(reread.topic_preferences).toEqual(['water', 'transit']);
+
+    // Canonical writes store the LEGACY-preserving spelling (rollout compat:
+    // a stale bundle on the same account keeps parsing the echo; the updated
+    // client normalizes it straight back)…
+    const bestEcho = feedPreferencesSchema.parse(
+      await (
+        await app().request(
+          jsonRequest('/v1/feed/preferences', 'PATCH', { feed_mode: 'best' }, cookie),
+        )
+      ).json(),
+    );
+    expect(bestEcho.feed_mode).toBe('balanced');
+    // …while the genuinely NEW sorts (no legacy spelling) store canonically.
+    const risingEcho = feedPreferencesSchema.parse(
+      await (
+        await app().request(
+          jsonRequest('/v1/feed/preferences', 'PATCH', { feed_mode: 'rising' }, cookie),
+        )
+      ).json(),
+    );
+    expect(risingEcho.feed_mode).toBe('rising');
   });
 
   it('rejects an invalid feed mode (400/422) and requires auth (401)', async () => {

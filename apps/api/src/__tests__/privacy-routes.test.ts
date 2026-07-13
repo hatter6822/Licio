@@ -157,6 +157,31 @@ describe('GET/PATCH /v1/privacy/settings', () => {
     expect(body.personalization_settings.topic_preferences).toEqual(['technology']);
   });
 
+  it('stores feed-mode writes in the legacy-preserving spelling (rollout compat)', async () => {
+    // A stale bundle on the same account validates the echoed settings value
+    // against the OLD mode enum: `best`/`new` store their lossless legacy
+    // spellings; the genuinely new sorts store canonically (no legacy
+    // spelling exists — see legacyPreservingFeedMode).
+    await seedUser('adult', 'mode@example.com', 'modeuser');
+    const app = createApp();
+    const sid = await login(app, 'mode@example.com');
+    const cases: Array<[string, string]> = [
+      ['best', 'balanced'],
+      ['new', 'chronological'],
+      ['rising', 'rising'],
+    ];
+    for (const [written, stored] of cases) {
+      const patch = await app.request('/v1/privacy/settings', {
+        method: 'PATCH',
+        headers: jsonHeaders(sid),
+        body: JSON.stringify({ personalization_settings: { feed_mode: written } }),
+      });
+      expect(patch.status).toBe(200);
+      const body = await readJson<{ personalization_settings: { feed_mode: string } }>(patch);
+      expect(body.personalization_settings.feed_mode).toBe(stored);
+    }
+  });
+
   it('round-trips the durable identification floor (defaults standard, settable to minimum)', async () => {
     await seedUser('adult', 'floor@example.com', 'flooruser');
     const app = createApp();

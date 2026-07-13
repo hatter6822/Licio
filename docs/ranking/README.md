@@ -469,7 +469,16 @@ emitted on `/v1/privacy/settings`, `/v1/feed/preferences`, and
 `/v1/settings` (for users with no stored row), and a pre-redesign bundle
 validates those responses against the old enum — a canonical default
 would break every settings read on stale bundles (a shared test pins
-this). **Removal target:** drop `LEGACY_FEED_MODES` +
+this). DURABLE WRITES apply the same discipline
+(`legacyPreservingFeedMode`, applied at all three PATCH boundaries): a
+mode change to `best`/`new` stores its LOSSLESS legacy spelling
+(`balanced`/`chronological` — normalization maps it straight back), so a
+stale bundle on the same account keeps parsing the echoed settings. The
+three genuinely new sorts (`rising`/`sources`/`debates`) have no legacy
+spelling — a downgrade would lose the preference for updated devices —
+so they store canonically, and a stale sibling bundle's settings read
+fails until its service worker updates (the one narrow, self-healing
+residual of this compat layer). **Removal target:** drop `LEGACY_FEED_MODES` +
 `feedModeCompatSchema` acceptance, flip both defaults to
 `DEFAULT_FEED_MODE`, and delete the two inert independent-sources-drawer
 compat stubs (`GET /v1/stories/:id/independent-sources` +
