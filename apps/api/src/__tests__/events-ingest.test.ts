@@ -251,7 +251,9 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
     expect(res.status).toBe(202);
     // The stored event payload has the fabricated traversal neutralized…
     const stored = await fixture.events.eventStore.listByOwner(userId);
-    const items = (stored[0]?.payload as { items?: Array<{ reply_depth_bucket?: string }> }).items;
+    const items = (
+      stored[0]?.payload as { items?: Array<{ reply_depth_bucket?: string }> } | undefined
+    )?.items;
     expect(items?.[0]?.reply_depth_bucket).toBe('none');
     // …and so does the durable §22.1 aggregate row.
     const rows = await fixture.events.attentionStore.listByUser(userId);

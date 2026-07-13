@@ -146,7 +146,9 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
     const normalized = (
       await fixture.events.eventStore.listByOwner(story?.submittedBy as string)
     ).find((e) => e.eventType === 'content.normalized');
-    expect((normalized?.payload as { claim_ids: string[] }).claim_ids.length).toBeGreaterThan(0);
+    expect(
+      (normalized?.payload as { claim_ids: string[] } | undefined)?.claim_ids.length,
+    ).toBeGreaterThan(0);
   });
 
   it('re-checks robots on the FINAL url and degrades a redirect-to-disallowed to link-only', async () => {

@@ -93,7 +93,9 @@ describe('WalletManager', () => {
     // The signed message must be the EXACT string the wallet was asked to sign.
     const [linkArgs] = mockLinkMutate.mock.calls[0] as [{ message: string; signature: string }];
     const signCall = providerRequest.mock.calls.find((c) => c[0].method === 'personal_sign');
-    expect((signCall?.[0] as unknown as { params: string[] }).params[0]).toBe(linkArgs.message);
+    expect((signCall?.[0] as unknown as { params: string[] } | undefined)?.params[0]).toBe(
+      linkArgs.message,
+    );
     expect(linkArgs.signature).toBe('0xsignature');
     // The message binds Licio's domain (anti-phishing).
     expect(linkArgs.message).toContain('wants you to sign in');

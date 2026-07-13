@@ -141,7 +141,8 @@ test.describe('private room MESH over the real rendezvous (three browsers, WS-S 
 
       const sealedInvite = await founder.evaluate(async (key) => {
         const m = (globalThis as unknown as { __M: Handle }).__M;
-        const { invite, inviteUrl } = (await m.s?.createInvite({ inviteePublicKey: key })) as {
+        if (!m.s) throw new Error('founder session missing');
+        const { invite, inviteUrl } = (await m.s.createInvite({ inviteePublicKey: key })) as {
           invite: unknown;
           inviteUrl: string;
         };
@@ -151,7 +152,8 @@ test.describe('private room MESH over the real rendezvous (three browsers, WS-S 
 
       const requestJson = await joiner.evaluate(async (sealed) => {
         const m = (globalThis as unknown as { __M: Handle }).__M;
-        const { request } = (await m.prep?.complete(sealed)) as { request: unknown };
+        if (!m.prep) throw new Error('join preparation missing');
+        const { request } = (await m.prep.complete(sealed)) as { request: unknown };
         return JSON.stringify(request);
       }, sealedInvite);
 
@@ -159,7 +161,8 @@ test.describe('private room MESH over the real rendezvous (three browsers, WS-S 
         const m = (globalThis as unknown as { __M: Handle }).__M;
         const request = await m.h.PrivateRoomSession.parseJoinRequest(reqJson);
         if (!request) return { error: 'parse-request-failed' };
-        const { verdict, grant } = (await m.s?.admitJoinRequest(m.invite, request)) as {
+        if (!m.s) return { error: 'founder-session-missing' };
+        const { verdict, grant } = (await m.s.admitJoinRequest(m.invite, request)) as {
           verdict: { ok: boolean; reason?: string };
           grant?: unknown;
         };

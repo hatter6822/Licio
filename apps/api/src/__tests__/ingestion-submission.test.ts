@@ -367,7 +367,7 @@ describe('link pipeline smoke through submission (WS-F.1.4e)', () => {
     expect(story?.language).toBe('en');
     expect(story?.extractionState).toBe('completed');
     expect(story?.excerpt).toBeTruthy();
-    expect((story?.excerpt as string).length).toBeLessThanOrEqual(501); // bound + ellipsis
+    expect((story?.excerpt as string | undefined)?.length).toBeLessThanOrEqual(501); // bound + ellipsis
     expect(story?.sourceId).not.toBeNull();
     const source = await fixture.ingestion.sources.getById(story?.sourceId as string);
     expect(source?.canonicalDomain).toBe('news.example');
