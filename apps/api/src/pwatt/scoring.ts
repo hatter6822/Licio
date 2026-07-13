@@ -425,7 +425,7 @@ export async function runPwattWindow(
     // — ActiveAttention and ConstructiveParticipation — with the contribution-
     // type hierarchy, per-user/per-dimension saturation, account-age trust, and
     // the window's own anti-signal attenuation. It deliberately stops there: the
-    // full §5.4 composite (baseline B, MERI/evidence/SCOI terms, promotion-gated
+    // full §5.4 composite (baseline B, the MERI/evidence terms, promotion-gated
     // penalties) is a per-REQUEST quantity the batch engine cannot know (B
     // carries the requesting user's freshness/relevance), so it is composed at
     // decision time by the SINGLE production §5.4 implementation, @licio/ranking

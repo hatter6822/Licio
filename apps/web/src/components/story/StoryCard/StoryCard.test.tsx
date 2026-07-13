@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { render, screen, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
 import type { StoryCardData } from '../types.js';
 import { StoryCard } from './StoryCard.js';
@@ -15,7 +15,6 @@ const sample: StoryCardData = {
   },
   sourcesCount: 3,
   corrections: { active: 1, validated: 1, incorrect: 0 },
-  distributionReason: 'Rising from independent source opens and sourced comments',
   contextChips: [
     { id: 'c2', label: '2 primary sources' },
     { id: 'c3', label: 'low coordination risk' },
@@ -43,7 +42,6 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
     expect(screen.getByText('3 sourced comments')).toBeInTheDocument();
     expect(screen.getByText('1 correction under debate')).toBeInTheDocument();
     expect(screen.getByText('1 comment challenged and validated')).toBeInTheDocument();
-    expect(screen.getByText(sample.distributionReason)).toBeInTheDocument();
     expect(screen.getByText('2 primary sources')).toBeInTheDocument();
     expect(screen.getByText('4 min read')).toBeInTheDocument();
     expect(screen.getByText('What changed upstream?')).toBeInTheDocument();
@@ -64,7 +62,6 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
       },
       sourcesCount: 0,
       corrections: { active: 0, validated: 0, incorrect: 0 },
-      distributionReason: 'New from a wire source',
     };
     const { container } = render(<StoryCard {...minimal} />);
     expect(screen.getByRole('heading', { name: 'Quiet update' })).toBeInTheDocument();
@@ -84,13 +81,12 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
 });
 
 describe('StoryCard screen-reader order (WS-B.2.1c / WCAG 1.3.2)', () => {
-  it('places content in DOM order: title → source → signals → reason → chips → estimate → preview', () => {
+  it('places content in DOM order: title → source → signals → chips → estimate → preview', () => {
     render(<StoryCard {...sample} />);
     const ordered = [
       screen.getByText(sample.story.title),
       screen.getByText('Delta Observer'),
       screen.getByText('3 sourced comments'),
-      screen.getByText(sample.distributionReason),
       screen.getByText('2 primary sources'),
       screen.getByText('4 min read'),
       screen.getByText('What changed upstream?'),
@@ -119,21 +115,13 @@ describe('StoryCard screen-reader order (WS-B.2.1c / WCAG 1.3.2)', () => {
   });
 });
 
-describe('StoryCard distribution-reason guard (no-applause)', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('warns in development when the distribution reason looks like a raw score', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    render(<StoryCard {...sample} distributionReason="Ranked 87 points this hour" />);
-    expect(warn).toHaveBeenCalledOnce();
-  });
-
-  it('does not warn for a human-readable distribution reason', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    render(<StoryCard {...sample} distributionReason="Rising from independent source opens" />);
-    expect(warn).not.toHaveBeenCalled();
+describe('distribution-reason removal', () => {
+  it('renders no per-card distribution reason (the explanation line was removed)', () => {
+    // The wire keeps a DEPRECATED `distribution_reason` for pre-removal cached
+    // bundles, but the card view-model no longer carries it — nothing on the
+    // card claims to explain why the item was shown.
+    render(<StoryCard {...sample} />);
+    expect(screen.queryByText('Shown in your feed.')).not.toBeInTheDocument();
   });
 });
 
@@ -141,8 +129,7 @@ describe('origin badge', () => {
   it('renders no source-origin badge (the hardcoded "Independent" placeholder is gone)', () => {
     // The `origin` field was never a real derived signal — the feed and detail
     // reads hardcoded it to 'independent', so the badge claimed every source was
-    // "Independent". The field and badge were removed; only the lowercase word
-    // inside the distribution reason ("independent source opens") remains.
+    // "Independent". The field and badge were removed.
     render(<StoryCard {...sample} />);
     expect(screen.queryByText('Independent')).not.toBeInTheDocument();
   });

@@ -40,7 +40,6 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     reading_minutes: 4,
     sources_count: 0,
     corrections: { active: 0, validated: 0, incorrect: 0 },
-    distribution_reason: 'Rising from independent source opens',
     context_chips: [],
     safety_state: 'ok',
     more_on_this_story: [],

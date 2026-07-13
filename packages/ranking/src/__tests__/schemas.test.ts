@@ -140,15 +140,6 @@ describe('WS-I.1.1a/d candidate schema + merge', () => {
     expect(merged[0]?.retrieval_origins).toEqual(['origin_b', 'origin_a']);
   });
 
-  it('merge preserves bridge context from whichever retriever supplied it', () => {
-    const bridge = makeCandidate(2, {
-      source_type: 'cross_community_bridge',
-      bridge_context: { scoi: 0.7, context_state: 'split', lens_count: 3 },
-    });
-    const merged = mergeCandidates([[makeCandidate(2)], [bridge]]);
-    expect(merged[0]?.bridge_context?.context_state).toBe('split');
-  });
-
   it('merge ordering is deterministic (score desc, freshness desc, id)', () => {
     const batch = [makeCandidate(3), makeCandidate(1), makeCandidate(2)];
     const a = mergeCandidates([batch]).map((c) => c.item_id);

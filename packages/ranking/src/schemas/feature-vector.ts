@@ -12,10 +12,15 @@
 //   active_attention / constructive_participation . WS-E PWAtt v1 components
 //   exposure_independence ......................... WS-H MERI (meri ∈ [0,1])
 //   source_evidence_completeness .................. WS-F claims/evidence join
-//   context_coherence_gain ........................ WS-H SCOI (1 − scoi)
+//   context_coherence_gain ........................ §5.4 C slot; NO current
+//                                                   provider (the SCOI→ranking
+//                                                   coupling was removed) —
+//                                                   absent ⇒ contributes 0
 //   meri_rank / redundancy_penalty ................ WS-H MERI
 //   mfci_score / mfci_risk_state / coordination_penalty ... WS-H MFCI (+ tropical)
-//   scoi_level .................................... WS-H SCOI context state
+//   scoi_level .................................... DEPRECATED (no producer;
+//                                                   kept so persisted feature
+//                                                   revisions parse on replay)
 //   gwei_cohort_disparity ......................... WS-H GWEI
 //   (PHI has NO per-item feature: holonomy is a per-USER/session signal, so it
 //    enters ranking as the per-user diversification constraint — see
@@ -42,13 +47,27 @@ import { findDeniedFields } from '../denylist.js';
 // the stored field set + the score for validated stories, so the version bumps —
 // stale v2 rows self-heal via the migration-on-read rebuild (service.ts) and
 // decision logs stay distinguishable, rather than silently mixing field sets.
-export const FEATURE_SCHEMA_VERSION = 3;
+// v4: the SCOI→ranking decoupling — `context_coherence_gain` and `scoi_level`
+// are no longer populated. Without the bump, already-stored v3 rows would keep
+// contributing `wC·C` to live scores until the next batch refresh touched
+// them; the bump forces the migration-on-read rebuild on first serve, so the
+// removal takes effect deterministically and serve cohorts stay
+// distinguishable. (Store reads return persisted payloads raw — validation
+// is write-side — so v3 rows flow into the version gate and replay still
+// joins them by pinned revision; the two fields stay deprecated-optional so
+// any future re-validation of historic rows stays tolerant.)
+export const FEATURE_SCHEMA_VERSION = 4;
 
 /** MFCI risk states as ranking features (SPEC §8.5). */
 export const MFCI_RISK_STATE_FEATURES = ['normal', 'elevated', 'high', 'severe'] as const;
 export type MfciRiskStateFeature = (typeof MFCI_RISK_STATE_FEATURES)[number];
 
-/** SCOI obstruction levels as ranking features (SPEC §10.6). */
+/**
+ * DEPRECATED — the SCOI ranking-constraint ladder was removed (it was
+ * promotion-gated and never enforced; its upper levels were unreachable under
+ * production calibration). The enum stays ONLY so persisted feature revisions
+ * that carry `scoi_level` keep parsing on replay. No producer writes it.
+ */
 export const SCOI_LEVELS = ['low', 'medium', 'high', 'very_high'] as const;
 export type ScoiLevel = (typeof SCOI_LEVELS)[number];
 
@@ -112,6 +131,7 @@ export const featureVectorSchema = z
     meri_rank: z.number().int().nonnegative().optional(),
     mfci_score: z.number().nonnegative().optional(),
     mfci_risk_state: z.enum(MFCI_RISK_STATE_FEATURES).optional(),
+    /** DEPRECATED — parse-compat only (see SCOI_LEVELS); never populated. */
     scoi_level: z.enum(SCOI_LEVELS).optional(),
     gwei_cohort_disparity: z.number().nonnegative().optional(),
 

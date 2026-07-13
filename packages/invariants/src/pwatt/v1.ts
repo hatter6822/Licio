@@ -10,8 +10,11 @@
 // subtracted separately (WS-E.2.3d — the total MAY go below zero).
 //
 // v1 component sourcing: A and P come from the WS-E aggregation + saturation
-// pipeline; E (MERI), S (evidence completeness), and C (SCOI coherence gain)
-// are provider inputs defaulting to 0.
+// pipeline; E (MERI), S (evidence completeness), and C (context coherence)
+// are provider inputs defaulting to 0. C has NO production provider — the
+// SCOI→ranking coupling was removed — so it stays an honest 0 unless a
+// future provider lands; the §5.4 formula shape (five weights summing to
+// 100) is unchanged.
 //
 // NOTE: this composite is NOT the production served score. The batch PWAtt
 // engine (apps/api/src/pwatt/scoring.ts) stores only the CONTENT components
@@ -38,9 +41,9 @@ import { clamp01 } from './types.js';
  *   correction > explanation > low_info_reply (zero).
  * `explanation` is the comment-grade constructive weight (the live `comment`
  * type maps here; sourced comments earn the citation bonus on top).
- * `bridge_comment` earns strong positive weight (placeholder constant in v1;
- * SCOI-conditioned in v2 — WS-H.4 integration point). `steward_action` counts
- * for thread health.
+ * `bridge_comment` earns strong positive weight (a constant; the measured
+ * SCOI-decrease condition lives in the WS-H.4.2d bridge-credit consumer, not
+ * here). `steward_action` counts for thread health.
  */
 export const V1_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, number>> = {
   correction: 0.9,
@@ -77,7 +80,7 @@ export interface PwattV1Components {
   exposureIndependence: number;
   /** Evidence/source completeness (WS-F provider; 0 until it lands). */
   evidenceCompleteness: number;
-  /** Context coherence gain (SCOI provider; 0 until WS-H.4). */
+  /** Context coherence gain (no production provider; honest 0). */
   contextCoherence: number;
 }
 

@@ -67,6 +67,15 @@ export const LEGACY_RATING_LABELS = [
 ] as const;
 export type LegacyRatingLabel = (typeof LEGACY_RATING_LABELS)[number];
 
+/**
+ * DEPRECATED — rollout compatibility only (see `distribution_reason` on
+ * `feedItemSchema`). The one string every server emitter sends for the
+ * removed per-card distribution reason: universally true, never score-like,
+ * and clean against the §13.6/§30.6 prohibited vocabulary, because
+ * pre-removal cached bundles RENDER it on every card until they age out.
+ */
+export const LEGACY_DISTRIBUTION_REASON = 'Shown in your feed.';
+
 /** Story-level safety posture surfaced to readers (SPEC §22.1 safety_state). */
 export const safetyStateSchema = z.enum(['ok', 'caution', 'under-review', 'restricted']);
 export type StorySafetyState = z.infer<typeof safetyStateSchema>;
@@ -130,14 +139,21 @@ export const feedItemSchema = z.object({
   /** DEPRECATED — emitted for pre-redesign cached bundles only (see
    *  LEGACY_RATING_LABELS). New clients ignore it. */
   rating_label: z.enum(LEGACY_RATING_LABELS).optional(),
-  /** Human-readable distribution reason; never a raw numeric score. */
-  distribution_reason: z.string().min(1),
+  /** DEPRECATED — rollout compatibility only. The per-card distribution
+   *  reason (the WS-I.2.6 explanation line) was removed from the product, but
+   *  a pre-removal cached PWA bundle still validates feed/detail responses
+   *  against a schema that REQUIRES a non-empty `distribution_reason`. The
+   *  server therefore keeps emitting `LEGACY_DISTRIBUTION_REASON` (above) and
+   *  the field stays declared OPTIONAL here so response validation does not
+   *  strip it. New clients never read it. Remove the field and the emitters
+   *  together with `rating_label` once pre-removal bundles have aged out
+   *  (tracked in docs/ranking/README.md). */
+  distribution_reason: z.string().min(1).optional(),
   context_chips: z.array(contextChipSchema).default([]),
   safety_state: safetyStateSchema.default('ok'),
   /** Same-cluster stories demoted by matroid dedup, available for the
    * "more on this story" expansion (WS-I.2.4a). */
   more_on_this_story: z.array(uuidSchema).max(12).default([]),
-  /** SCOI context card when interpretations diverge (WS-I.2.4c). */
   /** Topic-cluster ids for the story (descriptive; never a ranking input).
    *  Powers the per-card "repeats on this topic" preference and WS-H.6.1a
    *  client loop tracking. Capped at 8; defaults to empty so producers that

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-I.1.1a — the eight organic candidate retrievers (SPEC §13.2). Each
+// WS-I.1.1a — the seven organic candidate retrievers (SPEC §13.2). Each
 // implements the `CandidateRetriever` interface over the narrow read-only
 // `CandidateDataPorts` seam, so every retriever is independently testable
 // with fixture ports and the set is extensible through the registry.
@@ -16,12 +16,7 @@
 // retrieval; the safety filter (WS-I.2.2a) remains the authoritative
 // enforcement point and re-checks downstream.
 
-import {
-  type BridgeContext,
-  type Candidate,
-  type CandidateSourceType,
-  candidateSchema,
-} from '@licio/ranking';
+import { type Candidate, type CandidateSourceType, candidateSchema } from '@licio/ranking';
 import { isSentinelTopicId } from '@licio/shared';
 import type { AggregationWindowRecord } from '../events/stores.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
@@ -49,10 +44,6 @@ export interface CandidateDataPorts {
   roomStorageMode(roomId: string): Promise<'server' | 'p2p' | null>;
   /** storyId → last-seen ISO instant from the user's OWN attention rows. */
   userSeenStories(userId: string): Promise<Map<string, string>>;
-  /** Latest SCOI signal for a story (null before coverage). */
-  latestScoi(
-    storyId: string,
-  ): Promise<{ scoi: number; contextState: string; lensCount: number } | null>;
   /** Latest PWAtt components for a story (null before coverage). */
   latestPwattComponents(
     storyId: string,
@@ -127,7 +118,6 @@ async function storyToCandidate(
   sourceType: CandidateSourceType,
   origin: string,
   retrievalScore: number,
-  bridgeContext: BridgeContext | null = null,
 ): Promise<Candidate> {
   return candidateSchema.parse({
     item_id: story.storyId,
@@ -150,7 +140,6 @@ async function storyToCandidate(
     freshness_timestamp: storyFreshnessIso(story),
     retrieval_score: clamp01(retrievalScore),
     retrieval_origins: [origin],
-    bridge_context: bridgeContext,
   });
 }
 
@@ -347,42 +336,7 @@ export class IndependentSourceAdditionsRetriever implements CandidateRetriever {
   }
 }
 
-/** 6. Cross-community bridges: stories whose SCOI shows interpretation
- *  divergence across communities, surfaced WITH context metadata. */
-export class CrossCommunityBridgesRetriever implements CandidateRetriever {
-  readonly origin = 'cross_community_bridges_v1';
-  readonly sourceType = 'cross_community_bridge' as const;
-  constructor(private readonly ports: CandidateDataPorts) {}
-
-  async retrieve(context: RetrieveContext): Promise<Candidate[]> {
-    const stories = await this.ports.recentStories(context.limit * 4);
-    const out: Candidate[] = [];
-    for (const story of stories) {
-      if (!(await globallyRetrievable(this.ports, story))) continue;
-      const scoi = await this.ports.latestScoi(story.storyId);
-      if (scoi === null) continue;
-      if (scoi.contextState !== 'split' && scoi.contextState !== 'obstructed') continue;
-      out.push(
-        await storyToCandidate(
-          this.ports,
-          story,
-          this.sourceType,
-          this.origin,
-          clamp01(scoi.scoi),
-          {
-            scoi: clamp01(scoi.scoi),
-            context_state: scoi.contextState,
-            lens_count: scoi.lensCount,
-          },
-        ),
-      );
-      if (out.length >= context.limit) break;
-    }
-    return out;
-  }
-}
-
-/** 7. Expert explanations: stories from expert-led rooms (public rooms with
+/** 6. Expert explanations: stories from expert-led rooms (public rooms with
  *  the `experts_and_stewards` posting policy). */
 export class ExpertExplanationsRetriever implements CandidateRetriever {
   readonly origin = 'expert_explanations_v1';
@@ -436,7 +390,7 @@ async function storyIfGloballyRetrievable(
   return story !== null && (await globallyRetrievable(ports, story)) ? story : null;
 }
 
-/** 8. Chronological catch-up: recent unseen items in time order, respecting
+/** 7. Chronological catch-up: recent unseen items in time order, respecting
  *  the user's last-seen instant per room (WS-I.1.1a acceptance). */
 export class ChronologicalCatchUpRetriever implements CandidateRetriever {
   readonly origin = 'chronological_catch_up_v1';
@@ -544,7 +498,7 @@ export class RetrieverRegistry {
   }
 }
 
-/** Build the default registry: the eight organic SPEC §13.2 sources plus
+/** Build the default registry: the seven organic SPEC §13.2 sources plus
  *  the room-surface scoper (inert outside room feeds). */
 export function createDefaultRetrievers(ports: CandidateDataPorts): RetrieverRegistry {
   const registry = new RetrieverRegistry();
@@ -553,7 +507,6 @@ export function createDefaultRetrievers(ports: CandidateDataPorts): RetrieverReg
   registry.register(new GlobalCandidatesRetriever(ports));
   registry.register(new EmergingDiscussionsRetriever(ports));
   registry.register(new IndependentSourceAdditionsRetriever(ports));
-  registry.register(new CrossCommunityBridgesRetriever(ports));
   registry.register(new ExpertExplanationsRetriever(ports));
   registry.register(new ChronologicalCatchUpRetriever(ports));
   registry.register(new RoomSurfaceRetriever(ports));

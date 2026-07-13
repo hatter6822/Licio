@@ -62,8 +62,6 @@ export interface StoryCardData {
   /** WS-T dispute posture (SPEC §15.4): drives the "Challenged"/"Incorrect"
    *  badge. Absent ⇒ undisputed. A content-integrity signal, never applause. */
   disputeStatus?: ContributionDisputeStatus;
-  /** Human-readable distribution reason; never a raw numeric score. */
-  distributionReason: string;
   contextChips?: ContextChip[];
   branchPreview?: BranchPreviewItem[];
   /** WS-Q.5.3b — in-room chip on non-public items (room feeds). */

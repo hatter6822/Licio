@@ -459,7 +459,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     return { roomId, storyId, threadId, lensIds, bridgeUserId: bridgeUser.userId };
   }
 
-  it('steward reports are room-scoped with states, lenses, and recommendations', async () => {
+  it('steward reports are room-scoped with states and lenses', async () => {
     const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const { roomId, storyId, threadId } = await seedSplitRoom(fixture, steward.userId);
@@ -497,7 +497,6 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
         context_state: string;
         scoi: number;
         lenses: Array<{ name: string; contribution_count: number }>;
-        recommended_actions: string[];
         bridge_attempts: unknown[];
       }>;
     };
@@ -511,73 +510,6 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     const outsider = await seedUserWithSession(fixture.identity, { steward: true });
     const denied = await adminRequest(fixture, outsider.cookie, `/scoi/reports/${roomId}`);
     expect(denied.status).toBe(404);
-  });
-
-  it('annotation measurably reduces SCOI and is audited with a ratified code (SCOI-4)', async () => {
-    const fixture = freshInvariantServices();
-    const steward = await seedUserWithSession(fixture.identity, { steward: true });
-    const { storyId, threadId } = await seedSplitRoom(fixture, steward.userId);
-    // Baseline measurement (stored so the action has a before).
-    const baseline = await fixture.invariants.scoi.computeBatch(
-      [{ targetType: 'story', targetId: storyId }],
-      hourWindow(Date.now()),
-    );
-    const scoiBefore = baseline[0]?.score_vector['scoi'] as number;
-    expect(scoiBefore).toBeGreaterThan(0);
-    await fixture.events.invariantStore.upsert({
-      invariantType: 'SCOI',
-      targetType: 'story',
-      targetId: storyId,
-      timeWindow: hourWindow(Date.now()),
-      version: '1.0.0',
-      scoreVector: baseline[0]?.score_vector ?? {},
-      explanationSummary: null,
-      confidence: 0.8,
-      coverage: 1,
-      reasonCodes: [],
-      fallbackUsed: false,
-      versionMetadata: null,
-      shadowMode: true,
-      createdAt: new Date().toISOString(),
-    });
-    // A fabricated reason code is refused (422).
-    const fabricated = await adminRequest(
-      fixture,
-      steward.cookie,
-      `/scoi/threads/${threadId}/actions`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          action: 'annotate',
-          reason_code: 'MADE_UP_001',
-          annotation: 'Shared context.',
-        }),
-      },
-    );
-    expect(fabricated.status).toBe(422);
-    // The real annotation: identical shared context lands on BOTH lenses,
-    // pulling the interpretation vectors together.
-    const acted = await adminRequest(fixture, steward.cookie, `/scoi/threads/${threadId}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'annotate',
-        reason_code: 'MOD_MISINFO_001',
-        annotation:
-          'Officials confirmed this is a scheduled maintenance notice; the contamination figures referenced were from the 2019 incident report.',
-      }),
-    });
-    expect(acted.status).toBe(200);
-    const result = (await acted.json()) as {
-      action_id: string;
-      scoi_before: number;
-      scoi_after: number;
-    };
-    // The ACCEPTANCE criterion: annotation reduces SCOI on re-computation.
-    expect(result.scoi_after).toBeLessThan(result.scoi_before);
-    const actions = await fixture.invariants.scoiActions.listForThread(threadId, 5);
-    expect(actions).toHaveLength(1);
-    expect(actions[0]?.reasonCode).toBe('MOD_MISINFO_001');
-    expect(actions[0]?.actorRef).toBe(`steward:${steward.userId}`);
   });
 
   it('bridge requests route multi-lens candidates; a reducing contribution credits (SCOI-2)', async () => {
@@ -652,116 +584,6 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     expect(credited?.resolvedAt).not.toBeNull();
     // Single-shot: only one credit even though two contributions arrived.
     expect(attempts.filter((a) => a.status === 'credited')).toHaveLength(1);
-  });
-
-  it('a moderator annotation rebaselines the open request — credit is never inherited', async () => {
-    const fixture = freshInvariantServices();
-    const steward = await seedUserWithSession(fixture.identity, { steward: true });
-    const { threadId, lensIds, bridgeUserId } = await seedSplitRoom(fixture, steward.userId);
-    const opened = await adminRequest(
-      fixture,
-      steward.cookie,
-      `/scoi/threads/${threadId}/bridge-requests`,
-      { method: 'POST', body: JSON.stringify({}) },
-    );
-    expect(opened.status).toBe(200);
-    const { scoi_baseline } = (await opened.json()) as { scoi_baseline: number };
-    // The STEWARD annotation lowers SCOI (shared context on both lenses)…
-    const acted = await adminRequest(fixture, steward.cookie, `/scoi/threads/${threadId}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'annotate',
-        reason_code: 'MOD_MISINFO_001',
-        annotation:
-          'City bulletin: the figures describe the 2019 incident, not current conditions; both readings reference the same maintenance schedule.',
-      }),
-    });
-    expect(acted.status).toBe(200);
-    const { scoi_after } = (await acted.json()) as { scoi_after: number };
-    expect(scoi_after).toBeLessThan(scoi_baseline);
-    // …and the open attempt's baseline follows it, so the decrease the
-    // moderator caused cannot be claimed by the next contribution.
-    const open = await fixture.invariants.bridgeAttempts.openForThread(threadId);
-    expect(open?.scoiBaseline).toBe(scoi_after);
-    // A contribution that does NOT further reduce the energy (it restates
-    // one lens's reading) gets no credit.
-    const inserted = await fixture.forum.contributions.insert({
-      contributionId: randomUUID(),
-      threadId,
-      userId: bridgeUserId,
-      type: 'comment',
-      body: 'Routine harmless maintenance notice nothing unusual here at all.',
-      citations: [],
-      metadata: { lens_id: lensIds[0] ?? '' },
-      targetClaimId: null,
-      parentContributionId: null,
-      clientDraftId: randomUUID(),
-      path: [],
-      moderationState: 'published',
-    });
-    expect(inserted.ok).toBe(true);
-    if (inserted.ok) {
-      await fixture.events.router.publish({
-        event_id: randomUUID(),
-        event_type: 'contribution.created',
-        timestamp: new Date().toISOString(),
-        schema_version: '1',
-        thread_id: threadId,
-        contribution_id: inserted.contribution.contributionId,
-        user_id: bridgeUserId,
-        contribution_type: 'explanation',
-        privacy_classification: 'public',
-        retention_tier: 'public_contribution',
-      } as never);
-    }
-    const after = await fixture.invariants.bridgeAttempts.openForThread(threadId);
-    expect(after?.status).toBe('requested'); // still open — no inherited credit
-    expect(after?.bridgeUserId).toBeNull(); // …and no credit landed on the record
-    expect(after?.contributionId).toBeNull();
-  });
-
-  it('merge requires the actor to steward the RELATED thread too', async () => {
-    const fixture = freshInvariantServices();
-    const steward = await seedUserWithSession(fixture.identity, { steward: true });
-    const outsider = await seedUserWithSession(fixture.identity, { steward: true });
-    const mine = await seedSplitRoom(fixture, steward.userId);
-    const theirs = await seedSplitRoom(fixture, outsider.userId);
-    // Cross-room merge into a thread the actor does not steward: refused,
-    // and nothing lands in the other room's report.
-    const denied = await adminRequest(
-      fixture,
-      steward.cookie,
-      `/scoi/threads/${mine.threadId}/actions`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          action: 'merge',
-          reason_code: 'MOD_SPAM_001',
-          related_thread_id: theirs.threadId,
-        }),
-      },
-    );
-    expect(denied.status).toBe(422);
-    expect(await fixture.invariants.scoiActions.listForThread(theirs.threadId, 5)).toHaveLength(0);
-    // A related thread within the actor's own stewarded room is accepted
-    // and the record lists from BOTH sides.
-    const sibling = await seedStory(fixture);
-    await fixture.ingestion.stories.updateThread(sibling.threadId, { roomId: mine.roomId });
-    const merged = await adminRequest(
-      fixture,
-      steward.cookie,
-      `/scoi/threads/${mine.threadId}/actions`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          action: 'merge',
-          reason_code: 'MOD_SPAM_001',
-          related_thread_id: sibling.threadId,
-        }),
-      },
-    );
-    expect(merged.status).toBe(200);
-    expect(await fixture.invariants.scoiActions.listForThread(sibling.threadId, 5)).toHaveLength(1);
   });
 });
 

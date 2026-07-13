@@ -16,7 +16,6 @@
 //   MERI feed row          → exposure_independence (marginal gain),
 //                            meri_rank (rank among gains)
 //   WS-E redundancy hook   → redundancy_penalty
-//   SCOI story row         → context_coherence_gain (1 − scoi), scoi_level
 //   MFCI risk-state store + story row → mfci_score, mfci_risk_state
 //   Hodge thread row       → hodge_harmonic_tension, harmful_tension_risk
 //   Tropical topic rows    → tropical_cascade_rank (max synchronized share)
@@ -34,7 +33,6 @@ import {
   type FeatureVector,
   type InvariantVersionEntry,
   type MfciRiskStateFeature,
-  type ScoiLevel,
   sourceReliabilityFromHistory,
 } from '@licio/ranking';
 import { isSentinelTopicId } from '@licio/shared';
@@ -48,15 +46,6 @@ import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
 import { pwattRowForRanking, usable } from '../pwatt/shadow.js';
 import type { FeatureStore } from './stores.js';
-
-/** SCOI context states → the WS-I.2.4c gating ladder (SPEC §10.4 → §10.6). */
-const SCOI_STATE_TO_LEVEL: Readonly<Record<string, ScoiLevel>> = {
-  coherent: 'low',
-  ambiguous: 'medium',
-  split: 'medium',
-  obstructed: 'high',
-  weaponized: 'very_high',
-};
 
 const clamp01 = (value: number): number =>
   Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
@@ -179,20 +168,6 @@ export async function assembleFeatureVector(
     vector.dispute_penalty = 1;
   } else if (storyDispute === 'validated') {
     vector.dispute_validation = 1;
-  }
-
-  // --- SCOI: context coherence + gating level ------------------------------
-  const scoiRow = usable(await events.invariantStore.latest('SCOI', storyId));
-  if (scoiRow !== null) {
-    const scoi = num(scoiRow.scoreVector['scoi']);
-    const state = scoiRow.scoreVector['context_state'];
-    if (scoi !== undefined) {
-      vector.context_coherence_gain = clamp01(1 - scoi);
-      const level =
-        typeof state === 'string' ? (SCOI_STATE_TO_LEVEL[state] ?? undefined) : undefined;
-      if (level !== undefined) vector.scoi_level = level;
-      invariantVersions['SCOI'] = versionEntry(scoiRow);
-    }
   }
 
   // --- MFCI: the durable risk-state store is canonical; the latest output

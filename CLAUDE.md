@@ -430,7 +430,7 @@ licio/
 │           │   └── drizzle-invariant-stores.ts -- production Postgres adapters (gated)
 │           ├── ranking/                 -- WS-I ranking and distribution
 │           │   ├── stores.ts            --   feature store + decision logs (in-memory)
-│           │   ├── retrievers.ts        --   the eight organic candidate retrievers
+│           │   ├── retrievers.ts        --   the seven organic candidate retrievers
 │           │   │                             (WS-I.1.1a) + the room-surface scoper
 │           │   ├── quotas.ts            --   diversity quotas (WS-I.1.1b, ceil-reserved)
 │           │   ├── orchestrator.ts      --   candidate merge/dedup/budget (WS-I.1.1d)
@@ -743,11 +743,11 @@ licio/
 │           │                                 scored item, decision log)
 │           ├── scoring/                 --   §5.4 baseline/positive/penalties/constraints
 │           ├── diversify/               --   matroid dedup + source/topic/lens balancing
-│           ├── explain/                 --   template registry + generation (prohibited-
-│           │                                 language structural block; locale-ready)
+│           ├── prohibited-language.ts   --   the §13.6/§30.6 prohibited ranking
+│           │                                 vocabulary (the neutrality-test-9 artifact)
 │           ├── pipeline.ts              --   the deterministic constrained-optimization
 │           │                                 core (serving AND replay execute this)
-│           └── __tests__/               --   124 deterministic unit/property tests
+│           └── __tests__/               --   ~120 deterministic unit/property tests
 │   ├── ai-governance/           -- WS-K pure AI-governance domain (no I/O; browser-safe)
 │       └── src/
 │           ├── schemas/                 --   model card, registry, NIST/ISO risk assessment,
@@ -1546,7 +1546,7 @@ at current state).  Approximate file counts:
 | packages/shared | ~22 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite, the WS-S.10 update-channel verify-before-unlock core — RFC 9162 Merkle inclusion + `verifyUpdateManifest`/`decideUpdateActivation` fail-closed matrix) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
-| packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
+| packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, the prohibited-vocabulary artifact, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
 | packages/governance | ~7 (WS-U AI-governed-rooms domain: the deterministic moderation-bound wrapper (escalate-to-review ceiling + capability clamp), the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing) | node | `pnpm --filter @licio/governance test` |
 | packages/lcap | ~33 (WS-R LCAP v0.2 pure-protocol core: the LDC deterministic-CBOR encoder/decoder + the §9.1.5 integer table + the full decode rejection matrix, CID construction (SHA-256 known-answer grounded) + RFC 4648 base32, ES256 low-S + the malleability-twin defense, COSE_Sign1 build/verify + the §10.2.4 six-step matrix, device-key/COSE_Key round-trip, suite agility/downgrade, strict closed-schema records/proofs + LDC codec pairing, the §18.3 identity-chain accept/quarantine/reject/revoke matrix, arrival-order-independent record projection + fork detection, blocks/chunk reassembly + compression-bomb abort, the packfile round-trip/cap/tamper matrix, the exhaustive RFC 9162 Merkle inclusion/consistency proofs, the `validate()` trust-projection staged matrix, liveness/receipts, conflict dispatch, the §16/§17 sync-decision plane (`minimalClosure` + scheduler integration, frontier diff, pulse build/apply, reconciliation order, monotonic budget shrinking, the interest privacy/leak matrix, wants + resume ranges, idempotency, exchange assembly + status, the §24.1 server-ingestion commit-stage decision, the §24.4 topological ingestion-order resolver, the §27.2 malicious-graph guard), the conformance-corpus replay, the P1/P2/P3 determinism properties, the §22.6 transport seam (server-anchor-last selection / fallback / public-only carriage gate), and the §32.3/§32.5 deterministic network simulator (seeded link model + pluggable adversaries over the REAL scheduler + closure; the C0-never-starved / fork-detection / transport-independence scenarios)) | node | `pnpm --filter @licio/lcap test` |

@@ -27,6 +27,7 @@ import {
   feedQuerySchema,
   feedResponseSchema,
   isSentinelTopicId,
+  LEGACY_DISTRIBUTION_REASON,
   legacyRatingLabel,
   notificationPreferencesSchema,
   notificationsResponseSchema,
@@ -216,7 +217,9 @@ function realStoryToDetail(
       lifecycleState: story.lifecycleState,
       safetyState: signals.safetyState,
     }),
-    distribution_reason: 'Recently submitted to Licio',
+    // DEPRECATED rollout compat: pre-removal cached bundles REQUIRE a
+    // non-empty distribution_reason (see LEGACY_DISTRIBUTION_REASON).
+    distribution_reason: LEGACY_DISTRIBUTION_REASON,
     context_chips: [],
     safety_state: signals.safetyState,
     // WS-T dispute posture — powers the "Challenged"/"Incorrect" badge on the

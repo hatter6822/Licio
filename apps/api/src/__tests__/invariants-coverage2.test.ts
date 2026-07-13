@@ -767,41 +767,16 @@ describe('SCOI surface edge branches', () => {
     // Invalid UUIDs 422.
     expect((await req('/scoi/reports/not-a-uuid')).status).toBe(422);
     expect(
-      (
-        await req('/scoi/threads/not-a-uuid/actions', {
-          method: 'POST',
-          body: JSON.stringify({ action: 'separate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(422);
-    expect(
       (await req('/scoi/threads/not-a-uuid/bridge-requests', { method: 'POST', body: '{}' }))
         .status,
     ).toBe(422);
     // Missing thread 404 (uuid shape, no record).
     const ghost = randomUUID();
     expect(
-      (
-        await req(`/scoi/threads/${ghost}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'separate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(404);
-    expect(
       (await req(`/scoi/threads/${ghost}/bridge-requests`, { method: 'POST', body: '{}' })).status,
     ).toBe(404);
-    // Roomless thread (no steward scope possible) 404s; merge/annotate
-    // body requirements 422 on a scoped thread.
+    // Roomless thread (no steward scope possible), then scoped guards.
     const { threadId, storyId } = await seedStory(fixture);
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'separate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(404);
     const roomId = randomUUID();
     await fixture.forum.rooms.insert({
       roomId,
@@ -825,73 +800,18 @@ describe('SCOI surface edge branches', () => {
       assignedAt: new Date().toISOString(),
     });
     await fixture.ingestion.stories.updateThread(threadId, { roomId });
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'annotate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(422); // annotate without annotation
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'merge', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(422); // merge without related_thread_id
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({
-            action: 'annotate',
-            reason_code: 'MOD_SPAM_001',
-            annotation: 'No lenses exist yet.',
-          }),
-        })
-      ).status,
-    ).toBe(422); // no lens-tagged interpretations to annotate
-    // A related thread the actor does NOT steward (or that does not
-    // exist) is refused with ONE error shape — no cross-room oracle.
-    const ghostRelated = await req(`/scoi/threads/${threadId}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'separate',
-        reason_code: 'MOD_SPAM_001',
-        related_thread_id: ghost,
-      }),
-    });
-    expect(ghostRelated.status).toBe(422);
-    // SEPARATE records without recomputation (scoi_after mirrors before).
-    const separated = await req(`/scoi/threads/${threadId}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'separate',
-        reason_code: 'MOD_SPAM_001',
-      }),
-    });
-    expect(separated.status).toBe(200);
-    const actions = await fixture.invariants.scoiActions.listForThread(threadId, 5);
-    expect(actions[0]?.action).toBe('separate');
-    expect(actions[0]?.scoiBefore).toBeNull();
-    expect(actions[0]?.scoiAfter).toBeNull();
     // Bridge request without a SCOI baseline 422s (no measurement exists
     // and recompute degrades on a lens-less story).
     expect(
       (await req(`/scoi/threads/${threadId}/bridge-requests`, { method: 'POST', body: '{}' }))
         .status,
     ).toBe(422);
-    // The related thread's action listing sees the merge/separate record.
     void storyId;
   });
 
   it('bridge stores and consumer edges: single-shot credit, no-decrease, missing payloads', async () => {
     const fixture = freshInvariantServices();
-    const { InMemoryBridgeAttemptStore, InMemoryScoiContextActionStore } = await import(
-      '../invariants/stores.js'
-    );
+    const { InMemoryBridgeAttemptStore } = await import('../invariants/stores.js');
     const store = new InMemoryBridgeAttemptStore();
     expect(await store.openForThread('none')).toBeNull();
     expect(
@@ -902,24 +822,6 @@ describe('SCOI surface edge branches', () => {
         resolvedAt: new Date().toISOString(),
       }),
     ).toBeNull();
-    const actions = new InMemoryScoiContextActionStore();
-    await actions.insert({
-      actionId: randomUUID(),
-      action: 'merge',
-      threadId: 'a',
-      relatedThreadId: 'b',
-      storyId: randomUUID(),
-      roomId: null,
-      reasonCode: 'MOD_SPAM_001',
-      annotation: null,
-      actorRef: 'steward:x',
-      scoiBefore: null,
-      scoiAfter: null,
-      createdAt: new Date().toISOString(),
-    });
-    // Listed from BOTH sides of the merge.
-    expect(await actions.listForThread('a', 5)).toHaveLength(1);
-    expect(await actions.listForThread('b', 5)).toHaveLength(1);
     // Consumer ignores events without an open request or with missing fields.
     await fixture.events.router.publish({
       event_id: randomUUID(),

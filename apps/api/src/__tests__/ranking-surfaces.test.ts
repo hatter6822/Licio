@@ -17,7 +17,12 @@ import {
   MINHASH_SHINGLE_K,
 } from '@licio/invariants';
 import { EVERGREEN_PROFILE, rankingDecisionLogSchema } from '@licio/ranking';
-import { feedResponseSchema, topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import {
+  feedResponseSchema,
+  LEGACY_DISTRIBUTION_REASON,
+  topicIdForSlug,
+  UNCLASSIFIED_TOPIC_ID,
+} from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { signatureStory } from '../ingestion/dedup.js';
@@ -316,7 +321,7 @@ describe('topic feed surface (GET /v1/feed?topic=…)', () => {
 });
 
 describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
-  it('SCOI-flagged items are still counted by the context-gate metric', async () => {
+  it('a stored SCOI row shapes nothing on the served wire (coupling removed)', async () => {
     const { storyId } = await seedStory(fixture.ingestion);
     await seedInvariantOutput(fixture.events, {
       invariantType: 'SCOI',
@@ -324,7 +329,6 @@ describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
       scoreVector: { scoi: 0.45, context_state: 'split', lens_count: 3 },
     });
     await runFeatureBatch(featureDeps(), 50, 6);
-    const before = fixture.events.metrics.counter('ranking.context_gate.card');
     const served = await serveFeed(fixture.ranking, {
       userId: null,
       surface: 'front_page',
@@ -333,27 +337,16 @@ describe('wire fields (WS-I.2.4a expansions + WS-I.2.4c context cards)', () => {
       mode: undefined,
     });
     expect(served.items.some((i) => i.story_id === storyId)).toBe(true);
-    // §10.6 observability survives the rating-label removal: a served item
-    // carrying the scoi_context_card constraint flag at a non-low stored level
-    // still increments the context-gate dashboard counter.  The reader-facing
-    // divergence surface is the story page's "Where interpretations differ"
-    // drawer (GET /v1/stories/:id/interpretations), not a feed-card label.
-    expect(fixture.events.metrics.counter('ranking.context_gate.card')).toBe(before + 1);
-    // An unflagged item does not move the counter.
-    const clean = await seedStory(fixture.ingestion);
-    const mid = fixture.events.metrics.counter('ranking.context_gate.card');
-    const second = await serveFeed(fixture.ranking, {
-      userId: null,
-      surface: 'front_page',
-      surfaceRoomId: null,
-      surfaceTopicId: null,
-      mode: undefined,
-    });
-    expect(second.items.some((i) => i.story_id === clean.storyId)).toBe(true);
-    // Only the still-served SCOI-flagged item increments it on the second page.
-    expect(fixture.events.metrics.counter('ranking.context_gate.card')).toBe(
-      mid + (second.items.some((i) => i.story_id === storyId) ? 1 : 0),
-    );
+    // The SCOI→ranking coupling was removed: no context-gate metric, no
+    // constraint flag, no feature contribution.  The reader-facing divergence
+    // surface is the story page's "Where interpretations differ" drawer
+    // (GET /v1/stories/:id/interpretations), which reads the SCOI store
+    // directly and is untouched by the ranking cut.
+    expect(fixture.events.metrics.counter('ranking.context_gate.card')).toBe(0);
+    const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
+    const scored = log?.score_components[storyId];
+    expect(scored?.constraint_flags ?? []).not.toContain('scoi_context_card');
+    expect(scored?.score_components.context_coherence_gain ?? null).toBeNull();
   });
 
   it('cluster representatives carry more_on_this_story with the demoted sibling ids', async () => {
@@ -874,7 +867,7 @@ describe('replay backward-compatibility (pre-baseline_weights decision logs)', (
 });
 
 describe('/v1/feed stability under the kill switch (real stories)', () => {
-  it('the wire contract holds: schema-valid items in time order with the honest reason', async () => {
+  it('the wire contract holds: schema-valid items in time order', async () => {
     const older = await seedStory(fixture.ingestion, {
       publishedAt: new Date(Date.now() - 7_200_000).toISOString(),
     });
@@ -904,7 +897,7 @@ describe('/v1/feed stability under the kill switch (real stories)', () => {
     // and the response still validates the FULL §23.3 item schema.
     expect(body.items.map((item) => item.story_id)).toEqual([newer.storyId, older.storyId]);
     for (const item of body.items) {
-      expect(item.distribution_reason).toBe('Shown in time order while ranking is paused.');
+      expect(item.distribution_reason).toBe(LEGACY_DISTRIBUTION_REASON);
     }
     expect(body.request_id).toBeDefined();
     const log = await fixture.ranking.decisionLogs.getByRequestId(body.request_id as string);

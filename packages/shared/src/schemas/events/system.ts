@@ -84,8 +84,9 @@ export const rankingDecisionLoggedEventSchema = z
     position: z.number().int().nonnegative(),
     /** Signal types that fed the decision (names only, never values). */
     signals_used: z.array(z.string().min(1).max(64)).max(50),
-    /** The simplified user-facing explanation (SPEC §5.4). */
-    explanation_summary: z.string().max(500),
+    /** DEPRECATED — the per-item explanation system was removed; the field
+     *  stays optional so stored pre-removal events keep parsing. */
+    explanation_summary: z.string().max(500).optional(),
     privacy_classification: z.literal('sensitive'),
     retention_tier: z.literal('ranking_log'),
   })

@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// SCOI — context states and ranking actions (WS-H.4.1b/WS-H.4.2e,
-// SPEC §10.4/§10.6).
+// SCOI — context states (WS-H.4.1b, SPEC §10.4).
 //
 // Context states describe the DEGREE OF CONTEXT COLLAPSE — never content
 // quality. "Weaponized" additionally requires a safety-classifier signal:
-// disagreement alone can never produce it (WS-H.4.1b acceptance). Ranking
-// actions are pure descriptions; while SCOI is in shadow they are computed
-// and logged but never applied (WS-H.1.2e), and "high SCOI" always means
-// "travel with context", never suppression of the content as false.
+// disagreement alone can never produce it (WS-H.4.1b acceptance). A high
+// SCOI always means "travel with context", never suppression of the content
+// as false.
 
 export const SCOI_CONTEXT_STATES = [
   'coherent',
@@ -59,84 +57,8 @@ export function contextStateForScore(
   return 'coherent';
 }
 
-/** SPEC §10.6 ranking levels. */
-export const SCOI_RANKING_LEVELS = ['low', 'medium', 'high', 'very_high'] as const;
-export type ScoiRankingLevel = (typeof SCOI_RANKING_LEVELS)[number];
-
-export function rankingLevelForState(state: ScoiContextState): ScoiRankingLevel {
-  switch (state) {
-    case 'coherent':
-      return 'low';
-    case 'ambiguous':
-      return 'medium';
-    case 'split':
-      return 'high';
-    case 'obstructed':
-    case 'weaponized':
-      return 'very_high';
-    default: {
-      const exhaustive: never = state;
-      throw new Error(`unknown context state ${String(exhaustive)}`);
-    }
-  }
-}
-
-/** SPEC §10.6 ranking actions, as pure descriptions (promotion-gated). */
-export interface ScoiRankingAction {
-  requireContextCard: boolean;
-  reduceCrossCommunityAmplification: boolean;
-  prioritizeBridgeRouting: boolean;
-}
-
-export function rankingActionForLevel(level: ScoiRankingLevel): ScoiRankingAction {
-  switch (level) {
-    case 'low':
-      return {
-        requireContextCard: false,
-        reduceCrossCommunityAmplification: false,
-        prioritizeBridgeRouting: false,
-      };
-    case 'medium':
-      return {
-        requireContextCard: true,
-        reduceCrossCommunityAmplification: false,
-        prioritizeBridgeRouting: false,
-      };
-    case 'high':
-      return {
-        requireContextCard: true,
-        reduceCrossCommunityAmplification: true,
-        prioritizeBridgeRouting: false,
-      };
-    case 'very_high':
-      return {
-        requireContextCard: true,
-        reduceCrossCommunityAmplification: true,
-        prioritizeBridgeRouting: true,
-      };
-    default: {
-      const exhaustive: never = level;
-      throw new Error(`unknown ranking level ${String(exhaustive)}`);
-    }
-  }
-}
-
-/** Steward-report recommendation per state (WS-H.4.1c). */
-export function stewardRecommendationForState(state: ScoiContextState): string {
-  switch (state) {
-    case 'coherent':
-      return 'No action needed — interpretations agree across lenses.';
-    case 'ambiguous':
-      return 'Add a context-card prompt: some readers are missing background.';
-    case 'split':
-      return 'Show the lens map before commenting and invite a bridge comment.';
-    case 'obstructed':
-      return 'Slow cross-community spread and request bridge/synthesis contributions.';
-    case 'weaponized':
-      return 'Escalate for review: ambiguity is being used to inflame conflict.';
-    default: {
-      const exhaustive: never = state;
-      throw new Error(`unknown context state ${String(exhaustive)}`);
-    }
-  }
-}
+// The former §10.6 ranking-level/action descriptors and the per-state steward
+// recommendation strings were removed together with the SCOI ranking
+// constraint ladder and the WS-H.4.3d moderator context-action surface: they
+// were pure descriptions with no production consumer. The context states
+// themselves (above) remain the SCOI service's stored output vocabulary.

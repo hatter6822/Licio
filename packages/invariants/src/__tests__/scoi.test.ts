@@ -2,8 +2,8 @@
 //
 // SCOI tests (WS-H.4): coboundary correctness, Laplacian PSD, the
 // normalized Dirichlet energy at its analytic anchor points (0, 0.5, 1),
-// context states (weaponized requires a safety signal), ranking actions,
-// and the v2 H¹ structural diagnostic.
+// context states (weaponized requires a safety signal), and the v2 H¹
+// structural diagnostic.
 import { describe, expect, it } from 'vitest';
 import { jacobiEigSym } from '../math/linalg.js';
 import {
@@ -13,12 +13,9 @@ import {
   explainedCochain,
   h1Diagnostic,
   harmonicRepresentative,
-  rankingActionForLevel,
-  rankingLevelForState,
   type SheafStructure,
   scoiEnergy,
   sheafLaplacian,
-  stewardRecommendationForState,
   validateScoiStateThresholds,
 } from '../scoi/index.js';
 import { float, forAll } from './prop.js';
@@ -176,24 +173,6 @@ describe('SCOI context states (WS-H.4.1b)', () => {
     expect(validateScoiStateThresholds({ ambiguous: 0.5, split: 0.4, obstructed: 0.7 })).toMatch(
       /ambiguous < split/,
     );
-  });
-
-  it('maps states to §10.6 ranking actions (description only)', () => {
-    expect(rankingLevelForState('coherent')).toBe('low');
-    expect(rankingActionForLevel('medium').requireContextCard).toBe(true);
-    expect(rankingActionForLevel('high').reduceCrossCommunityAmplification).toBe(true);
-    expect(rankingActionForLevel('very_high').prioritizeBridgeRouting).toBe(true);
-    expect(rankingActionForLevel('low')).toEqual({
-      requireContextCard: false,
-      reduceCrossCommunityAmplification: false,
-      prioritizeBridgeRouting: false,
-    });
-  });
-
-  it('steward recommendations exist for every state', () => {
-    for (const state of ['coherent', 'ambiguous', 'split', 'obstructed', 'weaponized'] as const) {
-      expect(stewardRecommendationForState(state).length).toBeGreaterThan(10);
-    }
   });
 });
 

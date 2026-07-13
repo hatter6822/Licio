@@ -26,7 +26,6 @@ import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import {
   useSavedStoriesQuery,
-  useStoryInterpretationsQuery,
   useStoryQuery,
   useToggleSavedStoryMutation,
 } from '../../lib/queries.js';
@@ -100,7 +99,6 @@ function StoryCorrectionButton({
 function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElement {
   const t = useT();
   const story = useStoryQuery(storyId);
-  const interpretations = useStoryInterpretationsQuery(storyId);
   const [readerOpen, setReaderOpen] = useState(false);
   const openId = useRef(`source-${storyId}`);
   const navigate = useNavigate();
@@ -191,8 +189,6 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               <ShareStoryButton
                 title={data.title}
                 url={typeof window !== 'undefined' ? window.location.href : ''}
-                needsContext={interpretations.data?.needs_context ?? false}
-                contextStatusPending={interpretations.isPending}
               />
               {/* SPEC §7.6 — the MERI independent-sources drawer (WS-H.2.3a).
                   Visible for every readable story; its reads are lazy (fired

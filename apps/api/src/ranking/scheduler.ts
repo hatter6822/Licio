@@ -12,7 +12,6 @@
 //   4. Runtime-config reload (picks up validated steward writes).
 
 import { hostname } from 'node:os';
-import { EXPLANATION_TEMPLATES } from '@licio/ranking';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { runFeatureBatch } from './features.js';
 import { replayDecision } from './service.js';
@@ -67,16 +66,9 @@ export async function runRankingTick(
     if (config.replaySampleSize > 0) {
       const recent = await services.decisionLogs.query({ limit: config.replaySampleSize });
       let mismatches = 0;
-      let unknownTemplates = 0;
       for (const log of recent.logs) {
         const result = await replayDecision(services, log.request_id);
         if (!result.match) mismatches += 1;
-        // Explanation-consistency check (WS-I.2.6b observability): every
-        // logged explanation template must still exist in the registry — a
-        // removed/renamed template would silently orphan served reasons.
-        for (const templateId of Object.values(log.explanation_ids)) {
-          if (!EXPLANATION_TEMPLATES.has(templateId)) unknownTemplates += 1;
-        }
       }
       if (mismatches > 0) {
         services.events.metrics.increment('ranking.replay.regression_mismatch', mismatches);
@@ -84,10 +76,6 @@ export async function runRankingTick(
           sampled: recent.logs.length,
           mismatches,
         });
-      }
-      if (unknownTemplates > 0) {
-        services.events.metrics.increment('ranking.explanation.unknown_template', unknownTemplates);
-        services.log('ranking.explanation.unknown_template', { count: unknownTemplates });
       }
     }
   } catch (err) {

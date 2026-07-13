@@ -24,7 +24,6 @@ const FULL_ENFORCEMENT: RankingEnforcement = {
   hodge: true,
   meri: true,
   tropical: true,
-  scoi: true,
   gwei: true,
 };
 
@@ -326,7 +325,10 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
     );
   });
 
-  it('SCOI reduced distribution multiplies the score down (enforced only)', () => {
+  it('a stale scoi_level in a persisted feature revision never changes the score', () => {
+    // Parse-compat regression: the SCOI ranking ladder was removed, so a
+    // pre-removal feature revision carrying `scoi_level` scores identically
+    // under full and shadow enforcement.
     const candidates = [makeCandidate(1)];
     const features = featureMap([makeFeatures(1, { scoi_level: 'high' })]);
     const enforced = rankFeasibleSet(
@@ -343,12 +345,7 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
       SHADOW_RANKING_ENFORCEMENT,
       makeContext(),
     );
-    const enforcedScore = enforced.selected[0]?.pwatt_score ?? 0;
-    const shadowScore = shadow.selected[0]?.pwatt_score ?? 0;
-    expect(enforcedScore).toBeCloseTo(
-      shadowScore * EVERGREEN_PROFILE.constraints.scoi_reduce_multiplier,
-      12,
-    );
+    expect(enforced.selected[0]?.pwatt_score).toBe(shadow.selected[0]?.pwatt_score);
   });
 });
 

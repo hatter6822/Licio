@@ -167,7 +167,6 @@ import {
   DrizzleMfciRiskStateStore,
   DrizzlePromotionStore,
   DrizzleRunMetadataStore,
-  DrizzleScoiContextActionStore,
 } from './invariants/drizzle-invariant-stores.js';
 import { RedisSessionTopicSequenceStore } from './invariants/redis-session-store.js';
 import {
@@ -540,7 +539,6 @@ if (db) {
   invariantServices.mfciCases = new DrizzleMfciCaseStore(db);
   invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
   invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
-  invariantServices.scoiActions = new DrizzleScoiContextActionStore(db);
   invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
 }
 // The PHI session-topic sequences are SESSION-SCOPED ephemera (WS-H.6.1a) —
