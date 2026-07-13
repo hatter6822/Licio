@@ -2,17 +2,13 @@
 //
 // Proves the DEVELOPMENT seed showcase actually works end-to-end, through the
 // production read paths: the named test accounts are login-ready, the front
-// page shows the full variety of §5.6 rating labels (not a monotone "Getting
-// Attention"), MERI exposure labels and the SCOI divergence data surface, and
-// the owner-scoped Signal Ledger is non-empty for each test account. This is
-// the regression guard for "every story said Getting Attention" / "reading
-// signals were empty".
-import {
-  handleSchema,
-  type RatingLabelKind,
-  type ThreadListResponse,
-  threadListResponseSchema,
-} from '@licio/shared';
+// page shows the full variety of §5.6 card signals (sources counts, the WS-T
+// corrections tally, dispute badges, safety postures — not a monotone zeroed
+// row), MERI exposure labels and the SCOI divergence data surface, and the
+// owner-scoped Signal Ledger is non-empty for each test account. This is the
+// regression guard for "every card looked identical" / "reading signals were
+// empty".
+import { handleSchema, type ThreadListResponse, threadListResponseSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { userMayPostTopLevel } from '../forum/rooms.js';
@@ -105,37 +101,35 @@ describe('demo seed — development test accounts', () => {
   });
 });
 
-describe('demo seed — the feed shows every rating label', () => {
-  it('serves a varied set of labels, not a monotone default', async () => {
+describe('demo seed — the feed shows every card signal', () => {
+  it('serves a varied set of card signals, not a monotone zeroed row', async () => {
     const items = await fullFrontPage();
-    const labels = new Set<RatingLabelKind>(items.map((i) => i.rating_label));
-    // The seeded public corpus exercises the live-signal §5.6 labels plus the
-    // neutral "New" floor (a story with no active-reading signal — the honest
-    // default; §5.6 gates "Getting Attention" on a real attention signal, so a
-    // plain-attention-only story is proven reachable by the shared unit test).
-    const expected: RatingLabelKind[] = [
-      'new',
-      'deepening',
-      'needs-context',
-      'under-review',
-      'resolved-context',
-      'bridge-active',
-    ];
-    for (const label of expected) expect(labels).toContain(label);
-    // And it is genuinely varied (the bug was a single label across all items).
-    expect(labels.size).toBeGreaterThanOrEqual(6);
+    const byId = new Map(items.map((i) => [i.story_id, i]));
+    // Every §5.6 signal is exercised somewhere in the seeded public corpus:
+    // sourced comments, each corrections-tally posture, a story-level
+    // challenge, a safety review, and the neutral all-zero floor.
+    expect(items.some((i) => i.sources_count > 0)).toBe(true);
+    // S10 — a live comment arena (the hourglass tally).
+    expect(byId.get(S(10))?.corrections.active).toBeGreaterThanOrEqual(1);
+    // S11 — a challenged-and-upheld comment (the ✓ tally).
+    expect(byId.get(S(11))?.corrections.validated).toBeGreaterThanOrEqual(1);
+    // S4 — a correction prevailed against a comment (the ✗ tally).
+    expect(byId.get(S(4))?.corrections.incorrect).toBeGreaterThanOrEqual(1);
+    // S9 — the story itself is challenged (the dispute badge, not the tally:
+    // a story-target arena never double-reports into the comment tally).
+    expect(byId.get(S(9))?.dispute_status).toBe('under_debate');
+    expect(byId.get(S(9))?.corrections.active ?? 0).toBe(0);
   });
 
-  it('labels the sourced-discussion showcase stories "Deepening"', async () => {
+  it('counts the sourced-discussion showcase stories in sources_count', async () => {
     const items = await fullFrontPage();
-    const deepening = items.filter((i) => i.rating_label === 'deepening');
-    const ids = new Set(deepening.map((i) => i.story_id));
+    const byId = new Map(items.map((i) => [i.story_id, i]));
     // S1 (water dataset), S13 (soil-carbon), S22 (aquifer multi-lab) — the
-    // former Well-Sourced showcase trio: lifecycle `deepening` with sourced
-    // comments, read through the comment-centric §5.6 cascade.
-    expect(ids.has(S(1))).toBe(true);
-    expect(ids.has(S(13))).toBe(true);
-    expect(ids.has(S(22))).toBe(true);
+    // sourced showcase trio: published comments carrying citations, the same
+    // count the comment section's "Sources" view resolves.
+    expect(byId.get(S(1))?.sources_count).toBeGreaterThanOrEqual(1);
+    expect(byId.get(S(13))?.sources_count).toBeGreaterThanOrEqual(1);
+    expect(byId.get(S(22))?.sources_count).toBeGreaterThanOrEqual(1);
   });
 
   it('computes MERI source-independence gains (the honest signal; no user-facing label)', async () => {
@@ -171,7 +165,6 @@ describe('demo seed — the feed shows every rating label', () => {
   it('surfaces the coordination-review story as Under Review (descriptive)', async () => {
     const items = await fullFrontPage();
     const s19 = items.find((i) => i.story_id === S(19));
-    expect(s19?.rating_label).toBe('under-review');
     expect(s19?.safety_state).toBe('under-review');
   });
 });
@@ -216,36 +209,55 @@ describe('demo seed — SCOI divergence + reading signals', () => {
 });
 
 describe('demo seed — the story-detail read agrees with the feed', () => {
+  interface DetailSignals {
+    sources_count: number;
+    corrections: { active: number; validated: number; incorrect: number };
+    safety_state: string;
+    dispute_status: string;
+  }
+
   /** Read a story through the real GET /v1/stories/:id route. */
-  async function detail(storyId: string): Promise<{ rating_label: string; safety_state: string }> {
+  async function detail(storyId: string): Promise<DetailSignals> {
     const app = new Hono().route('/v1', createV1Routes());
     const res = await app.request(new Request(`http://localhost/v1/stories/${storyId}`));
     expect(res.status).toBe(200);
-    return (await res.json()) as { rating_label: string; safety_state: string };
+    return (await res.json()) as DetailSignals;
   }
 
-  it('derives the same label on the detail route as on the feed (deepening, under-review)', async () => {
+  it('derives the same card signals on the detail route as on the feed', async () => {
     const items = await fullFrontPage();
-    const feedLabel = (id: string) => items.find((i) => i.story_id === id)?.rating_label;
-    // The detail-route signal assembly (safety + lifecycle + SCOI divergence)
-    // feeds the SAME shared cascade, so non-trivial labels match the feed.
-    const s1 = await detail(S(1)); // lifecycle deepening + sourced discussion
-    expect(s1.rating_label).toBe('deepening');
-    expect(s1.rating_label).toBe(feedLabel(S(1)));
+    const feedItem = (id: string) => items.find((i) => i.story_id === id);
+    // The detail route reads the SAME shared storyCardSignals /
+    // deriveStorySafetyState derivations as the feed, so the surfaces agree.
+    const s1 = await detail(S(1)); // sourced discussion
+    expect(s1.sources_count).toBeGreaterThanOrEqual(1);
+    expect(s1.sources_count).toBe(feedItem(S(1))?.sources_count);
 
     const s19 = await detail(S(19)); // under coordination review
-    expect(s19.rating_label).toBe('under-review');
     expect(s19.safety_state).toBe('under-review');
-    expect(s19.rating_label).toBe(feedLabel(S(19)));
+    expect(s19.safety_state).toBe(feedItem(S(19))?.safety_state);
+
+    const s10 = await detail(S(10)); // live comment arena
+    expect(s10.corrections.active).toBeGreaterThanOrEqual(1);
+    expect(s10.corrections).toEqual(feedItem(S(10))?.corrections);
+
+    const s9 = await detail(S(9)); // story-level challenge
+    expect(s9.dispute_status).toBe('under_debate');
+    expect(s9.dispute_status).toBe(feedItem(S(9))?.dispute_status);
   });
 
-  it('a freshly-submitted story with no signals reads "New" (the honest floor, §5.6)', async () => {
-    // No live signals AND no active-reading signal ⇒ the neutral "New" floor,
-    // never a false "Getting Attention" (which requires real attention).
+  it('a freshly-submitted story with no signals carries the neutral zeroed row', async () => {
+    // No sourced comments, no corrections, no live safety signal ⇒ the honest
+    // all-zero card signals (never a fabricated non-zero count).
     const s21 = await detail(S(21)); // submitted lifecycle, no live signals
-    expect(s21.rating_label).toBe('new');
+    expect(s21.sources_count).toBe(0);
+    expect(s21.corrections).toEqual({ active: 0, validated: 0, incorrect: 0 });
+    expect(s21.safety_state).toBe('ok');
+    expect(s21.dispute_status).toBe('none');
     const items = await fullFrontPage();
-    expect(items.find((i) => i.story_id === S(21))?.rating_label).toBe('new'); // agrees
+    const feed21 = items.find((i) => i.story_id === S(21));
+    expect(feed21?.sources_count).toBe(0); // agrees
+    expect(feed21?.corrections).toEqual({ active: 0, validated: 0, incorrect: 0 });
   });
 });
 

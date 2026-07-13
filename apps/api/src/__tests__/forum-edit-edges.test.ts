@@ -243,7 +243,7 @@ describe('WS-J.2.6 safety-intake durability (KEC1S)', () => {
       10,
     );
     expect(queue).toHaveLength(1);
-    expect((queue[0]?.context as { contribution_id?: string }).contribution_id).toBe(
+    expect((queue[0]?.context as { contribution_id?: string } | undefined)?.contribution_id).toBe(
       retry.contribution.contributionId,
     );
   });

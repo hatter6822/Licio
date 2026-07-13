@@ -58,6 +58,7 @@ import type {
   RoomStewardRecord,
   RoomStore,
   RoomSubscriptionRecord,
+  ThreadSignalCounts,
   UploadRecord,
   UploadStore,
 } from './stores.js';
@@ -382,6 +383,43 @@ export class DrizzleContributionStore implements ContributionStore {
         ),
       );
     return rows[0]?.value ?? 0;
+  }
+
+  async cardSignalCounts(threadIds: readonly string[]): Promise<Map<string, ThreadSignalCounts>> {
+    if (threadIds.length === 0) return new Map();
+    // One conditional-aggregation GROUP BY for the whole feed page — the batch
+    // replacement for the per-story countSourced/countByDisputeStatus round
+    // trips.  Published-only, mirroring the in-memory adapter exactly.
+    const rows = await this.#db
+      .select({
+        threadId: contributionsTable.threadId,
+        sourced: sql`count(*) filter (where ${SOURCED_EXPR})`.mapWith(Number),
+        validated:
+          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'validated')`.mapWith(
+            Number,
+          ),
+        incorrect:
+          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'incorrect')`.mapWith(
+            Number,
+          ),
+      })
+      .from(contributionsTable)
+      .where(
+        and(
+          inArray(contributionsTable.threadId, [...threadIds]),
+          eq(contributionsTable.moderationState, 'published'),
+        ),
+      )
+      .groupBy(contributionsTable.threadId);
+    const counts = new Map<string, ThreadSignalCounts>();
+    for (const row of rows) {
+      counts.set(row.threadId, {
+        sourced: row.sourced,
+        validated: row.validated,
+        incorrect: row.incorrect,
+      });
+    }
+    return counts;
   }
 
   async listCited(opts: {

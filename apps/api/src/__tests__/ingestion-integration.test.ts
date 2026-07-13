@@ -257,7 +257,7 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       lshBandHashes(sigNear),
     );
     const stored = await signatures.getByStoryId(created.story.storyId);
-    expect([...(stored?.minhash as Uint32Array)]).toEqual([...sig]);
+    expect([...((stored?.minhash as Uint32Array | undefined) ?? [])]).toEqual([...sig]);
     const candidates = await signatures.candidatesByBands(
       lshBandHashes(sigNear),
       near.story.storyId,

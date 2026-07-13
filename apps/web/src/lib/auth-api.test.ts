@@ -128,7 +128,9 @@ describe('passkey login', () => {
     const user = await loginWithPasskey();
     expect(user.handle).toBe('ada');
     const verify = calls.find((c) => c.url.includes('/verify'));
-    expect((verify?.body as { response: { type: string } }).response.type).toBe('public-key');
+    expect((verify?.body as { response: { type: string } | undefined })?.response?.type).toBe(
+      'public-key',
+    );
   });
 });
 

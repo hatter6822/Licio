@@ -20,7 +20,6 @@ import {
   attentionIngestAckSchema,
   DEFAULT_NOTIFICATION_PREFERENCES,
   DEFAULT_USER_SETTINGS,
-  deriveRatingLabel,
   deriveStorySafetyState,
   FAIL_CLOSED_FLAGS,
   type FeedResponse,
@@ -28,6 +27,7 @@ import {
   feedQuerySchema,
   feedResponseSchema,
   isSentinelTopicId,
+  legacyRatingLabel,
   notificationPreferencesSchema,
   notificationsResponseSchema,
   okAckSchema,
@@ -54,6 +54,11 @@ import {
 } from '../events/ingest.js';
 import { getEventPipelineServices } from '../events/services.js';
 import type { SignalLedgerRecord } from '../events/stores.js';
+import {
+  EMPTY_CARD_SIGNALS,
+  type StoryCardSignals,
+  storyCardSignals,
+} from '../forum/card-signals.js';
 import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
@@ -78,7 +83,6 @@ import { replyNotifications } from '../lib/reply-notifications.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { getUserSettingsStore } from '../lib/user-settings.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
-import { pwattRowForRanking } from '../pwatt/shadow.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
 import { getTelemetryServices } from '../telemetry/service.js';
@@ -143,25 +147,20 @@ async function settingsKey(cookieHeader: string | undefined): Promise<string | u
 
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } } as const;
 
-/** The live conversation-state signals a story-detail read needs to derive its
- *  SPEC §5.6 rating label + §22.1 safety state IDENTICALLY to the WS-I feed. */
+/** The live safety posture a story-detail read needs to derive its SPEC §22.1
+ *  safety state IDENTICALLY to the WS-I feed. */
 interface StoryReadSignals {
   safetyState: ReturnType<typeof deriveStorySafetyState>;
-  interpretationsDiverge: boolean;
-  /** Served ActiveAttention component (§5.4), or undefined when uncovered —
-   *  keeps the §5.6 default label truthful (Getting Attention vs New). */
-  activeAttention: number | undefined;
 }
 
 /**
- * Assemble the live rating signals for ONE story from STORED shadow outputs (a
+ * Assemble the live safety posture for ONE story from STORED shadow outputs (a
  * detail read never triggers invariant computation): the item safety state +
- * MFCI risk + thread posture, and the latest SCOI energy (interpretation
- * divergence — SCOI energy ≥ the needs-context threshold, matching the
- * story-page "Where interpretations differ" drawer). Fed through the SAME shared
- * `deriveRatingLabel`/`deriveStorySafetyState` the feed uses, so the surfaces
- * agree on every dimension except the SCOI margin (the feed uses its
- * profile-aware context card there instead).
+ * MFCI risk + thread posture, fed through the SAME shared
+ * `deriveStorySafetyState` the feed uses, so the surfaces agree by
+ * construction.  (The SCOI-divergence and PWAtt-attention reads that used to
+ * live here fed only the removed §5.6 rating label; the reader-facing SCOI
+ * surface is the story page's "Where interpretations differ" drawer.)
  */
 async function assembleStoryReadSignals(
   story: StoryRecord,
@@ -169,55 +168,30 @@ async function assembleStoryReadSignals(
 ): Promise<StoryReadSignals> {
   const events = getEventPipelineServices();
   // Invariants are a SOFT dependency: when the platform is not wired, MFCI risk
-  // and the SCOI threshold are simply absent (the read still serves).
+  // is simply absent (the read still serves).
   const invariants = tryGetInvariantServices();
-  const [safeties, mfciRisk, scoiLatest, pwattV1, pwattV0] = await Promise.all([
+  const [safeties, mfciRisk] = await Promise.all([
     events.safetyStore.getMany([story.storyId]),
     invariants ? invariants.mfciRiskStates.get(story.storyId) : Promise.resolve(null),
-    events.invariantStore.latest('SCOI', story.storyId),
-    events.invariantStore.latest('PWAtt_v1', story.storyId),
-    events.invariantStore.latest('PWAtt_v0', story.storyId),
   ]);
-  // Served ActiveAttention (v1 preferred, v0 fallback) for the §5.6 default-label
-  // truthfulness gate; absent when no PWAtt run has covered the story yet. Read
-  // through the SAME §30.5 serving-row gate the feed's feature join uses, so a
-  // pre-lift shadow row, a degraded row, or a code-level revert is ABSENT here
-  // too — otherwise the detail read could label a story `getting-attention`
-  // from a value the feed treats as absent, and the two surfaces would diverge.
-  const servedPwatt = pwattRowForRanking(pwattV1) ?? pwattRowForRanking(pwattV0);
-  const pwattAttention = servedPwatt?.scoreVector['active_attention'];
-  const activeAttention = typeof pwattAttention === 'number' ? pwattAttention : undefined;
   const safetyState = deriveStorySafetyState({
     frozen: safeties.get(story.storyId)?.safetyState === 'frozen',
     mfciRiskState: mfciRisk?.state,
     threadSafetyState: thread?.safetyState,
   });
-  // SCOI interpretation divergence: the latest energy clears the needs-context
-  // threshold (matching the public /interpretations read), and the run actually
-  // covered the story (not an INSUFFICIENT_COVERAGE placeholder). With the
-  // platform unwired there is no SCOI output anyway, so the default threshold is
-  // never consulted in practice — but it keeps the comparison total.
-  const scoi =
-    scoiLatest && typeof scoiLatest.scoreVector['scoi'] === 'number'
-      ? scoiLatest.scoreVector['scoi']
-      : 0;
-  const scoiThreshold = invariants?.config().scoiNeedsContextThreshold ?? 0.4;
-  const interpretationsDiverge =
-    scoiLatest !== null &&
-    !scoiLatest.reasonCodes.includes('INSUFFICIENT_COVERAGE') &&
-    scoi >= scoiThreshold;
-  return { safetyState, interpretationsDiverge, activeAttention };
+  return { safetyState };
 }
 
 /** Map a REAL ingested story onto the established WS-C story-detail wire
  *  shape (the client validates against storyDetailSchema; real submissions
- *  appear through the same contract the demo fixtures established). The rating
- *  label + safety state derive from the SAME shared functions the feed uses. */
+ *  appear through the same contract the demo fixtures established). The card
+ *  signals + safety state derive from the SAME shared functions the feed uses. */
 function realStoryToDetail(
   story: StoryRecord,
   thread: { threadId: string } | null,
   viewer: { isOwner: boolean; roomVisibility: 'public' | 'private' },
   signals: StoryReadSignals,
+  cardSignals: StoryCardSignals,
 ) {
   const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
   return {
@@ -230,13 +204,17 @@ function realStoryToDetail(
     // Best-effort estimate from the bounded excerpt (the full body is never
     // stored, WS-F.1.4f) — a floor, not a measurement.
     reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
-    rating_label: deriveRatingLabel({
+    // SPEC §5.6 — the compact card signals (shared derivation with the feed):
+    // the sourced-comment count and the WS-T corrections tally.
+    sources_count: cardSignals.sourced,
+    corrections: cardSignals.corrections,
+    // DEPRECATED rollout compat: pre-redesign cached bundles REQUIRE
+    // rating_label; emit the legacy approximation until they age out (the
+    // detail path no longer reads PWAtt, so the attention gate floors at
+    // `new` — no pre-redesign detail surface ever rendered the label).
+    rating_label: legacyRatingLabel({
       lifecycleState: story.lifecycleState,
       safetyState: signals.safetyState,
-      interpretationsDiverge: signals.interpretationsDiverge,
-      ...(signals.activeAttention !== undefined
-        ? { activeAttention: signals.activeAttention }
-        : {}),
     }),
     distribution_reason: 'Recently submitted to Licio',
     context_chips: [],
@@ -432,12 +410,22 @@ export function createV1Routes() {
               return c.json(notFound, 404);
             }
             const thread = await ingestion.stories.getThreadByStoryId(storyId);
-            const signals = await assembleStoryReadSignals(real, thread);
+            const events = getEventPipelineServices();
+            // The card signals share the removal-aware derivation with the
+            // feed: a moderation-removed thread yields the neutral signals
+            // (never counts for a conversation the reader cannot open).
+            const [signals, cardSignalsByStory] = await Promise.all([
+              assembleStoryReadSignals(real, thread),
+              storyCardSignals(
+                forum,
+                events.safetyStore,
+                new Map([[storyId, thread?.threadId ?? null]]),
+              ),
+            ]);
             // WS-G.3.3 — a WS-J moderation removal makes the thread routes 404
             // (threadReadableToUser) and drops it from the directory; suppress
             // the id here too so the story page renders no conversation link to a
             // guaranteed-404 thread.
-            const events = getEventPipelineServices();
             const linkThread =
               thread !== null &&
               (await events.safetyStore.get(thread.threadId))?.safetyState === 'removed'
@@ -453,6 +441,7 @@ export function createV1Routes() {
                     roomVisibility: room.visibility,
                   },
                   signals,
+                  cardSignalsByStory.get(storyId) ?? EMPTY_CARD_SIGNALS,
                 ),
               ),
             );

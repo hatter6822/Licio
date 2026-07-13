@@ -25,7 +25,9 @@ export function feedItemToCard(item: FeedItem): StoryCardData {
       ...(item.url ? { url: item.url } : {}),
       readingMinutes: item.reading_minutes,
     },
-    ratingLabel: item.rating_label,
+    sourcesCount: item.sources_count,
+    corrections: item.corrections,
+    ...(item.safety_state !== 'ok' ? { safetyState: item.safety_state } : {}),
     ...(item.dispute_status !== 'none' ? { disputeStatus: item.dispute_status } : {}),
     distributionReason: item.distribution_reason,
     contextChips: item.context_chips.map((chip) => {

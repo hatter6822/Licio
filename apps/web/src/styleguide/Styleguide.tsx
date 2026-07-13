@@ -10,8 +10,8 @@ import { DefinedTerm } from '../components/cognitive/DefinedTerm/index.js';
 import { ExplainLikeNewLens } from '../components/cognitive/ExplainLikeNewLens/index.js';
 import { ProgressiveDisclosure } from '../components/cognitive/ProgressiveDisclosure/index.js';
 import { TranslationDisclosure } from '../components/i18n/TranslationDisclosure/index.js';
-import { RatingLabel, ratingLabelKinds } from '../components/story/RatingLabel/index.js';
 import { StoryCard } from '../components/story/StoryCard/index.js';
+import { StorySignals } from '../components/story/StorySignals/index.js';
 import { UgcBody } from '../components/ugc/UgcBody.js';
 import { AppShell } from '../components/ui/AppShell/index.js';
 import { Avatar } from '../components/ui/Avatar/index.js';
@@ -163,11 +163,13 @@ function Gallery(): React.ReactElement {
           </div>
         </Section>
 
-        <Section title="Rating labels">
+        <Section title="Story signals">
           <div className="flex flex-wrap gap-2">
-            {ratingLabelKinds.map((kind) => (
-              <RatingLabel key={kind} kind={kind} />
-            ))}
+            <StorySignals
+              sourcesCount={3}
+              corrections={{ active: 1, validated: 2, incorrect: 1 }}
+              safetyState="under-review"
+            />
           </div>
         </Section>
 
@@ -206,12 +208,10 @@ function Gallery(): React.ReactElement {
               url: '#main',
               readingMinutes: 4,
             }}
-            ratingLabel="deepening"
+            sourcesCount={3}
+            corrections={{ active: 1, validated: 0, incorrect: 0 }}
             distributionReason="Rising from independent source opens and sourced comments"
-            contextChips={[
-              { id: 'c1', label: '3 sourced comments' },
-              { id: 'c2', label: '2 primary sources' },
-            ]}
+            contextChips={[{ id: 'c2', label: '2 primary sources' }]}
             onSave={() => undefined}
             onOpenContext={() => undefined}
           />

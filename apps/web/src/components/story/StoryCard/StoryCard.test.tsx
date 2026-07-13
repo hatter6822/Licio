@@ -13,10 +13,10 @@ const sample: StoryCardData = {
     url: 'https://example.org/story',
     readingMinutes: 4,
   },
-  ratingLabel: 'deepening',
+  sourcesCount: 3,
+  corrections: { active: 1, validated: 1, incorrect: 0 },
   distributionReason: 'Rising from independent source opens and sourced comments',
   contextChips: [
-    { id: 'c1', label: '3 sourced comments' },
     { id: 'c2', label: '2 primary sources' },
     { id: 'c3', label: 'low coordination risk' },
   ],
@@ -38,9 +38,13 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
     expect(within(heading).queryByRole('link')).toBeNull();
 
     expect(screen.getByText('Delta Observer')).toBeInTheDocument();
-    expect(screen.getByText('Deepening')).toBeInTheDocument();
-    expect(screen.getByText(sample.distributionReason)).toBeInTheDocument();
+    // The §5.6 signal row: the sources chip and corrections tallies carry a
+    // full screen-reader expansion, never a bare number.
     expect(screen.getByText('3 sourced comments')).toBeInTheDocument();
+    expect(screen.getByText('1 correction under debate')).toBeInTheDocument();
+    expect(screen.getByText('1 comment challenged and validated')).toBeInTheDocument();
+    expect(screen.getByText(sample.distributionReason)).toBeInTheDocument();
+    expect(screen.getByText('2 primary sources')).toBeInTheDocument();
     expect(screen.getByText('4 min read')).toBeInTheDocument();
     expect(screen.getByText('What changed upstream?')).toBeInTheDocument();
   });
@@ -58,13 +62,17 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
         source: 'Wire Co',
         readingMinutes: 1,
       },
-      ratingLabel: 'getting-attention',
+      sourcesCount: 0,
+      corrections: { active: 0, validated: 0, incorrect: 0 },
       distributionReason: 'New from a wire source',
     };
-    render(<StoryCard {...minimal} />);
+    const { container } = render(<StoryCard {...minimal} />);
     expect(screen.getByRole('heading', { name: 'Quiet update' })).toBeInTheDocument();
     expect(screen.queryByText('lenses')).toBeNull();
     expect(screen.getByText('1 min read')).toBeInTheDocument();
+    // A story with all-neutral signals renders NO chip row at all — the honest
+    // neutral floor is empty, never a fabricated label.
+    expect(container.querySelectorAll('svg').length).toBe(0);
   });
 
   it('has no axe violations', async () => {
@@ -76,14 +84,14 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
 });
 
 describe('StoryCard screen-reader order (WS-B.2.1c / WCAG 1.3.2)', () => {
-  it('places content in DOM order: title → source → rating → reason → chips → estimate → preview', () => {
+  it('places content in DOM order: title → source → signals → reason → chips → estimate → preview', () => {
     render(<StoryCard {...sample} />);
     const ordered = [
       screen.getByText(sample.story.title),
       screen.getByText('Delta Observer'),
-      screen.getByText('Deepening'),
-      screen.getByText(sample.distributionReason),
       screen.getByText('3 sourced comments'),
+      screen.getByText(sample.distributionReason),
+      screen.getByText('2 primary sources'),
       screen.getByText('4 min read'),
       screen.getByText('What changed upstream?'),
     ];
