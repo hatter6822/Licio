@@ -59,8 +59,17 @@ export function buildDebateJudgeRunner(now: () => number): DebateJudgeRunner {
     if (!outcome.ok) return null;
     // A room-agent verdict lands in the WS-U agent action log (the provenance
     // triple; reversible — the steward's 24h overrule is the human remedy).
+    // Deferred to `onCommitted`: the log appends ONLY after the verdict's
+    // recordVerdict CAS lands, so a concurrent judge that loses the race
+    // (the supported awaiting_verdict re-claim path) never logs an
+    // adjudication the arena row discarded.
     if (outcome.viaRoomAgent && room !== null) {
-      await recordRoomDebateAction(room, context.debateId, outcome.verdict);
+      const committedRoom = room;
+      return {
+        verdict: outcome.verdict,
+        outputId: outcome.outputId,
+        onCommitted: () => recordRoomDebateAction(committedRoom, context.debateId, outcome.verdict),
+      };
     }
     return { verdict: outcome.verdict, outputId: outcome.outputId };
   };

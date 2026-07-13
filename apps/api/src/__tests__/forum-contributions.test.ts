@@ -640,3 +640,207 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     expect(child?.parentContributionId).toBe(question.contribution_id);
   });
 });
+
+describe('WS-T — lock/removal races, activity gaming, and debate-write access gates', () => {
+  const rethrow = (err: unknown): never => {
+    throw err;
+  };
+
+  async function openArena(): Promise<{ targetId: string; debateId: string }> {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    return {
+      targetId: target.contribution_id,
+      debateId: correction.metadata.debate_arena_id ?? '',
+    };
+  }
+
+  it('a NO-OP edit (identical body) does not reset the debate activity clocks', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    const before = await fixture.forum.debates.getById(debateId);
+    nowMs += 60_000;
+    // Identical body → immaterial: the side's clock must NOT move, or a party
+    // could ping contentless PATCHes to dodge the both-sides-idle expedite.
+    const noop = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: target.body },
+        cookie,
+      ),
+    );
+    expect(noop.status).toBe(200);
+    let after = await fixture.forum.debates.getById(debateId);
+    expect(after?.incumbentLastActiveAt).toBe(before?.incumbentLastActiveAt);
+    // A MATERIAL edit still counts as activity.
+    const real = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'Genuinely new material.' },
+        cookie,
+      ),
+    );
+    expect(real.status).toBe(200);
+    after = await fixture.forum.debates.getById(debateId);
+    expect(after?.incumbentLastActiveAt).toBe(new Date(nowMs).toISOString());
+  });
+
+  it('a FLAGGED edit racing the lock refreshes the snapshot as the SUPPRESSED side', async () => {
+    // A fixture whose safety classifier flags a malware-domain citation.
+    const flagged = freshForumServices({
+      now: () => nowMs,
+      config: { malwareDomains: ['evil.example'] },
+      forumConfig: { contributionsPerMinute: 100 },
+    });
+    const session = await seedUserWithSession(flagged.identity);
+    const seeded = await seedThread(flagged);
+    const mk = async (body: Record<string, unknown>) => {
+      const res = await app().request(
+        jsonRequest('/v1/contributions', 'POST', body, session.cookie),
+      );
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { contribution: ContributionPublic }).contribution;
+    };
+    const target = await mk(contributionBody('comment', seeded.threadId));
+    const correction = await mk(
+      contributionBody('correction', seeded.threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // The lock lands BETWEEN the edit's touch-CAS and its applyEdit — simulated
+    // by locking inside the store write itself.
+    const store = flagged.forum.contributions;
+    const realApplyEdit = store.applyEdit.bind(store);
+    let raced = false;
+    store.applyEdit = async (...args: Parameters<typeof realApplyEdit>) => {
+      if (!raced) {
+        raced = true;
+        await flagged.forum.debates.shiftDeadlines(debateId, {
+          editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+        });
+        await runDebateSchedulerTick(rethrow);
+        expect((await flagged.forum.debates.getById(debateId))?.state).toBe('locked');
+      }
+      return realApplyEdit(...args);
+    };
+    // The edit introduces a malware citation: the floor HOLDS it (under_review).
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        {
+          contribution_id: target.contribution_id,
+          body: 'Actually see this.',
+          citations: [{ url: 'https://evil.example/payload' }],
+        },
+        session.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(
+      (await flagged.forum.contributions.getById(target.contribution_id))?.moderationState,
+    ).toBe('under_review');
+    // The reconcile refreshed the snapshot AFTER the hold applied: the judged
+    // side is the SUPPRESSED content — never the held body or its citation.
+    const arena = await flagged.forum.debates.getById(debateId);
+    expect(arena?.state).toBe('locked');
+    expect(arena?.lockedContent?.target.body).toBe('');
+    expect(arena?.lockedContent?.target.citations).toEqual([]);
+  });
+
+  it("an arena that opens DURING a removal is closed by the removal's late pass", async () => {
+    const { targetId, debateId } = await openArena();
+    // Simulate the interleave: the removal's FIRST party snapshot misses the
+    // just-opened arena; the post-tombstone re-read must still see and close it.
+    const store = fixture.forum.debates;
+    const real = store.getActiveForComment.bind(store);
+    let first = true;
+    store.getActiveForComment = async (contributionId: string) => {
+      if (first && contributionId === targetId) {
+        first = false;
+        return null;
+      }
+      return real(contributionId);
+    };
+    const res = await app().request(
+      new Request(`http://local/v1/contributions/${targetId}`, {
+        method: 'DELETE',
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect((await fixture.forum.contributions.getById(targetId))?.moderationState).toBe('removed');
+    // The late pass closed the arena with the incumbent's exit (concession).
+    const arena = await fixture.forum.debates.getById(debateId);
+    expect(arena?.state).toBe('resolved');
+    expect(arena?.decidedBy).toBe('concession');
+  });
+
+  it('debate WRITES are gated on thread readability (position/withdraw/concede 404 once pulled)', async () => {
+    const { debateId } = await openArena();
+    // While readable, the party posts a rebuttal normally.
+    const okRes = await app().request(
+      jsonRequest(
+        `/v1/debates/${debateId}/position`,
+        'POST',
+        { summary: 'A live rebuttal.', citations: [{ url: 'https://example.org/live' }] },
+        cookie,
+      ),
+    );
+    expect(okRes.status).toBe(200);
+    // The floor pulls the thread (WS-J item-safety `removed`): every debate
+    // WRITE now 404s exactly like the reads — party status never outlives
+    // access to the conversation.
+    await fixture.events.safetyStore.set({
+      itemId: threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'mod-1',
+      updatedAt: new Date(nowMs).toISOString(),
+    });
+    const position = await app().request(
+      jsonRequest(
+        `/v1/debates/${debateId}/position`,
+        'POST',
+        { summary: 'Should be unreachable.', citations: [{ url: 'https://example.org/x' }] },
+        cookie,
+      ),
+    );
+    expect(position.status).toBe(404);
+    const withdraw = await app().request(
+      jsonRequest(`/v1/debates/${debateId}/withdraw`, 'POST', {}, cookie),
+    );
+    expect(withdraw.status).toBe(404);
+    const concede = await app().request(
+      jsonRequest(`/v1/debates/${debateId}/concede`, 'POST', {}, cookie),
+    );
+    expect(concede.status).toBe(404);
+  });
+
+  it('suppresses a moderation-held target body from the story debate summaries', async () => {
+    const { targetId, debateId } = await openArena();
+    const storyId = await fixture.ingestion.stories.getStoryIdByThreadId(threadId);
+    const summaries = async () => {
+      const res = await app().request(
+        new Request(`http://local/v1/stories/${storyId}/debates`, { headers: { cookie } }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        debates: { debate_id: string; target_excerpt: string | null }[];
+      };
+      return body.debates.find((d) => d.debate_id === debateId);
+    };
+    // Published target: the excerpt serves the body.
+    expect((await summaries())?.target_excerpt).not.toBeNull();
+    // Held target: the discovery list must not leak the withheld text.
+    await fixture.forum.contributions.setModerationState(targetId, 'under_review');
+    expect((await summaries())?.target_excerpt).toBeNull();
+  });
+});

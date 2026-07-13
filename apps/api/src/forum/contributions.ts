@@ -872,6 +872,16 @@ export async function editContribution(
   // Metadata edits are deliberately NOT accepted in v0 (the structured fields
   // define the contribution's meaning; changing them is a new contribution).
 
+  // WS-T — only a MATERIAL change (the body or citations actually differ from
+  // the stored row) counts as debate activity below: a no-op PATCH (empty
+  // patch, or values identical to what is already stored) must NOT reset the
+  // side's *_last_active_at clock, or a party could ping contentless edits to
+  // dodge the both-sides-idle expedite all the way to the 23h deadline.
+  const materialChange =
+    (patch.body !== undefined && patch.body !== existing.body) ||
+    (patch.citations !== undefined &&
+      JSON.stringify(patch.citations) !== JSON.stringify(existing.citations));
+
   // Safety re-screen (WS-G.3.1 parity): an edit can introduce exactly the
   // content the create-time classifier would have held — a denylisted URL
   // in the body or citations.  Classify the contribution AS IT WILL READ
@@ -911,19 +921,23 @@ export async function editContribution(
   // post-edit reconcile below must police (an arena already judged/terminal
   // BEFORE the edit legitimately allows it and needs no reconciliation).
   const racedArenaIds: string[] = [];
-  for (const { arena, side } of debateParties) {
-    if (arena.state !== 'open') continue;
-    racedArenaIds.push(arena.debateId);
-    if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
-      // The CAS lost: the arena left `open` during the passes above.  Only a
-      // pre-verdict freeze rejects; a debate that ENDED meanwhile (withdrawn,
-      // conceded, judged) frees the author to edit.
-      const current = await forum.debates.getById(arena.debateId);
-      if (
-        current !== null &&
-        (current.state === 'locked' || current.state === 'awaiting_verdict')
-      ) {
-        return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+  // An IMMATERIAL patch skips the touch entirely (no activity to record, no
+  // snapshot content to change — see `materialChange` above).
+  if (materialChange) {
+    for (const { arena, side } of debateParties) {
+      if (arena.state !== 'open') continue;
+      racedArenaIds.push(arena.debateId);
+      if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
+        // The CAS lost: the arena left `open` during the passes above.  Only a
+        // pre-verdict freeze rejects; a debate that ENDED meanwhile (withdrawn,
+        // conceded, judged) frees the author to edit.
+        const current = await forum.debates.getById(arena.debateId);
+        if (
+          current !== null &&
+          (current.state === 'locked' || current.state === 'awaiting_verdict')
+        ) {
+          return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+        }
       }
     }
   }
@@ -936,17 +950,107 @@ export async function editContribution(
     };
   }
 
+  // The WS-T lock-race reconcile runs BELOW, after the moderation decision —
+  // a snapshot refresh must read the row's FINAL moderation state, never a
+  // provisionally-published body the floor/agent is about to hold.
+  // The WS-U in-room agent RE-MODERATES the edited content (parity with the
+  // create path, WS-U §24.6): an edit-to-violate-the-community-policy is caught
+  // here too. Combined FLOOR-DOMINANTLY with the platform verdict (the agent can
+  // only add caution, never lower a floor decision).
+  const floorState: ModState =
+    verdict.disposition === 'block'
+      ? 'removed'
+      : verdict.disposition === 'flag'
+        ? 'under_review'
+        : 'published';
+  let target: ModState = floorState;
+  let agentEscalated = false;
+  let agentReason: string | null = null;
+  if (editThread?.roomId != null && forum.agentModerator !== null) {
+    const agent = await forum.agentModerator.moderateContribution({
+      roomId: editThread.roomId,
+      contributionId,
+      authorUserId: userId,
+      type: existing.type,
+      body: patch.body ?? existing.body,
+      citationCount: (patch.citations ?? existing.citations).length,
+      attachmentCount: Array.isArray(existing.metadata['attachment_ids'])
+        ? existing.metadata['attachment_ids'].length
+        : 0,
+    });
+    if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[target]) {
+      target = agent.state;
+      agentReason = agent.reason ?? null;
+      agentEscalated = true;
+    }
+  }
+  // Edit-to-introduce-spam/malware (floor) or to-violate-community-policy (agent)
+  // is caught here: `removed` removes the edit (appealable system action);
+  // `under_review` holds it for review.
+  let finalContribution = edited;
+  if (target !== 'published' && edited.moderationState === 'published') {
+    forum.metrics.increment(
+      agentEscalated && verdict.disposition === 'clear'
+        ? 'contributions.edit_agent_flagged'
+        : 'contributions.edit_safety_flagged',
+    );
+    const held = await forum.contributions.setModerationState(contributionId, target);
+    if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
+      // Awaited (not background): the auto-removal's appealable action/audit/
+      // notice must be durable with the removal (no silent auto-removal).
+      await forum.autoModerationSink.recordContentAutoBlock({
+        contributionId,
+        authorUserId: userId,
+        reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+        reasons: verdict.reasons,
+      });
+    }
+    const storyId = await bundle.ingestion.stories.getStoryIdByThreadId(existing.threadId);
+    await bundle.ingestion.reviewQueue.insert({
+      kind: 'contribution_safety_hold',
+      storyId,
+      context: {
+        contribution_id: contributionId,
+        thread_id: existing.threadId,
+        reasons: verdict.disposition !== 'clear' ? verdict.reasons : ['in_room_agent'],
+        trigger: 'edit',
+        ...(agentEscalated ? { source: 'in_room_agent' } : {}),
+      },
+      status: 'pending',
+      resolution: null,
+      resolvedBy: null,
+      resolvedAt: null,
+      notBefore: null,
+    });
+    // The in-room agent held an edit the floor cleared: notify the author with
+    // the agent's statement of reasons (no silent sanction).
+    if (agentEscalated && verdict.disposition === 'clear' && forum.autoModerationSink !== null) {
+      await forum.autoModerationSink.recordAgentHold({
+        contributionId,
+        authorUserId: userId,
+        removed: target === 'removed',
+        reason: agentReason,
+      });
+    }
+    finalContribution = held ?? edited;
+  }
   // WS-T — the residual sliver: a lock that lands BETWEEN the touch-CAS and
   // `applyEdit`.  Reconcile forward while every raced arena is still `locked`
   // (re-snapshot the now-current content — the queue has not claimed them, so
   // the judge scores exactly what the live row shows); once ANY is claimed/
   // judged it is too late, so the edit is REVERTED (an honest edit-history
   // entry) and the writer told `debate_locked` — never a silently unjudged
-  // live change.  Two passes ACROSS the arenas: verify every raced arena is
-  // refreshable BEFORE committing any refresh, so a dual-arena correction
-  // never leaves one arena's snapshot carrying an edit the other forced us to
-  // revert (and if a claim still lands between the passes, the refreshed
-  // snapshots are best-effort restored from the reverted row).
+  // live change.  Positioned AFTER the moderation decision above on purpose:
+  // the refresh snapshot reads the row's FINAL moderation state, so an edit
+  // the floor/agent held refreshes into the snapshot as the SUPPRESSED side —
+  // the adjudicator never scores material moderation is withholding.  (On the
+  // revert path a hold that was already applied stays applied: the restored
+  // pre-edit content simply waits out the review — caution over convenience.)
+  // Two passes ACROSS the arenas: verify every raced arena is refreshable
+  // BEFORE committing any refresh, so a dual-arena correction never leaves
+  // one arena's snapshot carrying an edit the other forced us to revert (and
+  // if a claim still lands between the passes, the refreshed snapshots are
+  // best-effort restored from the reverted row).
   if (debateDeps !== null) {
     const revertEdit = async (): Promise<void> => {
       await forum.contributions.applyEdit(
@@ -999,106 +1103,18 @@ export async function editContribution(
       return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
     }
   }
-  // The WS-U in-room agent RE-MODERATES the edited content (parity with the
-  // create path, WS-U §24.6): an edit-to-violate-the-community-policy is caught
-  // here too. Combined FLOOR-DOMINANTLY with the platform verdict (the agent can
-  // only add caution, never lower a floor decision).
-  const floorState: ModState =
-    verdict.disposition === 'block'
-      ? 'removed'
-      : verdict.disposition === 'flag'
-        ? 'under_review'
-        : 'published';
-  let target: ModState = floorState;
-  let agentEscalated = false;
-  let agentReason: string | null = null;
-  if (editThread?.roomId != null && forum.agentModerator !== null) {
-    const agent = await forum.agentModerator.moderateContribution({
-      roomId: editThread.roomId,
-      contributionId,
-      authorUserId: userId,
-      type: existing.type,
-      body: patch.body ?? existing.body,
-      citationCount: (patch.citations ?? existing.citations).length,
-      attachmentCount: Array.isArray(existing.metadata['attachment_ids'])
-        ? existing.metadata['attachment_ids'].length
-        : 0,
-    });
-    if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[target]) {
-      target = agent.state;
-      agentReason = agent.reason ?? null;
-      agentEscalated = true;
-    }
-  }
-  // Edit-to-introduce-spam/malware (floor) or to-violate-community-policy (agent)
-  // is caught here: `removed` removes the edit (appealable system action);
-  // `under_review` holds it for review.
-  if (target !== 'published' && edited.moderationState === 'published') {
-    forum.metrics.increment(
-      agentEscalated && verdict.disposition === 'clear'
-        ? 'contributions.edit_agent_flagged'
-        : 'contributions.edit_safety_flagged',
-    );
-    const held = await forum.contributions.setModerationState(contributionId, target);
-    if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
-      // Awaited (not background): the auto-removal's appealable action/audit/
-      // notice must be durable with the removal (no silent auto-removal).
-      await forum.autoModerationSink.recordContentAutoBlock({
-        contributionId,
-        authorUserId: userId,
-        reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
-        reasons: verdict.reasons,
-      });
-    }
-    const storyId = await bundle.ingestion.stories.getStoryIdByThreadId(existing.threadId);
-    await bundle.ingestion.reviewQueue.insert({
-      kind: 'contribution_safety_hold',
-      storyId,
-      context: {
-        contribution_id: contributionId,
-        thread_id: existing.threadId,
-        reasons: verdict.disposition !== 'clear' ? verdict.reasons : ['in_room_agent'],
-        trigger: 'edit',
-        ...(agentEscalated ? { source: 'in_room_agent' } : {}),
-      },
-      status: 'pending',
-      resolution: null,
-      resolvedBy: null,
-      resolvedAt: null,
-      notBefore: null,
-    });
-    // The in-room agent held an edit the floor cleared: notify the author with
-    // the agent's statement of reasons (no silent sanction).
-    if (agentEscalated && verdict.disposition === 'clear' && forum.autoModerationSink !== null) {
-      await forum.autoModerationSink.recordAgentHold({
-        contributionId,
-        authorUserId: userId,
-        removed: target === 'removed',
-        reason: agentReason,
-      });
-    }
-    // WS-T — fan the arena frames out ONLY NOW, after the hold/removal state
-    // has been applied: the projection reads the CURRENT row, so a held edit
-    // broadcasts as the suppressed content, never as a live body the
-    // moderation pass is about to pull.
-    if (debateDeps !== null) {
-      for (const { arena } of debateParties) {
-        await rebroadcastArena(debateDeps, arena.debateId);
-      }
-    }
-    forum.metrics.increment('contributions.edited');
-    return { ok: true, contribution: held ?? edited };
-  }
-  // WS-T — the published edit's fresh material fans out to arena viewers
-  // (after the moderation decision above cleared it as published; the
-  // activity clocks were already reset by the pre-write touch-CAS).
+  // WS-T — fan the arena frames out ONLY NOW, after BOTH the moderation state
+  // and the lock-race reconcile have settled: the projection reads the CURRENT
+  // row, so a held edit broadcasts as the suppressed content — never as a live
+  // body the moderation pass was about to pull — and a refreshed snapshot
+  // frames exactly what the judge will score.
   if (debateDeps !== null) {
     for (const { arena } of debateParties) {
       await rebroadcastArena(debateDeps, arena.debateId);
     }
   }
   forum.metrics.increment('contributions.edited');
-  return { ok: true, contribution: edited };
+  return { ok: true, contribution: finalContribution };
 }
 
 /**
@@ -1156,14 +1172,35 @@ export async function removeContribution(
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
   }
+  // WS-T — close the removal-vs-open race from THIS side: an arena that
+  // opened against this contribution between the party snapshot above and the
+  // tombstone was invisible to the first close.  Re-read live arenas AFTER
+  // the tombstone — each side writes before it reads, so either this pass
+  // sees the late arena (and closes it with the party's exit) or the opener's
+  // post-open target recheck sees the tombstone (and voids the arena itself).
+  const lateDeps = debateDeps ?? buildDebateDeps(forum, bundle.ingestion);
+  const lateParties = (await liveArenasForContribution(forum.debates, contributionId)).filter(
+    ({ arena }) => arena.state === 'open' && !closedArenaIds.includes(arena.debateId),
+  );
+  if (lateParties.length > 0) {
+    const lateOutcome = await closeDebatesForRemoval(lateDeps, lateParties, userId);
+    if (lateOutcome.ok) {
+      closedArenaIds = [...closedArenaIds, ...lateOutcome.closedIds];
+    } else {
+      // The opener's own void (or a concurrent close) beat us — the arena is
+      // no longer open; nothing further to do here, but leave a trace.
+      lateDeps.log('forum.debate_removal_late_close_skipped', {
+        contribution_id: contributionId,
+        arena_ids: lateParties.map(({ arena }) => arena.debateId),
+      });
+    }
+  }
   // The close above broadcast its terminal frame BEFORE the tombstone landed —
   // and a client stops streaming a terminal arena, so without this it would
   // keep the pre-removal body forever.  Re-broadcast now: the projection reads
   // the tombstoned row and serves the suppressed content.
-  if (debateDeps !== null) {
-    for (const debateId of closedArenaIds) {
-      await rebroadcastArena(debateDeps, debateId);
-    }
+  for (const debateId of closedArenaIds) {
+    await rebroadcastArena(lateDeps, debateId);
   }
   forum.metrics.increment('contributions.removed');
   return { ok: true, contribution: removed };

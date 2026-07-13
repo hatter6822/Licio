@@ -62,11 +62,22 @@ export interface DebateJudgeContext {
  * the deterministic MLP) + the AIOutputRecord (apps/api ai-governance/debate.ts).
  * A null result means the judge was UNAVAILABLE/BLOCKED — the arena resolves
  * fail-closed to `inconclusive` (nothing is tagged incorrect).
+ *
+ * `onCommitted` (optional) runs ONLY after the verdict has durably landed on
+ * the arena row (the `recordVerdict` CAS succeeded).  Side effects that must
+ * describe an EFFECTIVE decision — the WS-U room-agent action log — belong
+ * there, never in the runner body: two concurrent judges can race the CAS,
+ * and the loser's result is discarded, so provenance recorded pre-CAS would
+ * credit a verdict that never took effect.
  */
 export type DebateJudgeRunner = (
   context: DebateJudgeContext,
   input: DebateJudgeInput,
-) => Promise<{ verdict: DebateJudgeVerdict; outputId: string | null } | null>;
+) => Promise<{
+  verdict: DebateJudgeVerdict;
+  outputId: string | null;
+  onCommitted?: () => Promise<void>;
+} | null>;
 
 /** Resolve a user's public identity for the arena projection (null = tombstone). */
 export type DebateAuthorResolver = (
@@ -278,6 +289,32 @@ export async function maybeEnterDebate(
     resolvedAt: null,
   });
   if (arena === null) return null;
+  // WS-T — close the open-vs-removal race: an author removing this target
+  // re-reads live arenas AFTER their tombstone, and we re-read the target
+  // AFTER our open.  One side must observe the other (each writes before it
+  // reads), so a challenge can never survive against content whose author
+  // already tombstoned it: if the target is no longer served, VOID the arena
+  // we just opened (withdrawn, no dispute tag ever set) and treat the
+  // correction as debate-less.
+  let targetWithheld = false;
+  if (targetType === 'comment' && targetContributionId !== null) {
+    const recheck = await deps.contributions.getById(targetContributionId);
+    targetWithheld =
+      recheck === null ||
+      recheck.moderationState === 'removed' ||
+      recheck.moderationState === 'hidden';
+  } else if (targetStoryId !== null) {
+    targetWithheld = (await deps.storyContent(targetStoryId)) === null;
+  }
+  if (targetWithheld) {
+    await deps.debates.withdraw(debateId, nowIso);
+    deps.log('forum.debate_voided_target_removed', {
+      debate_id: debateId,
+      target_type: targetType,
+      story_id: correction.storyId,
+    });
+    return null;
+  }
   // Mark the challenged target `under_debate` (visible; not hidden).
   if (targetType === 'comment' && targetContributionId !== null) {
     await deps.contributions.setDisputeStatus(targetContributionId, 'under_debate');
@@ -547,6 +584,11 @@ export async function judgeDebateArena(
         };
   const updated = await deps.debates.recordVerdict(debateId, patch);
   if (updated === null) return null;
+  // The verdict is durable — NOW run the runner's post-commit effects (the
+  // WS-U agent action log).  A runner that lost the recordVerdict CAS above
+  // never reaches this line, so the log only ever describes verdicts that
+  // actually took effect.
+  if (result?.onCommitted) await result.onCommitted();
   deps.log('forum.debate_judged', {
     debate_id: debateId,
     verdict: patch.verdict,

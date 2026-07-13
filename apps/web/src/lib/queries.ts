@@ -470,15 +470,22 @@ export function useCreateCommentMutation(storyId: string) {
 
 /**
  * The story's ACTIVE debate arenas (the discovery list).  Light polling keeps
- * the countdowns + newly-opened arenas fresh while the reader is on the story;
- * a story with no live debate simply returns an empty list.
+ * the countdowns + newly-opened arenas fresh while the reader is on the
+ * story — INCLUDING a story that currently has none: a challenge filed while
+ * the reader sits on the page must still surface, so the empty state keeps a
+ * slower poll rather than stopping (stopping would hide every new debate
+ * until an unrelated refetch).
  */
+export function storyDebatesPollInterval(activeDebates: number): number {
+  return activeDebates > 0 ? 60_000 : 120_000;
+}
+
 export function useStoryDebatesQuery(storyId: string) {
   return useQuery({
     queryKey: queryKeys.storyDebates(storyId),
     enabled: storyId.length > 0,
     queryFn: () => api.fetchStoryDebates(storyId),
-    refetchInterval: (query) => (query.state.data?.debates.length ? 60_000 : false),
+    refetchInterval: (query) => storyDebatesPollInterval(query.state.data?.debates.length ?? 0),
   });
 }
 

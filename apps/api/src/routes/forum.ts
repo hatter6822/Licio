@@ -558,7 +558,10 @@ export function createForumRoutes() {
               let excerpt: string | null = story.title;
               if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
                 const target = await bundle.forum.contributions.getById(arena.targetContributionId);
-                excerpt = target ? target.body : null;
+                // A moderation-withheld target (under_review/removed/hidden)
+                // never leaks its text through the discovery excerpt — the
+                // same suppression the arena projection applies.
+                excerpt = target && target.moderationState === 'published' ? target.body : null;
               }
               return toDebateArenaSummary(arena, resolveAuthor, excerpt);
             }),
@@ -1377,6 +1380,14 @@ export function createForumRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const bundle = bundles();
           const { debateId } = c.req.valid('param');
+          // WS-T — writes carry the same readability gate as the reads: a
+          // party who lost access to the conversation cannot keep posting
+          // rebuttal/source text into its arena.
+          const gateArena = await bundle.forum.debates.getById(debateId);
+          if (gateArena === null) return c.json(notFound, 404);
+          if (!(await debateWriteReadable(bundle, gateArena, auth.userId))) {
+            return c.json(notFound, 404);
+          }
           const deps = debateDepsFromBundle(bundle);
           const outcome = await postDebatePosition(
             deps,
@@ -1418,6 +1429,12 @@ export function createForumRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const bundle = bundles();
           const { debateId } = c.req.valid('param');
+          // Same readability gate as the reads (404-over-403).
+          const gateArena = await bundle.forum.debates.getById(debateId);
+          if (gateArena === null) return c.json(notFound, 404);
+          if (!(await debateWriteReadable(bundle, gateArena, auth.userId))) {
+            return c.json(notFound, 404);
+          }
           const deps = debateDepsFromBundle(bundle);
           const outcome = await withdrawDebate(deps, debateId, auth.userId);
           if (!outcome.ok) {
@@ -1452,6 +1469,12 @@ export function createForumRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const bundle = bundles();
           const { debateId } = c.req.valid('param');
+          // Same readability gate as the reads (404-over-403).
+          const gateArena = await bundle.forum.debates.getById(debateId);
+          if (gateArena === null) return c.json(notFound, 404);
+          if (!(await debateWriteReadable(bundle, gateArena, auth.userId))) {
+            return c.json(notFound, 404);
+          }
           const deps = debateDepsFromBundle(bundle);
           const outcome = await concedeDebate(deps, debateId, auth.userId);
           if (!outcome.ok) {
@@ -1484,6 +1507,13 @@ export function createForumRoutes() {
           const bundle = bundles();
           const { debateId } = c.req.valid('param');
           const { winner, reason } = c.req.valid('json');
+          // Same readability gate as the reads (404-over-403): overruling is a
+          // room-governance power, exercised only from inside the conversation.
+          const gateArena = await bundle.forum.debates.getById(debateId);
+          if (gateArena === null) return c.json(notFound, 404);
+          if (!(await debateWriteReadable(bundle, gateArena, auth.userId))) {
+            return c.json(notFound, 404);
+          }
           const outcome = await overrideDebateVerdict(
             debateDepsFromBundle(bundle),
             debateId,
@@ -1515,6 +1545,27 @@ export function createForumRoutes() {
         },
       )
   );
+}
+
+/**
+ * WS-T — debate WRITES are gated on the SAME thread-readability check as the
+ * arena reads: a party (or steward) who has since lost access to the
+ * conversation — left or was removed from a restricted room, or the thread was
+ * pulled by the moderation floor — can no longer post to, close, or overrule
+ * its arena (404-over-403, matching the reads above).
+ */
+async function debateWriteReadable(
+  bundle: Parameters<typeof threadReadableToUser>[0] & {
+    ingestion: {
+      stories: { getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null> };
+    };
+  },
+  arena: { storyId: string },
+  userId: string,
+): Promise<boolean> {
+  const thread = await bundle.ingestion.stories.getThreadByStoryId(arena.storyId);
+  if (!thread) return false;
+  return threadReadableToUser(bundle, thread, userId);
 }
 
 function positionErrorMessage(reason: 'not_found' | 'not_a_party' | 'window_closed'): string {

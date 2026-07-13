@@ -1417,3 +1417,76 @@ describe('WS-T withdraw / concede — party-driven early closes', () => {
     });
   });
 });
+
+describe('WS-T — verdict-CAS-gated provenance + the open-vs-removal void', () => {
+  it('runs the runner onCommitted hook ONLY after the verdict CAS lands', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    pastResolveDue();
+    let committed = 0;
+    const withHook: DebateJudgeRunner = async (ctx, input) => {
+      const res = await corrected(ctx, input);
+      if (res === null) return null;
+      return {
+        ...res,
+        onCommitted: async () => {
+          committed += 1;
+        },
+      };
+    };
+    const judged = await judgeDebateArena({ ...deps, runJudge: withHook }, debateId);
+    expect(judged?.state).toBe('judged');
+    expect(committed).toBe(1);
+  });
+
+  it('does NOT run onCommitted when the verdict CAS loses (a stale concurrent judge)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    pastResolveDue();
+    let committed = 0;
+    const withHook: DebateJudgeRunner = async (ctx, input) => {
+      const res = await corrected(ctx, input);
+      if (res === null) return null;
+      return {
+        ...res,
+        onCommitted: async () => {
+          committed += 1;
+        },
+      };
+    };
+    // Simulate the supported re-claim race: another holder's verdict landed
+    // first, so THIS runner's recordVerdict CAS returns null.  The provenance
+    // hook must never fire for a verdict the arena row discarded.
+    const realRecord = debates.recordVerdict.bind(debates);
+    debates.recordVerdict = async () => null;
+    const judged = await judgeDebateArena({ ...deps, runJudge: withHook }, debateId);
+    debates.recordVerdict = realRecord;
+    expect(judged).toBeNull();
+    expect(committed).toBe(0);
+  });
+
+  it('VOIDS an arena opened against an already-tombstoned target (open-vs-removal race)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'About to vanish.');
+    const correctionId = await seedCorrection(targetId);
+    // The author's removal tombstones the target BETWEEN the correction's
+    // create-guard read and the arena open: the post-open recheck must void
+    // the arena (withdrawn, no dispute tag) rather than leave a live debate
+    // around content its author already removed.
+    await contributions.setModerationState(targetId, 'removed');
+    const debateId = randomUUID();
+    const arena = await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    expect(arena).toBeNull();
+    expect((await debates.getById(debateId))?.state).toBe('withdrawn');
+    expect((await contributions.getById(targetId))?.disputeStatus).not.toBe('under_debate');
+  });
+});

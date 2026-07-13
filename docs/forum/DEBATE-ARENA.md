@@ -33,7 +33,7 @@ optional co-visible **rebuttal statement** (summary + sources) on top.
 
 | Phase | Duration | What happens |
 |-------|----------|--------------|
-| `open` | up to 23h | Both sides adjust their underlying content + rebuttal statements (live co-visibility). The challenger may **withdraw** the correction; the incumbent may **concede**. Every content/rebuttal edit resets the editor's side-activity clock. |
+| `open` | up to 23h | Both sides adjust their underlying content + rebuttal statements (live co-visibility). The challenger may **withdraw** the correction; the incumbent may **concede**. Every **material** content/rebuttal edit resets the editor's side-activity clock — a no-op PATCH (body/citations identical to the stored row) does NOT count as activity, so the both-sides-idle expedite can't be dodged with contentless pings. |
 | `locked` | ≤1h | The material is **locked in** (a content snapshot is stamped). Two paths lead here: the **both-sides-idle expedite** — once BOTH sides have gone 1h without an edit, the arena locks at that instant and its queue entry pulls forward to *now* (a no-show incumbent therefore resolves ~1h after the challenge); or the **schedule** — at hour 23 the material locks regardless and the final hour is a frozen countdown. |
 | `awaiting_verdict` → `judged` | — | At `resolve_due_at` the debate enters the **room's AI resolution queue**: the lease-guarded scheduler (`debate-scheduler.ts`) runs the governed adjudicator over the LOCKED snapshot (due arenas fan out 4-wide per pass — independent verdicts, per-arena failure isolation); a verdict + the 24h override window are recorded. |
 | `judged` | 24h | The room **steward may fully overrule** the verdict either direction (audited, subordinate to the platform floor). |
@@ -117,8 +117,12 @@ to the platform rules*, exactly the moderation proposer's framing). The
 verdict's `AIOutputRecord` pins the room, the ratified model id, and the prompt
 digest in its input refs, and the adjudication is appended to the WS-U **agent
 action log** (`actionType: 'debate.judge'`, reversible — the steward's 24h
-overrule is the human remedy). Every failure at any step resolves
-deny-by-default to the platform legs (platform-prompted LLM → pinned MLP).
+overrule is the human remedy).  The log append runs through the runner's
+`onCommitted` hook, ONLY after the verdict's `recordVerdict` CAS lands on the
+arena row — a concurrent judge that loses the supported `awaiting_verdict`
+re-claim race never logs an adjudication the row discarded. Every failure at
+any step resolves deny-by-default to the platform legs (platform-prompted LLM
+→ pinned MLP).
 
 **Window policy.** The 23h edit / 1h lock / 1h inactivity / 24h override
 windows are the §15.4 spec constants (`DEBATE_EDIT_WINDOW_MS` /
@@ -153,10 +157,24 @@ renders in the dev panel and at `GET /v1/dev/simulator/status` (see
   can't mutate locked-in material — and it resets the side's activity clock);
   `POST /v1/debates/:id/withdraw` (challenger, `open` only) +
   `POST /v1/debates/:id/concede` (incumbent, `open` only);
-  `POST /v1/debates/:id/override` (steward, 24h window).  Contribution
-  edit/removal of debated content is gated: allowed while `open` (an edit
-  counts as side activity and fans out live), refused with `debate_locked`
-  while `locked`/`awaiting_verdict`.
+  `POST /v1/debates/:id/override` (steward, 24h window).  **Every debate
+  WRITE carries the same thread-readability gate as the reads** (404-over-403):
+  a party or steward who has since lost access to the conversation — left a
+  restricted room, or the thread was pulled by the moderation floor — can no
+  longer post to, close, or overrule its arena.  The story discovery list
+  (`GET /v1/stories/:id/debates`) suppresses a moderation-withheld target's
+  `target_excerpt` (null, exactly like the arena projection).  Contribution
+  edit/removal of debated content is gated: allowed while `open` (a
+  **material** edit counts as side activity and fans out live), refused with
+  `debate_locked` while `locked`/`awaiting_verdict`.  Two race seams are
+  closed structurally: the edit-race snapshot refresh runs AFTER the edit's
+  moderation decision (a held edit refreshes into the locked snapshot as the
+  SUPPRESSED side, never as material the floor is withholding), and
+  removal-vs-open is closed from BOTH sides (the arena open re-checks the
+  target after opening and voids itself against a tombstone; the removal
+  re-reads live arenas after the tombstone and closes any late-opened arena
+  with the party's exit — each side writes before it reads, so one of the two
+  always observes the other).
 - **Web:** source capture + render + a "Sourced" badge on comments
   (`CommentParts`/`CommentNode`).  Sources render **inline as clickable links in
   the comment body itself** (the `.ugc-body a` affordance — click-intercepted by

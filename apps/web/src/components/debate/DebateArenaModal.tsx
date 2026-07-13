@@ -615,7 +615,10 @@ export function DebateArenaModal({
   if (debateId === null) return null;
   return (
     <Sheet open onClose={onClose} title="Debate arena" className="max-w-3xl">
-      <DebateArenaContent debateId={debateId} />
+      {/* Keyed by the debate: switching `?debate=` while the sheet stays
+          mounted (e.g. browser back/forward between two arenas) remounts the
+          content, so edit drafts and expand state never leak across arenas. */}
+      <DebateArenaContent key={debateId} debateId={debateId} />
     </Sheet>
   );
 }

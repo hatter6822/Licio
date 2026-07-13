@@ -133,6 +133,27 @@ describe('DebateArenaModal', () => {
     rerender(<DebateArenaModal debateId={null} onClose={onClose} />);
     expect(screen.queryByRole('heading', { name: 'Debate arena' })).not.toBeInTheDocument();
   });
+
+  it('RESETS the arena view state when switching debates without closing the sheet', () => {
+    const longBody = `The council minutes are unambiguous on this point. ${'Detail sentence. '.repeat(40)}FULL-DEPTH-MARKER.`;
+    queryState = {
+      data: { debate: arena({ target_content: content('comment', { body: longBody }) }) },
+    };
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <DebateArenaModal debateId="00000000-0000-4000-8000-0000000000d1" onClose={onClose} />,
+    );
+    // Expand a card, then navigate to ANOTHER debate while the sheet stays
+    // mounted (browser back/forward between two ?debate= values): the content
+    // is keyed by the debate id, so per-arena state (expansion, edit drafts)
+    // must reset rather than leak into the next arena.
+    fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+    expect(screen.getByText(/FULL-DEPTH-MARKER/)).toBeInTheDocument();
+    rerender(
+      <DebateArenaModal debateId="00000000-0000-4000-8000-0000000000e2" onClose={onClose} />,
+    );
+    expect(screen.queryByText(/FULL-DEPTH-MARKER/)).not.toBeInTheDocument();
+  });
 });
 
 describe('DebateArenaContent', () => {
