@@ -4,8 +4,8 @@ import { queryKeys } from './query-keys.js';
 
 describe('queryKeys', () => {
   it('produces consistent, serializable tuple keys', () => {
-    expect(queryKeys.feed()).toEqual(['feed', 'balanced']);
-    expect(queryKeys.feed('chronological')).toEqual(['feed', 'chronological']);
+    expect(queryKeys.feed()).toEqual(['feed', 'best']);
+    expect(queryKeys.feed('new')).toEqual(['feed', 'new']);
     expect(queryKeys.story('s1')).toEqual(['story', 's1']);
     expect(queryKeys.thread('t1')).toEqual(['thread', 't1']);
     expect(queryKeys.storyComments('s1', { filter: 'sources' })).toEqual([

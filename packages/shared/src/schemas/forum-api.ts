@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 import { commentItemSchema, contributionPublicSchema } from './contribution.js';
-import { feedModeSchema } from './feed.js';
+import { feedModeCompatSchema } from './feed.js';
 import {
   attentionRetentionPreferenceSchema,
   MAX_TOPIC_PREFERENCES,
@@ -60,13 +60,17 @@ export type StoryCommentsResponse = z.infer<typeof storyCommentsResponseSchema>;
 // ---------------------------------------------------------------------------
 // GET/PATCH /v1/feed/preferences (WS-G.3.8, SPEC §13/§23.2).  A canonical
 // veneer over the WS-D settings stores (single source of truth: the identity
-// store's privacy/personalization blobs) — feed modes are the five §13 modes
-// and NONE of them introduces popularity ordering (no-applause invariant).
+// store's privacy/personalization blobs) — feed modes are the five §11.6
+// sort orders and NONE of them introduces popularity ordering (no-applause
+// invariant).  `feed_mode` is compat-accepting on BOTH directions of the
+// wire: a stored legacy value is echoed unchanged (pre-redesign bundles keep
+// parsing) and a legacy PATCH is still accepted; consumers normalize via
+// `normalizeFeedMode` (see LEGACY_FEED_MODES in feed.ts).
 // ---------------------------------------------------------------------------
 
 export const feedPreferencesSchema = z
   .object({
-    feed_mode: feedModeSchema,
+    feed_mode: feedModeCompatSchema,
     topic_preferences: z.array(z.string().min(1).max(128)).max(MAX_TOPIC_PREFERENCES),
     personalization_enabled: z.boolean(),
     attention_retention_preference: attentionRetentionPreferenceSchema,
@@ -77,7 +81,7 @@ export type FeedPreferences = z.infer<typeof feedPreferencesSchema>;
 
 export const feedPreferencesPatchSchema = z
   .object({
-    feed_mode: feedModeSchema.optional(),
+    feed_mode: feedModeCompatSchema.optional(),
     topic_preferences: z.array(z.string().min(1).max(128)).max(MAX_TOPIC_PREFERENCES).optional(),
     personalization_enabled: z.boolean().optional(),
     notification_preferences: privacyNotificationPreferencesSchema.partial().optional(),

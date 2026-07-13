@@ -119,11 +119,9 @@ describe('v1 auth + settings + flags', () => {
     const a = app();
     expect(await (await a.request('/v1/settings')).json()).toEqual(DEFAULT_USER_SETTINGS);
 
-    const patched = await a.request(
-      jsonRequest('/v1/settings', 'PATCH', { feed_mode: 'chronological' }),
-    );
+    const patched = await a.request(jsonRequest('/v1/settings', 'PATCH', { feed_mode: 'new' }));
     const body = userSettingsSchema.parse(await patched.json());
-    expect(body.feed_mode).toBe('chronological');
+    expect(body.feed_mode).toBe('new');
     expect(body.personalization_enabled).toBe(true);
   });
 

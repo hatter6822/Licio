@@ -822,7 +822,7 @@ Add Web Speech API voice dictation for body text where available. Detect `window
 **Ref:** Sections 23.2, 13
 
 **Description:**
-Implement `PATCH /v1/feed/preferences` to update personalization mode, topic preferences, feed-mode selection, and notification preferences. Integrates with ranking (WS-I) and privacy (WS-D.2). Valid feed modes: Balanced, Chronological, Source-diverse, Local, Low personalization (Section 13). No feed mode is influenced by likes/followers; changing a mode never exposes popularity ordering (no-applause invariant). Persist per user; changes take effect on the next feed request.
+Implement `PATCH /v1/feed/preferences` to update personalization mode, topic preferences, feed-mode selection, and notification preferences. Integrates with ranking (WS-I) and privacy (WS-D.2). Valid feed modes: Best, Rising, Sources, Debates, New (Section 11.6; the legacy pre-redesign values stay wire-accepted and normalize forward until stale bundles age out). No feed mode is influenced by likes/followers; changing a mode never exposes popularity ordering (no-applause invariant). Persist per user; changes take effect on the next feed request.
 
 **Acceptance criteria:**
 - Preferences persist per user; round-trip via GET/PATCH.

@@ -28,10 +28,10 @@ vi.mock('../../lib/queries.js', () => ({
 }));
 
 // dampenFeed is the PHI personalization pass; the H2 tests assert it runs only
-// in personalized modes. The default mock is a pass-through (the real multipliers
-// are empty anyway); the "dampens in balanced" test overrides it to DROP an item
-// so a dampened render is observable. Mock the loop tracker so real multipliers
-// never interfere.
+// in the personalized mode (`best`). The default mock is a pass-through (the real
+// multipliers are empty anyway); the "dampens in best" test overrides it to DROP
+// an item so a dampened render is observable. Mock the loop tracker so real
+// multipliers never interfere.
 const dampenFeed = vi.hoisted(() => vi.fn((items: unknown[]) => items));
 vi.mock('../../signals/topic-dampening.js', () => ({ dampenFeed }));
 vi.mock('../../signals/topic-loops.js', () => ({
@@ -40,7 +40,7 @@ vi.mock('../../signals/topic-loops.js', () => ({
 
 vi.mock('../../stores/index.js', () => ({
   useUIStore: (sel: (s: { feedMode: string; setFeedMode: () => void }) => unknown) =>
-    sel({ feedMode: 'balanced', setFeedMode: vi.fn() }),
+    sel({ feedMode: 'best', setFeedMode: vi.fn() }),
   useAuthStore: (sel: (s: { status: string }) => unknown) => sel({ status: 'anonymous' }),
 }));
 
@@ -126,8 +126,8 @@ describe('FrontPage pagination (WS-B.2.8b explicit continuation)', () => {
 });
 
 describe('FrontPage PHI dampening honors the reader-chosen mode (H2)', () => {
-  it('dampens in a personalized mode (balanced)', () => {
-    search.mockReturnValue({}); // ⇒ savedMode 'balanced'
+  it('dampens in the personalized mode (best)', () => {
+    search.mockReturnValue({}); // ⇒ savedMode 'best'
     dampenFeed.mockImplementationOnce((items: unknown[]) => items.slice(0, 1));
     feed.mockReturnValue(infiniteFeed());
     render(<FrontPage />);
@@ -137,8 +137,8 @@ describe('FrontPage PHI dampening honors the reader-chosen mode (H2)', () => {
     expect(screen.queryByText('Story b')).not.toBeInTheDocument();
   });
 
-  it('does NOT dampen in chronological mode (a complete server timeline)', () => {
-    search.mockReturnValue({ mode: 'chronological' });
+  it('does NOT dampen in the `new` mode (a complete server timeline)', () => {
+    search.mockReturnValue({ mode: 'new' });
     feed.mockReturnValue(infiniteFeed());
     render(<FrontPage />);
     expect(dampenFeed).not.toHaveBeenCalled();
@@ -147,8 +147,8 @@ describe('FrontPage PHI dampening honors the reader-chosen mode (H2)', () => {
     expect(screen.getByText('Story b')).toBeInTheDocument();
   });
 
-  it('does NOT dampen in low-personalization mode', () => {
-    search.mockReturnValue({ mode: 'low-personalization' });
+  it('does NOT dampen in an explicit metric sort (`rising` — a complete ordering)', () => {
+    search.mockReturnValue({ mode: 'rising' });
     feed.mockReturnValue(infiniteFeed());
     render(<FrontPage />);
     expect(dampenFeed).not.toHaveBeenCalled();

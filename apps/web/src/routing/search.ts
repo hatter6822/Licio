@@ -4,16 +4,21 @@
 // coerced to the route default via `.catch(...)` — never silently accepted as
 // arbitrary input. These drive the feed-mode switcher and the thread branch tab
 // from shareable URLs.
-import { feedModeSchema, uuidSchema } from '@licio/shared';
+import { feedModeCompatSchema, normalizeFeedMode, uuidSchema } from '@licio/shared';
 import { z } from 'zod';
 
 /**
  * Front-page feed search: `?mode=` ∈ feed modes. Optional so visiting `/` with no
  * param uses the reader's saved mode; an invalid value coerces to undefined (the
- * front page then falls back to the UI store), never silently accepted.
+ * front page then falls back to the UI store), never silently accepted. A legacy
+ * mode in a pre-redesign shared URL normalizes to its canonical successor
+ * instead of being dropped (the link keeps working).
  */
 export const feedSearchSchema = z.object({
-  mode: feedModeSchema.optional().catch(undefined),
+  mode: feedModeCompatSchema
+    .transform((mode) => normalizeFeedMode(mode))
+    .optional()
+    .catch(undefined),
 });
 export type FeedSearch = z.infer<typeof feedSearchSchema>;
 

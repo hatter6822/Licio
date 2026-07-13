@@ -305,8 +305,10 @@ export function createV1Routes() {
       // The eight-stage pipeline serves whenever ANY real story exists:
       // candidate generation → feature join → safety filter → constrained
       // PWAtt scoring → diversification → decision log → explanations →
-      // FeedItem mapping. The kill switch / user feed modes route through
-      // the safe chronological fallback inside the service (WS-I.4.1a/b).
+      // FeedItem mapping. The kill switch routes through the safe
+      // chronological fallback; the user sort modes (`new`/`sources`/
+      // `debates`/`rising`) serve their complete deterministic orderings
+      // over the same safety-filtered set inside the service (WS-I.4.1a/b).
       // With an EMPTY story store (fresh dev boot, contract tests) the
       // legacy WS-C demo fixture serves unchanged — clearly fixture data,
       // outside the ranking pipeline, and logged as demo serving.

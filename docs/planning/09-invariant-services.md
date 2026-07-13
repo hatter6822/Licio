@@ -1569,10 +1569,10 @@ When narrow-loop or compulsive-session detection triggers, display a non-blockin
 **Ref:** Sections 11.5, 11.6
 
 **Description:**
-User controls reachable from the wellbeing prompt and feed settings: feed-mode switch (Balanced, Chronological, Source-diverse, Local, Low personalization), "reset topic history," and "reduce personalization." PHI-4 satisfied: users can reset or reduce personalization without deleting their account.
+User controls reachable from the wellbeing prompt and feed settings: feed-mode switch (Best, Rising, Sources, Debates, New), "reset topic history," and "reduce personalization" (switches the feed to the non-personalized New sort). PHI-4 satisfied: users can reset or reduce personalization without deleting their account.
 
 **Acceptance criteria:**
-- Feed-mode switch accessible from prompt and from feed settings; modes: Balanced, Chronological, Source-diverse, Local, Low personalization.
+- Feed-mode switch accessible from prompt and from feed settings; modes: Best, Rising, Sources, Debates, New.
 - "Reset topic history" clears the user's topic-sequence state without affecting account or contributions.
 - "Reduce personalization" adjusts the personalization weight without full reset.
 - PHI-4 satisfied: reset/reduce personalization is available and does not require account deletion.

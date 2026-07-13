@@ -118,7 +118,7 @@ describe('request interceptor', () => {
       if (init) calls.push(init);
       return jsonResponse({ items: [], nextCursor: null });
     });
-    await fetchFeed('chronological');
+    await fetchFeed('new');
     expect(calls[0]?.credentials).toBe('include');
   });
 

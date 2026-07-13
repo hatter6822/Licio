@@ -28,6 +28,12 @@ export const FALLBACK_REASONS = [
 ] as const;
 export type FallbackReason = (typeof FALLBACK_REASONS)[number];
 
+/** The user-selected deterministic sort orders a `user_mode` decision can
+ *  serve (SPEC §11.6 feed modes; `best` is the ranked pipeline, not one of
+ *  these). */
+export const USER_ORDERINGS = ['new', 'rising', 'sources', 'debates'] as const;
+export type UserOrdering = (typeof USER_ORDERINGS)[number];
+
 const uuid = z.string().uuid();
 
 /**
@@ -162,6 +168,12 @@ export const rankingDecisionLogSchema = z
     fallback: z.boolean(),
     /** Why the fallback served, when it did. */
     fallback_reason: z.enum(FALLBACK_REASONS).nullable(),
+    /** Which user-selected sort order served a `user_mode` decision (SPEC
+     *  §11.6 feed modes; the ordering itself is deterministic but its metric
+     *  inputs are not score components, so the audit records WHICH order
+     *  ran). Null on ranked decisions and non-user-mode fallbacks; defaulted
+     *  so logs written before the sort modes existed still parse. */
+    user_ordering: z.enum(USER_ORDERINGS).nullable().default(null),
     /** Replay inputs (WS-I.2.5b); null only on fallback decisions. */
     replay_inputs: replayInputsSchema.nullable(),
     /** §22.4 retention deadline (180–365 days after `timestamp`). */

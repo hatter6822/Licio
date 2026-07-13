@@ -590,14 +590,14 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
     );
   });
 
-  it('the user-chosen chronological mode serves time order', async () => {
+  it('the user-chosen `new` mode serves time order', async () => {
     await seedStory(fixture.ingestion);
     const served = await serveFeed(fixture.ranking, {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
       surfaceTopicId: null,
-      mode: 'chronological',
+      mode: 'new',
     });
     expect(served.fallback).toBe(true);
     expect(served.items[0]?.distribution_reason).toBe(LEGACY_DISTRIBUTION_REASON);
@@ -792,7 +792,7 @@ describe('replay (WS-I.2.5b)', () => {
       surface: 'front_page',
       surfaceRoomId: null,
       surfaceTopicId: null,
-      mode: 'chronological',
+      mode: 'new',
     });
     const result = await replayDecision(fixture.ranking, served.requestId);
     expect(result.match).toBe(true);

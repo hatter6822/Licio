@@ -287,10 +287,39 @@ export function emptyFeatureVector(candidate: Candidate, nowMs: number): Feature
  * WS-I.4.1b — the safe fallback ordering: strictly chronological (newest
  * first; deterministic id tie-break), the same semantics as the WS-E
  * freshness ranking. No score, no personalization, no financial anything.
+ * ALSO the `new` user sort mode (SPEC §11.6): most recent first.
  */
 export function chronologicalOrder(candidates: readonly Candidate[]): Candidate[] {
   return [...candidates].sort(
     (a, b) =>
+      Date.parse(b.freshness_timestamp) - Date.parse(a.freshness_timestamp) ||
+      a.item_id.localeCompare(b.item_id),
+  );
+}
+
+/**
+ * The user-selected metric sort orders (SPEC §11.6 feed modes `rising` /
+ * `sources` / `debates`): a COMPLETE deterministic ordering of the feasible
+ * set by a per-item content-derived metric — PWAtt window-over-window
+ * velocity, sourced-comment count, or the WS-T debates tally — descending,
+ * with the chronological tie-break (freshness desc, then item id). An item
+ * the metric map does not cover sorts as 0 (honest absence: no history / no
+ * signal ties with flat, ahead of falling for a signed metric). Like
+ * `chronologicalOrder` this is an explicit reader choice, never a
+ * popularity/applause count — the metrics are attention-, citation-, and
+ * adjudication-derived by construction.
+ */
+export function metricOrder(
+  candidates: readonly Candidate[],
+  metricByItem: ReadonlyMap<string, number>,
+): Candidate[] {
+  const metric = (candidate: Candidate): number => {
+    const value = metricByItem.get(candidate.item_id);
+    return value !== undefined && Number.isFinite(value) ? value : 0;
+  };
+  return [...candidates].sort(
+    (a, b) =>
+      metric(b) - metric(a) ||
       Date.parse(b.freshness_timestamp) - Date.parse(a.freshness_timestamp) ||
       a.item_id.localeCompare(b.item_id),
   );

@@ -5,7 +5,7 @@
 // the signal processor, then performs best-effort, FAIL-CLOSED hydration of
 // feature flags, session, and the signal collection policy. Pure side-effect
 // orchestration kept out of main.tsx so the wiring is reviewable in one place.
-import { DEFAULT_USER_SETTINGS } from '@licio/shared';
+import { DEFAULT_USER_SETTINGS, normalizeFeedMode } from '@licio/shared';
 import { startLcapSync } from '../lcap/sync-boot.js';
 import { expireOldDrafts } from '../offline/drafts.js';
 import {
@@ -77,8 +77,10 @@ export async function confirmSession(): Promise<void> {
 async function seedDurableFeedMode(): Promise<void> {
   try {
     const settings = await fetchPrivacySettings();
+    // The durable blob may still hold a legacy mode (pre-redesign blobs
+    // round-trip unchanged on the wire); the UI store holds canonical only.
     const mode = settings.personalization_settings.feed_mode;
-    if (mode) useUIStore.getState().setFeedMode(mode);
+    if (mode) useUIStore.getState().setFeedMode(normalizeFeedMode(mode));
   } catch {
     // Offline / not yet verified: the locally persisted mode stands.
   }

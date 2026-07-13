@@ -69,6 +69,13 @@ describe('WS-I.2.1a feature vector schema', () => {
     expect(featureSchemaFieldNames().sort()).toEqual(
       [
         'active_attention',
+        // §11.6 `rising` sort mode — reviewed addition: the signed
+        // window-over-window delta of the SERVED PWAtt active-attention
+        // component. NON-SCORING (never a §5.4 term — it is the ordering
+        // metric of an explicit user sort, like `duplicate_cluster_id` it
+        // feeds a stage other than the objective); attention-derived, never
+        // financial.
+        'attention_velocity',
         'braid_agenda_entropy',
         'cid_defect',
         'constructive_participation',

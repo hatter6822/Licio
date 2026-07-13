@@ -91,6 +91,7 @@ function logOf(requestId: string, timestampIso: string): RankingDecisionLog {
     feature_version: 1,
     fallback: true,
     fallback_reason: 'kill_switch',
+    user_ordering: null,
     replay_inputs: null,
     retain_until: retentionDeadline(timestampIso, 180),
   };

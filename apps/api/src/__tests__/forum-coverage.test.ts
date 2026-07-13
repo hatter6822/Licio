@@ -320,7 +320,7 @@ describe('WS-G.3.8 — feed preferences round-trip', () => {
         )
       ).json(),
     );
-    expect(initial.feed_mode).toBe('balanced');
+    expect(initial.feed_mode).toBe('best');
 
     const patched = feedPreferencesSchema.parse(
       await (
@@ -329,6 +329,8 @@ describe('WS-G.3.8 — feed preferences round-trip', () => {
             '/v1/feed/preferences',
             'PATCH',
             {
+              // A LEGACY value on purpose: pre-redesign bundles still PATCH
+              // these, and the compat contract echoes them unchanged.
               feed_mode: 'chronological',
               topic_preferences: ['water', 'transit'],
               personalization_enabled: false,

@@ -10,6 +10,9 @@
 //
 // Field provenance (WS-I.2.1a acceptance "documented with their source"):
 //   active_attention / constructive_participation . WS-E PWAtt v1 components
+//   attention_velocity ............................ WS-E PWAtt window-over-
+//                                                   window delta (the `rising`
+//                                                   sort metric; non-scoring)
 //   exposure_independence ......................... WS-H MERI (meri ∈ [0,1])
 //   source_evidence_completeness .................. WS-F claims/evidence join
 //   context_coherence_gain ........................ §5.4 C slot; NO current
@@ -56,7 +59,13 @@ import { findDeniedFields } from '../denylist.js';
 // is write-side — so v3 rows flow into the version gate and replay still
 // joins them by pinned revision; the two fields stay deprecated-optional so
 // any future re-validation of historic rows stays tolerant.)
-export const FEATURE_SCHEMA_VERSION = 4;
+// v5 (feed sort modes): added `attention_velocity` — the signed
+// window-over-window delta of the served PWAtt active-attention component,
+// the ordering metric of the `rising` sort mode (NEVER a §5.4 score term).
+// The bump changes the stored field set and forces the migration-on-read
+// rebuild on first serve, so `rising` orders on freshly computed velocities
+// deterministically instead of silently sorting stale v4 rows as 0.
+export const FEATURE_SCHEMA_VERSION = 5;
 
 /** MFCI risk states as ranking features (SPEC §8.5). */
 export const MFCI_RISK_STATE_FEATURES = ['normal', 'elevated', 'high', 'severe'] as const;
@@ -122,6 +131,16 @@ export const featureVectorSchema = z
 
     // --- PWAtt components (WS-E v1; each normalized to [0, 1]) -------------
     active_attention: unit.optional(),
+    /**
+     * Signed per-window-step delta of the SERVED PWAtt active-attention
+     * component between the item's two most recent same-size scoring windows
+     * (both gated by `pwattRowForRanking` — a shadow/degraded row never
+     * contributes). The ordering metric of the `rising` feed mode; a
+     * NON-SCORING feature (never a §5.4 term — like `duplicate_cluster_id`,
+     * it feeds a stage other than the objective). Absent with fewer than two
+     * usable windows (honest absence, never a fabricated zero).
+     */
+    attention_velocity: z.number().min(-1).max(1).optional(),
     constructive_participation: unit.optional(),
     exposure_independence: unit.optional(),
     source_evidence_completeness: unit.optional(),

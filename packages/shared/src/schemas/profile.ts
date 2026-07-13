@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { privacyLevelSchema } from './attention.js';
 import { uuidSchema } from './common.js';
-import { feedModeSchema } from './feed.js';
+import { DEFAULT_FEED_MODE, feedModeCompatSchema } from './feed.js';
 
 /** Account lifecycle state (SPEC §22.1 account_state). */
 export const accountStateSchema = z.enum(['active', 'suspended', 'restricted', 'deactivated']);
@@ -35,7 +35,10 @@ export const motionPreferenceSchema = z.enum(['system', 'enabled', 'disabled']);
  * (WS-C.4.1d): personalization off ⇒ no attention aggregates are uploaded.
  */
 export const userSettingsSchema = z.object({
-  feed_mode: feedModeSchema,
+  /** Compat-accepting: stored settings rows written before the sort-mode
+   *  redesign carry legacy values (see LEGACY_FEED_MODES in feed.ts);
+   *  consumers normalize via `normalizeFeedMode`. */
+  feed_mode: feedModeCompatSchema,
   personalization_enabled: z.boolean(),
   privacy_level: privacyLevelSchema,
   theme: themePreferenceSchema,
@@ -45,7 +48,7 @@ export type UserSettings = z.infer<typeof userSettingsSchema>;
 
 /** Defaults a fresh account starts from (personalization on, standard privacy). */
 export const DEFAULT_USER_SETTINGS: UserSettings = {
-  feed_mode: 'balanced',
+  feed_mode: DEFAULT_FEED_MODE,
   personalization_enabled: true,
   privacy_level: 'standard',
   theme: 'system',

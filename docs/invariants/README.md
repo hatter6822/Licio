@@ -432,7 +432,7 @@ rarely — computed entirely in-browser, sentinel-excluded, and recovering over
 time; `apps/web/src/signals/topic-dampening.ts`), and the PHI-4 wellbeing
 controls ("Reset topic
 history" clears the device-local sequence and the quiet-topic set;
-"Reduce personalization" switches the feed mode) — plus the per-topic
+"Reduce personalization" switches the feed to the non-personalized `new` sort) — plus the per-topic
 repeats preference control on the story page (WS-H.2.3c), persisted in
 `personalization_settings.topic_repeat_preference` and consumable by
 the WS-I ranking pipeline. Feed-mode choices sync to the durable settings

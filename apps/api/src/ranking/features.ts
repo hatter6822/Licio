@@ -133,6 +133,13 @@ export async function assembleFeatureVector(
     if (attention !== undefined) vector.active_attention = clamp01(attention);
     if (participation !== undefined) vector.constructive_participation = clamp01(participation);
     invariantVersions[pwatt.invariantType] = versionEntry(pwatt);
+    // attention_velocity — the `rising` sort metric: the signed delta of the
+    // served active-attention component between this row's window and the
+    // most recent EARLIER same-size window of the same invariant type. Every
+    // contributing row passes the identical §30.5 serving gate; absent with
+    // fewer than two usable windows (honest absence, WS-H.1.2c).
+    const velocity = await attentionVelocity(events.invariantStore, pwatt);
+    if (velocity !== null) vector.attention_velocity = velocity;
   }
 
   // --- MERI: exposure independence + rank (the global feed-target row) -----
@@ -269,6 +276,47 @@ export async function assembleFeatureVector(
   if (clusterId !== null) vector.duplicate_cluster_id = clusterId;
 
   return vector;
+}
+
+/**
+ * The `rising`-mode ordering metric (WS-E PWAtt provenance): the signed
+ * window-over-window delta of the SERVED active-attention component. The
+ * previous window is the most recent row of the SAME invariant type whose
+ * same-size window starts strictly before `current`'s (same-version ties
+ * break on `createdAt`), gated by the identical `pwattRowForRanking` rule as
+ * the current row — a shadow, pre-lift, or degraded row can no more feed a
+ * velocity than it can feed a score. Null (feature ABSENT) with fewer than
+ * two usable same-size windows or a missing component value.
+ */
+async function attentionVelocity(
+  store: { listForTarget(targetId: string): Promise<InvariantOutputRecord[]> },
+  current: InvariantOutputRecord,
+): Promise<number | null> {
+  const currentAttention = num(current.scoreVector['active_attention']);
+  if (currentAttention === undefined) return null;
+  const currentStart = Date.parse(current.timeWindow.start);
+  const spanMs = Date.parse(current.timeWindow.end) - currentStart;
+  let previous: InvariantOutputRecord | null = null;
+  for (const raw of await store.listForTarget(current.targetId)) {
+    if (raw.invariantType !== current.invariantType) continue;
+    const row = pwattRowForRanking(raw);
+    if (row === null) continue;
+    const start = Date.parse(row.timeWindow.start);
+    if (Date.parse(row.timeWindow.end) - start !== spanMs) continue;
+    if (start >= currentStart) continue;
+    if (
+      previous === null ||
+      start > Date.parse(previous.timeWindow.start) ||
+      (start === Date.parse(previous.timeWindow.start) &&
+        Date.parse(row.createdAt) > Date.parse(previous.createdAt))
+    ) {
+      previous = row;
+    }
+  }
+  if (previous === null) return null;
+  const previousAttention = num(previous.scoreVector['active_attention']);
+  if (previousAttention === undefined) return null;
+  return Math.max(-1, Math.min(1, clamp01(currentAttention) - clamp01(previousAttention)));
 }
 
 /** Bounded component exploration limits (cost ceiling per assembly). */

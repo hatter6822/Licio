@@ -47,13 +47,11 @@ describe('useUpdateSettingsMutation (optimistic + rollback)', () => {
     const { result } = renderHook(() => useUpdateSettingsMutation(), { wrapper: wrapper(client) });
 
     act(() => {
-      result.current.mutate({ feed_mode: 'chronological' });
+      result.current.mutate({ feed_mode: 'new' });
     });
 
     await waitFor(() => {
-      expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe(
-        'chronological',
-      );
+      expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe('new');
     });
 
     act(() => {
@@ -61,7 +59,7 @@ describe('useUpdateSettingsMutation (optimistic + rollback)', () => {
     });
 
     await waitFor(() => {
-      expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe('balanced');
+      expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe('best');
     });
     expect(result.current.isError).toBe(true);
   });
@@ -69,14 +67,14 @@ describe('useUpdateSettingsMutation (optimistic + rollback)', () => {
   it('commits the optimistic update on success', async () => {
     const client = makeClient();
     client.setQueryData<UserSettings>(queryKeys.settings(), DEFAULT_USER_SETTINGS);
-    mockedUpdate.mockResolvedValueOnce({ ...DEFAULT_USER_SETTINGS, feed_mode: 'local' });
+    mockedUpdate.mockResolvedValueOnce({ ...DEFAULT_USER_SETTINGS, feed_mode: 'sources' });
 
     const { result } = renderHook(() => useUpdateSettingsMutation(), { wrapper: wrapper(client) });
     act(() => {
-      result.current.mutate({ feed_mode: 'local' });
+      result.current.mutate({ feed_mode: 'sources' });
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe('local');
+    expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe('sources');
   });
 });
