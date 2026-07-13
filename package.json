@@ -58,7 +58,7 @@
     "lefthook": "^2.1.9",
     "node-html-parser": "^8.0.4",
     "tsx": "^4.23.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },
   "pnpm": {
