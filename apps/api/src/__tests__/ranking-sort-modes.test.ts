@@ -299,20 +299,26 @@ describe('legacy feed modes (pre-redesign wire/storage compat)', () => {
     expect(local?.target_pct).toBe(10);
   });
 
-  it('a live `low-personalization` request keeps its personalization suppression', async () => {
+  it('`low-personalization` normalizes to the fully non-personalized `new` sort', async () => {
+    // The legacy mode meant "less personalization" — mapping it to `best`
+    // would silently re-enable personalized ranking once an updated client
+    // normalizes and re-sends the canonical mode. `new` preserves the intent
+    // on EVERY path (live request, stored default, persisted slice): the
+    // chronological user ordering has no personalization term at all.
     const { userId } = await seedUserWithSession(fixture.identity);
     await seedStory(fixture.ingestion);
-    const suppressed = await serve('low-personalization', userId);
-    expect(suppressed.fallback).toBe(false); // normalized to `best`
-    const suppressedLog = await fixture.ranking.decisionLogs.getByRequestId(suppressed.requestId);
-    expect(suppressedLog?.replay_inputs?.topic_relevance).toBeNull();
-    // The same user WITHOUT the legacy mode gets personalization (enabled by
-    // default) — proving the suppression came from the legacy request value.
+    const served = await serve('low-personalization', userId);
+    expect(served.fallback).toBe(true);
+    const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
+    expect(log?.fallback_reason).toBe('user_mode');
+    expect(log?.user_ordering).toBe('new');
+    expect(log?.replay_inputs).toBeNull(); // no personalization inputs exist
+    // The same user on `best` gets personalization (enabled by default) —
+    // the legacy value alone kept it out of the ranked path.
     const ranked = await serve('best', userId);
     const rankedLog = await fixture.ranking.decisionLogs.getByRequestId(ranked.requestId);
     expect(rankedLog?.replay_inputs?.topic_relevance).not.toBeNull();
   });
-
   it('a legacy STORED default normalizes too', async () => {
     const { userId } = await seedUserWithSession(fixture.identity);
     const user = await fixture.identity.store.getUser(userId);

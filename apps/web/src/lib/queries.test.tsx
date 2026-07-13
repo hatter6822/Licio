@@ -59,7 +59,7 @@ describe('useUpdateSettingsMutation (optimistic + rollback)', () => {
     });
 
     await waitFor(() => {
-      expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe('best');
+      expect(client.getQueryData<UserSettings>(queryKeys.settings())?.feed_mode).toBe('balanced');
     });
     expect(result.current.isError).toBe(true);
   });

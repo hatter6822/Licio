@@ -320,7 +320,9 @@ describe('WS-G.3.8 — feed preferences round-trip', () => {
         )
       ).json(),
     );
-    expect(initial.feed_mode).toBe('best');
+    // The DEFAULT blob emits the LEGACY value on purpose (rollout compat —
+    // stale bundles must keep parsing default reads); clients normalize.
+    expect(initial.feed_mode).toBe('balanced');
 
     const patched = feedPreferencesSchema.parse(
       await (

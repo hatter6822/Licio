@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { privacyLevelSchema } from './attention.js';
 import { uuidSchema } from './common.js';
-import { DEFAULT_FEED_MODE, feedModeCompatSchema } from './feed.js';
+import { feedModeCompatSchema } from './feed.js';
 
 /** Account lifecycle state (SPEC §22.1 account_state). */
 export const accountStateSchema = z.enum(['active', 'suspended', 'restricted', 'deactivated']);
@@ -48,7 +48,14 @@ export type UserSettings = z.infer<typeof userSettingsSchema>;
 
 /** Defaults a fresh account starts from (personalization on, standard privacy). */
 export const DEFAULT_USER_SETTINGS: UserSettings = {
-  feed_mode: DEFAULT_FEED_MODE,
+  // A LEGACY value ON PURPOSE (rollout compat): `GET /v1/settings` serves
+  // these defaults for EVERY user with no stored settings row, and a
+  // pre-redesign cached bundle validates the response against the old mode
+  // enum — a canonical value here would break settings sync on every stale
+  // bundle. Consumers normalize (`balanced` → the canonical default). Flip
+  // to DEFAULT_FEED_MODE when LEGACY_FEED_MODES is removed (tracked in
+  // docs/ranking/README.md).
+  feed_mode: 'balanced',
   personalization_enabled: true,
   privacy_level: 'standard',
   theme: 'system',

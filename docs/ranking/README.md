@@ -448,18 +448,31 @@ mode set (`balanced`, `chronological`, `source-diverse`, `local`,
 (`feedModeCompatSchema` / `LEGACY_FEED_MODES` in `@licio/shared`): stored
 personalization blobs round-trip unchanged so pre-redesign bundles keep
 parsing them, and every consumer normalizes through `normalizeFeedMode`
-(`balanced`→`best`, `chronological`→`new`, the rest→`best`; the mapping
-deliberately does NOT send `source-diverse` to `sources` — outlet-share
-balancing and citation counts are different things). A LIVE legacy
-`low-personalization` request additionally keeps its personalization
-suppression (the requesting bundle's UI still promises it); the durable
-OFF switch remains the `personalization_enabled` privacy setting. The
-removed pipeline modulations (the `source-diverse` balancing override and
-the `local` candidate-quota boost) are gone outright — the §13.2 local
+(`balanced`/`source-diverse`/`local`→`best`; `chronological` AND
+`low-personalization`→`new`). Two mapping choices are deliberate:
+`source-diverse` does NOT map to `sources` (outlet-share balancing and
+citation counts are different things), and `low-personalization` maps to
+the fully NON-personalized `new` sort — mapping it to `best` would
+silently re-enable personalized ranking the moment an updated client
+normalizes and re-sends the canonical mode; `new` preserves the user's
+reduce-personalization intent on every path (live request, stored default,
+persisted slice), matching the PHI-4 "Reduce personalization" control. The
+durable OFF switch remains the `personalization_enabled` privacy setting.
+The removed pipeline modulations (the `source-diverse` balancing override
+and the `local` candidate-quota boost) are gone outright — the §13.2 local
 diversity QUOTA itself (user-configured locale, never geolocation) is
-unaffected. **Removal target:** drop `LEGACY_FEED_MODES` +
-`feedModeCompatSchema` acceptance together with `rating_label` (below)
-once pre-redesign bundles have aged out of service-worker caches.
+unaffected. The stored/wire DEFAULTS
+(`defaultPersonalizationSettings().feed_mode`,
+`DEFAULT_USER_SETTINGS.feed_mode`) stay on the LEGACY `balanced` value
+until the compat cut: the defaults are seeded into new accounts and
+emitted on `/v1/privacy/settings`, `/v1/feed/preferences`, and
+`/v1/settings` (for users with no stored row), and a pre-redesign bundle
+validates those responses against the old enum — a canonical default
+would break every settings read on stale bundles (a shared test pins
+this). **Removal target:** drop `LEGACY_FEED_MODES` +
+`feedModeCompatSchema` acceptance, and flip both defaults to
+`DEFAULT_FEED_MODE`, together with `rating_label` (below) once
+pre-redesign bundles have aged out of service-worker caches.
 
 ## Kill switch and fallback (WS-I.4)
 

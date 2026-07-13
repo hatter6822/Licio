@@ -138,15 +138,24 @@ describe('ui store rehydration', () => {
     expect(state.focusMode).toBe(true);
   });
 
-  it('maps the removed legacy modes to the default ranked order', async () => {
-    for (const legacy of ['balanced', 'source-diverse', 'local', 'low-personalization']) {
+  it('maps the removed legacy modes to their canonical successors', async () => {
+    // The removed pipeline modulations fold into the default ranked order;
+    // `low-personalization` maps to `new` (the fully NON-personalized sort —
+    // the user asked for less personalization, and `best` would re-enable it).
+    const successors: Array<[string, string]> = [
+      ['balanced', 'best'],
+      ['source-diverse', 'best'],
+      ['local', 'best'],
+      ['low-personalization', 'new'],
+    ];
+    for (const [legacy, canonical] of successors) {
       const { useUIStore } = await freshUI({
         theme: 'light',
         reducedMotion: 'system',
         feedMode: legacy,
         focusMode: false,
       });
-      expect(useUIStore.getState().feedMode).toBe('best');
+      expect(useUIStore.getState().feedMode).toBe(canonical);
     }
   });
 

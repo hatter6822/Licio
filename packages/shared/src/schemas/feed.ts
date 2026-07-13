@@ -59,18 +59,21 @@ export type FeedModeCompat = z.infer<typeof feedModeCompatSchema>;
 
 const LEGACY_FEED_MODE_MAP: Record<LegacyFeedMode, FeedMode> = {
   // The default ranked pipeline is the direct successor of `balanced`; the
-  // removed pipeline MODULATIONS (`source-diverse` balancing override, the
-  // `local` quota boost, `low-personalization`) fold into it — `sources` is a
-  // citation count, NOT outlet diversity, so `source-diverse` must not map
-  // there. `chronological` maps exactly onto `new`. A live legacy
-  // `low-personalization` REQUEST additionally keeps its personalization
-  // suppression server-side (see serveFeed) — the mapping here only picks the
-  // ordering.
+  // removed pipeline MODULATIONS (the `source-diverse` balancing override and
+  // the `local` quota boost) fold into it — `sources` is a citation count,
+  // NOT outlet diversity, so `source-diverse` must not map there.
+  // `chronological` maps exactly onto `new`. `low-personalization` ALSO maps
+  // to `new`: the user chose LESS personalization, and `new` is the redesign's
+  // reduce-personalization affordance (strict chronological — no relevance
+  // term, no attention ranking; the PHI-4 "Reduce personalization" control
+  // sets the same mode). Mapping it to `best` would silently re-enable
+  // personalized ranking for that user the moment an updated client
+  // normalizes and re-sends the canonical mode.
   balanced: 'best',
   chronological: 'new',
   'source-diverse': 'best',
   local: 'best',
-  'low-personalization': 'best',
+  'low-personalization': 'new',
 };
 
 /**
@@ -244,9 +247,9 @@ export type FeedResponse = z.infer<typeof feedResponseSchema>;
 
 /** Query params for the feed (mode switcher + keyset cursor + the optional
  *  topic scope: `?topic=` serves the WS-I TOPIC surface). `mode` accepts the
- *  legacy values RAW (no normalization) so the server can both normalize the
- *  ordering and honour a live legacy `low-personalization` request's
- *  personalization suppression. */
+ *  legacy values (pre-redesign cached bundles still send them); the server
+ *  normalizes via `normalizeFeedMode` — the mapping is total, so no legacy
+ *  value carries extra out-of-band semantics. */
 export const feedQuerySchema = z.object({
   mode: feedModeCompatSchema.optional(),
   cursor: cursorSchema.optional(),

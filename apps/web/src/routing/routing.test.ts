@@ -22,6 +22,8 @@ describe('search param parsing', () => {
     expect(parseFeedSearch({ mode: 'chronological' }).mode).toBe('new');
     expect(parseFeedSearch({ mode: 'balanced' }).mode).toBe('best');
     expect(parseFeedSearch({ mode: 'local' }).mode).toBe('best');
+    // The reduce-personalization intent survives: `new` is non-personalized.
+    expect(parseFeedSearch({ mode: 'low-personalization' }).mode).toBe('new');
   });
 });
 

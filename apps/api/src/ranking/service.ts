@@ -86,10 +86,9 @@ export interface FeedServeRequest {
   surfaceRoomId: string | null;
   /** The topic a `topic`-surface request is scoped to (`?topic=`). */
   surfaceTopicId: string | null;
-  /** RAW wire value (canonical or legacy — pre-redesign cached bundles still
-   *  send legacy modes): the ordering normalizes via `normalizeFeedMode`, and
-   *  a live legacy `low-personalization` request keeps its personalization
-   *  suppression (see LEGACY_FEED_MODES in @licio/shared). */
+  /** Wire value, canonical or legacy (pre-redesign cached bundles still send
+   *  legacy modes) — normalized via `normalizeFeedMode` before serving (see
+   *  LEGACY_FEED_MODES in @licio/shared). */
   mode: FeedModeCompat | undefined;
   /** SEEN-AWARE pagination cursor: the previous page's request id. The next
    *  page re-runs the pipeline excluding everything that page chain already
@@ -568,12 +567,13 @@ export async function serveFeed(
   const config = services.config();
   const bucket = services.privacyBucket(request.userId);
   const user = await services.userContext(request.userId);
-  // The RAW mode (request > stored default) is kept for the legacy
-  // `low-personalization` suppression below; the canonical mode picks the
-  // ordering. A stored default can be a legacy value (pre-redesign blobs
-  // round-trip unchanged) — `normalizeFeedMode` is total over strings.
-  const rawMode: string = request.mode ?? user.feedModeDefault ?? 'best';
-  const mode: FeedMode = normalizeFeedMode(rawMode);
+  // Request > stored default > platform default. Either source can be a
+  // legacy value (pre-redesign bundles still send them; pre-redesign blobs
+  // round-trip unchanged) — `normalizeFeedMode` is total over strings, and
+  // the mapping preserves intent by construction (legacy
+  // `low-personalization` lands on the non-personalized `new` sort, so no
+  // raw-value special case is needed here).
+  const mode: FeedMode = normalizeFeedMode(request.mode ?? user.feedModeDefault ?? 'best');
 
   // --- Stage 1: candidate generation --------------------------------------
   const retrievalBudget = Math.max(...config.profiles.map((p) => p.candidate_budget));
@@ -762,11 +762,11 @@ export async function serveFeed(
 
   // --- Stage 2 (join) + 4–5 (score + diversify) ----------------------------
   const featuresById = await currentFeaturesFor(services, safety.feasible, nowMs);
-  // A live legacy `low-personalization` request (a pre-redesign cached
-  // bundle whose UI still promises it) keeps its suppression even though the
-  // ordering normalized to `best`; the durable OFF switch remains the user's
-  // `personalization_enabled` privacy setting.
-  const personalizationOn = user.personalizationEnabled && rawMode !== 'low-personalization';
+  // Only `best` reaches this ranked path (every other mode fell back to its
+  // complete deterministic ordering above, and legacy `low-personalization`
+  // normalizes to `new`), so the user's durable privacy setting is the sole
+  // personalization switch.
+  const personalizationOn = user.personalizationEnabled;
   let relevanceByItem: Map<string, number> | null = null;
   if (personalizationOn && request.userId !== null) {
     relevanceByItem = new Map();

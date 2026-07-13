@@ -17,7 +17,7 @@
 //     call (fail-closed), not merely hidden in the UI.
 import { z } from 'zod';
 import { privacyLevelSchema } from './attention.js';
-import { DEFAULT_FEED_MODE, feedModeCompatSchema } from './feed.js';
+import { feedModeCompatSchema } from './feed.js';
 import { topicRepeatPreferenceSchema } from './invariants-api.js';
 
 /** Current on-the-wire / at-rest schema version for both settings blobs. */
@@ -187,7 +187,15 @@ export function defaultPersonalizationSettings(): PersonalizationSettings {
     schema_version: PRIVACY_SETTINGS_VERSION,
     topic_preferences: [],
     topic_repeat_preference: {},
-    feed_mode: DEFAULT_FEED_MODE,
+    // A LEGACY value ON PURPOSE (rollout compat): this default is SEEDED into
+    // new accounts' blobs and EMITTED on `/v1/privacy/settings` +
+    // `/v1/feed/preferences`, and a pre-redesign cached bundle validates
+    // those responses against the old mode enum — a canonical value here
+    // would break every settings read on stale bundles. Every consumer
+    // normalizes (`balanced` → the canonical default). Flip to
+    // DEFAULT_FEED_MODE when LEGACY_FEED_MODES is removed (tracked in
+    // docs/ranking/README.md).
+    feed_mode: 'balanced',
     locale_overrides: [],
   };
 }
