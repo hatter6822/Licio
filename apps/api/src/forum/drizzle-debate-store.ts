@@ -17,11 +17,12 @@
 import type { DbExecutor } from '@licio/db';
 import { debateArenas as debateArenasTable } from '@licio/db';
 import type { Citation, DebateState } from '@licio/shared';
-import { and, asc, count, eq, inArray, lte, ne, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
 import type {
   DebateArenaRecord,
   DebateConcessionPatch,
   DebateLockedContent,
+  DebateRemovalClosure,
   DebateSidePosition,
   DebateStore,
   DebateVerdictPatch,
@@ -44,6 +45,15 @@ function isUniqueViolation(error: unknown): boolean {
     current = (current as { cause?: unknown }).cause;
   }
   return false;
+}
+
+/** Thrown inside the removal-close transaction to trigger a full rollback
+ *  when any arena misses its `state = 'open'` CAS. */
+class RemovalCloseConflict extends Error {
+  constructor() {
+    super('removal close conflict');
+    this.name = 'RemovalCloseConflict';
+  }
 }
 
 const NON_RESOLVED: readonly DebateState[] = ['open', 'locked', 'awaiting_verdict', 'judged'];
@@ -305,6 +315,27 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async backfillLockedContent(
+    debateId: string,
+    lockedAt: string,
+    content: DebateLockedContent,
+  ): Promise<DebateArenaRecord | null> {
+    // CAS: fill only a MISSING snapshot on a claimed arena (legacy / crash
+    // recovery) — an existing snapshot is frozen for the judge.
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({ lockedAt: new Date(lockedAt), lockedContent: content, updatedAt: new Date() })
+      .where(
+        and(
+          eq(debateArenasTable.debateId, debateId),
+          eq(debateArenasTable.state, 'awaiting_verdict'),
+          isNull(debateArenasTable.lockedContent),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
   async withdraw(debateId: string, closedAt: string): Promise<DebateArenaRecord | null> {
     // CAS: a withdrawal racing the lock loses (the material was locked in).
     const rows = await this.#db
@@ -332,6 +363,64 @@ export class DrizzleDebateStore implements DebateStore {
       .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'open')))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async closeForRemoval(
+    closures: readonly DebateRemovalClosure[],
+  ): Promise<DebateArenaRecord[] | null> {
+    if (closures.length === 0) return [];
+    // ONE transaction over the per-arena `state = 'open'` CAS closes: any
+    // arena that locked/closed concurrently misses its CAS and the whole set
+    // rolls back — a removal never half-closes its arenas.
+    try {
+      return await this.#db.transaction(async (tx) => {
+        const rows: DebateArenaRecord[] = [];
+        for (const closure of closures) {
+          const updated =
+            closure.kind === 'withdraw'
+              ? await tx
+                  .update(debateArenasTable)
+                  .set({
+                    state: 'withdrawn',
+                    resolvedAt: new Date(closure.closedAt),
+                    updatedAt: new Date(),
+                  })
+                  .where(
+                    and(
+                      eq(debateArenasTable.debateId, closure.debateId),
+                      eq(debateArenasTable.state, 'open'),
+                    ),
+                  )
+                  .returning()
+              : await tx
+                  .update(debateArenasTable)
+                  .set({
+                    state: 'resolved',
+                    verdict: closure.patch.verdict,
+                    winner: closure.patch.winner,
+                    decidedBy: closure.patch.decidedBy,
+                    rationale: closure.patch.rationale,
+                    verdictAt: new Date(closure.patch.verdictAt),
+                    resolvedAt: new Date(closure.patch.resolvedAt),
+                    updatedAt: new Date(),
+                  })
+                  .where(
+                    and(
+                      eq(debateArenasTable.debateId, closure.debateId),
+                      eq(debateArenasTable.state, 'open'),
+                    ),
+                  )
+                  .returning();
+          const row = updated[0];
+          if (!row) throw new RemovalCloseConflict();
+          rows.push(this.#toRecord(row));
+        }
+        return rows;
+      });
+    } catch (error) {
+      if (error instanceof RemovalCloseConflict) return null;
+      throw error;
+    }
   }
 
   async claimForVerdict(debateId: string): Promise<DebateArenaRecord | null> {

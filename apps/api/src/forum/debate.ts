@@ -40,8 +40,10 @@ import {
 import { mapBounded } from '../lib/concurrency.js';
 import type {
   DebateArenaRecord,
+  DebateConcessionPatch,
   DebateLockedContent,
   DebateLockedSide,
+  DebateRemovalClosure,
   DebateSidePosition,
   DebateStore,
 } from './debate-store.js';
@@ -459,8 +461,21 @@ export async function judgeDebateArena(
   // (Re-claiming `awaiting_verdict` succeeds: a claim whose judge crashed is
   // re-judged on a later tick.) A judged/terminal arena refuses the claim —
   // return it unchanged (the idempotent no-op).
-  const arena = await deps.debates.claimForVerdict(debateId);
+  let arena = await deps.debates.claimForVerdict(debateId);
   if (arena === null) return deps.debates.getById(debateId);
+  // A claim WITHOUT a snapshot — a pre-live-window legacy row, or a crash
+  // whose recovery re-claims an arena that was claimed straight from `open` —
+  // must never judge empty sides: backfill the snapshot from the live rows
+  // now (CAS on the missing snapshot; an existing snapshot stays frozen).
+  if (arena.lockedContent === null) {
+    const content = await snapshotDebateContent(deps, arena);
+    const filled = await deps.debates.backfillLockedContent(
+      debateId,
+      new Date(deps.now()).toISOString(),
+      content,
+    );
+    arena = filled ?? (await deps.debates.getById(debateId)) ?? arena;
+  }
   // Co-viewers see the arena enter the resolution queue immediately.
   await broadcastArena(deps, arena);
 
@@ -566,6 +581,14 @@ export type WithdrawOutcome =
   | { ok: true; arena: DebateArenaRecord }
   | { ok: false; reason: 'not_found' | 'not_challenger' | 'window_closed' };
 
+/** The post-close effects of a withdrawal: the target's `under_debate` tag
+ *  clears back to `none` (still re-challengeable), audit log, live frame. */
+async function applyWithdrawalEffects(deps: DebateDeps, closed: DebateArenaRecord): Promise<void> {
+  await clearDisputeTag(deps, closed);
+  deps.log('forum.debate_withdrawn', { debate_id: closed.debateId, story_id: closed.storyId });
+  await broadcastArena(deps, closed);
+}
+
 /**
  * The challenger retracts the correction while the arena is open: the debate
  * closes as `withdrawn` — no verdict, and the target's `under_debate` tag
@@ -586,15 +609,37 @@ export async function withdrawDebate(
   // The store CAS (`open` only): a withdrawal racing the lock loses.
   const closed = await deps.debates.withdraw(debateId, nowIso);
   if (closed === null) return { ok: false, reason: 'window_closed' };
-  await clearDisputeTag(deps, closed);
-  deps.log('forum.debate_withdrawn', { debate_id: debateId, story_id: arena.storyId });
-  await broadcastArena(deps, closed);
+  await applyWithdrawalEffects(deps, closed);
   return { ok: true, arena: closed };
 }
 
 export type ConcedeOutcome =
   | { ok: true; arena: DebateArenaRecord }
   | { ok: false; reason: 'not_found' | 'not_incumbent' | 'window_closed' };
+
+/** The canonical concession outcome patch (`decided_by = 'concession'`). */
+export function concessionPatch(nowIso: string): DebateConcessionPatch {
+  return {
+    verdict: 'corrected',
+    winner: 'challenger',
+    decidedBy: 'concession',
+    rationale: 'The incumbent conceded the challenge.',
+    verdictAt: nowIso,
+    resolvedAt: nowIso,
+  };
+}
+
+/** The post-close effects of a concession: the target is tagged `incorrect`
+ *  (visible-but-sunk, never hidden), audit log, live frame. */
+async function applyConcessionEffects(deps: DebateDeps, closed: DebateArenaRecord): Promise<void> {
+  if (closed.targetType === 'comment' && closed.targetContributionId !== null) {
+    await deps.contributions.setDisputeStatus(closed.targetContributionId, 'incorrect');
+  } else if (closed.targetType === 'story') {
+    await deps.setStoryDispute(closed.storyId, 'incorrect');
+  }
+  deps.log('forum.debate_conceded', { debate_id: closed.debateId, story_id: closed.storyId });
+  await broadcastArena(deps, closed);
+}
 
 /**
  * The incumbent concedes while the arena is open: the challenger prevails
@@ -614,24 +659,61 @@ export async function concedeDebate(
     return { ok: false, reason: 'window_closed' };
   }
   // The store CAS (`open` only): a concession racing the lock loses.
-  const closed = await deps.debates.concede(debateId, {
-    verdict: 'corrected',
-    winner: 'challenger',
-    decidedBy: 'concession',
-    rationale: 'The incumbent conceded the challenge.',
-    verdictAt: nowIso,
-    resolvedAt: nowIso,
-  });
+  const closed = await deps.debates.concede(debateId, concessionPatch(nowIso));
   if (closed === null) return { ok: false, reason: 'window_closed' };
-  // Apply the outcome to the conceded target (visible-but-sunk, never hidden).
-  if (closed.targetType === 'comment' && closed.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(closed.targetContributionId, 'incorrect');
-  } else if (closed.targetType === 'story') {
-    await deps.setStoryDispute(closed.storyId, 'incorrect');
-  }
-  deps.log('forum.debate_conceded', { debate_id: debateId, story_id: arena.storyId });
-  await broadcastArena(deps, closed);
+  await applyConcessionEffects(deps, closed);
   return { ok: true, arena: closed };
+}
+
+/**
+ * The exits a REMOVAL implies, closed ALL-OR-NOTHING: for every live arena
+ * the removed contribution is party to, the challenger side withdraws and the
+ * incumbent side concedes — in one atomic store close, so a second arena that
+ * locked concurrently can never leave the first half-closed while the removal
+ * is refused.  Returns the closed arena ids, or 'window_closed' when any
+ * arena is no longer open (NOTHING mutated), or 'noop' when the caller holds
+ * no closable arenas.  The per-arena outcome effects (tags, logs, frames)
+ * apply after the atomic close succeeds.
+ */
+export async function closeDebatesForRemoval(
+  deps: DebateDeps,
+  parties: readonly { arena: DebateArenaRecord; side: 'incumbent' | 'challenger' }[],
+  userId: string,
+): Promise<{ ok: true; closedIds: string[] } | { ok: false; reason: 'window_closed' | 'noop' }> {
+  const nowIso = new Date(deps.now()).toISOString();
+  const closures: DebateRemovalClosure[] = [];
+  const kinds = new Map<string, 'withdraw' | 'concede'>();
+  for (const { arena: listed, side } of parties) {
+    // Re-read FRESH: the caller's list may predate a concurrent lifecycle
+    // move.  A pre-verdict freeze (`locked`/`awaiting_verdict`) refuses the
+    // whole removal; a debate that ENDED meanwhile simply needs no exit.
+    const arena = await deps.debates.getById(listed.debateId);
+    if (arena === null) continue;
+    if (arena.state === 'locked' || arena.state === 'awaiting_verdict') {
+      return { ok: false, reason: 'window_closed' };
+    }
+    if (arena.state !== 'open') continue;
+    // Only the party's OWN exit applies (the caller verified row ownership;
+    // a mismatched arena user — e.g. a tombstoned author — closes nothing).
+    if (side === 'challenger' && arena.challengerUserId === userId) {
+      closures.push({ debateId: arena.debateId, kind: 'withdraw', closedAt: nowIso });
+      kinds.set(arena.debateId, 'withdraw');
+    } else if (side === 'incumbent' && arena.incumbentUserId === userId) {
+      closures.push({ debateId: arena.debateId, kind: 'concede', patch: concessionPatch(nowIso) });
+      kinds.set(arena.debateId, 'concede');
+    }
+  }
+  if (closures.length === 0) return { ok: false, reason: 'noop' };
+  // The store close is ALL-OR-NOTHING under per-arena `state='open'` CAS —
+  // the final race sliver (a lock between the re-read above and this call)
+  // rolls the whole set back.
+  const closed = await deps.debates.closeForRemoval(closures);
+  if (closed === null) return { ok: false, reason: 'window_closed' };
+  for (const arena of closed) {
+    if (kinds.get(arena.debateId) === 'withdraw') await applyWithdrawalEffects(deps, arena);
+    else await applyConcessionEffects(deps, arena);
+  }
+  return { ok: true, closedIds: closed.map((arena) => arena.debateId) };
 }
 
 /** Clear the challenged target's `under_debate` tag back to `none`. */
@@ -1023,11 +1105,13 @@ export async function readDebateArenaContent(
       );
     }
   } else {
-    // Story target.  The reader returns null for a missing/hidden story; a
-    // locked snapshot still projects (the debate happened over it).
+    // Story target.  The reader returns null for a missing/hidden story — a
+    // locked snapshot then projects SUPPRESSED too: a debate SSE subscriber
+    // must never receive later lifecycle frames carrying a body the story's
+    // takedown/safety hide has since pulled (parity with the comment path).
     const story = await storyContent(arena.storyId);
     if (locked !== null) {
-      target = projectContent('story', locked.target, false, true);
+      target = projectContent('story', locked.target, story === null, true);
     } else if (story !== null) {
       target = projectContent(
         'story',

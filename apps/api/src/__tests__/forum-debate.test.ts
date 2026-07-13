@@ -18,6 +18,7 @@ import {
 } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  closeDebatesForRemoval,
   concedeDebate,
   type DebateDeps,
   type DebateJudgeRunner,
@@ -1201,6 +1202,117 @@ describe('WS-T withdraw / concede — party-driven early closes', () => {
     const conceded = await concedeDebate(deps, debateId, INCUMBENT);
     expect(conceded.ok).toBe(true);
     expect(storyDisputes.get(STORY)).toBe('incorrect');
+  });
+
+  it('judging a claimed-but-never-locked arena BACKFILLS the snapshot (never judges empty sides)', async () => {
+    // A pre-live-window legacy row / crash-recovered claim: the arena reached
+    // `awaiting_verdict` without ever locking, so `lockedContent` is null.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    await debates.claimForVerdict(debateId); // straight from `open` — no lock
+    expect((await debates.getById(debateId))?.lockedContent).toBeNull();
+
+    let judgedContent = '';
+    const capturing: DebateDeps = {
+      ...deps,
+      runJudge: async (ctx, input) => {
+        judgedContent = input.incumbent.content;
+        return corrected(ctx, input);
+      },
+    };
+    const judged = await judgeDebateArena(capturing, debateId);
+    expect(judged?.state).toBe('judged');
+    // The snapshot was backfilled from the live rows before scoring.
+    expect(judgedContent).toBe('The vote passed 5-4.');
+    expect((await debates.getById(debateId))?.lockedContent?.target.body).toBe(
+      'The vote passed 5-4.',
+    );
+  });
+
+  it('a hidden story suppresses even the LOCKED snapshot in the projection', async () => {
+    const correctionId = randomUUID();
+    await contributions.insert({
+      contributionId: correctionId,
+      threadId: THREAD,
+      userId: CHALLENGER,
+      type: 'correction',
+      body: 'The headline is wrong.',
+      citations: [citation],
+      metadata: { target_story_id: STORY },
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: `draft-${correctionId}`,
+      path: [],
+      moderationState: 'published',
+    });
+    const debateId = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      {
+        contributionId: correctionId,
+        threadId: THREAD,
+        storyId: STORY,
+        roomId: ROOM,
+        userId: CHALLENGER,
+        body: 'The headline is wrong.',
+        citations: [citation],
+        metadata: { target_story_id: STORY },
+      },
+      debateId,
+    );
+    await lockDebateArena(deps, debateId, 'expedited');
+    // The story is now hidden (takedown/safety): the reader returns null, and
+    // even the LOCKED snapshot must project suppressed — a live SSE
+    // subscriber's later lifecycle frames never re-carry the hidden body.
+    const hiddenDeps: DebateDeps = { ...deps, storyContent: async () => null };
+    const arena = await debates.getById(debateId);
+    if (arena === null) throw new Error('arena missing');
+    const content = await readDebateArenaContent(contributions, hiddenDeps.storyContent, arena);
+    expect(content.target?.removed).toBe(true);
+    expect(content.target?.body).toBe('');
+    expect(content.target?.title).toBeNull();
+  });
+
+  it('closeDebatesForRemoval closes every open arena atomically — or none on a lock race', async () => {
+    // The dual-arena correction: challenger of arena A, incumbent of arena B.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const arenaA = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), arenaA);
+    const counterId = await seedCorrection(correctionId);
+    const arenaB = randomUUID();
+    await maybeEnterDebate(
+      deps,
+      {
+        ...correctionInput(counterId, correctionId),
+        metadata: { target_contribution_id: correctionId },
+      },
+      arenaB,
+    );
+    const parties = await liveArenasForContribution(debates, correctionId);
+
+    // Race: arena B locks AFTER the parties were read — the atomic close must
+    // refuse and leave arena A untouched (no half-closed removal).
+    await lockDebateArena(deps, arenaB, 'expedited');
+    const refused = await closeDebatesForRemoval(deps, parties, CHALLENGER);
+    expect(refused).toEqual({ ok: false, reason: 'window_closed' });
+    expect((await debates.getById(arenaA))?.state).toBe('open');
+
+    // With B resolved out of the way, the close succeeds: A withdraws (this
+    // author is its challenger) and the target's tag clears.
+    await judgeDebateArena(deps, arenaB);
+    await finalizeDebate(deps, arenaB);
+    const partiesNow = await liveArenasForContribution(debates, correctionId);
+    const closed = await closeDebatesForRemoval(deps, partiesNow, CHALLENGER);
+    expect(closed.ok).toBe(true);
+    if (closed.ok) expect(closed.closedIds).toEqual([arenaA]);
+    expect((await debates.getById(arenaA))?.state).toBe('withdrawn');
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('none');
   });
 
   it('withdraw and concede are refused once the material is locked in', async () => {

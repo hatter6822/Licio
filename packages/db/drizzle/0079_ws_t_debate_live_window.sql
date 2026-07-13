@@ -48,10 +48,12 @@ ALTER TABLE "debate_arenas" ALTER COLUMN "challenger_last_active_at" SET NOT NUL
 -- correction's body + citations (the correction WAS the opening position).
 -- The redesign shows and judges the correction row itself as the challenger's
 -- underlying content, with the position now a distinct rebuttal layer — so a
--- legacy row whose challenger position still equals its correction body would
--- display and score the same text twice. Reset exactly those verbatim copies
--- to the empty rebuttal; a position the challenger genuinely edited differs
--- from the correction body and is kept.
+-- legacy row whose challenger position still equals its correction would
+-- display and score the same material twice. Reset exactly those verbatim
+-- seeds — the summary AND the citations must both still match (jsonb equality
+-- is structural) — so a position the challenger edited in EITHER layer (a
+-- reworded case, or the same text with added/changed rebuttal sources) is
+-- kept with everything the challenger submitted.
 UPDATE "debate_arenas" SET "positions" = jsonb_set(
   "positions",
   '{challenger}',
@@ -59,7 +61,8 @@ UPDATE "debate_arenas" SET "positions" = jsonb_set(
 )
 FROM "contributions" c
 WHERE c."contribution_id" = "debate_arenas"."challenger_contribution_id"
-  AND "debate_arenas"."positions"->'challenger'->>'summary' = c."body";--> statement-breakpoint
+  AND "debate_arenas"."positions"->'challenger'->>'summary' = c."body"
+  AND "debate_arenas"."positions"->'challenger'->'citations' = c."citations";--> statement-breakpoint
 DROP INDEX IF EXISTS "debate_arenas_open_comment_uq";--> statement-breakpoint
 CREATE UNIQUE INDEX "debate_arenas_open_comment_uq" ON "debate_arenas" USING btree ("target_contribution_id") WHERE "debate_arenas"."target_contribution_id" is not null and "debate_arenas"."state" not in ('resolved', 'withdrawn');--> statement-breakpoint
 DROP INDEX IF EXISTS "debate_arenas_open_story_uq";--> statement-breakpoint

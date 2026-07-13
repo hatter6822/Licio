@@ -108,6 +108,11 @@ export interface DebateConcessionPatch {
   resolvedAt: string;
 }
 
+/** One arena's exit in an ALL-OR-NOTHING removal close (`closeForRemoval`). */
+export type DebateRemovalClosure =
+  | { debateId: string; kind: 'withdraw'; closedAt: string }
+  | { debateId: string; kind: 'concede'; patch: DebateConcessionPatch };
+
 export interface DebateStore {
   /** Insert a new arena.  Returns null if a live (non-terminal) arena already
    *  exists for the same target (the one-live-per-target invariant). */
@@ -161,6 +166,17 @@ export interface DebateStore {
     debateId: string,
     content: DebateLockedContent,
   ): Promise<DebateArenaRecord | null>;
+  /** ATOMICALLY fill a MISSING snapshot on an already-claimed arena (CAS on
+   *  `state = 'awaiting_verdict' AND lockedContent IS NULL`).  The judge-time
+   *  catch-up for an arena claimed WITHOUT ever locking — a pre-live-window
+   *  legacy row or a crash-recovered claim — so re-judging never scores empty
+   *  sides.  Deliberately DISTINCT from `refreshLockedContent`: a snapshot
+   *  that already exists is frozen for the judge and is never replaced here. */
+  backfillLockedContent(
+    debateId: string,
+    lockedAt: string,
+    content: DebateLockedContent,
+  ): Promise<DebateArenaRecord | null>;
   /** ATOMICALLY close an `open` arena as `withdrawn` (the challenger retracted
    *  the correction) — terminal, no verdict.  Non-`open` returns null (a
    *  withdrawal racing the hour-23 lock loses: the material was locked in). */
@@ -169,6 +185,12 @@ export interface DebateStore {
    *  outcome (the incumbent conceded; the challenger prevails without
    *  adjudication).  Non-`open` returns null (same lock-race rule). */
   concede(debateId: string, patch: DebateConcessionPatch): Promise<DebateArenaRecord | null>;
+  /** ALL-OR-NOTHING close of every arena a removed contribution is party to
+   *  (a correction can be challenger of one arena AND incumbent of another):
+   *  every arena must still be `open`, else NOTHING mutates and null returns
+   *  — a removal must never withdraw one arena and then fail on a second
+   *  that locked concurrently.  Returns the closed rows in input order. */
+  closeForRemoval(closures: readonly DebateRemovalClosure[]): Promise<DebateArenaRecord[] | null>;
   /** ATOMICALLY claim an arena for adjudication (`open`/`locked`/
    *  `awaiting_verdict` → `awaiting_verdict`), returning the post-claim row —
    *  the EXACT snapshot the judge must score.  `open` is accepted for
@@ -398,6 +420,25 @@ export class InMemoryDebateStore implements DebateStore {
     return row;
   }
 
+  async backfillLockedContent(
+    debateId: string,
+    lockedAt: string,
+    content: DebateLockedContent,
+  ): Promise<DebateArenaRecord | null> {
+    const row = this.#rows.get(debateId);
+    if (!row) return null;
+    // CAS: fill only a MISSING snapshot on a claimed arena — an existing
+    // snapshot is frozen for the judge.
+    if (row.state !== 'awaiting_verdict' || row.lockedContent !== null) return null;
+    row.lockedAt = lockedAt;
+    row.lockedContent = {
+      target: { ...content.target, citations: [...content.target.citations] },
+      correction: { ...content.correction, citations: [...content.correction.citations] },
+    };
+    row.updatedAt = this.#iso();
+    return row;
+  }
+
   async withdraw(debateId: string, closedAt: string): Promise<DebateArenaRecord | null> {
     const row = this.#rows.get(debateId);
     if (!row) return null;
@@ -423,6 +464,37 @@ export class InMemoryDebateStore implements DebateStore {
     row.resolvedAt = patch.resolvedAt;
     row.updatedAt = this.#iso();
     return row;
+  }
+
+  async closeForRemoval(
+    closures: readonly DebateRemovalClosure[],
+  ): Promise<DebateArenaRecord[] | null> {
+    // Check-all-then-mutate with NO awaits in between: on the single-threaded
+    // event loop this is atomic — either every arena closes or none does.
+    const rows: DebateArenaRecord[] = [];
+    for (const closure of closures) {
+      const row = this.#rows.get(closure.debateId);
+      if (row?.state !== 'open') return null;
+      rows.push(row);
+    }
+    for (let i = 0; i < closures.length; i += 1) {
+      const closure = closures[i] as DebateRemovalClosure;
+      const row = rows[i] as DebateArenaRecord;
+      if (closure.kind === 'withdraw') {
+        row.state = 'withdrawn';
+        row.resolvedAt = closure.closedAt;
+      } else {
+        row.state = 'resolved';
+        row.verdict = closure.patch.verdict;
+        row.winner = closure.patch.winner;
+        row.decidedBy = closure.patch.decidedBy;
+        row.rationale = closure.patch.rationale;
+        row.verdictAt = closure.patch.verdictAt;
+        row.resolvedAt = closure.patch.resolvedAt;
+      }
+      row.updatedAt = this.#iso();
+    }
+    return rows;
   }
 
   async claimForVerdict(debateId: string): Promise<DebateArenaRecord | null> {

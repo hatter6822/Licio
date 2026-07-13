@@ -42,12 +42,11 @@ import type { NewStoredEvent } from '../events/stores.js';
 import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import {
-  concedeDebate,
+  closeDebatesForRemoval,
   liveArenasForContribution,
   maybeEnterDebate,
   rebroadcastArena,
   snapshotDebateContent,
-  withdrawDebate,
 } from './debate.js';
 import { buildDebateDeps } from './debate-scheduler.js';
 import type { DebateArenaRecord } from './debate-store.js';
@@ -890,12 +889,30 @@ export async function editContribution(
   // store-level `state = 'open'` CAS, so it doubles as the permission check:
   // a loser here is told `debate_locked` BEFORE anything is written (and a
   // winner has its side-activity clock reset atomically with the permission).
+  // Only STILL-OPEN arenas participate — the pre-verdict freeze covers
+  // `locked`/`awaiting_verdict` only (rejected by the gate above); an arena
+  // already judged, resolved, or withdrawn no longer restricts the author.
   const debateDeps =
     debateParties.length > 0 ? buildDebateDeps(bundle.forum, bundle.ingestion) : null;
   const touchAt = new Date(forum.now()).toISOString();
+  // The arenas that were OPEN at this write gate — the only ones the
+  // post-edit reconcile below must police (an arena already judged/terminal
+  // BEFORE the edit legitimately allows it and needs no reconciliation).
+  const racedArenaIds: string[] = [];
   for (const { arena, side } of debateParties) {
+    if (arena.state !== 'open') continue;
+    racedArenaIds.push(arena.debateId);
     if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
-      return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+      // The CAS lost: the arena left `open` during the passes above.  Only a
+      // pre-verdict freeze rejects; a debate that ENDED meanwhile (withdrawn,
+      // conceded, judged) frees the author to edit.
+      const current = await forum.debates.getById(arena.debateId);
+      if (
+        current !== null &&
+        (current.state === 'locked' || current.state === 'awaiting_verdict')
+      ) {
+        return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+      }
     }
   }
 
@@ -908,36 +925,66 @@ export async function editContribution(
   }
 
   // WS-T — the residual sliver: a lock that lands BETWEEN the touch-CAS and
-  // `applyEdit`.  Reconcile forward while the arena is still `locked`
-  // (re-snapshot the now-current content — the queue has not claimed it, so
-  // the judge scores exactly what the live row shows); once claimed/judged it
-  // is too late to reconcile, so the edit is REVERTED (an honest edit-history
+  // `applyEdit`.  Reconcile forward while every raced arena is still `locked`
+  // (re-snapshot the now-current content — the queue has not claimed them, so
+  // the judge scores exactly what the live row shows); once ANY is claimed/
+  // judged it is too late, so the edit is REVERTED (an honest edit-history
   // entry) and the writer told `debate_locked` — never a silently unjudged
-  // live change.
+  // live change.  Two passes ACROSS the arenas: verify every raced arena is
+  // refreshable BEFORE committing any refresh, so a dual-arena correction
+  // never leaves one arena's snapshot carrying an edit the other forced us to
+  // revert (and if a claim still lands between the passes, the refreshed
+  // snapshots are best-effort restored from the reverted row).
   if (debateDeps !== null) {
-    for (const { arena } of debateParties) {
-      const current = await forum.debates.getById(arena.debateId);
-      if (current === null || current.state === 'open') continue;
-      if (current.state === 'locked') {
-        const snapshot = await snapshotDebateContent(debateDeps, current);
-        if ((await forum.debates.refreshLockedContent(current.debateId, snapshot)) !== null) {
-          continue; // the judged snapshot now includes this edit
-        }
-      }
-      // Claimed or judged mid-race: put the previous material back.
+    const revertEdit = async (): Promise<void> => {
       await forum.contributions.applyEdit(
         contributionId,
         { body: existing.body, citations: existing.citations },
         userId,
         randomUUID(),
       );
+    };
+    // Pass 1: read the RACED arenas' current states (only those that were
+    // `open` at the write gate); classify.
+    const toRefresh: string[] = [];
+    let mustRevert = false;
+    for (const debateId of racedArenaIds) {
+      const current = await forum.debates.getById(debateId);
+      if (current === null) continue;
+      if (current.state === 'locked') toRefresh.push(current.debateId);
+      else if (current.state === 'awaiting_verdict' || current.state === 'judged') {
+        // Claimed or judged mid-race: the snapshot is frozen without this edit.
+        mustRevert = true;
+      }
+      // `open` (no race), `withdrawn`, `resolved`: nothing to reconcile.
+    }
+    if (mustRevert) {
+      await revertEdit();
       return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
     }
-    // Fan the fresh material out to arena viewers (the activity clocks were
-    // already reset by the pre-write touch-CAS above).  The projection reads
-    // the CURRENT row, so a moderation-held edit broadcasts suppressed.
-    for (const { arena } of debateParties) {
-      await rebroadcastArena(debateDeps, arena.debateId);
+    // Pass 2: commit the refreshes.  A claim landing between the passes fails
+    // the CAS — revert the edit AND restore the already-refreshed snapshots
+    // from the (now reverted) row, best effort.
+    const refreshed: string[] = [];
+    for (const debateId of toRefresh) {
+      const current = await forum.debates.getById(debateId);
+      if (current === null) continue;
+      const snapshot = await snapshotDebateContent(debateDeps, current);
+      if ((await forum.debates.refreshLockedContent(debateId, snapshot)) !== null) {
+        refreshed.push(debateId);
+        continue;
+      }
+      await revertEdit();
+      for (const doneId of refreshed) {
+        const row = await forum.debates.getById(doneId);
+        if (row !== null) {
+          await forum.debates.refreshLockedContent(
+            doneId,
+            await snapshotDebateContent(debateDeps, row),
+          );
+        }
+      }
+      return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
     }
   }
   // The WS-U in-room agent RE-MODERATES the edited content (parity with the
@@ -1018,8 +1065,25 @@ export async function editContribution(
         reason: agentReason,
       });
     }
+    // WS-T — fan the arena frames out ONLY NOW, after the hold/removal state
+    // has been applied: the projection reads the CURRENT row, so a held edit
+    // broadcasts as the suppressed content, never as a live body the
+    // moderation pass is about to pull.
+    if (debateDeps !== null) {
+      for (const { arena } of debateParties) {
+        await rebroadcastArena(debateDeps, arena.debateId);
+      }
+    }
     forum.metrics.increment('contributions.edited');
     return { ok: true, contribution: held ?? edited };
+  }
+  // WS-T — the published edit's fresh material fans out to arena viewers
+  // (after the moderation decision above cleared it as published; the
+  // activity clocks were already reset by the pre-write touch-CAS).
+  if (debateDeps !== null) {
+    for (const { arena } of debateParties) {
+      await rebroadcastArena(debateDeps, arena.debateId);
+    }
   }
   forum.metrics.increment('contributions.edited');
   return { ok: true, contribution: edited };
@@ -1057,24 +1121,21 @@ export async function removeContribution(
   //     locked in until the AI resolution queue renders the verdict.
   //   • `judged`/terminal: the outcome already stands; removal proceeds.
   const debateParties = await liveArenasForContribution(forum.debates, contributionId);
-  const closedArenaIds: string[] = [];
+  let closedArenaIds: string[] = [];
   if (anyDebateLockedIn(debateParties)) {
     return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
   }
   const debateDeps = debateParties.length > 0 ? buildDebateDeps(forum, bundle.ingestion) : null;
-  for (const { arena, side } of debateParties) {
-    if (arena.state !== 'open' || debateDeps === null) continue;
-    const outcome =
-      side === 'challenger'
-        ? await withdrawDebate(debateDeps, arena.debateId, userId)
-        : await concedeDebate(debateDeps, arena.debateId, userId);
-    // A close racing the lock loses (`window_closed`): the material just
-    // locked in, so the removal is refused too.  A stale party record
-    // (`not_found`/`not_*`) has nothing to close — the removal proceeds.
+  if (debateDeps !== null) {
+    // ALL-OR-NOTHING: every open arena closes with the party's own exit in
+    // one atomic store close — an arena that locked concurrently rolls the
+    // whole set back, so the refused removal never leaves another arena
+    // already withdrawn/conceded behind it.
+    const outcome = await closeDebatesForRemoval(debateDeps, debateParties, userId);
     if (!outcome.ok && outcome.reason === 'window_closed') {
       return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
     }
-    if (outcome.ok) closedArenaIds.push(arena.debateId);
+    if (outcome.ok) closedArenaIds = outcome.closedIds;
   }
   const removed = await forum.contributions.setModerationState(contributionId, 'removed');
   if (!removed) {

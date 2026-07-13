@@ -347,6 +347,89 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect((await store.getById(id))?.lockedContent?.target.body).toBe('post-edit body');
   });
 
+  it('backfills a MISSING snapshot on a claimed arena but never replaces one', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const arena = await store.open(makeArena(ctx));
+    const id = arena?.debateId ?? '';
+    const side = (body: string): DebateLockedContent['target'] => ({
+      title: null,
+      body,
+      citations: [],
+      updatedAt: null,
+    });
+    // A legacy/crash claim: straight from `open`, no lock, no snapshot.
+    await store.claimForVerdict(id);
+    const filled = await store.backfillLockedContent(id, '2026-07-05T01:00:00.000Z', {
+      target: side('the challenged text'),
+      correction: side('the correction'),
+    });
+    expect(filled?.lockedContent?.target.body).toBe('the challenged text');
+    expect(filled?.lockedAt).toBe('2026-07-05T01:00:00.000Z');
+    // An existing snapshot is frozen for the judge — the backfill CAS refuses.
+    expect(
+      await store.backfillLockedContent(id, '2026-07-05T02:00:00.000Z', {
+        target: side('overwrite attempt'),
+        correction: side('x'),
+      }),
+    ).toBeNull();
+    expect((await store.getById(id))?.lockedContent?.target.body).toBe('the challenged text');
+  });
+
+  it('closeForRemoval closes every arena atomically — or NONE when any left `open`', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    // Two live arenas: a comment-target one (this row as challenger) and a
+    // story-target one (this row's author as incumbent).
+    const a = await store.open(makeArena(ctx));
+    const b = await store.open(
+      makeArena(ctx, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: ctx.challenger2Id,
+      }),
+    );
+    const aId = a?.debateId ?? '';
+    const bId = b?.debateId ?? '';
+    const patch = {
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'concession',
+      rationale: 'The incumbent conceded the challenge.',
+      verdictAt: '2026-07-05T01:00:00.000Z',
+      resolvedAt: '2026-07-05T01:00:00.000Z',
+    } as const;
+    // One of the pair locks concurrently: the WHOLE close rolls back.
+    await store.lock(bId, '2026-07-05T00:30:00.000Z', {
+      target: { title: null, body: 'x', citations: [], updatedAt: null },
+      correction: { title: null, body: 'y', citations: [], updatedAt: null },
+    });
+    expect(
+      await store.closeForRemoval([
+        { debateId: aId, kind: 'withdraw', closedAt: '2026-07-05T01:00:00.000Z' },
+        { debateId: bId, kind: 'concede', patch },
+      ]),
+    ).toBeNull();
+    expect((await store.getById(aId))?.state).toBe('open'); // untouched
+    // With every arena OPEN (a fresh pair on a fresh graph), the set closes.
+    const ctx2 = await freshCtx();
+    const a2 = await store.open(makeArena(ctx2));
+    const b2 = await store.open(
+      makeArena(ctx2, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: ctx2.challenger2Id,
+      }),
+    );
+    if (!a2 || !b2) throw new Error('fresh arenas not opened');
+    const closed = await store.closeForRemoval([
+      { debateId: a2.debateId, kind: 'withdraw', closedAt: '2026-07-05T02:00:00.000Z' },
+      { debateId: b2.debateId, kind: 'concede', patch },
+    ]);
+    expect(closed?.map((row) => row.state)).toEqual(['withdrawn', 'resolved']);
+    expect(closed?.[1]?.decidedBy).toBe('concession');
+  });
+
   it('withdraws an OPEN arena (terminal, frees the per-target slot)', async () => {
     const store = makeStore();
     const ctx = await freshCtx();

@@ -535,6 +535,49 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     expect(res.status).toBe(404);
   });
 
+  it('WS-T — the debated-content freeze covers ONLY locked/awaiting: judged frees the edit', async () => {
+    const rethrow = (err: unknown): never => {
+      throw err;
+    };
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // Lock the arena (the pre-verdict freeze): the target's edit is refused.
+    await fixture.forum.debates.shiftDeadlines(debateId, {
+      editDeadlineAt: new Date(nowMs - 1000).toISOString(),
+    });
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('locked');
+    const frozen = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A mid-lock fix.' },
+        cookie,
+      ),
+    );
+    expect(frozen.status).toBe(409);
+    expect(((await frozen.json()) as { error: { code: string } }).error.code).toBe('debate_locked');
+    // Once JUDGED (the 24h override window running), the author edits freely —
+    // the freeze never outlives the verdict.
+    await fixture.forum.debates.shiftDeadlines(debateId, {
+      resolveDueAt: new Date(nowMs - 1000).toISOString(),
+    });
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+    const freed = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A post-verdict fix.' },
+        cookie,
+      ),
+    );
+    expect(freed.status).toBe(200);
+  });
+
   it('edits cannot drop the correction citation floor (422)', async () => {
     const target = await createOk(contributionBody('comment', threadId));
     const res = await create(
