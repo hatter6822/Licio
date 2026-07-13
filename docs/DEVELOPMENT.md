@@ -745,12 +745,18 @@ When using Postgres-backed dev data, the seed is transactional and idempotent.
 If you need to discard old seeded data completely, reset the local stack with
 `docker compose down -v` and run `pnpm db:migrate` again before `pnpm dev`.
 
-### Seeded labels and invariant signals
+### Seeded card signals and invariant signals
 
-Rating labels describe **conversation state**, never popularity (SPEC §5.6).
-The seed includes stories and signals for the label set: New, Getting
-Attention, Deepening, Needs Context, Under Review, Resolved Context, and
-Bridge Active — plus the "N sourced comments" chip on cited discussions.
+Story cards carry compact **content-integrity signals**, never popularity
+(SPEC §5.6): the sources count (link icon — published comments carrying
+citations), the WS-T corrections tally (hourglass = live correction debates,
+check = comments challenged and validated, X = comments corrected as
+incorrect), the story-level dispute badge (Challenged / Validated /
+Incorrect), and the "Under review" safety chip. The seed exercises every
+posture: sourced discussions (S1, S13, S22), a live story-level challenge
+(S9, "Challenged"), a live comment arena (S10, hourglass), a validated
+comment (S11, check), an incorrect comment (S4, X), and a story under
+coordination review (S19, "Under review").
 
 The invariant signals are computed through the same WS-H/WS-E paths used by
 production code, not hand-authored fixtures:

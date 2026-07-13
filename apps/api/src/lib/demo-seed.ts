@@ -19,6 +19,8 @@ import {
   attentionAggregateEventSchema,
   type ContributionMetadata,
   type ContributionType,
+  DEBATE_EDIT_WINDOW_MS,
+  DEBATE_LIVE_WINDOW_MS,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   type LocationScope,
@@ -66,6 +68,7 @@ const T = (n: number): string => `5f5e2000-0000-4000-8000-${String(n).padStart(1
 const LENS = (n: number): string => `5f5e5000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const SUB = (n: number): string => `5f5e8000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const CLAIM = (n: number): string => `5f5e9000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const DEBATE = (n: number): string => `5f5ee000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
@@ -262,7 +265,7 @@ export async function seedForumDemoData(
       threadId: DEMO_IDS.THREAD_1,
       roomId: DEMO_IDS.ROOM_1,
       visibility: 'public' as const,
-      // Deepening + sourced comments ⇒ "Deepening" with the sources chip.
+      // Deepening conversation stage with sourced comments (drives sources_count).
       lifecycle: 'deepening' as StoryLifecycleState,
       title: 'Regional water board publishes the full testing dataset',
       body: 'The board released raw and processed results alongside the sampling methodology.',
@@ -272,7 +275,7 @@ export async function seedForumDemoData(
       threadId: DEMO_IDS.THREAD_2,
       roomId: DEMO_IDS.ROOM_2,
       visibility: 'public' as const,
-      // Two communities reconciling divergent readings ⇒ "Bridge Active".
+      // Two communities reconciling divergent readings (bridging stage).
       lifecycle: 'bridging' as StoryLifecycleState,
       title: 'Two neighbourhoods read the same zoning proposal very differently',
       body: 'The proposal text is identical, but two rooms summarise its effects differently.',
@@ -283,7 +286,7 @@ export async function seedForumDemoData(
       threadId: DEMO_IDS.THREAD_3,
       roomId: DEMO_IDS.ROOM_3,
       visibility: 'room_only' as const,
-      // A clarifying question awaiting evidence ⇒ "Needs Context".
+      // A clarifying question awaiting evidence (context_needed stage).
       lifecycle: 'context_needed' as StoryLifecycleState,
       title: 'Claim about the new transit timetable is missing a key caveat',
       body: 'The timetable claim omits a service-frequency caveat.',
@@ -597,10 +600,12 @@ export async function seedForumDemoData(
   });
 
   // --- Stories (varied submission types + visibility tiers + lifecycle) -----
-  // The lifecycle state is the BASE of the §5.6 rating label, so varying it
-  // across the corpus is what makes the feed show every label rather than a
-  // monotone "Getting Attention". Live invariant signals (SCOI → needs-context,
-  // thread safety → under-review) are layered on in seedShadowSignals below.
+  // Varying the lifecycle state keeps the corpus honest across conversation
+  // stages (retrieval eligibility, the archival sweep). The reader-facing card
+  // signals are seeded separately: sourced comments drive sources_count, the
+  // WS-T dispute showcase below drives the corrections tally + badges, and the
+  // live safety signals (thread safety → under-review) are layered on in
+  // seedShadowSignals below.
   const seedStory = async (spec: {
     n: number;
     roomId: string;
@@ -906,7 +911,7 @@ export async function seedForumDemoData(
       'Descriptive only: a coordination signal is being reviewed — not a verdict on the content.',
     topicIds: [topics.water],
   });
-  // S20 — an older, resolved explainer ⇒ "Resolved Context" (archived).
+  // S20 — an older, resolved explainer (archived; excluded from retrieval).
   await seedStory({
     n: 20,
     lifecycle: 'archived',
@@ -921,7 +926,7 @@ export async function seedForumDemoData(
     excerpt: 'A previously ambiguous process, now resolved with a cited synthesis.',
     topicIds: [topics.elections],
   });
-  // S21 — brand-new submission ⇒ "Getting Attention" (submitted).
+  // S21 — brand-new submission (submitted stage; all-zero card signals).
   await seedStory({
     n: 21,
     lifecycle: 'submitted',
@@ -956,7 +961,7 @@ export async function seedForumDemoData(
     excerpt: 'Independent primary sources converge on the same drawdown estimate.',
     topicIds: [topics.science],
   });
-  // S23 — an expert's open question ⇒ "Getting Attention".
+  // S23 — an expert's open question (submitted stage).
   await seedStory({
     n: 23,
     roomId: R(4),
@@ -970,7 +975,7 @@ export async function seedForumDemoData(
     excerpt: 'An open methodological question inviting evidence.',
     topicIds: [topics.climate],
   });
-  // S24 — a steward's local service-change brief ⇒ "Deepening".
+  // S24 — a steward's local service-change brief (deepening stage).
   await seedStory({
     n: 24,
     lifecycle: 'deepening',
@@ -1296,7 +1301,13 @@ export async function seedForumDemoData(
       parent: 1,
       body: 'The first peak was Tuesday, not Monday — the labels in the chart are off by a day.',
       citations: [{ url: 'https://example.org/grid/raw-readings', title: 'Raw interval readings' }],
-      metadata: { target_text_excerpt: 'Monday evening peak' },
+      // Formally targets the STORY (the brief's own chart) — the WS-T dispute
+      // showcase below opens the live arena this correction is arguing in.
+      metadata: {
+        target_text_excerpt: 'Monday evening peak',
+        target_story_id: S(9),
+        debate_arena_id: DEBATE(1),
+      },
     },
     {
       type: 'comment',
@@ -1490,7 +1501,7 @@ export async function seedForumDemoData(
   // archived recall write-up's method trail (S20), the expert methodology
   // exchange (S23), and a note folding the verbatim repost to the original (S25).
   // Transit timetable caveat (PRIVATE Transit room, room_only): the demo member
-  // (the room's only member) pins the missing caveat behind the "Needs Context".
+  // (the room's only member) pins the missing caveat awaiting evidence.
   await tree(T(3), 300, [
     {
       type: 'comment',
@@ -1532,8 +1543,8 @@ export async function seedForumDemoData(
       body: 'Two piers swapped weeks; the rest is unchanged. The bulletin has the updated calendar.',
     },
   ]);
-  // Recall-petition write-up (public, archived ⇒ Resolved Context): the method
-  // trail behind the certified total.
+  // Recall-petition write-up (public, archived): the method trail behind the
+  // certified total.
   await tree(T(20), 330, [
     {
       type: 'comment',
@@ -1554,8 +1565,8 @@ export async function seedForumDemoData(
       citations: [{ url: 'https://example.org/elections/recall-rejection-log' }],
     },
   ]);
-  // Winter-rate filing (public, just submitted ⇒ Getting Attention): one opening
-  // question, kept light because no interpretation has formed yet.
+  // Winter-rate filing (public, just submitted): one opening question, kept
+  // light because no interpretation has formed yet.
   await tree(T(21), 340, [
     {
       type: 'comment',
@@ -1600,6 +1611,173 @@ export async function seedForumDemoData(
       body: 'Partly seasonal, but the post-cleanup readings are above the same months last year.',
     },
   ]);
+
+  // -------------------------------------------------------------------------
+  // WS-T dispute showcase: the §5.6 corrections tally + dispute badges render
+  // from real adjudication state, so seed each posture through the same stores
+  // the debate lifecycle writes (the tags below are exactly what
+  // maybeEnterDebate / finalizeDebate would have left behind):
+  //   • S(9)  — the chart-label correction challenges the STORY: a LIVE
+  //             story-target arena ⇒ the story badge reads "Challenged".
+  //   • S(10) — a cited correction challenges a comment's confounder claim:
+  //             a LIVE comment arena ⇒ the card tally shows an hourglass.
+  //   • S(11) — the certified-totals cross-check was challenged and UPHELD ⇒
+  //             a "Validated" comment (the ✓ tally).
+  //   • S(4)  — a correction PREVAILED against the national-spec claim ⇒ an
+  //             "Incorrect" comment, kept visible but sunk (the ✗ tally).
+  // Live-arena deadlines are freshly stamped, so the dev debate scheduler
+  // treats them as newly opened rather than instantly due.
+  // -------------------------------------------------------------------------
+  const seedCorrection = async (spec: {
+    n: number;
+    threadId: string;
+    author: string;
+    body: string;
+    citations: Cite[];
+    metadata: ContributionMetadata;
+  }): Promise<string> => {
+    await forum.contributions.insert({
+      contributionId: C(spec.n),
+      threadId: spec.threadId,
+      userId: spec.author,
+      type: 'correction',
+      body: spec.body,
+      citations: spec.citations,
+      metadata: spec.metadata,
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: `seed-${C(spec.n)}`,
+      path: [],
+      moderationState: 'published',
+    });
+    return C(spec.n);
+  };
+  const openSeedArena = async (spec: {
+    debateId: string;
+    storyId: string;
+    threadId: string;
+    targetContributionId: string | null;
+    challengerContributionId: string;
+    challengerUserId: string;
+    challengerSummary: string;
+    challengerCitations: Cite[];
+  }): Promise<void> => {
+    const story = await ingestion.stories.getById(spec.storyId);
+    const openedAt = new Date(forum.now());
+    const after = (ms: number): string => new Date(openedAt.getTime() + ms).toISOString();
+    const incumbentUserId =
+      spec.targetContributionId === null
+        ? (story?.submittedBy ?? null)
+        : ((await forum.contributions.getById(spec.targetContributionId))?.userId ?? null);
+    await forum.debates.open({
+      debateId: spec.debateId,
+      storyId: spec.storyId,
+      threadId: spec.threadId,
+      roomId: story?.roomId ?? null,
+      targetType: spec.targetContributionId === null ? 'story' : 'comment',
+      targetContributionId: spec.targetContributionId,
+      challengerContributionId: spec.challengerContributionId,
+      incumbentUserId,
+      challengerUserId: spec.challengerUserId,
+      state: 'open',
+      positions: {
+        incumbent: { summary: '', citations: [], updatedAt: null },
+        challenger: {
+          summary: spec.challengerSummary,
+          citations: spec.challengerCitations,
+          updatedAt: openedAt.toISOString(),
+        },
+      },
+      editDeadlineAt: after(DEBATE_EDIT_WINDOW_MS),
+      resolveDueAt: after(DEBATE_LIVE_WINDOW_MS),
+      lockedAt: null,
+      lockedContent: null,
+      incumbentLastActiveAt: openedAt.toISOString(),
+      challengerLastActiveAt: openedAt.toISOString(),
+      verdict: null,
+      winner: null,
+      decidedBy: null,
+      rationale: null,
+      confidence: null,
+      aiOutputId: null,
+      verdictAt: null,
+      overrideDeadlineAt: null,
+      overriddenByUserId: null,
+      overrideReason: null,
+      resolvedAt: null,
+    });
+  };
+
+  // S(9): the existing chart-label correction C(142) argues in a live
+  // story-target arena — the story itself is "Challenged".
+  await openSeedArena({
+    debateId: DEBATE(1),
+    storyId: S(9),
+    threadId: T(9),
+    targetContributionId: null,
+    challengerContributionId: C(142),
+    challengerUserId: maya,
+    challengerSummary:
+      'The raw interval readings put the first peak on Tuesday; the chart labels are off by a day.',
+    challengerCitations: [
+      { url: 'https://example.org/grid/raw-readings', title: 'Raw interval readings' },
+    ],
+  });
+  await ingestion.stories.update(S(9), { disputeStatus: 'under_debate' });
+
+  // S(10): a live COMMENT arena — the confounder claim C(161) is challenged.
+  const tariffCorrection = await seedCorrection({
+    n: 380,
+    threadId: T(10),
+    author: samd,
+    body: 'The neighboring market introduced an equivalent levy in the same quarter — it is not a tariff-free comparison.',
+    citations: [
+      { url: 'https://example.org/climate/neighbor-levy', title: 'Neighboring levy filing' },
+    ],
+    metadata: { target_contribution_id: C(161), debate_arena_id: DEBATE(2) },
+  });
+  await openSeedArena({
+    debateId: DEBATE(2),
+    storyId: S(10),
+    threadId: T(10),
+    targetContributionId: C(161),
+    challengerContributionId: tariffCorrection,
+    challengerUserId: samd,
+    challengerSummary:
+      'The comparison market is not tariff-free: an equivalent levy took effect the same quarter.',
+    challengerCitations: [
+      { url: 'https://example.org/climate/neighbor-levy', title: 'Neighboring levy filing' },
+    ],
+  });
+  await forum.contributions.setDisputeStatus(C(161), 'under_debate');
+
+  // S(11): a challenge that DID NOT hold — the cross-check C(182) stands as
+  // accurate ("Validated", the terminal tag finalizeDebate writes on upheld).
+  await seedCorrection({
+    n: 381,
+    threadId: T(11),
+    author: theo,
+    body: 'The three checked precincts were all early-count precincts; the sample may not generalize.',
+    citations: [
+      { url: 'https://example.org/elections/count-order', title: 'Count-order schedule' },
+    ],
+    metadata: { target_contribution_id: C(182) },
+  });
+  await forum.contributions.setDisputeStatus(C(182), 'validated');
+
+  // S(4): a correction that PREVAILED — the national-spec claim C(102) is
+  // "Incorrect": kept fully visible, demoted to the bottom of its section.
+  await seedCorrection({
+    n: 382,
+    threadId: T(4),
+    author: lena,
+    body: 'The adjustment model matches the SUPERSEDED 2019 specification — the current national model added two covariates.',
+    citations: [
+      { url: 'https://example.org/standards/readmission-model-v2', title: 'Current model spec' },
+    ],
+    metadata: { target_contribution_id: C(102) },
+  });
+  await forum.contributions.setDisputeStatus(C(102), 'incorrect');
 
   // MinHash signatures for every seeded story (over the title + excerpt). These
   // are the SAME signatures the WS-F dedup pipeline writes, so the REAL MERI

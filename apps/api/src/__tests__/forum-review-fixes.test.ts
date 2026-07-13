@@ -166,7 +166,7 @@ describe('edits re-run the safety classifier (WS-G.3.1 parity)', () => {
       10,
     );
     expect(queue).toHaveLength(1);
-    expect((queue[0]?.context as { trigger?: string }).trigger).toBe('edit');
+    expect((queue[0]?.context as { trigger?: string } | undefined)?.trigger).toBe('edit');
   });
 
   it('benign edits stay published', async () => {

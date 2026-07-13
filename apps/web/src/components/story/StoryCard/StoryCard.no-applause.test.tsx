@@ -16,7 +16,12 @@ const sample: StoryCardData = {
     url: 'https://example.org/story',
     readingMinutes: 4,
   },
-  ratingLabel: 'bridge-active',
+  // The §5.6 card signals are content-INTEGRITY counts (citations and WS-T
+  // adjudication outcomes) — exercised here so the applause matrix proves the
+  // signal row itself introduces no forbidden affordance.
+  sourcesCount: 3,
+  corrections: { active: 1, validated: 2, incorrect: 1 },
+  safetyState: 'under-review',
   distributionReason: 'Multiple communities are engaging with improving coherence',
   contextChips: [
     { id: 'c1', label: '3 evidence cards' },

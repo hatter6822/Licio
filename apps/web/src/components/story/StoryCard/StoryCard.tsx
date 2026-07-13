@@ -5,8 +5,8 @@ import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
 import { DisputeBadge } from '../DisputeBadge/index.js';
-import { RatingLabel } from '../RatingLabel/index.js';
 import { StoryMedia } from '../StoryMedia/index.js';
+import { StorySignals } from '../StorySignals/index.js';
 import type { StoryCardData } from '../types.js';
 
 export interface StoryCardProps extends StoryCardData {
@@ -45,7 +45,9 @@ function warnIfScoreLike(reason: string): void {
 
 export function StoryCard({
   story,
-  ratingLabel,
+  sourcesCount,
+  corrections,
+  safetyState,
   disputeStatus = 'none',
   distributionReason,
   contextChips,
@@ -125,13 +127,28 @@ export function StoryCard({
         />
       ) : null}
 
-      {/* 3. Rating label (conversation state) */}
-      <div className="flex flex-wrap items-center gap-2">
-        <RatingLabel kind={ratingLabel} />
-        {/* WS-T — a sourced correction has challenged (or prevailed against)
-            this story. Renders nothing when undisputed. */}
-        <DisputeBadge status={disputeStatus} />
-      </div>
+      {/* 3. Signal row (SPEC §5.6): the story's own dispute posture, then the
+          compact content-integrity signals — safety review, sourced-comment
+          count, corrections tally. Both render nothing when there is nothing
+          to say, so a quiet story carries no chip row at all. */}
+      {disputeStatus !== 'none' ||
+      sourcesCount > 0 ||
+      corrections.active > 0 ||
+      corrections.validated > 0 ||
+      corrections.incorrect > 0 ||
+      safetyState === 'under-review' ||
+      safetyState === 'restricted' ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {/* WS-T — a sourced correction has challenged (or prevailed against)
+              this story. Renders nothing when undisputed. */}
+          <DisputeBadge status={disputeStatus} />
+          <StorySignals
+            sourcesCount={sourcesCount}
+            corrections={corrections}
+            safetyState={safetyState}
+          />
+        </div>
+      ) : null}
 
       {/* 4. One-line distribution reason (human-readable, no raw score) */}
       <p className="text-sm text-ink">{distributionReason}</p>

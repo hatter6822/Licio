@@ -12,7 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.110.0",
+    "@anthropic-ai/sdk": "^0.111.0",
     "@hono/node-server": "^2.0.8",
     "@hono/zod-validator": "^0.8.0",
     "@licio/ai-governance": "workspace:*",
@@ -25,17 +25,17 @@
     "@licio/shared": "workspace:*",
     "@simplewebauthn/server": "^13.3.2",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.12.27",
+    "hono": "^4.12.30",
     "ioredis": "^5.11.1",
     "pino": "^10.3.1",
-    "viem": "^2.54.5",
+    "viem": "^2.55.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.1.1",
     "pino-pretty": "^13.0.0",
     "postgres": "^3.4.0",
-    "tsx": "^4.23.0",
-    "typescript": "^7.0.2"
+    "tsx": "^4.23.1",
+    "typescript": "^6.0.3"
   }
 }

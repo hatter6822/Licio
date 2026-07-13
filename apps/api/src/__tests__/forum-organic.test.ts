@@ -166,7 +166,7 @@ describe('structural deepening (WS-G.1.1 system trigger)', () => {
         (row.payload as { new_state?: string }).new_state === 'deepening',
     );
     expect(change).toBeDefined();
-    expect((change?.payload as { changed_by?: string }).changed_by).toBe('system');
+    expect((change?.payload as { changed_by?: string } | undefined)?.changed_by).toBe('system');
   });
 });
 

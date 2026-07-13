@@ -612,6 +612,24 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0]?.value ?? 0;
   }
 
+  async countActiveCommentArenas(storyIds: readonly string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (storyIds.length === 0) return out;
+    const rows = await this.#db
+      .select({ storyId: debateArenasTable.storyId, value: count() })
+      .from(debateArenasTable)
+      .where(
+        and(
+          eq(debateArenasTable.targetType, 'comment'),
+          inArray(debateArenasTable.storyId, [...storyIds]),
+          inArray(debateArenasTable.state, [...NON_RESOLVED]),
+        ),
+      )
+      .groupBy(debateArenasTable.storyId);
+    for (const row of rows) out.set(row.storyId, row.value);
+    return out;
+  }
+
   async listActiveForStory(storyId: string, limit: number): Promise<DebateArenaRecord[]> {
     const rows = await this.#db
       .select()

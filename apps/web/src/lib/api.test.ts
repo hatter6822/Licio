@@ -139,7 +139,7 @@ describe('request interceptor', () => {
     const postCall = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find((c) =>
       String(c[0]).includes('/v1/contributions'),
     );
-    const headers = new Headers((postCall?.[1] as RequestInit).headers);
+    const headers = new Headers((postCall?.[1] as RequestInit | undefined)?.headers);
     expect(urls.some((u) => u.includes('/api/csrf-token'))).toBe(true);
     expect(headers.get('x-csrf-token')).toBe('tok-123');
   });

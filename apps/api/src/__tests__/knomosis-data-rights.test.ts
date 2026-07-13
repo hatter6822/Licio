@@ -227,7 +227,7 @@ describe('WS-L financial wallet data-rights', () => {
       `event-orphan:${inflightHash}`,
     );
     expect(marker?.outcome).toBe('match');
-    expect((marker?.details as { kind?: string }).kind).toBe('purged_action');
+    expect((marker?.details as { kind?: string } | undefined)?.kind).toBe('purged_action');
     // A TERMINAL action gets NO marker (it can never receive a further event).
     expect(
       await knomosis.reconciliation.latestForEntity('action', 'event-orphan:0xterm0'),

@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",
@@ -53,12 +53,12 @@
     "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.2",
+    "@biomejs/biome": "^2.5.3",
     "@vitest/coverage-v8": "^4.1.10",
-    "lefthook": "^2.1.9",
+    "lefthook": "^2.1.10",
     "node-html-parser": "^8.0.4",
-    "tsx": "^4.23.0",
-    "typescript": "^7.0.2",
+    "tsx": "^4.23.1",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.10"
   },
   "pnpm": {

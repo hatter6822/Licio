@@ -238,6 +238,12 @@ export interface DebateStore {
   activeDebateIdsForContributions(ids: readonly string[]): Promise<Map<string, string>>;
   /** Count active arenas for a story's threads (the overview `debates_count`). */
   countActiveForStory(storyId: string): Promise<number>;
+  /** Batched story-card signal: live (non-terminal) COMMENT-target arenas per
+   *  story — one read per feed page.  Story-target arenas are excluded by
+   *  design: the story's own live challenge is already carried by its
+   *  `dispute_status` (`under_debate`), so the card tally never double-reports
+   *  one debate.  Stories with no live comment arenas are absent from the map. */
+  countActiveCommentArenas(storyIds: readonly string[]): Promise<Map<string, number>>;
   /** Live (non-terminal) arenas for a story — comment- AND story-target —
    *  ordered by their edit deadline (soonest first): the story-level "active
    *  debates" discovery list.  Bounded by `limit`. */
@@ -631,6 +637,17 @@ export class InMemoryDebateStore implements DebateStore {
       if (row.storyId === storyId && NON_RESOLVED.has(row.state)) count += 1;
     }
     return count;
+  }
+
+  async countActiveCommentArenas(storyIds: readonly string[]): Promise<Map<string, number>> {
+    const wanted = new Set(storyIds);
+    const out = new Map<string, number>();
+    for (const row of this.#rows.values()) {
+      if (row.targetType !== 'comment' || !wanted.has(row.storyId) || !NON_RESOLVED.has(row.state))
+        continue;
+      out.set(row.storyId, (out.get(row.storyId) ?? 0) + 1);
+    }
+    return out;
   }
 
   async listActiveForStory(storyId: string, limit: number): Promise<DebateArenaRecord[]> {
