@@ -299,10 +299,12 @@ export async function maybeEnterDebate(
   let targetWithheld = false;
   if (targetType === 'comment' && targetContributionId !== null) {
     const recheck = await deps.contributions.getById(targetContributionId);
-    targetWithheld =
-      recheck === null ||
-      recheck.moderationState === 'removed' ||
-      recheck.moderationState === 'hidden';
+    // ANY non-published state counts as withheld — including a transient
+    // under_review hold: the create guard refuses challenges against held
+    // targets for the same reason (the projection and the lock snapshot
+    // suppress every non-published row, so an arena surviving here would be
+    // judged against an EMPTY incumbent side).
+    targetWithheld = recheck === null || recheck.moderationState !== 'published';
   } else if (targetStoryId !== null) {
     targetWithheld = (await deps.storyContent(targetStoryId)) === null;
   }

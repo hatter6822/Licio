@@ -386,8 +386,12 @@ export async function createContribution(
       if (!target || target.threadId !== request.thread_id) {
         return invalid('invalid_target', 'A correction must target a comment in the same thread.');
       }
-      if (target.moderationState === 'removed' || target.moderationState === 'hidden') {
-        return invalid('invalid_target', 'The targeted comment is no longer available.');
+      // The arena judges PUBLICLY-SERVED material only (the snapshot doctrine):
+      // a challenge against ANY withheld row — removed, hidden, or a transient
+      // under_review hold — is refused, or the incumbent would be judged on an
+      // empty (suppressed) side.  Once a hold clears, the challenge can be filed.
+      if (target.moderationState !== 'published') {
+        return invalid('invalid_target', 'The targeted comment is not currently available.');
       }
       // WS-T — refuse a challenge against a comment already under debate or already
       // adjudicated `incorrect` (the UI disables this, but a direct API caller must
@@ -926,11 +930,13 @@ export async function editContribution(
   if (materialChange) {
     for (const { arena, side } of debateParties) {
       if (arena.state !== 'open') continue;
-      racedArenaIds.push(arena.debateId);
       if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
         // The CAS lost: the arena left `open` during the passes above.  Only a
         // pre-verdict freeze rejects; a debate that ENDED meanwhile (withdrawn,
-        // conceded, judged) frees the author to edit.
+        // conceded, judged) frees the author to edit — and is deliberately
+        // NOT added to the raced set, or the reconcile below would treat the
+        // landed verdict as a mid-race claim and revert a legitimate
+        // post-verdict edit.
         const current = await forum.debates.getById(arena.debateId);
         if (
           current !== null &&
@@ -938,7 +944,11 @@ export async function editContribution(
         ) {
           return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
         }
+        continue;
       }
+      // Only a WON touch (the arena was verifiably `open` at this write
+      // boundary) joins the reconcile set.
+      racedArenaIds.push(arena.debateId);
     }
   }
 

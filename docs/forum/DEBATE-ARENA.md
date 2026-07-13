@@ -19,12 +19,16 @@ pay-to-rank neutrality firewall holds (`check:neutrality`).
 keeping the 1–5 mandatory-source floor.  The create guard refuses a correction
 against a target already `under_debate` or already adjudicated `incorrect`
 (`target_under_debate` / `target_already_incorrect`), so a direct API caller
-cannot open a second arena or re-litigate a settled outcome.  A `validated`
-target (challenged and proven accurate) is deliberately **NOT** refused — it
-remains re-challengeable if new evidence emerges.
+cannot open a second arena or re-litigate a settled outcome — and against ANY
+target the moderation floor is currently withholding (`removed`, `hidden`, or
+a transient `under_review` hold): the arena judges publicly-served material
+only, so a held target would be scored as an empty side (the post-open
+recheck voids on the same bar).  A `validated` target (challenged and proven
+accurate) is deliberately **NOT** refused — it remains re-challengeable if
+new evidence emerges.
 
 **A sourced correction opens a live debate arena** (`debate_arenas`, migrations
-`0056`/`0078`/`0079`; `apps/api/src/forum/debate.ts` + `debate-store.ts`).  The
+`0056`/`0078`/`0079`/`0080`; `apps/api/src/forum/debate.ts` + `debate-store.ts`).  The
 arena is about the **real material**: the challenged story/comment (the
 **incumbent**'s side) and the correction (the **challenger**'s side) render on
 the arena modal LIVE while it is open — either author may keep adjusting their
@@ -252,7 +256,13 @@ platform legal floor).
   arena projection over `GET /v1/debates/:id/stream` (SSE), and the web
   `useDebateStream` nudges an immediate role-scoped refetch on each frame (the 5s
   poll is the fallback).
-- The gated Drizzle `debate_arenas` adapter (over migrations 0056/0078/0079) is
+- Migration `0080` backfills `locked_content` for LEGACY judged/resolved
+  arenas (rows verdicted before 0079 added the column) from the rows as of
+  the migration, under the same suppression doctrine as the runtime snapshot
+  — without it the projection would fall back to the live rows, and a
+  post-verdict edit during the override window could be shown as the judged
+  material.
+- The gated Drizzle `debate_arenas` adapter (over migrations 0056/0078/0079/0080) is
   bound at production boot and proven by the parameterized `DebateStore`
   contract test (in-memory always; live Postgres under `DATABASE_URL`),
   including the lock CAS, withdrawal/concession, the activity clocks, and the

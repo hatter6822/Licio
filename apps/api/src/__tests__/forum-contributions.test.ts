@@ -824,6 +824,61 @@ describe('WS-T — lock/removal races, activity gaming, and debate-write access 
     expect(concede.status).toBe(404);
   });
 
+  it('refuses a correction against a moderation-held (under_review) target', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    // The arena judges publicly-served material only: a held target would be
+    // scored as an EMPTY incumbent side, so the challenge is refused until
+    // the hold clears.
+    await fixture.forum.contributions.setModerationState(target.contribution_id, 'under_review');
+    const res = await create(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('invalid_target');
+  });
+
+  it('an edit racing a verdict that lands BEFORE the touch-CAS still succeeds (judged frees it)', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: target.contribution_id }),
+    );
+    const debateId = correction.metadata.debate_arena_id ?? '';
+    // The verdict lands BETWEEN the edit's early gate (arena open, deadlines
+    // in the future) and the write-boundary touch: simulated by judging the
+    // arena inside the first touchActivity call.  The failed touch must NOT
+    // leave the arena in the reconcile set — a judged arena frees the edit,
+    // so reverting it as a mid-race claim would 409 a legitimate
+    // post-verdict edit.
+    const store = fixture.forum.debates;
+    const realTouch = store.touchActivity.bind(store);
+    let raced = false;
+    store.touchActivity = async (...args: Parameters<typeof realTouch>) => {
+      if (!raced) {
+        raced = true;
+        await store.shiftDeadlines(debateId, {
+          editDeadlineAt: new Date(nowMs - 2000).toISOString(),
+          resolveDueAt: new Date(nowMs - 1000).toISOString(),
+        });
+        await runDebateSchedulerTick(rethrow);
+        expect((await store.getById(debateId))?.state).toBe('judged');
+      }
+      return realTouch(...args);
+    };
+    const res = await app().request(
+      jsonRequest(
+        `/v1/contributions/${target.contribution_id}`,
+        'PATCH',
+        { contribution_id: target.contribution_id, body: 'A legitimate post-verdict fix.' },
+        cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((await fixture.forum.contributions.getById(target.contribution_id))?.body).toBe(
+      'A legitimate post-verdict fix.',
+    );
+    expect((await store.getById(debateId))?.state).toBe('judged');
+  });
+
   it('suppresses a moderation-held target body from the story debate summaries', async () => {
     const { targetId, debateId } = await openArena();
     const storyId = await fixture.ingestion.stories.getStoryIdByThreadId(threadId);

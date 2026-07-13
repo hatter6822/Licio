@@ -1489,4 +1489,19 @@ describe('WS-T — verdict-CAS-gated provenance + the open-vs-removal void', () 
     expect((await debates.getById(debateId))?.state).toBe('withdrawn');
     expect((await contributions.getById(targetId))?.disputeStatus).not.toBe('under_debate');
   });
+
+  it('VOIDS an arena opened against a target held under_review (any non-published state)', async () => {
+    const targetId = await seedComment(INCUMBENT, 'Held for review.');
+    const correctionId = await seedCorrection(targetId);
+    // A transient hold is withheld too: the projection and the lock snapshot
+    // suppress every non-published row, so an arena surviving here would be
+    // judged against an EMPTY incumbent side (the create guard refuses held
+    // targets for the same reason).
+    await contributions.setModerationState(targetId, 'under_review');
+    const debateId = randomUUID();
+    const arena = await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    expect(arena).toBeNull();
+    expect((await debates.getById(debateId))?.state).toBe('withdrawn');
+    expect((await contributions.getById(targetId))?.disputeStatus).not.toBe('under_debate');
+  });
 });
