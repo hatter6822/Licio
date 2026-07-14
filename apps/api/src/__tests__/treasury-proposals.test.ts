@@ -135,6 +135,10 @@ interface TestHarness extends ProposalDeps {
   executorCalls: { category: string; amount: string }[];
   executorAccepts: { value: boolean };
   electionsOpened: string[];
+  memberFactsOverride: Map<
+    string,
+    { membershipDays: number | null; contributionCount: number | null; verifiedIdentity: boolean }
+  >;
 }
 
 function buildHarness(): TestHarness {
@@ -164,10 +168,18 @@ function buildHarness(): TestHarness {
       return true;
     },
   };
+  const memberFactsOverride = new Map<
+    string,
+    { membershipDays: number | null; contributionCount: number | null; verifiedIdentity: boolean }
+  >();
   const membership: MembershipFactsPort = {
     memberFacts: async (_r, userId) =>
       members.has(userId)
-        ? { membershipDays: 60, contributionCount: 10, verifiedIdentity: true }
+        ? (memberFactsOverride.get(userId) ?? {
+            membershipDays: 60,
+            contributionCount: 10,
+            verifiedIdentity: true,
+          })
         : null,
     eligibleMemberCount: async () => 3,
   };
@@ -226,6 +238,7 @@ function buildHarness(): TestHarness {
     executorCalls,
     executorAccepts,
     electionsOpened,
+    memberFactsOverride,
   });
 }
 
@@ -485,7 +498,7 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     });
     expect(
       await createProductionProposal(fresh, { roomId: ROOM, userId: PROPOSER, create: draft() }),
-    ).toMatchObject({ ok: false, code: 'balance_unreconciled' });
+    ).toMatchObject({ ok: false, code: 'treasury_not_synced' });
     // With a reconciled but SMALL balance, funds fail closed.
     const t = await fresh.treasuries.getByRoom(ROOM);
     await fresh.treasuries.setReconciliation(
@@ -707,6 +720,74 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     expect(revoked).toMatchObject({ ok: true });
     const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
     expect(chain.some((e) => e.actionType === 'delegation_revoked')).toBe(true);
+  });
+
+  it('excludes INELIGIBLE delegators from delegated weight (W3 review)', async () => {
+    const deps = buildHarness();
+    // Treasury votes need 30 membership days under this pack.
+    await prepareRoom(deps, {
+      weightModel: 'delegated',
+      maxVotingWeightPerAccount: 5,
+      eligibility: {
+        minMembershipDays: 30,
+        minContributions: 0,
+        requireVerifiedIdentity: false,
+        newWalletCoolingOffDays: 0,
+      },
+    });
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    // PROPOSER is a 5-day member: their delegation must not boost the ballot.
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 5,
+      contributionCount: 10,
+      verifiedIdentity: true,
+    });
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: STEWARD,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // Own 1 + STEWARD's eligible delegation = 2; PROPOSER's ineligible one is out.
+    expect(vote.signature.weightSnapshot).toBe('2');
+  });
+
+  it('binds the cooling-off to the NEWEST active wallet (W3 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      eligibility: {
+        minMembershipDays: 0,
+        minContributions: 0,
+        requireVerifiedIdentity: false,
+        newWalletCoolingOffDays: 7,
+      },
+    });
+    // The SELECTED wallet is 30 days old… but a fresh wallet linked yesterday
+    // exists, and spend-controlling votes bind the newest one.
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address, 30);
+    await linkWallet(deps, WALLET_2, PROPOSER, testAccount2.address, 1);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'wallet_cooling_off' });
   });
 });
 

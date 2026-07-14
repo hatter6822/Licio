@@ -342,3 +342,42 @@ describe('the treasury services singleton', () => {
     expect(getTreasuryServices()).toBe(services);
   });
 });
+
+describe('eligibility-aware quorum basis (W3 review)', () => {
+  const forumOf = (facts: Record<string, { requestedAt: string } | null>): ForumServices =>
+    ({
+      rooms: {
+        getSubscription: async (_room: string, userId: string) =>
+          facts[userId] ? { status: 'active', requestedAt: facts[userId]?.requestedAt } : null,
+        countEligibleVoters: async () => Object.keys(facts).length,
+        listEligibleVoterIds: async () => Object.keys(facts),
+      },
+    }) as unknown as ForumServices;
+
+  it('filters members who fail the law-pack predicate out of the denominator', async () => {
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(5);
+    const now = fixture.knomosis.now();
+    const old = new Date(now - 90 * 86_400_000).toISOString();
+    const fresh = new Date(now - 2 * 86_400_000).toISOString();
+    const port = buildMembershipFactsPort(
+      forumOf({ veteran: { requestedAt: old }, newbie: { requestedAt: fresh } }),
+      { store: { getAuth: async () => ({ emailVerified: true }) } } as never,
+      fixture.knomosis,
+    );
+    // Without rules: the raw electorate.
+    expect(await port.eligibleMemberCount(ROOM)).toBe(2);
+    // With a 30-day membership rule: the 2-day member leaves the denominator.
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules: {
+          minMembershipDays: 30,
+          minContributions: 0,
+          requireVerifiedIdentity: false,
+          newWalletCoolingOffDays: 0,
+        },
+        treasuryControlling: true,
+      }),
+    ).toBe(1);
+  });
+});

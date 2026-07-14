@@ -32,6 +32,7 @@
 import { createHash } from 'node:crypto';
 import {
   checkVoterEligibility,
+  type EligibilityRules,
   type LawPack,
   resolveVotingWeight,
   tallyProposalVotes,
@@ -92,8 +93,13 @@ export interface MembershipFactsPort {
     contributionCount: number | null;
     verifiedIdentity: boolean;
   } | null>;
-  /** The quorum-basis population (active members). */
-  eligibleMemberCount(roomId: string): Promise<number>;
+  /** The quorum-basis population.  With `eligibility` set, the SAME law-pack
+   *  predicate that gates ballots filters the denominator — otherwise members
+   *  who can never vote would inflate the basis and starve quorum (WS-M.4.2c). */
+  eligibleMemberCount(
+    roomId: string,
+    eligibility?: { rules: EligibilityRules; treasuryControlling: boolean },
+  ): Promise<number>;
 }
 
 /** The shipped WS-U executor seam (GovernanceService.executeTreasuryAction). */
@@ -140,6 +146,8 @@ export interface ProposalDeps extends LawPackDeps, GrantDeps {
     wsmChallengeWindowSeconds: number;
     wsmExecutionWindowSeconds: number;
   };
+  /** Operational alert sink (the container provides it; optional for tests). */
+  alert?: (event: string, meta: Record<string, unknown>) => void;
 }
 
 /** Real-asset modes where production proposals run (sim rooms use WS-L.4). */
@@ -208,7 +216,15 @@ async function tallyFor(
   const threshold = pack.thresholdRules?.[proposal.proposalType] ?? {
     minAffirmativeFraction: 0.5,
   };
-  const eligibleCount = await deps.membership.eligibleMemberCount(proposal.roomId);
+  const eligibleCount = await deps.membership.eligibleMemberCount(proposal.roomId, {
+    rules: pack.eligibility ?? {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    },
+    treasuryControlling: proposal.category !== null && proposal.category !== undefined,
+  });
   return tallyProposalVotes(
     recordedVotes(signatures),
     { quorum, threshold },
@@ -327,12 +343,32 @@ export async function createProductionProposal(
         `Requested ${input.create.requested_amount} exceeds the free headroom ${headroom.headroom}.`,
       );
     }
-    // Fail-closed funds check: only a RECONCILED balance can promise money.
+    // Fail-closed funds check: only a CURRENTLY SYNCED balance can promise
+    // money — a pending/divergent treasury keeps its LAST snapshot for the
+    // dashboard, but new spend authorizations against stale numbers are
+    // refused until reconciliation clears (WS-M.5.2a).
+    if (treasury.reconciliationState !== 'synced') {
+      return tgErr(
+        409,
+        'treasury_not_synced',
+        'The treasury is not reconciled; new spend proposals are paused.',
+      );
+    }
     const balance = treasury.balanceSnapshot?.[input.create.asset ?? ''] ?? null;
     if (balance === null) {
       return tgErr(409, 'balance_unreconciled', 'The treasury balance is not reconciled yet.');
     }
-    if (decCompare(input.create.requested_amount, balance) > 0) {
+    // Liquidity = reconciled balance MINUS what other passed proposals have
+    // already reserved in this asset — two spends can never both promise the
+    // same money (WS-M.2.3a-1).
+    const { decSum } = await import('@licio/governance');
+    const reservedRows = await deps.reservations.listActiveByTreasuryAsset(
+      treasury.treasuryId,
+      input.create.asset ?? '',
+    );
+    const alreadyReserved = decSum(reservedRows.map((r) => r.amount));
+    const liquid = decSum([balance, `-${alreadyReserved}`]);
+    if (liquid.startsWith('-') || decCompare(input.create.requested_amount, liquid) > 0) {
       return tgErr(409, 'insufficient_funds', 'The treasury cannot cover this proposal.');
     }
     // Recipient sanctions screening (fail-closed on real-funds deployments).
@@ -541,7 +577,16 @@ export async function signProposal(
 
   const facts = await deps.membership.memberFacts(input.roomId, input.userId);
   const spendControlling = proposal.category !== null;
-  const walletAgeDays = Math.floor((deps.now() - Date.parse(wallet.linkedAt)) / 86_400_000);
+  // The cooling-off binds the member's NEWEST active wallet — voting with an
+  // older wallet while a fresh one exists would bypass the §17.5 control.
+  const activeWallets = (await deps.wallets.listByUser(input.userId, false)).filter(
+    (w) => w.unlinkState === 'active',
+  );
+  const newestLinkedAt = activeWallets.reduce(
+    (newest, w) => Math.max(newest, Date.parse(w.linkedAt)),
+    Date.parse(wallet.linkedAt),
+  );
+  const walletAgeDays = Math.floor((deps.now() - newestLinkedAt) / 86_400_000);
   const voterFacts: VoterFacts = {
     userId: input.userId,
     membershipDays: facts?.membershipDays ?? null,
@@ -586,11 +631,50 @@ export async function signProposal(
   );
   const incoming = [];
   for (const delegation of delegations) {
+    let delegatorEligible = false;
+    if (
+      delegation.delegatorUserId !== null &&
+      (await deps.rooms.isMember(input.roomId, delegation.delegatorUserId))
+    ) {
+      // The delegator must pass the SAME law-pack eligibility gate as a direct
+      // voter (membership age, contributions, identity) — otherwise ineligible
+      // members boost a delegate's ballot they could never cast themselves.
+      // Wallet arms are neutral here: delegating involves no wallet.
+      const delegatorFacts = await deps.membership.memberFacts(
+        input.roomId,
+        delegation.delegatorUserId,
+      );
+      const verdict = checkVoterEligibility(
+        {
+          userId: delegation.delegatorUserId,
+          membershipDays: delegatorFacts?.membershipDays ?? null,
+          contributionCount: delegatorFacts?.contributionCount ?? null,
+          verifiedIdentity: delegatorFacts?.verifiedIdentity ?? false,
+          newestWalletAgeDays: Number.MAX_SAFE_INTEGER,
+          walletClusterId: null,
+          hasDisclosedConflict: false,
+          roleClasses: [],
+          reputationScore: 0,
+          tokenVoteUnits: 0,
+          isDesignatedSigner: false,
+        },
+        {
+          rules: evalPack.eligibility ?? {
+            minMembershipDays: 0,
+            minContributions: 0,
+            requireVerifiedIdentity: false,
+            newWalletCoolingOffDays: 0,
+          },
+          treasuryControlling: spendControlling,
+          recusalRequired: false,
+          clustersAlreadyVoted: new Set(),
+        },
+      );
+      delegatorEligible = verdict.eligible;
+    }
     incoming.push({
       delegatorUserId: delegation.delegatorUserId ?? '',
-      delegatorEligible:
-        delegation.delegatorUserId !== null &&
-        (await deps.rooms.isMember(input.roomId, delegation.delegatorUserId)),
+      delegatorEligible,
       weight: 1,
     });
   }
@@ -649,7 +733,10 @@ export async function signProposal(
 
 export async function settleDueProposals(deps: ProposalDeps, roomId: string): Promise<number> {
   const nowIso = new Date(deps.now()).toISOString();
-  const proposals = await deps.proposals.listByRoom(roomId, 500);
+  // Enumerate UNSETTLED production rows (deliberation/open/timelocked/
+  // executing) — bounded by live work, so a room's terminal history can never
+  // occupy the page and starve an older due proposal.
+  const proposals = await deps.proposals.listUnsettledByRoom(roomId, 500);
   let settled = 0;
   for (const proposal of proposals) {
     if (proposal.simulationMode) continue;
@@ -741,12 +828,48 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
       settled += 1;
       continue;
     }
+    // A claim stranded mid-execution (a crash between claim and finalize/
+    // block) is released honestly after the execution window: blocked +
+    // reservation released, never a permanent `executing` wedge (W3 review).
+    if (
+      proposal.votingState === 'passed' &&
+      proposal.executionState === 'executing' &&
+      proposal.executionClaimedAt !== null &&
+      deps.now() - Date.parse(proposal.executionClaimedAt) >
+        deps.wsmProposalConfig().wsmExecutionWindowSeconds * 1000
+    ) {
+      await deps.proposals.update({
+        ...proposal,
+        executionState: 'blocked',
+        executionClaimedAt: null,
+      });
+      await releaseReservation(deps, proposal.proposalId);
+      await appendChainedAudit(deps, {
+        roomId,
+        actionType: 'proposal_execution_failed',
+        actorUserId: null,
+        details: { proposal_id: proposal.proposalId, code: 'execution_stranded' },
+        proposalId: proposal.proposalId,
+      });
+      settled += 1;
+      continue;
+    }
     // Passed but never executed inside the execution window → expired.
     if (
       proposal.votingState === 'passed' &&
       proposal.executionState === 'timelocked' &&
       proposal.executableAfter !== null
     ) {
+      // An unresolved challenge is the only thing BLOCKING execution — the
+      // window must not burn down while review is pending, or a later
+      // dismissal could never restore an executable proposal.
+      if (
+        proposal.challengeState === 'open' ||
+        proposal.challengeState === 'escalated' ||
+        (await deps.challenges.countOpenByProposal(proposal.proposalId)) > 0
+      ) {
+        continue;
+      }
       const expiryMs =
         Date.parse(proposal.executableAfter) +
         deps.wsmProposalConfig().wsmExecutionWindowSeconds * 1000;
@@ -967,58 +1090,70 @@ export async function executeProposal(
 
   // Route the effect per type.  Treasury categories go through the SHIPPED
   // fail-closed executor (kernel verdict + capability + kill switch) — the
-  // WS-U residual's production caller.
+  // WS-U residual's production caller.  The whole post-claim effect block is
+  // guarded: an unexpected THROW (executor outage, store error) releases the
+  // claim into `blocked` — never a stranded `executing` row that rejects
+  // every future execute (W3 review; the sweep also re-drives stale claims).
   let failure: string | null = null;
-  if (claimed.category !== null && claimed.category !== undefined) {
-    const verdict = await deps.treasuryExecutor.execute(input.roomId, {
-      category: claimed.category,
-      amount: claimed.requestedAmount ?? '0',
-      asset: claimed.asset,
-      coiDeclared: claimed.conflictDisclosures !== null,
-      proposedAt: claimed.createdAt,
-    });
-    if (!verdict.accepted) {
-      failure = verdict.code ?? 'kernel_rejected';
-    } else {
-      // The grant record is the payout ledger: create it BEFORE consuming the
-      // reservation so a malformed milestone plan blocks the execution (with
-      // the headroom released) instead of finalizing a spend with no grant.
-      if (claimed.proposalType === 'capped_grant' || claimed.proposalType === 'bounty') {
-        const grant = await createGrantFromProposal(deps, claimed);
-        if (grant === null) failure = 'grant_creation_failed';
+  try {
+    if (claimed.category !== null && claimed.category !== undefined) {
+      const verdict = await deps.treasuryExecutor.execute(input.roomId, {
+        category: claimed.category,
+        amount: claimed.requestedAmount ?? '0',
+        asset: claimed.asset,
+        coiDeclared: claimed.conflictDisclosures !== null,
+        proposedAt: claimed.createdAt,
+      });
+      if (!verdict.accepted) {
+        failure = verdict.code ?? 'kernel_rejected';
+      } else {
+        // The grant record is the payout ledger: create it BEFORE consuming the
+        // reservation so a malformed milestone plan blocks the execution (with
+        // the headroom released) instead of finalizing a spend with no grant.
+        if (claimed.proposalType === 'capped_grant' || claimed.proposalType === 'bounty') {
+          const grant = await createGrantFromProposal(deps, claimed);
+          if (grant === null) failure = 'grant_creation_failed';
+        }
+        if (failure === null) {
+          await consumeReservation(deps, claimed.proposalId);
+        }
       }
-      if (failure === null) {
-        await consumeReservation(deps, claimed.proposalId);
-      }
-    }
-  } else if (claimed.proposalType === 'charter_update') {
-    // The voted charter content becomes the new version at execution.
-    const sections = claimed.requestedAction['sections'];
-    const { createCharterVersion } = await import('./charter.js');
-    const created = await createCharterVersion(deps, {
-      roomId: input.roomId,
-      sections,
-      actorUserId: input.userId,
-    });
-    if ('code' in created) failure = created.code;
-  } else if (
-    claimed.proposalType === 'law_pack_upgrade' ||
-    claimed.proposalType === 'treasury_policy_update'
-  ) {
-    const lawPackId = claimed.requestedAction['law_pack_id'];
-    if (typeof lawPackId !== 'string') {
-      failure = 'law_pack_id_missing';
-    } else {
-      const adopted = await adoptLawPack(deps, {
+    } else if (claimed.proposalType === 'charter_update') {
+      // The voted charter content becomes the new version at execution.
+      const sections = claimed.requestedAction['sections'];
+      const { createCharterVersion } = await import('./charter.js');
+      const created = await createCharterVersion(deps, {
         roomId: input.roomId,
-        lawPackId,
+        sections,
         actorUserId: input.userId,
       });
-      if ('code' in adopted) failure = adopted.code;
+      if ('code' in created) failure = created.code;
+    } else if (
+      claimed.proposalType === 'law_pack_upgrade' ||
+      claimed.proposalType === 'treasury_policy_update'
+    ) {
+      const lawPackId = claimed.requestedAction['law_pack_id'];
+      if (typeof lawPackId !== 'string') {
+        failure = 'law_pack_id_missing';
+      } else {
+        const adopted = await adoptLawPack(deps, {
+          roomId: input.roomId,
+          lawPackId,
+          actorUserId: input.userId,
+        });
+        if ('code' in adopted) failure = adopted.code;
+      }
+    } else if (claimed.proposalType === 'steward_rotation') {
+      const opened = await deps.elections.openElection(input.roomId);
+      if (!opened) failure = 'election_not_opened';
     }
-  } else if (claimed.proposalType === 'steward_rotation') {
-    const opened = await deps.elections.openElection(input.roomId);
-    if (!opened) failure = 'election_not_opened';
+  } catch (error) {
+    failure = 'execution_error';
+    deps.alert?.('wsm.proposal.execution_threw', {
+      proposal_id: claimed.proposalId,
+      room_id: input.roomId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   if (failure !== null) {

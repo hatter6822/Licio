@@ -12,6 +12,7 @@
 import type { AccountingExportResponse, AccountingExportRow } from '@licio/shared';
 import { type TreasuryGovernanceError, tgErr } from './profile.js';
 import type { PaymentIntentStore, SnapshotStore, TreasuryStore } from './stores.js';
+import { allIntentsForTreasury } from './treasury-reconciliation.js';
 
 export interface ExportDeps {
   treasuries: TreasuryStore;
@@ -38,9 +39,10 @@ export async function buildAccountingExport(
 
   // Reconciliation status per asset (the latest snapshot decides inclusion).
   const assetResult = new Map<string, 'synced' | 'explained' | 'divergent'>();
-  const intents = (await deps.intents.listByRoom(input.roomId, 10_000)).filter(
-    (intent) => intent.treasuryId === treasury.treasuryId,
-  );
+  // The FULL history via keyset pages — a newest-N slice would silently drop
+  // rows from older export periods on busy treasuries (tax records must be
+  // complete or explicitly excluded, never truncated).
+  const intents = await allIntentsForTreasury(deps.intents, treasury.treasuryId);
   for (const asset of new Set(intents.map((intent) => intent.asset))) {
     const latest = await deps.snapshots.latestByTreasuryAsset(treasury.treasuryId, asset);
     assetResult.set(asset, latest?.result ?? 'explained');

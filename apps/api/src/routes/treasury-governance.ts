@@ -663,7 +663,10 @@ export function createTreasuryGovernanceRoutes() {
           if (gate) return c.json(deny(gate.code, gate.message), 503);
           const services = getTreasuryServices();
           const { roomId, grantId } = c.req.valid('param');
-          if (!(await services.rooms.isMember(roomId, auth.userId))) {
+          // Review CLEARANCE gates disbursement (milestone acceptance requires
+          // it) — a reviewer authority, not mere membership: room stewards or
+          // platform staff (the service still blocks proposer/recipient COI).
+          if (!isPlatformStaff(auth) && !(await services.rooms.isSteward(roomId, auth.userId))) {
             return c.json(notFound, 404);
           }
           const result = await setGrantReview(services, {

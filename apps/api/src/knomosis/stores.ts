@@ -537,6 +537,10 @@ export interface GovernanceProposalStore {
   insert(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   getById(proposalId: string): Promise<GovernanceProposalRecord | null>;
   listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]>;
+  /** PRODUCTION rows with live settle work (deliberation/open voting, or a
+   *  passed row still timelocked/executing) — bounded by open work, never by
+   *  history, so the sweep can't starve behind a full newest-N page (WS-M). */
+  listUnsettledByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]>;
   update(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   /** ATOMICALLY claim a passed, timelocked proposal for execution: CAS the
    *  executionState `timelocked` → `executing`, returning the claimed row, or null
@@ -1454,6 +1458,21 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
   async getById(proposalId: string): Promise<GovernanceProposalRecord | null> {
     const row = this.#rows.get(proposalId);
     return row ? structuredClone(row) : null;
+  }
+
+  async listUnsettledByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.roomId === roomId &&
+          !row.simulationMode &&
+          (row.votingState === 'deliberation' ||
+            row.votingState === 'open' ||
+            (row.votingState === 'passed' &&
+              (row.executionState === 'timelocked' || row.executionState === 'executing'))),
+      )
+      .slice(0, limit)
+      .map((row) => structuredClone(row));
   }
 
   async listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]> {

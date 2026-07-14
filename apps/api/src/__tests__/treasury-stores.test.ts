@@ -344,6 +344,79 @@ describe('in-memory WS-M stores (the Drizzle contract, no I/O)', () => {
   });
 });
 
+describe('W3 review surfaces: pagination, period aggregates, asset reservations', () => {
+  it('walks a treasury history in keyset pages (id-ascending, complete)', async () => {
+    const store = new InMemoryPaymentIntentStore();
+    const treasuryId = randomUUID();
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const record = intentOf({ treasuryId, idempotencyKey: randomUUID() });
+      await store.insert(record);
+      ids.push(record.paymentIntentId);
+    }
+    const first = await store.listByTreasuryPage(treasuryId, null, 2);
+    expect(first).toHaveLength(2);
+    const second = await store.listByTreasuryPage(treasuryId, first[1]?.paymentIntentId ?? null, 2);
+    const third = await store.listByTreasuryPage(treasuryId, second[1]?.paymentIntentId ?? null, 2);
+    const walked = [...first, ...second, ...third].map((r) => r.paymentIntentId);
+    expect(new Set(walked).size).toBe(5);
+    expect([...walked].sort()).toEqual([...ids].sort());
+  });
+
+  it('lists the COMPLETE in-period deposit set for a room', async () => {
+    const store = new InMemoryPaymentIntentStore();
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    await store.insert(
+      intentOf({ createdAt: new Date(Date.now() - 7_200_000).toISOString() }), // pre-period
+    );
+    await store.insert(intentOf({ idempotencyKey: randomUUID() })); // in period
+    await store.insert(
+      intentOf({
+        idempotencyKey: randomUUID(),
+        targetType: 'grant_payout', // payout-class never counts toward deposits
+      }),
+    );
+    const deposits = await store.listDepositsInPeriod(ROOM, since);
+    expect(deposits).toHaveLength(1);
+  });
+
+  it('projects OPEN reservations per asset across categories', async () => {
+    const store = new InMemoryReservationStore();
+    const treasuryId = 't-9';
+    const base = {
+      treasuryId,
+      asset: 'USDC',
+      amount: '5',
+      state: 'reserved' as const,
+      createdAt: NOW(),
+      updatedAt: NOW(),
+    };
+    await store.insert({
+      ...base,
+      reservationId: randomUUID(),
+      proposalId: randomUUID(),
+      category: 'grant',
+    });
+    await store.insert({
+      ...base,
+      reservationId: randomUUID(),
+      proposalId: randomUUID(),
+      category: 'bounty',
+    });
+    const consumed = {
+      ...base,
+      reservationId: randomUUID(),
+      proposalId: randomUUID(),
+      category: 'grant',
+    };
+    await store.insert(consumed);
+    await store.transition(consumed.reservationId, 'reserved', 'consumed', NOW());
+    // Both OPEN reservations count regardless of category; the consumed one is out.
+    expect(await store.listActiveByTreasuryAsset(treasuryId, 'USDC')).toHaveLength(2);
+    expect(await store.listActiveByTreasuryAsset(treasuryId, 'OTHER')).toHaveLength(0);
+  });
+});
+
 describe('clear() (interface parity: every adapter resets for tests)', () => {
   it('empties every in-memory store', async () => {
     const treasuries = new InMemoryTreasuryStore();

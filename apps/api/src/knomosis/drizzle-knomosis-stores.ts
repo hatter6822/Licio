@@ -1240,6 +1240,28 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows.map(mapProposal);
   }
 
+  async listUnsettledByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(governanceProposals)
+      .where(
+        and(
+          eq(governanceProposals.roomId, roomId),
+          eq(governanceProposals.simulationMode, false),
+          or(
+            inArray(governanceProposals.votingState, ['deliberation', 'open']),
+            and(
+              eq(governanceProposals.votingState, 'passed'),
+              inArray(governanceProposals.executionState, ['timelocked', 'executing']),
+            ),
+          ),
+        ),
+      )
+      .orderBy(desc(governanceProposals.createdAt))
+      .limit(limit);
+    return rows.map(mapProposal);
+  }
+
   async update(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord> {
     await this.db
       .update(governanceProposals)

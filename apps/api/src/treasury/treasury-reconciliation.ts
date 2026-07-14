@@ -26,7 +26,28 @@
 import { decCompare, decSum } from '@licio/governance';
 import { appendChainedAudit } from './audit-chain.js';
 import type { IntentDeps } from './intents.js';
-import type { PaymentIntentRecord, SnapshotRecord, SnapshotStore } from './stores.js';
+import type {
+  PaymentIntentRecord,
+  PaymentIntentStore,
+  SnapshotRecord,
+  SnapshotStore,
+} from './stores.js';
+
+/** Walk a treasury's complete intent history (keyset pages of 1,000). */
+export async function allIntentsForTreasury(
+  intents: PaymentIntentStore,
+  treasuryId: string,
+): Promise<PaymentIntentRecord[]> {
+  const all: PaymentIntentRecord[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const page = await intents.listByTreasuryPage(treasuryId, after, 1_000);
+    all.push(...page);
+    if (page.length < 1_000) return all;
+    after = page[page.length - 1]?.paymentIntentId ?? null;
+    if (after === null) return all;
+  }
+}
 
 export interface TreasuryReconciliationDeps extends IntentDeps {
   snapshots: SnapshotStore;
@@ -63,9 +84,10 @@ export async function reconcileTreasury(
 ): Promise<SnapshotRecord[]> {
   const treasury = await deps.treasuries.getById(treasuryId);
   if (treasury === null) return [];
-  const intents = (await deps.intents.listByRoom(treasury.roomId, 10_000)).filter(
-    (intent) => intent.treasuryId === treasuryId,
-  );
+  // The treasury's FULL intent history via keyset pages — a fixed newest-N
+  // slice would silently drop older finalized rows from the product ledger
+  // and mask real divergences on busy treasuries.
+  const intents = await allIntentsForTreasury(deps.intents, treasuryId);
   const assets = new Set<string>([...treasury.acceptedAssets, ...intents.map((i) => i.asset)]);
   const snapshots: SnapshotRecord[] = [];
   const observedBalances: Record<string, string> = {};

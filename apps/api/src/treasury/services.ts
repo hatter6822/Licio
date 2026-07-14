@@ -15,6 +15,7 @@
 //    (kernel verdict + capability + kill switch) — WS-M is its production caller.
 //  - `elections` adapts scheduleElection(force) for community-voted rotations.
 
+import { checkVoterEligibility } from '@licio/governance';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import type { GovernanceStores } from '../governance/stores.js';
@@ -55,24 +56,62 @@ export function buildMembershipFactsPort(
   identity: IdentityServices,
   knomosis: KnomosisServices,
 ): MembershipFactsPort {
+  const memberFacts = async (roomId: string, userId: string) => {
+    const subscription = await forum.rooms.getSubscription(roomId, userId);
+    if (subscription === null || subscription.status !== 'active') return null;
+    const auth = await identity.store.getAuth(userId);
+    const membershipDays = Math.floor(
+      (knomosis.now() - Date.parse(subscription.requestedAt)) / 86_400_000,
+    );
+    return {
+      membershipDays: Number.isFinite(membershipDays) ? Math.max(0, membershipDays) : null,
+      contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(roomId, userId),
+      verifiedIdentity: auth?.emailVerified === true,
+    };
+  };
   return {
-    memberFacts: async (roomId, userId) => {
-      const subscription = await forum.rooms.getSubscription(roomId, userId);
-      if (subscription === null || subscription.status !== 'active') return null;
-      const auth = await identity.store.getAuth(userId);
-      const membershipDays = Math.floor(
-        (knomosis.now() - Date.parse(subscription.requestedAt)) / 86_400_000,
-      );
-      return {
-        membershipDays: Number.isFinite(membershipDays) ? Math.max(0, membershipDays) : null,
-        contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(
-          roomId,
-          userId,
-        ),
-        verifiedIdentity: auth?.emailVerified === true,
-      };
+    memberFacts,
+    eligibleMemberCount: async (roomId, eligibility) => {
+      // Without rules the electorate is the room membership; with rules the
+      // SAME predicate that gates ballots filters the quorum basis — members
+      // who could never vote must not inflate the denominator (WS-M.4.2c).
+      const trivial =
+        eligibility === undefined ||
+        ((eligibility.rules.minMembershipDays ?? 0) === 0 &&
+          (eligibility.rules.minContributions ?? 0) === 0 &&
+          eligibility.rules.requireVerifiedIdentity !== true);
+      if (trivial) return forum.rooms.countEligibleVoters(roomId);
+      const ids = await forum.rooms.listEligibleVoterIds(roomId);
+      let eligible = 0;
+      for (const userId of ids) {
+        const facts = await memberFacts(roomId, userId);
+        const verdict = checkVoterEligibility(
+          {
+            userId,
+            membershipDays: facts?.membershipDays ?? null,
+            contributionCount: facts?.contributionCount ?? null,
+            verifiedIdentity: facts?.verifiedIdentity ?? false,
+            // Wallet arms are neutral for the basis: any member could link a
+            // sufficiently aged wallet before voting.
+            newestWalletAgeDays: Number.MAX_SAFE_INTEGER,
+            walletClusterId: null,
+            hasDisclosedConflict: false,
+            roleClasses: [],
+            reputationScore: 0,
+            tokenVoteUnits: 0,
+            isDesignatedSigner: false,
+          },
+          {
+            rules: eligibility.rules,
+            treasuryControlling: eligibility.treasuryControlling,
+            recusalRequired: false,
+            clustersAlreadyVoted: new Set(),
+          },
+        );
+        if (verdict.eligible) eligible += 1;
+      }
+      return eligible;
     },
-    eligibleMemberCount: async (roomId) => forum.rooms.countEligibleVoters(roomId),
   };
 }
 

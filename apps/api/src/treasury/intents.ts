@@ -95,12 +95,12 @@ export async function depositAllowance(
   const treasury = await deps.treasuries.getByRoom(roomId);
   if (treasury === null) return null;
   const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
-  const recent = (await deps.intents.listByRoom(roomId, 1_000)).filter(
-    (intent) =>
-      DEPOSIT_TARGETS.has(intent.targetType) &&
-      ALLOWANCE_STATES.has(intent.executionState) &&
-      Date.parse(intent.createdAt) >= periodStart,
-  );
+  // The COMPLETE in-period deposit set (bounded by the period, never a fixed
+  // newest-N slice that would let a busy room's older in-period deposits slip
+  // out of the cap math).
+  const recent = (
+    await deps.intents.listDepositsInPeriod(roomId, new Date(periodStart).toISOString())
+  ).filter((intent) => ALLOWANCE_STATES.has(intent.executionState));
   const roomUsed = decSum(recent.map((intent) => intent.amount));
   const userUsed = decSum(
     recent.filter((intent) => intent.userId === userId).map((intent) => intent.amount),

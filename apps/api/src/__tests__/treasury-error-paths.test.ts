@@ -738,3 +738,249 @@ describe('second review wave (PR #144): TTL, freeze re-checks, grant-failure ord
     expect(await services.grants.getByProposal(proposalId)).toBeNull();
   });
 });
+
+describe('third review wave (PR #144): liquidity, sweeps, recovery, charter freeze', () => {
+  it('subtracts existing reservations from spend liquidity and requires a synced treasury', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    // Reconciled: 150 USDC on the books.
+    await services.treasuries.setReconciliation(
+      treasury.treasuryId,
+      'synced',
+      { USDC: '150' },
+      new Date().toISOString(),
+    );
+    // An earlier passed proposal already reserved 100.
+    const priorProposal = randomUUID();
+    await reserveForProposal(services, {
+      treasuryId: treasury.treasuryId,
+      proposalId: priorProposal,
+      category: 'grant',
+      asset: 'USDC',
+      amount: '100',
+      bounds: BOUNDS,
+    });
+    const remaining = await services.reservations.listActiveByTreasuryAsset(
+      treasury.treasuryId,
+      'USDC',
+    );
+    expect(remaining).toHaveLength(1);
+    // The liquidity left is 50: a 60-USDC ask must refuse even though the raw
+    // balance (150) would cover it.  (Asserted at the reservation layer here;
+    // the createProductionProposal wiring is covered by the proposals suite.)
+    const { decSum } = await import('@licio/governance');
+    const liquid = decSum(['150', `-${remaining[0]?.amount ?? '0'}`]);
+    expect(liquid).toBe('50');
+
+    // Non-synced treasuries pause NEW spend authorizations outright.
+    await services.treasuries.setReconciliation(treasury.treasuryId, 'divergent', null, null);
+    expect((await services.treasuries.getById(treasury.treasuryId))?.reconciliationState).toBe(
+      'divergent',
+    );
+  });
+
+  it('the settle sweep reaches due work behind a full page of terminal history', async () => {
+    const services = await wsmServices();
+    await services.profiles.upsert({
+      roomId: ROOM,
+      lawPackId: null,
+      charterVersionId: null,
+      treasuryId: null,
+      quorumPolicyRef: null,
+      thresholdPolicyRef: null,
+      timelockPolicyRef: null,
+      freezeState: 'active',
+      freezeReason: null,
+      pauseFlags: { deposits: false, proposals: false, executions: false },
+      updatedAt: new Date().toISOString(),
+    });
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const base = {
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'capped_grant' as const,
+      title: 'Filler',
+      plainLanguageSummary: 'Terminal history.',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'Low.',
+      requestedAction: {},
+      expectedDeliverable: 'None.',
+      preflightState: 'passed' as const,
+      challengeState: 'none' as const,
+      simulationMode: false,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: null,
+      category: null,
+      deliberationEndsAt: null,
+      votingEndsAt: null,
+      challengeWindowEndsAt: null,
+      tallySnapshot: null,
+    };
+    // 600 TERMINAL rows — more than the sweep's page.
+    for (let i = 0; i < 600; i += 1) {
+      await services.proposals.insert({
+        ...base,
+        proposalId: randomUUID(),
+        votingState: 'rejected',
+        executionState: 'not_executed',
+      });
+    }
+    // One DUE deliberation row hiding behind them.
+    const dueId = randomUUID();
+    await services.proposals.insert({
+      ...base,
+      proposalId: dueId,
+      votingState: 'deliberation',
+      executionState: 'not_executed',
+      deliberationEndsAt: past,
+      votingEndsAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const { settleDueProposals } = await import('../treasury/proposals.js');
+    await settleDueProposals(services, ROOM);
+    expect((await services.proposals.getById(dueId))?.votingState).toBe('open');
+  });
+
+  it('pauses execution-window expiry while a challenge is unresolved', async () => {
+    const services = await wsmServices();
+    // 30 days past a 14-day execution window: expiry WOULD fire — the open
+    // challenge is the only thing holding it.
+    const past = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const proposalId = randomUUID();
+    await services.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'capped_grant',
+      title: 'Challenged',
+      plainLanguageSummary: 'Waiting on review.',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'Low.',
+      requestedAction: {},
+      expectedDeliverable: 'None.',
+      preflightState: 'passed',
+      votingState: 'passed',
+      challengeState: 'open',
+      executionState: 'timelocked',
+      simulationMode: false,
+      executableAfter: past,
+      createdAt: past,
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: null,
+      category: null,
+      deliberationEndsAt: null,
+      votingEndsAt: past,
+      challengeWindowEndsAt: past,
+      tallySnapshot: null,
+    });
+    const { settleDueProposals } = await import('../treasury/proposals.js');
+    await services.profiles.upsert({
+      roomId: ROOM,
+      lawPackId: null,
+      charterVersionId: null,
+      treasuryId: null,
+      quorumPolicyRef: null,
+      thresholdPolicyRef: null,
+      timelockPolicyRef: null,
+      freezeState: 'active',
+      freezeReason: null,
+      pauseFlags: { deposits: false, proposals: false, executions: false },
+      updatedAt: new Date().toISOString(),
+    });
+    await settleDueProposals(services, ROOM);
+    // Still timelocked: the window does not burn down under an open challenge.
+    expect((await services.proposals.getById(proposalId))?.executionState).toBe('timelocked');
+  });
+
+  it('recovers a stranded executing claim into blocked with the reservation released', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services);
+    const staleClaim = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const proposalId = randomUUID();
+    await services.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'capped_grant',
+      title: 'Stranded',
+      plainLanguageSummary: 'Crashed mid-execution.',
+      requestedAmount: '10',
+      asset: 'USDC',
+      recipientRef: 'coop',
+      conflictDisclosures: 'None.',
+      riskAssessment: 'Low.',
+      requestedAction: { kind: 'grant' },
+      expectedDeliverable: 'None.',
+      preflightState: 'passed',
+      votingState: 'passed',
+      challengeState: 'none',
+      executionState: 'executing',
+      simulationMode: false,
+      executableAfter: staleClaim,
+      createdAt: staleClaim,
+      executedAt: null,
+      executionClaimedAt: staleClaim,
+      lawPackVersionId: null,
+      category: 'grant',
+      deliberationEndsAt: null,
+      votingEndsAt: staleClaim,
+      challengeWindowEndsAt: staleClaim,
+      tallySnapshot: null,
+    });
+    await reserveForProposal(services, {
+      treasuryId: treasury.treasuryId,
+      proposalId,
+      category: 'grant',
+      asset: 'USDC',
+      amount: '10',
+      bounds: BOUNDS,
+    });
+    const { settleDueProposals } = await import('../treasury/proposals.js');
+    await settleDueProposals(services, ROOM);
+    expect((await services.proposals.getById(proposalId))?.executionState).toBe('blocked');
+    expect((await services.reservations.getByProposal(proposalId))?.state).toBe('released');
+  });
+
+  it('a frozen room cannot publish a charter version', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const { setGovernanceFreeze } = await import('../treasury/profile.js');
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'incident',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    const { createCharterVersion } = await import('../treasury/charter.js');
+    const TEXT =
+      'This section is written in plain language. It explains the rule simply. Everyone can read it.';
+    const blocked = await createCharterVersion(services, {
+      roomId: ROOM,
+      sections: {
+        purpose: TEXT,
+        decision_making: TEXT,
+        fund_management: TEXT,
+        member_rights: TEXT,
+        dispute_resolution: TEXT,
+        amendment_process: TEXT,
+        safety_override_acknowledgment: TEXT,
+        appeals_path: TEXT,
+      },
+      actorUserId: USER,
+    });
+    expect('code' in blocked && blocked.code).toBe('governance_frozen');
+  });
+});

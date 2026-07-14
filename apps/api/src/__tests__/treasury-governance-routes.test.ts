@@ -420,6 +420,20 @@ describe('WS-M treasury + payment intents', () => {
     expect(blocked.status).toBe(404);
   });
 
+  it('grant review clearance is a reviewer authority, not mere membership (W3)', async () => {
+    const fixture = await wsmFixture({ steward: false });
+    const member = await seedUserWithSession(fixture.identity, { handle: 'grant_member' });
+    const review = await req(
+      'POST',
+      `/rooms/${ROOM}/treasury/grants/${crypto.randomUUID()}/review`,
+      member.cookie,
+      { review_state: 'cleared' },
+    );
+    // A joined member without steward/platform authority never reaches the
+    // service (404-over-403, no reviewer oracle).
+    expect(review.status).toBe(404);
+  });
+
   it('a frozen room cannot provision a treasury (PR #144 review)', async () => {
     const fixture = await wsmFixture();
     const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });

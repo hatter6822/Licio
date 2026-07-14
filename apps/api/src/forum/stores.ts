@@ -405,6 +405,9 @@ export interface RoomStore {
    *  role holder can vote without an active subscription). Used as the governance
    *  quorum/turnout denominator so it matches who can actually cast a ballot. */
   countEligibleVoters(roomId: string): Promise<number>;
+  /** The SAME electorate as `countEligibleVoters`, as ids — WS-M applies the
+   *  law-pack eligibility predicate per member for the quorum basis. */
+  listEligibleVoterIds(roomId: string): Promise<string[]>;
   listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]>;
   getJoinRequest(requestId: string): Promise<RoomSubscriptionRecord | null>;
   /** Remove every subscription and steward row for a user (WS-D.2.4
@@ -1125,6 +1128,10 @@ export class InMemoryRoomStore implements RoomStore {
   }
 
   async countEligibleVoters(roomId: string): Promise<number> {
+    return (await this.listEligibleVoterIds(roomId)).length;
+  }
+
+  async listEligibleVoterIds(roomId: string): Promise<string[]> {
     // Distinct users who may vote: active subscribers ∪ stewards (a steward can
     // vote via their role without an active subscription).
     const ids = new Set<string>();
@@ -1134,7 +1141,7 @@ export class InMemoryRoomStore implements RoomStore {
     for (const steward of this.#stewards) {
       if (steward.roomId === roomId) ids.add(steward.userId);
     }
-    return ids.size;
+    return [...ids];
   }
 
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {

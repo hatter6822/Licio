@@ -265,6 +265,9 @@ export interface ReservationStore {
    *  consumed window separately, so the two projections must stay disjoint
    *  (a non-released union here would double-count every consumed row). */
   listActiveByTreasury(treasuryId: string, category: string): Promise<ReservationRecord[]>;
+  /** OPEN reservations per ASSET across every category — the liquidity check
+   *  a new spend proposal subtracts from the reconciled balance. */
+  listActiveByTreasuryAsset(treasuryId: string, asset: string): Promise<ReservationRecord[]>;
   listConsumedByTreasury(treasuryId: string, category: string): Promise<ReservationRecord[]>;
   clear(): Promise<void>;
 }
@@ -300,6 +303,17 @@ export interface PaymentIntentStore {
     updatedAt: string,
   ): Promise<PaymentIntentRecord | null>;
   listByRoom(roomId: string, limit: number): Promise<PaymentIntentRecord[]>;
+  /** Keyset page over a treasury's FULL intent history (paymentIntentId
+   *  ascending) — reconciliation and the accounting export walk every page,
+   *  never a fixed newest-N slice that silently drops older rows. */
+  listByTreasuryPage(
+    treasuryId: string,
+    afterId: string | null,
+    limit: number,
+  ): Promise<PaymentIntentRecord[]>;
+  /** Deposit-class intents CREATED in the rolling period for a room — the
+   *  complete allowance basis (WS-M.2.2a), bounded by the period itself. */
+  listDepositsInPeriod(roomId: string, sinceIso: string): Promise<PaymentIntentRecord[]>;
   /** Timed-out pre-submission intents for the expiry sweep (WS-M.3.1b). */
   listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]>;
   /** Post-submission intents to reconcile against their action records. */
@@ -539,6 +553,12 @@ export class InMemoryReservationStore implements ReservationStore {
       .map(clone);
   }
 
+  async listActiveByTreasuryAsset(treasuryId: string, asset: string): Promise<ReservationRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.treasuryId === treasuryId && r.asset === asset && r.state === 'reserved')
+      .map(clone);
+  }
+
   async listConsumedByTreasury(treasuryId: string, category: string): Promise<ReservationRecord[]> {
     return [...this.#rows.values()]
       .filter(
@@ -612,6 +632,30 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
       .filter((r) => r.roomId === roomId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
+      .map(clone);
+  }
+
+  async listByTreasuryPage(
+    treasuryId: string,
+    afterId: string | null,
+    limit: number,
+  ): Promise<PaymentIntentRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.treasuryId === treasuryId)
+      .sort((a, b) => (a.paymentIntentId < b.paymentIntentId ? -1 : 1))
+      .filter((r) => afterId === null || r.paymentIntentId > afterId)
+      .slice(0, limit)
+      .map(clone);
+  }
+
+  async listDepositsInPeriod(roomId: string, sinceIso: string): Promise<PaymentIntentRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.roomId === roomId &&
+          (r.targetType === 'treasury_deposit' || r.targetType === 'bounty_contribution') &&
+          r.createdAt >= sinceIso,
+      )
       .map(clone);
   }
 

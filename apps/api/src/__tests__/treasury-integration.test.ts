@@ -1025,6 +1025,82 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
     }
   });
 
+  it('W3 surfaces: keyset pages, period deposits, per-asset reservations, unsettled query', async () => {
+    // Keyset pagination over the treasury history is complete and duplicate-free.
+    const pageIds: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const record: PaymentIntentRecord = {
+        paymentIntentId: randomUUID(),
+        userId,
+        roomId,
+        treasuryId: treasury.treasuryId,
+        targetType: 'treasury_deposit',
+        targetId: treasury.treasuryId,
+        asset: 'USDC',
+        amount: '1',
+        jurisdictionState: 'blocked',
+        complianceState: 'pending',
+        executionState: 'created',
+        retryCount: 0,
+        quoteRef: null,
+        actionRecordId: null,
+        receiptId: null,
+        idempotencyKey: randomUUID(),
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        createdAt: NOW(),
+        updatedAt: NOW(),
+      };
+      await stores.intents.insert(record);
+      pageIds.push(record.paymentIntentId);
+    }
+    const walked: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page = await stores.intents.listByTreasuryPage(treasury.treasuryId, after, 2);
+      walked.push(...page.map((r) => r.paymentIntentId));
+      if (page.length < 2) break;
+      after = page[page.length - 1]?.paymentIntentId ?? null;
+    }
+    for (const id of pageIds) expect(walked).toContain(id);
+    expect(new Set(walked).size).toBe(walked.length);
+
+    // The in-period deposit aggregate sees every deposit-class row.
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    const deposits = await stores.intents.listDepositsInPeriod(roomId, since);
+    expect(deposits.length).toBeGreaterThanOrEqual(3);
+    expect(deposits.every((d) => d.targetType !== 'grant_payout')).toBe(true);
+
+    // Per-asset open reservations across categories.
+    const proposalId = await makeProposal();
+    await stores.reservations.insert({
+      reservationId: randomUUID(),
+      treasuryId: treasury.treasuryId,
+      proposalId,
+      category: 'bounty',
+      asset: 'USDC',
+      amount: '3',
+      state: 'reserved',
+      createdAt: NOW(),
+      updatedAt: NOW(),
+    });
+    const open = await stores.reservations.listActiveByTreasuryAsset(treasury.treasuryId, 'USDC');
+    expect(open.some((r) => r.proposalId === proposalId)).toBe(true);
+
+    // The unsettled query returns live production work only.
+    const unsettled = await proposals.listUnsettledByRoom(roomId, 100);
+    expect(unsettled.every((p) => !p.simulationMode)).toBe(true);
+    expect(
+      unsettled.every(
+        (p) =>
+          p.votingState === 'deliberation' ||
+          p.votingState === 'open' ||
+          (p.votingState === 'passed' &&
+            (p.executionState === 'timelocked' || p.executionState === 'executing')),
+      ),
+    ).toBe(true);
+    expect(unsettled.some((p) => p.proposalId === proposalId)).toBe(true);
+  });
+
   // --- casVotingState (evolved knomosis proposal store) --------------------------------------
 
   it('settles a proposal exactly once via the casVotingState gate', async () => {

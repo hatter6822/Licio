@@ -1008,6 +1008,20 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0]?.value ?? 0;
   }
 
+  async listEligibleVoterIds(roomId: string): Promise<string[]> {
+    const rows = (await this.#db.execute(sql`
+      SELECT voters.user_id AS value FROM (
+        SELECT ${roomSubscriptionsTable.userId} AS user_id FROM ${roomSubscriptionsTable}
+          WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
+            AND ${roomSubscriptionsTable.status} = 'active'
+        UNION
+        SELECT ${roomStewardsTable.userId} AS user_id FROM ${roomStewardsTable}
+          WHERE ${roomStewardsTable.roomId} = ${roomId}
+      ) voters
+    `)) as unknown as Array<{ value: string }>;
+    return rows.map((row) => row.value);
+  }
+
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {
     const rows = await this.#db
       .select()

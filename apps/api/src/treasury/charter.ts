@@ -14,7 +14,13 @@ import { createHash } from 'node:crypto';
 import { canonicalize } from '@licio/governance';
 import { type CharterSections, charterSectionsSchema } from '@licio/shared';
 import { appendChainedAudit } from './audit-chain.js';
-import { ensureProfile, type ProfileDeps, type TreasuryGovernanceError, tgErr } from './profile.js';
+import {
+  assertGovernanceWritable,
+  ensureProfile,
+  type ProfileDeps,
+  type TreasuryGovernanceError,
+  tgErr,
+} from './profile.js';
 import type { CharterStore, CharterVersionRecord } from './stores.js';
 
 export interface CharterDeps extends ProfileDeps {
@@ -54,6 +60,10 @@ export async function createCharterVersion(
   deps: CharterDeps,
   input: { roomId: string; sections: unknown; actorUserId: string },
 ): Promise<TreasuryGovernanceError | { ok: true; charter: CharterVersionRecord }> {
+  // A frozen room cannot rewrite its charter mid-review (WS-M.2.4a-1: the
+  // guard covers EVERY WS-M configuration mutation).
+  const frozen = await assertGovernanceWritable(deps, input.roomId, 'configuration');
+  if (frozen !== null) return frozen;
   const parsed = charterSectionsSchema.safeParse(input.sections);
   if (!parsed.success) {
     const missing = parsed.error.issues
@@ -85,9 +95,13 @@ export async function createCharterVersion(
     const inserted = await deps.charters.insert(record);
     if (inserted === null) continue; // (room, version) collision — re-read + retry
     const profile = await ensureProfile(deps, input.roomId);
+    // Concurrent publishes: the pointer always lands on the NEWEST version —
+    // re-read the latest so a slower lower-version request can never point the
+    // active profile back at an older charter.
+    const newest = await deps.charters.latestByRoom(input.roomId);
     await deps.profiles.upsert({
       ...profile,
-      charterVersionId: inserted.charterVersionId,
+      charterVersionId: newest?.charterVersionId ?? inserted.charterVersionId,
       updatedAt: new Date(deps.now()).toISOString(),
     });
     await appendChainedAudit(deps, {

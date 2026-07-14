@@ -21,7 +21,7 @@ import {
   treasuryReservations,
 } from '@licio/db';
 import type { PauseFlags, PaymentIntentState } from '@licio/shared';
-import { and, desc, eq, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import type {
   ActionBudgetRecord,
   ActionBudgetStore,
@@ -423,6 +423,20 @@ export class DrizzleReservationStore implements ReservationStore {
     return rows.map(mapReservation);
   }
 
+  async listActiveByTreasuryAsset(treasuryId: string, asset: string): Promise<ReservationRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(treasuryReservations)
+      .where(
+        and(
+          eq(treasuryReservations.treasuryId, treasuryId),
+          eq(treasuryReservations.asset, asset),
+          eq(treasuryReservations.state, 'reserved'),
+        ),
+      );
+    return rows.map(mapReservation);
+  }
+
   async listConsumedByTreasury(treasuryId: string, category: string): Promise<ReservationRecord[]> {
     const rows = await this.db
       .select()
@@ -577,6 +591,41 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
       .where(eq(paymentIntents.roomId, roomId))
       .orderBy(desc(paymentIntents.createdAt))
       .limit(limit);
+    return rows.map(mapIntent);
+  }
+
+  async listByTreasuryPage(
+    treasuryId: string,
+    afterId: string | null,
+    limit: number,
+  ): Promise<PaymentIntentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(paymentIntents)
+      .where(
+        afterId === null
+          ? eq(paymentIntents.treasuryId, treasuryId)
+          : and(
+              eq(paymentIntents.treasuryId, treasuryId),
+              gt(paymentIntents.paymentIntentId, afterId),
+            ),
+      )
+      .orderBy(asc(paymentIntents.paymentIntentId))
+      .limit(limit);
+    return rows.map(mapIntent);
+  }
+
+  async listDepositsInPeriod(roomId: string, sinceIso: string): Promise<PaymentIntentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(paymentIntents)
+      .where(
+        and(
+          eq(paymentIntents.roomId, roomId),
+          inArray(paymentIntents.targetType, ['treasury_deposit', 'bounty_contribution']),
+          gte(paymentIntents.createdAt, new Date(sinceIso)),
+        ),
+      );
     return rows.map(mapIntent);
   }
 
