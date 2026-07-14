@@ -1173,6 +1173,13 @@ function mapProposal(row: typeof governanceProposals.$inferSelect): GovernancePr
     createdAt: iso(row.createdAt),
     executedAt: isoOrNull(row.executedAt),
     executionClaimedAt: isoOrNull(row.executionClaimedAt),
+    // WS-M production lifecycle columns (null on sim rows).
+    lawPackVersionId: row.lawPackVersionId,
+    category: row.category,
+    deliberationEndsAt: isoOrNull(row.deliberationEndsAt),
+    votingEndsAt: isoOrNull(row.votingEndsAt),
+    challengeWindowEndsAt: isoOrNull(row.challengeWindowEndsAt),
+    tallySnapshot: (row.tallySnapshot as Record<string, unknown> | null) ?? null,
   };
 }
 
@@ -1203,6 +1210,12 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
       createdAt: new Date(record.createdAt),
       executedAt: dateOrNull(record.executedAt),
       executionClaimedAt: dateOrNull(record.executionClaimedAt),
+      lawPackVersionId: record.lawPackVersionId ?? null,
+      category: record.category ?? null,
+      deliberationEndsAt: dateOrNull(record.deliberationEndsAt ?? null),
+      votingEndsAt: dateOrNull(record.votingEndsAt ?? null),
+      challengeWindowEndsAt: dateOrNull(record.challengeWindowEndsAt ?? null),
+      tallySnapshot: record.tallySnapshot ?? null,
     });
     return record;
   }
@@ -1473,6 +1486,9 @@ function mapSignature(row: typeof governanceSignatures.$inferSelect): Governance
     weightSnapshot: row.weightSnapshot,
     eligibilityReason: row.eligibilityReason,
     createdAt: iso(row.createdAt),
+    purpose: row.purpose as NonNullable<GovernanceSignatureRecord['purpose']>,
+    choice: (row.choice as GovernanceSignatureRecord['choice']) ?? null,
+    nonce: row.nonce,
   };
 }
 
@@ -1493,6 +1509,9 @@ export class DrizzleGovernanceSignatureStore implements GovernanceSignatureStore
         weightSnapshot: record.weightSnapshot,
         eligibilityReason: record.eligibilityReason,
         createdAt: new Date(record.createdAt),
+        purpose: record.purpose ?? 'vote',
+        choice: record.choice ?? null,
+        nonce: record.nonce ?? null,
       })
       .onConflictDoNothing()
       .returning({ signatureId: governanceSignatures.signatureId });
@@ -1732,6 +1751,10 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
         simulationMode: entry.simulationMode,
         createdAt: new Date(entry.createdAt),
         dedupeKey: entry.dedupeKey ?? null,
+        prevHash: entry.prevHash ?? null,
+        integrityHash: entry.integrityHash ?? null,
+        proposalId: entry.proposalId ?? null,
+        treasuryId: entry.treasuryId ?? null,
       })
       .onConflictDoNothing({ target: governanceAuditLogs.dedupeKey });
     return entry;
@@ -1766,6 +1789,10 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
       actionDetails: row.actionDetails as Record<string, unknown>,
       simulationMode: row.simulationMode,
       createdAt: iso(row.createdAt),
+      prevHash: row.prevHash,
+      integrityHash: row.integrityHash,
+      proposalId: row.proposalId,
+      treasuryId: row.treasuryId,
     }));
   }
 

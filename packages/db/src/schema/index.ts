@@ -31,6 +31,7 @@ export * from './story.js';
 export * from './takedown.js';
 export * from './telemetry.js';
 export * from './thread.js';
+export * from './treasury-governance.js';
 export * from './upload.js';
 export * from './user.js';
 export * from './wallet/wallet-account.js';

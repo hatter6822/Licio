@@ -409,14 +409,38 @@ export type KillSwitchAdminRequest = z.infer<typeof killSwitchAdminRequestSchema
 // Governance simulation (WS-L.4; SPEC §17.4, §22.2 GovernanceProposal)
 // ---------------------------------------------------------------------------
 
-/** The three K1 proposal templates (WS-L.4.1b; §17.3.4 MVP law pack). */
-export const PROPOSAL_TYPES = ['charter_update', 'bounty', 'capped_grant'] as const;
+/** The proposal templates: the three K1 sim templates (WS-L.4.1b; §17.3.4 MVP
+ *  law pack) plus the WS-M production types (steward rotation, law-pack
+ *  upgrade, treasury-policy update). */
+export const PROPOSAL_TYPES = [
+  'charter_update',
+  'bounty',
+  'capped_grant',
+  'steward_rotation',
+  'law_pack_upgrade',
+  'treasury_policy_update',
+] as const;
 export type ProposalType = (typeof PROPOSAL_TYPES)[number];
 export const proposalTypeSchema = z.enum(PROPOSAL_TYPES);
 
 export const PROPOSAL_PREFLIGHT_STATES = ['pending', 'passed', 'failed'] as const;
-export const PROPOSAL_VOTING_STATES = ['open', 'passed', 'rejected', 'quorum_not_met'] as const;
-export const PROPOSAL_CHALLENGE_STATES = ['none', 'open', 'upheld', 'dismissed'] as const;
+/** Sim rows use open→settled; WS-M production rows prefix draft→deliberation. */
+export const PROPOSAL_VOTING_STATES = [
+  'open',
+  'passed',
+  'rejected',
+  'quorum_not_met',
+  'draft',
+  'deliberation',
+] as const;
+export const PROPOSAL_CHALLENGE_STATES = [
+  'none',
+  'open',
+  'upheld',
+  'dismissed',
+  // WS-M.4.3a platform escalation.
+  'escalated',
+] as const;
 export const PROPOSAL_EXECUTION_STATES = [
   'not_executed',
   'timelocked',
@@ -425,7 +449,12 @@ export const PROPOSAL_EXECUTION_STATES = [
   'executing',
   'executed',
   'blocked',
+  // WS-M: a passed proposal whose execution window lapsed.
+  'expired',
 ] as const;
+export type ProposalVotingState = (typeof PROPOSAL_VOTING_STATES)[number];
+export type ProposalChallengeColumnState = (typeof PROPOSAL_CHALLENGE_STATES)[number];
+export type ProposalExecutionState = (typeof PROPOSAL_EXECUTION_STATES)[number];
 
 /** The simulated asset ledger prefix — fake assets are ALWAYS SIM-* (WS-L.4.1c). */
 export const SIM_ASSET_PREFIX = 'SIM-' as const;

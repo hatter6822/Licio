@@ -14,6 +14,10 @@ import type {
   GovernanceAuditActionType,
   KnomosisEnvironment,
   KnomosisSignedActionType,
+  ProposalChallengeColumnState,
+  ProposalExecutionState,
+  ProposalType,
+  ProposalVotingState,
   ReconciliationState,
   SubmissionState,
   UnlinkState,
@@ -118,7 +122,7 @@ export interface GovernanceProposalRecord {
    *  votes/signatures are preserved; only the deleting user's authorship link is
    *  scrubbed (WS-L data-rights; never cascade-delete co-participants). */
   proposerUserId: string | null;
-  proposalType: 'charter_update' | 'bounty' | 'capped_grant';
+  proposalType: ProposalType;
   title: string;
   plainLanguageSummary: string;
   requestedAmount: string | null;
@@ -129,14 +133,14 @@ export interface GovernanceProposalRecord {
   requestedAction: Record<string, unknown>;
   expectedDeliverable: string;
   preflightState: 'pending' | 'passed' | 'failed';
-  votingState: 'open' | 'passed' | 'rejected' | 'quorum_not_met';
-  challengeState: 'none' | 'open' | 'upheld' | 'dismissed';
+  votingState: ProposalVotingState;
+  challengeState: ProposalChallengeColumnState;
   // `executing` is a RECOVERABLE in-progress state (WS-L.4.1c): a proposal is
   // claimed `timelocked`→`executing` BEFORE the simulated debit, and advanced to
   // `executed` ONLY after the debit + ledger are durable.  A crash mid-execution
   // leaves it `executing` — honest (never falsely `executed`) and never re-run by
   // the timelocked-only sweep, so the treasury is never double-debited.
-  executionState: 'not_executed' | 'timelocked' | 'executing' | 'executed' | 'blocked';
+  executionState: ProposalExecutionState;
   simulationMode: boolean;
   executableAfter: string | null;
   createdAt: string;
@@ -147,6 +151,16 @@ export interface GovernanceProposalRecord {
    *  scheduler, which would otherwise mis-attribute the `execution_simulated` audit
    *  row to the (null-actor) sweep instead of the initiating user (WS-L.4.1c / N2). */
   executionClaimedAt: string | null;
+  // --- WS-M production lifecycle (migration 0082; null on sim rows). ---------
+  /** The law-pack version PINNED at publication (WS-M.1.3d). */
+  lawPackVersionId?: string | null;
+  /** Spend category for treasury proposals (kernel cap category). */
+  category?: string | null;
+  deliberationEndsAt?: string | null;
+  votingEndsAt?: string | null;
+  challengeWindowEndsAt?: string | null;
+  /** The settled tally snapshot (proposalTallyWireSchema shape). */
+  tallySnapshot?: Record<string, unknown> | null;
 }
 
 export type ProposalVoteChoice = 'approve' | 'reject' | 'abstain';
@@ -169,6 +183,13 @@ export interface GovernanceSignatureRecord {
   weightSnapshot: string | null;
   eligibilityReason: string;
   createdAt: string;
+  // --- WS-M.2.3b-1 (migration 0082; defaults cover WS-L.4 rows). -------------
+  /** What the signature authorizes (the crypto scheme stays in signatureType). */
+  purpose?: 'vote' | 'approval' | 'multisig' | 'delegation';
+  /** Vote choice for purpose=vote (null otherwise). */
+  choice?: ProposalVoteChoice | null;
+  /** Per-proposal single-use nonce (anti-replay). */
+  nonce?: string | null;
 }
 
 export interface SimTreasuryRecord {
@@ -209,6 +230,15 @@ export interface GovernanceAuditRecord {
    *  by proposal so the execution row is written exactly once even if the executing
    *  proposal is re-driven by the recovery sweep (WS-L.4.1c / P2). */
   dedupeKey?: string;
+  // --- WS-M.4.3c per-room hash chain (migration 0082; absent on WS-L.4 rows).
+  /** The previous CHAINED entry's integrity hash (null = chain genesis). */
+  prevHash?: string | null;
+  /** 0x-prefixed SHA-256 over (prevHash ‖ actionType ‖ canonical(details) ‖
+   *  createdAt ‖ roomId) — computed by the WS-M audit-chain writer only. */
+  integrityHash?: string | null;
+  /** WS-M linkage (soft; null on room-level / WS-L.4 entries). */
+  proposalId?: string | null;
+  treasuryId?: string | null;
 }
 
 export interface ReconciliationResultRecord {
