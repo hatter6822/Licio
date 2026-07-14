@@ -1446,10 +1446,11 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
       evidenceRefs: [],
     });
     if ('code' in first) throw new Error(first.message);
+    // A SECOND challenger (one open challenge per member — sweep cap).
     const second = await fileChallenge(deps, {
       roomId: ROOM,
       proposalId: settled.proposalId,
-      userId: VOTER_2,
+      userId: STEWARD,
       challengeType: 'fraud',
       description: 'Numbers look fabricated.',
       evidenceRefs: [],
@@ -1936,6 +1937,52 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     expect(vote.signature.weightSnapshot).toBe('2');
   });
 
+  it('one member holds at most ONE open challenge per proposal (sweep)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    const first = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'coi',
+      description: 'First concern.',
+      evidenceRefs: [],
+    });
+    expect(first).toMatchObject({ ok: true });
+    // Stacking unresolved challenges would hold execution hostage.
+    expect(
+      await fileChallenge(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: VOTER_2,
+        challengeType: 'fraud',
+        description: 'Second concern.',
+        evidenceRefs: [],
+      }),
+    ).toMatchObject({ ok: false, code: 'challenge_already_open' });
+    // Once the first is resolved, the member may file again.
+    if (!('challenge' in first)) throw new Error('unreachable');
+    await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: first.challenge.challengeId,
+      resolution: 'dismissed',
+      resolutionNote: 'No issue.',
+      actorUserId: STEWARD,
+      isPlatformStaff: false,
+    });
+    expect(
+      await fileChallenge(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: VOTER_2,
+        challengeType: 'fraud',
+        description: 'Renewed concern.',
+        evidenceRefs: [],
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('a frozen room defers new challenge filings (W11 review)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps);
@@ -2041,6 +2088,111 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
       blockExecution: true,
     });
     expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('executed');
+  });
+
+  it('execution fails closed when the reservation is no longer consumable (W13)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    deps.clockAdvance(3_600 * 1000 + 1_000);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    // A concurrent upheld resolution RELEASED the reservation in the gap
+    // before the claim: the spend must not finalize against nothing.
+    const { releaseReservation } = await import('../treasury/reservations.js');
+    await releaseReservation(deps, settled.proposalId);
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    expect(executed).toMatchObject({ ok: false, code: 'reservation_not_consumable' });
+    expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('blocked');
+  });
+
+  it('an audit-append failure after the effect never wedges the row (W13)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    deps.clockAdvance(3_600 * 1000 + 1_000);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const alerts: string[] = [];
+    const rawAudit = deps.governanceAudit;
+    const failing = {
+      ...deps,
+      alert: (event: string) => alerts.push(event),
+      governanceAudit: new Proxy(rawAudit, {
+        get(target, prop) {
+          if (prop === 'appendChained' || prop === 'append' || prop === 'insertChained') {
+            const original = Reflect.get(target, prop, target);
+            if (typeof original === 'function') {
+              return async (entry: { actionType?: string }) => {
+                if (entry?.actionType === 'proposal_executed') {
+                  throw new Error('audit store down');
+                }
+                return (original as (e: unknown) => Promise<unknown>).call(target, entry);
+              };
+            }
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }),
+    };
+    const executed = await executeProposal(failing, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    // The grant/kernel effect happened and the row is EXECUTED — the audit
+    // failure alerted instead of stranding an `executing` claim.
+    expect(executed).toMatchObject({ ok: true });
+    expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('executed');
+    expect(alerts).toContain('wsm.proposal.execute_audit_failed');
+  });
+
+  it('milestone descriptions carry the wire bounds at execution preflight (W13)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps, {
+      requested_action: {
+        kind: 'grant',
+        milestones: [{ description: 'x'.repeat(1_001), amount: '4000' }],
+      },
+    });
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: proposal.proposalId,
+      userId: STEWARD,
+    });
+    // Rejected BEFORE the kernel: an over-bound description would otherwise
+    // make every later grants read fail response validation for the room.
+    expect(executed).toMatchObject({ ok: false, code: 'grant_creation_failed' });
+    expect(deps.executorCalls).toEqual([]);
+  });
+
+  it('production ballots must ride the room treasury deployment (W13)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    // Repoint the room at a DIFFERENT deployment (inserted directly — the
+    // create path would reject an unpinned id).
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('treasury missing');
+    await deps.treasuries.clear();
+    await deps.treasuries.insert({ ...treasury, deploymentId: crypto.randomUUID() });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'deployment_mismatch' });
   });
 
   it('a disposed challenge is immutable: no re-resolution, no late escalation (W5 review)', async () => {

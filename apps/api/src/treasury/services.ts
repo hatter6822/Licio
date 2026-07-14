@@ -19,7 +19,9 @@ import { checkVoterEligibility } from '@licio/governance';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import type { GovernanceStores } from '../governance/stores.js';
+import { hasVerifiedCredential } from '../identity/auth-methods.js';
 import type { IdentityServices } from '../identity/services.js';
+import { authMethodInventory } from '../identity/services.js';
 import type { ExternalObligation, TreasuryObligationsPort } from '../knomosis/ports.js';
 import type { KnomosisServices } from '../knomosis/services.js';
 import type {
@@ -89,6 +91,15 @@ export function buildMembershipFactsPort(
       const ids = await forum.rooms.listEligibleVoterIds(roomId);
       let eligible = 0;
       for (const userId of ids) {
+        // ROUTE-GATE PARITY for treasury-controlling counts (W13): production
+        // ballots and delegations require a verified ADULT account, so members
+        // who could never reach signProposal must not inflate the basis.
+        if (eligibility?.treasuryControlling === true) {
+          const user = await identity.store.getUser(userId);
+          if (user?.ageBand !== 'adult') continue;
+          const inventory = await authMethodInventory(identity, userId);
+          if (!hasVerifiedCredential(inventory)) continue;
+        }
         const facts = await memberFacts(roomId, userId);
         const verdict = checkVoterEligibility(
           {

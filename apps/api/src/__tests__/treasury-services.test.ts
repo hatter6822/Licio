@@ -453,7 +453,14 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
     const fresh = new Date(now - 2 * 86_400_000).toISOString();
     const port = buildMembershipFactsPort(
       forumOf({ veteran: { requestedAt: old }, newbie: { requestedAt: fresh } }),
-      { store: { getAuth: async () => ({ emailVerified: true }) } } as never,
+      {
+        store: {
+          getAuth: async () => ({ emailVerified: true }),
+          getUser: async () => ({ ageBand: 'adult' }),
+          listWebauthn: async () => [],
+          listWalletAuth: async () => [],
+        },
+      } as never,
       fixture.knomosis,
     );
     // Without rules: the raw electorate.
@@ -483,7 +490,14 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
     // under TRIVIAL rules.
     const port = buildMembershipFactsPort(
       forumOf({ member: { requestedAt: old }, subless_steward: null }),
-      { store: { getAuth: async () => ({ emailVerified: true }) } } as never,
+      {
+        store: {
+          getAuth: async () => ({ emailVerified: true }),
+          getUser: async () => ({ ageBand: 'adult' }),
+          listWebauthn: async () => [],
+          listWalletAuth: async () => [],
+        },
+      } as never,
       fixture.knomosis,
     );
     const trivialRules = {

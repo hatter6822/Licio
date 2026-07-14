@@ -2267,3 +2267,142 @@ describe('twelfth review wave (PR #144): atomic attach, column projections, scru
     expect('code' in result && result.code).toBe('law_pack_invalid');
   });
 });
+
+describe('class sweep (PR #144): freeze columns + execution CAS', () => {
+  it('a freeze decision never writes back stale pause flags', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    // The pause lands FIRST…
+    await setGovernancePause(services, {
+      roomId: ROOM,
+      patch: { deposits: true },
+      reason: 'Maintenance.',
+      actorUserId: USER,
+    });
+    // …then a freeze whose profile read could be stale: the column-scoped
+    // write must change ONLY the freeze fields.
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Emergency.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    const profile = await services.profiles.get(ROOM);
+    expect(profile?.freezeState).toBe('frozen');
+    expect(profile?.pauseFlags.deposits).toBe(true);
+  });
+
+  it('execution-state CAS writes never rewrite the challenge column', async () => {
+    const services = await wsmServices();
+    const proposalId = randomUUID();
+    await services.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'capped_grant',
+      title: 'CAS fixture',
+      plainLanguageSummary: 'Execution vs challenge race.',
+      requestedAmount: '100',
+      asset: 'USDC',
+      recipientRef: null,
+      conflictDisclosures: 'None.',
+      riskAssessment: 'Low.',
+      requestedAction: { kind: 'grant' },
+      expectedDeliverable: 'None.',
+      preflightState: 'passed',
+      votingState: 'passed',
+      challengeState: 'none',
+      executionState: 'executing',
+      simulationMode: false,
+      executableAfter: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: new Date().toISOString(),
+      lawPackVersionId: null,
+      category: 'grant',
+      deliberationEndsAt: null,
+      votingEndsAt: new Date().toISOString(),
+      challengeWindowEndsAt: null,
+      tallySnapshot: null,
+    });
+    // A challenge projection lands while the claim holder is mid-execution…
+    await services.proposals.applyChallengeProjection(proposalId, { challengeState: 'open' });
+    // …and the failure path's CAS releases the claim WITHOUT touching it.
+    expect(
+      await services.proposals.casExecutionState(proposalId, ['executing'], 'blocked', {
+        clearClaim: true,
+      }),
+    ).toBe(true);
+    const row = await services.proposals.getById(proposalId);
+    expect(row?.executionState).toBe('blocked');
+    expect(row?.executionClaimedAt).toBeNull();
+    expect(row?.challengeState).toBe('open'); // survived the release
+    // A stale from-state loses the CAS cleanly.
+    expect(await services.proposals.casExecutionState(proposalId, ['executing'], 'expired')).toBe(
+      false,
+    );
+  });
+});
+
+describe('thirteenth review wave (PR #144): reviewer-wallet COI', () => {
+  it('a reviewer cannot clear a grant paying their own linked wallet', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const reviewerAddress = `0x${'d7'.repeat(20)}`;
+    const { hashFinancialWalletAddress } = await import('../identity/siwe.js');
+    await services.wallets.insert({
+      walletAccountId: randomUUID(),
+      userId: USER,
+      addressHashHex: hashFinancialWalletAddress(services.masterSecret, reviewerAddress),
+      addressTruncated: `${reviewerAddress.slice(0, 6)}…${reviewerAddress.slice(-4)}`,
+      chainId: 1337,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    const grant = await services.grants.insert({
+      grantId: randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: randomUUID(),
+      recipientRef: reviewerAddress, // the reviewer's OWN wallet, as an address
+      purpose: 'Self-dealing fixture',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [],
+      milestoneState: 'pending',
+      reviewState: 'pending',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    expect(
+      await setGrantReview(services, {
+        roomId: ROOM,
+        grantId: grant.grantId,
+        reviewState: 'cleared',
+        reviewerUserId: USER,
+      }),
+    ).toMatchObject({ ok: false, code: 'independent_review_required' });
+    // An unrelated reviewer clears normally.
+    expect(
+      await setGrantReview(services, {
+        roomId: ROOM,
+        grantId: grant.grantId,
+        reviewState: 'cleared',
+        reviewerUserId: OTHER,
+      }),
+    ).toMatchObject({ ok: true });
+  });
+});

@@ -444,6 +444,21 @@ describe('WS-M treasury + payment intents', () => {
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe('adult_required');
   });
 
+  it('grant review clearance is verified+adult gated (sweep)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie, userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.identity.store.updateUser(userId, { ageBand: 'teen_16_17' });
+    const res = await req(
+      'POST',
+      `/rooms/${ROOM}/treasury/grants/${crypto.randomUUID()}/review`,
+      cookie,
+      { review_state: 'cleared' },
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('adult_required');
+  });
+
   it('grant milestone transitions are verified+adult gated (W12 review)', async () => {
     const fixture = await wsmFixture();
     fixture.mode.value = 'testnet';

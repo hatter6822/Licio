@@ -217,6 +217,14 @@ export interface GovernanceProfileStore {
   /** COLUMN-scoped charter-pointer update: a whole-record upsert built from a
    *  stale read could clobber a freeze written in between (PR #144 W7). */
   setCharterPointer(roomId: string, charterVersionId: string, updatedAt: string): Promise<boolean>;
+  /** COLUMN-scoped freeze fields — the whole-record upsert wrote back stale
+   *  pause flags / pack refs read before the freeze decision (sweep). */
+  setProfileFreeze(
+    roomId: string,
+    state: 'active' | 'frozen',
+    reason: string | null,
+    updatedAt: string,
+  ): Promise<boolean>;
   /** COLUMN-scoped treasury pointer (same stale-clobber hazard). */
   setTreasuryPointer(roomId: string, treasuryId: string, updatedAt: string): Promise<boolean>;
   /** COLUMN-scoped pause flags — a whole-record write from a stale read could
@@ -507,6 +515,20 @@ export class InMemoryGovernanceProfileStore implements GovernanceProfileStore {
     const row = this.#rows.get(roomId);
     if (row === undefined) return false;
     row.charterVersionId = charterVersionId;
+    row.updatedAt = updatedAt;
+    return true;
+  }
+
+  async setProfileFreeze(
+    roomId: string,
+    state: 'active' | 'frozen',
+    reason: string | null,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const row = this.#rows.get(roomId);
+    if (row === undefined) return false;
+    row.freezeState = state;
+    row.freezeReason = reason;
     row.updatedAt = updatedAt;
     return true;
   }

@@ -1099,6 +1099,108 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect(created.intent.targetType).toBe('grant_payout');
   });
 
+  it('the sweep AUTO-ATTACHES a durable action whose client died pre-attach (W13)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const created = await createPaymentIntent(deps, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    // The WS-L submit landed (idempotency key = the INTENT id, the client
+    // convention) but the browser died before the attach request.
+    const action: KnomosisActionRecordEntity = {
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: {
+        message: { amount: '100', asset: 'USDC', treasuryId: treasury.treasuryId },
+        signature: '0xsig',
+      },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await deps.actions.insert(action);
+    await reconcileIntents(deps);
+    const recovered = await deps.intents.getById(id);
+    expect(recovered?.executionState).toBe('submitted');
+    expect(recovered?.actionRecordId).toBe(action.actionRecordId);
+  });
+
+  it('a revert landing before the first sweep still reaches terminal state (W13)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const actionRecordId = crypto.randomUUID();
+    await deps.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: { message: {}, signature: '0xsig' },
+      submissionState: 'reverted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await deps.intents.insert({
+      paymentIntentId: crypto.randomUUID(),
+      userId: USER,
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      jurisdictionState: 'allowed',
+      complianceState: 'cleared',
+      executionState: 'submitted',
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId,
+      receiptId: null,
+      idempotencyKey: crypto.randomUUID(),
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const before = (await deps.intents.listByStates(['submitted'], 10))[0];
+    if (before === undefined) throw new Error('fixture intent missing');
+    await reconcileIntents(deps);
+    // submitted → pending → reverted in ONE pass: a permanently `submitted`
+    // row would count as in-flight forever (deposit limits, unlink).
+    expect((await deps.intents.getById(before.paymentIntentId))?.executionState).toBe('reverted');
+  });
+
   it('rejects an action record already settling another intent', async () => {
     const deps = buildDeps();
     const first = await signedIntent(deps);

@@ -148,17 +148,21 @@ export async function setGovernanceFreeze(
   if (input.source !== 'steward' && !input.isPlatformStaff) {
     return tgErr(403, 'source_not_authorized', 'This freeze source requires platform staff.');
   }
-  const profile = await ensureProfile(deps, input.roomId);
+  await ensureProfile(deps, input.roomId);
   const frozen = input.action === 'freeze';
   const treasury = await deps.treasuries.getByRoom(input.roomId);
 
+  // NOTE (sweep): freeze/unfreeze is SAFETY machinery — deliberately outside
+  // the writability guard (a frozen room must accept its own unfreeze, and a
+  // steward must always be able to freeze).  COLUMN-scoped so the freeze
+  // decision never writes back stale pause flags or pack refs.
   if (input.scope === 'room') {
-    await deps.profiles.upsert({
-      ...profile,
-      freezeState: frozen ? 'frozen' : 'active',
-      freezeReason: frozen ? input.reason : null,
-      updatedAt: new Date(deps.now()).toISOString(),
-    });
+    await deps.profiles.setProfileFreeze(
+      input.roomId,
+      frozen ? 'frozen' : 'active',
+      frozen ? input.reason : null,
+      new Date(deps.now()).toISOString(),
+    );
   }
   // A room-scope freeze also freezes the treasury (marked as a CASCADE); a
   // treasury-scope action touches the treasury only.  A room-scope UNFREEZE

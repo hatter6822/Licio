@@ -148,6 +148,20 @@ export class DrizzleGovernanceProfileStore implements GovernanceProfileStore {
     return rows.length > 0;
   }
 
+  async setProfileFreeze(
+    roomId: string,
+    state: 'active' | 'frozen',
+    reason: string | null,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(roomGovernanceProfiles)
+      .set({ freezeState: state, freezeReason: reason, updatedAt: new Date(updatedAt) })
+      .where(eq(roomGovernanceProfiles.roomId, roomId))
+      .returning({ roomId: roomGovernanceProfiles.roomId });
+    return rows.length > 0;
+  }
+
   async setTreasuryPointer(
     roomId: string,
     treasuryId: string,

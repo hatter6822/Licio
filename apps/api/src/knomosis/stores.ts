@@ -602,6 +602,16 @@ export interface GovernanceProposalStore {
       >
     >,
   ): Promise<GovernanceProposalRecord | null>;
+  /** COLUMN-scoped execution-state CAS (sweep): the settle/expiry/failure
+   *  paths write ONLY the execution columns against an expected from-state —
+   *  a whole-row snapshot here could clobber a concurrent challenge
+   *  projection or vote settlement. */
+  casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options?: { clearClaim?: boolean },
+  ): Promise<boolean>;
   /** COLUMN-scoped challenge projection (PR #144 W11): challenge resolution
    *  must never write a stale whole-row snapshot back over a concurrent
    *  execution.  `blockExecution` blocks only a not-yet-executed row;
@@ -1563,6 +1573,19 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     const updated = { ...row, ...patch, votingState: to };
     this.#rows.set(proposalId, structuredClone(updated));
     return structuredClone(updated);
+  }
+
+  async casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options: { clearClaim?: boolean } = {},
+  ): Promise<boolean> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || !fromStates.includes(row.executionState)) return false;
+    row.executionState = to;
+    if (options.clearClaim === true) row.executionClaimedAt = null;
+    return true;
   }
 
   async applyChallengeProjection(

@@ -609,7 +609,15 @@ function mapActionState(
   switch (intentState) {
     case 'submitted':
       if (actionState === 'failed') return 'failed';
-      if (['accepted', 'settled', 'finalized', 'challenged', 'frozen'].includes(actionState)) {
+      // A revert can land BEFORE the first sweep touches the row: step it
+      // through `pending` so the walker reaches `reverted` in the same pass —
+      // a permanently `submitted` intent would count as in-flight forever
+      // (deposit limits, unlink obligations) (W13).
+      if (
+        ['accepted', 'settled', 'finalized', 'challenged', 'frozen', 'reverted'].includes(
+          actionState,
+        )
+      ) {
         return 'pending';
       }
       return null;
@@ -639,15 +647,39 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
   // Keyset pages over EVERY reconcilable intent: a fixed first-N slice would
   // let long-lived stuck rows starve later intents whose actions have
   // finalized, freezing deposits and payouts short of ledger finality.
+  // `signed` rides along for the AUTO-ATTACH recovery below (W13).
   for (;;) {
     const candidates = await deps.intents.listByStates(
-      ['submitted', 'pending', 'confirmed'],
+      ['signed', 'submitted', 'pending', 'confirmed'],
       pageSize,
       afterId,
     );
     if (candidates.length === 0) break;
     afterId = candidates[candidates.length - 1]?.paymentIntentId ?? null;
     for (const intent of candidates) {
+      // AUTO-ATTACH recovery (W13): the client submits the WS-L action with
+      // idempotency key = the payment-intent id, so a browser that died
+      // between submit and attach leaves a durable action the server can
+      // re-bind — the full attach validation (bindings, freeze, uniqueness)
+      // still applies, and the intent would otherwise expire while the
+      // transfer finalized off-ledger.
+      if (intent.executionState === 'signed') {
+        if (intent.userId === null || intent.actionRecordId !== null) continue;
+        const orphan = await deps.actions.getByIdempotencyKey(
+          intent.userId,
+          intent.paymentIntentId,
+        );
+        if (orphan !== null) {
+          const attached = await attachIntentSubmission(
+            deps,
+            intent.paymentIntentId,
+            orphan.actionRecordId,
+            intent.userId,
+          );
+          if (!('code' in attached)) advanced += 1;
+        }
+        continue; // the next sweep maps the freshly submitted intent onward
+      }
       if (intent.actionRecordId === null) continue;
       const action = await deps.actions.getById(intent.actionRecordId);
       if (action === null) continue;

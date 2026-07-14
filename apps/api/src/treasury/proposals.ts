@@ -694,6 +694,13 @@ export async function signProposal(
   if (deployment?.status !== 'active') {
     return tgErr(409, 'deployment_unknown', 'Unknown or inactive deployment.');
   }
+  // The ballot must ride the ROOM's deployment (W13): with several active
+  // deployments, a wallet on another chain could otherwise record a
+  // production signature that execution never re-checks.
+  const roomTreasury = await deps.treasuries.getByRoom(input.roomId);
+  if (roomTreasury !== null && roomTreasury.deploymentId !== input.deploymentId) {
+    return tgErr(409, 'deployment_mismatch', 'Sign with the room treasury’s deployment.');
+  }
   if (wallet.chainId !== deployment.chain_id) {
     return tgErr(409, 'wallet_chain_mismatch', 'The wallet is linked on a different chain.');
   }
@@ -1028,7 +1035,11 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
               bounds: pack.treasury,
             });
             if ('code' in reserved) {
-              await deps.proposals.update({ ...settledRow, executionState: 'blocked' });
+              await deps.proposals.casExecutionState(
+                settledRow.proposalId,
+                ['timelocked'],
+                'blocked',
+              );
               await appendChainedAudit(deps, {
                 roomId,
                 actionType: 'proposal_execution_failed',
@@ -1071,10 +1082,8 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
       deps.now() - Date.parse(proposal.executionClaimedAt) >
         deps.wsmProposalConfig().wsmExecutionWindowSeconds * 1000
     ) {
-      await deps.proposals.update({
-        ...proposal,
-        executionState: 'blocked',
-        executionClaimedAt: null,
+      await deps.proposals.casExecutionState(proposal.proposalId, ['executing'], 'blocked', {
+        clearClaim: true,
       });
       await releaseReservation(deps, proposal.proposalId);
       await appendChainedAudit(deps, {
@@ -1110,10 +1119,8 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
         // The claim CAS guarantees exclusivity against a racing execute.
         const claimed = await deps.proposals.claimForExecution(proposal.proposalId, nowIso);
         if (claimed !== null) {
-          await deps.proposals.update({
-            ...claimed,
-            executionState: 'expired',
-            executionClaimedAt: null,
+          await deps.proposals.casExecutionState(proposal.proposalId, ['executing'], 'expired', {
+            clearClaim: true,
           });
           await releaseReservation(deps, proposal.proposalId);
           await appendChainedAudit(deps, {
@@ -1167,6 +1174,17 @@ export async function fileChallenge(
   ) {
     return tgErr(409, 'challenge_window_closed', 'The challenge window is not open.');
   }
+  // ONE open challenge per (proposal, challenger) — without the cap a single
+  // member could stack unresolved challenges and hold execution hostage
+  // (each needs an independent steward/platform disposition) (sweep).
+  const siblings = await deps.challenges.listByProposal(input.proposalId);
+  if (siblings.some((c) => c.challengerUserId === input.userId && c.state === 'open')) {
+    return tgErr(
+      409,
+      'challenge_already_open',
+      'You already have an open challenge on this proposal.',
+    );
+  }
   const challenge: ChallengeRecord = {
     challengeId: deps.uuid(),
     proposalId: input.proposalId,
@@ -1181,7 +1199,7 @@ export async function fileChallenge(
     resolvedAt: null,
   };
   await deps.challenges.insert(challenge);
-  await deps.proposals.update({ ...proposal, challengeState: 'open' });
+  await deps.proposals.applyChallengeProjection(input.proposalId, { challengeState: 'open' });
   await appendChainedAudit(deps, {
     roomId: input.roomId,
     actionType: 'challenge_filed',
@@ -1196,6 +1214,9 @@ export async function fileChallenge(
   return { ok: true, challenge };
 }
 
+/** NOTE (sweep): deliberately OUTSIDE the writability guard — resolution is
+ *  the REVIEW machinery itself (stewards/platform must be able to dispose of
+ *  challenges while the room is frozen for that very review). */
 export async function resolveChallenge(
   deps: ProposalDeps,
   input: {
@@ -1397,6 +1418,16 @@ export async function executeProposal(
   if (claimed === null) {
     return tgErr(409, 'not_executable', 'This proposal is already being executed.');
   }
+  // RE-CHECK the challenge column AFTER the claim (W13): an upheld/escalated
+  // resolution can land in the gap between the pre-claim check and the claim
+  // itself — executing past it would spend despite the verdict.
+  const postClaim = await deps.proposals.getById(input.proposalId);
+  if (postClaim?.challengeState === 'upheld' || postClaim?.challengeState === 'escalated') {
+    await deps.proposals.casExecutionState(input.proposalId, ['executing'], 'blocked', {
+      clearClaim: true,
+    });
+    return tgErr(409, 'challenge_blocking', 'A challenge blocks this execution.');
+  }
 
   // Route the effect per type.  Treasury categories go through the SHIPPED
   // fail-closed executor (kernel verdict + capability + kill switch) — the
@@ -1446,7 +1477,11 @@ export async function executeProposal(
           if (grant === null) failure = 'grant_creation_failed';
         }
         if (failure === null) {
-          await consumeReservation(deps, claimed.proposalId);
+          // A false consume means the reservation is GONE (a concurrent
+          // upheld resolution released it) — the spend must not finalize
+          // against unencumbered headroom (W13).
+          const consumed = await consumeReservation(deps, claimed.proposalId);
+          if (!consumed) failure = 'reservation_not_consumable';
         }
       }
     } else if (claimed.proposalType === 'charter_update') {
@@ -1490,10 +1525,10 @@ export async function executeProposal(
   if (failure !== null) {
     // Release the claim honestly: the proposal is blocked, never falsely
     // executed, and the reservation stays released for a corrected retry.
-    await deps.proposals.update({
-      ...claimed,
-      executionState: 'blocked',
-      executionClaimedAt: null,
+    // COLUMN-scoped CAS (sweep): the claimed snapshot must not write back a
+    // challengeState a concurrent resolution changed mid-execution.
+    await deps.proposals.casExecutionState(claimed.proposalId, ['executing'], 'blocked', {
+      clearClaim: true,
     });
     await releaseReservation(deps, claimed.proposalId);
     await appendChainedAudit(deps, {
@@ -1506,14 +1541,25 @@ export async function executeProposal(
     return tgErr(409, failure, 'Execution failed; the proposal is blocked.');
   }
 
-  await appendChainedAudit(deps, {
-    roomId: input.roomId,
-    actionType: 'proposal_executed',
-    actorUserId: input.userId,
-    details: { proposal_id: claimed.proposalId, proposal_type: claimed.proposalType },
-    proposalId: claimed.proposalId,
-  });
+  // FINALIZE before the audit (W13): the side effect is already durable, so
+  // an audit-append failure must not leave an `executing` row whose recovery
+  // sweep would mark an executed effect blocked.  The audit failure alerts.
   const finalized = await deps.proposals.finalizeExecution(claimed.proposalId, nowIso);
+  try {
+    await appendChainedAudit(deps, {
+      roomId: input.roomId,
+      actionType: 'proposal_executed',
+      actorUserId: input.userId,
+      details: { proposal_id: claimed.proposalId, proposal_type: claimed.proposalType },
+      proposalId: claimed.proposalId,
+    });
+  } catch (error) {
+    deps.alert?.('wsm.proposal.execute_audit_failed', {
+      proposal_id: claimed.proposalId,
+      room_id: input.roomId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   return {
     ok: true,
     proposal: finalized ?? { ...claimed, executionState: 'executed', executedAt: nowIso },

@@ -289,10 +289,32 @@ describe('audit chain (WS-M.4.3c)', () => {
     expect(verification).toMatchObject({ valid: true, chainedEntries: 2 });
   });
 
-  it('hashes are deterministic and tamper-evident', async () => {
-    const hash = computeEntryHash(null, 'charter_version_created', { a: 1 }, 'T', ROOM);
-    expect(hash).toBe(computeEntryHash(null, 'charter_version_created', { a: 1 }, 'T', ROOM));
-    expect(hash).not.toBe(computeEntryHash(null, 'charter_version_created', { a: 2 }, 'T', ROOM));
+  it('hashes are deterministic, tamper-evident, and BIND the attribution (W13)', async () => {
+    const ACTOR_A = '88888888-8888-4888-8888-888888888888';
+    const ACTOR_B = '99999999-9999-4999-8999-999999999999';
+    const hash = computeEntryHash(
+      null,
+      'charter_version_created',
+      { a: 1 },
+      'T',
+      ROOM,
+      ACTOR_A,
+      null,
+      null,
+    );
+    expect(hash).toBe(
+      computeEntryHash(null, 'charter_version_created', { a: 1 }, 'T', ROOM, ACTOR_A, null, null),
+    );
+    expect(hash).not.toBe(
+      computeEntryHash(null, 'charter_version_created', { a: 2 }, 'T', ROOM, ACTOR_A, null, null),
+    );
+    // Re-attributing the actor or the proposal/treasury refs changes the hash.
+    expect(hash).not.toBe(
+      computeEntryHash(null, 'charter_version_created', { a: 1 }, 'T', ROOM, ACTOR_B, null, null),
+    );
+    expect(hash).not.toBe(
+      computeEntryHash(null, 'charter_version_created', { a: 1 }, 'T', ROOM, ACTOR_A, 'p-1', null),
+    );
   });
 
   it('detects a tampered chain on verification', async () => {

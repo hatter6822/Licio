@@ -41,6 +41,11 @@ function milestonePlan(
       ) {
         return null;
       }
+      // The WIRE bounds (grantMilestoneSchema: description 1..1000): storing
+      // an out-of-bounds description would make every later grants read fail
+      // response validation for the whole room (W13).
+      const description = (entry as { description: string }).description;
+      if (description.length < 1 || description.length > 1_000) return null;
       const trancheAmount = (entry as { amount: string }).amount;
       // Every tranche must be a POSITIVE minor-unit integer no larger than the
       // approved amount: the sum check alone would accept `-100` + `200` for a
@@ -99,6 +104,8 @@ export function hasValidMilestonePlan(proposal: GovernanceProposalRecord): boole
     ) {
       return false;
     }
+    const description = (entry as { description: string }).description;
+    if (description.length < 1 || description.length > 1_000) return false;
     const trancheAmount = (entry as { amount: string }).amount;
     if (
       !/^[0-9]{1,78}$/.test(trancheAmount) ||
@@ -186,6 +193,22 @@ export async function setGrantReview(
       'independent_review_required',
       'The reviewer must have no stake in the grant (WS-M.2.3d).',
     );
+  }
+  // An ADDRESS-shaped recipient can be the reviewer in disguise: hash it
+  // against the reviewer's linked wallets — a steward must not clear the
+  // review gate for a grant that pays their own address (W13).
+  const recipientLower = grant.recipientRef.toLowerCase();
+  if (/^0x[0-9a-f]{40}$/.test(recipientLower)) {
+    const { hashFinancialWalletAddress } = await import('../identity/siwe.js');
+    const recipientHash = hashFinancialWalletAddress(deps.masterSecret, recipientLower);
+    const reviewerWallets = await deps.wallets.listByUser(input.reviewerUserId, true);
+    if (reviewerWallets.some((w) => w.addressHashHex === recipientHash)) {
+      return tgErr(
+        403,
+        'independent_review_required',
+        'The reviewer must have no stake in the grant (WS-M.2.3d).',
+      );
+    }
   }
   // COLUMN-scoped (W12): never write the milestones snapshot back.
   if (!(await deps.grants.setReviewState(grant.grantId, input.reviewState))) {
@@ -317,7 +340,10 @@ export async function updateGrantMilestone(
   return { ok: true, grant: updated };
 }
 
-/** Upheld-dispute reversal where on-chain reversal is possible (WS-M.5.1a). */
+/** Upheld-dispute reversal where on-chain reversal is possible (WS-M.5.1a).
+ *  NOTE (sweep): deliberately OUTSIDE the writability guard — clawback is
+ *  platform SAFETY machinery and must work in a frozen room (a freeze often
+ *  accompanies the very dispute being reversed). */
 export async function markGrantClawedBack(
   deps: GrantDeps,
   input: { roomId: string; grantId: string; actorUserId: string; note: string },

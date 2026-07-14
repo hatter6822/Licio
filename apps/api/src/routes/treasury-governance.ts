@@ -663,6 +663,10 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/treasury/grants/:grantId/review',
         authMiddleware(),
+        // Review clearance is the payout prerequisite — the same verified+
+        // adult bar as the milestone route it unlocks (sweep).
+        requireVerifiedAccount(),
+        requireAdult(),
         zValidator('param', z.object({ roomId: uuidSchema, grantId: uuidSchema })),
         zValidator(
           'json',
@@ -788,6 +792,10 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/governance/proposals/:proposalId/challenge',
         authMiddleware(),
+        // Filing blocks execution: age-open by design (a member safety valve)
+        // but VERIFIED — an unverified throwaway must not stall a treasury
+        // (one open challenge per member is capped in the service) (sweep).
+        requireVerifiedAccount(),
         zValidator('param', z.object({ roomId: uuidSchema, proposalId: uuidSchema })),
         zValidator('json', proposalChallengeRequestSchema),
         async (c) => {

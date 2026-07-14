@@ -32,17 +32,23 @@ export interface ChainedAuditInput {
   treasuryId?: string | null;
 }
 
-/** The deterministic entry hash (verifiable by anyone with the row). */
+/** The deterministic entry hash (verifiable by anyone with the row).  The
+ *  hash covers the ATTRIBUTION fields too — actor + proposal/treasury refs —
+ *  or a row could be re-attributed to a different actor/target while the
+ *  chain still verified (W13). */
 export function computeEntryHash(
   prevHash: string | null,
   actionType: string,
   details: Record<string, unknown>,
   createdAt: string,
   roomId: string,
+  actorUserId: string | null,
+  proposalId: string | null,
+  treasuryId: string | null,
 ): string {
   const digest = createHash('sha256')
     .update(
-      `${prevHash ?? 'genesis'}\n${actionType}\n${canonicalize(details)}\n${createdAt}\n${roomId}`,
+      `${prevHash ?? 'genesis'}\n${actionType}\n${canonicalize(details)}\n${createdAt}\n${roomId}\n${actorUserId ?? '-'}\n${proposalId ?? '-'}\n${treasuryId ?? '-'}`,
       'utf8',
     )
     .digest('hex');
@@ -81,6 +87,9 @@ export async function appendChainedAudit(
         input.details,
         createdAt,
         input.roomId,
+        input.actorUserId,
+        input.proposalId ?? null,
+        input.treasuryId ?? null,
       ),
       proposalId: input.proposalId ?? null,
       treasuryId: input.treasuryId ?? null,
@@ -117,6 +126,9 @@ export async function verifyAuditChain(
       entry.actionDetails,
       entry.createdAt,
       entry.roomId,
+      entry.actorUserId ?? null,
+      entry.proposalId ?? null,
+      entry.treasuryId ?? null,
     );
     if (recomputed !== entry.integrityHash) {
       problems.push(`entry ${entry.entryId}: stored hash does not recompute (tamper evidence)`);

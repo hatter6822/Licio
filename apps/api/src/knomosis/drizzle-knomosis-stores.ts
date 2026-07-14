@@ -1389,6 +1389,28 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows[0] ? mapProposal(rows[0]) : null;
   }
 
+  async casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options: { clearClaim?: boolean } = {},
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(governanceProposals)
+      .set({
+        executionState: to,
+        ...(options.clearClaim === true ? { executionClaimedAt: null } : {}),
+      })
+      .where(
+        and(
+          eq(governanceProposals.proposalId, proposalId),
+          inArray(governanceProposals.executionState, [...fromStates]),
+        ),
+      )
+      .returning({ proposalId: governanceProposals.proposalId });
+    return rows.length > 0;
+  }
+
   async applyChallengeProjection(
     proposalId: string,
     projection: {
