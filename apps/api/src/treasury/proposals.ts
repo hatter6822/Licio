@@ -182,6 +182,21 @@ const STEWARD_ONLY_TYPES: ReadonlySet<ProposalType> = new Set([
   'steward_rotation',
 ]);
 
+/** Treasury-CONTROLLING proposals: spend-bearing categories plus the types
+ *  that rewrite the treasury's rules — the SINGLE predicate `signProposal`
+ *  and the quorum basis share, so a member the ballot gate would refuse can
+ *  never inflate the denominator (W14). */
+export function isTreasuryControlling(proposal: {
+  category?: string | null | undefined;
+  proposalType: string;
+}): boolean {
+  return (
+    (proposal.category !== null && proposal.category !== undefined) ||
+    proposal.proposalType === 'law_pack_upgrade' ||
+    proposal.proposalType === 'treasury_policy_update'
+  );
+}
+
 /** Deterministic proposal id from the client idempotency scope, so a replayed
  *  create maps to the SAME row (the primary key is the idempotency record). */
 export function deterministicProposalId(roomId: string, userId: string, key: string): string {
@@ -266,7 +281,7 @@ async function tallyFor(
       requireVerifiedIdentity: false,
       newWalletCoolingOffDays: 0,
     },
-    treasuryControlling: proposal.category !== null && proposal.category !== undefined,
+    treasuryControlling: isTreasuryControlling(proposal),
   });
   return tallyProposalVotes(
     recordedVotes(signatures),
@@ -757,10 +772,7 @@ export async function signProposal(
   // the treasury's rules (law-pack upgrade, treasury policy) controls the
   // treasury as surely as a vote that spends from it — the wallet cooling-off
   // and the other treasury-specific voter gates apply to both.
-  const spendControlling =
-    proposal.category !== null ||
-    proposal.proposalType === 'law_pack_upgrade' ||
-    proposal.proposalType === 'treasury_policy_update';
+  const spendControlling = isTreasuryControlling(proposal);
   // The cooling-off binds the member's NEWEST active wallet — voting with an
   // older wallet while a fresh one exists would bypass the §17.5 control.
   const activeWallets = (await deps.wallets.listByUser(input.userId, false)).filter(

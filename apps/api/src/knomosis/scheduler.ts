@@ -117,6 +117,7 @@ export async function runKnomosisTick(
           {
             actions: services.actions,
             signatures: services.proposalSignatures,
+            proposals: services.proposals,
             uuid: services.uuid,
             now: services.now,
             log: services.log,

@@ -18,6 +18,7 @@ import {
   delegationRecords,
   governanceChallenges,
   governanceProposals,
+  knomosisActionRecords,
   knomosisDeployments,
   migrationsFolder,
   paymentIntents,
@@ -27,6 +28,7 @@ import {
   treasuryGrants,
   treasuryReservations,
   users,
+  walletAccounts,
 } from '@licio/db';
 import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { eq, inArray, sql } from 'drizzle-orm';
@@ -35,6 +37,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DrizzleGovernanceAuditStore,
   DrizzleGovernanceProposalStore,
+  DrizzleKnomosisActionStore,
 } from '../knomosis/drizzle-knomosis-stores.js';
 import type { GovernanceProposalRecord } from '../knomosis/stores.js';
 import { createDrizzleTreasuryStores } from '../treasury/drizzle-treasury-stores.js';
@@ -498,6 +501,92 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
     await stores.intents.transition(expired.paymentIntentId, 'signed', 'submitted', {}, NOW());
     const relisted = await stores.intents.listExpired(NOW(), 50);
     expect(relisted.some((i) => i.paymentIntentId === expired.paymentIntentId)).toBe(false);
+  });
+
+  it('listActiveByUser excludes REORGED intents (W14: the transfer reversed)', async () => {
+    const owner = await makeUser(db, 'wsm_reorg');
+    const intentOf = (executionState: 'confirmed' | 'reorged'): PaymentIntentRecord => ({
+      paymentIntentId: randomUUID(),
+      userId: owner,
+      roomId,
+      treasuryId: treasury.treasuryId,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      jurisdictionState: 'allowed',
+      complianceState: 'cleared',
+      executionState,
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: null,
+      idempotencyKey: randomUUID(),
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      createdAt: NOW(),
+      updatedAt: NOW(),
+    });
+    await stores.intents.insert(intentOf('reorged'));
+    const confirmed = await stores.intents.insert(intentOf('confirmed'));
+    const active = await stores.intents.listActiveByUser(owner, 10);
+    expect(active.map((i) => i.paymentIntentId)).toEqual([confirmed.paymentIntentId]);
+    await db.delete(paymentIntents).where(eq(paymentIntents.userId, owner));
+    await db.delete(users).where(eq(users.userId, owner));
+  });
+
+  it('getByRoomIdempotencyKey finds the EARLIEST steward action (W14 auto-attach)', async () => {
+    const actions = new DrizzleKnomosisActionStore(db);
+    const stewardA = await makeUser(db, 'wsm_stew_a');
+    const stewardB = await makeUser(db, 'wsm_stew_b');
+    const walletOf = async (owner: string) => {
+      const inserted = await db
+        .insert(walletAccounts)
+        .values({
+          userId: owner,
+          addressHash: Buffer.from(randomUUID().replaceAll('-', ''), 'hex'),
+          addressTruncated: '0xabcd…ef01',
+          chainId: 1337,
+          walletType: 'eoa' as const,
+          unlinkState: 'active' as const,
+          riskState: 'normal' as const,
+        })
+        .returning();
+      return (inserted[0] as { walletAccountId: string }).walletAccountId;
+    };
+    const sharedKey = randomUUID();
+    const actionOf = (owner: string, wallet: string, createdAt: string) => ({
+      actionRecordId: randomUUID(),
+      deploymentId,
+      actionType: 'grant_payout' as const,
+      roomId,
+      actorWalletAccountId: wallet,
+      actorUserId: owner,
+      payloadHash: HEX32('1'),
+      typedDataHash: `0x${randomUUID().replaceAll('-', '')}${'0'.repeat(32)}`,
+      signedAction: { message: { amount: '10', asset: 'USDC' }, signature: '0xsig' },
+      submissionState: 'submitted' as const,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending' as const,
+      idempotencyKey: sharedKey,
+      createdAt,
+      updatedAt: createdAt,
+    });
+    // Two stewards raced the SAME attempt key (idempotency is actor-scoped):
+    // the room-scoped lookup returns the EARLIEST row deterministically.
+    const walletA = await walletOf(stewardA);
+    const walletB = await walletOf(stewardB);
+    const early = actionOf(stewardA, walletA, new Date(Date.now() - 60_000).toISOString());
+    const late = actionOf(stewardB, walletB, NOW());
+    await actions.insert(late);
+    await actions.insert(early);
+    const found = await actions.getByRoomIdempotencyKey(roomId, sharedKey);
+    expect(found?.actionRecordId).toBe(early.actionRecordId);
+    // Scoped to THE room — another room sees nothing under the key.
+    expect(await actions.getByRoomIdempotencyKey(randomUUID(), sharedKey)).toBeNull();
+    await db.delete(knomosisActionRecords).where(eq(knomosisActionRecords.roomId, roomId));
+    await db.delete(walletAccounts).where(inArray(walletAccounts.userId, [stewardA, stewardB]));
+    await db.delete(users).where(inArray(users.userId, [stewardA, stewardB]));
   });
 
   // --- Grants ----------------------------------------------------------------------

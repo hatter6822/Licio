@@ -755,6 +755,8 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
             'abandoned',
             'failed',
             'reverted',
+            // A reorg is a reversal — it must not pin an unlink obligation (W14).
+            'reorged',
           ]),
         ),
       )

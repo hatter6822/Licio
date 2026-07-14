@@ -365,6 +365,57 @@ describe('buildTreasuryObligationsPort (WS-L.2.5b, W12)', () => {
     });
     expect(await port.obligationsForWallet(walletAccountId)).toEqual([]);
   });
+
+  it('a REORGED intent holds no unlink obligation — the transfer reversed (W14)', async () => {
+    const services = await wsmServices();
+    const { buildTreasuryObligationsPort } = await import('../treasury/services.js');
+    const port = buildTreasuryObligationsPort(services);
+    const walletAccountId = randomUUID();
+    await services.wallets.insert({
+      walletAccountId,
+      userId: USER,
+      addressHashHex: 'j'.repeat(64),
+      addressTruncated: '0xaaaa…bbbb',
+      chainId: 1337,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    const intentOf = (executionState: 'confirmed' | 'reorged') => ({
+      paymentIntentId: randomUUID(),
+      userId: USER,
+      roomId: ROOM,
+      treasuryId: randomUUID(),
+      targetType: 'treasury_deposit' as const,
+      targetId: randomUUID(),
+      asset: 'USDC',
+      amount: '100',
+      jurisdictionState: 'allowed' as const,
+      complianceState: 'cleared' as const,
+      executionState,
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: null,
+      idempotencyKey: randomUUID(),
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // A reorged intent already REVERSED — it must not pin the last wallet.
+    await services.intents.insert(intentOf('reorged'));
+    expect(await port.obligationsForWallet(walletAccountId)).toEqual([]);
+    // A genuinely in-flight intent still does.
+    await services.intents.insert(intentOf('confirmed'));
+    const blocked = await port.obligationsForWallet(walletAccountId);
+    expect(blocked.some((o) => o.type === 'pending_payment')).toBe(true);
+  });
 });
 
 describe('buildTreasuryExecutorPort (the WS-U kernel adapter)', () => {

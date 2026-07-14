@@ -27,6 +27,7 @@ import {
   depositAllowance,
   expireIntents,
   type IntentDeps,
+  intentActionIdempotencyKey,
   markIntentSigned,
   preflightIntent,
   quoteIntent,
@@ -463,27 +464,39 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
-    const actionRecordId = crypto.randomUUID();
-    await deps.actions.insert({
-      actionRecordId,
-      deploymentId: DEPLOYMENT,
-      actionType: 'treasury_deposit' as KnomosisSignedActionType,
-      roomId: ROOM,
-      actorWalletAccountId: crypto.randomUUID(),
-      actorUserId: USER,
-      payloadHash: `0x${'1'.repeat(64)}`,
-      typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: { amount: '100', asset: 'USDC', treasuryId }, signature: '0xsig' },
-      submissionState: 'failed' as SubmissionState,
-      failureReason: 'gateway rejected',
-      indexedEventRef: null,
-      reconciliationState: 'pending',
-      idempotencyKey: crypto.randomUUID(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-    await attachIntentSubmission(deps, id, actionRecordId, USER);
-    await reconcileIntents(deps);
+    // Each attempt binds a FRESH live action that then fails at the gateway —
+    // a terminal action can never be (re)attached (W14), matching the real
+    // sign→submit→attach→ingest flow.
+    const failAttempt = async () => {
+      const action: KnomosisActionRecordEntity = {
+        actionRecordId: crypto.randomUUID(),
+        deploymentId: DEPLOYMENT,
+        actionType: 'treasury_deposit' as KnomosisSignedActionType,
+        roomId: ROOM,
+        actorWalletAccountId: crypto.randomUUID(),
+        actorUserId: USER,
+        payloadHash: `0x${'1'.repeat(64)}`,
+        typedDataHash: `0x${'2'.repeat(64)}`,
+        signedAction: { message: { amount: '100', asset: 'USDC', treasuryId }, signature: '0xsig' },
+        submissionState: 'submitted' as SubmissionState,
+        failureReason: null,
+        indexedEventRef: null,
+        reconciliationState: 'pending',
+        idempotencyKey: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await deps.actions.insert(action);
+      const attached = await attachIntentSubmission(deps, id, action.actionRecordId, USER);
+      expect(attached).toMatchObject({ ok: true });
+      await deps.actions.update({
+        ...action,
+        submissionState: 'failed' as SubmissionState,
+        failureReason: 'gateway rejected',
+      });
+      await reconcileIntents(deps);
+    };
+    await failAttempt();
     expect((await deps.intents.getById(id))?.executionState).toBe('failed');
     // Bounded retries (default 3): three succeed, the fourth refuses.
     for (let i = 0; i < 3; i += 1) {
@@ -495,8 +508,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       await preflightIntent(deps, id, USER);
       await quoteIntent(deps, id, USER);
       await markIntentSigned(deps, id, USER);
-      await attachIntentSubmission(deps, id, actionRecordId, USER);
-      await reconcileIntents(deps);
+      await failAttempt();
     }
     expect(await retryIntent(deps, id, USER)).toMatchObject({
       ok: false,
@@ -1228,6 +1240,162 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     const reused = await attachIntentSubmission(deps, secondId, action.actionRecordId, USER);
     if (!('code' in reused)) throw new Error('unexpectedly attached');
     expect(reused.code).toBe('action_in_use');
+  });
+
+  it('the sweep recovers a ROOM-OWNED payout whose steward died pre-attach (W14)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const approvedRecipient = `0x${'d4'.repeat(20)}`;
+    const grant = await deps.grants.insert({
+      grantId: crypto.randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: crypto.randomUUID(),
+      recipientRef: approvedRecipient,
+      purpose: 'Recovered tranche',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [],
+      milestoneState: 'accepted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    const created = await createPaymentIntent(deps, {
+      userId: null,
+      roomId: ROOM,
+      targetType: 'grant_payout',
+      targetId: grant.grantId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    // The steward's WS-L submit landed (idempotency key = the intent id) but
+    // the browser died before the attach — a NULL-owner intent has no
+    // user-scoped key, so recovery rides the room-scoped lookup.
+    const action: KnomosisActionRecordEntity = {
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'grant_payout' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: {
+        message: {
+          amount: '100',
+          asset: 'USDC',
+          grantId: grant.grantId,
+          recipient: approvedRecipient,
+        },
+        signature: '0xsig',
+      },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await deps.actions.insert(action);
+    await reconcileIntents(deps);
+    const recovered = await deps.intents.getById(id);
+    expect(recovered?.executionState).toBe('submitted');
+    expect(recovered?.actionRecordId).toBe(action.actionRecordId);
+  });
+
+  it("a retried intent never re-binds the prior attempt's terminal action (W14)", async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    // Attempt keys rotate per retry: same id at 0, `:r<n>`-suffixed after.
+    expect(intentActionIdempotencyKey({ paymentIntentId: 'pi', retryCount: 0 })).toBe('pi');
+    expect(intentActionIdempotencyKey({ paymentIntentId: 'pi', retryCount: 2 })).toBe('pi:r2');
+    const created = await createPaymentIntent(deps, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    // Attempt 0's action FAILED at the gateway (durable, key = intent id).
+    const dead: KnomosisActionRecordEntity = {
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: {
+        message: { amount: '100', asset: 'USDC', treasuryId: treasury.treasuryId },
+        signature: '0xsig',
+      },
+      submissionState: 'failed' as SubmissionState,
+      failureReason: 'gateway_rejected',
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await deps.actions.insert(dead);
+    // Same-attempt recovery binds the terminal action (accurate bookkeeping:
+    // the failure reconciles onto the intent, opening the retry path).
+    await reconcileIntents(deps);
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(id))?.executionState).toBe('failed');
+    // The bounded retry re-arms the intent for a NEW attempt…
+    const retried = await retryIntent(deps, id, USER);
+    if (!('intent' in retried)) throw new Error(JSON.stringify(retried));
+    expect(retried.intent.retryCount).toBe(1);
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    // …whose MANUAL attach refuses the dead attempt-0 action outright…
+    const replay = await attachIntentSubmission(deps, id, dead.actionRecordId, USER);
+    if (!('code' in replay)) throw new Error('unexpectedly attached');
+    expect(replay.code).toBe('action_terminal');
+    // …and whose auto-attach looks up the ROTATED key, so the dead action
+    // (still stored under the attempt-0 key) is invisible to recovery.
+    await reconcileIntents(deps);
+    const after = await deps.intents.getById(id);
+    expect(after?.executionState).toBe('signed');
+    expect(after?.actionRecordId).toBeNull();
+    // A fresh attempt-1 action under the rotated key DOES recover.
+    const fresh: KnomosisActionRecordEntity = {
+      ...dead,
+      actionRecordId: crypto.randomUUID(),
+      typedDataHash: `0x${'3'.repeat(64)}`,
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      idempotencyKey: `${id}:r1`,
+    };
+    await deps.actions.insert(fresh);
+    await reconcileIntents(deps);
+    const rebound = await deps.intents.getById(id);
+    expect(rebound?.executionState).toBe('submitted');
+    expect(rebound?.actionRecordId).toBe(fresh.actionRecordId);
   });
 });
 

@@ -39,6 +39,7 @@ import {
 import {
   applyTransition,
   canTransitionSubmissionState,
+  recordAcceptedProposalSignature,
   resubmitPendingActions,
   VALID_SUBMISSION_TRANSITIONS,
 } from '../knomosis/submission.js';
@@ -565,6 +566,7 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     const deps = {
       actions: fixture.knomosis.actions,
       signatures: fixture.knomosis.proposalSignatures,
+      proposals: fixture.knomosis.proposals,
       uuid: fixture.knomosis.uuid,
       now: fixture.knomosis.now,
       log: fixture.knomosis.log,
@@ -601,6 +603,7 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     const deps = {
       actions: fixture.knomosis.actions,
       signatures: fixture.knomosis.proposalSignatures,
+      proposals: fixture.knomosis.proposals,
       uuid: fixture.knomosis.uuid,
       now: fixture.knomosis.now,
       log: fixture.knomosis.log,
@@ -915,6 +918,65 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
     expect((await actions.getById(record.actionRecordId))?.submissionState).toBe('finalized');
   });
 
+  it('an accepted proposal_sign on a PRODUCTION proposal records NO ledger row (W14)', async () => {
+    const fixture = await freshKnomosisServices();
+    const proposalRow = (proposalId: string, simulationMode: boolean) => ({
+      proposalId,
+      roomId: crypto.randomUUID(),
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'charter_update' as const,
+      title: 't',
+      plainLanguageSummary: 's',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'r',
+      requestedAction: {},
+      expectedDeliverable: 'd',
+      preflightState: 'passed' as const,
+      votingState: 'open' as const,
+      challengeState: 'none' as const,
+      executionState: 'not_executed' as const,
+      simulationMode,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+    });
+    const signAction = (proposalId: string) =>
+      baseAction({
+        actionType: 'proposal_sign',
+        submissionState: 'accepted',
+        signedAction: {
+          message: { proposalId, purpose: 'vote', choice: 'approve' },
+          signature: `0x${'cd'.repeat(65)}`,
+        },
+      });
+    const deps = {
+      signatures: fixture.knomosis.proposalSignatures,
+      proposals: fixture.knomosis.proposals,
+      uuid: fixture.knomosis.uuid,
+      now: fixture.knomosis.now,
+    };
+    // A PRODUCTION ballot's ledger is the WS-M sign surface — a null-snapshot
+    // row here would occupy the (proposal, wallet, purpose) unique and BLOCK
+    // the same wallet's real vote (W14).
+    const production = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert(proposalRow(production, false));
+    await recordAcceptedProposalSignature(deps, signAction(production));
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(production)).toHaveLength(0);
+    // A SIMULATED proposal still records its educational ledger row…
+    const sim = crypto.randomUUID();
+    await fixture.knomosis.proposals.insert(proposalRow(sim, true));
+    await recordAcceptedProposalSignature(deps, signAction(sim));
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(sim)).toHaveLength(1);
+    // …and an UNKNOWN proposal id keeps the durable-marker behaviour.
+    const unknown = crypto.randomUUID();
+    await recordAcceptedProposalSignature(deps, signAction(unknown));
+    expect(await fixture.knomosis.proposalSignatures.listByProposal(unknown)).toHaveLength(1);
+  });
+
   it('resubmitPendingActions re-forwards only submitted records', async () => {
     const fixture = await freshKnomosisServices();
     const record = baseAction({ submissionState: 'submitted', reconciliationState: 'pending' });
@@ -923,6 +985,7 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
       {
         actions: fixture.knomosis.actions,
         signatures: fixture.knomosis.proposalSignatures,
+        proposals: fixture.knomosis.proposals,
         uuid: fixture.knomosis.uuid,
         gateway: fixture.knomosis.gateway,
         now: fixture.knomosis.now,
@@ -957,6 +1020,7 @@ describe('submission state machine + resubmit (WS-L.3.2)', () => {
       {
         actions: fixture.knomosis.actions,
         signatures: fixture.knomosis.proposalSignatures,
+        proposals: fixture.knomosis.proposals,
         uuid: fixture.knomosis.uuid,
         gateway: fixture.knomosis.gateway,
         now: fixture.knomosis.now,
@@ -1252,6 +1316,7 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     const deps = {
       actions: fixture.knomosis.actions,
       signatures: fixture.knomosis.proposalSignatures,
+      proposals: fixture.knomosis.proposals,
       uuid: fixture.knomosis.uuid,
       now: fixture.knomosis.now,
       log: fixture.knomosis.log,
@@ -1442,6 +1507,7 @@ describe('ingest unsupported-event halt (WS-L.3.3a)', () => {
     return {
       actions: fixture.knomosis.actions,
       proposalSignatures: fixture.knomosis.proposalSignatures,
+      proposals: fixture.knomosis.proposals,
       actorMappings: fixture.knomosis.actorMappings,
       events: fixture.knomosis.events,
       reconciliation: fixture.knomosis.reconciliation,
@@ -2226,6 +2292,7 @@ describe('in-memory store adapters + services getter', () => {
       {
         actions: fixture.knomosis.actions,
         proposalSignatures: fixture.knomosis.proposalSignatures,
+        proposals: fixture.knomosis.proposals,
         actorMappings: fixture.knomosis.actorMappings,
         events: fixture.knomosis.events,
         reconciliation: fixture.knomosis.reconciliation,

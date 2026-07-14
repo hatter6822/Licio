@@ -357,7 +357,10 @@ export const paymentIntentSchema = z
     jurisdiction_state: z.enum(['allowed', 'restricted', 'blocked']),
     compliance_state: z.enum(['pending', 'cleared', 'flagged', 'blocked']),
     execution_state: paymentIntentStateSchema,
-    /** Retries consumed against the bounded retry budget (WS-M.3.1b). */
+    /** Retries consumed against the bounded retry budget (WS-M.3.1b).  Also
+     *  derives the WS-L action idempotency key for the CURRENT attempt: the
+     *  intent id when 0, `<intentId>:r<retryCount>` after a retry — a fresh
+     *  attempt must never dedup onto a prior attempt's terminal action. */
     retry_count: z.number().int().min(0),
     /** The WS-L action record once submitted (null pre-submission). */
     action_record_id: uuidSchema.nullable(),

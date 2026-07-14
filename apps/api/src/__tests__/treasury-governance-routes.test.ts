@@ -474,6 +474,23 @@ describe('WS-M treasury + payment intents', () => {
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe('adult_required');
   });
 
+  it('challenge resolution is verified+adult gated (W14)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie, userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.identity.store.updateUser(userId, { ageBand: 'teen_16_17' });
+    // Resolution clears the LAST execution blocker on a real-asset proposal —
+    // a teen steward must not open the door another steward walks through.
+    const res = await req(
+      'POST',
+      `/rooms/${ROOM}/governance/challenges/${crypto.randomUUID()}/resolve`,
+      cookie,
+      { resolution: 'dismissed', resolution_note: 'Should never reach the service.' },
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('adult_required');
+  });
+
   it('production proposal creation is adult-gated (W9 review)', async () => {
     const fixture = await wsmFixture();
     fixture.mode.value = 'testnet';

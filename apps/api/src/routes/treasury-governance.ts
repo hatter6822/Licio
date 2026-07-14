@@ -820,6 +820,12 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/governance/challenges/:challengeId/resolve',
         authMiddleware(),
+        // Resolution CLEARS the execution blocker on a real-asset proposal —
+        // the same verified+adult bar as signing/delegation/execution applies
+        // (a teen or unverified steward must not dismiss the last blocker and
+        // hand another steward a clear execute) (W14).
+        requireVerifiedAccount(),
+        requireAdult(),
         zValidator('param', z.object({ roomId: uuidSchema, challengeId: uuidSchema })),
         zValidator('json', challengeResolveRequestSchema),
         async (c) => {

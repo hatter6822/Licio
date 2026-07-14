@@ -379,6 +379,15 @@ export interface KnomosisActionStore {
     actorUserId: string,
     idempotencyKey: string,
   ): Promise<KnomosisActionRecordEntity | null>;
+  /** Room-scoped orphan lookup for the WS-M auto-attach sweep (W14): a
+   *  ROOM-owned payout intent (null owner) recovers the steward-signed action
+   *  by the intent's attempt key regardless of WHICH steward signed it.
+   *  Idempotency is actor-scoped, so several stewards may have raced the same
+   *  key — returns the earliest inserted row for determinism. */
+  getByRoomIdempotencyKey(
+    roomId: string,
+    idempotencyKey: string,
+  ): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
   /** COMPARE-AND-SET the submission state: apply the patch ONLY if the stored row
    *  is still in `expectedState`, returning null when a concurrent writer (e.g.
@@ -1121,6 +1130,20 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
   ): Promise<KnomosisActionRecordEntity | null> {
     for (const row of this.#rows.values()) {
       if (row.actorUserId === actorUserId && row.idempotencyKey === idempotencyKey) {
+        return structuredClone(row);
+      }
+    }
+    return null;
+  }
+
+  async getByRoomIdempotencyKey(
+    roomId: string,
+    idempotencyKey: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    // Insertion order IS creation order here — the first match is the
+    // earliest row, mirroring the Drizzle adapter's createdAt ordering.
+    for (const row of this.#rows.values()) {
+      if (row.roomId === roomId && row.idempotencyKey === idempotencyKey) {
         return structuredClone(row);
       }
     }

@@ -625,12 +625,19 @@ export async function submitAction(
  * retry insert cleanly (WS-L.3.2a).  Insert-once: a duplicate is a no-op.
  */
 export async function recordAcceptedProposalSignature(
-  deps: Pick<SubmissionDeps, 'signatures' | 'uuid' | 'now'>,
+  deps: Pick<SubmissionDeps, 'signatures' | 'uuid' | 'now' | 'proposals'>,
   record: KnomosisActionRecordEntity,
 ): Promise<void> {
   if (record.actionType !== 'proposal_sign') return;
   const proposalId = record.signedAction.message['proposalId'];
   if (proposalId === undefined || proposalId.length === 0) return;
+  // PRODUCTION rows record NO ledger row here (W14): the WS-M sign surface is
+  // the signature ledger for production ballots, and a null-snapshot row
+  // under the signed purpose would occupy the (proposal, wallet, purpose)
+  // unique — BLOCKING the same wallet's real vote/approval.  The action
+  // record itself remains the durable WS-L artifact.
+  const target = await deps.proposals.getById(proposalId);
+  if (target !== null && !target.simulationMode) return;
   // The signature already passed low-s verification before submit, so a 65-byte
   // ECDSA blob is `ok`; anything else is an EIP-1271 contract signature.
   const isEcdsa = classifyEcdsaSignature(record.signedAction.signature) === 'ok';
@@ -665,7 +672,7 @@ export async function recordAcceptedProposalSignature(
 
 /** Forward one record to the gateway and apply the verdict (idempotent). */
 export async function forwardToGateway(
-  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log' | 'signatures' | 'uuid'>,
+  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log' | 'signatures' | 'uuid' | 'proposals'>,
   gateway: KnomosisGateway,
   record: KnomosisActionRecordEntity,
 ): Promise<{
@@ -767,7 +774,7 @@ export async function resubmitPendingActions(
   // `signatures` + `uuid` flow through to `forwardToGateway` so an outage-stuck
   // `proposal_sign` that the retry finally gets ACCEPTED records its signature
   // then — the submit path records nothing until acceptance (WS-L.3.2a).
-  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log' | 'signatures' | 'uuid'> & {
+  deps: Pick<SubmissionDeps, 'actions' | 'now' | 'log' | 'signatures' | 'uuid' | 'proposals'> & {
     gateway: () => KnomosisGateway | null;
     /** WS-L.3.5c: skip forwarding a record whose submission is paused — the
      *  crypto flag is off, or the `action_submission` OR the action-type-specific

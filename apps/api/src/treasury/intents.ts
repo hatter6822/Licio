@@ -465,6 +465,22 @@ const TARGET_FIELD_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
 };
 
 /**
+ * The WS-L action idempotency key for the intent's CURRENT attempt (W14):
+ * the first attempt uses the payment-intent id (the W13 client convention);
+ * every retry rotates the key to `<intentId>:r<retryCount>` so a fresh
+ * attempt never dedups onto — nor auto-recovers — a previous attempt's
+ * terminal action.  The client derives the same key from the wire
+ * `retry_count` when submitting the retried action.
+ */
+export function intentActionIdempotencyKey(
+  intent: Pick<PaymentIntentRecord, 'paymentIntentId' | 'retryCount'>,
+): string {
+  return intent.retryCount > 0
+    ? `${intent.paymentIntentId}:r${intent.retryCount}`
+    : intent.paymentIntentId;
+}
+
+/**
  * `signed → submitted`: bind the WS-L action record minted by the submit path.
  * The action must BELONG to this intent — same room, same actor, the target's
  * action type, and the signed amount/asset the intent carries — otherwise any
@@ -477,6 +493,7 @@ export async function attachIntentSubmission(
   paymentIntentId: string,
   actionRecordId: string,
   actorUserId: string,
+  opts?: { allowTerminal?: boolean },
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
@@ -488,6 +505,19 @@ export async function attachIntentSubmission(
   if (guard !== null) return guard;
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
+  // A DEAD action can settle nothing: manually binding a failed/reverted
+  // record (a pre-retry attempt's corpse still matches every belongs-to
+  // check) would drive a freshly retried intent straight back to its
+  // terminal state, burning the retry budget without a transfer (W14).
+  // The reconcile sweep is exempt: recovering the CURRENT attempt's action
+  // — whatever its state — is accurate bookkeeping (the attempt key keeps
+  // older attempts out of its reach).
+  if (
+    opts?.allowTerminal !== true &&
+    (action.submissionState === 'failed' || action.submissionState === 'reverted')
+  ) {
+    return tgErr(409, 'action_terminal', 'This action record already failed or reverted.');
+  }
   // Member-owned intents bind the action's ACTOR to the owner; room-owned
   // intents (null owner: grant/compensation payouts) accept any steward's
   // signed action — the route enforces stewardship, and the room + type +
@@ -658,23 +688,31 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
     afterId = candidates[candidates.length - 1]?.paymentIntentId ?? null;
     for (const intent of candidates) {
       // AUTO-ATTACH recovery (W13): the client submits the WS-L action with
-      // idempotency key = the payment-intent id, so a browser that died
-      // between submit and attach leaves a durable action the server can
-      // re-bind — the full attach validation (bindings, freeze, uniqueness)
+      // idempotency key = the intent's ATTEMPT key (`intentActionIdempotencyKey`
+      // — the intent id, `:r<n>`-suffixed after a retry, W14), so a browser
+      // that died between submit and attach leaves a durable action the server
+      // can re-bind — the full attach validation (bindings, freeze, uniqueness)
       // still applies, and the intent would otherwise expire while the
-      // transfer finalized off-ledger.
+      // transfer finalized off-ledger.  Room-owned payout intents (null owner:
+      // grant/compensation) recover through the room-scoped lookup — ANY
+      // steward's signed action under the attempt key qualifies (W14).
       if (intent.executionState === 'signed') {
-        if (intent.userId === null || intent.actionRecordId !== null) continue;
-        const orphan = await deps.actions.getByIdempotencyKey(
-          intent.userId,
-          intent.paymentIntentId,
-        );
+        if (intent.actionRecordId !== null) continue;
+        const attemptKey = intentActionIdempotencyKey(intent);
+        const orphan =
+          intent.userId !== null
+            ? await deps.actions.getByIdempotencyKey(intent.userId, attemptKey)
+            : await deps.actions.getByRoomIdempotencyKey(intent.roomId, attemptKey);
         if (orphan !== null) {
           const attached = await attachIntentSubmission(
             deps,
             intent.paymentIntentId,
             orphan.actionRecordId,
-            intent.userId,
+            intent.userId ?? orphan.actorUserId,
+            // Same-attempt recovery binds even a terminal action: the failure
+            // then reconciles onto the intent (retryable) instead of the row
+            // silently expiring into `abandoned`.
+            { allowTerminal: true },
           );
           if (!('code' in attached)) advanced += 1;
         }

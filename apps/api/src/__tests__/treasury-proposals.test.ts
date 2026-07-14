@@ -35,6 +35,7 @@ import {
   deterministicProposalId,
   executeProposal,
   fileChallenge,
+  isTreasuryControlling,
   type MembershipFactsPort,
   type ProposalDeps,
   resolveChallenge,
@@ -1318,6 +1319,76 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     expect(
       await castVote(deps, created.proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve'),
     ).toMatchObject({ ok: false, code: 'wallet_cooling_off' });
+  });
+
+  it('policy-type proposals count quorum with the treasury-controlling basis (W14)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      allowedProposalTypes: ['capped_grant', 'charter_update', 'treasury_policy_update'],
+      quorumRules: {
+        capped_grant: { basis: 'eligible_voters', minFraction: 0.2 },
+        charter_update: { basis: 'eligible_voters', minFraction: 0.2 },
+        treasury_policy_update: { basis: 'eligible_voters', minFraction: 0.2 },
+      },
+      thresholdRules: {
+        capped_grant: { minAffirmativeFraction: 0.5 },
+        charter_update: { minAffirmativeFraction: 0.5 },
+        treasury_policy_update: { minAffirmativeFraction: 0.5 },
+      },
+      timelockRules: {
+        capped_grant: { seconds: 3_600 },
+        charter_update: { seconds: 3_600 },
+        treasury_policy_update: { seconds: 3_600 },
+      },
+    });
+    const targetDoc = fullLawPack({ version: '1.1.0' });
+    const target = await registerLawPack(deps, {
+      roomId: ROOM,
+      document: targetDoc,
+      fixtures: corpusFor(targetDoc),
+      actorUserId: STEWARD,
+    });
+    if (!('record' in target)) throw new Error(JSON.stringify(target));
+    const created = await createProductionProposal(deps, {
+      roomId: ROOM,
+      userId: STEWARD,
+      create: draft({
+        proposal_type: 'treasury_policy_update',
+        category: null,
+        requested_amount: null,
+        asset: null,
+        recipient_ref: null,
+        requested_action: { kind: 'law_pack_upgrade', law_pack_id: target.record.lawPackId },
+      }),
+    });
+    if (!('proposal' in created)) throw new Error(JSON.stringify(created));
+    await openVoting(deps);
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    await castVote(deps, created.proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve');
+    // Capture the eligibility basis the TALLY hands the membership port: the
+    // ballot gate treats a category-less rule rewrite as spend-controlling, so
+    // the quorum denominator must apply the SAME predicate — members who
+    // could never sign must not inflate it (W14).
+    const inner = deps.membership;
+    const captured: boolean[] = [];
+    deps.membership = {
+      memberFacts: (roomId, userId) => inner.memberFacts(roomId, userId),
+      eligibleMemberCount: (roomId, eligibility) => {
+        if (eligibility !== undefined) captured.push(eligibility.treasuryControlling);
+        return inner.eligibleMemberCount(roomId, eligibility);
+      },
+    };
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    expect(captured).toContain(true);
+    expect(captured).not.toContain(false);
+    // The ONE predicate both gates share.
+    expect(isTreasuryControlling({ category: null, proposalType: 'treasury_policy_update' })).toBe(
+      true,
+    );
+    expect(isTreasuryControlling({ category: null, proposalType: 'law_pack_upgrade' })).toBe(true);
+    expect(isTreasuryControlling({ category: null, proposalType: 'charter_update' })).toBe(false);
+    expect(isTreasuryControlling({ category: 'grant', proposalType: 'capped_grant' })).toBe(true);
   });
 
   it('the grant RECIPIENT is recused from their own payout vote (W5 review)', async () => {

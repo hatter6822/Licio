@@ -25,6 +25,7 @@ import type { GatewayEvent, KnomosisGateway } from './gateway.js';
 import { type ReceiptDeps, writeReceipts } from './receipts.js';
 import { ensureActorMapping } from './standing.js';
 import type {
+  GovernanceProposalStore,
   GovernanceSignatureStore,
   KnomosisActionRecordEntity,
   KnomosisActionStore,
@@ -61,6 +62,8 @@ export interface IngestDeps extends ReceiptDeps {
   /** Governance-signature ledger — a reverted proposal_sign's signature is
    *  removed here so it stops counting/blocking (WS-L.3.4c). */
   proposalSignatures: GovernanceSignatureStore;
+  /** Production rows record NO ledger signature (W14) — the lookup gate. */
+  proposals: GovernanceProposalStore;
   /** Wallet→actor mapping — REPAIRED here from a confirmed gateway event when the
    *  post-submit HTTP side effect that normally writes it crashed (N4). */
   actorMappings: WalletActorMappingStore;
@@ -358,7 +361,12 @@ export async function ingestGatewayEvents(
           // insert-once per (proposal, wallet), so the submit path and ingestion
           // recording the same acceptance is a no-op (WS-L.3.2a/3.4c).
           await recordAcceptedProposalSignature(
-            { signatures: deps.proposalSignatures, uuid: deps.uuid, now: deps.now },
+            {
+              signatures: deps.proposalSignatures,
+              proposals: deps.proposals,
+              uuid: deps.uuid,
+              now: deps.now,
+            },
             effective,
           );
         }

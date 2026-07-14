@@ -866,7 +866,15 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   }
 
   async listActiveByUser(userId: string, limit: number): Promise<PaymentIntentRecord[]> {
-    const terminal: PaymentIntentState[] = ['finalized', 'abandoned', 'failed', 'reverted'];
+    // `reorged` is a REVERSAL (the transfer un-happened) — it must not hold a
+    // wallet-unlink obligation open; a retry re-checks the wallet set (W14).
+    const terminal: PaymentIntentState[] = [
+      'finalized',
+      'abandoned',
+      'failed',
+      'reverted',
+      'reorged',
+    ];
     return [...this.#rows.values()]
       .filter((r) => r.userId === userId && !terminal.includes(r.executionState))
       .slice(0, limit)
