@@ -129,7 +129,8 @@ function ProductionProposalCard({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingVote, setPendingVote] = useState<{
-    choice: 'approve' | 'reject' | 'abstain';
+    purpose: 'vote' | 'approval';
+    choice: 'approve' | 'reject' | 'abstain' | null;
     preview: TransactionPreview;
     message: Record<string, string>;
     address: string;
@@ -147,7 +148,10 @@ function ProductionProposalCard({
     setError(e instanceof ApiClientError ? e.message : fallback);
   }
 
-  async function prepareVote(choice: 'approve' | 'reject' | 'abstain'): Promise<void> {
+  async function prepareSignature(
+    purpose: 'vote' | 'approval',
+    choice: 'approve' | 'reject' | 'abstain' | null,
+  ): Promise<void> {
     setError(null);
     if (voteContext === null) {
       setError(
@@ -169,9 +173,10 @@ function ProductionProposalCard({
       roomId,
       proposalId: proposal.proposal_id,
       // Registry v2: the BALLOT is part of the signed struct — the wallet
-      // shows exactly the choice being recorded.
-      purpose: 'vote',
-      choice,
+      // shows exactly the choice being recorded.  An execution APPROVAL is
+      // choice-neutral by contract ('none'): it can never read as a ballot.
+      purpose,
+      choice: choice ?? 'none',
       actor: address,
       nonce: freshNonce(),
       expiration: signatureExpiration(),
@@ -192,7 +197,7 @@ function ProductionProposalCard({
       supportContact: 'https://licio.app/help',
       displayAmount: null,
     });
-    setPendingVote({ choice, preview, message, address });
+    setPendingVote({ purpose, choice, preview, message, address });
   }
 
   async function submitVote(): Promise<void> {
@@ -219,7 +224,7 @@ function ProductionProposalCard({
       const result = await sign.mutateAsync({
         proposalId: proposal.proposal_id,
         request: {
-          purpose: 'vote',
+          purpose: pendingVote.purpose,
           choice: pendingVote.choice,
           deployment_id: voteContext.deploymentId,
           wallet_account_id: voteContext.walletAccountId,
@@ -229,9 +234,11 @@ function ProductionProposalCard({
       });
       setPendingVote(null);
       setNotice(
-        t('room.proposals.vote.recorded', 'Vote recorded with weight {weight}.', {
-          weight: result.weight_snapshot,
-        }),
+        pendingVote.purpose === 'approval'
+          ? t('room.proposals.approve.recorded', 'Execution approval recorded.')
+          : t('room.proposals.vote.recorded', 'Vote recorded with weight {weight}.', {
+              weight: result.weight_snapshot,
+            }),
       );
     } catch (e) {
       surface(e, t('room.proposals.vote.error', 'The vote could not be recorded.'));
@@ -245,6 +252,13 @@ function ProductionProposalCard({
     (proposal.voting_state === 'passed' || proposal.voting_state === 'open');
   const canExecute =
     isRoomSteward &&
+    proposal.voting_state === 'passed' &&
+    (proposal.execution_state === 'not_executed' || proposal.execution_state === 'timelocked');
+  // Multisig packs need designated-signer approvals before execution; the
+  // co-sign affordance rides every passed proposal (harmless where no
+  // multisig policy applies — the signature simply never gates anything).
+  const canCoSign =
+    joined &&
     proposal.voting_state === 'passed' &&
     (proposal.execution_state === 'not_executed' || proposal.execution_state === 'timelocked');
 
@@ -295,16 +309,21 @@ function ProductionProposalCard({
         <div className="flex flex-wrap gap-2">
           {canVote ? (
             <>
-              <Button variant="ghost" onClick={() => void prepareVote('approve')}>
+              <Button variant="ghost" onClick={() => void prepareSignature('vote', 'approve')}>
                 {t('room.proposals.vote.approve', 'Vote approve')}
               </Button>
-              <Button variant="ghost" onClick={() => void prepareVote('reject')}>
+              <Button variant="ghost" onClick={() => void prepareSignature('vote', 'reject')}>
                 {t('room.proposals.vote.reject', 'Vote reject')}
               </Button>
-              <Button variant="ghost" onClick={() => void prepareVote('abstain')}>
+              <Button variant="ghost" onClick={() => void prepareSignature('vote', 'abstain')}>
                 {t('room.proposals.vote.abstain', 'Abstain')}
               </Button>
             </>
+          ) : null}
+          {canCoSign ? (
+            <Button variant="ghost" onClick={() => void prepareSignature('approval', null)}>
+              {t('room.proposals.approve.button', 'Co-sign execution')}
+            </Button>
           ) : null}
           {canChallenge ? (
             <Button variant="ghost" onClick={() => setChallengeOpen((open) => !open)}>

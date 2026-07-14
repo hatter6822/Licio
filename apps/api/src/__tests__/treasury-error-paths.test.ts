@@ -1671,3 +1671,47 @@ describe('seventh review wave (PR #144): divergence halts funds, freeze-safe poi
     expect((await services.proposals.getById(dueId))?.votingState).toBe('open');
   });
 });
+
+describe('eighth review wave (PR #144): frozen grant review', () => {
+  it('a frozen room refuses grant review-state changes', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const grant = await services.grants.insert({
+      grantId: randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: randomUUID(),
+      recipientRef: `user:${OTHER}`,
+      purpose: 'Translation sprint',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [],
+      milestoneState: 'pending',
+      reviewState: 'pending',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Emergency review.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    // Review clearance is the prerequisite for payout scheduling — frozen
+    // rooms must not advance disbursement state.
+    expect(
+      await setGrantReview(services, {
+        roomId: ROOM,
+        grantId: grant.grantId,
+        reviewState: 'cleared',
+        reviewerUserId: USER,
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+});

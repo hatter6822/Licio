@@ -404,6 +404,37 @@ describe('ProposalsPanel (WS-M.4)', () => {
     expect(await screen.findByText(/vote recorded with weight 1/i)).toBeInTheDocument();
   });
 
+  it('co-signs a PASSED proposal with a choice-neutral approval (W8 review)', async () => {
+    armVoteContext();
+    // The fixture is already passed/not_executed — the co-sign affordance
+    // serves multisig designated signers before execution.
+    mockProposals.mockReturnValue({ isLoading: false, data: [PRODUCTION_PROPOSAL] });
+    mockSignTypedData.mockResolvedValue({
+      signature: `0x${'22'.repeat(65)}`,
+      message: { roomId: PRODUCTION_PROPOSAL.room_id },
+    });
+    mockSignMutation.mockResolvedValue({
+      signature_id: '55555555-5555-4555-8555-555555555555',
+      weight_snapshot: '1',
+      eligibility_reason: 'eligible',
+      tally: null,
+    });
+    render(<ProposalsPanel roomId={PRODUCTION_PROPOSAL.room_id} joined isRoomSteward={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /co-sign execution/i }));
+    const signButton = await screen.findByRole('button', { name: /^sign proposal$/i });
+    fireEvent.click(signButton);
+    await waitFor(() =>
+      expect(mockSignMutation).toHaveBeenCalledWith({
+        proposalId: PRODUCTION_PROPOSAL.proposal_id,
+        request: expect.objectContaining({
+          purpose: 'approval',
+          choice: null,
+        }),
+      }),
+    );
+    expect(await screen.findByText(/execution approval recorded/i)).toBeInTheDocument();
+  });
+
   it('explains a missing wallet instead of opening the ballot preview', async () => {
     // No treasury/manifest/wallet wired: voteContext is null.
     const open = { ...PRODUCTION_PROPOSAL, voting_state: 'open' as const, tally: null };

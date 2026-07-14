@@ -646,8 +646,13 @@ export async function recordAcceptedProposalSignature(
     signatureType: isEcdsa ? 'eip712_ecdsa' : 'eip712_eip1271',
     typedDataHash: record.typedDataHash,
     signatureRef: record.actionRecordId,
+    // LEDGER-ONLY: a null snapshot marks a row that never passed the WS-M
+    // eligibility/weight gate — the production tally, quorum, and multisig
+    // execution gate all require a resolved snapshot, so this row can never
+    // shift a governance outcome (PR #144 W8).  Production ballots that
+    // should COUNT go through the WS-M sign surface.
     weightSnapshot: null,
-    eligibilityReason: 'proposal_sign accepted by the gateway (WS-L.3.2a)',
+    eligibilityReason: 'proposal_sign accepted by the gateway (WS-L.3.2a; ledger-only)',
     createdAt: new Date(deps.now()).toISOString(),
     ...(signedPurpose === 'vote' || signedPurpose === 'approval' || signedPurpose === 'multisig'
       ? { purpose: signedPurpose }

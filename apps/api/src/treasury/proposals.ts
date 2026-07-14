@@ -201,7 +201,18 @@ const wireTally = (tally: ReturnType<typeof tallyProposalVotes>): ProposalTallyW
 /** Recorded votes (purpose=vote) → the pure tally input. */
 function recordedVotes(signatures: readonly GovernanceSignatureRecord[]) {
   return signatures
-    .filter((s) => (s.purpose ?? 'vote') === 'vote' && s.choice !== undefined && s.choice !== null)
+    .filter(
+      (s) =>
+        (s.purpose ?? 'vote') === 'vote' &&
+        s.choice !== undefined &&
+        s.choice !== null &&
+        // Only WEIGHT-RESOLVED ballots tally: the generic WS-L submit path
+        // records a durable ledger row (WS-L.3.2a) with a null snapshot —
+        // it never passed the WS-M eligibility/weight gate, so it must not
+        // count as a voter or shift quorum (PR #144 W8).
+        s.weightSnapshot !== null &&
+        s.weightSnapshot !== undefined,
+    )
     .map((s) => ({
       voterUserId: s.userId,
       choice: s.choice as 'approve' | 'reject' | 'abstain',
@@ -339,6 +350,40 @@ export async function createProductionProposal(
   // Prohibited-target classifier (WS-M.1.2d, fail-closed).
   const target = classifyProposalTarget(proposalType, input.create.requested_action);
   if (!target.allowed) return tgErr(422, target.code, target.reason);
+
+  // A law-pack upgrade must target a PUBLISHED pack in THIS room: a missing/
+  // foreign/unpublished id would deliberate, pass, and only then die at
+  // execution — a wasted governance cycle in a real-asset room.  Real-asset
+  // completeness is checked here too (execution re-checks regardless).
+  if (proposalType === 'law_pack_upgrade' || proposalType === 'treasury_policy_update') {
+    const targetPackId = input.create.requested_action['law_pack_id'];
+    const targetRecord =
+      typeof targetPackId === 'string' ? await deps.lawPacks.get(targetPackId) : null;
+    if (
+      targetRecord === null ||
+      targetRecord.roomId !== input.roomId ||
+      targetRecord.published !== true
+    ) {
+      return tgErr(
+        400,
+        'law_pack_target_invalid',
+        'The upgrade must target a published law-pack of this room.',
+      );
+    }
+    const { validateLawPackForRealAssets, lawPackSchema } = await import('@licio/governance');
+    const parsedTarget = lawPackSchema.safeParse(targetRecord.lawPack);
+    const problems = parsedTarget.success ? validateLawPackForRealAssets(parsedTarget.data) : null;
+    if (problems === null || problems.length > 0) {
+      const first = problems?.[0];
+      return tgErr(
+        409,
+        'law_pack_not_real_asset_ready',
+        first
+          ? `${first.path}: ${first.problem}`
+          : 'The target law-pack does not meet the real-asset bar.',
+      );
+    }
+  }
 
   // A charter update carries its FULL proposed sections: validate them at
   // publication so a malformed draft can never consume a deliberation/voting
@@ -620,12 +665,20 @@ export async function signProposal(
     if (input.choice === null) {
       return tgErr(400, 'choice_required', 'A vote requires a choice.');
     }
-  } else if (proposal.votingState !== 'open' && proposal.votingState !== 'passed') {
-    return tgErr(
-      409,
-      'not_approvable',
-      'Approval signatures apply to open or passed proposals only.',
-    );
+  } else {
+    if (proposal.votingState !== 'open' && proposal.votingState !== 'passed') {
+      return tgErr(
+        409,
+        'not_approvable',
+        'Approval signatures apply to open or passed proposals only.',
+      );
+    }
+    // An approval/multisig co-signature is CHOICE-NEUTRAL: execution counts
+    // every such row as affirmative, so a signed `reject` choice riding an
+    // approval purpose would satisfy the multisig gate while reading as a no.
+    if (input.choice !== null) {
+      return tgErr(400, 'choice_not_allowed', 'Approval signatures carry no ballot choice.');
+    }
   }
 
   // --- WS-L signature verification (the SAME verifiers, never a parallel path).
@@ -758,7 +811,9 @@ export async function signProposal(
   // their weight must not also ride the delegate's signature (double-count).
   const priorSignatures = await deps.proposalSignatures.listByProposal(input.proposalId);
   const alreadyVoted = new Set(
-    priorSignatures.filter((s) => s.purpose === 'vote').map((s) => s.userId),
+    priorSignatures
+      .filter((s) => s.purpose === 'vote' && s.weightSnapshot != null)
+      .map((s) => s.userId),
   );
   const incoming = [];
   for (const delegation of delegations) {
@@ -786,7 +841,14 @@ export async function signProposal(
           verifiedIdentity: delegatorFacts?.verifiedIdentity ?? false,
           newestWalletAgeDays: Number.MAX_SAFE_INTEGER,
           walletClusterId: null,
-          hasDisclosedConflict: false,
+          // COI recusal applies to DELEGATED units too: a conflicted proposer
+          // or grant recipient must not route their weight around the recusal
+          // by delegating before the delegate signs.
+          hasDisclosedConflict:
+            (proposal.conflictDisclosures !== null &&
+              proposal.proposerUserId === delegation.delegatorUserId) ||
+            proposal.recipientRef === delegation.delegatorUserId ||
+            proposal.recipientRef === `user:${delegation.delegatorUserId}`,
           roleClasses: [],
           reputationScore: 0,
           tokenVoteUnits: 0,
@@ -800,7 +862,10 @@ export async function signProposal(
             newWalletCoolingOffDays: 0,
           },
           treasuryControlling: spendControlling,
-          recusalRequired: false,
+          recusalRequired:
+            (evalPack.coiRequirements?.recusalRequired ?? false) &&
+            (evalPack.coiRequirements?.independentReviewFor.includes(proposal.proposalType) ??
+              false),
           clustersAlreadyVoted: new Set(),
         },
       );
@@ -866,6 +931,12 @@ export async function signProposal(
 // ---------------------------------------------------------------------------
 
 export async function settleDueProposals(deps: ProposalDeps, roomId: string): Promise<number> {
+  // A frozen room's governance is PAUSED wholesale: deadlines must not settle
+  // votes, start timelocks, or encumber treasury headroom mid-review.  The
+  // sweep simply defers — settlement resumes once the freeze lifts (ballots
+  // stayed deadline-gated throughout, so the eventual tally is unchanged).
+  const profile = await deps.profiles.get(roomId);
+  if (profile?.freezeState === 'frozen') return 0;
   const nowIso = new Date(deps.now()).toISOString();
   // Enumerate UNSETTLED production rows (deliberation/open/timelocked/
   // executing) via keyset pages — bounded by live work AND exhaustive, so a
@@ -1266,7 +1337,12 @@ export async function executeProposal(
     const approvals = new Set(
       signatures
         .filter(
-          (s) => (s.purpose === 'approval' || s.purpose === 'multisig') && signerSet.has(s.userId),
+          (s) =>
+            (s.purpose === 'approval' || s.purpose === 'multisig') &&
+            signerSet.has(s.userId) &&
+            // Ledger-only rows from the generic WS-L path (null snapshot)
+            // never satisfy the execution gate (PR #144 W8).
+            s.weightSnapshot != null,
         )
         .map((s) => s.userId),
     );

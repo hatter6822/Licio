@@ -13,7 +13,7 @@ import { decCompare, decSum } from '@licio/governance';
 import type { GovernanceProposalRecord, GovernanceProposalStore } from '../knomosis/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { createPaymentIntent, type IntentDeps } from './intents.js';
-import { type TreasuryGovernanceError, tgErr } from './profile.js';
+import { assertGovernanceWritable, type TreasuryGovernanceError, tgErr } from './profile.js';
 import type { GrantMilestoneRecord, GrantRecord, GrantStore } from './stores.js';
 
 export interface GrantDeps extends IntentDeps {
@@ -136,6 +136,10 @@ export async function setGrantReview(
   if (grant === null || grant.roomId !== input.roomId) {
     return tgErr(404, 'not_found', 'Resource not found');
   }
+  // Review clearance is the prerequisite for milestone acceptance and payout
+  // scheduling — a frozen room must not advance disbursement state (W8).
+  const writable = await assertGovernanceWritable(deps, input.roomId, 'executions');
+  if (writable !== null) return writable;
   const proposal = await deps.proposals.getById(grant.proposalId);
   if (
     proposal?.proposerUserId === input.reviewerUserId ||

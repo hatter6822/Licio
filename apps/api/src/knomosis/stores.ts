@@ -1668,12 +1668,18 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
   }
 
   async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
-    // Emulate ALL THREE unique indexes from migrations 0059 + 0082 so tests
-    // exercise database semantics: (proposal, wallet), one VOTE per (proposal,
-    // user), and single-use nonce per proposal.
+    // Emulate ALL THREE unique indexes from migrations 0059 + 0082 + 0084 so
+    // tests exercise database semantics: (proposal, wallet, PURPOSE) — a
+    // designated signer who voted can still record the execution co-signature
+    // — one VOTE per (proposal, user), and single-use nonce per proposal.
     for (const row of this.#rows.values()) {
       if (row.proposalId !== record.proposalId) continue;
-      if (row.walletAccountId === record.walletAccountId) return null;
+      if (
+        row.walletAccountId === record.walletAccountId &&
+        (row.purpose ?? 'vote') === (record.purpose ?? 'vote')
+      ) {
+        return null;
+      }
       if (
         (row.purpose ?? 'vote') === 'vote' &&
         (record.purpose ?? 'vote') === 'vote' &&

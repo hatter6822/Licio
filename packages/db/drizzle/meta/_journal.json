@@ -582,6 +582,13 @@
       "idx": 82,
       "when": 1783728000007,
       "tag": "0083_ws_m_room_owned_intent_idempotency"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 83,
+      "when": 1783728000008,
+      "tag": "0084_ws_m_signature_purpose_scope"
     }
   ]
 }

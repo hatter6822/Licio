@@ -414,7 +414,10 @@ export const governanceSignatures = knomosisSchema.table(
     nonce: text('nonce'),
   },
   (t) => [
-    uniqueIndex('governance_signature_unique_idx').on(t.proposalId, t.walletAccountId),
+    // One signature per (proposal, wallet, PURPOSE): a designated signer who
+    // voted must still be able to record the execution co-signature required
+    // by a multisig pack (migration 0084 rescoped the old two-column unique).
+    uniqueIndex('governance_signature_unique_idx').on(t.proposalId, t.walletAccountId, t.purpose),
     // One VOTE per user per proposal — regardless of how many wallets they hold.
     uniqueIndex('governance_signature_one_vote_uq')
       .on(t.proposalId, t.userId)

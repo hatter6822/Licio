@@ -647,6 +647,43 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     ).toMatchObject({ ok: false, code: 'charter_sections_invalid' });
   });
 
+  it('law-pack upgrades must target a published pack of this room (W8 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      allowedProposalTypes: ['capped_grant', 'charter_update', 'law_pack_upgrade'],
+      quorumRules: {
+        capped_grant: { basis: 'eligible_voters', minFraction: 0.2 },
+        charter_update: { basis: 'eligible_voters', minFraction: 0.2 },
+        law_pack_upgrade: { basis: 'eligible_voters', minFraction: 0.2 },
+      },
+      thresholdRules: {
+        capped_grant: { minAffirmativeFraction: 0.5 },
+        charter_update: { minAffirmativeFraction: 0.5 },
+        law_pack_upgrade: { minAffirmativeFraction: 0.5 },
+      },
+      timelockRules: {
+        capped_grant: { seconds: 3_600 },
+        charter_update: { seconds: 3_600 },
+        law_pack_upgrade: { seconds: 3_600 },
+      },
+    });
+    // A random id would deliberate, pass, and only then die at execution.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: STEWARD,
+        create: draft({
+          proposal_type: 'law_pack_upgrade',
+          category: null,
+          requested_amount: null,
+          asset: null,
+          recipient_ref: null,
+          requested_action: { kind: 'law_pack_upgrade', law_pack_id: crypto.randomUUID() },
+        }),
+      }),
+    ).toMatchObject({ ok: false, code: 'law_pack_target_invalid' });
+  });
+
   it('a role_class quorum basis without a signer set cannot publish (W6 review)', async () => {
     const deps = buildHarness();
     const registered = await registerLawPack(deps, {
@@ -992,6 +1029,14 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
         treasury_policy_update: { seconds: 3_600 },
       },
     });
+    // The upgrade must target a real published pack (W6/W8 create gate).
+    const target = await registerLawPack(deps, {
+      roomId: ROOM,
+      document: fullLawPack({ version: '1.1.0' }),
+      fixtures: null,
+      actorUserId: STEWARD,
+    });
+    if (!('record' in target)) throw new Error(JSON.stringify(target));
     // Steward-only type; carries NO spend category — before the fix a fresh
     // wallet could vote to rewrite the treasury's rules.
     const created = await createProductionProposal(deps, {
@@ -1003,7 +1048,7 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
         requested_amount: null,
         asset: null,
         recipient_ref: null,
-        requested_action: { kind: 'law_pack_upgrade' },
+        requested_action: { kind: 'law_pack_upgrade', law_pack_id: target.record.lawPackId },
       }),
     });
     if (!('proposal' in created)) throw new Error(JSON.stringify(created));
@@ -1378,14 +1423,16 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
         userId: STEWARD,
       }),
     ).toMatchObject({ ok: false, code: 'multisig_required' });
-    // The two designated signers record APPROVAL signatures (fresh wallets —
-    // the (proposal, wallet) unique holds one signature per wallet).
+    // An approval carries NO ballot choice — a signed `approve`/`reject`
+    // riding the approval purpose rejects outright (W8 review).
     const WALLET_3 = '33333333-3333-4333-8333-333333333333';
-    const WALLET_4 = '44444444-4444-4444-8444-444444444444';
     const signer3 = privateKeyToAccount(`0x${'59'.repeat(32)}`);
-    const signer4 = privateKeyToAccount(`0x${'5a'.repeat(32)}`);
     await linkWallet(deps, WALLET_3, STEWARD, signer3.address);
-    await linkWallet(deps, WALLET_4, VOTER_2, signer4.address);
+    expect(
+      await castVote(deps, settled.proposalId, STEWARD, WALLET_3, signer3, 'approve', {
+        purpose: 'approval',
+      }),
+    ).toMatchObject({ ok: false, code: 'choice_not_allowed' });
     const approve1 = await castVote(
       deps,
       settled.proposalId,
@@ -1404,12 +1451,15 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
         userId: STEWARD,
       }),
     ).toMatchObject({ ok: false, code: 'multisig_required' });
+    // VOTER_2 already VOTED with WALLET_2 — the SAME wallet records the
+    // execution approval (migration 0084: uniqueness scopes by purpose, so a
+    // signer who voted is never locked out of co-signing) (W8 review).
     const approve2 = await castVote(
       deps,
       settled.proposalId,
       VOTER_2,
-      WALLET_4,
-      signer4,
+      WALLET_2,
+      testAccount2,
       'approve',
       { purpose: 'approval', choice: null },
     );
@@ -1479,6 +1529,101 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
         create: draft({ requested_amount: '900' }),
       }),
     ).toMatchObject({ ok: true });
+  });
+
+  it('ledger-only signature rows (null snapshot) never tally or satisfy quorum (W8 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    // A generic WS-L `proposal_sign` submit records a DURABLE row with no
+    // weight snapshot (it never passed the WS-M eligibility/weight gate).
+    // Two such rows would otherwise meet the 0.2×3 quorum as distinct voters.
+    for (const userId of [PROPOSER, VOTER_2]) {
+      await deps.proposalSignatures.insert({
+        signatureId: crypto.randomUUID(),
+        proposalId: proposal.proposalId,
+        userId,
+        walletAccountId: crypto.randomUUID(),
+        signatureType: 'eip712_ecdsa',
+        typedDataHash: `0x${'2'.repeat(64)}`,
+        signatureRef: crypto.randomUUID(),
+        weightSnapshot: null,
+        eligibilityReason: 'proposal_sign accepted by the gateway (WS-L.3.2a; ledger-only)',
+        createdAt: new Date(deps.now()).toISOString(),
+        purpose: 'vote',
+        choice: 'approve',
+        nonce: crypto.randomUUID(),
+      });
+    }
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('quorum_not_met');
+  });
+
+  it('a frozen room defers deadline settlement entirely (W8 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    // The freeze lands before the sweep: settlement must DEFER — no pass, no
+    // timelock, no reservation encumbered mid-review.
+    const profile = await deps.profiles.get(ROOM);
+    if (profile === null) throw new Error('profile missing');
+    await deps.profiles.upsert({ ...profile, freezeState: 'frozen', freezeReason: 'Review.' });
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('open');
+    expect(await deps.reservations.getByProposal(proposal.proposalId)).toBeNull();
+    // Once the freeze lifts the same sweep settles the recorded ballots.
+    await deps.profiles.upsert({ ...profile, freezeState: 'active', freezeReason: null });
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('passed');
+  });
+
+  it('a conflicted delegator is recused from delegated weight too (W8 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      weightModel: 'delegated',
+      maxVotingWeightPerAccount: 5,
+      coiRequirements: {
+        disclosureTriggers: ['financial relationship'],
+        recusalRequired: true,
+        independentReviewFor: ['capped_grant'],
+      },
+    });
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    // The PROPOSER (a disclosed-conflict party on their own spend) delegates
+    // to VOTER_2 before the vote — the recusal must follow the weight.
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: STEWARD,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // Own 1 + STEWARD's unit; the conflicted PROPOSER's unit is recused.
+    expect(vote.signature.weightSnapshot).toBe('2');
   });
 
   it('a disposed challenge is immutable: no re-resolution, no late escalation (W5 review)', async () => {
