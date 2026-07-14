@@ -1,0 +1,958 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-M slice-6: the production proposal lifecycle — create/publish with the
+// fail-closed preflight, wallet-signature voting through the REAL EIP-712
+// verifiers, the deadline settle sweep (kernel tally + reservation), typed
+// challenges, and execution through the shipped treasury-executor seam —
+// plus grants, delegations, and action budgets.
+
+import type { LawPack } from '@licio/governance';
+import type { GovernanceMode, ProductionProposalCreate } from '@licio/shared';
+import { privateKeyToAccount } from 'viem/accounts';
+import { describe, expect, it } from 'vitest';
+import { InMemoryPwattConfigStore } from '../events/stores.js';
+import { InMemoryLawPackStore } from '../governance/stores.js';
+import { hashFinancialWalletAddress } from '../identity/siwe.js';
+import { DEFAULT_KNOMOSIS_CONFIG } from '../knomosis/config.js';
+import { defaultCompliancePort, defaultRegionResolverPort } from '../knomosis/ports.js';
+import type { RoomGovernancePort } from '../knomosis/preflight.js';
+import type { RoomModePort } from '../knomosis/readiness.js';
+import {
+  InMemoryFinancialWalletStore,
+  InMemoryGovernanceAuditStore,
+  InMemoryGovernanceProposalStore,
+  InMemoryGovernanceSignatureStore,
+  InMemoryKnomosisActionStore,
+  InMemoryKnomosisReceiptStore,
+} from '../knomosis/stores.js';
+import { verifyAuditChain } from '../treasury/audit-chain.js';
+import { actionBudgetStatus } from '../treasury/budgets.js';
+import { createDelegation, revokeDelegation } from '../treasury/delegations.js';
+import { setGrantReview, updateGrantMilestone } from '../treasury/grants.js';
+import { adoptLawPack, registerLawPack } from '../treasury/law-packs.js';
+import {
+  createProductionProposal,
+  deterministicProposalId,
+  executeProposal,
+  fileChallenge,
+  type MembershipFactsPort,
+  type ProposalDeps,
+  resolveChallenge,
+  type SignProposalInput,
+  settleDueProposals,
+  signProposal,
+} from '../treasury/proposals.js';
+import {
+  InMemoryActionBudgetStore,
+  InMemoryChallengeStore,
+  InMemoryCharterStore,
+  InMemoryDelegationStore,
+  InMemoryGovernanceProfileStore,
+  InMemoryGrantStore,
+  InMemoryPaymentIntentStore,
+  InMemoryReservationStore,
+  InMemoryTreasuryStore,
+} from '../treasury/stores.js';
+import { createTreasury } from '../treasury/treasury.js';
+import {
+  LOCAL_DEPLOYMENT,
+  signedTypedData,
+  TEST_KEY_2,
+  testAccount,
+  testAccount2,
+} from './knomosis-test-helpers.js';
+
+const ROOM = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const PROPOSER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const VOTER_2 = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const STEWARD = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const WALLET_1 = '11111111-1111-4111-8111-111111111111';
+const WALLET_2 = '22222222-2222-4222-8222-222222222222';
+const MASTER_SECRET = 'test-master-secret';
+
+const fullLawPack = (overrides: Partial<LawPack> = {}): Record<string, unknown> => ({
+  lawPackId: 'placeholder',
+  version: '1.0.0',
+  allowedProposalTypes: ['capped_grant', 'charter_update'],
+  permittedCapabilities: ['treasury.grant'],
+  treasury: {
+    caps: [
+      { category: 'grant', perActionMax: '5000', perWindowMax: '10000', windowSeconds: 86_400 },
+    ],
+    minIntervalSeconds: 0,
+    timelockSeconds: 0,
+    materialThreshold: '1000000',
+    requireCoiFor: ['grant'],
+    investment: null,
+  },
+  election: {
+    weightModel: 'one_civic_account_one_vote',
+    perAccountCap: 1,
+    minQuorum: 1,
+    minTurnout: 0,
+    termSeconds: 31_536_000,
+  },
+  humanSummary: 'Grants with COI review.',
+  quorumRules: {
+    capped_grant: { basis: 'eligible_voters', minFraction: 0.2 },
+    charter_update: { basis: 'eligible_voters', minFraction: 0.2 },
+  },
+  thresholdRules: {
+    capped_grant: { minAffirmativeFraction: 0.5 },
+    charter_update: { minAffirmativeFraction: 0.5 },
+  },
+  timelockRules: {
+    capped_grant: { seconds: 3_600 },
+    charter_update: { seconds: 3_600 },
+  },
+  weightModel: 'one_civic_account_one_vote',
+  maxVotingWeightPerAccount: 1,
+  eligibility: {
+    minMembershipDays: 0,
+    minContributions: 0,
+    requireVerifiedIdentity: false,
+    newWalletCoolingOffDays: 7,
+  },
+  coiRequirements: {
+    disclosureTriggers: ['financial relationship'],
+    recusalRequired: false,
+    independentReviewFor: ['capped_grant'],
+  },
+  appealRules: { whoCanAppeal: ['any_member'], timelineSeconds: 604_800, process: 'Floor.' },
+  forkExitRules: { conditions: 'Vote.', process: 'Fork.', fundHandling: 'Return.' },
+  emergencyConstraints: { freezeTriggers: ['divergence'], escalation: 'Security.' },
+  actionBudgetRules: {
+    costs: { proposal_submission: 5 },
+    refill: { periodSeconds: 86_400, units: 5, max: 10 },
+  },
+  testFixtureCorpusRef: 'corpus-1',
+  ...overrides,
+});
+
+interface TestHarness extends ProposalDeps {
+  mode: { value: GovernanceMode };
+  clockAdvance: (ms: number) => void;
+  executorCalls: { category: string; amount: string }[];
+  executorAccepts: { value: boolean };
+  electionsOpened: string[];
+}
+
+function buildHarness(): TestHarness {
+  let clock = Date.parse('2026-07-13T00:00:00.000Z');
+  const mode = { value: 'testnet' as GovernanceMode };
+  const members = new Set([PROPOSER, VOTER_2, STEWARD]);
+  const stewards = new Set([STEWARD]);
+  const executorCalls: TestHarness['executorCalls'] = [];
+  const executorAccepts = { value: true };
+  const electionsOpened: string[] = [];
+  const proposals = new InMemoryGovernanceProposalStore();
+  const rooms: RoomGovernancePort = {
+    roomGovernance: async () => ({ mode: mode.value, name: 'Test Room' }),
+    isMember: async (_r, userId) => members.has(userId),
+    isSteward: async (_r, userId) => stewards.has(userId),
+    contentVisibleToUser: async () => true,
+  };
+  const roomMode: RoomModePort = {
+    currentMode: async () => mode.value,
+    setMode: async (_r, m) => {
+      mode.value = m;
+      return true;
+    },
+    setModeIf: async (_r, expected, next) => {
+      if (mode.value !== expected) return false;
+      mode.value = next;
+      return true;
+    },
+  };
+  const membership: MembershipFactsPort = {
+    memberFacts: async (_r, userId) =>
+      members.has(userId)
+        ? { membershipDays: 60, contributionCount: 10, verifiedIdentity: true }
+        : null,
+    eligibleMemberCount: async () => 3,
+  };
+  const deps: ProposalDeps = {
+    profiles: new InMemoryGovernanceProfileStore(),
+    treasuries: new InMemoryTreasuryStore(),
+    reservations: new InMemoryReservationStore(),
+    charters: new InMemoryCharterStore(),
+    lawPacks: new InMemoryLawPackStore(),
+    proposals,
+    proposalSignatures: new InMemoryGovernanceSignatureStore(proposals),
+    challenges: new InMemoryChallengeStore(),
+    delegations: new InMemoryDelegationStore(),
+    budgets: new InMemoryActionBudgetStore(),
+    grants: new InMemoryGrantStore(),
+    intents: new InMemoryPaymentIntentStore(),
+    actions: new InMemoryKnomosisActionStore(),
+    receipts: new InMemoryKnomosisReceiptStore(),
+    wallets: new InMemoryFinancialWalletStore(),
+    governanceAudit: new InMemoryGovernanceAuditStore(),
+    rooms,
+    roomMode,
+    membership,
+    treasuryExecutor: {
+      execute: async (_roomId, action) => {
+        executorCalls.push({ category: action.category, amount: action.amount });
+        return executorAccepts.value
+          ? { accepted: true, code: null }
+          : { accepted: false, code: 'per_action_cap_exceeded' };
+      },
+    },
+    elections: {
+      openElection: async (roomId) => {
+        electionsOpened.push(roomId);
+        return true;
+      },
+    },
+    compliance: defaultCompliancePort,
+    regionResolver: defaultRegionResolverPort,
+    configStore: new InMemoryPwattConfigStore(),
+    masterSecret: MASTER_SECRET,
+    contractVerifier: undefined,
+    wsmConfig: () => DEFAULT_KNOMOSIS_CONFIG,
+    wsmProposalConfig: () => DEFAULT_KNOMOSIS_CONFIG,
+    now: () => {
+      clock += 1;
+      return clock;
+    },
+    uuid: () => crypto.randomUUID(),
+  };
+  return Object.assign(deps, {
+    mode,
+    clockAdvance: (ms: number) => {
+      clock += ms;
+    },
+    executorCalls,
+    executorAccepts,
+    electionsOpened,
+  });
+}
+
+/** Provision treasury (with a reconciled balance) + adopt the law-pack. */
+async function prepareRoom(deps: TestHarness, packOverrides: Partial<LawPack> = {}) {
+  const created = await createTreasury(deps, {
+    roomId: ROOM,
+    deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+    treasuryAddress: `0x${'ab'.repeat(20)}`,
+    acceptedAssets: ['USDC'],
+    depositLimits: {
+      perUserPerPeriod: '1000000',
+      perRoomPerPeriod: '10000000',
+      perDepositMax: '500000',
+      periodSeconds: 86_400,
+    },
+    actorUserId: STEWARD,
+  });
+  if (!('treasury' in created)) throw new Error('treasury');
+  await deps.treasuries.setReconciliation(
+    created.treasury.treasuryId,
+    'synced',
+    { USDC: '100000' },
+    new Date().toISOString(),
+  );
+  const registered = await registerLawPack(deps, {
+    roomId: ROOM,
+    document: fullLawPack(packOverrides),
+    fixtures: null,
+    actorUserId: STEWARD,
+  });
+  if (!('record' in registered)) throw new Error(JSON.stringify(registered));
+  await adoptLawPack(deps, {
+    roomId: ROOM,
+    lawPackId: registered.record.lawPackId,
+    actorUserId: STEWARD,
+  });
+  return created.treasury;
+}
+
+/** Link a wallet (old enough to clear the 7-day cooling-off). */
+async function linkWallet(
+  deps: TestHarness,
+  walletAccountId: string,
+  userId: string,
+  address: string,
+  ageDays = 30,
+) {
+  await deps.wallets.insert({
+    walletAccountId,
+    userId,
+    addressHashHex: hashFinancialWalletAddress(MASTER_SECRET, address.toLowerCase()),
+    addressTruncated: `${address.slice(0, 6)}…${address.slice(-4)}`,
+    chainId: LOCAL_DEPLOYMENT.chain_id,
+    walletType: 'eoa',
+    unlinkState: 'active',
+    riskState: 'normal',
+    label: null,
+    linkedAt: new Date(deps.now() - ageDays * 86_400_000).toISOString(),
+    lastUsedAt: null,
+    unlinkRequestedAt: null,
+    unlinkFinalizeAfter: null,
+    unlinkedAt: null,
+  });
+}
+
+const draft = (overrides: Partial<ProductionProposalCreate> = {}): ProductionProposalCreate => ({
+  proposal_type: 'capped_grant',
+  title: 'Fund the translation sprint',
+  plain_language_summary: 'Pay a contributor to translate the charter.',
+  category: 'grant',
+  requested_amount: '4000',
+  asset: 'USDC',
+  recipient_ref: `0x${'cd'.repeat(20)}`,
+  conflict_disclosures: 'None: no relationship with the recipient.',
+  risk_assessment: 'Low: capped and milestone-gated.',
+  requested_action: { kind: 'grant' },
+  expected_deliverable: 'A published translation.',
+  idempotency_key: crypto.randomUUID(),
+  ...overrides,
+});
+
+async function createProposal(
+  deps: TestHarness,
+  overrides: Partial<ProductionProposalCreate> = {},
+) {
+  const result = await createProductionProposal(deps, {
+    roomId: ROOM,
+    userId: PROPOSER,
+    create: draft(overrides),
+  });
+  if (!('proposal' in result)) throw new Error(JSON.stringify(result));
+  return result.proposal;
+}
+
+/** Sign a REAL EIP-712 vote for `proposal_sign`. */
+async function castVote(
+  deps: TestHarness,
+  proposalId: string,
+  userId: string,
+  walletAccountId: string,
+  account: typeof testAccount,
+  choice: 'approve' | 'reject' | 'abstain',
+  overrides: Partial<SignProposalInput> = {},
+) {
+  const nonce = String(Math.floor(Math.random() * 1_000_000_000));
+  const message: Record<string, string> = {
+    roomId: ROOM,
+    proposalId,
+    actor: account.address.toLowerCase(),
+    nonce,
+    expiration: String(Math.floor(deps.now() / 1000) + 600),
+    deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+  };
+  const signature = await signedTypedData('proposal_sign', message, account);
+  return signProposal(deps, {
+    roomId: ROOM,
+    proposalId,
+    userId,
+    purpose: 'vote',
+    choice,
+    deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+    walletAccountId,
+    typedDataMessage: message,
+    signature,
+    ...overrides,
+  });
+}
+
+/** Advance past deliberation, open voting. */
+async function openVoting(deps: TestHarness) {
+  deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmDeliberationSeconds * 1000 + 1_000);
+  await settleDueProposals(deps, ROOM);
+}
+
+describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
+  it('publishes into deliberation with the law-pack pinned', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const proposal = await createProposal(deps);
+    expect(proposal.votingState).toBe('deliberation');
+    expect(proposal.simulationMode).toBe(false);
+    expect(proposal.lawPackVersionId).not.toBeNull();
+    expect(proposal.category).toBe('grant');
+    const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
+    expect(chain.some((e) => e.actionType === 'proposal_published')).toBe(true);
+  });
+
+  it('replays idempotently on the same (room, user, key)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const key = crypto.randomUUID();
+    const first = await createProposal(deps, { idempotency_key: key });
+    const replay = await createProposal(deps, { idempotency_key: key });
+    expect(replay.proposalId).toBe(first.proposalId);
+    expect(first.proposalId).toBe(deterministicProposalId(ROOM, PROPOSER, key));
+  });
+
+  it('requires a real-asset mode, membership, and an allowed type', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    deps.mode.value = 'simulated';
+    expect(
+      await createProductionProposal(deps, { roomId: ROOM, userId: PROPOSER, create: draft() }),
+    ).toMatchObject({ ok: false, code: 'mode_invalid' });
+    deps.mode.value = 'testnet';
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        create: draft(),
+      }),
+    ).toMatchObject({ ok: false, code: 'not_member' });
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({
+          proposal_type: 'bounty',
+          category: 'bounty',
+          requested_action: { kind: 'bounty' },
+        }),
+      }),
+    ).toMatchObject({ ok: false, code: 'type_not_allowed' });
+  });
+
+  it('enforces draft completeness and the prohibited-target classifier', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ conflict_disclosures: null }),
+      }),
+    ).toMatchObject({ ok: false, code: 'coi_required' });
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_action: { kind: 'unban_user' } }),
+      }),
+    ).toMatchObject({ ok: false, code: 'prohibited_target' });
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_action: { kind: 'something_new' } }),
+      }),
+    ).toMatchObject({ ok: false, code: 'unclassifiable_action' });
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_action: {} }),
+      }),
+    ).toMatchObject({ ok: false, code: 'unclassifiable_action' });
+  });
+
+  it('fails closed on unreconciled balances and insufficient headroom', async () => {
+    const deps = buildHarness();
+    const treasury = await prepareRoom(deps);
+    await deps.treasuries.setReconciliation(treasury.treasuryId, 'pending', null, null);
+    // Balance snapshot still exists from prepareRoom — wipe it via a fresh harness instead.
+    const fresh = buildHarness();
+    const t2 = await createTreasury(fresh, {
+      roomId: ROOM,
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      treasuryAddress: `0x${'ab'.repeat(20)}`,
+      acceptedAssets: ['USDC'],
+      depositLimits: {
+        perUserPerPeriod: '1000000',
+        perRoomPerPeriod: '10000000',
+        perDepositMax: '500000',
+        periodSeconds: 86_400,
+      },
+      actorUserId: STEWARD,
+    });
+    void t2;
+    const registered = await registerLawPack(fresh, {
+      roomId: ROOM,
+      document: fullLawPack(),
+      fixtures: null,
+      actorUserId: STEWARD,
+    });
+    if (!('record' in registered)) throw new Error('law pack');
+    await adoptLawPack(fresh, {
+      roomId: ROOM,
+      lawPackId: registered.record.lawPackId,
+      actorUserId: STEWARD,
+    });
+    expect(
+      await createProductionProposal(fresh, { roomId: ROOM, userId: PROPOSER, create: draft() }),
+    ).toMatchObject({ ok: false, code: 'balance_unreconciled' });
+    // With a reconciled but SMALL balance, funds fail closed.
+    const t = await fresh.treasuries.getByRoom(ROOM);
+    await fresh.treasuries.setReconciliation(
+      t?.treasuryId ?? '',
+      'synced',
+      { USDC: '10' },
+      new Date().toISOString(),
+    );
+    expect(
+      await createProductionProposal(fresh, { roomId: ROOM, userId: PROPOSER, create: draft() }),
+    ).toMatchObject({ ok: false, code: 'insufficient_funds' });
+  });
+
+  it('charges the action budget and blocks when exhausted', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps); // cost 5, max 10 ⇒ two proposals, then empty
+    await createProposal(deps);
+    await createProposal(deps);
+    expect(
+      await createProductionProposal(deps, { roomId: ROOM, userId: PROPOSER, create: draft() }),
+    ).toMatchObject({ ok: false, code: 'insufficient_budget' });
+    const status = await actionBudgetStatus(deps, {
+      roomId: ROOM,
+      userId: PROPOSER,
+      rules: {
+        costs: { proposal_submission: 5 },
+        refill: { periodSeconds: 86_400, units: 5, max: 10 },
+      },
+    });
+    expect(status.available_units).toBe(0);
+    expect(status.transferable).toBe(false);
+  });
+});
+
+describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
+  it('records a capped weight snapshot from a REAL EIP-712 signature', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    // Deliberation first: voting has not opened.
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'still_deliberating' });
+    await openVoting(deps);
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    expect(vote.signature.weightSnapshot).toBe('1');
+    expect(vote.signature.purpose).toBe('vote');
+    expect(vote.tally.approve).toBe('1');
+    expect(vote.tally.outcome).toBe('open'); // deadline-driven, never early
+  });
+
+  it('rejects double votes, replayed nonces, expired payloads, and tampered signatures', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'reject'),
+    ).toMatchObject({ ok: false, code: 'already_signed' });
+    // Expired typed data.
+    const nonce = '424242';
+    const expired: Record<string, string> = {
+      roomId: ROOM,
+      proposalId: proposal.proposalId,
+      actor: testAccount2.address.toLowerCase(),
+      nonce,
+      expiration: String(Math.floor(deps.now() / 1000) - 10),
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+    };
+    expect(
+      await signProposal(deps, {
+        roomId: ROOM,
+        proposalId: proposal.proposalId,
+        userId: VOTER_2,
+        purpose: 'vote',
+        choice: 'approve',
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+        walletAccountId: WALLET_2,
+        typedDataMessage: expired,
+        signature: await signedTypedData('proposal_sign', expired, testAccount2),
+      }),
+    ).toMatchObject({ ok: false, code: 'expired' });
+    // A signature from a DIFFERENT key than the linked wallet fails.
+    const stranger = privateKeyToAccount(TEST_KEY_2);
+    const forged: Record<string, string> = {
+      roomId: ROOM,
+      proposalId: proposal.proposalId,
+      actor: testAccount.address.toLowerCase(),
+      nonce: '99',
+      expiration: String(Math.floor(deps.now() / 1000) + 600),
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+    };
+    expect(
+      await signProposal(deps, {
+        roomId: ROOM,
+        proposalId: proposal.proposalId,
+        userId: VOTER_2,
+        purpose: 'vote',
+        choice: 'approve',
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+        walletAccountId: WALLET_2,
+        typedDataMessage: forged,
+        signature: await signedTypedData('proposal_sign', forged, stranger),
+      }),
+    ).toMatchObject({ ok: false, code: 'signature_invalid' });
+  });
+
+  it('enforces the cooling-off for treasury-controlling votes (WS-M.4.2c-2)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    // A wallet linked 2 days ago is inside the 7-day cooling-off.
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address, 2);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'wallet_cooling_off' });
+  });
+
+  it('aggregates delegated weight under the delegated model, capped', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    // Two members delegate to VOTER_2 (own 1 + 2 delegated = 3, capped to 2).
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: STEWARD,
+      delegateUserId: VOTER_2,
+      scope: { proposal_type: 'capped_grant' },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    expect(vote.signature.weightSnapshot).toBe('2');
+    // Revocation is public + audited.
+    const delegations = await deps.delegations.listByRoom(ROOM, 10);
+    const first = delegations.find((d) => d.delegatorUserId === PROPOSER);
+    const revoked = await revokeDelegation(deps, {
+      roomId: ROOM,
+      delegationId: first?.delegationId ?? '',
+      actorUserId: PROPOSER,
+      isPlatformStaff: false,
+    });
+    expect(revoked).toMatchObject({ ok: true });
+    const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
+    expect(chain.some((e) => e.actionType === 'delegation_revoked')).toBe(true);
+  });
+});
+
+describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
+  /** Drive a proposal to `passed` with quorum met (2 approvals of 3 eligible). */
+  async function passProposal(deps: TestHarness) {
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    const settled = await deps.proposals.getById(proposal.proposalId);
+    if (settled === null) throw new Error('proposal lost');
+    return settled;
+  }
+
+  it('settles a quorum-meeting majority to passed with timelock + reservation', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    expect(settled.votingState).toBe('passed');
+    expect(settled.executionState).toBe('timelocked');
+    expect(settled.challengeWindowEndsAt).not.toBeNull();
+    expect(settled.tallySnapshot).toMatchObject({ outcome: 'passed', approve: '2' });
+    const reservation = await deps.reservations.getByProposal(settled.proposalId);
+    expect(reservation).toMatchObject({ state: 'reserved', amount: '4000' });
+  });
+
+  it('expires below quorum at the deadline', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('quorum_not_met');
+  });
+
+  it('executes through the shipped treasury executor, consumes the reservation, creates the grant', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    // Before the timelock elapses + challenge window closes, execution refuses
+    // (the timelock guard fires first; the window guard covers the remainder).
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'timelocked' });
+    deps.clockAdvance(3_600 * 1000 + 1_000); // past the 1h law-pack timelock
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'challenge_window_open' });
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    if (!('proposal' in executed)) throw new Error(JSON.stringify(executed));
+    expect(executed.proposal.executionState).toBe('executed');
+    expect(deps.executorCalls).toEqual([{ category: 'grant', amount: '4000' }]);
+    expect((await deps.reservations.getByProposal(settled.proposalId))?.state).toBe('consumed');
+    const grant = await deps.grants.getByProposal(settled.proposalId);
+    expect(grant).toMatchObject({ amount: '4000', payoutState: 'not_started' });
+    // Only stewards execute; a second execute cannot double-run.
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'not_executable' });
+    expect((await verifyAuditChain(deps, ROOM)).valid).toBe(true);
+  });
+
+  it('a kernel rejection blocks execution and releases the reservation', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    deps.executorAccepts.value = false;
+    const failed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    expect(failed).toMatchObject({ ok: false, code: 'per_action_cap_exceeded' });
+    expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('blocked');
+    expect((await deps.reservations.getByProposal(settled.proposalId))?.state).toBe('released');
+  });
+
+  it('challenges block execution; upheld releases; dismissed unblocks; legal needs platform', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    const filed = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'coi',
+      description: 'The proposer has an undisclosed relationship with the recipient.',
+      evidenceRefs: ['https://example.com/evidence'],
+    });
+    if (!('challenge' in filed)) throw new Error(JSON.stringify(filed));
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'challenge_blocking' });
+    // The proposer cannot judge a challenge against their own proposal — but
+    // STEWARD here is independent, so dismissal unblocks execution.
+    const dismissed = await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: filed.challenge.challengeId,
+      resolution: 'dismissed',
+      resolutionNote: 'Reviewed: no relationship found.',
+      actorUserId: STEWARD,
+      isPlatformStaff: false,
+    });
+    expect(dismissed).toMatchObject({ ok: true });
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: true });
+
+    // A second scenario: a LEGAL challenge needs platform staff.
+    const deps2 = buildHarness();
+    await prepareRoom(deps2);
+    const settled2 = await passProposal(deps2);
+    const legal = await fileChallenge(deps2, {
+      roomId: ROOM,
+      proposalId: settled2.proposalId,
+      userId: VOTER_2,
+      challengeType: 'legal',
+      description: 'This disbursement may violate a court order in effect.',
+      evidenceRefs: [],
+    });
+    if (!('challenge' in legal)) throw new Error('legal challenge');
+    expect(
+      await resolveChallenge(deps2, {
+        roomId: ROOM,
+        challengeId: legal.challenge.challengeId,
+        resolution: 'upheld',
+        resolutionNote: 'Confirmed.',
+        actorUserId: STEWARD,
+        isPlatformStaff: false,
+      }),
+    ).toMatchObject({ ok: false, code: 'platform_review_required' });
+    const upheld = await resolveChallenge(deps2, {
+      roomId: ROOM,
+      challengeId: legal.challenge.challengeId,
+      resolution: 'upheld',
+      resolutionNote: 'Confirmed by legal.',
+      actorUserId: 'admin',
+      isPlatformStaff: true,
+    });
+    expect(upheld).toMatchObject({ ok: true });
+    expect((await deps2.proposals.getById(settled2.proposalId))?.executionState).toBe('blocked');
+    expect((await deps2.reservations.getByProposal(settled2.proposalId))?.state).toBe('released');
+  });
+
+  it('an unexecuted proposal expires after the execution window and frees headroom', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    deps.clockAdvance((DEFAULT_KNOMOSIS_CONFIG.wsmExecutionWindowSeconds + 7_200) * 1000 + 60_000);
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('expired');
+    expect((await deps.reservations.getByProposal(settled.proposalId))?.state).toBe('released');
+  });
+});
+
+describe('grants (WS-M.5.1a)', () => {
+  async function executedGrant(deps: TestHarness) {
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps, {
+      requested_action: {
+        kind: 'grant',
+        milestones: [
+          { description: 'Draft', amount: '1500' },
+          { description: 'Final', amount: '2500' },
+        ],
+      },
+    });
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: proposal.proposalId,
+      userId: STEWARD,
+    });
+    if (!('proposal' in executed)) throw new Error(JSON.stringify(executed));
+    const grant = await deps.grants.getByProposal(proposal.proposalId);
+    if (grant === null) throw new Error('grant missing');
+    return grant;
+  }
+
+  it('milestone acceptance is review-gated and schedules idempotent tranches', async () => {
+    const deps = buildHarness();
+    const grant = await executedGrant(deps);
+    expect(grant.milestones).toHaveLength(2);
+    const [first] = grant.milestones;
+    if (!first) throw new Error('milestone');
+    // Walk to submitted.
+    await updateGrantMilestone(deps, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      milestoneId: first.milestoneId,
+      state: 'in_progress',
+      actorUserId: STEWARD,
+    });
+    await updateGrantMilestone(deps, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      milestoneId: first.milestoneId,
+      state: 'submitted',
+      actorUserId: STEWARD,
+    });
+    // Acceptance blocked until the independent review clears.
+    expect(
+      await updateGrantMilestone(deps, {
+        roomId: ROOM,
+        grantId: grant.grantId,
+        milestoneId: first.milestoneId,
+        state: 'accepted',
+        actorUserId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'independent_review_required' });
+    // The PROPOSER cannot be the reviewer.
+    expect(
+      await setGrantReview(deps, {
+        roomId: ROOM,
+        grantId: grant.grantId,
+        reviewState: 'cleared',
+        reviewerUserId: PROPOSER,
+      }),
+    ).toMatchObject({ ok: false, code: 'independent_review_required' });
+    await setGrantReview(deps, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      reviewState: 'cleared',
+      reviewerUserId: VOTER_2,
+    });
+    const accepted = await updateGrantMilestone(deps, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      milestoneId: first.milestoneId,
+      state: 'accepted',
+      actorUserId: STEWARD,
+    });
+    if (!('grant' in accepted)) throw new Error(JSON.stringify(accepted));
+    const tranche = accepted.grant.milestones.find((m) => m.milestoneId === first.milestoneId);
+    expect(tranche?.paymentIntentId).not.toBeNull();
+    expect(accepted.grant.payoutState).toBe('partially_paid');
+    // The tranche intent exists with the milestone amount.
+    const intent = await deps.intents.getById(tranche?.paymentIntentId ?? '');
+    expect(intent).toMatchObject({ targetType: 'grant_payout', amount: '1500' });
+  });
+
+  it('rejects milestone plans that do not sum to the approved amount', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps, {
+      requested_action: {
+        kind: 'grant',
+        milestones: [{ description: 'Only', amount: '9999' }], // ≠ 4000
+      },
+    });
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    await executeProposal(deps, { roomId: ROOM, proposalId: proposal.proposalId, userId: STEWARD });
+    // The malformed plan yields NO grant (execution still settles the treasury
+    // action; grant creation refuses the unsound tranche split).
+    expect(await deps.grants.getByProposal(proposal.proposalId)).toBeNull();
+  });
+});

@@ -1327,6 +1327,41 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows[0] ? mapProposal(rows[0]) : null;
   }
 
+  async casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Parameters<GovernanceProposalStore['casVotingState']>[3],
+  ): Promise<GovernanceProposalRecord | null> {
+    // Generalized voting-state CAS (WS-M.4.2d): the WHERE carries the
+    // expectation so a concurrent settle matches zero rows, never clobbers.
+    const rows = await this.db
+      .update(governanceProposals)
+      .set({
+        votingState: to,
+        ...(patch.executionState !== undefined ? { executionState: patch.executionState } : {}),
+        ...(patch.executableAfter !== undefined
+          ? { executableAfter: dateOrNull(patch.executableAfter ?? null) }
+          : {}),
+        ...(patch.challengeWindowEndsAt !== undefined
+          ? { challengeWindowEndsAt: dateOrNull(patch.challengeWindowEndsAt ?? null) }
+          : {}),
+        ...(patch.votingEndsAt !== undefined
+          ? { votingEndsAt: dateOrNull(patch.votingEndsAt ?? null) }
+          : {}),
+        ...(patch.tallySnapshot !== undefined ? { tallySnapshot: patch.tallySnapshot } : {}),
+        ...(patch.challengeState !== undefined ? { challengeState: patch.challengeState } : {}),
+      })
+      .where(
+        and(
+          eq(governanceProposals.proposalId, proposalId),
+          eq(governanceProposals.votingState, from),
+        ),
+      )
+      .returning();
+    return rows[0] ? mapProposal(rows[0]) : null;
+  }
+
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
     const rows = await this.db
       .select()

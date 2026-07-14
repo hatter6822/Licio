@@ -1,0 +1,998 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-M.4 — the PRODUCTION governance-proposal lifecycle over the shipped
+// `governance_proposal` table (production rows carry simulationMode=false; the
+// WS-L.4 simulated lifecycle keeps its own surface untouched):
+//
+//   create   — draft validation (WS-M.4.1b) + fail-closed preflight
+//              (WS-M.4.1c: type allowlist, role permission, the WS-M.1.2d
+//              prohibited-target classifier, cap headroom incl. reservations,
+//              reconciled-balance sufficiency, recipient sanctions, action
+//              budget) + law-pack version PINNING (WS-M.1.3d) + publication
+//              into a deliberation window (WS-M.4.2a).
+//   sign     — wallet-signature voting (WS-M.2.3b-1): the SAME WS-L EIP-712
+//              verifiers, server-recomputed typed-data hash, per-proposal
+//              single-use nonce, the §17.5 eligibility gate before the weight
+//              resolver, and the CAPPED weight snapshot recorded with the
+//              signature (WS-M.4.2c).
+//   settle   — the deadline sweep (WS-M.4.2d): deliberation→open, then the
+//              exact-decimal kernel tally over recorded snapshots at the
+//              voting deadline; a pass starts the challenge window + timelock
+//              and RESERVES the spend (WS-M.2.3a-1); pass/fail is CAS-settled
+//              so two sweeps can never double-close.
+//   challenge— WS-M.4.3a: typed challenges during the window; unresolved
+//              challenges block execution; legal/capture escalate to platform.
+//   execute  — WS-M.4.3b: an EXPLICIT steward trigger that re-checks every
+//              prerequisite, claims the proposal (the shipped CAS), routes
+//              treasury categories through the shipped fail-closed
+//              `executeTreasuryAction` (closing the WS-U residual), consumes
+//              the reservation atomically, and finalizes.  Expired execution
+//              windows release the reservation (`expired`).
+
+import { createHash } from 'node:crypto';
+import {
+  checkVoterEligibility,
+  type LawPack,
+  resolveVotingWeight,
+  tallyProposalVotes,
+  type VoterFacts,
+  type WeightResolution,
+} from '@licio/governance';
+import type {
+  GovernanceMode,
+  ProductionProposalCreate,
+  ProposalTallyWire,
+  ProposalType,
+} from '@licio/shared';
+import type { PwattConfigStore } from '../events/stores.js';
+import { hashFinancialWalletAddress } from '../identity/siwe.js';
+import { killSwitchDecision } from '../knomosis/killswitch.js';
+import { pinnedDeployment } from '../knomosis/pin.js';
+import type { CompliancePort, RegionResolverPort } from '../knomosis/ports.js';
+import { buildEip712Domain, type RoomGovernancePort } from '../knomosis/preflight.js';
+import type { RoomModePort } from '../knomosis/readiness.js';
+import { type ContractTypedDataVerifier, verifyActionSignature } from '../knomosis/signatures.js';
+import type {
+  FinancialWalletStore,
+  GovernanceProposalRecord,
+  GovernanceProposalStore,
+  GovernanceSignatureRecord,
+  GovernanceSignatureStore,
+} from '../knomosis/stores.js';
+import { appendChainedAudit } from './audit-chain.js';
+import { chargeRoomActionBudget, NO_BUDGET_RULES } from './budgets.js';
+import { incomingDelegationsFor } from './delegations.js';
+import { createGrantFromProposal, type GrantDeps } from './grants.js';
+import { activeLawPack, adoptLawPack, type LawPackDeps } from './law-packs.js';
+import { assertGovernanceWritable, type TreasuryGovernanceError, tgErr } from './profile.js';
+import { classifyProposalTarget } from './prohibited-targets.js';
+import {
+  categoryHeadroom,
+  consumeReservation,
+  releaseReservation,
+  reserveForProposal,
+} from './reservations.js';
+import type {
+  ActionBudgetStore,
+  ChallengeRecord,
+  ChallengeStore,
+  CharterStore,
+  DelegationStore,
+  ReservationStore,
+} from './stores.js';
+
+/** WS-M facts about a member the eligibility gate folds over (wired to the
+ *  forum/identity stores at boot; null facts fail closed for treasury votes). */
+export interface MembershipFactsPort {
+  memberFacts(
+    roomId: string,
+    userId: string,
+  ): Promise<{
+    membershipDays: number | null;
+    contributionCount: number | null;
+    verifiedIdentity: boolean;
+  } | null>;
+  /** The quorum-basis population (active members). */
+  eligibleMemberCount(roomId: string): Promise<number>;
+}
+
+/** The shipped WS-U executor seam (GovernanceService.executeTreasuryAction). */
+export interface TreasuryExecutorPort {
+  execute(
+    roomId: string,
+    action: {
+      category: string;
+      amount: string;
+      asset: string | null;
+      coiDeclared: boolean;
+      proposedAt: string;
+    },
+  ): Promise<{ accepted: boolean; code: string | null }>;
+}
+
+/** WS-U election seam for `steward_rotation` execution (WS-M.4.3b). */
+export interface StewardElectionPort {
+  openElection(roomId: string): Promise<boolean>;
+}
+
+export interface ProposalDeps extends LawPackDeps, GrantDeps {
+  proposals: GovernanceProposalStore;
+  proposalSignatures: GovernanceSignatureStore;
+  challenges: ChallengeStore;
+  delegations: DelegationStore;
+  budgets: ActionBudgetStore;
+  reservations: ReservationStore;
+  charters: CharterStore;
+  wallets: FinancialWalletStore;
+  rooms: RoomGovernancePort;
+  roomMode: RoomModePort;
+  membership: MembershipFactsPort;
+  treasuryExecutor: TreasuryExecutorPort;
+  elections: StewardElectionPort;
+  compliance: CompliancePort;
+  regionResolver: RegionResolverPort;
+  configStore: PwattConfigStore;
+  masterSecret: string;
+  contractVerifier?: ContractTypedDataVerifier | undefined;
+  wsmProposalConfig: () => {
+    wsmDeliberationSeconds: number;
+    wsmVotingSeconds: number;
+    wsmChallengeWindowSeconds: number;
+    wsmExecutionWindowSeconds: number;
+  };
+}
+
+/** Real-asset modes where production proposals run (sim rooms use WS-L.4). */
+const PRODUCTION_MODES: ReadonlySet<GovernanceMode> = new Set([
+  'testnet',
+  'capped_production',
+  'mature_production',
+]);
+
+/** Spend category per spend-bearing proposal type. */
+const SPEND_CATEGORY: Readonly<Partial<Record<ProposalType, string>>> = {
+  capped_grant: 'grant',
+  bounty: 'bounty',
+};
+
+/** Proposal types only the elected steward (or platform) may open. */
+const STEWARD_ONLY_TYPES: ReadonlySet<ProposalType> = new Set([
+  'law_pack_upgrade',
+  'treasury_policy_update',
+  'steward_rotation',
+]);
+
+/** Deterministic proposal id from the client idempotency scope, so a replayed
+ *  create maps to the SAME row (the primary key is the idempotency record). */
+export function deterministicProposalId(roomId: string, userId: string, key: string): string {
+  const digest = createHash('sha256').update(`${roomId}\n${userId}\n${key}`, 'utf8').digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40; // version 4 shape
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const wireTally = (tally: ReturnType<typeof tallyProposalVotes>): ProposalTallyWire => ({
+  outcome: tally.outcome,
+  quorum_met: tally.quorumMet,
+  approve: tally.approve,
+  reject: tally.reject,
+  abstain: tally.abstain,
+  distinct_voters: tally.distinctVoters,
+  turnout: tally.turnout,
+});
+
+/** Recorded votes (purpose=vote) → the pure tally input. */
+function recordedVotes(signatures: readonly GovernanceSignatureRecord[]) {
+  return signatures
+    .filter((s) => (s.purpose ?? 'vote') === 'vote' && s.choice !== undefined && s.choice !== null)
+    .map((s) => ({
+      voterUserId: s.userId,
+      choice: s.choice as 'approve' | 'reject' | 'abstain',
+      weightSnapshot: s.weightSnapshot ?? '0',
+    }));
+}
+
+async function tallyFor(
+  deps: ProposalDeps,
+  proposal: GovernanceProposalRecord,
+  pack: LawPack,
+  deadlinePassed: boolean,
+) {
+  const signatures = await deps.proposalSignatures.listByProposal(proposal.proposalId);
+  const quorum = pack.quorumRules?.[proposal.proposalType] ?? {
+    basis: 'eligible_voters' as const,
+    minFraction: 0.2,
+  };
+  const threshold = pack.thresholdRules?.[proposal.proposalType] ?? {
+    minAffirmativeFraction: 0.5,
+  };
+  const eligibleCount = await deps.membership.eligibleMemberCount(proposal.roomId);
+  return tallyProposalVotes(
+    recordedVotes(signatures),
+    { quorum, threshold },
+    {
+      eligibleCount,
+      deadlinePassed,
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Create + publish (WS-M.4.1a/b/c + 4.2a)
+// ---------------------------------------------------------------------------
+
+export async function createProductionProposal(
+  deps: ProposalDeps,
+  input: { roomId: string; userId: string; create: ProductionProposalCreate },
+): Promise<TreasuryGovernanceError | { ok: true; proposal: GovernanceProposalRecord }> {
+  const guard = await assertGovernanceWritable(deps, input.roomId, 'proposals');
+  if (guard !== null) return guard;
+  const mode = await deps.roomMode.currentMode(input.roomId);
+  if (mode === null) return tgErr(404, 'not_found', 'Resource not found');
+  if (!PRODUCTION_MODES.has(mode)) {
+    return tgErr(
+      409,
+      'mode_invalid',
+      'Production proposals require a real-asset governance mode (simulated rooms practice via the simulation surface).',
+    );
+  }
+  if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
+    return tgErr(403, 'not_member', 'Only room members can open proposals.');
+  }
+  const proposalType = input.create.proposal_type as ProposalType;
+  if (STEWARD_ONLY_TYPES.has(proposalType)) {
+    if (!(await deps.rooms.isSteward(input.roomId, input.userId))) {
+      return tgErr(403, 'steward_required', 'This proposal type requires a room steward.');
+    }
+  }
+
+  // The room's ACTIVE law-pack is pinned onto the proposal (WS-M.1.3d).
+  const active = await activeLawPack(deps, input.roomId);
+  if (active === null) {
+    return tgErr(409, 'no_law_pack', 'The room has no adopted law-pack.');
+  }
+  if (!active.pack.allowedProposalTypes.includes(proposalType)) {
+    return tgErr(409, 'type_not_allowed', `"${proposalType}" is not allowed by the law-pack.`);
+  }
+
+  // Idempotency: the deterministic id from (room, user, key) IS the record.
+  const proposalId = deterministicProposalId(
+    input.roomId,
+    input.userId,
+    input.create.idempotency_key,
+  );
+  const existing = await deps.proposals.getById(proposalId);
+  if (existing !== null) return { ok: true, proposal: existing };
+
+  // Draft completeness (WS-M.4.1b): spend fields all-or-none, category coherent.
+  const spendCategory = SPEND_CATEGORY[proposalType] ?? null;
+  if (spendCategory !== null) {
+    if (
+      input.create.requested_amount === null ||
+      input.create.asset === null ||
+      input.create.recipient_ref === null
+    ) {
+      return tgErr(400, 'draft_incomplete', 'Spend proposals need amount, asset, and recipient.');
+    }
+    if (
+      input.create.conflict_disclosures === null ||
+      input.create.conflict_disclosures.trim() === ''
+    ) {
+      return tgErr(
+        400,
+        'coi_required',
+        'Spend proposals require a conflict-of-interest disclosure.',
+      );
+    }
+    if (input.create.category !== null && input.create.category !== spendCategory) {
+      return tgErr(400, 'category_mismatch', `"${proposalType}" spends from "${spendCategory}".`);
+    }
+  } else if (input.create.requested_amount !== null || input.create.asset !== null) {
+    return tgErr(400, 'draft_invalid', 'This proposal type carries no budget fields.');
+  }
+
+  // Prohibited-target classifier (WS-M.1.2d, fail-closed).
+  const target = classifyProposalTarget(proposalType, input.create.requested_action);
+  if (!target.allowed) return tgErr(422, target.code, target.reason);
+
+  // Action budget (§17.7): charge BEFORE side effects; free when unconfigured.
+  const budget = await chargeRoomActionBudget(deps, {
+    roomId: input.roomId,
+    userId: input.userId,
+    actionType: 'proposal_submission',
+    rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
+  });
+  if ('code' in budget) return budget;
+
+  // Spend preflight (WS-M.4.1c): headroom incl. reservations + reconciled funds.
+  if (spendCategory !== null && input.create.requested_amount !== null) {
+    const treasury = await deps.treasuries.getByRoom(input.roomId);
+    if (treasury === null) return tgErr(409, 'no_treasury', 'The room has no treasury.');
+    const headroom = await categoryHeadroom(
+      deps,
+      treasury.treasuryId,
+      spendCategory,
+      active.pack.treasury,
+    );
+    if (headroom === null) {
+      return tgErr(409, 'no_cap_configured', `No spend cap for "${spendCategory}".`);
+    }
+    const { decCompare } = await import('@licio/governance');
+    if (decCompare(input.create.requested_amount, headroom.headroom) > 0) {
+      return tgErr(
+        409,
+        'insufficient_headroom',
+        `Requested ${input.create.requested_amount} exceeds the free headroom ${headroom.headroom}.`,
+      );
+    }
+    // Fail-closed funds check: only a RECONCILED balance can promise money.
+    const balance = treasury.balanceSnapshot?.[input.create.asset ?? ''] ?? null;
+    if (balance === null) {
+      return tgErr(409, 'balance_unreconciled', 'The treasury balance is not reconciled yet.');
+    }
+    if (decCompare(input.create.requested_amount, balance) > 0) {
+      return tgErr(409, 'insufficient_funds', 'The treasury cannot cover this proposal.');
+    }
+    // Recipient sanctions screening (fail-closed on real-funds deployments).
+    const deployment = pinnedDeployment(treasury.deploymentId);
+    const realFunds =
+      deployment !== undefined &&
+      (deployment.environment === 'capped_production' ||
+        deployment.environment === 'mature_production');
+    const screen = await deps.compliance.screenAddress({
+      addressLower: (input.create.recipient_ref ?? '').toLowerCase(),
+      deploymentId: treasury.deploymentId,
+    });
+    if (screen === 'blocked') {
+      return tgErr(422, 'sanctions_blocked', 'This proposal cannot be completed.');
+    }
+    if (screen === 'unavailable' && realFunds) {
+      return tgErr(503, 'screening_unavailable', 'Recipient screening is unavailable.');
+    }
+  }
+
+  const nowMs = deps.now();
+  const config = deps.wsmProposalConfig();
+  const deliberationEndsAt = new Date(nowMs + config.wsmDeliberationSeconds * 1000).toISOString();
+  const votingEndsAt = new Date(
+    nowMs + (config.wsmDeliberationSeconds + config.wsmVotingSeconds) * 1000,
+  ).toISOString();
+  const record: GovernanceProposalRecord = {
+    proposalId,
+    roomId: input.roomId,
+    proposerUserId: input.userId,
+    proposalType,
+    title: input.create.title,
+    plainLanguageSummary: input.create.plain_language_summary,
+    requestedAmount: input.create.requested_amount,
+    asset: input.create.asset,
+    recipientRef: input.create.recipient_ref,
+    conflictDisclosures: input.create.conflict_disclosures,
+    riskAssessment: input.create.risk_assessment,
+    requestedAction: input.create.requested_action,
+    expectedDeliverable: input.create.expected_deliverable,
+    preflightState: 'passed',
+    votingState: 'deliberation',
+    challengeState: 'none',
+    executionState: 'not_executed',
+    simulationMode: false,
+    executableAfter: null,
+    createdAt: new Date(nowMs).toISOString(),
+    executedAt: null,
+    executionClaimedAt: null,
+    lawPackVersionId: active.record.lawPackId,
+    category: spendCategory,
+    deliberationEndsAt,
+    votingEndsAt,
+    challengeWindowEndsAt: null,
+    tallySnapshot: null,
+  };
+  await deps.proposals.insert(record);
+  await appendChainedAudit(deps, {
+    roomId: input.roomId,
+    actionType: 'proposal_published',
+    actorUserId: input.userId,
+    details: {
+      proposal_id: proposalId,
+      proposal_type: proposalType,
+      law_pack_version_id: active.record.lawPackId,
+      category: spendCategory,
+    },
+    proposalId,
+  });
+  return { ok: true, proposal: record };
+}
+
+// ---------------------------------------------------------------------------
+// Signing / voting (WS-M.2.3b-1 + 4.2c)
+// ---------------------------------------------------------------------------
+
+export interface SignProposalInput {
+  roomId: string;
+  proposalId: string;
+  userId: string;
+  purpose: 'vote' | 'approval' | 'multisig';
+  choice: 'approve' | 'reject' | 'abstain' | null;
+  deploymentId: string;
+  walletAccountId: string;
+  typedDataMessage: Record<string, string>;
+  signature: string;
+}
+
+export async function signProposal(
+  deps: ProposalDeps,
+  input: SignProposalInput,
+): Promise<
+  | TreasuryGovernanceError
+  | { ok: true; signature: GovernanceSignatureRecord; tally: ProposalTallyWire }
+> {
+  const guard = await assertGovernanceWritable(deps, input.roomId, 'voting');
+  if (guard !== null) return guard;
+  const region = await deps.regionResolver.regionForUser(input.userId);
+  const killSwitch = await killSwitchDecision(deps.configStore, 'governance_voting', {
+    roomId: input.roomId,
+    region,
+  });
+  if (killSwitch.engaged) {
+    return tgErr(503, 'kill_switch_active', 'Voting is temporarily paused.');
+  }
+  const proposal = await deps.proposals.getById(input.proposalId);
+  if (proposal === null || proposal.roomId !== input.roomId || proposal.simulationMode) {
+    return tgErr(404, 'not_found', 'Resource not found');
+  }
+  if (proposal.votingState !== 'open') {
+    return tgErr(
+      409,
+      proposal.votingState === 'deliberation' ? 'still_deliberating' : 'voting_closed',
+      proposal.votingState === 'deliberation'
+        ? 'The deliberation window has not ended yet.'
+        : 'Voting on this proposal has closed.',
+    );
+  }
+  if (input.purpose === 'vote' && input.choice === null) {
+    return tgErr(400, 'choice_required', 'A vote requires a choice.');
+  }
+
+  // --- WS-L signature verification (the SAME verifiers, never a parallel path).
+  const wallet = await deps.wallets.getById(input.walletAccountId);
+  if (wallet === null || wallet.userId !== input.userId || wallet.unlinkState !== 'active') {
+    return tgErr(403, 'wallet_not_active', 'The selected wallet is not active.');
+  }
+  const deployment = pinnedDeployment(input.deploymentId);
+  if (deployment?.status !== 'active') {
+    return tgErr(409, 'deployment_unknown', 'Unknown or inactive deployment.');
+  }
+  if (wallet.chainId !== deployment.chain_id) {
+    return tgErr(409, 'wallet_chain_mismatch', 'The wallet is linked on a different chain.');
+  }
+  const verified = await verifyActionSignature({
+    actionType: 'proposal_sign',
+    domain: buildEip712Domain(deployment),
+    message: input.typedDataMessage,
+    signature: input.signature,
+    contractVerifier: deps.contractVerifier,
+  });
+  if (!verified.ok) {
+    return tgErr(422, 'signature_invalid', 'The signed payload failed validation.');
+  }
+  if (
+    hashFinancialWalletAddress(deps.masterSecret, verified.actorLower) !== wallet.addressHashHex
+  ) {
+    return tgErr(422, 'signature_invalid', 'The signer is not the selected wallet.');
+  }
+  const message = input.typedDataMessage;
+  if (message['proposalId'] !== input.proposalId || message['roomId'] !== input.roomId) {
+    return tgErr(422, 'payload_mismatch', 'The signed payload targets a different proposal.');
+  }
+  const nonce = message['nonce'] ?? '';
+  if (nonce === '') return tgErr(422, 'nonce_required', 'The signed payload needs a nonce.');
+  // Signatures over expired typed data are rejected (WS-M.2.3b-1).
+  const expiration = Number.parseInt(message['expiration'] ?? '', 10);
+  if (!Number.isFinite(expiration) || expiration * 1000 <= deps.now()) {
+    return tgErr(422, 'expired', 'The signature expiration is invalid or has passed.');
+  }
+
+  // --- Eligibility gate BEFORE weight resolution (WS-M.4.2c-2).
+  const active = await activeLawPack(deps, input.roomId);
+  const pack = active?.pack ?? null;
+  // The proposal evaluates under ITS pinned pack when still resolvable.
+  const pinned =
+    proposal.lawPackVersionId != null ? await deps.lawPacks.get(proposal.lawPackVersionId) : null;
+  const evalPack: LawPack | null = pinned !== null ? (pinned.lawPack as LawPack) : pack;
+  if (evalPack === null) return tgErr(409, 'no_law_pack', 'No law-pack applies to this proposal.');
+
+  const facts = await deps.membership.memberFacts(input.roomId, input.userId);
+  const spendControlling = proposal.category !== null;
+  const walletAgeDays = Math.floor((deps.now() - Date.parse(wallet.linkedAt)) / 86_400_000);
+  const voterFacts: VoterFacts = {
+    userId: input.userId,
+    membershipDays: facts?.membershipDays ?? null,
+    contributionCount: facts?.contributionCount ?? null,
+    verifiedIdentity: facts?.verifiedIdentity ?? false,
+    newestWalletAgeDays: walletAgeDays,
+    walletClusterId: null, // cluster heuristics: WS-N seam (null = no cluster)
+    hasDisclosedConflict:
+      proposal.conflictDisclosures !== null && proposal.proposerUserId === input.userId,
+    roleClasses: (await deps.rooms.isSteward(input.roomId, input.userId)) ? ['steward'] : [],
+    reputationScore: 0,
+    tokenVoteUnits: 0,
+    isDesignatedSigner: evalPack.multisig?.signers.includes(input.userId) ?? false,
+  };
+  const eligibility = checkVoterEligibility(voterFacts, {
+    rules: evalPack.eligibility ?? {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    },
+    treasuryControlling: spendControlling,
+    recusalRequired:
+      (evalPack.coiRequirements?.recusalRequired ?? false) &&
+      (evalPack.coiRequirements?.independentReviewFor.includes(proposal.proposalType) ?? false),
+    clustersAlreadyVoted: new Set(),
+  });
+  if (!eligibility.eligible) {
+    return tgErr(403, eligibility.code, eligibility.reason);
+  }
+  if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
+    return tgErr(403, 'not_member', 'Only room members can vote.');
+  }
+
+  // --- Weight resolution (WS-M.4.2c-1): capped, explainable, gated fail-closed.
+  const model = evalPack.weightModel ?? 'one_civic_account_one_vote';
+  const delegations = await incomingDelegationsFor(
+    deps.delegations,
+    input.roomId,
+    input.userId,
+    proposal.proposalType,
+  );
+  const incoming = [];
+  for (const delegation of delegations) {
+    incoming.push({
+      delegatorUserId: delegation.delegatorUserId ?? '',
+      delegatorEligible:
+        delegation.delegatorUserId !== null &&
+        (await deps.rooms.isMember(input.roomId, delegation.delegatorUserId)),
+      weight: 1,
+    });
+  }
+  const resolution: WeightResolution = resolveVotingWeight({
+    model,
+    facts: voterFacts,
+    maxVotingWeightPerAccount: evalPack.maxVotingWeightPerAccount ?? 1,
+    // §17.5 gated models refuse until Sybil/anti-bribery/legal review are
+    // RECORDED — no recording mechanism exists yet, so they stay refused (MVP).
+    gates: {
+      sybilControlsVerified: false,
+      antiBriberyMonitoring: false,
+      legalReviewPassed: false,
+    },
+    delegations: incoming,
+  });
+  if (!resolution.resolved) {
+    return tgErr(409, resolution.code, resolution.reason);
+  }
+
+  const record: GovernanceSignatureRecord = {
+    signatureId: deps.uuid(),
+    proposalId: input.proposalId,
+    userId: input.userId,
+    walletAccountId: input.walletAccountId,
+    signatureType: verified.walletType === 'contract' ? 'eip712_eip1271' : 'eip712_ecdsa',
+    typedDataHash: verified.typedDataHash,
+    signatureRef: input.signature,
+    weightSnapshot: resolution.weight,
+    eligibilityReason: resolution.eligibilityReason,
+    createdAt: new Date(deps.now()).toISOString(),
+    purpose: input.purpose,
+    choice: input.purpose === 'vote' ? input.choice : null,
+    nonce,
+  };
+  const inserted = await deps.proposalSignatures.insert(record);
+  if (inserted === null) {
+    return tgErr(409, 'already_signed', 'A signature by this user/wallet/nonce already exists.');
+  }
+  await appendChainedAudit(deps, {
+    roomId: input.roomId,
+    actionType: 'vote_signature_recorded',
+    actorUserId: input.userId,
+    // Tallies are public; INDIVIDUAL choices stay out of the public audit
+    // payload (law-pack-configurable visibility, WS-M.4.2c).
+    details: { proposal_id: input.proposalId, purpose: input.purpose },
+    proposalId: input.proposalId,
+  });
+  const tally = await tallyFor(deps, proposal, evalPack, false);
+  return { ok: true, signature: inserted, tally: wireTally(tally) };
+}
+
+// ---------------------------------------------------------------------------
+// The deadline sweep (WS-M.4.2d) + execution-window expiry
+// ---------------------------------------------------------------------------
+
+export async function settleDueProposals(deps: ProposalDeps, roomId: string): Promise<number> {
+  const nowIso = new Date(deps.now()).toISOString();
+  const proposals = await deps.proposals.listByRoom(roomId, 500);
+  let settled = 0;
+  for (const proposal of proposals) {
+    if (proposal.simulationMode) continue;
+    // deliberation → open at the deliberation deadline.
+    if (
+      proposal.votingState === 'deliberation' &&
+      proposal.deliberationEndsAt != null &&
+      proposal.deliberationEndsAt <= nowIso
+    ) {
+      const opened = await deps.proposals.casVotingState(
+        proposal.proposalId,
+        'deliberation',
+        'open',
+        {},
+      );
+      if (opened !== null) settled += 1;
+      continue;
+    }
+    // open → terminal at the voting deadline (kernel tally, WS-M.4.2d).
+    if (
+      proposal.votingState === 'open' &&
+      proposal.votingEndsAt != null &&
+      proposal.votingEndsAt <= nowIso
+    ) {
+      const pinned =
+        proposal.lawPackVersionId != null
+          ? await deps.lawPacks.get(proposal.lawPackVersionId)
+          : null;
+      const pack = (pinned?.lawPack ?? (await activeLawPack(deps, roomId))?.pack) as
+        | LawPack
+        | undefined;
+      if (pack === undefined) continue;
+      const tally = await tallyFor(deps, proposal, pack, true);
+      const config = deps.wsmProposalConfig();
+      if (tally.outcome === 'passed') {
+        const timelockSeconds =
+          pack.timelockRules?.[proposal.proposalType]?.seconds ?? config.wsmChallengeWindowSeconds;
+        const settledRow = await deps.proposals.casVotingState(
+          proposal.proposalId,
+          'open',
+          'passed',
+          {
+            executionState: 'timelocked',
+            executableAfter: new Date(deps.now() + timelockSeconds * 1000).toISOString(),
+            challengeWindowEndsAt: new Date(
+              deps.now() + config.wsmChallengeWindowSeconds * 1000,
+            ).toISOString(),
+            tallySnapshot: wireTally(tally) as unknown as Record<string, unknown>,
+          },
+        );
+        if (settledRow === null) continue;
+        // Reserve the spend at approval (WS-M.2.3a-1).  A failed reservation
+        // (headroom consumed since preflight) BLOCKS execution honestly.
+        if (settledRow.category !== null && settledRow.category !== undefined) {
+          const treasury = await deps.treasuries.getByRoom(roomId);
+          if (treasury !== null && settledRow.requestedAmount !== null) {
+            const reserved = await reserveForProposal(deps, {
+              treasuryId: treasury.treasuryId,
+              proposalId: settledRow.proposalId,
+              category: settledRow.category,
+              asset: settledRow.asset ?? '',
+              amount: settledRow.requestedAmount,
+              bounds: pack.treasury,
+            });
+            if ('code' in reserved) {
+              await deps.proposals.update({ ...settledRow, executionState: 'blocked' });
+              await appendChainedAudit(deps, {
+                roomId,
+                actionType: 'proposal_execution_failed',
+                actorUserId: null,
+                details: { proposal_id: settledRow.proposalId, code: reserved.code },
+                proposalId: settledRow.proposalId,
+              });
+            }
+          }
+        }
+      } else {
+        await deps.proposals.casVotingState(proposal.proposalId, 'open', tally.outcome, {
+          tallySnapshot: wireTally(tally) as unknown as Record<string, unknown>,
+        });
+      }
+      await appendChainedAudit(deps, {
+        roomId,
+        actionType: 'proposal_voting_settled',
+        actorUserId: null,
+        details: { proposal_id: proposal.proposalId, outcome: tally.outcome },
+        proposalId: proposal.proposalId,
+      });
+      settled += 1;
+      continue;
+    }
+    // Passed but never executed inside the execution window → expired.
+    if (
+      proposal.votingState === 'passed' &&
+      proposal.executionState === 'timelocked' &&
+      proposal.executableAfter !== null
+    ) {
+      const expiryMs =
+        Date.parse(proposal.executableAfter) +
+        deps.wsmProposalConfig().wsmExecutionWindowSeconds * 1000;
+      if (deps.now() >= expiryMs) {
+        // The claim CAS guarantees exclusivity against a racing execute.
+        const claimed = await deps.proposals.claimForExecution(proposal.proposalId, nowIso);
+        if (claimed !== null) {
+          await deps.proposals.update({
+            ...claimed,
+            executionState: 'expired',
+            executionClaimedAt: null,
+          });
+          await releaseReservation(deps, proposal.proposalId);
+          await appendChainedAudit(deps, {
+            roomId,
+            actionType: 'proposal_execution_failed',
+            actorUserId: null,
+            details: { proposal_id: proposal.proposalId, code: 'execution_window_expired' },
+            proposalId: proposal.proposalId,
+          });
+          settled += 1;
+        }
+      }
+    }
+  }
+  return settled;
+}
+
+// ---------------------------------------------------------------------------
+// Challenges (WS-M.4.3a)
+// ---------------------------------------------------------------------------
+
+export async function fileChallenge(
+  deps: ProposalDeps,
+  input: {
+    roomId: string;
+    proposalId: string;
+    userId: string;
+    challengeType: ChallengeRecord['challengeType'];
+    description: string;
+    evidenceRefs: string[];
+  },
+): Promise<TreasuryGovernanceError | { ok: true; challenge: ChallengeRecord }> {
+  const proposal = await deps.proposals.getById(input.proposalId);
+  if (proposal === null || proposal.roomId !== input.roomId || proposal.simulationMode) {
+    return tgErr(404, 'not_found', 'Resource not found');
+  }
+  if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
+    return tgErr(403, 'not_member', 'Only room members can file challenges.');
+  }
+  const nowIso = new Date(deps.now()).toISOString();
+  if (
+    proposal.votingState !== 'passed' ||
+    proposal.challengeWindowEndsAt == null ||
+    proposal.challengeWindowEndsAt <= nowIso ||
+    proposal.executionState === 'executed'
+  ) {
+    return tgErr(409, 'challenge_window_closed', 'The challenge window is not open.');
+  }
+  const challenge: ChallengeRecord = {
+    challengeId: deps.uuid(),
+    proposalId: input.proposalId,
+    challengerUserId: input.userId,
+    challengeType: input.challengeType,
+    description: input.description,
+    evidenceRefs: input.evidenceRefs,
+    state: 'open',
+    resolutionNote: null,
+    resolvedByUserId: null,
+    createdAt: nowIso,
+    resolvedAt: null,
+  };
+  await deps.challenges.insert(challenge);
+  await deps.proposals.update({ ...proposal, challengeState: 'open' });
+  await appendChainedAudit(deps, {
+    roomId: input.roomId,
+    actionType: 'challenge_filed',
+    actorUserId: input.userId,
+    details: {
+      proposal_id: input.proposalId,
+      challenge_id: challenge.challengeId,
+      challenge_type: input.challengeType,
+    },
+    proposalId: input.proposalId,
+  });
+  return { ok: true, challenge };
+}
+
+export async function resolveChallenge(
+  deps: ProposalDeps,
+  input: {
+    roomId: string;
+    challengeId: string;
+    resolution: 'upheld' | 'dismissed' | 'escalated';
+    resolutionNote: string;
+    actorUserId: string;
+    isPlatformStaff: boolean;
+  },
+): Promise<TreasuryGovernanceError | { ok: true; challenge: ChallengeRecord }> {
+  const challenge = await deps.challenges.getById(input.challengeId);
+  if (challenge === null) return tgErr(404, 'not_found', 'Resource not found');
+  const proposal = await deps.proposals.getById(challenge.proposalId);
+  if (proposal === null || proposal.roomId !== input.roomId) {
+    return tgErr(404, 'not_found', 'Resource not found');
+  }
+  // Legal/capture challenges reach PLATFORM actors (WS-M.4.3a): only platform
+  // staff can give them a final disposition; stewards may escalate.
+  const platformClass =
+    challenge.challengeType === 'legal' || challenge.challengeType === 'capture';
+  if (input.resolution !== 'escalated') {
+    if (platformClass && !input.isPlatformStaff) {
+      return tgErr(403, 'platform_review_required', 'This challenge class needs platform review.');
+    }
+    if (!platformClass && !input.isPlatformStaff) {
+      const isSteward = await deps.rooms.isSteward(input.roomId, input.actorUserId);
+      if (!isSteward) return tgErr(403, 'steward_required', 'Only stewards resolve challenges.');
+      // A steward may not judge a challenge against their OWN proposal (COI).
+      if (proposal.proposerUserId === input.actorUserId) {
+        return tgErr(403, 'independent_review_required', 'An independent reviewer must decide.');
+      }
+    }
+  }
+  const from = challenge.state;
+  const resolved = await deps.challenges.transition(input.challengeId, from, input.resolution, {
+    note: input.resolutionNote,
+    resolvedByUserId: input.actorUserId,
+    resolvedAt: new Date(deps.now()).toISOString(),
+  });
+  if (resolved === null) {
+    return tgErr(409, 'invalid_transition', 'The challenge cannot move to that state.');
+  }
+  // Project the proposal-level challenge column.
+  if (input.resolution === 'upheld') {
+    await deps.proposals.update({
+      ...proposal,
+      challengeState: 'upheld',
+      executionState: 'blocked',
+    });
+    await releaseReservation(deps, proposal.proposalId);
+  } else if (input.resolution === 'escalated') {
+    await deps.proposals.update({ ...proposal, challengeState: 'escalated' });
+  } else {
+    const openLeft = await deps.challenges.countOpenByProposal(proposal.proposalId);
+    if (openLeft === 0) {
+      await deps.proposals.update({ ...proposal, challengeState: 'dismissed' });
+    }
+  }
+  await appendChainedAudit(deps, {
+    roomId: input.roomId,
+    actionType: 'challenge_resolved',
+    actorUserId: input.actorUserId,
+    details: {
+      proposal_id: proposal.proposalId,
+      challenge_id: input.challengeId,
+      resolution: input.resolution,
+    },
+    proposalId: proposal.proposalId,
+  });
+  return { ok: true, challenge: resolved };
+}
+
+// ---------------------------------------------------------------------------
+// Execution (WS-M.4.3b) — the caller of the shipped executeTreasuryAction.
+// ---------------------------------------------------------------------------
+
+export async function executeProposal(
+  deps: ProposalDeps,
+  input: { roomId: string; proposalId: string; userId: string },
+): Promise<TreasuryGovernanceError | { ok: true; proposal: GovernanceProposalRecord }> {
+  const guard = await assertGovernanceWritable(deps, input.roomId, 'executions');
+  if (guard !== null) return guard;
+  // Explicit, allowlisted executor: the room steward (or platform, via route).
+  if (!(await deps.rooms.isSteward(input.roomId, input.userId))) {
+    return tgErr(403, 'steward_required', 'Execution requires a room steward.');
+  }
+  const proposal = await deps.proposals.getById(input.proposalId);
+  if (proposal === null || proposal.roomId !== input.roomId || proposal.simulationMode) {
+    return tgErr(404, 'not_found', 'Resource not found');
+  }
+  // Re-check EVERY prerequisite at execution time (never a stale "ready").
+  const nowIso = new Date(deps.now()).toISOString();
+  if (proposal.votingState !== 'passed' || proposal.executionState !== 'timelocked') {
+    return tgErr(409, 'not_executable', 'This proposal is not ready to execute.');
+  }
+  if (proposal.executableAfter === null || proposal.executableAfter > nowIso) {
+    return tgErr(409, 'timelocked', 'The timelock has not elapsed yet.');
+  }
+  if (proposal.challengeWindowEndsAt != null && proposal.challengeWindowEndsAt > nowIso) {
+    return tgErr(409, 'challenge_window_open', 'The challenge window has not closed yet.');
+  }
+  if (proposal.challengeState === 'upheld' || proposal.challengeState === 'escalated') {
+    return tgErr(409, 'challenge_blocking', 'A challenge blocks this execution.');
+  }
+  if ((await deps.challenges.countOpenByProposal(input.proposalId)) > 0) {
+    return tgErr(409, 'challenge_blocking', 'Unresolved challenges block execution.');
+  }
+
+  // ATOMIC claim (the shipped CAS): two executes cannot both proceed.
+  const claimed = await deps.proposals.claimForExecution(input.proposalId, nowIso);
+  if (claimed === null) {
+    return tgErr(409, 'not_executable', 'This proposal is already being executed.');
+  }
+
+  // Route the effect per type.  Treasury categories go through the SHIPPED
+  // fail-closed executor (kernel verdict + capability + kill switch) — the
+  // WS-U residual's production caller.
+  let failure: string | null = null;
+  if (claimed.category !== null && claimed.category !== undefined) {
+    const verdict = await deps.treasuryExecutor.execute(input.roomId, {
+      category: claimed.category,
+      amount: claimed.requestedAmount ?? '0',
+      asset: claimed.asset,
+      coiDeclared: claimed.conflictDisclosures !== null,
+      proposedAt: claimed.createdAt,
+    });
+    if (!verdict.accepted) {
+      failure = verdict.code ?? 'kernel_rejected';
+    } else {
+      await consumeReservation(deps, claimed.proposalId);
+      if (claimed.proposalType === 'capped_grant' || claimed.proposalType === 'bounty') {
+        await createGrantFromProposal(deps, claimed);
+      }
+    }
+  } else if (claimed.proposalType === 'charter_update') {
+    // The voted charter content becomes the new version at execution.
+    const sections = claimed.requestedAction['sections'];
+    const { createCharterVersion } = await import('./charter.js');
+    const created = await createCharterVersion(deps, {
+      roomId: input.roomId,
+      sections,
+      actorUserId: input.userId,
+    });
+    if ('code' in created) failure = created.code;
+  } else if (
+    claimed.proposalType === 'law_pack_upgrade' ||
+    claimed.proposalType === 'treasury_policy_update'
+  ) {
+    const lawPackId = claimed.requestedAction['law_pack_id'];
+    if (typeof lawPackId !== 'string') {
+      failure = 'law_pack_id_missing';
+    } else {
+      const adopted = await adoptLawPack(deps, {
+        roomId: input.roomId,
+        lawPackId,
+        actorUserId: input.userId,
+      });
+      if ('code' in adopted) failure = adopted.code;
+    }
+  } else if (claimed.proposalType === 'steward_rotation') {
+    const opened = await deps.elections.openElection(input.roomId);
+    if (!opened) failure = 'election_not_opened';
+  }
+
+  if (failure !== null) {
+    // Release the claim honestly: the proposal is blocked, never falsely
+    // executed, and the reservation stays released for a corrected retry.
+    await deps.proposals.update({
+      ...claimed,
+      executionState: 'blocked',
+      executionClaimedAt: null,
+    });
+    await releaseReservation(deps, claimed.proposalId);
+    await appendChainedAudit(deps, {
+      roomId: input.roomId,
+      actionType: 'proposal_execution_failed',
+      actorUserId: input.userId,
+      details: { proposal_id: claimed.proposalId, code: failure },
+      proposalId: claimed.proposalId,
+    });
+    return tgErr(409, failure, 'Execution failed; the proposal is blocked.');
+  }
+
+  await appendChainedAudit(deps, {
+    roomId: input.roomId,
+    actionType: 'proposal_executed',
+    actorUserId: input.userId,
+    details: { proposal_id: claimed.proposalId, proposal_type: claimed.proposalType },
+    proposalId: claimed.proposalId,
+  });
+  const finalized = await deps.proposals.finalizeExecution(claimed.proposalId, nowIso);
+  return {
+    ok: true,
+    proposal: finalized ?? { ...claimed, executionState: 'executed', executedAt: nowIso },
+  };
+}

@@ -18,7 +18,7 @@ import type { GovernanceProfileRecord, GovernanceProfileStore, TreasuryStore } f
 
 export interface TreasuryGovernanceError {
   ok: false;
-  status: 400 | 403 | 404 | 409 | 503;
+  status: 400 | 403 | 404 | 409 | 422 | 503;
   code: string;
   message: string;
 }

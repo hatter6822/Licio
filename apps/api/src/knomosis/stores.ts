@@ -570,6 +570,27 @@ export interface GovernanceProposalStore {
       | { votingState: 'passed'; executionState: 'timelocked'; executableAfter: string }
       | { votingState: 'rejected' },
   ): Promise<GovernanceProposalRecord | null>;
+  /** WS-M.4.2d — generalized voting-state CAS for the PRODUCTION lifecycle:
+   *  apply `patch` only while `votingState` still equals `from`, returning the
+   *  updated row or null on a lost race.  Drives `deliberation → open` and
+   *  `open → passed/rejected/quorum_not_met` (with tally snapshot, challenge
+   *  window, and timelock columns) without racing a concurrent settle. */
+  casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Partial<
+      Pick<
+        GovernanceProposalRecord,
+        | 'executionState'
+        | 'executableAfter'
+        | 'challengeWindowEndsAt'
+        | 'votingEndsAt'
+        | 'tallySnapshot'
+        | 'challengeState'
+      >
+    >,
+  ): Promise<GovernanceProposalRecord | null>;
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
   /** Proposals stranded mid-execution (claimed `executing` but never finalized —
@@ -1482,6 +1503,19 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     return structuredClone(resolved);
   }
 
+  async casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Parameters<GovernanceProposalStore['casVotingState']>[3],
+  ): Promise<GovernanceProposalRecord | null> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || row.votingState !== from) return null;
+    const updated = { ...row, ...patch, votingState: to };
+    this.#rows.set(proposalId, structuredClone(updated));
+    return structuredClone(updated);
+  }
+
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
     return [...this.#rows.values()]
       .filter(
@@ -1598,9 +1632,28 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
   }
 
   async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
-    const key = `${record.proposalId}:${record.walletAccountId}`;
+    // Emulate ALL THREE unique indexes from migrations 0059 + 0082 so tests
+    // exercise database semantics: (proposal, wallet), one VOTE per (proposal,
+    // user), and single-use nonce per proposal.
     for (const row of this.#rows.values()) {
-      if (`${row.proposalId}:${row.walletAccountId}` === key) return null;
+      if (row.proposalId !== record.proposalId) continue;
+      if (row.walletAccountId === record.walletAccountId) return null;
+      if (
+        (row.purpose ?? 'vote') === 'vote' &&
+        (record.purpose ?? 'vote') === 'vote' &&
+        row.userId === record.userId
+      ) {
+        return null;
+      }
+      if (
+        row.nonce !== undefined &&
+        row.nonce !== null &&
+        record.nonce !== undefined &&
+        record.nonce !== null &&
+        row.nonce === record.nonce
+      ) {
+        return null;
+      }
     }
     this.#rows.set(record.signatureId, { ...record });
     return { ...record };
