@@ -18,7 +18,7 @@ import {
   mfciMargins,
   mfciRiskStates,
 } from '@licio/db';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type {
   BridgeAttemptRecord,
   BridgeAttemptStatus,
@@ -424,6 +424,25 @@ export class DrizzleMfciRiskStateStore implements MfciRiskStateStore {
       reason: row.reason,
       updatedAt: iso(row.updatedAt),
     };
+  }
+
+  async getMany(targetIds: readonly string[]): Promise<Map<string, MfciRiskStateRecord>> {
+    const out = new Map<string, MfciRiskStateRecord>();
+    if (targetIds.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(mfciRiskStates)
+      .where(inArray(mfciRiskStates.targetId, [...targetIds]));
+    for (const row of rows) {
+      out.set(row.targetId, {
+        targetId: row.targetId,
+        state: row.state as MfciRiskStateRecord['state'],
+        score: row.score,
+        reason: row.reason,
+        updatedAt: iso(row.updatedAt),
+      });
+    }
+    return out;
   }
 
   async set(record: MfciRiskStateRecord): Promise<void> {

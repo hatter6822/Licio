@@ -59,6 +59,7 @@ import {
   isSentinelTopicId,
   LEGACY_DISTRIBUTION_REASON,
   legacyRatingLabel,
+  type MfciRiskLevel,
   normalizeFeedMode,
   rankingDecisionLoggedEventSchema,
   TOPIC_ID_BY_SLUG,
@@ -73,6 +74,7 @@ import {
 } from '../forum/card-signals.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
 import type { ThreadShellRecord } from '../ingestion/stores.js';
+import { mapBounded } from '../lib/concurrency.js';
 import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { killSwitchDecision } from './killswitch.js';
@@ -155,15 +157,21 @@ function poolFreshnessClass(
 
 /** Story safety posture for the wire (descriptive, never a sanction). Thin
  *  adapter over the shared `deriveStorySafetyState` so the feed and the
- *  story-detail read derive the posture identically. */
+ *  story-detail read derive the posture identically — from the SAME inputs:
+ *  the DURABLE MFCI risk state (an integrity signal, not a PWAtt value), the
+ *  frozen flag, and the thread safety state. Passing the resolved risk level
+ *  (not the feature vector) lets the WS-I.4.1b degradation fallbacks — which
+ *  serve feature-blind so no PWAtt value leaks under a kill switch (§30.5) —
+ *  still carry the honest "under review" posture, exactly as the un-gated
+ *  story-detail read does. */
 function feedSafetyState(
-  features: FeatureVector | undefined,
+  mfciRiskState: MfciRiskLevel | undefined,
   thread: ThreadShellRecord | undefined,
   frozen: boolean,
 ): FeedItem['safety_state'] {
   return deriveStorySafetyState({
     frozen,
-    mfciRiskState: features?.mfci_risk_state,
+    mfciRiskState,
     threadSafetyState: thread?.safetyState,
   });
 }
@@ -210,19 +218,31 @@ async function buildFeedItems(
 ): Promise<FeedItem[]> {
   if (entries.length === 0) return [];
   const ids = entries.map((entry) => entry.itemId);
-  const [stories, threads, safeties] = await Promise.all([
+  const [stories, threads, safeties, mfciRisks] = await Promise.all([
     services.ingestion.stories.getByIds(ids),
     services.ingestion.stories.getThreadsByStoryIds(ids),
     services.events.safetyStore.getMany(ids),
+    // The DURABLE MFCI risk state — the SAME authoritative source the story-
+    // detail read consults (v1.ts), read here so the card's safety posture
+    // agrees across surfaces on EVERY path. On the WS-I.4.1b degradation
+    // fallbacks `entry.features` is null (feature-blind under a kill switch),
+    // so without this read a story under high/severe MFCI risk would read
+    // "ok" on the card while story-detail reads "under review". MFCI risk is a
+    // WS-H integrity signal (not PWAtt), so surfacing it degraded is §30.5-safe.
+    services.invariants.mfciRiskStates.getMany(ids),
   ]);
   const items: FeedItem[] = [];
   for (const entry of entries) {
     const story = stories.get(entry.itemId);
     if (story === undefined) continue;
     const thread = threads.get(entry.itemId);
+    // Prefer the durable (current) risk state; fall back to the ranking
+    // feature's cached copy when the durable store has no row yet.
+    const mfciRiskState: MfciRiskLevel | undefined =
+      mfciRisks.get(entry.itemId)?.state ?? entry.features?.mfci_risk_state;
     const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
     const chips: Array<{ id: string; label: string }> = [];
-    if (entry.features?.mfci_risk_state === 'normal') {
+    if (mfciRiskState === 'normal') {
       chips.push({ id: 'coordination', label: 'low coordination risk' });
     }
     if (entry.moreOnThisStory.length > 0) {
@@ -232,7 +252,7 @@ async function buildFeedItems(
       });
     }
     const safetyState = feedSafetyState(
-      entry.features,
+      mfciRiskState,
       thread,
       safeties.get(entry.itemId)?.safetyState === 'frozen',
     );
@@ -470,11 +490,21 @@ async function filterByVisibility(
   ];
   const roomPublic = new Map<string, boolean>();
   const roomReadable = new Map<string, boolean>();
-  for (const roomId of roomIds) {
+  // Each distinct room resolves independently — its own getById + up to two
+  // membership reads (roomContentVisibleToUser). Fan them out with a bounded
+  // concurrency instead of one-at-a-time serial round-trips (the pool page can
+  // touch tens of rooms). Map writes are side effects on disjoint keys (safe
+  // single-threaded); an unknown room stays absent from both maps ⇒ fail
+  // closed. A read error is re-thrown IN ORDER to preserve the serial loop's
+  // fail-the-request semantics exactly.
+  const outcomes = await mapBounded(roomIds, 16, async (roomId) => {
     const room = await services.forum.rooms.getById(roomId);
-    if (room === null) continue; // unknown room ⇒ fail closed (absent ⇒ false)
+    if (room === null) return; // unknown room ⇒ fail closed (absent ⇒ false)
     roomPublic.set(roomId, room.visibility === 'public');
     roomReadable.set(roomId, await roomContentVisibleToUser(services.forum, room, userId));
+  });
+  for (const outcome of outcomes) {
+    if (!outcome.ok) throw outcome.error;
   }
   const reasons = new Map<string, number>();
   const drop = (reason: string): false => {
@@ -1011,15 +1041,17 @@ async function serveFallback(
       services,
       ordered.map((candidate) => candidate.item_id),
     ));
-  // USER-SORTED serves carry the same per-item feature row as the ranked
-  // path, so the card POSTURE (the MFCI-derived safety state, the
-  // coordination chip, the legacy label approximation) agrees across
-  // surfaces — a high/severe-MFCI story must read "under review" here
-  // exactly as it does on the ranked feed and the story detail. The
-  // DEGRADATION fallbacks (kill switch / GWEI gate / empty pool) stay
-  // feature-blind: §30.5 requires an engaged kill switch to let no
-  // PWAtt-derived value (the legacy label reads `active_attention`) reach a
-  // served field, and `deriveStorySafetyState` degrades gracefully.
+  // The card POSTURE agrees across surfaces on EVERY path because
+  // `buildFeedItems` derives the safety state from the DURABLE MFCI risk store
+  // (a WS-H integrity signal, read for both the ranked and fallback paths) — a
+  // high/severe-MFCI story reads "under review" on the ranked feed, the
+  // user-sorted feed, the degradation fallback, AND the story detail alike.
+  // What the DEGRADATION fallbacks (kill switch / GWEI gate / empty pool) still
+  // withhold is the PWAtt feature row: §30.5 forbids a PWAtt-derived value
+  // reaching a served field under an engaged kill switch, and the ONLY such
+  // value here is `active_attention` (which feeds the legacy label). So the
+  // feature join runs for user-sorted serves and stays null on degradation —
+  // the MFCI posture is unaffected either way (it no longer rides the feature).
   const featuresByStory =
     args.userOrdering === null
       ? null

@@ -80,6 +80,32 @@ describe('ui store feed mode, focus mode, sheet', () => {
     expect(raw.state.feedMode).toBe('rising');
   });
 
+  it('persists best/new under a legacy-parseable spelling', async () => {
+    // Rollout compat: a canonical mode with a lossless legacy spelling is
+    // stored as that spelling, so a pre-redesign bundle re-served during
+    // rollout still validates the slice (theme/motion/focus survive with it).
+    const { useUIStore } = await freshUI();
+    useUIStore.getState().setFeedMode('best');
+    expect(JSON.parse(localStorage.getItem('licio:ui') ?? '{}').state.feedMode).toBe('balanced');
+    useUIStore.getState().setFeedMode('new');
+    expect(JSON.parse(localStorage.getItem('licio:ui') ?? '{}').state.feedMode).toBe(
+      'chronological',
+    );
+    // The genuinely new sorts have no legacy spelling and store canonically.
+    useUIStore.getState().setFeedMode('rising');
+    expect(JSON.parse(localStorage.getItem('licio:ui') ?? '{}').state.feedMode).toBe('rising');
+  });
+
+  it('normalizes a legacy-spelled persisted slice back to the canonical mode', async () => {
+    const { useUIStore } = await freshUI({
+      theme: 'system',
+      reducedMotion: 'system',
+      feedMode: 'chronological',
+      focusMode: false,
+    });
+    expect(useUIStore.getState().feedMode).toBe('new');
+  });
+
   it('toggles focus mode and reflects it onto <html data-focus>', async () => {
     const { useUIStore } = await freshUI();
     expect(useUIStore.getState().focusMode).toBe(false);

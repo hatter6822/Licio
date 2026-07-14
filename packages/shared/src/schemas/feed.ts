@@ -23,7 +23,6 @@ import { contributionDisputeStatusSchema } from './contribution.js';
  */
 export const FEED_MODES = ['best', 'rising', 'sources', 'debates', 'new'] as const;
 export type FeedMode = (typeof FEED_MODES)[number];
-export const feedModeSchema = z.enum(FEED_MODES);
 
 /** Default mode when the reader has expressed no preference. */
 export const DEFAULT_FEED_MODE: FeedMode = 'best';

@@ -266,6 +266,9 @@ export interface MfciRiskStateRecord {
 
 export interface MfciRiskStateStore {
   get(targetId: string): Promise<MfciRiskStateRecord | null>;
+  /** Batch read for a feed page — one round-trip for many targets. Absent
+   *  targets are simply missing from the map. */
+  getMany(targetIds: readonly string[]): Promise<Map<string, MfciRiskStateRecord>>;
   set(record: MfciRiskStateRecord): Promise<void>;
   clear(): Promise<void>;
 }
@@ -276,6 +279,15 @@ export class InMemoryMfciRiskStateStore implements MfciRiskStateStore {
   async get(targetId: string): Promise<MfciRiskStateRecord | null> {
     const row = this.#rows.get(targetId);
     return row ? { ...row } : null;
+  }
+
+  async getMany(targetIds: readonly string[]): Promise<Map<string, MfciRiskStateRecord>> {
+    const out = new Map<string, MfciRiskStateRecord>();
+    for (const targetId of targetIds) {
+      const row = this.#rows.get(targetId);
+      if (row) out.set(targetId, { ...row });
+    }
+    return out;
   }
 
   async set(record: MfciRiskStateRecord): Promise<void> {
