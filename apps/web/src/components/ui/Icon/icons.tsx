@@ -117,6 +117,15 @@ export const iconPaths = {
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </>
   ),
+  // ---- Governance lifecycle vocabulary (WS-M) ----
+  shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />,
+  wallet: (
+    <>
+      <path d="M20 7H5a2 2 0 0 1 0-4h13v4" />
+      <path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1" />
+      <line x1="16" y1="14" x2="16.01" y2="14" />
+    </>
+  ),
   home: (
     <>
       <path d="m3 10.5 9-7 9 7" />

@@ -33,8 +33,26 @@ vi.mock('../../lib/queries.js', () => ({
   useChangeRoomVisibilityMutation: () => ({ mutate: () => {}, isPending: false }),
   useRoomLensesQuery: () => ({ data: [] }),
   useCreateLensMutation: () => ({ mutate: () => {}, isPending: false, isError: false }),
+  // WS-M panels (Lifecycle / Treasury / Proposals tabs).
+  useGovernanceProfileQuery: () => ({ isLoading: false, isError: false, data: undefined }),
+  useRoomReadinessQuery: () => ({ isLoading: true, isError: false, data: undefined }),
+  useModeTransitionMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
+  useAuditChainQuery: () => ({ data: undefined, isFetching: false, refetch: () => {} }),
+  useTreasuryTabQuery: () => ({ isLoading: true, isError: false, data: undefined }),
+  useRoomGrantsQuery: () => ({ data: [] }),
+  usePaymentIntentQuery: () => ({ data: undefined }),
+  useProposalListQuery: () => ({ isLoading: false, isError: false, data: [] }),
+  useTreasuryDashboardQuery: () => ({ data: undefined }),
+  useKnomosisDeploymentsQuery: () => ({ data: undefined }),
+  useKnomosisManifestQuery: () => ({ data: undefined }),
+  useWalletsQuery: () => ({ data: undefined }),
+  useCreateProposalMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
+  useSignProposalMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
+  useExecuteProposalMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
+  useFileChallengeMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
 }));
 
+import { useFeatureFlagStore } from '../../stores/feature-flags.js';
 import { RoomGovernanceDialog } from './RoomGovernanceDialog.js';
 
 function baseRoom(over: Partial<RoomDetail> = {}): RoomDetail {
@@ -79,6 +97,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RoomGovernanceD
 
 afterEach(() => {
   vi.clearAllMocks();
+  useFeatureFlagStore.getState().reset();
 });
 
 describe('RoomGovernanceDialog (WS-U §16.6/§24.6)', () => {
@@ -129,5 +148,37 @@ describe('RoomGovernanceDialog (WS-U §16.6/§24.6)', () => {
     renderDialog({ showSettings: true, room: baseRoom({ is_steward: true }) });
     // The dialog is portaled to <body>, so assert over the whole document.
     expect(await checkA11y(document.body)).toHaveNoViolations();
+  });
+
+  // --- WS-M tabs (fail-closed on the governance flag) ------------------------
+
+  it('hides every WS-M tab while the governance flag is off (fail-closed)', () => {
+    renderDialog({ room: baseRoom({ governance_mode: 'testnet' }) });
+    expect(screen.queryByRole('tab', { name: /mode & readiness/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /treasury/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /proposals/i })).not.toBeInTheDocument();
+  });
+
+  it('shows the lifecycle tab (but not treasury/proposals) for an ordinary room', () => {
+    useFeatureFlagStore.setState((state) => ({
+      flags: { ...state.flags, governanceEnabled: true },
+    }));
+    renderDialog();
+    expect(screen.getByRole('tab', { name: /mode & readiness/i })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /treasury/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /proposals/i })).not.toBeInTheDocument();
+  });
+
+  it('shows treasury + proposals once the room leaves ordinary, with the mode badge', () => {
+    useFeatureFlagStore.setState((state) => ({
+      flags: { ...state.flags, governanceEnabled: true },
+    }));
+    renderDialog({ room: baseRoom({ governance_mode: 'testnet' }) });
+    // The overview leads with the server-derived mode indicator (WS-M.1.1c).
+    expect(screen.getByText('Testnet')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /treasury/i })).toBeInTheDocument();
+    const proposalsTab = screen.getByRole('tab', { name: /proposals/i });
+    fireEvent.click(proposalsTab);
+    expect(screen.getByText(/no proposals yet/i)).toBeInTheDocument();
   });
 });

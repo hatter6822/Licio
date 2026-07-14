@@ -308,14 +308,16 @@ export function createRoomGovernanceSimRoutes() {
         requireVerifiedAccount(),
         roomParam,
         // The body shape is MODE-DEPENDENT (sim template vs WS-M production
-        // draft), so validation happens in the handler after the mode read.
+        // draft), so a loose object validator types the RPC client while the
+        // real validation happens in the handler after the mode read.
+        zValidator('json', z.record(z.string(), z.unknown())),
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
           const roomId = c.req.valid('param').roomId;
           const gate = await simGate(services, roomId, auth.userId, true);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
-          const body: unknown = await c.req.json().catch(() => null);
+          const body: unknown = c.req.valid('json');
           if (gate.mode !== 'simulated') {
             // WS-M production proposals (real-asset modes; WS-M.4.1a-c + 4.2a).
             if (!treasuryServicesConfigured()) {
@@ -584,53 +586,61 @@ export function createRoomGovernanceSimRoutes() {
       )
 
       // --- Readiness + mode transition (WS-L.4.1g) ---------------------------
-      .get('/rooms/:roomId/governance/readiness', authMiddleware(), roomParam, async (c) => {
-        const auth = requireAuth(c);
-        const services = getKnomosisServices();
-        const roomId = c.req.valid('param').roomId;
-        const gate = await simGate(services, roomId, auth.userId, false);
-        if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
-        // WS-M.1.2e: the EXTENDED per-item checklist with `requiredFor`
-        // semantics, evaluated LIVE for the requested (or next) target mode.
-        if (treasuryServicesConfigured()) {
-          const rawTarget = c.req.query('target_mode');
-          const target = (READINESS_TARGET_MODES as readonly string[]).includes(rawTarget ?? '')
-            ? (rawTarget as ReadinessTargetMode)
-            : defaultReadinessTarget(gate.mode);
-          const wsm = await evaluateWsmReadiness(
-            getTreasuryServices(),
-            roomId,
-            auth.userId,
-            target,
-          );
+      .get(
+        '/rooms/:roomId/governance/readiness',
+        authMiddleware(),
+        roomParam,
+        // Typed for the RPC client; the enum check stays in the handler so an
+        // unknown target degrades to the default rather than a 400.
+        zValidator('query', z.object({ target_mode: z.string().max(32).optional() })),
+        async (c) => {
+          const auth = requireAuth(c);
+          const services = getKnomosisServices();
+          const roomId = c.req.valid('param').roomId;
+          const gate = await simGate(services, roomId, auth.userId, false);
+          if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          // WS-M.1.2e: the EXTENDED per-item checklist with `requiredFor`
+          // semantics, evaluated LIVE for the requested (or next) target mode.
+          if (treasuryServicesConfigured()) {
+            const rawTarget = c.req.valid('query').target_mode;
+            const target = (READINESS_TARGET_MODES as readonly string[]).includes(rawTarget ?? '')
+              ? (rawTarget as ReadinessTargetMode)
+              : defaultReadinessTarget(gate.mode);
+            const wsm = await evaluateWsmReadiness(
+              getTreasuryServices(),
+              roomId,
+              auth.userId,
+              target,
+            );
+            return c.json(
+              roomReadinessResponseSchema.parse({
+                room_id: roomId,
+                current_mode: gate.mode,
+                target_mode: target,
+                ready: wsm.ready,
+                unmet: wsm.unmet,
+                items: wsm.items,
+              }),
+            );
+          }
+          const deps = readinessDeps(services);
+          if (deps === null) {
+            return c.json(deny('unavailable', 'Governance data unavailable.'), 503);
+          }
+          const readiness = await evaluateReadiness(deps, roomId, auth.userId);
           return c.json(
             roomReadinessResponseSchema.parse({
               room_id: roomId,
               current_mode: gate.mode,
-              target_mode: target,
-              ready: wsm.ready,
-              unmet: wsm.unmet,
-              items: wsm.items,
+              ready: readiness.ready,
+              unmet: readiness.unmet.map((u) => ({
+                requirement: u.requirement,
+                description: u.description,
+              })),
             }),
           );
-        }
-        const deps = readinessDeps(services);
-        if (deps === null) {
-          return c.json(deny('unavailable', 'Governance data unavailable.'), 503);
-        }
-        const readiness = await evaluateReadiness(deps, roomId, auth.userId);
-        return c.json(
-          roomReadinessResponseSchema.parse({
-            room_id: roomId,
-            current_mode: gate.mode,
-            ready: readiness.ready,
-            unmet: readiness.unmet.map((u) => ({
-              requirement: u.requirement,
-              description: u.description,
-            })),
-          }),
-        );
-      })
+        },
+      )
       .post(
         '/rooms/:roomId/governance/mode',
         authMiddleware(),

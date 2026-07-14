@@ -141,6 +141,7 @@ export type RoomGovernanceProfile = z.infer<typeof roomGovernanceProfileSchema>;
 export const roomGovernanceProfileResponseSchema = z
   .object({ profile: roomGovernanceProfileSchema })
   .strict();
+export type RoomGovernanceProfileResponse = z.infer<typeof roomGovernanceProfileResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Charter versions (WS-M.1.2a) — plain-language, sectioned, hash-committed.

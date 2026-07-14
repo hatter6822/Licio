@@ -559,7 +559,12 @@ export function createTreasuryGovernanceRoutes() {
                       )
                     : await markIntentSigned(services, paymentIntentId, auth.userId);
           if ('code' in result) return tgError(c, result);
-          return c.json({ execution_state: result.intent.executionState });
+          // The quote rides back with the state so the client preview can show
+          // every fee upfront (WS-L.2.6c) — never a fee discovered at signing.
+          return c.json({
+            execution_state: result.intent.executionState,
+            quote: result.intent.quoteRef ?? null,
+          });
         },
       )
 
@@ -841,33 +846,41 @@ export function createTreasuryGovernanceRoutes() {
       })
 
       // --- Accounting export (WS-M.5.2b) + audit-chain verification --------------
-      .get('/rooms/:roomId/treasury/export', authMiddleware(), roomParam, async (c) => {
-        const auth = requireAuth(c);
-        const gate = flagGate('governance');
-        if (gate) return c.json(deny(gate.code, gate.message), 503);
-        const services = getTreasuryServices();
-        const roomId = c.req.valid('param').roomId;
-        // Sensitive financial records: stewards + platform finance only.
-        if (!isPlatformStaff(auth) && !(await services.rooms.isSteward(roomId, auth.userId))) {
-          return c.json(notFound, 404);
-        }
-        const query = z
-          .object({ period_start: z.string().datetime(), period_end: z.string().datetime() })
-          .safeParse({
-            period_start: c.req.query('period_start'),
-            period_end: c.req.query('period_end'),
+      .get(
+        '/rooms/:roomId/treasury/export',
+        authMiddleware(),
+        roomParam,
+        // Loose here (types the RPC client); the datetime check below keeps
+        // the specific `invalid_period` error code.
+        zValidator(
+          'query',
+          z.object({ period_start: z.string().optional(), period_end: z.string().optional() }),
+        ),
+        async (c) => {
+          const auth = requireAuth(c);
+          const gate = flagGate('governance');
+          if (gate) return c.json(deny(gate.code, gate.message), 503);
+          const services = getTreasuryServices();
+          const roomId = c.req.valid('param').roomId;
+          // Sensitive financial records: stewards + platform finance only.
+          if (!isPlatformStaff(auth) && !(await services.rooms.isSteward(roomId, auth.userId))) {
+            return c.json(notFound, 404);
+          }
+          const query = z
+            .object({ period_start: z.string().datetime(), period_end: z.string().datetime() })
+            .safeParse(c.req.valid('query'));
+          if (!query.success) {
+            return c.json(deny('invalid_period', 'period_start and period_end are required.'), 400);
+          }
+          const result = await buildAccountingExport(services, {
+            roomId,
+            periodStartIso: query.data.period_start,
+            periodEndIso: query.data.period_end,
           });
-        if (!query.success) {
-          return c.json(deny('invalid_period', 'period_start and period_end are required.'), 400);
-        }
-        const result = await buildAccountingExport(services, {
-          roomId,
-          periodStartIso: query.data.period_start,
-          periodEndIso: query.data.period_end,
-        });
-        if ('code' in result) return tgError(c, result);
-        return c.json(accountingExportResponseSchema.parse(result.export));
-      })
+          if ('code' in result) return tgError(c, result);
+          return c.json(accountingExportResponseSchema.parse(result.export));
+        },
+      )
       .get('/rooms/:roomId/governance/audit-chain', authMiddleware(), roomParam, async (c) => {
         const auth = requireAuth(c);
         const gate = flagGate('governance');

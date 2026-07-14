@@ -21,7 +21,12 @@
 
 import type { RoomDetail } from '@licio/shared';
 import { useT } from '../../i18n/index.js';
+import { selectGovernanceEnabled, useFeatureFlagStore } from '../../stores/feature-flags.js';
 import { RoomSettingsForm } from '../rooms/RoomSettingsForm/index.js';
+import { GovernanceLifecyclePanel } from '../treasury/GovernanceLifecyclePanel.js';
+import { GovernanceModeBadge } from '../treasury/GovernanceModeBadge.js';
+import { ProposalsPanel } from '../treasury/ProposalsPanel.js';
+import { TreasuryPanel } from '../treasury/TreasuryPanel.js';
 import { Dialog } from '../ui/Dialog/index.js';
 import { type TabDescriptor, Tabs } from '../ui/Tabs/index.js';
 import { GovernedByPanel } from './GovernedByPanel.js';
@@ -48,6 +53,12 @@ export function RoomGovernanceDialog({
   defaultTab,
 }: RoomGovernanceDialogProps): React.ReactElement {
   const t = useT();
+  // WS-M surfaces fail closed with the governance flag: when it is off (or the
+  // hydration failed) the lifecycle/treasury/proposal tabs simply do not exist.
+  const governanceEnabled = useFeatureFlagStore(selectGovernanceEnabled);
+  const isRoomSteward = room.is_steward === true;
+  // Treasury + proposals exist once the room leaves `ordinary` (WS-M.1.1a).
+  const inLifecycle = room.governance_mode !== 'ordinary';
 
   const tabs: TabDescriptor[] = [
     {
@@ -56,6 +67,29 @@ export function RoomGovernanceDialog({
       icon: 'circle-info',
     },
     { id: 'models', label: t('room.governance.tab.models', 'Models & voting'), icon: 'layers' },
+    ...(governanceEnabled
+      ? [
+          {
+            id: 'lifecycle',
+            label: t('room.governance.tab.lifecycle', 'Mode & readiness'),
+            icon: 'shield',
+          } satisfies TabDescriptor,
+        ]
+      : []),
+    ...(governanceEnabled && inLifecycle
+      ? [
+          {
+            id: 'treasury',
+            label: t('room.governance.tab.treasury', 'Treasury'),
+            icon: 'wallet',
+          } satisfies TabDescriptor,
+          {
+            id: 'proposals',
+            label: t('room.governance.tab.proposals', 'Proposals'),
+            icon: 'document-check',
+          } satisfies TabDescriptor,
+        ]
+      : []),
     ...(showSettings
       ? [
           {
@@ -84,13 +118,32 @@ export function RoomGovernanceDialog({
       >
         {(active) => (
           <div className="pt-4">
-            {active === 'overview' ? <GovernedByPanel roomId={roomId} embedded /> : null}
+            {active === 'overview' ? (
+              <div className="flex flex-col gap-3">
+                <GovernanceModeBadge mode={room.governance_mode} showDescription />
+                <GovernedByPanel roomId={roomId} embedded />
+              </div>
+            ) : null}
             {active === 'models' ? (
               <StewardModelManager
                 roomId={roomId}
                 embedded
                 joined={room.joined}
-                isRoomSteward={room.is_steward === true}
+                isRoomSteward={isRoomSteward}
+              />
+            ) : null}
+            {active === 'lifecycle' && governanceEnabled ? (
+              <GovernanceLifecyclePanel roomId={roomId} isRoomSteward={isRoomSteward} />
+            ) : null}
+            {active === 'treasury' && governanceEnabled && inLifecycle ? (
+              <TreasuryPanel roomId={roomId} joined={room.joined} isRoomSteward={isRoomSteward} />
+            ) : null}
+            {active === 'proposals' && governanceEnabled && inLifecycle ? (
+              <ProposalsPanel
+                roomId={roomId}
+                joined={room.joined}
+                isRoomSteward={isRoomSteward}
+                roomName={room.name}
               />
             ) : null}
             {active === 'settings' && showSettings ? (

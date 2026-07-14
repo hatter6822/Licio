@@ -13,6 +13,7 @@ import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
 import { RoomLensButton } from '../../components/rooms/RoomLensControl/index.js';
 import { RoomMembership } from '../../components/rooms/RoomMembership/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
+import { GovernanceModeBadge } from '../../components/treasury/GovernanceModeBadge.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { Dialog } from '../../components/ui/Dialog/index.js';
 import { Icon } from '../../components/ui/Icon/index.js';
@@ -210,6 +211,12 @@ export function RoomDetailBody({
             ? t('room.badge.private', 'Private room')
             : t('room.badge.public', 'Public room')}
         </span>
+        {/* WS-M.1.1c — the server-derived governance-mode indicator: always
+            visible once the room leaves `ordinary` (a real-asset room must
+            never look like a plain room), announced on change. */}
+        {room.governance_mode !== 'ordinary' ? (
+          <GovernanceModeBadge mode={room.governance_mode} />
+        ) : null}
       </div>
       {room.description ? <p className="text-ink-muted">{room.description}</p> : null}
 
