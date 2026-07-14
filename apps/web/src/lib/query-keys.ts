@@ -3,16 +3,12 @@
 // Query-key factory (WS-C.1.2). One place that mints consistent, serializable
 // tuple keys used for both reads and targeted invalidation, so a typo can never
 // silently split a cache entry in two.
-import type { FeedMode } from '@licio/shared';
+import { DEFAULT_FEED_MODE, type FeedMode } from '@licio/shared';
 
 export const queryKeys = {
-  feed: (mode: FeedMode = 'balanced') => ['feed', mode] as const,
+  feed: (mode: FeedMode = DEFAULT_FEED_MODE) => ['feed', mode] as const,
   story: (storyId: string) => ['story', storyId] as const,
   storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
-  /** WS-H.2.3a — the SPEC §7.6 independent-sources drawer payload. */
-  storyIndependentSources: (storyId: string) => ['story', storyId, 'independent-sources'] as const,
-  /** WS-F.1.2a — the story's public claim projections. */
-  storyClaims: (storyId: string) => ['story', storyId, 'claims'] as const,
   storyComments: (
     storyId: string,
     options: {

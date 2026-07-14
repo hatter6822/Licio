@@ -407,8 +407,9 @@ user activation, story submission renders with shared-schema validation, and the
 * **WS-H**: SCOI divergence for the lens read (the endpoint degrades
   gracefully); MERI independence-group assignment beyond inheritance;
   bridge-comment SCOI conditioning.
-* **WS-I**: feed-mode consumption in real ranking (preferences persist and
-  the §13 vocabulary is wired); room/thread read models in the front page.
+* **WS-I**: room/thread read models in the front page (feed-mode
+  consumption is CLOSED — the §11.6 sort modes are served by the real
+  ranking service, and preferences persist).
 * **WS-J**: queue ownership (forum intake lands in the shared review inbox
   as `contribution_safety_hold`), steward
   moderation actions on contributions beyond author tombstones, appeals;

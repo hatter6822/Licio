@@ -8,16 +8,105 @@ import { z } from 'zod';
 import { cursorSchema, httpUrlSchema, paginatedSchema, uuidSchema } from './common.js';
 import { contributionDisputeStatusSchema } from './contribution.js';
 
-/** Feed ranking/personalization modes (SPEC §6.4; WS-B.2.9 switcher). */
-export const FEED_MODES = [
+/**
+ * Feed sort modes (SPEC §11.6; WS-B.2.9 switcher). Every mode is an OBJECTIVE,
+ * content-derived ordering — never popularity, never a like/vote count:
+ *   `best`    — highest participation-weighted attention right now (the full
+ *               WS-I ranked pipeline; PWAtt is the ordering objective).
+ *   `rising`  — fastest-INCREASING participation-weighted attention (the
+ *               per-item PWAtt window-over-window velocity).
+ *   `sources` — most sourced (published comments carrying ≥1 citation — the
+ *               same count as the card's `sources_count`).
+ *   `debates` — most WS-T debates (the corrections tally: live arenas +
+ *               validated + incorrect adjudications).
+ *   `new`     — most recent (strict chronological).
+ */
+export const FEED_MODES = ['best', 'rising', 'sources', 'debates', 'new'] as const;
+export type FeedMode = (typeof FEED_MODES)[number];
+export const feedModeSchema = z.enum(FEED_MODES);
+
+/** Default mode when the reader has expressed no preference. */
+export const DEFAULT_FEED_MODE: FeedMode = 'best';
+
+/**
+ * DEPRECATED — rollout compatibility only. The pre-redesign mode set
+ * (`local` was removed outright: the platform collects no user location, so a
+ * location-sorted feed was never honest; the rest were replaced by the
+ * explicit sort orders above). Pre-redesign cached PWA bundles still SEND
+ * these values (`?mode=` requests, settings PATCHes) and hold them in stored
+ * personalization blobs, so the wire/storage boundaries keep ACCEPTING them
+ * via {@link feedModeCompatSchema} and every consumer normalizes through
+ * {@link normalizeFeedMode}. Remove together with `rating_label` once
+ * pre-redesign bundles have aged out (tracked in docs/ranking/README.md).
+ */
+export const LEGACY_FEED_MODES = [
   'balanced',
   'chronological',
   'source-diverse',
   'local',
   'low-personalization',
 ] as const;
-export type FeedMode = (typeof FEED_MODES)[number];
-export const feedModeSchema = z.enum(FEED_MODES);
+export type LegacyFeedMode = (typeof LEGACY_FEED_MODES)[number];
+
+/**
+ * Wire/storage-compat mode schema: accepts canonical AND legacy values,
+ * output UNCHANGED (no transform — a stored legacy value round-trips as-is so
+ * pre-redesign bundles reading the same blob keep parsing; consumers
+ * normalize explicitly at the point of use).
+ */
+export const feedModeCompatSchema = z.enum([...FEED_MODES, ...LEGACY_FEED_MODES]);
+export type FeedModeCompat = z.infer<typeof feedModeCompatSchema>;
+
+const LEGACY_FEED_MODE_MAP: Record<LegacyFeedMode, FeedMode> = {
+  // The default ranked pipeline is the direct successor of `balanced`; the
+  // removed pipeline MODULATIONS (the `source-diverse` balancing override and
+  // the `local` quota boost) fold into it — `sources` is a citation count,
+  // NOT outlet diversity, so `source-diverse` must not map there.
+  // `chronological` maps exactly onto `new`. `low-personalization` ALSO maps
+  // to `new`: the user chose LESS personalization, and `new` is the redesign's
+  // reduce-personalization affordance (strict chronological — no relevance
+  // term, no attention ranking; the PHI-4 "Reduce personalization" control
+  // sets the same mode). Mapping it to `best` would silently re-enable
+  // personalized ranking for that user the moment an updated client
+  // normalizes and re-sends the canonical mode.
+  balanced: 'best',
+  chronological: 'new',
+  'source-diverse': 'best',
+  local: 'best',
+  'low-personalization': 'new',
+};
+
+/**
+ * Canonical mode for any wire/storage value. TOTAL over `string` — an
+ * absent, unknown, or corrupted stored value resolves to the default (never
+ * `undefined` leaking into an ordering decision), a legacy value maps per
+ * {@link LEGACY_FEED_MODES}, and a canonical value passes through.
+ */
+export function normalizeFeedMode(mode: string | null | undefined): FeedMode {
+  if (mode === null || mode === undefined) return DEFAULT_FEED_MODE;
+  if ((FEED_MODES as readonly string[]).includes(mode)) return mode as FeedMode;
+  return (LEGACY_FEED_MODE_MAP as Record<string, FeedMode | undefined>)[mode] ?? DEFAULT_FEED_MODE;
+}
+
+/**
+ * The at-rest spelling for a DURABLE feed-mode write (rollout compat): the
+ * settings responses echo the stored value, and a pre-redesign cached bundle
+ * on the SAME account (another device, an un-refreshed tab) validates them
+ * against the old mode enum alone. `best` and `new` have LOSSLESS legacy
+ * spellings (`balanced` / `chronological` — {@link normalizeFeedMode} maps
+ * them straight back), so durable writes store those and stale bundles keep
+ * parsing. The three genuinely NEW sorts (`rising`/`sources`/`debates`) have
+ * no legacy spelling — any downgrade would LOSE the preference for updated
+ * devices — so they store canonically, and a stale sibling bundle's settings
+ * read fails until its service worker updates (narrow, self-healing;
+ * documented in docs/ranking/README.md). Every write boundary that persists
+ * a feed mode applies this; remove together with {@link LEGACY_FEED_MODES}.
+ */
+export function legacyPreservingFeedMode(mode: FeedModeCompat): FeedModeCompat {
+  if (mode === 'best') return 'balanced';
+  if (mode === 'new') return 'chronological';
+  return mode;
+}
 
 /**
  * Per-story corrections tally (SPEC §5.6) — the WS-T adjudication record of the
@@ -177,9 +266,12 @@ export const feedResponseSchema = paginatedSchema(feedItemSchema).extend({
 export type FeedResponse = z.infer<typeof feedResponseSchema>;
 
 /** Query params for the feed (mode switcher + keyset cursor + the optional
- *  topic scope: `?topic=` serves the WS-I TOPIC surface). */
+ *  topic scope: `?topic=` serves the WS-I TOPIC surface). `mode` accepts the
+ *  legacy values (pre-redesign cached bundles still send them); the server
+ *  normalizes via `normalizeFeedMode` — the mapping is total, so no legacy
+ *  value carries extra out-of-band semantics. */
 export const feedQuerySchema = z.object({
-  mode: feedModeSchema.optional(),
+  mode: feedModeCompatSchema.optional(),
   cursor: cursorSchema.optional(),
   topic: z.string().min(1).max(128).optional(),
 });

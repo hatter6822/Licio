@@ -301,9 +301,9 @@ evidence METADATA only (ROLE_EVIDENCE holds no content-removal power by
 construction: the module never touches a moderation state), audited under the
 doctrine action ids, duplicate-protected by partial unique indexes
 (`evidence_decisions`, migration 0077), and listed newest-first via `GET
-/v1/moderation/evidence-decisions`.  The public consumer is the WS-H
-independent-sources drawer, which surfaces `mark-primary-source` annotations
-on the story's lineage panel ("reviewed by an evidence steward").  The
+/v1/moderation/evidence-decisions`.  Decisions surface through the console's
+evidence panels (the former public independent-sources drawer projection was
+removed — comment-centric sourcing superseded story-level lineage).  The
 reviewer link-opening malware check (`/url-verdict`) is access-gated to the
 panels the links render in: report-queue OR evidence-queue roles — and
 `mark-primary-source` itself refuses a citation whose server verdict is

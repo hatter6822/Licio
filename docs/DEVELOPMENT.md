@@ -737,9 +737,8 @@ reader-facing surface has something meaningful to render:
 - A non-empty moderation queue and a WS-J report case so steward/admin review
   surfaces render real queue, review-panel, action-palette, and audit-log data
   on first boot — plus one ROLE_EVIDENCE showcase decision (a citation marked
-  as a primary source), so the console's Evidence tab, its recent-decisions
-  trail, and the story page's "Independent sources" drawer all render real
-  reviewed metadata.
+  as a primary source), so the console's Evidence tab and its
+  recent-decisions trail render real reviewed metadata.
 
 When using Postgres-backed dev data, the seed is transactional and idempotent.
 If you need to discard old seeded data completely, reset the local stack with
@@ -764,9 +763,9 @@ production code, not hand-authored fixtures:
 - MERI source-independence is computed by the real batch and enforced live
   (MERI is promoted to `soft_constraint` in every environment): a near-duplicate
   repost is demoted below its original rather than counting as independent
-  support. The exposure label is no longer shown on feed cards; the
-  independent-sources drawer (`GET /v1/stories/:id/independent-sources`) still
-  exposes the lineage.
+  support. MERI has no reader-facing surface (the exposure label and the
+  independent-sources drawer were both removed); the signal works entirely
+  through ranking.
 - SCOI divergence appears in the **Where interpretations differ** drawer
   (rendered right after the composer) for stories where seeded lenses genuinely
   interpret the context differently (S10). Lenses are authored end-to-end: a room

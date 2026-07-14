@@ -413,11 +413,15 @@ export function SettingsPage(): React.ReactElement {
             <Button
               variant="secondary"
               onClick={() => {
-                applyFeedMode('low-personalization');
+                // PHI-4 contract: "changes only how your feed is ordered" —
+                // `new` is the fully non-personalized, non-attention order
+                // (strict chronological), the strongest reduction a feed-mode
+                // switch can make without touching the account.
+                applyFeedMode('new');
                 toast({
                   message: t(
                     'settings.personalization.reduced',
-                    'Feed switched to low personalization.',
+                    'Feed switched to newest-first — no personalization.',
                   ),
                 });
               }}

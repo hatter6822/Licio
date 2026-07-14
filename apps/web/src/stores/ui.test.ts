@@ -25,12 +25,12 @@ afterEach(() => {
 });
 
 describe('ui store defaults', () => {
-  it('defaults to system theme/motion, balanced feed, focus off, closed sheet', async () => {
+  it('defaults to system theme/motion, best feed, focus off, closed sheet', async () => {
     const { useUIStore } = await freshUI();
     const state = useUIStore.getState();
     expect(state.theme).toBe('system');
     expect(state.reducedMotion).toBe('system');
-    expect(state.feedMode).toBe('balanced');
+    expect(state.feedMode).toBe('best');
     expect(state.focusMode).toBe(false);
     expect(state.sheet).toEqual({ open: false, id: null });
   });
@@ -59,10 +59,10 @@ describe('ui store theme + motion application', () => {
     const { useUIStore, initUIStore } = await freshUI({
       theme: 'light',
       reducedMotion: 'enabled',
-      feedMode: 'chronological',
+      feedMode: 'new',
       focusMode: true,
     });
-    expect(useUIStore.getState().feedMode).toBe('chronological');
+    expect(useUIStore.getState().feedMode).toBe('new');
     initUIStore();
     expect(document.documentElement.getAttribute('data-theme')).toBe('light');
     expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
@@ -74,10 +74,10 @@ describe('ui store theme + motion application', () => {
 describe('ui store feed mode, focus mode, sheet', () => {
   it('sets the feed mode and persists it', async () => {
     const { useUIStore } = await freshUI();
-    useUIStore.getState().setFeedMode('source-diverse');
-    expect(useUIStore.getState().feedMode).toBe('source-diverse');
+    useUIStore.getState().setFeedMode('rising');
+    expect(useUIStore.getState().feedMode).toBe('rising');
     const raw = JSON.parse(localStorage.getItem('licio:ui') ?? '{}');
-    expect(raw.state.feedMode).toBe('source-diverse');
+    expect(raw.state.feedMode).toBe('rising');
   });
 
   it('toggles focus mode and reflects it onto <html data-focus>', async () => {
@@ -113,13 +113,50 @@ describe('ui store rehydration', () => {
     const { useUIStore } = await freshUI({
       theme: 'dark',
       reducedMotion: 'system',
-      feedMode: 'local',
+      feedMode: 'debates',
       focusMode: true,
     });
     const state = useUIStore.getState();
     expect(state.theme).toBe('dark');
-    expect(state.feedMode).toBe('local');
+    expect(state.feedMode).toBe('debates');
     expect(state.focusMode).toBe(true);
+  });
+
+  it('normalizes a legacy persisted feed mode WITHOUT discarding the slice', async () => {
+    // A slice persisted before the sort-mode redesign: the legacy mode maps
+    // forward (chronological → new) and the OTHER preferences survive — a
+    // wholesale rejection would reset the theme too.
+    const { useUIStore } = await freshUI({
+      theme: 'dark',
+      reducedMotion: 'enabled',
+      feedMode: 'chronological',
+      focusMode: true,
+    });
+    const state = useUIStore.getState();
+    expect(state.feedMode).toBe('new');
+    expect(state.theme).toBe('dark');
+    expect(state.focusMode).toBe(true);
+  });
+
+  it('maps the removed legacy modes to their canonical successors', async () => {
+    // The removed pipeline modulations fold into the default ranked order;
+    // `low-personalization` maps to `new` (the fully NON-personalized sort —
+    // the user asked for less personalization, and `best` would re-enable it).
+    const successors: Array<[string, string]> = [
+      ['balanced', 'best'],
+      ['source-diverse', 'best'],
+      ['local', 'best'],
+      ['low-personalization', 'new'],
+    ];
+    for (const [legacy, canonical] of successors) {
+      const { useUIStore } = await freshUI({
+        theme: 'light',
+        reducedMotion: 'system',
+        feedMode: legacy,
+        focusMode: false,
+      });
+      expect(useUIStore.getState().feedMode).toBe(canonical);
+    }
   });
 
   it('falls back to defaults when an unknown feed mode is stored', async () => {
@@ -129,8 +166,8 @@ describe('ui store rehydration', () => {
       feedMode: 'bogus-mode',
       focusMode: false,
     });
-    // The whole invalid slice is rejected, so the feed mode is back to balanced.
-    expect(useUIStore.getState().feedMode).toBe('balanced');
+    // The whole invalid slice is rejected, so the feed mode is back to best.
+    expect(useUIStore.getState().feedMode).toBe('best');
   });
 
   it('falls back to defaults on corrupt JSON', async () => {

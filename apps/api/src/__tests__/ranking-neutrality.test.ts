@@ -766,7 +766,7 @@ describe('Test 11 — WS-Q two-tier containment (in-room content never reaches a
       surface: 'front_page',
       surfaceRoomId: null,
       surfaceTopicId: null,
-      mode: 'chronological',
+      mode: 'new',
     });
     expect(fallback.fallback).toBe(true);
     expect(fallback.items.map((i) => i.story_id)).not.toContain(planted.storyId);

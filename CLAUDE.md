@@ -229,7 +229,6 @@ licio/
 │   │       │   ├── story/               -- StoryCard, StorySignals (§5.6 signal
 │   │       │   │                           row: sources count + corrections tally +
 │   │       │   │                           safety chip), DisputeBadge, TopicRepeatsButton,
-│   │       │   │                           IndependentSourcesDrawer (WS-H §7.6),
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
 │   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),
@@ -495,7 +494,7 @@ licio/
 │           │   ├── audit.ts             --   append-only writer + suppressed transparency export
 │           │   ├── evidence.ts          --   ROLE_EVIDENCE surface: the derived evidence queue +
 │           │   │                             mark-primary-source/flag-citation decisions (audited
-│           │   │                             evidence metadata; feeds the drawer's primary sources)
+│           │   │                             evidence metadata; console-surfaced)
 │           │   ├── notices.ts           --   statement-of-reasons + appeal-outcome inbox
 │           │   ├── review.ts            --   queue + full-context review + appeal projections
 │           │   ├── prechecks.ts         --   WS-J.2.6 detection math (spam/malware/flood/policy-risk)

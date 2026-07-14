@@ -404,7 +404,7 @@ The Submit tab is centered and persistent; it is a contribution entry point, not
 
 ## 6.3 Front Page layout
 
-Each feed card contains: story title; source; home-room chip (where the conversation lives); the Section 5.6 signal row (the dispute badge, the "Under review" safety chip, the sources count, and the corrections tally — rendered only when non-empty); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, long-press to signal problem / mute source / adjust topic). Interpretation-divergence detail lives on the STORY surface (the "Where interpretations differ" lens map and the independent-sources drawer) rather than as a per-card overlay or label — the tap-through story page carries the detail; the compact feed context-card payload had no client surface and was removed with the other unreachable planes. The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
+Each feed card contains: story title; source; home-room chip (where the conversation lives); the Section 5.6 signal row (the dispute badge, the "Under review" safety chip, the sources count, and the corrections tally — rendered only when non-empty); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, long-press to signal problem / mute source / adjust topic). Interpretation-divergence detail lives on the STORY surface (the "Where interpretations differ" lens map) rather than as a per-card overlay or label — the tap-through story page carries the detail; the compact feed context-card payload had no client surface and was removed with the other unreachable planes. The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
 
 ## 6.4 Thread layout
 
@@ -690,7 +690,7 @@ Pseudo-code:
 
 ## 7.6 UI requirements
 
-The MERI exposure label ("New angle," "Independent source," "Duplicate context," "Same claim, new evidence") is computed but is NOT surfaced on feed cards — the source-independence signal drives ranking and the independent-sources drawer instead. Topic pages include an "independent sources" drawer. Users can choose "show fewer repeats" or "show all updates" per topic. The app must never say "this is true because many outlets repeated it" — repetition is not independence.
+The MERI exposure label ("New angle," "Independent source," "Duplicate context," "Same claim, new evidence") is computed but is NOT surfaced to readers — the source-independence signal drives ranking (the `exposure_independence` feature, the redundancy penalty, and the Section 13.2 diversity quota) rather than any reader-facing label. (The former story-page "independent sources" lineage drawer was removed: comment-centric sourcing — citations on contributions, the Sources view, the sources count — superseded story-level lineage as the reader-facing surface.) Users can choose "show fewer repeats" or "show all updates" per topic. The app must never say "this is true because many outlets repeated it" — repetition is not independence.
 
 ## 7.7 Acceptance criteria
 
@@ -800,7 +800,7 @@ A new algorithm cannot launch if protected or sensitive cohorts receive structur
 
 ## 9.6 UI and transparency
 
-GWEI is mostly an internal audit invariant. Public transparency reports may disclose aggregate experience-parity metrics, not sensitive cohort details. Users may see "Why am I seeing this?", "Your feed balances local, national, and topic-room context," "You can choose a less personalized feed," or "You are currently in a source-diverse mode."
+GWEI is mostly an internal audit invariant. Public transparency reports may disclose aggregate experience-parity metrics, not sensitive cohort details. Users may see "Why am I seeing this?", "Your feed balances local, national, and topic-room context," "You can choose a less personalized feed," or "You are currently sorting by newest."
 
 ## 9.7 Acceptance criteria
 
@@ -907,11 +907,11 @@ Two users both end up viewing nutrition content. One arrived via sports performa
 
 ## 11.5 Ranking constraints
 
-No sequence should repeatedly route a user through high-risk loops without deliberate user choice; high-holonomy transitions are dampened or diversified; sensitive topics (self-harm, eating disorders, medical misinformation, extremist ideology, harassment) have stricter loop thresholds; minors receive stricter thresholds and less personalization; users can choose chronological, source-diverse, or low-personalization modes.
+No sequence should repeatedly route a user through high-risk loops without deliberate user choice; high-holonomy transitions are dampened or diversified; sensitive topics (self-harm, eating disorders, medical misinformation, extremist ideology, harassment) have stricter loop thresholds; minors receive stricter thresholds and less personalization; users can choose the non-attention sort orders (New, Sources, Debates) at any time — complete, deterministic orderings with no personalization term.
 
 ## 11.6 UX requirements
 
-**Graduated topic-frequency dampening (not a modal prompt).** A topic the reader is circling is shown steadily *less often* in the feed — its display frequency ramps down to a non-zero floor as the circling intensifies, so a genuinely pursued topic still surfaces, only rarely (never removed). The circling signal is computed entirely in-browser (topic-cluster ids + timing only, nothing sent to the server) and *decays over time*, so the topic's normal frequency recovers once the reader moves on. This is a quiet, self-correcting nudge that reshapes only what the reader's own device renders — it replaces the earlier interrupting "Change the path" prompt. Plus: feed-mode switch ("Balanced," "Chronological," "Source-diverse," "Local," "Low personalization"); quiet notification policy for circled topics; user-accessible topic controls (mute, reset topic history, reduce personalization).
+**Graduated topic-frequency dampening (not a modal prompt).** A topic the reader is circling is shown steadily *less often* in the feed — its display frequency ramps down to a non-zero floor as the circling intensifies, so a genuinely pursued topic still surfaces, only rarely (never removed). The circling signal is computed entirely in-browser (topic-cluster ids + timing only, nothing sent to the server) and *decays over time*, so the topic's normal frequency recovers once the reader moves on. This is a quiet, self-correcting nudge that reshapes only what the reader's own device renders — it replaces the earlier interrupting "Change the path" prompt. Plus: the feed sort switch ("Best" — highest participation-weighted attention right now, the default ranked pipeline; "Rising" — fastest-increasing attention, the PWAtt window-over-window velocity; "Sources" — most sourced comments; "Debates" — most WS-T debates; "New" — most recent). Every order is objective and content-derived — none is a popularity count, and none is location-derived (the platform collects no user location, so the former "Local" mode was removed). Plus: quiet notification policy for circled topics; user-accessible topic controls (mute, reset topic history, reduce personalization — the latter switches the feed to "New").
 
 ## 11.7 Acceptance criteria
 
@@ -2061,7 +2061,7 @@ Many accounts report a journalist's post within two minutes; MFCI finds target c
 
 ## 35.5 Rabbit-hole dampening
 
-A user reads several high-conflict health posts; PHI detects a loop from wellness to conspiratorial medical content and back; ranking injects broader evidence-based context; the user sees "Your recent feed is narrowing around this topic. See broader sources?"; the user switches to Source-diverse mode or resets topic personalization.
+A user reads several high-conflict health posts; PHI detects a loop from wellness to conspiratorial medical content and back; ranking injects broader evidence-based context; the user sees "Your recent feed is narrowing around this topic. See broader sources?"; the user switches to the New sort or resets topic personalization.
 
 ## 35.6 Supporting a Forum Commons treasury
 

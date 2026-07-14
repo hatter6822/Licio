@@ -1150,7 +1150,10 @@ export async function seedForumDemoData(
       firstSeenStoryId: storyId,
       // A real claim independence group so MERI's claim-extraction input is
       // present for these stories (the real batch computes their exposure).
-      independenceGroupId: `demo-claim-indep-${claimN}`,
+      // A DETERMINISTIC UUID (the claim model types group ids as UUIDs — the
+      // real dedup path mints randomUUID(); a bare string here is
+      // model-invalid seed data).
+      independenceGroupId: `5f5e9100-0000-4000-8000-${String(claimN).padStart(12, '0')}`,
       createdBy: null,
       extractionSource: 'steward',
       extractionConfidence: null,
@@ -1781,8 +1784,8 @@ export async function seedForumDemoData(
 
   // MinHash signatures for every seeded story (over the title + excerpt). These
   // are the SAME signatures the WS-F dedup pipeline writes, so the REAL MERI
-  // batch — and the independent-sources drawer — detect near-duplicates from
-  // genuine signature collisions (S21 ↔ S25) rather than hand-authored groups.
+  // batch detects near-duplicates from genuine signature collisions
+  // (S21 ↔ S25) rather than hand-authored groups.
   for (const story of await ingestion.stories.listRecent(200)) {
     if (await ingestion.signatures.getByStoryId(story.storyId)) continue;
     const text = `${story.title} ${story.excerpt ?? ''}`.trim();
@@ -2112,10 +2115,9 @@ export async function seedModerationDemo(moderation: ModerationServices): Promis
     });
   }
   // One ROLE_EVIDENCE showcase decision: the methodology citation on the
-  // sourced reply C(2) is marked a PRIMARY SOURCE, so the evidence queue, the
-  // recent-decisions panel, AND the story's independent-sources drawer all
-  // render real reviewed metadata on `pnpm dev`.  Best-effort + idempotent
-  // (a re-boot hits duplicate_decision and moves on).
+  // sourced reply C(2) is marked a PRIMARY SOURCE, so the evidence queue and
+  // the recent-decisions panel render real reviewed metadata on `pnpm dev`.
+  // Best-effort + idempotent (a re-boot hits duplicate_decision and moves on).
   await applyEvidenceDecision(
     moderation,
     {

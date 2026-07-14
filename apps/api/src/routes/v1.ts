@@ -28,6 +28,7 @@ import {
   feedResponseSchema,
   isSentinelTopicId,
   LEGACY_DISTRIBUTION_REASON,
+  legacyPreservingFeedMode,
   legacyRatingLabel,
   notificationPreferencesSchema,
   notificationsResponseSchema,
@@ -305,8 +306,10 @@ export function createV1Routes() {
       // The eight-stage pipeline serves whenever ANY real story exists:
       // candidate generation → feature join → safety filter → constrained
       // PWAtt scoring → diversification → decision log → explanations →
-      // FeedItem mapping. The kill switch / user feed modes route through
-      // the safe chronological fallback inside the service (WS-I.4.1a/b).
+      // FeedItem mapping. The kill switch routes through the safe
+      // chronological fallback; the user sort modes (`new`/`sources`/
+      // `debates`/`rising`) serve their complete deterministic orderings
+      // over the same safety-filtered set inside the service (WS-I.4.1a/b).
       // With an EMPTY story store (fresh dev boot, contract tests) the
       // legacy WS-C demo fixture serves unchanged — clearly fixture data,
       // outside the ranking pipeline, and logged as demo serving.
@@ -555,7 +558,18 @@ export function createV1Routes() {
           key === undefined
             ? DEFAULT_USER_SETTINGS
             : ((await getUserSettingsStore().get(key)) ?? DEFAULT_USER_SETTINGS);
-        const merged = userSettingsSchema.parse({ ...current, ...c.req.valid('json') });
+        const patch = c.req.valid('json');
+        // Feed-mode writes store the legacy-preserving spelling (rollout
+        // compat: a stale bundle for the same account validates this
+        // response/store echo against the old mode enum; lossless for
+        // best/new — see legacyPreservingFeedMode).
+        const merged = userSettingsSchema.parse({
+          ...current,
+          ...patch,
+          ...(patch.feed_mode !== undefined
+            ? { feed_mode: legacyPreservingFeedMode(patch.feed_mode) }
+            : {}),
+        });
         if (key !== undefined) await getUserSettingsStore().set(key, merged);
         return c.json(merged);
       })

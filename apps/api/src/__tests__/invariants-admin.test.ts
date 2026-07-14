@@ -369,27 +369,37 @@ describe('public WS-H read surfaces', () => {
     await fixture.ingestion.stories.update(storyId, { hiddenState: 'takedown' });
     const hidden = await app().request(`http://local/v1/stories/${storyId}/interpretations`);
     expect(hidden.status).toBe(404);
-    const missing = await app().request(
-      `http://local/v1/stories/${randomUUID()}/independent-sources`,
-    );
+    const missing = await app().request(`http://local/v1/stories/${randomUUID()}/interpretations`);
     expect(missing.status).toBe(404);
   });
 
-  it('the independent-sources drawer serves lineage context from stored data', async () => {
-    const fixture = freshInvariantServices();
-    const wire = await fixture.ingestion.sources.upsertByDomain('wire.example', { name: 'Wire' });
-    const { storyId } = await seedStory(fixture, {
-      canonicalUrl: 'https://wire.example/a',
-      sourceId: wire.sourceId,
+  it('the removed drawer paths serve the constant honest-absence compat stubs', async () => {
+    // Rollout compat: a pre-removal cached bundle's independent-sources
+    // drawer still fires both lazy reads on open; the stubs serve the OLD
+    // response schemas' honest-absence shapes UNIFORMLY for any UUID (no
+    // story lookup ⇒ no existence oracle, no content). Remove together with
+    // the drawer's other compat artifacts (docs/ranking/README.md).
+    freshInvariantServices();
+    const storyId = randomUUID();
+    const drawer = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
+    expect(drawer.status).toBe(200);
+    expect(await drawer.json()).toEqual({
+      story_id: storyId,
+      marginal_gain: null,
+      exposure_label: null,
+      redundancy_classes: 0,
+      source: null,
+      confirmed_syndication_count: 0,
+      co_group_stories: [],
+      primary_sources: [],
     });
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      source: { name: string } | null;
-      marginal_gain: number | null;
-    };
-    expect(body.source?.name).toBe('Wire');
-    expect(body.marginal_gain).toBeNull(); // no MERI run yet — honestly absent
+    const claims = await app().request(`http://local/v1/stories/${storyId}/claims`);
+    expect(claims.status).toBe(200);
+    expect(await claims.json()).toEqual({ items: [] });
+    // Malformed ids still 422 exactly as the old routes did.
+    expect((await app().request('http://local/v1/stories/nope/independent-sources')).status).toBe(
+      422,
+    );
   });
 });
 
@@ -617,7 +627,7 @@ describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { items: Array<Record<string, unknown>> };
     // The exposure label was removed from the wire; the MERI source-independence
-    // signal survives via the /independent-sources drawer + ranking, not the feed.
+    // signal survives via ranking (the `exposure_independence` feature), not the feed.
     for (const item of body.items) {
       expect(item).not.toHaveProperty('exposure_label');
     }
@@ -708,47 +718,5 @@ describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => 
     );
     expect(names.has('Local residents')).toBe(true);
     expect(names.has('Water engineers')).toBe(true);
-  });
-
-  it('the drawer lists visible co-group stories (syndication siblings)', async () => {
-    const fixture = freshInvariantServices();
-    const wire = await fixture.ingestion.sources.upsertByDomain('wire.example', { name: 'Wire' });
-    const mirror = await fixture.ingestion.sources.upsertByDomain('mirror.example', {
-      name: 'Mirror',
-    });
-    await fixture.ingestion.syndications.insert({
-      syndicationId: randomUUID(),
-      fromSourceId: wire.sourceId,
-      toSourceId: mirror.sourceId,
-      relationshipType: 'wire',
-      establishedBy: 'steward',
-      status: 'confirmed',
-      evidenceRef: 'steward:confirmed',
-      confidence: 1,
-    });
-    const { storyId } = await seedStory(fixture, {
-      canonicalUrl: 'https://wire.example/report',
-      sourceId: wire.sourceId,
-      title: 'Original wire report',
-    });
-    const { storyId: copyId } = await seedStory(fixture, {
-      canonicalUrl: 'https://mirror.example/report',
-      sourceId: mirror.sourceId,
-      title: 'Mirrored wire report',
-    });
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      co_group_stories: Array<{ story_id: string; relationship: string }>;
-    };
-    expect(body.co_group_stories.map((m) => m.story_id)).toContain(copyId);
-    expect(body.co_group_stories.find((m) => m.story_id === copyId)?.relationship).toBe(
-      'syndicated',
-    );
-    // Hidden members never appear (visibility-gated).
-    await fixture.ingestion.stories.update(copyId, { hiddenState: 'takedown' });
-    const after = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    const afterBody = (await after.json()) as { co_group_stories: Array<{ story_id: string }> };
-    expect(afterBody.co_group_stories.map((m) => m.story_id)).not.toContain(copyId);
   });
 });

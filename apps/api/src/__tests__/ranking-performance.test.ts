@@ -216,6 +216,7 @@ describe.skipIf(!PERF || !DB_URL)(
             feature_version: 1,
             fallback: true,
             fallback_reason: 'kill_switch',
+            user_ordering: null,
             replay_inputs: null,
             retain_until: retentionDeadline(timestamp, 180),
           };

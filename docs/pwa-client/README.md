@@ -139,7 +139,10 @@ version mismatch is discarded and the store falls back to its defaults.
   authenticated/session-expired). Persists only the **non-sensitive user
   context** — the session token lives in an HttpOnly, `SameSite=Strict` cookie,
   never in JS (XSS-token-theft defense). Cross-tab logout via `BroadcastChannel`.
-- **`useUIStore` (1.3b):** theme, reduced-motion, feed mode, focus mode, sheet.
+- **`useUIStore` (1.3b):** theme, reduced-motion, feed mode (the §11.6 sort
+  orders `best`/`rising`/`sources`/`debates`/`new`; a legacy persisted value
+  normalizes forward on rehydration instead of discarding the slice), focus
+  mode, sheet.
   The accessibility-adapter surface — applies `data-theme` / `data-motion` to
   `<html>` for the WS-B token layer.
 - **`useFeatureFlagStore` (1.3c):** `cryptoEnabled` / `governanceEnabled` /
@@ -295,7 +298,9 @@ uploaded (to `attention.aggregate`).
   still surfaces, only rarely, never removed. The score decays with time, so the
   frequency recovers once the reader moves on. Nothing about the circling ever
   leaves the device; this reshapes only what THIS browser renders, never what
-  the server ranks.
+  the server ranks. Dampening applies only in the `best` sort mode — every
+  other §11.6 mode (`new`, `sources`, `debates`, `rising`) is an explicit
+  COMPLETE ordering the reader chose, which local thinning would corrupt.
 
 - **Active viewing (4.1a):** dwell accrues only while visible **and** focused,
   derived from current DOM truth on every event (robust to unpaired events); a

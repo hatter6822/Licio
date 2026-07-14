@@ -36,6 +36,7 @@ import {
   FEATURE_SCHEMA_VERSION,
   type FeatureVector,
   gweiDeploymentGate,
+  metricOrder,
   type RankingDecisionLog,
   type RankingProfileConfig,
   type RankingRequestContext,
@@ -47,15 +48,18 @@ import {
   type ScoredItem,
   selectProfileForContext,
   topicRelevance,
+  type UserOrdering,
 } from '@licio/ranking';
 import {
   deriveStorySafetyState,
   type FeedItem,
   type FeedMode,
+  type FeedModeCompat,
   feedItemSchema,
   isSentinelTopicId,
   LEGACY_DISTRIBUTION_REASON,
   legacyRatingLabel,
+  normalizeFeedMode,
   rankingDecisionLoggedEventSchema,
   TOPIC_ID_BY_SLUG,
   TOPIC_REGISTRY,
@@ -82,7 +86,10 @@ export interface FeedServeRequest {
   surfaceRoomId: string | null;
   /** The topic a `topic`-surface request is scoped to (`?topic=`). */
   surfaceTopicId: string | null;
-  mode: FeedMode | undefined;
+  /** Wire value, canonical or legacy (pre-redesign cached bundles still send
+   *  legacy modes) — normalized via `normalizeFeedMode` before serving (see
+   *  LEGACY_FEED_MODES in @licio/shared). */
+  mode: FeedModeCompat | undefined;
   /** SEEN-AWARE pagination cursor: the previous page's request id. The next
    *  page re-runs the pipeline excluding everything that page chain already
    *  served. Absent/unknown/expired cursors serve the first page (clients
@@ -362,7 +369,21 @@ async function commitDecision(
 /** Signal NAMES that fed one item's decision (names only, never values). */
 function signalNamesOf(log: RankingDecisionLog, itemId: string): string[] {
   const scored = log.score_components[itemId];
-  if (scored === undefined) return ['chronological'];
+  if (scored === undefined) {
+    // Fallback / user-ordered serves carry no score components; the audit
+    // names the ONE ordering signal that ran (`new` IS the chronological
+    // ordering, degradations always serve chronological).
+    switch (log.user_ordering) {
+      case 'rising':
+        return ['attention_velocity'];
+      case 'sources':
+        return ['sources_count'];
+      case 'debates':
+        return ['corrections_tally'];
+      default:
+        return ['chronological'];
+    }
+  }
   const names: string[] = [];
   const components = scored.score_components;
   if (components.active_attention !== null) names.push('active_attention');
@@ -487,6 +508,54 @@ async function filterByVisibility(
   return { filtered, excludedCount };
 }
 
+/**
+ * Stage-2 feature join, shared by the ranked path and the `rising` user
+ * ordering so both operate on CURRENT-schema vectors. Bulk-reads the latest
+ * vectors, then per item:
+ *
+ *  • Cold-start write-through (WS-I.2.5b): an item the feature store has not
+ *    covered yet joins the honest EMPTY vector — which must itself be a
+ *    stored revision, or the decision could not be replayed at its recorded
+ *    versions. The empty vector carries metadata only.
+ *  • Migration-on-read: a STALE-schema row (a store carried across a
+ *    FEATURE_SCHEMA_VERSION bump) can hold the old field set (e.g. no
+ *    `attention_velocity`), so scoring/ordering would run on old fields
+ *    while the decision log claims the new version. Rebuild it at the
+ *    current schema first; the rebuilt row sticks (one-time, self-healing).
+ */
+async function currentFeaturesFor(
+  services: RankingServices,
+  candidates: readonly Candidate[],
+  nowMs: number,
+): Promise<Map<string, FeatureVector>> {
+  const featuresById = await services.featureStore.getLatestMany(candidates.map((c) => c.item_id));
+  for (const candidate of candidates) {
+    const stored = featuresById.get(candidate.item_id);
+    if (stored !== undefined && stored.feature_version >= FEATURE_SCHEMA_VERSION) continue;
+    if (stored !== undefined) {
+      await refreshStoryFeatures(services, candidate.item_id);
+      const rebuilt = await services.featureStore.getLatest(candidate.item_id);
+      featuresById.set(
+        candidate.item_id,
+        rebuilt !== null && rebuilt.feature_version >= FEATURE_SCHEMA_VERSION
+          ? rebuilt
+          : emptyFeatureVector(candidate, nowMs),
+      );
+      continue;
+    }
+    const empty = emptyFeatureVector(candidate, nowMs);
+    const written = await services.featureStore.upsert(empty);
+    if (written !== null) {
+      featuresById.set(candidate.item_id, written);
+    } else {
+      // Lost a race to a concurrent writer: use whatever landed.
+      const latest = await services.featureStore.getLatest(candidate.item_id);
+      if (latest !== null) featuresById.set(candidate.item_id, latest);
+    }
+  }
+  return featuresById;
+}
+
 /** Serve one feed request through the full WS-I pipeline. */
 export async function serveFeed(
   services: RankingServices,
@@ -498,28 +567,23 @@ export async function serveFeed(
   const config = services.config();
   const bucket = services.privacyBucket(request.userId);
   const user = await services.userContext(request.userId);
-  const mode: FeedMode = request.mode ?? (user.feedModeDefault as FeedMode | null) ?? 'balanced';
+  // Request > stored default > platform default. Either source can be a
+  // legacy value (pre-redesign bundles still send them; pre-redesign blobs
+  // round-trip unchanged) — `normalizeFeedMode` is total over strings, and
+  // the mapping preserves intent by construction (legacy
+  // `low-personalization` lands on the non-personalized `new` sort, so no
+  // raw-value special case is needed here).
+  const mode: FeedMode = normalizeFeedMode(request.mode ?? user.feedModeDefault ?? 'best');
 
   // --- Stage 1: candidate generation --------------------------------------
   const retrievalBudget = Math.max(...config.profiles.map((p) => p.candidate_budget));
   const baseProfile =
     config.profiles.find((p) => p.profile_id === 'evergreen') ?? config.profiles[0];
   if (baseProfile === undefined) throw new Error('no ranking profiles configured');
-  // Local mode boosts the local quota at the CANDIDATE stage only.
-  const quotaProfile: RankingProfileConfig =
-    mode === 'local'
-      ? {
-          ...baseProfile,
-          quotas: {
-            ...baseProfile.quotas,
-            local_min_pct: Math.min(50, baseProfile.quotas.local_min_pct * 3),
-          },
-        }
-      : baseProfile;
   const assembled = await assembleCandidatePool(
     services.retrievers,
     services.classification,
-    { ...quotaProfile, candidate_budget: retrievalBudget },
+    { ...baseProfile, candidate_budget: retrievalBudget },
     {
       userId: request.userId,
       surface: request.surface,
@@ -657,17 +721,31 @@ export async function serveFeed(
       until: new Date(gweiOverridden.untilMs).toISOString(),
     });
   }
+  // The kill switch outranks EVERYTHING (an engaged switch serves plain
+  // chronological even for an explicit sort request — the operator pulled the
+  // plug on computed orderings); then the user's explicit sort order (`best`
+  // is the ranked pipeline, every other mode is a complete deterministic
+  // ordering over the same safety-filtered set); the GWEI gate binds only the
+  // ranked objective it measures.
   let fallbackReason: FallbackReason | null = null;
-  if (killSwitch.engaged) fallbackReason = 'kill_switch';
-  else if (mode === 'chronological') fallbackReason = 'user_mode';
-  else if (gwei.blocked && gweiOverridden === null) fallbackReason = 'gwei_gate';
-  else if (safety.feasible.length === 0) fallbackReason = 'empty_pool';
+  let userOrdering: UserOrdering | null = null;
+  if (killSwitch.engaged) {
+    fallbackReason = 'kill_switch';
+  } else if (mode !== 'best') {
+    fallbackReason = 'user_mode';
+    userOrdering = mode;
+  } else if (gwei.blocked && gweiOverridden === null) {
+    fallbackReason = 'gwei_gate';
+  } else if (safety.feasible.length === 0) {
+    fallbackReason = 'empty_pool';
+  }
 
   if (fallbackReason !== null) {
     return serveFallback(services, request, {
       requestId,
       parentRequestId,
       nowIso,
+      nowMs,
       bucket,
       profile,
       feasible: safety.feasible,
@@ -675,50 +753,26 @@ export async function serveFeed(
       safetyExclusions: safety.exclusions,
       quotaOutcomes: assembled.quotaOutcomes,
       reason: fallbackReason,
-      gweiApplication: gwei.application,
+      userOrdering,
+      // The gate application is recorded ONLY on the serve it actually
+      // shaped: a `gwei_gate` fallback. A user-sorted or kill-switch serve
+      // is not a deployment of the ranked objective the gate governs —
+      // logging an `excluded` application there would misattribute an
+      // enforcement to a decision the gate never touched (the ranked path
+      // records its own application separately, enforced or shadow).
+      gweiApplication: fallbackReason === 'gwei_gate' ? gwei.application : null,
       retentionDays: config.decisionLogRetentionDays,
       visibilityExcludedCount,
     });
   }
 
   // --- Stage 2 (join) + 4–5 (score + diversify) ----------------------------
-  const featuresById = await services.featureStore.getLatestMany(
-    safety.feasible.map((c) => c.item_id),
-  );
-  // Cold-start write-through (WS-I.2.5b): an item the feature store has not
-  // covered yet is scored on the honest EMPTY vector — which must itself be
-  // a stored revision, or the decision could not be replayed at its
-  // recorded versions. The empty vector carries metadata only.
-  for (const candidate of safety.feasible) {
-    const stored = featuresById.get(candidate.item_id);
-    if (stored !== undefined && stored.feature_version >= FEATURE_SCHEMA_VERSION) continue;
-    if (stored !== undefined) {
-      // A STALE-schema row (a store carried across a FEATURE_SCHEMA_VERSION bump)
-      // can hold pre-catalog/random topic_ids and lack sensitivity_labels, so
-      // scoring would run on the old field set while the decision log claims the
-      // new version. Rebuild it at the current schema before scoring; the
-      // rebuilt row sticks (a one-time, self-healing migration-on-read).
-      await refreshStoryFeatures(services, candidate.item_id);
-      const rebuilt = await services.featureStore.getLatest(candidate.item_id);
-      featuresById.set(
-        candidate.item_id,
-        rebuilt !== null && rebuilt.feature_version >= FEATURE_SCHEMA_VERSION
-          ? rebuilt
-          : emptyFeatureVector(candidate, nowMs),
-      );
-      continue;
-    }
-    const empty = emptyFeatureVector(candidate, nowMs);
-    const written = await services.featureStore.upsert(empty);
-    if (written !== null) {
-      featuresById.set(candidate.item_id, written);
-    } else {
-      // Lost a race to a concurrent writer: use whatever landed.
-      const latest = await services.featureStore.getLatest(candidate.item_id);
-      if (latest !== null) featuresById.set(candidate.item_id, latest);
-    }
-  }
-  const personalizationOn = user.personalizationEnabled && mode !== 'low-personalization';
+  const featuresById = await currentFeaturesFor(services, safety.feasible, nowMs);
+  // Only `best` reaches this ranked path (every other mode fell back to its
+  // complete deterministic ordering above, and legacy `low-personalization`
+  // normalizes to `new`), so the user's durable privacy setting is the sole
+  // personalization switch.
+  const personalizationOn = user.personalizationEnabled;
   let relevanceByItem: Map<string, number> | null = null;
   if (personalizationOn && request.userId !== null) {
     relevanceByItem = new Map();
@@ -728,10 +782,10 @@ export async function serveFeed(
     }
   }
   const phiRisk = request.userId === null ? null : await services.userPhiRisk(request.userId);
-  const sourceShareOverride =
-    mode === 'source-diverse'
-      ? Math.max(1, Math.floor(profile.balancing.max_source_share_pct / 2))
-      : null;
+  // No serving path sets a balancing override any more (the `source-diverse`
+  // mode was replaced by the explicit sort orders); the context field and the
+  // replay-inputs slot remain so pre-redesign decision logs replay exactly.
+  const sourceShareOverride: number | null = null;
   // Real lens assignments for room-surface lens balancing (WS-I.2.4b).
   const lensByItem =
     request.surface === 'room' && request.surfaceRoomId !== null
@@ -853,6 +907,7 @@ interface FallbackArgs {
   requestId: string;
   parentRequestId: string | null;
   nowIso: string;
+  nowMs: number;
   bucket: string;
   profile: RankingProfileConfig;
   feasible: readonly Candidate[];
@@ -860,6 +915,10 @@ interface FallbackArgs {
   safetyExclusions: readonly SafetyExclusion[];
   quotaOutcomes: RankingDecisionLog['quota_outcomes'];
   reason: FallbackReason;
+  /** The user-selected sort order when `reason === 'user_mode'`; null on the
+   *  degradation reasons (kill switch, GWEI gate, empty pool), which always
+   *  serve plain chronological. */
+  userOrdering: UserOrdering | null;
   gweiApplication: RankingDecisionLog['constraints_applied'][number] | null;
   retentionDays: number;
   /** WS-Q.4.2b — visibility-gate drops (the gate ran before the ranked/fallback
@@ -868,27 +927,108 @@ interface FallbackArgs {
 }
 
 /**
- * WS-I.4.1b — the safe fallback ranker: chronological ordering over the
- * SAFETY-FILTERED set (the filter is never bypassed), no PWAtt, no
- * personalization, no financial anything; and a decision log marked
- * `fallback: true` with the honest fallback reason.
+ * Resolve the served ordering over the SAFETY-FILTERED set:
+ *
+ *   • degradations + the `new` mode — strict chronological (WS-I.4.1b: no
+ *     PWAtt, no personalization, no financial anything);
+ *   • `sources` / `debates` — the §5.6 card-signal metrics (sourced-comment
+ *     count / the WS-T corrections tally), batched over the WHOLE feasible
+ *     set and handed back so the page assembly reuses the same read;
+ *   • `rising` — the `attention_velocity` feature over current-schema
+ *     vectors (the same stage-2 join as the ranked path, so a stale row is
+ *     rebuilt rather than silently ordered as 0).
+ *
+ * Every ordering is complete and deterministic (`metricOrder` tie-breaks
+ * chronologically) — an explicit reader choice never reshapes the safety
+ * filter, only the order.
+ */
+async function orderFeasibleForFallback(
+  services: RankingServices,
+  args: FallbackArgs,
+): Promise<{
+  ordered: Candidate[];
+  feasibleSignals: Map<string, StoryCardSignals> | null;
+  /** The rising ordering's feature join, handed back so the page assembly
+   *  reuses the same read instead of re-fetching. */
+  feasibleFeatures: Map<string, FeatureVector> | null;
+}> {
+  if (args.userOrdering === 'sources' || args.userOrdering === 'debates') {
+    const feasibleSignals = await cardSignalsForPage(
+      services,
+      args.feasible.map((candidate) => candidate.item_id),
+    );
+    const metric = new Map<string, number>();
+    for (const candidate of args.feasible) {
+      const signals = feasibleSignals.get(candidate.item_id);
+      if (signals === undefined) continue;
+      metric.set(
+        candidate.item_id,
+        args.userOrdering === 'sources'
+          ? signals.sourced
+          : signals.corrections.active +
+              signals.corrections.validated +
+              signals.corrections.incorrect,
+      );
+    }
+    return { ordered: metricOrder(args.feasible, metric), feasibleSignals, feasibleFeatures: null };
+  }
+  if (args.userOrdering === 'rising') {
+    const feasibleFeatures = await currentFeaturesFor(services, args.feasible, args.nowMs);
+    const metric = new Map<string, number>();
+    for (const candidate of args.feasible) {
+      const velocity = feasibleFeatures.get(candidate.item_id)?.attention_velocity;
+      if (velocity !== undefined) metric.set(candidate.item_id, velocity);
+    }
+    return { ordered: metricOrder(args.feasible, metric), feasibleSignals: null, feasibleFeatures };
+  }
+  return {
+    ordered: chronologicalOrder(args.feasible),
+    feasibleSignals: null,
+    feasibleFeatures: null,
+  };
+}
+
+/**
+ * WS-I.4.1b + the user sort orders: a COMPLETE deterministic ordering over
+ * the SAFETY-FILTERED set (the filter is never bypassed) — chronological for
+ * every degradation reason, the mode's metric order for a `user_mode` serve —
+ * and a decision log marked `fallback: true` with the honest reason and the
+ * ordering that ran.
  */
 async function serveFallback(
   services: RankingServices,
   request: FeedServeRequest,
   args: FallbackArgs,
 ): Promise<ServedFeed> {
-  const ordered = chronologicalOrder(args.feasible).slice(0, args.profile.page_size);
-  // The degraded feed still carries honest §5.6 card signals — one batched
-  // read, same as the ranked path.
-  const signalsByStory = await cardSignalsForPage(
-    services,
-    ordered.map((candidate) => candidate.item_id),
-  );
+  const orderedFeasible = await orderFeasibleForFallback(services, args);
+  const ordered = orderedFeasible.ordered.slice(0, args.profile.page_size);
+  // The page still carries honest §5.6 card signals — reuse the whole-set
+  // read when the ordering already made it, else one batched page read (the
+  // same shape as the ranked path).
+  const signalsByStory =
+    orderedFeasible.feasibleSignals ??
+    (await cardSignalsForPage(
+      services,
+      ordered.map((candidate) => candidate.item_id),
+    ));
+  // USER-SORTED serves carry the same per-item feature row as the ranked
+  // path, so the card POSTURE (the MFCI-derived safety state, the
+  // coordination chip, the legacy label approximation) agrees across
+  // surfaces — a high/severe-MFCI story must read "under review" here
+  // exactly as it does on the ranked feed and the story detail. The
+  // DEGRADATION fallbacks (kill switch / GWEI gate / empty pool) stay
+  // feature-blind: §30.5 requires an engaged kill switch to let no
+  // PWAtt-derived value (the legacy label reads `active_attention`) reach a
+  // served field, and `deriveStorySafetyState` degrades gracefully.
+  const featuresByStory =
+    args.userOrdering === null
+      ? null
+      : (orderedFeasible.feasibleFeatures ??
+        (await services.featureStore.getLatestMany(ordered.map((c) => c.item_id))));
   const entries: SelectedEntry[] = ordered.map((candidate) => ({
     itemId: candidate.item_id,
     score: 0,
-    features: undefined,
+    features: featuresByStory?.get(candidate.item_id),
     moreOnThisStory: [],
     signals: signalsByStory.get(candidate.item_id) ?? EMPTY_CARD_SIGNALS,
   }));
@@ -918,6 +1058,7 @@ async function serveFallback(
     feature_version: FEATURE_SCHEMA_VERSION,
     fallback: true,
     fallback_reason: args.reason,
+    user_ordering: args.userOrdering,
     replay_inputs: null,
     retain_until: retentionDeadline(args.nowIso, args.retentionDays),
   });
@@ -926,6 +1067,7 @@ async function serveFallback(
     request_id: args.requestId,
     surface: request.surface,
     reason: args.reason,
+    user_ordering: args.userOrdering,
   });
   // The fallback paginates too (deep scroll keeps working while ranking is
   // paused): same exclusion semantics, time order, honest reason per page —

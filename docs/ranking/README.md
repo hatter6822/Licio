@@ -307,8 +307,10 @@ exclusions with policy reasons, quota outcomes (target always reported,
 with the `applicable` flag), experiment ids, the
 profile id/version, and `replay_inputs` (the exact profile snapshot, the
 promotion-enforcement flags in force, per-item resolved topic relevance —
-the user's interest LIST is never persisted — the user PHI input, any
-feed-mode balancing override, and the per-item LENS assignments room
+the user's interest LIST is never persisted — the user PHI input, the
+feed-mode balancing override slot (always null since the `source-diverse`
+mode was removed; retained so pre-redesign logs replay at their recorded
+inputs), and the per-item LENS assignments room
 surfaces ranked with: each item's lens is the most frequent `lens_id`
 among its thread's lens-tagged contributions, ties lexicographic, so lens
 balancing is deterministic and replayable). Retention is 180–365 days
@@ -413,6 +415,76 @@ The §23.3 wire fields that carry the diversification/context outputs:
   machine's terminal `restricted` state reaches the wire `restricted` posture
   (it never silently collapses to `ok`); the card renders any review/restricted
   posture as the descriptive "Under review" chip.
+
+## Feed sort modes (SPEC §11.6)
+
+The reader-facing sort switch serves five OBJECTIVE, content-derived
+orders — never popularity, never location (the platform collects no user
+location, so the former "Local" mode was removed):
+
+| Mode | Ordering | Path |
+|---|---|---|
+| `best` (default) | Highest participation-weighted attention right now — the §5.4 constrained-optimization objective | The full ranked pipeline |
+| `rising` | Fastest-INCREASING attention: the `attention_velocity` feature (the signed window-over-window delta of the served PWAtt active-attention component, §30.5-gated at assembly) | `metricOrder` user ordering |
+| `sources` | Most sourced: the §5.6 `sources_count` card signal (published comments with ≥1 citation), batched over the whole feasible set | `metricOrder` user ordering |
+| `debates` | Most WS-T debates: the corrections tally (`active + validated + incorrect`) | `metricOrder` user ordering |
+| `new` | Most recent (strict chronological) | `chronologicalOrder` user ordering |
+
+The user orderings are COMPLETE deterministic sorts over the SAME
+safety-filtered, visibility-gated pool as the ranked path (neither filter
+is ever bypassed; ties break chronologically, then by item id). They log
+`fallback: true, fallback_reason: 'user_mode'` with the honest
+`user_ordering` field, paginate with the same seen-aware cursor chain, and
+carry the same §5.6 card signals. The engaged kill switch outranks every
+mode (plain chronological, reason `kill_switch`); the GWEI gate binds only
+the ranked objective it measures. The `rising` path shares the ranked
+path's stage-2 feature join (`currentFeaturesFor`: cold-start
+write-through + the migration-on-read rebuild), so it orders on
+current-schema vectors instead of silently sorting stale rows as 0.
+
+**Legacy modes (DEPRECATED compat — tracked residual).** The pre-redesign
+mode set (`balanced`, `chronological`, `source-diverse`, `local`,
+`low-personalization`) stays wire- and storage-ACCEPTED
+(`feedModeCompatSchema` / `LEGACY_FEED_MODES` in `@licio/shared`): stored
+personalization blobs round-trip unchanged so pre-redesign bundles keep
+parsing them, and every consumer normalizes through `normalizeFeedMode`
+(`balanced`/`source-diverse`/`local`→`best`; `chronological` AND
+`low-personalization`→`new`). Two mapping choices are deliberate:
+`source-diverse` does NOT map to `sources` (outlet-share balancing and
+citation counts are different things), and `low-personalization` maps to
+the fully NON-personalized `new` sort — mapping it to `best` would
+silently re-enable personalized ranking the moment an updated client
+normalizes and re-sends the canonical mode; `new` preserves the user's
+reduce-personalization intent on every path (live request, stored default,
+persisted slice), matching the PHI-4 "Reduce personalization" control. The
+durable OFF switch remains the `personalization_enabled` privacy setting.
+The removed pipeline modulations (the `source-diverse` balancing override
+and the `local` candidate-quota boost) are gone outright — the §13.2 local
+diversity QUOTA itself (user-configured locale, never geolocation) is
+unaffected. The stored/wire DEFAULTS
+(`defaultPersonalizationSettings().feed_mode`,
+`DEFAULT_USER_SETTINGS.feed_mode`) stay on the LEGACY `balanced` value
+until the compat cut: the defaults are seeded into new accounts and
+emitted on `/v1/privacy/settings`, `/v1/feed/preferences`, and
+`/v1/settings` (for users with no stored row), and a pre-redesign bundle
+validates those responses against the old enum — a canonical default
+would break every settings read on stale bundles (a shared test pins
+this). DURABLE WRITES apply the same discipline
+(`legacyPreservingFeedMode`, applied at all three PATCH boundaries): a
+mode change to `best`/`new` stores its LOSSLESS legacy spelling
+(`balanced`/`chronological` — normalization maps it straight back), so a
+stale bundle on the same account keeps parsing the echoed settings. The
+three genuinely new sorts (`rising`/`sources`/`debates`) have no legacy
+spelling — a downgrade would lose the preference for updated devices —
+so they store canonically, and a stale sibling bundle's settings read
+fails until its service worker updates (the one narrow, self-healing
+residual of this compat layer). **Removal target:** drop `LEGACY_FEED_MODES` +
+`feedModeCompatSchema` acceptance, flip both defaults to
+`DEFAULT_FEED_MODE`, and delete the two inert independent-sources-drawer
+compat stubs (`GET /v1/stories/:id/independent-sources` +
+`GET /v1/stories/:id/claims` — constant honest-absence payloads for
+pre-removal bundles), together with `rating_label` (below) once
+pre-redesign bundles have aged out of service-worker caches.
 
 ## Kill switch and fallback (WS-I.4)
 

@@ -10,6 +10,7 @@ import {
   chronologicalOrder,
   diffRankings,
   emptyFeatureVector,
+  metricOrder,
   type RankingEnforcement,
   rankFeasibleSet,
   SHADOW_RANKING_ENFORCEMENT,
@@ -358,6 +359,71 @@ describe('WS-I.4.1b chronological fallback ordering', () => {
       makeCandidate(3, { freshness_timestamp: new Date(T0 + 1000).toISOString() }),
     ]);
     expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(3), uuidOf(1), uuidOf(2)]);
+  });
+});
+
+describe('§11.6 user metric sort orders (metricOrder)', () => {
+  it('orders by metric desc, then freshness desc, then item id', () => {
+    const tied = new Date(T0).toISOString();
+    const candidates = [
+      makeCandidate(1, { freshness_timestamp: tied }),
+      makeCandidate(2, { freshness_timestamp: new Date(T0 + 1000).toISOString() }),
+      makeCandidate(3, { freshness_timestamp: tied }),
+      makeCandidate(4, { freshness_timestamp: new Date(T0 + 2000).toISOString() }),
+    ];
+    const ordered = metricOrder(
+      candidates,
+      new Map([
+        [uuidOf(1), 3],
+        [uuidOf(2), 3],
+        [uuidOf(3), 1],
+      ]),
+    );
+    // 2 beats 1 on freshness within the metric tie; 4 (no metric ⇒ 0) sinks
+    // below 3 (metric 1) despite being the freshest candidate overall.
+    expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(2), uuidOf(1), uuidOf(3), uuidOf(4)]);
+  });
+
+  it('a signed metric puts falling items below flat ones', () => {
+    const tied = new Date(T0).toISOString();
+    const ordered = metricOrder(
+      [
+        makeCandidate(1, { freshness_timestamp: tied }),
+        makeCandidate(2, { freshness_timestamp: tied }),
+        makeCandidate(3, { freshness_timestamp: tied }),
+      ],
+      new Map([
+        [uuidOf(1), -0.4], // falling
+        [uuidOf(3), 0.4], // rising
+        // 2 absent ⇒ 0 (flat / no history)
+      ]),
+    );
+    expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(3), uuidOf(2), uuidOf(1)]);
+  });
+
+  it('a non-finite metric sorts as 0 and never corrupts the order', () => {
+    const tied = new Date(T0).toISOString();
+    const ordered = metricOrder(
+      [
+        makeCandidate(1, { freshness_timestamp: tied }),
+        makeCandidate(2, { freshness_timestamp: tied }),
+      ],
+      new Map([
+        [uuidOf(2), Number.NaN],
+        [uuidOf(1), 1],
+      ]),
+    );
+    expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(1), uuidOf(2)]);
+  });
+
+  it('is deterministic (identical inputs ⇒ identical output; input untouched)', () => {
+    const candidates = [makeCandidate(2), makeCandidate(1), makeCandidate(3)];
+    const inputOrder = candidates.map((c) => c.item_id);
+    const metric = new Map([[uuidOf(1), 2]]);
+    const a = metricOrder(candidates, metric).map((c) => c.item_id);
+    const b = metricOrder(candidates, metric).map((c) => c.item_id);
+    expect(a).toEqual(b);
+    expect(candidates.map((c) => c.item_id)).toEqual(inputOrder);
   });
 });
 

@@ -87,28 +87,6 @@ export function useStoryInterpretationsQuery(storyId: string, enabled = true) {
   });
 }
 
-/** The SPEC §7.6 independent-sources drawer (MERI, WS-H.2.3a).  Lazy by design:
- *  callers pass `enabled` only once the drawer opens, so a story load costs
- *  nothing. */
-export function useIndependentSourcesQuery(storyId: string, enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.storyIndependentSources(storyId),
-    queryFn: () => api.fetchIndependentSources(storyId),
-    enabled: enabled && storyId.length > 0,
-    ...cachePolicy.feed,
-  });
-}
-
-/** The story's public claims (WS-F.1.2a) — lazy alongside the drawer. */
-export function useStoryClaimsQuery(storyId: string, enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.storyClaims(storyId),
-    queryFn: () => api.fetchStoryClaims(storyId),
-    enabled: enabled && storyId.length > 0,
-    ...cachePolicy.feed,
-  });
-}
-
 export function useThreadQuery(threadId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.thread(threadId),

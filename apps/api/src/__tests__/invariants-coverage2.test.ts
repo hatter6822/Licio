@@ -9,9 +9,9 @@
 // empty bounded maps).
 import { randomUUID } from 'node:crypto';
 import { minhashSignature } from '@licio/invariants';
-import { independentSourcesResponseSchema, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   assembleMeriCandidates,
   assemblePhiTopicData,
@@ -26,13 +26,6 @@ import {
 } from '../invariants/runner.js';
 import { runBatchTier } from '../invariants/scheduler.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
-import type { CitedContribution, ModerationContentPort } from '../moderation/ports.js';
-import {
-  createInMemoryModerationServices,
-  getModerationServices,
-  resetModerationServicesForTests,
-  setModerationServices,
-} from '../moderation/services.js';
 import { createV1Routes } from '../routes/v1.js';
 import { attentionEvent } from './event-test-helpers.js';
 import {
@@ -104,158 +97,6 @@ describe('public surfaces with stored data', () => {
     expect(body.interpretations[1]?.summary).toMatch(/the same way/);
     // Invalid UUID 422s.
     expect((await app().request('http://local/v1/stories/nope/interpretations')).status).toBe(422);
-  });
-
-  it('maps all four exposure-label tiers on the drawer endpoint', async () => {
-    const fixture = freshInvariantServices();
-    const gains: Record<string, number> = {};
-    const cases: Array<{ gain: number; label: string }> = [
-      { gain: 1, label: 'independent_source' },
-      { gain: 0.5, label: 'new_angle' },
-      { gain: 0.01, label: 'same_claim_new_evidence' },
-      { gain: 0, label: 'duplicate_context' },
-    ];
-    const ids: string[] = [];
-    for (const { gain } of cases) {
-      const { storyId } = await seedStory(fixture);
-      ids.push(storyId);
-      gains[storyId] = gain;
-    }
-    await upsertOutput(fixture, {
-      invariantType: 'MERI',
-      targetType: 'feed',
-      targetId: GLOBAL_FEED_TARGET_ID,
-      scoreVector: {
-        meri: 0.8,
-        marginal_gains: gains,
-        approximation: false,
-        per_class_bounds: { 'singleton:x': 1 },
-        group_ids: [],
-      },
-    });
-    for (let i = 0; i < cases.length; i += 1) {
-      const response = await app().request(`http://local/v1/stories/${ids[i]}/independent-sources`);
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { exposure_label: string | null };
-      expect(body.exposure_label).toBe(cases[i]?.label);
-    }
-    expect((await app().request('http://local/v1/stories/nope/independent-sources')).status).toBe(
-      422,
-    );
-  });
-
-  it('a degraded MERI row contributes NOTHING: gains AND redundancy classes both gated', async () => {
-    const fixture = freshInvariantServices();
-    const { storyId } = await seedStory(fixture);
-    await upsertOutput(fixture, {
-      invariantType: 'MERI',
-      targetType: 'feed',
-      targetId: GLOBAL_FEED_TARGET_ID,
-      scoreVector: {
-        meri: 0.8,
-        marginal_gains: { [storyId]: 1 },
-        approximation: false,
-        per_class_bounds: { 'singleton:x': 1, 'singleton:y': 0.5 },
-        group_ids: [],
-      },
-      // The WS-H.1.2c `usable` gate: an INSUFFICIENT_COVERAGE row is ABSENT to
-      // every stored-output consumer — no stale gain, no fabricated classes.
-      reasonCodes: ['INSUFFICIENT_COVERAGE'],
-    });
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = independentSourcesResponseSchema.parse(await response.json());
-    expect(body.marginal_gain).toBeNull();
-    expect(body.exposure_label).toBeNull();
-    expect(body.redundancy_classes).toBe(0);
-  });
-});
-
-describe('primary_sources on the independent-sources drawer (route surface)', () => {
-  afterEach(() => {
-    resetModerationServicesForTests();
-  });
-
-  function stubContentPort(row: CitedContribution): ModerationContentPort {
-    return {
-      async resolveTarget() {
-        return { exists: true, subjectUserId: null, contentKind: 'contribution' };
-      },
-      async applyContentState() {},
-      async applyAccountState() {},
-      async contentSnapshot() {
-        return null;
-      },
-      async threadContext() {
-        return { items: [], reportedContributionId: null };
-      },
-      async getCitedContribution(contributionId) {
-        return contributionId === row.contributionId ? row : null;
-      },
-    };
-  }
-
-  it('surfaces a steward mark through the schema-validated wire response', async () => {
-    const fixture = freshInvariantServices();
-    const { storyId, threadId } = await seedStory(fixture);
-    const contributionId = randomUUID();
-    setModerationServices(
-      createInMemoryModerationServices({
-        content: stubContentPort({
-          contributionId,
-          threadId,
-          storyId,
-          storyTitle: 'Seeded story',
-          type: 'comment',
-          bodyPreview: 'Sourced comment.',
-          citations: [{ url: 'https://example.org/primary-dataset', title: 'Primary dataset' }],
-          createdAt: new Date().toISOString(),
-          threadRemoved: false,
-        }),
-      }),
-    );
-    const inserted = await getModerationServices().evidenceDecisions.insert({
-      contributionId,
-      threadId,
-      storyId,
-      action: 'mark-primary-source',
-      citationUrl: 'https://example.org/primary-dataset',
-      citationTitle: 'Primary dataset',
-      reasonCode: null,
-      note: null,
-      decidedBy: null,
-    });
-    expect(inserted.ok).toBe(true);
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = independentSourcesResponseSchema.parse(await response.json());
-    expect(body.primary_sources).toEqual([
-      { url: 'https://example.org/primary-dataset', title: 'Primary dataset' },
-    ]);
-  });
-
-  it('fail-closed: a moderation singleton without a content port surfaces nothing', async () => {
-    const fixture = freshInvariantServices();
-    const { storyId, threadId } = await seedStory(fixture);
-    // The bare in-memory seam has NO published-only `getCitedContribution`
-    // read — an unverifiable mark must surface nothing, not leak.
-    setModerationServices(createInMemoryModerationServices());
-    const inserted = await getModerationServices().evidenceDecisions.insert({
-      contributionId: randomUUID(),
-      threadId,
-      storyId,
-      action: 'mark-primary-source',
-      citationUrl: 'https://example.org/unverifiable',
-      citationTitle: null,
-      reasonCode: null,
-      note: null,
-      decidedBy: null,
-    });
-    expect(inserted.ok).toBe(true);
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = independentSourcesResponseSchema.parse(await response.json());
-    expect(body.primary_sources).toEqual([]);
   });
 });
 
