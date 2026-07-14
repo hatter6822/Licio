@@ -1422,6 +1422,65 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     expect(executed).toMatchObject({ ok: true });
   });
 
+  it('manual execution refuses once the execution window has closed (W7 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    // Past the timelock, the challenge window, AND the 14-day execution
+    // window: a delayed sweep must not leave the proposal steward-executable.
+    deps.clockAdvance(
+      3_600 * 1000 + DEFAULT_KNOMOSIS_CONFIG.wsmExecutionWindowSeconds * 1000 + 60_000,
+    );
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'execution_window_expired' });
+  });
+
+  it('unpaid grant obligations stay encumbered against new spends (W7 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps); // 4000 USDC grant
+    deps.clockAdvance(3_600 * 1000 + 1_000);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    expect(executed).toMatchObject({ ok: true });
+    // The reservation is CONSUMED but the grant is unpaid — the cash is still
+    // in the reconciled balance.  Re-reconcile to a small balance: 5000 on the
+    // books, 4000 of it owed to the executed grant.
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    await deps.treasuries.setReconciliation(
+      treasury?.treasuryId ?? '',
+      'synced',
+      { USDC: '5000' },
+      new Date(deps.now()).toISOString(),
+    );
+    // A 4000 ask fits the window headroom (10000 − 4000 consumed = 6000) and
+    // the raw balance — but only 1000 is actually free.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_amount: '4000' }),
+      }),
+    ).toMatchObject({ ok: false, code: 'insufficient_funds' });
+    // A 900 ask fits the free liquidity.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_amount: '900' }),
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('a disposed challenge is immutable: no re-resolution, no late escalation (W5 review)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps);

@@ -18,7 +18,7 @@ import {
   type ProductionProposal,
   type TransactionPreview,
 } from '@licio/shared';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import {
@@ -456,6 +456,11 @@ function CreateProposalForm({
     return action;
   }
 
+  // ONE idempotency key per draft attempt: a retry after a lost create
+  // response replays the SAME key and recovers the published proposal instead
+  // of publishing a second one.  Rotates after a confirmed create or reset.
+  const attemptKeyRef = useRef<string | null>(null);
+
   async function submit(): Promise<void> {
     setError(null);
     try {
@@ -475,12 +480,14 @@ function CreateProposalForm({
         // The strict WS-L.4 template schema rejects production-only fields.
         await createSim.mutateAsync(draft as never);
       } else {
+        attemptKeyRef.current ??= crypto.randomUUID();
         await create.mutateAsync({
           ...draft,
           category: null, // the server derives the category from the type
-          idempotency_key: crypto.randomUUID(),
+          idempotency_key: attemptKeyRef.current,
         });
       }
+      attemptKeyRef.current = null; // confirmed create — the next draft is new
       setTitle('');
       setSummary('');
       setRisk('');

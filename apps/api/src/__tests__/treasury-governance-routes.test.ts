@@ -311,6 +311,52 @@ describe('WS-M treasury + payment intents', () => {
     expect(((await replay.json()) as { existing: boolean }).existing).toBe(true);
   });
 
+  it('the proposal DETAIL read returns the production shape in real-asset rooms (W7)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
+    const proposalId = crypto.randomUUID();
+    await fixture.treasury.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 'Fund the sprint',
+      plainLanguageSummary: 'Pay a contributor.',
+      requestedAmount: '500',
+      asset: 'USDC',
+      recipientRef: null,
+      conflictDisclosures: 'None.',
+      riskAssessment: 'Low.',
+      requestedAction: { kind: 'grant' },
+      expectedDeliverable: 'A deliverable.',
+      preflightState: 'passed',
+      votingState: 'deliberation',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: false,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: crypto.randomUUID(),
+      category: 'grant',
+      deliberationEndsAt: new Date(Date.now() + 3_600_000).toISOString(),
+      votingEndsAt: new Date(Date.now() + 7_200_000).toISOString(),
+      challengeWindowEndsAt: null,
+      tallySnapshot: null,
+    });
+    const detail = await req('GET', `/rooms/${ROOM}/governance/proposals/${proposalId}`, cookie);
+    expect(detail.status).toBe(200);
+    const body = (await detail.json()) as {
+      proposal: Record<string, unknown>;
+    };
+    // The PRODUCTION wire shape: lifecycle fields present, no sim vote block.
+    expect(body.proposal['preflight_state']).toBe('passed');
+    expect(body.proposal['law_pack_version_id']).toBeDefined();
+    expect(body.proposal['votes']).toBeUndefined();
+  });
+
   it('a stranger cannot advance someone else’s payment intent (PR #144 review)', async () => {
     const fixture = await wsmFixture({ steward: false });
     const owner = await seedUserWithSession(fixture.identity, { handle: 'intent_owner' });

@@ -205,15 +205,19 @@ export async function adoptLawPack(
       );
     }
   }
-  const profile = await ensureProfile(deps, input.roomId);
-  await deps.profiles.upsert({
-    ...profile,
-    lawPackId: record.lawPackId,
-    quorumPolicyRef: { lawPackId: record.lawPackId, section: 'quorumRules' },
-    thresholdPolicyRef: { lawPackId: record.lawPackId, section: 'thresholdRules' },
-    timelockPolicyRef: { lawPackId: record.lawPackId, section: 'timelockRules' },
-    updatedAt: new Date(deps.now()).toISOString(),
-  });
+  await ensureProfile(deps, input.roomId);
+  // COLUMN-scoped adoption refs: an upsert built from a stale profile read
+  // could clobber a freeze written after the writability check (PR #144 W7).
+  await deps.profiles.setLawPackRefs(
+    input.roomId,
+    {
+      lawPackId: record.lawPackId,
+      quorumPolicyRef: { lawPackId: record.lawPackId, section: 'quorumRules' },
+      thresholdPolicyRef: { lawPackId: record.lawPackId, section: 'thresholdRules' },
+      timelockPolicyRef: { lawPackId: record.lawPackId, section: 'timelockRules' },
+    },
+    new Date(deps.now()).toISOString(),
+  );
   await appendChainedAudit(deps, {
     roomId: input.roomId,
     actionType: 'law_pack_adopted',

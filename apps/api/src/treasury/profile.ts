@@ -101,6 +101,17 @@ export async function assertGovernanceWritable(
           treasury.freezeReason ?? 'This treasury is paused pending review.',
         );
       }
+      // An UNEXPLAINED reconciliation divergence halts fund movement by
+      // itself — waiting for an operator to act on the alert would let
+      // deposits and payout advancement continue over a broken ledger.
+      // Self-healing: the block lifts the moment reconciliation clears.
+      if (treasury.reconciliationState === 'divergent') {
+        return tgErr(
+          403,
+          'treasury_divergent',
+          'The treasury has an unexplained reconciliation divergence; fund movement is paused.',
+        );
+      }
       if (treasury.pauseFlags[operation]) {
         return tgErr(403, `${operation}_paused`, `New ${operation} are temporarily paused here.`);
       }

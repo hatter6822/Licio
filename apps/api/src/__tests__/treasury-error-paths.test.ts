@@ -1524,3 +1524,150 @@ describe('sixth review wave (PR #144): deposit retry caps', () => {
     expect((await services.intents.getById(id))?.executionState).toBe('failed');
   });
 });
+
+describe('seventh review wave (PR #144): divergence halts funds, freeze-safe pointers', () => {
+  it('an unexplained divergence blocks deposits and executions by itself', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    await services.treasuries.setReconciliation(treasury.treasuryId, 'divergent', null, null);
+    // No operator freeze happened — the divergence ALONE halts fund movement.
+    const deposit = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '50',
+      idempotencyKey: randomUUID(),
+    });
+    expect('code' in deposit && deposit.code).toBe('treasury_divergent');
+    // Self-healing: a clean reconciliation lifts the block without an unfreeze.
+    await services.treasuries.setReconciliation(
+      treasury.treasuryId,
+      'synced',
+      { USDC: '0' },
+      new Date().toISOString(),
+    );
+    expect(
+      await createPaymentIntent(services, {
+        userId: USER,
+        roomId: ROOM,
+        targetType: 'treasury_deposit',
+        targetId: treasury.treasuryId,
+        asset: 'USDC',
+        amount: '50',
+        idempotencyKey: randomUUID(),
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('a freeze landing mid-publish survives the charter pointer write', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const SECTION =
+      'This section is written in plain language. It explains the rule simply. Everyone can read it.';
+    const sections = {
+      purpose: SECTION,
+      decision_making: SECTION,
+      fund_management: SECTION,
+      member_rights: SECTION,
+      dispute_resolution: SECTION,
+      amendment_process: SECTION,
+      safety_override_acknowledgment: SECTION,
+      appeals_path: SECTION,
+    };
+    // An emergency freeze lands AFTER the writability check, WHILE the version
+    // insert is in flight — the pointer write must not clobber it.
+    const rawCharters = services.charters;
+    const deps = {
+      ...services,
+      charters: new Proxy(rawCharters, {
+        get(target, prop) {
+          if (prop === 'insert') {
+            return async (record: Parameters<typeof rawCharters.insert>[0]) => {
+              const inserted = await target.insert(record);
+              const profile = await services.profiles.get(ROOM);
+              if (profile !== null) {
+                await services.profiles.upsert({
+                  ...profile,
+                  freezeState: 'frozen',
+                  freezeReason: 'Emergency mid-publish.',
+                });
+              }
+              return inserted;
+            };
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }),
+    };
+    const { createCharterVersion } = await import('../treasury/charter.js');
+    const published = await createCharterVersion(deps, {
+      roomId: ROOM,
+      sections,
+      actorUserId: USER,
+    });
+    if ('code' in published) throw new Error(published.message);
+    const profile = await services.profiles.get(ROOM);
+    // The freeze SURVIVED the pointer write, and the pointer still landed.
+    expect(profile?.freezeState).toBe('frozen');
+    expect(profile?.charterVersionId).toBe(published.charter.charterVersionId);
+  });
+
+  it('the settle sweep pages past 600 not-yet-due proposals to reach a due one', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const base = {
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'capped_grant' as const,
+      title: 'Filler',
+      plainLanguageSummary: 'Not due yet.',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'Low.',
+      requestedAction: {},
+      expectedDeliverable: 'None.',
+      preflightState: 'passed' as const,
+      challengeState: 'none' as const,
+      simulationMode: false,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: null,
+      category: null,
+      deliberationEndsAt: future,
+      votingEndsAt: null,
+      challengeWindowEndsAt: null,
+      tallySnapshot: null,
+    };
+    // 600 UNSETTLED but not-yet-due rows — more than one keyset page.
+    for (let i = 0; i < 600; i += 1) {
+      await services.proposals.insert({
+        ...base,
+        proposalId: randomUUID(),
+        votingState: 'deliberation',
+        executionState: 'not_executed',
+      });
+    }
+    const dueId = randomUUID();
+    await services.proposals.insert({
+      ...base,
+      proposalId: dueId,
+      votingState: 'deliberation',
+      executionState: 'not_executed',
+      deliberationEndsAt: past,
+      votingEndsAt: future,
+    });
+    const { settleDueProposals } = await import('../treasury/proposals.js');
+    await settleDueProposals(services, ROOM);
+    expect((await services.proposals.getById(dueId))?.votingState).toBe('open');
+  });
+});

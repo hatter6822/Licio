@@ -133,6 +133,43 @@ export class DrizzleGovernanceProfileStore implements GovernanceProfileStore {
     return record;
   }
 
+  async setCharterPointer(
+    roomId: string,
+    charterVersionId: string,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(roomGovernanceProfiles)
+      .set({ charterVersionId, updatedAt: new Date(updatedAt) })
+      .where(eq(roomGovernanceProfiles.roomId, roomId))
+      .returning({ roomId: roomGovernanceProfiles.roomId });
+    return rows.length > 0;
+  }
+
+  async setLawPackRefs(
+    roomId: string,
+    refs: {
+      lawPackId: string;
+      quorumPolicyRef: Record<string, unknown>;
+      thresholdPolicyRef: Record<string, unknown>;
+      timelockPolicyRef: Record<string, unknown>;
+    },
+    updatedAt: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(roomGovernanceProfiles)
+      .set({
+        lawPackId: refs.lawPackId,
+        quorumPolicyRef: refs.quorumPolicyRef,
+        thresholdPolicyRef: refs.thresholdPolicyRef,
+        timelockPolicyRef: refs.timelockPolicyRef,
+        updatedAt: new Date(updatedAt),
+      })
+      .where(eq(roomGovernanceProfiles.roomId, roomId))
+      .returning({ roomId: roomGovernanceProfiles.roomId });
+    return rows.length > 0;
+  }
+
   async listAll(): Promise<GovernanceProfileRecord[]> {
     const rows = await this.db.select().from(roomGovernanceProfiles);
     return rows.map(mapProfile);

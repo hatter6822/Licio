@@ -236,6 +236,42 @@ describe('ProposalsPanel (WS-M.4)', () => {
     );
   });
 
+  it('replays the SAME idempotency key when a create retry follows a failure (W7 review)', async () => {
+    mockProposals.mockReturnValue({ isLoading: false, data: [] });
+    const { ApiClientError } = await import('../../lib/api.js');
+    // First submit: the create dies after the server may have published.
+    mockCreate.mockRejectedValueOnce(new ApiClientError('network', 'Connection lost.', 503));
+    render(<ProposalsPanel roomId="r1" joined isRoomSteward={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /open a proposal/i }));
+    fireEvent.change(screen.getByLabelText(/^title/i), { target: { value: 'Fund the survey' } });
+    fireEvent.change(screen.getByLabelText(/plain-language summary/i), {
+      target: { value: 'Pay a hydrologist.' },
+    });
+    fireEvent.change(screen.getByLabelText(/risk assessment/i), { target: { value: 'Low.' } });
+    fireEvent.change(screen.getByLabelText(/expected deliverable/i), {
+      target: { value: 'A report.' },
+    });
+    fireEvent.change(screen.getByLabelText(/amount \(minor units\)/i), {
+      target: { value: '1000000' },
+    });
+    fireEvent.change(screen.getByLabelText(/^asset/i), { target: { value: 'USDC' } });
+    fireEvent.change(screen.getByLabelText(/recipient reference/i), {
+      target: { value: 'hydrologist-coop' },
+    });
+    fireEvent.change(screen.getByLabelText(/conflict-of-interest/i), {
+      target: { value: 'None.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^open proposal$/i }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    // The retry must carry the SAME key — a fresh one would publish a second
+    // proposal when the first create actually landed.
+    mockCreate.mockResolvedValueOnce(PRODUCTION_PROPOSAL);
+    fireEvent.click(screen.getByRole('button', { name: /^open proposal$/i }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(2));
+    const drafts = mockCreate.mock.calls.map((call) => call[0] as { idempotency_key: string });
+    expect(drafts[1]?.idempotency_key).toBe(drafts[0]?.idempotency_key);
+  });
+
   it('law-pack upgrades require the target pack id and send its action payload', async () => {
     mockProposals.mockReturnValue({ isLoading: false, data: [] });
     mockCreate.mockResolvedValue(PRODUCTION_PROPOSAL);

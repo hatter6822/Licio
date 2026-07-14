@@ -366,6 +366,21 @@ export async function requestWsmModeTransition(
       'Leaving the frozen state requires a platform remediation review.',
     );
   }
+  // A GOVERNANCE-frozen room cannot change its mode mid-review: the freeze
+  // pauses every WS-M mutation and the mode machine is no exception.  Three
+  // corridors stay open: the emergency edge INTO frozen, the platform
+  // remediation edge OUT of it, and the `migrating` wind-down that follows
+  // remediation (the profile freeze is lifted separately by platform staff).
+  if (gate !== 'post_remediation' && gate !== 'emergency' && current !== 'migrating') {
+    const profile = await deps.profiles.get(input.roomId);
+    if (profile?.freezeState === 'frozen') {
+      return tgErr(
+        403,
+        'governance_frozen',
+        profile.freezeReason ?? 'Governance actions in this room are paused pending review.',
+      );
+    }
+  }
   if (gate === 'readiness' || gate === 'resume') {
     if (!isReadinessTarget(input.targetMode)) {
       return tgErr(409, 'transition_not_permitted', 'The target mode cannot be readiness-gated.');

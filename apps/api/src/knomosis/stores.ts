@@ -540,7 +540,14 @@ export interface GovernanceProposalStore {
   /** PRODUCTION rows with live settle work (deliberation/open voting, or a
    *  passed row still timelocked/executing) — bounded by open work, never by
    *  history, so the sweep can't starve behind a full newest-N page (WS-M). */
-  listUnsettledByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]>;
+  /** Keyset-paged (proposalId ascending): the settle sweep walks EVERY
+   *  unsettled row — a fixed newest-first slice would let a busy room's
+   *  not-yet-due proposals starve older due ones (PR #144 W7). */
+  listUnsettledByRoom(
+    roomId: string,
+    limit: number,
+    afterId?: string | null,
+  ): Promise<GovernanceProposalRecord[]>;
   update(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   /** ATOMICALLY claim a passed, timelocked proposal for execution: CAS the
    *  executionState `timelocked` → `executing`, returning the claimed row, or null
@@ -1460,7 +1467,11 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     return row ? structuredClone(row) : null;
   }
 
-  async listUnsettledByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]> {
+  async listUnsettledByRoom(
+    roomId: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<GovernanceProposalRecord[]> {
     return [...this.#rows.values()]
       .filter(
         (row) =>
@@ -1471,6 +1482,8 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
             (row.votingState === 'passed' &&
               (row.executionState === 'timelocked' || row.executionState === 'executing'))),
       )
+      .sort((a, b) => (a.proposalId < b.proposalId ? -1 : 1))
+      .filter((row) => afterId === null || row.proposalId > afterId)
       .slice(0, limit)
       .map((row) => structuredClone(row));
   }

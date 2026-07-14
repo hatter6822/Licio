@@ -190,6 +190,10 @@ async function simGate(
   roomId: string,
   userId: string,
   needsMembership: boolean,
+  // The LIFECYCLE surfaces (readiness) serve ordinary rooms too — the
+  // ordinary→simulated checklist is how a room ENTERS the lifecycle; only the
+  // simulation surfaces themselves are non-ordinary (WS-L.4.1a).
+  allowOrdinary = false,
 ): Promise<
   { ok: true; mode: string } | { ok: false; status: 403 | 404 | 503; code: string; message: string }
 > {
@@ -209,7 +213,7 @@ async function simGate(
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   }
   // The simulation surface exists only for non-ordinary rooms (WS-L.4.1a).
-  if (room.mode === 'ordinary') {
+  if (room.mode === 'ordinary' && !allowOrdinary) {
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   }
   // WS-Q §16.1 content bar — closes the private-room governance READ: a private
@@ -376,6 +380,14 @@ export function createRoomGovernanceSimRoutes() {
           if (proposal === null || proposal.roomId !== params.roomId) {
             return c.json(notFound, 404);
           }
+          // Same mode branch as the list: a production proposal opened by id
+          // must carry its production shape (law-pack pin, windows, tally) —
+          // never a simulated-shaped row with zero sim votes.
+          if (gate.mode !== 'simulated') {
+            if (proposal.simulationMode) return c.json(notFound, 404);
+            return c.json({ proposal: toWireProductionProposal(proposal) });
+          }
+          if (!proposal.simulationMode) return c.json(notFound, 404);
           return c.json({ proposal: await toWireProposal(proposal, services.votes) });
         },
       )
@@ -597,7 +609,9 @@ export function createRoomGovernanceSimRoutes() {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
           const roomId = c.req.valid('param').roomId;
-          const gate = await simGate(services, roomId, auth.userId, false);
+          // `allowOrdinary`: the ordinary→simulated checklist is how a room
+          // ENTERS the lifecycle — the readiness read must serve it (W7).
+          const gate = await simGate(services, roomId, auth.userId, false, true);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
           // WS-M.1.2e: the EXTENDED per-item checklist with `requiredFor`
           // semantics, evaluated LIVE for the requested (or next) target mode.

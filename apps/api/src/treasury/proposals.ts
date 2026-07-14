@@ -420,16 +420,38 @@ export async function createProductionProposal(
     if (balance === null) {
       return tgErr(409, 'balance_unreconciled', 'The treasury balance is not reconciled yet.');
     }
-    // Liquidity = reconciled balance MINUS what other passed proposals have
-    // already reserved in this asset — two spends can never both promise the
-    // same money (WS-M.2.3a-1).
+    // Liquidity = reconciled balance MINUS active reservations MINUS the
+    // consumed-but-UNPAID grant obligations in this asset: an executed grant's
+    // reservation moves to `consumed` while its milestone payouts are still
+    // pending, yet the cash is still in the reconciled balance — without the
+    // encumbrance the same funds could back a second spend (WS-M.2.3a-1).
     const { decSum } = await import('@licio/governance');
     const reservedRows = await deps.reservations.listActiveByTreasuryAsset(
       treasury.treasuryId,
       input.create.asset ?? '',
     );
     const alreadyReserved = decSum(reservedRows.map((r) => r.amount));
-    const liquid = decSum([balance, `-${alreadyReserved}`]);
+    const obligationParts: string[] = [];
+    for (const grant of await deps.grants.listByRoom(input.roomId, 500)) {
+      if (
+        grant.treasuryId !== treasury.treasuryId ||
+        grant.asset !== input.create.asset ||
+        grant.payoutState === 'paid' ||
+        grant.payoutState === 'clawed_back'
+      ) {
+        continue;
+      }
+      const finalizedParts: string[] = [];
+      for (const milestone of grant.milestones) {
+        if (milestone.paymentIntentId === null) continue;
+        const linked = await deps.intents.getById(milestone.paymentIntentId);
+        if (linked?.executionState === 'finalized') finalizedParts.push(milestone.amount);
+      }
+      const outstanding = decSum([grant.amount, `-${decSum(finalizedParts)}`]);
+      if (!outstanding.startsWith('-')) obligationParts.push(outstanding);
+    }
+    const encumbered = decSum(obligationParts);
+    const liquid = decSum([balance, `-${alreadyReserved}`, `-${encumbered}`]);
     if (liquid.startsWith('-') || decCompare(input.create.requested_amount, liquid) > 0) {
       return tgErr(409, 'insufficient_funds', 'The treasury cannot cover this proposal.');
     }
@@ -846,9 +868,17 @@ export async function signProposal(
 export async function settleDueProposals(deps: ProposalDeps, roomId: string): Promise<number> {
   const nowIso = new Date(deps.now()).toISOString();
   // Enumerate UNSETTLED production rows (deliberation/open/timelocked/
-  // executing) — bounded by live work, so a room's terminal history can never
-  // occupy the page and starve an older due proposal.
-  const proposals = await deps.proposals.listUnsettledByRoom(roomId, 500);
+  // executing) via keyset pages — bounded by live work AND exhaustive, so a
+  // busy room's newer not-yet-due proposals can never starve an older due one.
+  const proposals: GovernanceProposalRecord[] = [];
+  let afterId: string | null = null;
+  for (;;) {
+    const page = await deps.proposals.listUnsettledByRoom(roomId, 500, afterId);
+    proposals.push(...page);
+    if (page.length < 500) break;
+    afterId = page[page.length - 1]?.proposalId ?? null;
+    if (afterId === null) break;
+  }
   let settled = 0;
   for (const proposal of proposals) {
     if (proposal.simulationMode) continue;
@@ -1193,6 +1223,19 @@ export async function executeProposal(
   }
   if (proposal.executableAfter === null || proposal.executableAfter > nowIso) {
     return tgErr(409, 'timelocked', 'The timelock has not elapsed yet.');
+  }
+  // The execution window binds MANUAL execution too: a sweep delay must not
+  // let a steward execute a proposal that should already have expired.
+  const windowEndsAt = new Date(
+    Date.parse(proposal.executableAfter) +
+      deps.wsmProposalConfig().wsmExecutionWindowSeconds * 1000,
+  ).toISOString();
+  if (windowEndsAt <= nowIso) {
+    return tgErr(
+      409,
+      'execution_window_expired',
+      'The execution window has closed; the sweep will expire this proposal.',
+    );
   }
   if (proposal.challengeWindowEndsAt != null && proposal.challengeWindowEndsAt > nowIso) {
     return tgErr(409, 'challenge_window_open', 'The challenge window has not closed yet.');

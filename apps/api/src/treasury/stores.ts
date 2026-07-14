@@ -210,6 +210,20 @@ export interface AttestationRecord {
 export interface GovernanceProfileStore {
   get(roomId: string): Promise<GovernanceProfileRecord | null>;
   upsert(record: GovernanceProfileRecord): Promise<GovernanceProfileRecord>;
+  /** COLUMN-scoped charter-pointer update: a whole-record upsert built from a
+   *  stale read could clobber a freeze written in between (PR #144 W7). */
+  setCharterPointer(roomId: string, charterVersionId: string, updatedAt: string): Promise<boolean>;
+  /** COLUMN-scoped law-pack adoption refs (same stale-clobber hazard). */
+  setLawPackRefs(
+    roomId: string,
+    refs: {
+      lawPackId: string;
+      quorumPolicyRef: Record<string, unknown>;
+      thresholdPolicyRef: Record<string, unknown>;
+      timelockPolicyRef: Record<string, unknown>;
+    },
+    updatedAt: string,
+  ): Promise<boolean>;
   /** Every governed room (the scheduler's sweep population). */
   listAll(): Promise<GovernanceProfileRecord[]>;
   clear(): Promise<void>;
@@ -408,6 +422,38 @@ export class InMemoryGovernanceProfileStore implements GovernanceProfileStore {
   async upsert(record: GovernanceProfileRecord): Promise<GovernanceProfileRecord> {
     this.#rows.set(record.roomId, clone(record));
     return clone(record);
+  }
+
+  async setCharterPointer(
+    roomId: string,
+    charterVersionId: string,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const row = this.#rows.get(roomId);
+    if (row === undefined) return false;
+    row.charterVersionId = charterVersionId;
+    row.updatedAt = updatedAt;
+    return true;
+  }
+
+  async setLawPackRefs(
+    roomId: string,
+    refs: {
+      lawPackId: string;
+      quorumPolicyRef: Record<string, unknown>;
+      thresholdPolicyRef: Record<string, unknown>;
+      timelockPolicyRef: Record<string, unknown>;
+    },
+    updatedAt: string,
+  ): Promise<boolean> {
+    const row = this.#rows.get(roomId);
+    if (row === undefined) return false;
+    row.lawPackId = refs.lawPackId;
+    row.quorumPolicyRef = clone(refs.quorumPolicyRef);
+    row.thresholdPolicyRef = clone(refs.thresholdPolicyRef);
+    row.timelockPolicyRef = clone(refs.timelockPolicyRef);
+    row.updatedAt = updatedAt;
+    return true;
   }
 
   async listAll(): Promise<GovernanceProfileRecord[]> {

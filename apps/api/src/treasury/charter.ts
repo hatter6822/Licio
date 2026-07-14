@@ -94,16 +94,18 @@ export async function createCharterVersion(
     };
     const inserted = await deps.charters.insert(record);
     if (inserted === null) continue; // (room, version) collision — re-read + retry
-    const profile = await ensureProfile(deps, input.roomId);
+    await ensureProfile(deps, input.roomId);
     // Concurrent publishes: the pointer always lands on the NEWEST version —
     // re-read the latest so a slower lower-version request can never point the
-    // active profile back at an older charter.
+    // active profile back at an older charter.  COLUMN-scoped write: a
+    // whole-record upsert from a stale read could clobber a freeze written
+    // between the writability check and here (PR #144 W7).
     const newest = await deps.charters.latestByRoom(input.roomId);
-    await deps.profiles.upsert({
-      ...profile,
-      charterVersionId: newest?.charterVersionId ?? inserted.charterVersionId,
-      updatedAt: new Date(deps.now()).toISOString(),
-    });
+    await deps.profiles.setCharterPointer(
+      input.roomId,
+      newest?.charterVersionId ?? inserted.charterVersionId,
+      new Date(deps.now()).toISOString(),
+    );
     await appendChainedAudit(deps, {
       roomId: input.roomId,
       actionType: 'charter_version_created',
