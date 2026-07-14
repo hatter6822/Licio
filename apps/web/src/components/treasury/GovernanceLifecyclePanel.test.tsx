@@ -94,6 +94,34 @@ describe('GovernanceLifecyclePanel (WS-M.1/6)', () => {
     );
   });
 
+  it('surfaces a freeze failure as an alert (typed message preserved)', async () => {
+    mockProfile.mockReturnValue(profileData());
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockFreeze.mockRejectedValue(new ApiClientError('kill_switch_active', 'Paused.', 503));
+    render(<GovernanceLifecyclePanel roomId="r1" isRoomSteward />);
+    fireEvent.change(screen.getByLabelText(/reason \(recorded in the audit chain\)/i), {
+      target: { value: 'Incident.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /freeze governance now/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/paused/i));
+  });
+
+  it('verifies a healthy chain with its entry count', async () => {
+    mockProfile.mockReturnValue(profileData());
+    mockAudit.mockImplementation((enabled: boolean) =>
+      enabled
+        ? {
+            data: { valid: true, chained_entries: 12, problems: [] },
+            isFetching: false,
+            refetch: vi.fn(),
+          }
+        : { data: undefined, isFetching: false, refetch: vi.fn() },
+    );
+    render(<GovernanceLifecyclePanel roomId="r1" isRoomSteward={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /verify the audit chain/i }));
+    await waitFor(() => expect(screen.getByText(/12 entries verified/i)).toBeInTheDocument());
+  });
+
   it('tells a steward that only the platform can unfreeze', () => {
     mockProfile.mockReturnValue(profileData({ freeze_state: 'frozen' }));
     render(<GovernanceLifecyclePanel roomId="r1" isRoomSteward />);

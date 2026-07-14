@@ -1819,7 +1819,13 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
     } catch (error) {
       // 23505 = unique_violation on the fork-proof chain indexes (migration
       // 0082) — the writer re-reads the head and retries; anything else rethrows.
-      if ((error as { code?: string }).code === '23505') return null;
+      // Drizzle wraps driver errors, so the SQLSTATE lives on the CAUSE chain
+      // (a direct `.code` check never fires on a DrizzleQueryError).
+      let current: unknown = error;
+      for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
+        if ((current as { code?: string }).code === '23505') return null;
+        current = (current as { cause?: unknown }).cause;
+      }
       throw error;
     }
   }
@@ -1886,8 +1892,11 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
               eq(governanceAuditLogs.roomId, roomId),
               // Row-value keyset comparison over the STRICT (createdAt, entryId)
               // total order — the entryId tiebreaker makes same-millisecond rows
-              // page without skips/duplicates (WS-L.4.1f).
-              sql`(${governanceAuditLogs.createdAt}, ${governanceAuditLogs.entryId}) < (${new Date(before.createdAt)}, ${before.entryId}::uuid)`,
+              // page without skips/duplicates (WS-L.4.1f).  The timestamp binds
+              // as an ISO STRING + explicit cast: postgres.js cannot serialize a
+              // raw Date inside a row-value fragment (it threw on every second
+              // page until the treasury contract test caught it).
+              sql`(${governanceAuditLogs.createdAt}, ${governanceAuditLogs.entryId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.entryId}::uuid)`,
             ),
       )
       .orderBy(desc(governanceAuditLogs.createdAt), desc(governanceAuditLogs.entryId))

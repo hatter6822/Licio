@@ -199,6 +199,79 @@ describe('DepositFlow (WS-M.3.1)', () => {
     );
   });
 
+  it('surfaces an intent-creation failure and never opens the preview', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockRejectedValue(
+      new ApiClientError('deposit_limit_exceeded', 'Over the per-deposit maximum.', 409),
+    );
+    render(<DepositFlow roomId="r1" treasury={TREASURY} onIntentCreated={() => {}} />);
+    enterAmount('99');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByText(/per-deposit maximum/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole('region', { name: /review before signing/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('surfaces a wallet signing refusal at the preview stage', async () => {
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' });
+    mockSign.mockResolvedValue(null); // the wallet declined
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByText(/did not sign/i)).toBeInTheDocument();
+    expect(mockPreflightAction).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a WS-L preflight refusal with the server message', async () => {
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    mockPreflightAction.mockResolvedValue({
+      result: 'fail',
+      human_message: 'This region cannot move real funds.',
+    });
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByText(/cannot move real funds/i)).toBeInTheDocument());
+    expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it('asks for a linked wallet when none matches the deployment chain', async () => {
+    mockWallets.mockReturnValue({ data: { items: [], nextCursor: null } });
+    render(<DepositFlow roomId="r1" treasury={TREASURY} onIntentCreated={() => {}} />);
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByText(/link a wallet/i)).toBeInTheDocument();
+    expect(mockCreateIntent).not.toHaveBeenCalled();
+  });
+
   it('blocks the flow when deposits are paused', () => {
     render(
       <DepositFlow

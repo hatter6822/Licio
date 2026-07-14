@@ -74,6 +74,12 @@ export async function reserveForProposal(
   deps: ReservationDeps,
   input: ReserveInput,
 ): Promise<TreasuryGovernanceError | { ok: true; reservation: ReservationRecord }> {
+  // Idempotency FIRST: a re-driven approval (the recovery sweep, a retried
+  // execute) returns the reservation it already holds.  Checking caps first
+  // would mis-report the replay as `per_window_cap_exceeded` — its own amount
+  // is already counted against the window.
+  const existing = await deps.reservations.getByProposal(input.proposalId);
+  if (existing !== null) return { ok: true, reservation: existing };
   const cap = input.bounds.caps.find((c) => c.category === input.category);
   if (!cap) {
     return tgErr(409, 'no_cap_configured', `No spend cap configured for "${input.category}".`);

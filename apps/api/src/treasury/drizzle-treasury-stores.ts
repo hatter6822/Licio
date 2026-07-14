@@ -54,8 +54,18 @@ const iso = (value: Date): string => value.toISOString();
 const isoOrNull = (value: Date | null): string | null => (value ? value.toISOString() : null);
 const dateOrNull = (value: string | null | undefined): Date | null =>
   value == null ? null : new Date(value);
-const isUniqueViolation = (error: unknown): boolean =>
-  (error as { code?: string }).code === '23505';
+// Drizzle wraps driver errors (DrizzleQueryError → cause: PostgresError), so
+// the SQLSTATE lives on the CAUSE chain — a direct `.code` check never fires
+// and the raced insert would surface as a thrown 500 instead of the designed
+// clean-loser null (the drizzle-debate-store house pattern).
+function isUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
+    if ((current as { code?: string }).code === '23505') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Governance profiles
@@ -198,8 +208,11 @@ export class DrizzleCharterStore implements CharterStore {
     return rows.map(mapCharter);
   }
 
+  /** Test/dev reset ONLY (interface parity with the in-memory store).  The
+   *  append-only trigger rejects row DELETEs, so the sole reset path is
+   *  TRUNCATE (which does not fire row-level triggers). */
   async clear(): Promise<void> {
-    await this.db.delete(governanceCharterVersions);
+    await this.db.execute(sql`truncate table ${governanceCharterVersions}`);
   }
 }
 
@@ -1046,8 +1059,11 @@ export class DrizzleSnapshotStore implements SnapshotStore {
     return rows.map(mapSnapshot);
   }
 
+  /** Test/dev reset ONLY (interface parity with the in-memory store).  The
+   *  append-only trigger rejects row DELETEs, so the sole reset path is
+   *  TRUNCATE (which does not fire row-level triggers). */
   async clear(): Promise<void> {
-    await this.db.delete(treasuryReconciliationSnapshots);
+    await this.db.execute(sql`truncate table ${treasuryReconciliationSnapshots}`);
   }
 }
 

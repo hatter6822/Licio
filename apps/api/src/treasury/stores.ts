@@ -238,6 +238,8 @@ export interface TreasuryStore {
     reason: string | null,
   ): Promise<boolean>;
   setPauseFlags(treasuryId: string, flags: PauseFlags): Promise<boolean>;
+  /** A null snapshot PRESERVES the last-reconciled balances (a divergent or
+   *  pending tick must never blank the dashboard's last-reconciled view). */
   setReconciliation(
     treasuryId: string,
     state: TreasuryRecord['reconciliationState'],
@@ -259,7 +261,9 @@ export interface ReservationStore {
     to: ReservationState,
     updatedAt: string,
   ): Promise<boolean>;
-  /** All non-released reservations for headroom math. */
+  /** OPEN (`reserved`) reservations only — headroom subtracts these AND the
+   *  consumed window separately, so the two projections must stay disjoint
+   *  (a non-released union here would double-count every consumed row). */
   listActiveByTreasury(treasuryId: string, category: string): Promise<ReservationRecord[]>;
   listConsumedByTreasury(treasuryId: string, category: string): Promise<ReservationRecord[]>;
   clear(): Promise<void>;

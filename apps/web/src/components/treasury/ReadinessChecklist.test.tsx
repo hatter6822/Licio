@@ -76,6 +76,42 @@ describe('ReadinessChecklist (WS-M.1.2e)', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 
+  it('falls back to the legacy unmet list when per-item detail is absent', () => {
+    mockReadiness.mockReturnValue(
+      readinessData({
+        items: undefined,
+        unmet: [{ requirement: 'external_audit_passed', description: 'Audit missing.' }],
+      }),
+    );
+    render(<ReadinessChecklist roomId="r1" isRoomSteward={false} />);
+    expect(screen.getByText(/per-item detail is unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/audit missing/i)).toBeInTheDocument();
+    mockReadiness.mockReturnValue(readinessData({ items: undefined, unmet: [] }));
+    render(<ReadinessChecklist roomId="r2" isRoomSteward={false} />);
+    expect(screen.getByText(/none\./i)).toBeInTheDocument();
+  });
+
+  it('shows the loading and error states', () => {
+    mockReadiness.mockReturnValue({ isLoading: true, isError: false, data: undefined });
+    const loading = render(<ReadinessChecklist roomId="r1" isRoomSteward={false} />);
+    expect(screen.getByText(/loading readiness/i)).toBeInTheDocument();
+    loading.unmount();
+    mockReadiness.mockReturnValue({ isLoading: false, isError: true, data: undefined });
+    render(<ReadinessChecklist roomId="r1" isRoomSteward={false} />);
+    expect(screen.getByText(/couldn't load the readiness checklist/i)).toBeInTheDocument();
+  });
+
+  it('clears the reason after a successful transition request', async () => {
+    mockReadiness.mockReturnValue(readinessData({ ready: true, unmet: [] }));
+    mockMutateAsync.mockResolvedValue({ governance_mode: 'testnet' });
+    render(<ReadinessChecklist roomId="r1" isRoomSteward />);
+    const reason = screen.getByLabelText(/reason for the transition/i);
+    fireEvent.change(reason, { target: { value: 'Ready.' } });
+    fireEvent.click(screen.getByRole('button', { name: /request transition/i }));
+    await waitFor(() => expect(mockMutateAsync).toHaveBeenCalled());
+    await waitFor(() => expect(reason).toHaveValue(''));
+  });
+
   it('hides the transition form from non-stewards', () => {
     mockReadiness.mockReturnValue(readinessData());
     render(<ReadinessChecklist roomId="r1" isRoomSteward={false} />);

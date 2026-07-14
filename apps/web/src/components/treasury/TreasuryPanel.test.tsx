@@ -106,6 +106,65 @@ describe('TreasuryPanel (WS-M.2.2c)', () => {
     expect(screen.getByText(/no treasury provisioned/i)).toBeInTheDocument();
   });
 
+  it('renders a plain error state for a non-mode failure, and loading first', () => {
+    mockTab.mockReturnValue({ isLoading: true, isError: false, data: undefined });
+    const loading = render(<TreasuryPanel roomId="r1" joined isRoomSteward={false} />);
+    expect(screen.getByText(/loading treasury/i)).toBeInTheDocument();
+    loading.unmount();
+    mockTab.mockReturnValue({
+      isLoading: false,
+      isError: true,
+      data: undefined,
+      error: new Error('network down'),
+    });
+    render(<TreasuryPanel roomId="r1" joined isRoomSteward={false} />);
+    expect(screen.getByText(/couldn't load the treasury/i)).toBeInTheDocument();
+  });
+
+  it('shows the never-reconciled note, grants, and the steward export hint', () => {
+    mockGrants.mockReturnValue({
+      data: [
+        {
+          grant_id: '11111111-1111-4111-8111-111111111111',
+          room_id: TREASURY.room_id,
+          treasury_id: TREASURY.treasury_id,
+          proposal_id: '22222222-2222-4222-8222-222222222222',
+          recipient_ref: 'coop',
+          purpose: 'River survey',
+          amount: '1000000',
+          asset: 'USDC',
+          milestones: [
+            {
+              milestone_id: '33333333-3333-4333-8333-333333333333',
+              description: 'All',
+              amount: '1000000',
+              state: 'pending',
+              payment_intent_id: null,
+            },
+          ],
+          milestone_state: 'pending',
+          review_state: 'pending',
+          payout_state: 'not_started',
+          audit_summary: null,
+          created_at: '2026-07-01T00:00:00.000Z',
+        },
+      ],
+    } as never);
+    mockTab.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: {
+        treasury: { ...TREASURY, balances: [], balances_reconciled_at: null },
+      },
+    });
+    render(<TreasuryPanel roomId="r1" joined={false} isRoomSteward />);
+    expect(screen.getByText(/not reconciled yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/no reconciled balances yet/i)).toBeInTheDocument();
+    expect(screen.getByText('River survey')).toBeInTheDocument();
+    expect(screen.getByText(/1 milestones/i)).toBeInTheDocument();
+    expect(screen.getByText(/versioned accounting export/i)).toBeInTheDocument();
+  });
+
   it('explains a mode without a treasury surface (409) instead of erroring', () => {
     mockTab.mockReturnValue({
       isLoading: false,

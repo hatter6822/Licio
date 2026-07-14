@@ -220,9 +220,12 @@ a non-`ordinary` mode) plus the room header:
 - `apps/api/src/__tests__/treasury-governance-{foundation,payments,proposals,routes}.test.ts`
   (69 tests: services + the mounted route surface with real sessions; proposal
   voting uses REAL viem EIP-712 signatures via the knomosis test helpers).
-- `apps/api/src/__tests__/governance-integration.test.ts` — the gated live-
-  Postgres contract legs for the Drizzle treasury stores (CI runs them with
-  service containers).
+- `apps/api/src/__tests__/treasury-integration.test.ts` — the gated live-
+  Postgres contract tests for all eleven Drizzle treasury stores plus the
+  evolved chained-audit/casVotingState knomosis methods (CI runs them with
+  service containers); `treasury-stores.test.ts` proves the SAME contract
+  against the in-memory adapters, and `treasury-services.test.ts` covers the
+  container port builders + the runWsmTick sweeps.
 - `packages/governance/src/__tests__/` — the pure math (weights, tally,
   lifecycle tables, law-pack validation, budgets, decimals).
 - `apps/web/src/components/treasury/*.test.tsx` + the extended
