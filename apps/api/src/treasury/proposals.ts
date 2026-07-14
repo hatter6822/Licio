@@ -480,13 +480,20 @@ export async function createProductionProposal(
       const page = await deps.grants.listUnsettledByTreasury(treasury.treasuryId, 500, grantCursor);
       for (const grant of page) {
         if (grant.asset !== input.create.asset) continue;
+        // Outstanding = the NON-REJECTED milestone total minus finalized
+        // tranches: a terminally rejected tranche will never disburse, so
+        // encumbering the whole grant amount would strand its share of the
+        // liquidity forever (W12).
+        const owedParts: string[] = [];
         const finalizedParts: string[] = [];
         for (const milestone of grant.milestones) {
+          if (milestone.state === 'rejected') continue;
+          owedParts.push(milestone.amount);
           if (milestone.paymentIntentId === null) continue;
           const linked = await deps.intents.getById(milestone.paymentIntentId);
           if (linked?.executionState === 'finalized') finalizedParts.push(milestone.amount);
         }
-        const outstanding = decSum([grant.amount, `-${decSum(finalizedParts)}`]);
+        const outstanding = decSum([decSum(owedParts), `-${decSum(finalizedParts)}`]);
         if (!outstanding.startsWith('-')) obligationParts.push(outstanding);
       }
       if (page.length < 500) break;

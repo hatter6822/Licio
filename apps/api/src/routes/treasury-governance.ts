@@ -693,6 +693,11 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/treasury/grants/:grantId/milestones/:milestoneId',
         authMiddleware(),
+        // Milestone transitions mutate DISBURSEMENT state (acceptance mints
+        // the payout intent): the same verified+adult bar as every other
+        // fund-moving treasury action (W12).
+        requireVerifiedAccount(),
+        requireAdult(),
         zValidator(
           'param',
           z.object({ roomId: uuidSchema, grantId: uuidSchema, milestoneId: uuidSchema }),

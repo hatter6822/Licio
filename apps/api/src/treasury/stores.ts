@@ -344,6 +344,12 @@ export interface PaymentIntentStore {
   /** Deposit-class intents CREATED in the rolling period for a room — the
    *  complete allowance basis (WS-M.2.2a), bounded by the period itself. */
   listDepositsInPeriod(roomId: string, sinceIso: string): Promise<PaymentIntentRecord[]>;
+  /** IN-FLIGHT intents owned by a user (nothing terminal) — the wallet-unlink
+   *  obligations check (W12). */
+  listActiveByUser(userId: string, limit: number): Promise<PaymentIntentRecord[]>;
+  /** Data-rights scrub (W12): null the OWNER on every intent of a deleted
+   *  user — the tombstoned users row never fires the FK's SET NULL. */
+  anonymizeUser(userId: string): Promise<number>;
   /** Timed-out pre-submission intents for the expiry sweep (WS-M.3.1b). */
   listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]>;
   /** Post-submission intents to reconcile against their action records —
@@ -401,6 +407,19 @@ export interface GrantStore {
     toState: GrantMilestoneRecord['state'],
     paymentIntentId: string | null,
   ): Promise<GrantRecord | null>;
+  /** COLUMN-scoped payout-state projection (W12): the reconcile sweep and
+   *  clawback must never write a stale milestones snapshot back over a
+   *  concurrent milestone transition. */
+  setPayoutState(
+    grantId: string,
+    payoutState: GrantRecord['payoutState'],
+    auditSummary?: string,
+  ): Promise<boolean>;
+  /** COLUMN-scoped review-state write (same stale-snapshot hazard). */
+  setReviewState(grantId: string, reviewState: GrantRecord['reviewState']): Promise<boolean>;
+  /** UNSETTLED grants with recipientRef = ref (not paid/clawed_back) — the
+   *  wallet-unlink obligations check (W12). */
+  listUnsettledByRecipient(recipientRef: string, limit: number): Promise<GrantRecord[]>;
   /** UNSETTLED grants for a treasury (payout not paid/clawed_back), keyset-
    *  paged by grantId — the liquidity encumbrance walks EVERY page (W9). */
   listUnsettledByTreasury(
@@ -768,6 +787,18 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   ): Promise<PaymentIntentRecord | null> {
     const row = this.#rows.get(paymentIntentId);
     if (!row || row.executionState !== from) return null;
+    // Emulate the 0087 partial unique: ONE intent per action record — the
+    // attach race's loser gets a clean CAS-loss null, never a double-settle.
+    if (patch.actionRecordId != null) {
+      for (const other of this.#rows.values()) {
+        if (
+          other.paymentIntentId !== paymentIntentId &&
+          other.actionRecordId === patch.actionRecordId
+        ) {
+          return null;
+        }
+      }
+    }
     row.executionState = to;
     row.updatedAt = updatedAt;
     if (patch.jurisdictionState !== undefined) row.jurisdictionState = patch.jurisdictionState;
@@ -810,6 +841,25 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
           r.createdAt >= sinceIso,
       )
       .map(clone);
+  }
+
+  async listActiveByUser(userId: string, limit: number): Promise<PaymentIntentRecord[]> {
+    const terminal: PaymentIntentState[] = ['finalized', 'abandoned', 'failed', 'reverted'];
+    return [...this.#rows.values()]
+      .filter((r) => r.userId === userId && !terminal.includes(r.executionState))
+      .slice(0, limit)
+      .map(clone);
+  }
+
+  async anonymizeUser(userId: string): Promise<number> {
+    let scrubbed = 0;
+    for (const row of this.#rows.values()) {
+      if (row.userId === userId) {
+        row.userId = null;
+        scrubbed += 1;
+      }
+    }
+    return scrubbed;
   }
 
   async listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]> {
@@ -884,6 +934,37 @@ export class InMemoryGrantStore implements GrantStore {
     row.milestoneState = aggregates.milestoneState;
     row.payoutState = aggregates.payoutState;
     return clone(row);
+  }
+
+  async setPayoutState(
+    grantId: string,
+    payoutState: GrantRecord['payoutState'],
+    auditSummary?: string,
+  ): Promise<boolean> {
+    const row = this.#rows.get(grantId);
+    if (row === undefined) return false;
+    row.payoutState = payoutState;
+    if (auditSummary !== undefined) row.auditSummary = auditSummary;
+    return true;
+  }
+
+  async setReviewState(grantId: string, reviewState: GrantRecord['reviewState']): Promise<boolean> {
+    const row = this.#rows.get(grantId);
+    if (row === undefined) return false;
+    row.reviewState = reviewState;
+    return true;
+  }
+
+  async listUnsettledByRecipient(recipientRef: string, limit: number): Promise<GrantRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.recipientRef === recipientRef &&
+          r.payoutState !== 'paid' &&
+          r.payoutState !== 'clawed_back',
+      )
+      .slice(0, limit)
+      .map(clone);
   }
 
   async listUnsettledByTreasury(

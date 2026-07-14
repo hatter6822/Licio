@@ -277,6 +277,96 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
   });
 });
 
+describe('buildTreasuryObligationsPort (WS-L.2.5b, W12)', () => {
+  it('blocks unlinking the LAST wallet while a user: grant or intent is live', async () => {
+    const services = await wsmServices();
+    const { buildTreasuryObligationsPort } = await import('../treasury/services.js');
+    const port = buildTreasuryObligationsPort(services);
+    const walletAccountId = randomUUID();
+    await services.wallets.insert({
+      walletAccountId,
+      userId: USER,
+      addressHashHex: 'h'.repeat(64),
+      addressTruncated: '0xabcd…ef01',
+      chainId: 1337,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    // No obligations yet.
+    expect(await port.obligationsForWallet(walletAccountId)).toEqual([]);
+    // An unsettled grant payable to the member blocks the LAST wallet.
+    const treasury = await (async () => {
+      const record = {
+        treasuryId: randomUUID(),
+        roomId: ROOM,
+        deploymentId: randomUUID(),
+        treasuryAddress: `0x${'ab'.repeat(20)}`,
+        acceptedAssets: ['USDC'],
+        balanceSnapshot: null,
+        balancesReconciledAt: null,
+        depositLimits: {
+          perUserPerPeriod: '1000',
+          perRoomPerPeriod: '5000',
+          perDepositMax: '100',
+          periodSeconds: 86_400,
+        },
+        freezeState: 'active' as const,
+        freezeReason: null,
+        freezeCascade: false,
+        pauseFlags: { deposits: false, proposals: false, executions: false },
+        reconciliationState: 'synced' as const,
+        createdAt: new Date().toISOString(),
+      };
+      const inserted = await services.treasuries.insert(record);
+      if (inserted === null) throw new Error('fixture treasury collision');
+      return inserted;
+    })();
+    await services.grants.insert({
+      grantId: randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: randomUUID(),
+      recipientRef: `user:${USER}`,
+      purpose: 'Pending payout',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [],
+      milestoneState: 'pending',
+      reviewState: 'cleared',
+      payoutState: 'scheduled',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    const blocked = await port.obligationsForWallet(walletAccountId);
+    expect(blocked.some((o) => o.type === 'pending_grant')).toBe(true);
+    // A SECOND active wallet satisfies the payout binding — unlink frees up.
+    await services.wallets.insert({
+      walletAccountId: randomUUID(),
+      userId: USER,
+      addressHashHex: 'i'.repeat(64),
+      addressTruncated: '0xdcba…10fe',
+      chainId: 1337,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    expect(await port.obligationsForWallet(walletAccountId)).toEqual([]);
+  });
+});
+
 describe('buildTreasuryExecutorPort (the WS-U kernel adapter)', () => {
   const serviceOf = (
     result:

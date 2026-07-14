@@ -718,6 +718,17 @@ export function createRoomGovernanceSimRoutes() {
           // readiness and a CAS mode write.  Falls back to the WS-L.4.1g
           // two-edge gate when the WS-M container is not wired.
           if (treasuryServicesConfigured()) {
+            // Entering a REAL-ASSET mode enables production governance for the
+            // whole room — the same adult bar every real-asset action carries
+            // (rollbacks and recovery edges stay open) (W12).
+            if (
+              (body.target_mode === 'testnet' ||
+                body.target_mode === 'capped_production' ||
+                body.target_mode === 'mature_production') &&
+              auth.ageBand !== 'adult'
+            ) {
+              return c.json(deny('adult_required', 'This feature is not available'), 403);
+            }
             const outcome = await requestWsmModeTransition(getTreasuryServices(), {
               roomId,
               targetMode: body.target_mode,

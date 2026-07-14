@@ -828,6 +828,85 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     ).toMatchObject({ ok: false, code: 'law_pack_not_real_asset_ready' });
   });
 
+  it('a malformed fixture corpus rejects publication outright (W12 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    // Valid DOCUMENT, garbage FIXTURES: silently publishing with
+    // `fixtures: null` would drop the proof corpus the steward attached.
+    expect(
+      await registerLawPack(deps, {
+        roomId: ROOM,
+        document: fullLawPack({ version: '4.0.0' }),
+        fixtures: { fixtures: 'not-an-array' },
+        actorUserId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'law_pack_coverage_gap' });
+  });
+
+  it('rejected milestones leave the liquidity encumbrance (W12 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('treasury missing');
+    // A 4000 grant whose 3000 tranche was terminally REJECTED: only the 1000
+    // pending tranche still encumbers.
+    const inserted = await deps.grants.insert({
+      grantId: crypto.randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: crypto.randomUUID(),
+      recipientRef: `0x${'cd'.repeat(20)}`,
+      purpose: 'Partially rejected grant',
+      amount: '4000',
+      asset: 'USDC',
+      milestones: [
+        {
+          milestoneId: crypto.randomUUID(),
+          description: 'Rejected',
+          amount: '3000',
+          state: 'rejected',
+          paymentIntentId: null,
+        },
+        {
+          milestoneId: crypto.randomUUID(),
+          description: 'Pending',
+          amount: '1000',
+          state: 'pending',
+          paymentIntentId: null,
+        },
+      ],
+      milestoneState: 'rejected',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (inserted === null) throw new Error('fixture grant collision');
+    await deps.treasuries.setReconciliation(
+      treasury.treasuryId,
+      'synced',
+      { USDC: '5000' },
+      new Date(deps.now()).toISOString(),
+    );
+    // Free liquidity = 5000 − 1000 (pending tranche only): a 3900 ask fits —
+    // encumbering the whole 4000 would have blocked it forever.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_amount: '3900' }),
+      }),
+    ).toMatchObject({ ok: true });
+    // …and the pending 1000 still counts: 4100 exceeds the free liquidity.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_amount: '4100' }),
+      }),
+    ).toMatchObject({ ok: false, code: 'insufficient_funds' });
+  });
+
   it('a frozen room cannot register a new law-pack (W10 review)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps);

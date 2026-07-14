@@ -285,6 +285,7 @@ import {
   buildMembershipFactsPort,
   buildStewardElectionPort,
   buildTreasuryExecutorPort,
+  buildTreasuryObligationsPort,
   createInMemoryTreasuryServices,
   setTreasuryServices,
 } from './treasury/services.js';
@@ -1175,8 +1176,19 @@ if (env.REDIS_URL !== undefined) {
 // actions + signatures + private receipts purged on account deletion).
 identityServices.exportFinancialWallets = (userId) =>
   exportFinancialWalletData(knomosisServices, userId);
-identityServices.purgeFinancialWallets = (userId) =>
-  purgeFinancialWalletData(knomosisServices, userId);
+identityServices.purgeFinancialWallets = async (userId) => {
+  await purgeFinancialWalletData(knomosisServices, userId);
+  // WS-M: the tombstoned users row never fires payment_intent's SET NULL —
+  // scrub the intent owner explicitly (room financial history survives the
+  // erasure ownerless, exactly like the FK intended) (W12).  Lazy lookup:
+  // the treasury container is wired later in this boot.
+  const { getTreasuryServices, treasuryServicesConfigured } = await import(
+    './treasury/services.js'
+  );
+  if (treasuryServicesConfigured()) {
+    await getTreasuryServices().intents.anonymizeUser(userId);
+  }
+};
 // The WS-U governance stores are SHARED with the law-pack port below.
 const governanceStores = db ? createDrizzleGovernanceStores(db) : createInMemoryGovernanceStores();
 knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
@@ -1458,6 +1470,9 @@ setTreasuryServices(treasuryServices);
 // (charter + elected seat/appeals + treasury policy + safety attestation),
 // replacing the fail-closed defaults.
 knomosisServices.readinessChecklist = buildWsmReadinessChecklistPort(treasuryServices);
+// WS-L.2.5b: wallet unlink now sees the LIVE WS-M obligations (unsettled
+// user: grants + in-flight intents), replacing the empty default (W12).
+knomosisServices.treasuryObligations = buildTreasuryObligationsPort(treasuryServices);
 // The forum contribution path consults the in-room agent (subordinate to the
 // platform floor) for any room with an active community-approved binding. The
 // agent's author-history signals are read from the real identity + forum +

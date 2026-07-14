@@ -650,29 +650,38 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     patch: Parameters<PaymentIntentStore['transition']>[3],
     updatedAt: string,
   ): Promise<PaymentIntentRecord | null> {
-    const rows = await this.db
-      .update(paymentIntents)
-      .set({
-        executionState: to,
-        updatedAt: new Date(updatedAt),
-        ...(patch.jurisdictionState !== undefined
-          ? { jurisdictionState: patch.jurisdictionState }
-          : {}),
-        ...(patch.complianceState !== undefined ? { complianceState: patch.complianceState } : {}),
-        ...(patch.retryCount !== undefined ? { retryCount: patch.retryCount } : {}),
-        ...(patch.quoteRef !== undefined ? { quoteRef: patch.quoteRef } : {}),
-        ...(patch.actionRecordId !== undefined ? { actionRecordId: patch.actionRecordId } : {}),
-        ...(patch.receiptId !== undefined ? { receiptId: patch.receiptId } : {}),
-        ...(patch.expiresAt !== undefined ? { expiresAt: new Date(patch.expiresAt) } : {}),
-      })
-      .where(
-        and(
-          eq(paymentIntents.paymentIntentId, paymentIntentId),
-          eq(paymentIntents.executionState, from),
-        ),
-      )
-      .returning();
-    return rows[0] ? mapIntent(rows[0]) : null;
+    try {
+      const rows = await this.db
+        .update(paymentIntents)
+        .set({
+          executionState: to,
+          updatedAt: new Date(updatedAt),
+          ...(patch.jurisdictionState !== undefined
+            ? { jurisdictionState: patch.jurisdictionState }
+            : {}),
+          ...(patch.complianceState !== undefined
+            ? { complianceState: patch.complianceState }
+            : {}),
+          ...(patch.retryCount !== undefined ? { retryCount: patch.retryCount } : {}),
+          ...(patch.quoteRef !== undefined ? { quoteRef: patch.quoteRef } : {}),
+          ...(patch.actionRecordId !== undefined ? { actionRecordId: patch.actionRecordId } : {}),
+          ...(patch.receiptId !== undefined ? { receiptId: patch.receiptId } : {}),
+          ...(patch.expiresAt !== undefined ? { expiresAt: new Date(patch.expiresAt) } : {}),
+        })
+        .where(
+          and(
+            eq(paymentIntents.paymentIntentId, paymentIntentId),
+            eq(paymentIntents.executionState, from),
+          ),
+        )
+        .returning();
+      return rows[0] ? mapIntent(rows[0]) : null;
+    } catch (error) {
+      // The 0087 partial unique (one intent per action record): the attach
+      // race's loser surfaces as a clean CAS loss, never a thrown 500.
+      if (isUniqueViolation(error)) return null;
+      throw error;
+    }
   }
 
   async listByRoom(roomId: string, limit: number): Promise<PaymentIntentRecord[]> {
@@ -718,6 +727,34 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
         ),
       );
     return rows.map(mapIntent);
+  }
+
+  async listActiveByUser(userId: string, limit: number): Promise<PaymentIntentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(paymentIntents)
+      .where(
+        and(
+          eq(paymentIntents.userId, userId),
+          notInArray(paymentIntents.executionState, [
+            'finalized',
+            'abandoned',
+            'failed',
+            'reverted',
+          ]),
+        ),
+      )
+      .limit(limit);
+    return rows.map(mapIntent);
+  }
+
+  async anonymizeUser(userId: string): Promise<number> {
+    const rows = await this.db
+      .update(paymentIntents)
+      .set({ userId: null })
+      .where(eq(paymentIntents.userId, userId))
+      .returning({ paymentIntentId: paymentIntents.paymentIntentId });
+    return rows.length;
   }
 
   async listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]> {
@@ -877,6 +914,42 @@ export class DrizzleGrantStore implements GrantStore {
         .returning();
       return updated[0] ? mapGrant(updated[0]) : null;
     });
+  }
+
+  async setPayoutState(
+    grantId: string,
+    payoutState: GrantRecord['payoutState'],
+    auditSummary?: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(treasuryGrants)
+      .set({ payoutState, ...(auditSummary !== undefined ? { auditSummary } : {}) })
+      .where(eq(treasuryGrants.grantId, grantId))
+      .returning({ grantId: treasuryGrants.grantId });
+    return rows.length > 0;
+  }
+
+  async setReviewState(grantId: string, reviewState: GrantRecord['reviewState']): Promise<boolean> {
+    const rows = await this.db
+      .update(treasuryGrants)
+      .set({ reviewState })
+      .where(eq(treasuryGrants.grantId, grantId))
+      .returning({ grantId: treasuryGrants.grantId });
+    return rows.length > 0;
+  }
+
+  async listUnsettledByRecipient(recipientRef: string, limit: number): Promise<GrantRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(treasuryGrants)
+      .where(
+        and(
+          eq(treasuryGrants.recipientRef, recipientRef),
+          notInArray(treasuryGrants.payoutState, ['paid', 'clawed_back']),
+        ),
+      )
+      .limit(limit);
+    return rows.map(mapGrant);
   }
 
   async listUnsettledByTreasury(

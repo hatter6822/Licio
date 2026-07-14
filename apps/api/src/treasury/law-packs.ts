@@ -127,7 +127,15 @@ export async function registerLawPack(
       `Fixture "${first?.label}": expected ${first?.expected}, got ${first?.actual}.`,
     );
   }
-  if (report.corpus !== null && report.coverageProblems.length > 0) {
+  // Any coverage/parse problem rejects WHENEVER fixtures were supplied: a
+  // malformed corpus lands its zod issues in `coverageProblems` with a null
+  // `corpus`, and silently publishing with `fixtures: null` would drop the
+  // proof corpus the steward believed they attached (W12).
+  if (
+    input.fixtures !== null &&
+    input.fixtures !== undefined &&
+    report.coverageProblems.length > 0
+  ) {
     const first = report.coverageProblems[0];
     return tgErr(400, 'law_pack_coverage_gap', `${first?.path}: ${first?.problem}`);
   }

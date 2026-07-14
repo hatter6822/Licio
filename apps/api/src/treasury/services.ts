@@ -20,6 +20,7 @@ import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import type { GovernanceStores } from '../governance/stores.js';
 import type { IdentityServices } from '../identity/services.js';
+import type { ExternalObligation, TreasuryObligationsPort } from '../knomosis/ports.js';
 import type { KnomosisServices } from '../knomosis/services.js';
 import type {
   MembershipFactsPort,
@@ -115,6 +116,50 @@ export function buildMembershipFactsPort(
         if (verdict.eligible) eligible += 1;
       }
       return eligible;
+    },
+  };
+}
+
+/** WS-L.2.5b: LIVE WS-M obligations for the wallet-unlink check (W12) — a
+ *  grant recipient must not unlink their LAST active wallet while an
+ *  unsettled `user:<id>` grant needs it for the payout binding, and an owner
+ *  of in-flight intents keeps the wallet until they settle. */
+export function buildTreasuryObligationsPort(services: {
+  wallets: TreasuryServices['wallets'];
+  grants: TreasuryServices['grants'];
+  intents: TreasuryServices['intents'];
+}): TreasuryObligationsPort {
+  return {
+    obligationsForWallet: async (walletAccountId) => {
+      const wallet = await services.wallets.getById(walletAccountId);
+      if (wallet === null) return [];
+      const obligations: ExternalObligation[] = [];
+      // Unsettled grants payable to this member block unlinking the LAST
+      // active wallet (the payout attach binds to the linked-wallet set).
+      const others = (await services.wallets.listByUser(wallet.userId, false)).filter(
+        (w) => w.unlinkState === 'active' && w.walletAccountId !== walletAccountId,
+      );
+      if (others.length === 0) {
+        const pending = await services.grants.listUnsettledByRecipient(`user:${wallet.userId}`, 1);
+        if (pending.length > 0) {
+          obligations.push({
+            type: 'pending_grant',
+            ref: pending[0]?.grantId ?? 'grant',
+            description:
+              'An unsettled grant pays this member; keep a linked wallet until it settles.',
+          });
+        }
+      }
+      // In-flight intents owned by the member still need a signing wallet.
+      const inflight = (await services.intents.listActiveByUser(wallet.userId, 1)).length > 0;
+      if (inflight && others.length === 0) {
+        obligations.push({
+          type: 'pending_payment',
+          ref: walletAccountId,
+          description: 'A payment intent is still in flight for this account.',
+        });
+      }
+      return obligations;
     },
   };
 }

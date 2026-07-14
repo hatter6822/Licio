@@ -46,7 +46,12 @@ import { hasPassedComprehension } from '../knomosis/simulation.js';
 import type { ComprehensionStore } from '../knomosis/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { activeLawPack, type LawPackDeps } from './law-packs.js';
-import { setGovernanceFreeze, type TreasuryGovernanceError, tgErr } from './profile.js';
+import {
+  assertGovernanceWritable,
+  setGovernanceFreeze,
+  type TreasuryGovernanceError,
+  tgErr,
+} from './profile.js';
 import type { AttestationStore, CharterStore } from './stores.js';
 
 export interface WsmReadinessDeps extends LawPackDeps {
@@ -487,6 +492,10 @@ export async function recordReadinessAttestation(
   ) {
     return tgErr(403, 'steward_required', 'A room steward must record this acknowledgment.');
   }
+  // Attestations feed the readiness checklist directly — a frozen room must
+  // not accumulate production-readiness state mid-review (W12).
+  const writable = await assertGovernanceWritable(deps, input.roomId, 'configuration');
+  if (writable !== null) return writable;
   await deps.attestations.upsert({
     roomId: input.roomId,
     item: input.item,

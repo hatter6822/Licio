@@ -722,7 +722,9 @@ async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord):
       ? ('paid' as const)
       : ('partially_paid' as const);
   if (payoutState === grant.payoutState) return;
-  await deps.grants.update({ ...grant, payoutState });
+  // COLUMN-scoped (W12): a whole-grant update here would write the stale
+  // milestones snapshot back over a concurrent milestone transition.
+  await deps.grants.setPayoutState(grant.grantId, payoutState);
 }
 
 /**

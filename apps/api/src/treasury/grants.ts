@@ -187,7 +187,11 @@ export async function setGrantReview(
       'The reviewer must have no stake in the grant (WS-M.2.3d).',
     );
   }
-  const updated = await deps.grants.update({ ...grant, reviewState: input.reviewState });
+  // COLUMN-scoped (W12): never write the milestones snapshot back.
+  if (!(await deps.grants.setReviewState(grant.grantId, input.reviewState))) {
+    return tgErr(404, 'not_found', 'Resource not found');
+  }
+  const updated = await deps.grants.getById(grant.grantId);
   if (updated === null) return tgErr(404, 'not_found', 'Resource not found');
   await appendChainedAudit(deps, {
     roomId: input.roomId,
@@ -322,11 +326,11 @@ export async function markGrantClawedBack(
   if (grant === null || grant.roomId !== input.roomId) {
     return tgErr(404, 'not_found', 'Resource not found');
   }
-  const updated = await deps.grants.update({
-    ...grant,
-    payoutState: 'clawed_back',
-    auditSummary: input.note,
-  });
+  // COLUMN-scoped (W12): never write the milestones snapshot back.
+  if (!(await deps.grants.setPayoutState(grant.grantId, 'clawed_back', input.note))) {
+    return tgErr(404, 'not_found', 'Resource not found');
+  }
+  const updated = await deps.grants.getById(grant.grantId);
   if (updated === null) return tgErr(404, 'not_found', 'Resource not found');
   // A clawback CANCELS the grant's open payout intents: a scheduled tranche
   // still in a pre-submission state must not remain attachable after the

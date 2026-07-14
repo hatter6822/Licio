@@ -432,6 +432,33 @@ describe('WS-M treasury + payment intents', () => {
     expect(body.error.code).toBe('adult_required');
   });
 
+  it('real-asset mode transitions are adult-gated (W12 review)', async () => {
+    const fixture = await wsmFixture();
+    const { cookie, userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.identity.store.updateUser(userId, { ageBand: 'teen_16_17' });
+    const res = await req('POST', `/rooms/${ROOM}/governance/mode`, cookie, {
+      target_mode: 'testnet',
+      reason: 'graduating',
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('adult_required');
+  });
+
+  it('grant milestone transitions are verified+adult gated (W12 review)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie, userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.identity.store.updateUser(userId, { ageBand: 'teen_16_17' });
+    const res = await req(
+      'POST',
+      `/rooms/${ROOM}/treasury/grants/${crypto.randomUUID()}/milestones/${crypto.randomUUID()}`,
+      cookie,
+      { state: 'accepted' },
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('adult_required');
+  });
+
   it('production proposal creation is adult-gated (W9 review)', async () => {
     const fixture = await wsmFixture();
     fixture.mode.value = 'testnet';

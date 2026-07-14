@@ -2101,3 +2101,169 @@ describe('eleventh review wave (PR #144): CAS-loss orphan cleanup', () => {
     expect(orphan?.executionState).toBe('abandoned');
   });
 });
+
+describe('twelfth review wave (PR #144): atomic attach, column projections, scrub', () => {
+  it('the store refuses to bind one action record to two intents', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services);
+    const mkSigned = async () => {
+      const row = await services.intents.insert({
+        paymentIntentId: randomUUID(),
+        userId: USER,
+        roomId: ROOM,
+        treasuryId: treasury.treasuryId,
+        targetType: 'treasury_deposit',
+        targetId: treasury.treasuryId,
+        asset: 'USDC',
+        amount: '100',
+        jurisdictionState: 'allowed',
+        complianceState: 'cleared',
+        executionState: 'signed',
+        retryCount: 0,
+        quoteRef: null,
+        actionRecordId: null,
+        receiptId: null,
+        idempotencyKey: randomUUID(),
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      return row.paymentIntentId;
+    };
+    const first = await mkSigned();
+    const second = await mkSigned();
+    const actionRecordId = randomUUID();
+    const nowIso = new Date().toISOString();
+    const won = await services.intents.transition(
+      first,
+      'signed',
+      'submitted',
+      { actionRecordId },
+      nowIso,
+    );
+    expect(won).not.toBeNull();
+    // The RACE loser (its pre-check read happened before the winner stored the
+    // binding) hits the uniqueness at the store and loses the CAS cleanly.
+    const lost = await services.intents.transition(
+      second,
+      'signed',
+      'submitted',
+      { actionRecordId },
+      nowIso,
+    );
+    expect(lost).toBeNull();
+    expect((await services.intents.getById(second))?.executionState).toBe('signed');
+  });
+
+  it('payout/review projections never rewrite a concurrently changed milestone', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services);
+    const a = {
+      milestoneId: randomUUID(),
+      description: 'A',
+      amount: '50',
+      state: 'submitted' as const,
+      paymentIntentId: null,
+    };
+    const grant = await services.grants.insert({
+      grantId: randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: randomUUID(),
+      recipientRef: `0x${'aa'.repeat(20)}`,
+      purpose: 'Projection fixture',
+      amount: '50',
+      asset: 'USDC',
+      milestones: [a],
+      milestoneState: 'submitted',
+      reviewState: 'cleared',
+      payoutState: 'scheduled',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    // A milestone transition lands AFTER any earlier snapshot was taken…
+    const intentId = randomUUID();
+    await services.grants.applyMilestoneTransition(
+      grant.grantId,
+      a.milestoneId,
+      'submitted',
+      'accepted',
+      intentId,
+    );
+    // …and the payout-state projection (column-scoped) must not clobber it.
+    await services.grants.setPayoutState(grant.grantId, 'paid');
+    const current = await services.grants.getById(grant.grantId);
+    expect(current?.payoutState).toBe('paid');
+    expect(current?.milestones[0]?.state).toBe('accepted');
+    expect(current?.milestones[0]?.paymentIntentId).toBe(intentId);
+  });
+
+  it('a frozen room defers readiness attestations', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Emergency review.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    expect(
+      await recordReadinessAttestation(services, {
+        roomId: ROOM,
+        item: 'safety_override_acknowledged',
+        note: 'Recorded mid-freeze.',
+        actorUserId: USER,
+        isPlatformStaff: false,
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+
+  it('the deletion scrub nulls a purged user across their intents', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services);
+    for (let i = 0; i < 2; i += 1) {
+      await services.intents.insert({
+        paymentIntentId: randomUUID(),
+        userId: USER,
+        roomId: ROOM,
+        treasuryId: treasury.treasuryId,
+        targetType: 'treasury_deposit',
+        targetId: treasury.treasuryId,
+        asset: 'USDC',
+        amount: '10',
+        jurisdictionState: 'allowed',
+        complianceState: 'cleared',
+        executionState: 'finalized',
+        retryCount: 0,
+        quoteRef: null,
+        actionRecordId: null,
+        receiptId: randomUUID(),
+        idempotencyKey: randomUUID(),
+        expiresAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    expect(await services.intents.anonymizeUser(USER)).toBe(2);
+    const rows = await services.intents.listDepositsInPeriod(ROOM, new Date(0).toISOString());
+    expect(rows.every((r) => r.userId === null)).toBe(true);
+  });
+
+  it('malformed fixture corpora reject at publication instead of silently dropping', async () => {
+    const services = await wsmServices();
+    const { registerLawPack } = await import('../treasury/law-packs.js');
+    const result = await registerLawPack(services, {
+      roomId: ROOM,
+      document: { not: 'a law pack' },
+      fixtures: { fixtures: 'not-an-array' },
+      actorUserId: USER,
+    });
+    // Structural failure fires first here; the corpus-specific leg is covered
+    // in the proposals suite with a valid document.
+    expect('code' in result && result.code).toBe('law_pack_invalid');
+  });
+});

@@ -322,6 +322,11 @@ export const paymentIntents = knomosisSchema.table(
       .where(
         sql`${t.userId} IS NULL AND ${t.targetType} IN ('grant_payout', 'steward_compensation')`,
       ),
+    // ONE intent per WS-L action record (0087): the attach race's loser hits
+    // this instead of double-settling a single transfer.
+    uniqueIndex('payment_intent_action_uq')
+      .on(t.actionRecordId)
+      .where(sql`${t.actionRecordId} IS NOT NULL`),
     index('payment_intent_room_idx').on(t.roomId, t.createdAt),
     index('payment_intent_state_idx').on(t.executionState, t.expiresAt),
     index('payment_intent_treasury_idx').on(t.treasuryId, t.targetType),
