@@ -311,6 +311,127 @@ describe('WS-M treasury + payment intents', () => {
     expect(((await replay.json()) as { existing: boolean }).existing).toBe(true);
   });
 
+  it('governed rooms change charters via proposal, never the direct route (W10 review)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
+    const res = await req('POST', `/rooms/${ROOM}/governance/charter`, cookie, {
+      sections: SECTIONS,
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('proposal_required');
+  });
+
+  it('production delegation carries the verified + adult gates (W11 review)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie, userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.identity.store.updateUser(userId, { ageBand: 'teen_16_17' });
+    const res = await req('POST', `/rooms/${ROOM}/governance/delegations`, cookie, {
+      delegate_user_id: crypto.randomUUID(),
+      scope: { all: true },
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('adult_required');
+  });
+
+  it('the tab bundle serves ACTIVE production proposals in their own shape (review-body)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
+    // An ACTIVE production spend row (USDC): the sim projection's SIM-* asset
+    // contract would make the old single-shape tab response THROW.
+    const productionId = crypto.randomUUID();
+    await fixture.treasury.proposals.insert({
+      proposalId: productionId,
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 'Fund the sprint',
+      plainLanguageSummary: 'Pay a contributor.',
+      requestedAmount: '500',
+      asset: 'USDC',
+      recipientRef: null,
+      conflictDisclosures: 'None.',
+      riskAssessment: 'Low.',
+      requestedAction: { kind: 'grant' },
+      expectedDeliverable: 'A deliverable.',
+      preflightState: 'passed',
+      votingState: 'open',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: false,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: crypto.randomUUID(),
+      category: 'grant',
+      deliberationEndsAt: null,
+      votingEndsAt: new Date(Date.now() + 3_600_000).toISOString(),
+      challengeWindowEndsAt: null,
+      tallySnapshot: null,
+    });
+    // A leftover SIMULATED practice row must stay OFF the production list.
+    await fixture.treasury.proposals.insert({
+      proposalId: crypto.randomUUID(),
+      roomId: ROOM,
+      proposerUserId: crypto.randomUUID(),
+      proposalType: 'capped_grant',
+      title: 'Practice round',
+      plainLanguageSummary: 'Simulated.',
+      requestedAmount: '10',
+      asset: 'SIM-USD',
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'Low.',
+      requestedAction: {},
+      expectedDeliverable: 'None.',
+      preflightState: 'passed',
+      votingState: 'open',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: true,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: null,
+      category: null,
+      deliberationEndsAt: null,
+      votingEndsAt: null,
+      challengeWindowEndsAt: null,
+      tallySnapshot: null,
+    });
+    const tab = await req('GET', `/rooms/${ROOM}/governance`, cookie);
+    expect(tab.status).toBe(200);
+    const body = (await tab.json()) as {
+      active_proposals: unknown[];
+      active_production_proposals: { proposal_id: string; asset: string | null }[];
+    };
+    expect(body.active_proposals).toHaveLength(0);
+    expect(body.active_production_proposals).toHaveLength(1);
+    expect(body.active_production_proposals[0]?.proposal_id).toBe(productionId);
+    expect(body.active_production_proposals[0]?.asset).toBe('USDC');
+  });
+
+  it('production proposal execution is adult-gated (review-body)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie, userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.identity.store.updateUser(userId, { ageBand: 'teen_16_17' });
+    const res = await req(
+      'POST',
+      `/rooms/${ROOM}/governance/proposals/${crypto.randomUUID()}/execute`,
+      cookie,
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('adult_required');
+  });
+
   it('production proposal creation is adult-gated (W9 review)', async () => {
     const fixture = await wsmFixture();
     fixture.mode.value = 'testnet';

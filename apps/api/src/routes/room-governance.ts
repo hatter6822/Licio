@@ -20,7 +20,7 @@ import {
   governanceAuditLogResponseSchema,
   governanceProposalCreateSchema,
   governanceProposalListResponseSchema,
-  governanceTabResponseSchema,
+  governanceTabWithProductionSchema,
   modeTransitionRequestSchema,
   type ProductionProposal,
   productionProposalCreateSchema,
@@ -263,15 +263,25 @@ export function createRoomGovernanceSimRoutes() {
           (p) => p.votingState === 'open' || p.executionState === 'timelocked',
         );
         const isSimulated = gate.mode === 'simulated';
+        // MODE-AWARE projection (PR #144 review): a production spend row can
+        // never ride the sim shape (its `SIM-*` asset contract would make the
+        // response parse THROW on a USDC proposal), and a real-asset room's
+        // leftover practice rows stay off the production list — each mode
+        // serializes only its own rows, in its own shape.
+        const activeSim = active.filter((p) => p.simulationMode);
+        const activeProduction = active.filter((p) => !p.simulationMode);
         return c.json(
-          governanceTabResponseSchema.parse({
+          governanceTabWithProductionSchema.parse({
             room_id: roomId,
             governance_mode: gate.mode,
             simulation_mode: isSimulated,
             charter_summary: null,
-            active_proposals: await Promise.all(
-              active.map((p) => toWireProposal(p, services.votes)),
-            ),
+            active_proposals: isSimulated
+              ? await Promise.all(activeSim.map((p) => toWireProposal(p, services.votes)))
+              : [],
+            active_production_proposals: isSimulated
+              ? []
+              : activeProduction.map((p) => toWireProductionProposal(p)),
             treasury: isSimulated ? await simTreasuryView(sim, roomId) : null,
           }),
         );
@@ -440,6 +450,12 @@ export function createRoomGovernanceSimRoutes() {
           if (gate.mode !== 'simulated') {
             // WS-M production execution (WS-M.4.3b): the explicit steward
             // trigger through the shipped fail-closed treasury executor.
+            // ADULT-gated like signing, deposits, and treasury actions — the
+            // shared sim/production route makes the gate conditional here
+            // (simulated practice stays age-open) (PR #144 review).
+            if (auth.ageBand !== 'adult') {
+              return c.json(deny('adult_required', 'This feature is not available'), 403);
+            }
             if (!treasuryServicesConfigured()) {
               return c.json(deny('mode_invalid', 'Execution here exists in simulated mode.'), 409);
             }

@@ -20,11 +20,16 @@
 import { decCompare, decSum, paymentIntentTransitionAllowed } from '@licio/governance';
 import type { PaymentIntentState, PaymentTargetType } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
+import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import { killSwitchDecision } from '../knomosis/killswitch.js';
 import { pinnedDeployment } from '../knomosis/pin.js';
 import type { CompliancePort, RegionResolverPort } from '../knomosis/ports.js';
 import { REAL_FUNDS_ENVIRONMENTS } from '../knomosis/preflight.js';
-import type { KnomosisActionStore, KnomosisReceiptStore } from '../knomosis/stores.js';
+import type {
+  FinancialWalletStore,
+  KnomosisActionStore,
+  KnomosisReceiptStore,
+} from '../knomosis/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
 import {
   assertGovernanceWritable,
@@ -40,6 +45,10 @@ export interface IntentDeps extends ProfileDeps {
   receipts: KnomosisReceiptStore;
   /** Payout finality projects onto the linked grant (WS-M.5.1a). */
   grants: GrantStore;
+  /** `user:<id>` grant recipients bind to the member's LINKED wallets at
+   *  attach (hashed comparison — addresses are never stored raw) (W11). */
+  wallets: FinancialWalletStore;
+  masterSecret: string;
   compliance: CompliancePort;
   regionResolver: RegionResolverPort;
   configStore: PwattConfigStore;
@@ -514,6 +523,16 @@ export async function attachIntentSubmission(
   // address and reconciliation would mark the grant paid.  (Opaque refs
   // (`user:…`, a co-op name) have no on-chain address to compare; the WS-L
   // action layer screens the actual payout address regardless.)
+  // The action must ride the intent's DEPLOYMENT: with multiple active
+  // deployments, a same-shape action from another deployment would settle
+  // this intent against the wrong treasury chain (W11).
+  const intentTreasury = await deps.treasuries.getById(intent.treasuryId);
+  if (intentTreasury === null) {
+    return tgErr(404, 'no_treasury', 'This room has no treasury.');
+  }
+  if (action.deploymentId !== intentTreasury.deploymentId) {
+    return tgErr(422, 'action_mismatch', 'The action belongs to a different deployment.');
+  }
   if (intent.targetType === 'grant_payout' || intent.targetType === 'steward_compensation') {
     const grant = await deps.grants.getById(intent.targetId);
     if (grant === null) {
@@ -524,9 +543,9 @@ export async function attachIntentSubmission(
       return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; payouts are closed.');
     }
     const approvedRecipient = grant.recipientRef.toLowerCase();
+    const signedRecipient =
+      typeof message['recipient'] === 'string' ? message['recipient'].toLowerCase() : '';
     if (/^0x[0-9a-f]{40}$/.test(approvedRecipient)) {
-      const signedRecipient =
-        typeof message['recipient'] === 'string' ? message['recipient'].toLowerCase() : '';
       if (signedRecipient !== approvedRecipient) {
         return tgErr(
           422,
@@ -534,6 +553,35 @@ export async function attachIntentSubmission(
           'The signed recipient differs from the approved grant recipient.',
         );
       }
+    } else if (/^user:[0-9a-f-]{36}$/.test(grant.recipientRef)) {
+      // A `user:<id>` recipient binds to that member's LINKED wallets: the
+      // signed address must hash to one of them, or a same-grant/same-amount
+      // action could pay an unrelated address and still mark the grant paid
+      // (W11).  Addresses are stored hashed, so the comparison is keyed.
+      if (!/^0x[0-9a-f]{40}$/.test(signedRecipient)) {
+        return tgErr(422, 'action_mismatch', 'The signed recipient is not a valid address.');
+      }
+      const recipientUserId = grant.recipientRef.slice('user:'.length);
+      const linked = (await deps.wallets.listByUser(recipientUserId, false)).filter(
+        (w) => w.unlinkState === 'active',
+      );
+      const signedHash = hashFinancialWalletAddress(deps.masterSecret, signedRecipient);
+      if (!linked.some((w) => w.addressHashHex === signedHash)) {
+        return tgErr(
+          422,
+          'recipient_not_bound',
+          'The signed address is not a linked wallet of the approved recipient.',
+        );
+      }
+    } else {
+      // Any OTHER opaque ref (a co-op name, free text) has nothing to bind
+      // against — an on-chain payout cannot verify its destination, so the
+      // attach fails CLOSED.  Re-propose with an address or `user:` recipient.
+      return tgErr(
+        422,
+        'recipient_not_bound',
+        'This grant recipient cannot be bound to an on-chain address.',
+      );
     }
   }
   // One WS-L action settles exactly ONE intent — a record already bound to

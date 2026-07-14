@@ -1389,6 +1389,54 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
     return rows[0] ? mapProposal(rows[0]) : null;
   }
 
+  async applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean> {
+    // COLUMN-scoped, WHERE-guarded statements — never a stale whole-row write
+    // that could undo a concurrent execution (PR #144 W11).
+    return this.db.transaction(async (tx) => {
+      const rows = await tx
+        .update(governanceProposals)
+        .set({ challengeState: projection.challengeState })
+        .where(eq(governanceProposals.proposalId, proposalId))
+        .returning({ proposalId: governanceProposals.proposalId });
+      if (rows.length === 0) return false;
+      if (projection.blockExecution === true) {
+        await tx
+          .update(governanceProposals)
+          .set({ executionState: 'blocked' })
+          .where(
+            and(
+              eq(governanceProposals.proposalId, proposalId),
+              inArray(governanceProposals.executionState, ['not_executed', 'timelocked']),
+            ),
+          );
+      }
+      if (projection.executableAfterFloor !== undefined) {
+        const floor = new Date(projection.executableAfterFloor);
+        await tx
+          .update(governanceProposals)
+          .set({ executableAfter: floor })
+          .where(
+            and(
+              eq(governanceProposals.proposalId, proposalId),
+              eq(governanceProposals.executionState, 'timelocked'),
+              or(
+                isNull(governanceProposals.executableAfter),
+                lt(governanceProposals.executableAfter, floor),
+              ),
+            ),
+          );
+      }
+      return true;
+    });
+  }
+
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
     const rows = await this.db
       .select()

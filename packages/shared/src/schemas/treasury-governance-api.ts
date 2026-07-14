@@ -17,6 +17,7 @@
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 import {
+  governanceTabResponseSchema,
   hash32Schema,
   lowercaseAddressSchema,
   minorUnitAmountSchema,
@@ -424,6 +425,11 @@ export const proposalTallyWireSchema = z
   .strict();
 export type ProposalTallyWire = z.infer<typeof proposalTallyWireSchema>;
 
+/** The governance TAB bundle, production-aware (PR #144 review): real-asset
+ *  rooms carry their active PRODUCTION proposals in a separate list — the sim
+ *  projection's `SIM-*` asset contract cannot hold a USDC spend row, and
+ *  mixing shapes in one array would force every client into shape-sniffing.
+ *  Exactly one of the two lists is non-empty per mode. */
 export const productionProposalSchema = z
   .object({
     proposal_id: uuidSchema,
@@ -467,6 +473,14 @@ export type ProductionProposal = z.infer<typeof productionProposalSchema>;
 export const productionProposalResponseSchema = z
   .object({ proposal: productionProposalSchema })
   .strict();
+/** The mode-aware governance tab bundle (PR #144 review): extends the WS-L.4
+ *  tab with the room's active PRODUCTION proposals.  Exactly one of
+ *  `active_proposals` (sim) / `active_production_proposals` is non-empty. */
+export const governanceTabWithProductionSchema = governanceTabResponseSchema.extend({
+  active_production_proposals: z.array(productionProposalSchema).max(50),
+});
+export type GovernanceTabWithProduction = z.infer<typeof governanceTabWithProductionSchema>;
+
 export const productionProposalListResponseSchema = z
   .object({ proposals: z.array(productionProposalSchema).max(100) })
   .strict();

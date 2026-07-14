@@ -578,7 +578,14 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
       .from(paymentIntents)
       .where(
         and(
-          userId === null ? isNull(paymentIntents.userId) : eq(paymentIntents.userId, userId),
+          userId === null
+            ? and(
+                isNull(paymentIntents.userId),
+                // The room-owned scope covers the PAYOUT classes only (0086):
+                // an ERASED member deposit also carries a null user.
+                inArray(paymentIntents.targetType, ['grant_payout', 'steward_compensation']),
+              )
+            : eq(paymentIntents.userId, userId),
           eq(paymentIntents.roomId, roomId),
           eq(paymentIntents.idempotencyKey, idempotencyKey),
         ),

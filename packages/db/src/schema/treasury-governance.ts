@@ -312,12 +312,16 @@ export const paymentIntents = knomosisSchema.table(
     // Idempotency scope (user, room, key) — WS-M.3.1c.  The key row is written
     // in the same transaction as the intent (the unique index IS the record).
     uniqueIndex('payment_intent_idem_uq').on(t.userId, t.roomId, t.idempotencyKey),
-    // ROOM-owned intents (user_id NULL: grant/compensation payouts) scope
+    // ROOM-owned intents (user_id NULL by DESIGN: the payout classes) scope
     // idempotency to (room, key) — NULLs are distinct under the index above,
-    // so the milestone-keyed dedup needs its own partial unique (0083).
+    // so the milestone-keyed dedup needs its own partial unique.  Scoped to
+    // the payout target types (0086): account erasure also nulls user_id on
+    // member deposits, which must never join this uniqueness.
     uniqueIndex('payment_intent_room_idem_uq')
       .on(t.roomId, t.idempotencyKey)
-      .where(sql`${t.userId} IS NULL`),
+      .where(
+        sql`${t.userId} IS NULL AND ${t.targetType} IN ('grant_payout', 'steward_compensation')`,
+      ),
     index('payment_intent_room_idx').on(t.roomId, t.createdAt),
     index('payment_intent_state_idx').on(t.executionState, t.expiresAt),
     index('payment_intent_treasury_idx').on(t.treasuryId, t.targetType),

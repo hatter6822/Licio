@@ -12,6 +12,7 @@ import { DEFAULT_KNOMOSIS_CONFIG } from '../knomosis/config.js';
 import { KNOMOSIS_PIN } from '../knomosis/pin.js';
 import { defaultCompliancePort, defaultRegionResolverPort } from '../knomosis/ports.js';
 import {
+  InMemoryFinancialWalletStore,
   InMemoryGovernanceAuditStore,
   InMemoryGovernanceProposalStore,
   InMemoryKnomosisActionStore,
@@ -90,6 +91,8 @@ function buildDeps(): TestDeps & {
     actions: new InMemoryKnomosisActionStore(),
     receipts: new InMemoryKnomosisReceiptStore(),
     snapshots: new InMemorySnapshotStore(),
+    wallets: new InMemoryFinancialWalletStore(),
+    masterSecret: 'test-master-secret',
     governanceAudit: new InMemoryGovernanceAuditStore(),
     compliance: defaultCompliancePort,
     regionResolver: defaultRegionResolverPort,
@@ -866,6 +869,9 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
           signature: '0xsig',
         },
       },
+      // A different DEPLOYMENT: a same-shape action from another chain must
+      // not settle this treasury's intent (W11).
+      { deploymentId: crypto.randomUUID() },
     ];
     for (const [index, over] of cases.entries()) {
       const action = actionOf(over);
@@ -955,6 +961,144 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     });
   });
 
+  it('binds user: grant recipients to their LINKED wallets (W11 review)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const recipientAddress = `0x${'e1'.repeat(20)}`;
+    const { hashFinancialWalletAddress } = await import('../identity/siwe.js');
+    await deps.wallets.insert({
+      walletAccountId: crypto.randomUUID(),
+      userId: OTHER,
+      addressHashHex: hashFinancialWalletAddress('test-master-secret', recipientAddress),
+      addressTruncated: `${recipientAddress.slice(0, 6)}…${recipientAddress.slice(-4)}`,
+      chainId: 1337,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    const grant = await deps.grants.insert({
+      grantId: crypto.randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: crypto.randomUUID(),
+      recipientRef: `user:${OTHER}`,
+      purpose: 'Member grant',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [],
+      milestoneState: 'accepted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    const mkIntent = async () => {
+      const created = await createPaymentIntent(deps, {
+        userId: null,
+        roomId: ROOM,
+        targetType: 'grant_payout',
+        targetId: grant.grantId,
+        asset: 'USDC',
+        amount: '100',
+        idempotencyKey: crypto.randomUUID(),
+      });
+      if (!('intent' in created)) throw new Error('expected intent');
+      const id = created.intent.paymentIntentId;
+      await preflightIntent(deps, id, USER);
+      await quoteIntent(deps, id, USER);
+      await markIntentSigned(deps, id, USER);
+      return id;
+    };
+    const payoutAction = (recipient: string): KnomosisActionRecordEntity => ({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'grant_payout' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: {
+        message: { amount: '100', asset: 'USDC', grantId: grant.grantId, recipient },
+        signature: '0xsig',
+      },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // An UNRELATED address rejects — the approved member never linked it.
+    const first = await mkIntent();
+    const foreign = payoutAction(`0x${'bb'.repeat(20)}`);
+    await deps.actions.insert(foreign);
+    expect(await attachIntentSubmission(deps, first, foreign.actionRecordId, USER)).toMatchObject({
+      ok: false,
+      code: 'recipient_not_bound',
+    });
+    // The recipient's LINKED wallet binds (hashed comparison).
+    const good = payoutAction(recipientAddress);
+    await deps.actions.insert(good);
+    expect(await attachIntentSubmission(deps, first, good.actionRecordId, USER)).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it('erased member deposits never join the room-owned idempotency scope (W10 review)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const sharedKey = crypto.randomUUID();
+    // An ERASED member deposit: user nulled by the data-rights purge.
+    await deps.intents.insert({
+      paymentIntentId: crypto.randomUUID(),
+      userId: null,
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '50',
+      jurisdictionState: 'allowed',
+      complianceState: 'cleared',
+      executionState: 'finalized',
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: crypto.randomUUID(),
+      idempotencyKey: sharedKey,
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // A room-owned PAYOUT with the same key must not replay the erased
+    // deposit (0086 scopes the null-owner uniqueness to the payout classes).
+    const created = await createPaymentIntent(deps, {
+      userId: null,
+      roomId: ROOM,
+      targetType: 'grant_payout',
+      targetId: crypto.randomUUID(),
+      asset: 'USDC',
+      amount: '10',
+      idempotencyKey: sharedKey,
+    });
+    if (!('intent' in created)) throw new Error(JSON.stringify(created));
+    expect(created.existing).toBe(false);
+    expect(created.intent.targetType).toBe('grant_payout');
+  });
+
   it('rejects an action record already settling another intent', async () => {
     const deps = buildDeps();
     const first = await signedIntent(deps);
@@ -997,7 +1141,7 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
       roomId: ROOM,
       treasuryId: treasury.treasuryId,
       proposalId: crypto.randomUUID(),
-      recipientRef: 'coop',
+      recipientRef: `0x${'aa'.repeat(20)}`,
       purpose: 'Finality fixture',
       amount: '100',
       asset: 'USDC',
@@ -1051,7 +1195,12 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
       signedAction: {
-        message: { amount: '100', asset: 'USDC', grantId: inserted.grantId },
+        message: {
+          amount: '100',
+          asset: 'USDC',
+          grantId: inserted.grantId,
+          recipient: `0x${'aa'.repeat(20)}`,
+        },
         signature: '0xsig',
       },
       submissionState: 'finalized' as SubmissionState,

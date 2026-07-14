@@ -164,6 +164,17 @@ export function createTreasuryGovernanceRoutes() {
           if (!(await services.rooms.isSteward(roomId, auth.userId))) {
             return c.json(notFound, 404); // 404-over-403 (no steward oracle)
           }
+          // Post-enablement charter changes go through the charter_update
+          // PROPOSAL (whose execution publishes the version); the direct
+          // route is the pre-enablement drafting path only — mirrors the
+          // law-pack adoption gate below (PR #144 W10).
+          const mode = await services.roomMode.currentMode(roomId);
+          if (mode !== 'ordinary' && mode !== 'simulated') {
+            return c.json(
+              deny('proposal_required', 'Governed rooms change charters via a proposal.'),
+              409,
+            );
+          }
           const result = await createCharterVersion(services, {
             roomId,
             sections: c.req.valid('json').sections,
@@ -828,6 +839,16 @@ export function createTreasuryGovernanceRoutes() {
           const auth = requireAuth(c);
           const gate = flagGate('governance');
           if (gate) return c.json(deny(gate.code, gate.message), 503);
+          // Delegation SHIFTS production voting power: the same verified +
+          // adult bar as casting the ballot directly, or an account that
+          // cannot vote treasury-controlling proposals could still route its
+          // unit through an adult delegate (PR #144 W11).
+          if (!auth.accountVerified) {
+            return c.json(deny('verification_required', 'Verify your account to continue'), 403);
+          }
+          if (auth.ageBand !== 'adult') {
+            return c.json(deny('adult_required', 'This feature is not available'), 403);
+          }
           const services = getTreasuryServices();
           const roomId = c.req.valid('param').roomId;
           const body = c.req.valid('json');

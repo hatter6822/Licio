@@ -780,6 +780,70 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     ).toMatchObject({ ok: false, code: 'law_pack_target_invalid' });
   });
 
+  it('an upgrade targeting a fixture-less pack rejects at CREATE (W11 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      allowedProposalTypes: ['capped_grant', 'charter_update', 'law_pack_upgrade'],
+      quorumRules: {
+        capped_grant: { basis: 'eligible_voters', minFraction: 0.2 },
+        charter_update: { basis: 'eligible_voters', minFraction: 0.2 },
+        law_pack_upgrade: { basis: 'eligible_voters', minFraction: 0.2 },
+      },
+      thresholdRules: {
+        capped_grant: { minAffirmativeFraction: 0.5 },
+        charter_update: { minAffirmativeFraction: 0.5 },
+        law_pack_upgrade: { minAffirmativeFraction: 0.5 },
+      },
+      timelockRules: {
+        capped_grant: { seconds: 3_600 },
+        charter_update: { seconds: 3_600 },
+        law_pack_upgrade: { seconds: 3_600 },
+      },
+    });
+    // The freeze guard on registration is off (room active); the pack is
+    // structurally valid but NEVER fixture-proven.
+    const registered = await registerLawPack(deps, {
+      roomId: ROOM,
+      document: fullLawPack({ version: '2.0.0' }),
+      fixtures: null,
+      actorUserId: STEWARD,
+    });
+    if (!('record' in registered)) throw new Error(JSON.stringify(registered));
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: STEWARD,
+        create: draft({
+          proposal_type: 'law_pack_upgrade',
+          category: null,
+          requested_amount: null,
+          asset: null,
+          recipient_ref: null,
+          requested_action: {
+            kind: 'law_pack_upgrade',
+            law_pack_id: registered.record.lawPackId,
+          },
+        }),
+      }),
+    ).toMatchObject({ ok: false, code: 'law_pack_not_real_asset_ready' });
+  });
+
+  it('a frozen room cannot register a new law-pack (W10 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const profile = await deps.profiles.get(ROOM);
+    if (profile === null) throw new Error('profile missing');
+    await deps.profiles.upsert({ ...profile, freezeState: 'frozen', freezeReason: 'Review.' });
+    expect(
+      await registerLawPack(deps, {
+        roomId: ROOM,
+        document: fullLawPack({ version: '3.0.0' }),
+        fixtures: null,
+        actorUserId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+
   it('a role_class quorum basis without a signer set cannot publish (W6 review)', async () => {
     const deps = buildHarness();
     const registered = await registerLawPack(deps, {
@@ -1145,11 +1209,13 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
         treasury_policy_update: { seconds: 3_600 },
       },
     });
-    // The upgrade must target a real published pack (W6/W8 create gate).
+    // The upgrade must target a real published, FIXTURE-PROVEN pack
+    // (W6/W8/W11 create gate).
+    const targetDoc = fullLawPack({ version: '1.1.0' });
     const target = await registerLawPack(deps, {
       roomId: ROOM,
-      document: fullLawPack({ version: '1.1.0' }),
-      fixtures: null,
+      document: targetDoc,
+      fixtures: corpusFor(targetDoc),
       actorUserId: STEWARD,
     });
     if (!('record' in target)) throw new Error(JSON.stringify(target));
@@ -1789,6 +1855,113 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
     // Own 1 + STEWARD's unit; the conflicted PROPOSER's unit is recused.
     expect(vote.signature.weightSnapshot).toBe('2');
+  });
+
+  it('a frozen room defers new challenge filings (W11 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    const profile = await deps.profiles.get(ROOM);
+    if (profile === null) throw new Error('profile missing');
+    await deps.profiles.upsert({ ...profile, freezeState: 'frozen', freezeReason: 'Review.' });
+    expect(
+      await fileChallenge(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: VOTER_2,
+        challengeType: 'coi',
+        description: 'Filed mid-freeze.',
+        evidenceRefs: [],
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+
+  it('dismissing the last challenge restarts an execution window spent under review (W10 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    const filed = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'coi',
+      description: 'Undisclosed conflict.',
+      evidenceRefs: [],
+    });
+    if ('code' in filed) throw new Error(filed.message);
+    // The ENTIRE execution window elapses while the challenge is under
+    // review (the sweep pauses expiry; manual execute is challenge-blocked).
+    deps.clockAdvance(
+      3_600 * 1000 + DEFAULT_KNOMOSIS_CONFIG.wsmExecutionWindowSeconds * 1000 + 60_000,
+    );
+    const dismissed = await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: filed.challenge.challengeId,
+      resolution: 'dismissed',
+      resolutionNote: 'No conflict found.',
+      actorUserId: STEWARD,
+      isPlatformStaff: false,
+    });
+    expect(dismissed).toMatchObject({ ok: true });
+    // The window restarted at dismissal — execution succeeds instead of
+    // dying `execution_window_expired` for time spent under review.
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    expect(executed).toMatchObject({ ok: true });
+  });
+
+  it('a late upheld verdict cannot un-execute a completed proposal (W11 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    const filed = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'coi',
+      description: 'Undisclosed conflict.',
+      evidenceRefs: [],
+    });
+    if ('code' in filed) throw new Error(filed.message);
+    const dismissed = await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: filed.challenge.challengeId,
+      resolution: 'dismissed',
+      resolutionNote: 'No conflict.',
+      actorUserId: STEWARD,
+      isPlatformStaff: false,
+    });
+    expect(dismissed).toMatchObject({ ok: true });
+    deps.clockAdvance(3_600 * 1000 + 1_000);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    expect(executed).toMatchObject({ ok: true });
+    // A second challenge upheld AFTER execution projects the challenge
+    // column but must NOT rewrite executionState (blockExecution guards on
+    // not-yet-executed rows only).
+    const second = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'fraud',
+      description: 'Post-hoc claim.',
+      evidenceRefs: [],
+    });
+    // The challenge window closed at execution — filings are shut; drive the
+    // projection DIRECTLY to prove the guard (the store-level contract).
+    expect(second).toMatchObject({ ok: false });
+    await deps.proposals.applyChallengeProjection(settled.proposalId, {
+      challengeState: 'upheld',
+      blockExecution: true,
+    });
+    expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('executed');
   });
 
   it('a disposed challenge is immutable: no re-resolution, no late escalation (W5 review)', async () => {

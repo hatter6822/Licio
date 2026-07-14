@@ -602,6 +602,19 @@ export interface GovernanceProposalStore {
       >
     >,
   ): Promise<GovernanceProposalRecord | null>;
+  /** COLUMN-scoped challenge projection (PR #144 W11): challenge resolution
+   *  must never write a stale whole-row snapshot back over a concurrent
+   *  execution.  `blockExecution` blocks only a not-yet-executed row;
+   *  `executableAfterFloor` restarts the execution window for a still-
+   *  timelocked row whose window elapsed under challenge review. */
+  applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean>;
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
   /** Proposals stranded mid-execution (claimed `executing` but never finalized —
@@ -1550,6 +1563,33 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     const updated = { ...row, ...patch, votingState: to };
     this.#rows.set(proposalId, structuredClone(updated));
     return structuredClone(updated);
+  }
+
+  async applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined) return false;
+    row.challengeState = projection.challengeState;
+    if (
+      projection.blockExecution === true &&
+      (row.executionState === 'not_executed' || row.executionState === 'timelocked')
+    ) {
+      row.executionState = 'blocked';
+    }
+    if (
+      projection.executableAfterFloor !== undefined &&
+      row.executionState === 'timelocked' &&
+      (row.executableAfter === null || row.executableAfter < projection.executableAfterFloor)
+    ) {
+      row.executableAfter = projection.executableAfterFloor;
+    }
+    return true;
   }
 
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {

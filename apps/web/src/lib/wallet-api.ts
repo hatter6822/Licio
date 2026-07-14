@@ -13,9 +13,9 @@ import {
   comprehensionQuizResponseSchema,
   comprehensionSubmitResponseSchema,
   type GovernanceProposalListResponse,
-  type GovernanceTabResponse,
+  type GovernanceTabWithProduction,
   governanceProposalListResponseSchema,
-  governanceTabResponseSchema,
+  governanceTabWithProductionSchema,
   type KnomosisDeploymentListResponse,
   type KnomosisManifestResponse,
   type KnomosisPreflightRequest,
@@ -130,9 +130,9 @@ export async function submitKnomosisAction(
 
 // --- Governance simulation (WS-L.4) ----------------------------------------
 
-export async function fetchGovernanceTab(roomId: string): Promise<GovernanceTabResponse> {
+export async function fetchGovernanceTab(roomId: string): Promise<GovernanceTabWithProduction> {
   const response = await client.v1.rooms[':roomId'].governance.$get({ param: { roomId } });
-  return parseResponse(response, governanceTabResponseSchema);
+  return parseResponse(response, governanceTabWithProductionSchema);
 }
 
 export async function fetchGovernanceProposals(

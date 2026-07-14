@@ -2032,3 +2032,72 @@ describe('tenth review wave (PR #144): the cascade marker', () => {
     expect(held?.freezeCascade).toBe(false);
   });
 });
+
+describe('eleventh review wave (PR #144): CAS-loss orphan cleanup', () => {
+  it('an accept that loses the milestone CAS abandons its freshly minted intent', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const milestoneId = randomUUID();
+    const grant = await services.grants.insert({
+      grantId: randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: randomUUID(),
+      recipientRef: `0x${'aa'.repeat(20)}`,
+      purpose: 'Race fixture',
+      amount: '50',
+      asset: 'USDC',
+      milestones: [
+        {
+          milestoneId,
+          description: 'All',
+          amount: '50',
+          state: 'submitted',
+          paymentIntentId: null,
+        },
+      ],
+      milestoneState: 'submitted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    // A REJECTION wins the race inside the accept's CAS window: the proxy
+    // rejects the milestone via the raw store just before the accept's CAS.
+    const raw = services.grants;
+    let intercepted = false;
+    services.grants = new Proxy(raw, {
+      get(target, prop) {
+        if (prop === 'applyMilestoneTransition' && !intercepted) {
+          return async (
+            grantId: string,
+            msId: string,
+            fromState: Parameters<typeof raw.applyMilestoneTransition>[2],
+            toState: Parameters<typeof raw.applyMilestoneTransition>[3],
+            intentId: string | null,
+          ) => {
+            intercepted = true;
+            await target.applyMilestoneTransition(grantId, msId, 'submitted', 'rejected', null);
+            return target.applyMilestoneTransition(grantId, msId, fromState, toState, intentId);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const result = await updateGrantMilestone(services, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      milestoneId,
+      state: 'accepted',
+      actorUserId: USER,
+    });
+    services.grants = raw;
+    expect('code' in result && result.code).toBe('invalid_transition');
+    // The orphaned room-owned payout was ABANDONED, never left drivable.
+    const orphan = await services.intents.findByIdempotencyKey(null, ROOM, milestoneId);
+    expect(orphan?.executionState).toBe('abandoned');
+  });
+});

@@ -722,7 +722,17 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
     idempotencyKey: string,
   ): Promise<PaymentIntentRecord | null> {
     for (const row of this.#rows.values()) {
-      if (row.userId === userId && row.roomId === roomId && row.idempotencyKey === idempotencyKey) {
+      if (row.roomId !== roomId || row.idempotencyKey !== idempotencyKey) continue;
+      if (userId === null) {
+        // The room-owned scope covers the PAYOUT classes only (0086): an
+        // ERASED member deposit also carries a null user and must not match.
+        if (
+          row.userId === null &&
+          (row.targetType === 'grant_payout' || row.targetType === 'steward_compensation')
+        ) {
+          return clone(row);
+        }
+      } else if (row.userId === userId) {
         return clone(row);
       }
     }

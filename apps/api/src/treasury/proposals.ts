@@ -66,7 +66,12 @@ import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './b
 import { readabilityProblems } from './charter.js';
 import { incomingDelegationsFor } from './delegations.js';
 import { createGrantFromProposal, type GrantDeps, hasValidMilestonePlan } from './grants.js';
-import { activeLawPack, adoptLawPack, type LawPackDeps } from './law-packs.js';
+import {
+  activeLawPack,
+  adoptLawPack,
+  type LawPackDeps,
+  lawPackRealAssetFailure,
+} from './law-packs.js';
 import { assertGovernanceWritable, type TreasuryGovernanceError, tgErr } from './profile.js';
 import { classifyProposalTarget } from './prohibited-targets.js';
 import {
@@ -370,19 +375,10 @@ export async function createProductionProposal(
         'The upgrade must target a published law-pack of this room.',
       );
     }
-    const { validateLawPackForRealAssets, lawPackSchema } = await import('@licio/governance');
-    const parsedTarget = lawPackSchema.safeParse(targetRecord.lawPack);
-    const problems = parsedTarget.success ? validateLawPackForRealAssets(parsedTarget.data) : null;
-    if (problems === null || problems.length > 0) {
-      const first = problems?.[0];
-      return tgErr(
-        409,
-        'law_pack_not_real_asset_ready',
-        first
-          ? `${first.path}: ${first.problem}`
-          : 'The target law-pack does not meet the real-asset bar.',
-      );
-    }
+    // The FULL real-asset bar including the live fixture re-run (W11): a
+    // fixture-less target would deliberate, pass, and die at adoption.
+    const targetFailure = lawPackRealAssetFailure(targetRecord);
+    if (targetFailure !== null) return targetFailure;
   }
 
   // A charter update carries its FULL proposed sections: validate them at
@@ -1037,9 +1033,16 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
           }
         }
       } else {
-        await deps.proposals.casVotingState(proposal.proposalId, 'open', tally.outcome, {
-          tallySnapshot: wireTally(tally) as unknown as Record<string, unknown>,
-        });
+        // A contended sweep can lose this CAS to a sibling that already
+        // closed the row — auditing a transition that did not happen would
+        // forge history (W11).
+        const closed = await deps.proposals.casVotingState(
+          proposal.proposalId,
+          'open',
+          tally.outcome,
+          { tallySnapshot: wireTally(tally) as unknown as Record<string, unknown> },
+        );
+        if (closed === null) continue;
       }
       await appendChainedAudit(deps, {
         roomId,
@@ -1140,6 +1143,11 @@ export async function fileChallenge(
   if (proposal === null || proposal.roomId !== input.roomId || proposal.simulationMode) {
     return tgErr(404, 'not_found', 'Resource not found');
   }
+  // A frozen room's governance is paused wholesale — filing mutates proposal
+  // state and creates a new execution blocker mid-review (W11).  Platform
+  // review acts through the freeze/challenge-resolution surfaces regardless.
+  const writable = await assertGovernanceWritable(deps, input.roomId, 'voting');
+  if (writable !== null) return writable;
   if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
     return tgErr(403, 'not_member', 'Only room members can file challenges.');
   }
@@ -1241,16 +1249,19 @@ export async function resolveChallenge(
   if (resolved === null) {
     return tgErr(409, 'invalid_transition', 'The challenge cannot move to that state.');
   }
-  // Project the proposal-level challenge column.
+  // Project the proposal-level challenge column — COLUMN-scoped (W11): a
+  // stale whole-row write here could undo a concurrent execution that claimed
+  // the proposal in the gap after the last blocker resolved.
   if (input.resolution === 'upheld') {
-    await deps.proposals.update({
-      ...proposal,
+    await deps.proposals.applyChallengeProjection(proposal.proposalId, {
       challengeState: 'upheld',
-      executionState: 'blocked',
+      blockExecution: true, // only a not-yet-executed row blocks
     });
     await releaseReservation(deps, proposal.proposalId);
   } else if (input.resolution === 'escalated') {
-    await deps.proposals.update({ ...proposal, challengeState: 'escalated' });
+    await deps.proposals.applyChallengeProjection(proposal.proposalId, {
+      challengeState: 'escalated',
+    });
   } else {
     // The proposal-level column is an AGGREGATE over all its challenges:
     // dismissing one must never clear a sibling escalation/upheld verdict
@@ -1263,7 +1274,15 @@ export async function resolveChallenge(
         : siblings.some((c) => c.state === 'open')
           ? ('open' as const)
           : ('dismissed' as const);
-    await deps.proposals.update({ ...proposal, challengeState: aggregate });
+    await deps.proposals.applyChallengeProjection(proposal.proposalId, {
+      challengeState: aggregate,
+      // Dismissing the LAST blocker restarts the execution window for a
+      // still-timelocked row: the sweep paused expiry during review, so time
+      // spent under challenge must not consume the room's window (W10 pair).
+      ...(aggregate === 'dismissed'
+        ? { executableAfterFloor: new Date(deps.now()).toISOString() }
+        : {}),
+    });
   }
   await appendChainedAudit(deps, {
     roomId: input.roomId,

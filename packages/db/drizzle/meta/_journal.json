@@ -596,6 +596,13 @@
       "idx": 84,
       "when": 1783728000009,
       "tag": "0085_ws_m_treasury_freeze_cascade"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 85,
+      "when": 1783728000010,
+      "tag": "0086_ws_m_room_idem_payout_scope"
     }
   ]
 }

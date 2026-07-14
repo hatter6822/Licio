@@ -281,6 +281,21 @@ export async function updateGrantMilestone(
     paymentIntentId,
   );
   if (updated === null) {
+    // The CAS lost.  If this accept minted a payout intent, decide its fate
+    // from the CURRENT milestone (W11): a concurrent ACCEPT converged on the
+    // SAME intent (milestone-keyed idempotency) — leave it linked; anything
+    // else (a rejection won the race) orphans it — abandon, or a steward who
+    // learns the id could still drive an unlinked room-owned payout.
+    if (input.state === 'accepted' && paymentIntentId !== null) {
+      const current = await deps.grants.getById(input.grantId);
+      const currentMilestone = current?.milestones.find((m) => m.milestoneId === input.milestoneId);
+      if (
+        currentMilestone?.state !== 'accepted' ||
+        currentMilestone.paymentIntentId !== paymentIntentId
+      ) {
+        await abandonOpenIntent(deps, paymentIntentId);
+      }
+    }
     return tgErr(409, 'invalid_transition', 'The milestone changed concurrently; re-check.');
   }
   await appendChainedAudit(deps, {
