@@ -291,7 +291,8 @@ adapter.
 | WS-R — LCAP offline content availability | Core protocol, client/server I/O, transport seams, native courier shell, and simulator-tested live transports shipped; remaining emphasis is physical-device field confirmation |
 | WS-S — private-P2P rooms | Foundation, crypto, reducer, sync plane, blind rendezvous, live WebRTC carrier (real-browser convergence E2E included), hardened update channel, and server→private migration shipped; residuals (physical-radio field confirmation, an audited MLS build) tracked in docs |
 | WS-L — Knomosis gateway, wallets, and receipts | Complete behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags: wallet link (SIWE + ECDSA/EIP-1271), no-blind-signing EIP-712 preview, the `knomosis-gateway` v0.4 preflight→submit→reconcile pipeline, ranking-firewalled standing reads, five emergency kill switches, and K1 governance simulation; residuals tracked in `docs/knomosis/README.md` |
-| WS-M / WS-N / WS-O / WS-P | Planned or partially seeded; the WS-O adversarial suite, WS-P Core-Web-Vitals telemetry sink, and BFF-in-the-loop E2E harness exist |
+| WS-M — treasury and governance | Complete behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags: the governance lifecycle (charters, law-packs, live readiness + the full mode machine), the real-asset room treasury with payment intents and three-source reconciliation, deadline-driven proposals with wallet-signed voting/challenges and kernel-routed execution, grants/delegations/action budgets, the hash-chained audit log, and the member/steward web surfaces; residuals tracked in `docs/treasury/README.md` |
+| WS-N / WS-O / WS-P | Planned or partially seeded; the WS-O adversarial suite, WS-P Core-Web-Vitals telemetry sink, and BFF-in-the-loop E2E harness exist |
 
 ## Architecture
 

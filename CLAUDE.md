@@ -239,6 +239,18 @@ licio/
 │   │       │   │                           + LinkInterstitial (WS-G.4.2c)
 │   │       │   ├── reader/              -- SourceReader + readability worker
 │   │       │   ├── profile/             -- SignalLedger
+│   │       │   ├── governance/          -- WS-U room-governance modal (overview/models/
+│   │       │   │                           settings tabs), GovernedByPanel, steward
+│   │       │   │                           model manager + member ratification voting
+│   │       │   ├── treasury/            -- WS-M tabs: GovernanceModeBadge (7-mode SSOT,
+│   │       │   │                           SR-announced changes), ReadinessChecklist +
+│   │       │   │                           mode transitions, GovernanceLifecyclePanel
+│   │       │   │                           (freeze + audit-chain verify), TreasuryPanel +
+│   │       │   │                           DepositFlow (intent → preview → EIP-712 sign →
+│   │       │   │                           WS-L submit), ProposalsPanel (create/vote/
+│   │       │   │                           challenge/execute)
+│   │       │   ├── wallet/              -- WS-L.2 WalletManager (EIP-6963 + SIWE link) +
+│   │       │   │                           the full-disclosure TransactionPreview card
 │   │       │   ├── security/            -- StepUpDialog + step-up retry gate
 │   │       │   ├── i18n/                -- TranslationDisclosure
 │   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget,
@@ -256,6 +268,12 @@ licio/
 │   │       │   ├── privacy-api.ts       --   WS-D data-rights flows (export, deletion)
 │   │       │   ├── link-safety.ts       --   WS-G external-link verdicts (shared heuristics)
 │   │       │   ├── blob-url.ts          --   WS-Q.5.2c object-URL sanitizer (local media preview)
+│   │       │   ├── wallet-api.ts        --   WS-L wallet/knomosis flows (SIWE link, deployments,
+│   │       │   │                             action preflight/submit, governance sim reads)
+│   │       │   ├── treasury-api.ts      --   WS-M flows (profile, readiness, mode, treasury,
+│   │       │   │                             intents, proposals, challenges, audit-chain)
+│   │       │   ├── wallet-signing.ts    --   eth_signTypedData_v4 over the SHARED EIP-712
+│   │       │   │                             registry (EIP-6963 discovery; no parallel schema)
 │   │       │   ├── queries.ts           --   TanStack Query hooks
 │   │       │   ├── query-keys.ts        --   query-key factory
 │   │       │   ├── query-client.ts      --   SWR defaults (30s stale, 5min gc)
@@ -359,6 +377,20 @@ licio/
 │           │   │                             deploy gate + steward review (WS-K)
 │           │   ├── ai-governance-public.ts -- model-card lookup, translation,
 │           │   │                             summary/translation reports (WS-K)
+│           │   ├── wallet.ts            --   /v1/wallet/* + /v1/wallets (WS-L.2 SIWE
+│           │   │                             link/unlink, risk state, standing reads)
+│           │   ├── knomosis.ts          --   /v1/knomosis/* deployments/manifest + action
+│           │   │                             preflight/submit/status (WS-L.1/3)
+│           │   ├── governance.ts        --   WS-U room governance: steward seat/elections,
+│           │   │                             model propose/ratify/download, governed-by view
+│           │   ├── room-governance.ts   --   WS-L.4 + WS-M MODE-AWARE room governance: tab
+│           │   │                             bundle, proposals (sim AND production), treasury
+│           │   │                             read, audit log, comprehension, readiness
+│           │   │                             (?target_mode checklist) + the full mode machine
+│           │   ├── treasury-governance.ts -- WS-M production surface: profile, charters,
+│           │   │                             law-packs, attestations, freeze/pause, treasury +
+│           │   │                             payment intents, grants, proposal sign/challenge,
+│           │   │                             delegations, accounting export, audit-chain verify
 │           │   ├── health.ts            --   /health liveness + /health/ready readiness probes
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
@@ -565,6 +597,25 @@ licio/
 │           │   │                             pack-import POST /packs (CSRF-exempt, rate-limited;
 │           │   │                             §22.1.1 status), mounted at /api/lcap/v2 (WS-R.12.4)
 │           │   └── service.ts            --   the process-wide ingestion-server singleton
+│           ├── knomosis/                 -- WS-L gateway, wallets, and receipts: the pinned
+│           │                                  deployment manifest, the preflight→submit→
+│           │                                  reconcile pipeline, kill switches, the WS-L.4
+│           │                                  governance simulation + readiness, all behind the
+│           │                                  fail-closed cryptoEnabled/governanceEnabled config
+│           ├── governance/               -- WS-U AI-governed-rooms runtime: elections, model
+│           │                                  proposal/ratification, capability derivation, the
+│           │                                  fail-closed executeTreasuryAction kernel executor,
+│           │                                  lawmaking facilitation + the LLM provider seam
+│           ├── treasury/                 -- WS-M treasury-and-governance production layer:
+│           │                                  governance profiles/charters/law-packs, the
+│           │                                  WS-M.1.1b mode machine + live readiness, the
+│           │                                  real-asset treasury + 13-state payment intents +
+│           │                                  three-source reconciliation, deadline-driven
+│           │                                  proposals (wallet-signed voting, challenges,
+│           │                                  kernel-routed execution), grants/delegations/
+│           │                                  budgets, the hash-chained audit log, accounting
+│           │                                  export, gated Drizzle adapters + scheduler sweeps
+│           ├── private-rendezvous/       -- WS-S.6.6 server-blind Private P2P rendezvous
 │           ├── simulator/                -- DEV-ONLY traffic simulator (NEVER in production):
 │           │   ├── prng.ts               --   deterministic mulberry32 seeded PRNG
 │           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster +
@@ -654,10 +705,22 @@ licio/
 │   │       │   ├── identity-records.ts  --   session/credential/wallet zod mirrors
 │   │       │   ├── auth-api.ts          --   auth endpoint wire contracts
 │   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
+│   │       │   ├── knomosis-api.ts      --   WS-L wire contracts (deployments/manifest,
+│   │       │   │                             preflight/submit, sim governance, readiness
+│   │       │   │                             + the WS-M per-item checklist extension)
+│   │       │   ├── treasury-governance-api.ts -- WS-M wire contracts (~30 strict schemas:
+│   │       │   │                             profile, charters, law-packs, treasury,
+│   │       │   │                             payment intents, production proposals +
+│   │       │   │                             tallies, challenges, grants, delegations,
+│   │       │   │                             freeze/pause, accounting export)
 │   │       │   ├── audit.ts             --   audit event taxonomy
 │   │       │   └── events/              --   WS-E event schemas (envelope, retention
 │   │       │                                 tiers, 15 core topic schemas, topic
 │   │       │                                 registry SSOT, knomosis/ bounded context)
+│   │       ├── knomosis/                --   WS-L/WS-M pure client+server SSOTs: the EIP-712
+│   │       │                                 typed-data registry, transaction-preview
+│   │       │                                 assembly, and the asset-decimals registry +
+│   │       │                                 exact human-amount parser (no floats)
 │   │       ├── ugc/                     --   WS-G.4 UGC pipeline: Markdown-lite AST
 │   │       │                                 (no raw-HTML node), constrained serializer,
 │   │       │                                 DOMPurify `licio-ugc` policy, renderUGC,
@@ -716,6 +779,17 @@ licio/
 │   │       │   │                               + the six §23.2 coherence CHECKs (migration 0043)
 │   │       │   ├── private-room.ts      --     WS-S.1.2 private_room_stubs + private_rendezvous
 │   │       │   │                               _records: the §8.2 column allowlist (migration 0044)
+│   │       │   ├── knomosis-gateway.ts  --     WS-L `knomosis` bounded context: deployments,
+│   │       │   │                               signed actions, receipts, indexed events,
+│   │       │   │                               reconciliation (soft room refs; no ranking FK)
+│   │       │   ├── governance.ts        --     WS-U steward seats/elections, governance models,
+│   │       │   │                               ratifications, law-packs, agent action log
+│   │       │   ├── treasury-governance.ts --   WS-M: governance profiles, charter versions, room
+│   │       │   │                               treasuries, reservations, the 13-state payment
+│   │       │   │                               intents, grants, action budgets, delegations,
+│   │       │   │                               challenges, reconciliation snapshots, attestations
+│   │       │   │                               (CHECKs + partial uniques + append-only triggers;
+│   │       │   │                               migration 0082)
 │   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
 │   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
 │   │       ├── private-room-guard.ts    --   WS-S.1.2 checkPrivateServerTables (§8.1 column denylist)
@@ -887,7 +961,12 @@ duplicated here.
 @licio/governance          (depends on @licio/shared only; browser-safe,
                             NEVER @licio/db — the WS-U AI-governed-rooms domain
                             (the deterministic moderation-bound wrapper, kernel,
-                            capabilities, elections) has no database access by
+                            capabilities, elections) PLUS the pure WS-M
+                            treasury-governance math (voting-weight resolver +
+                            eligibility, deadline-driven proposal tally, the
+                            payment-intent/mode lifecycle tables, law-pack
+                            validation + fixtures, action budgets, exact
+                            decimal arithmetic) has no database access by
                             construction)
 @licio/lcap                (depends on @licio/shared, zod; browser-safe,
                             NEVER @licio/db — the WS-R LCAP protocol core
@@ -1391,7 +1470,7 @@ Status:
 | WS-J | Trust, safety, and abuse operations | Complete (residuals tracked, `docs/trust-safety/README.md`) |
 | WS-K | AI and model governance | Complete (residuals tracked, `docs/ai-governance/README.md`); **re-scoped by WS-U** into the platform eval/transparency substrate for community room models |
 | WS-L | Knomosis and wallets | Complete (residuals tracked, `docs/knomosis/README.md`); all behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags |
-| WS-M | Treasury and governance | Planned |
+| WS-M | Treasury and governance | Complete (residuals tracked, `docs/treasury/README.md`); all behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags — governance lifecycle + live readiness, charters, law-packs, the real-asset treasury + payment intents + three-source reconciliation, deadline-driven proposals with wallet-signed voting/challenges, grants/delegations/budgets, the hash-chained audit log, and the web lifecycle/treasury/proposal surfaces |
 | WS-N | Compliance | Planned |
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
@@ -1545,19 +1624,20 @@ re-using the same settings so `pnpm --filter <ws> test` runs standalone.
 Coverage threshold: 80% minimum for lines, functions, branches,
 and statements.
 
-**Test counts.**  `pnpm test` is the canonical query (≈5673 tests pass
-at current state).  Approximate file counts:
+**Test counts.**  `pnpm test` is the canonical query (≈7417 tests pass
+at current state without the gated integration env; ≈7620 with live
+Postgres/Redis).  Approximate file counts:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~140 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect, the WS-K AI provenance-label component, the WS-R.11 client-store suites — `lcap_v2` schema, §23.2 durability layer, §21.2 eviction, §21.3 storage modes, §23.3 sync triggers, §21.4 replication — and the WS-S.7 private-room client suite — the IndexedDb storage adapter (room isolation + idempotent upsert) + `loadPrivateRoomEngine` + the `PrivateRoomSession` create/author/persist/reload manager + the `CreatePrivateRoomWizard`/`PrivateRoomView` UI suites over fake-indexeddb + axe) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~120 (incl. WS-D identity + the `expert`/`admin` RBAC roles + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-K governance backbone/pipelines/routes/stores/coverage + the WS-Q E2E test-auth route + the WS-R in-memory LCAP ingestion engine (incl. server-computed §18.3 validation over registered identity state) + the §29 LCAP routes (content reads + the pack-import POST, with shared crypto fixtures) + the LcapServerStore contract over the in-memory + gated Drizzle adapters + the WS-S.6.6 server-blind rendezvous suite (TTL clamp, no-existence-oracle, signal queue/drain, CSRF-exempt mount) + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
-| packages/shared | ~22 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite, the WS-S.10 update-channel verify-before-unlock core — RFC 9162 Merkle inclusion + `verifyUpdateManifest`/`decideUpdateActivation` fail-closed matrix) | node | `pnpm --filter @licio/shared test` |
+| apps/web | ~229 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect, the WS-K AI provenance-label component, the WS-R.11 client-store suites — `lcap_v2` schema, §23.2 durability layer, §21.2 eviction, §21.3 storage modes, §23.3 sync triggers, §21.4 replication — and the WS-S.7 private-room client suite — the IndexedDb storage adapter (room isolation + idempotent upsert) + `loadPrivateRoomEngine` + the `PrivateRoomSession` create/author/persist/reload manager + the `CreatePrivateRoomWizard`/`PrivateRoomView` UI suites over fake-indexeddb + axe — and the WS-M treasury surfaces: the 7-mode badge SSOT, the readiness checklist + blocked-transition unmet list, the mode-aware treasury panel, the exact-math deposit flow through the WS-L.2.6 preview, and the production proposal cards/create/vote/execute) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~210 (incl. WS-D identity + the `expert`/`admin` RBAC roles + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-K governance backbone/pipelines/routes/stores/coverage + the WS-Q E2E test-auth route + the WS-R in-memory LCAP ingestion engine (incl. server-computed §18.3 validation over registered identity state) + the §29 LCAP routes (content reads + the pack-import POST, with shared crypto fixtures) + the LcapServerStore contract over the in-memory + gated Drizzle adapters + the WS-S.6.6 server-blind rendezvous suite (TTL clamp, no-existence-oracle, signal queue/drain, CSRF-exempt mount) + the dev-seed showcase integration test + the RUN_PERF benchmarks + the WS-M treasury-governance suites — foundation (charters/law-packs/readiness/mode machine/freeze/audit chain), payments (intent lifecycle + limits + reconciliation), proposals (real viem EIP-712 voting, tally, challenges, kernel-routed execution), the mounted route surface, and the gated Drizzle treasury-store contract) | node | `pnpm --filter api test` |
+| packages/shared | ~31 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite, the WS-S.10 update-channel verify-before-unlock core — RFC 9162 Merkle inclusion + `verifyUpdateManifest`/`decideUpdateActivation` fail-closed matrix, and the WS-M asset registry + exact human-amount parser) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
 | packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, the prohibited-vocabulary artifact, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
-| packages/governance | ~7 (WS-U AI-governed-rooms domain: the deterministic moderation-bound wrapper (escalate-to-review ceiling + capability clamp), the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing) | node | `pnpm --filter @licio/governance test` |
+| packages/governance | ~12 (WS-U AI-governed-rooms domain: the deterministic moderation-bound wrapper (escalate-to-review ceiling + capability clamp), the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing; plus the WS-M pure math: voting weights + fail-closed eligibility, the deadline-driven tally, the payment-intent/mode lifecycle tables, law-pack validation + fixture execution, action budgets, and exact decimal arithmetic) | node | `pnpm --filter @licio/governance test` |
 | packages/lcap | ~33 (WS-R LCAP v0.2 pure-protocol core: the LDC deterministic-CBOR encoder/decoder + the §9.1.5 integer table + the full decode rejection matrix, CID construction (SHA-256 known-answer grounded) + RFC 4648 base32, ES256 low-S + the malleability-twin defense, COSE_Sign1 build/verify + the §10.2.4 six-step matrix, device-key/COSE_Key round-trip, suite agility/downgrade, strict closed-schema records/proofs + LDC codec pairing, the §18.3 identity-chain accept/quarantine/reject/revoke matrix, arrival-order-independent record projection + fork detection, blocks/chunk reassembly + compression-bomb abort, the packfile round-trip/cap/tamper matrix, the exhaustive RFC 9162 Merkle inclusion/consistency proofs, the `validate()` trust-projection staged matrix, liveness/receipts, conflict dispatch, the §16/§17 sync-decision plane (`minimalClosure` + scheduler integration, frontier diff, pulse build/apply, reconciliation order, monotonic budget shrinking, the interest privacy/leak matrix, wants + resume ranges, idempotency, exchange assembly + status, the §24.1 server-ingestion commit-stage decision, the §24.4 topological ingestion-order resolver, the §27.2 malicious-graph guard), the conformance-corpus replay, the P1/P2/P3 determinism properties, the §22.6 transport seam (server-anchor-last selection / fallback / public-only carriage gate), and the §32.3/§32.5 deterministic network simulator (seeded link model + pluggable adversaries over the REAL scheduler + closure; the C0-never-starved / fork-detection / transport-independence scenarios)) | node | `pnpm --filter @licio/lcap test` |
 | packages/lcap-p2p | ~3 (WS-R.15.6/15.7 optional transports: the server-blind AES-GCM signaling envelope (AAD-bound, opaque-fields), the §26.4 ICE/NAT-privacy policy (off-by-default / Stealth-force-off / relay-only-requires-TURN), the WebRTC data-channel transport over a fake channel + the ≤16 KiB SCTP datachannel fragmentation/reassembly fail-closed matrix; the `block_cid ⇄ CIDv1(raw,sha2-256)` mapping, the gateway bridge's re-verify-before-use + public-only publish gate + the `TakedownOracle` seam / `takedownInForce` / `republicationSet` halt rule) | node | `pnpm --filter @licio/lcap-p2p test` |
 | packages/private-p2p | ~33 (WS-S Private P2P rooms: the canonical DAG-CBOR + strict-schema + op-body suites; the **WS-S.3 crypto foundation** — RFC 5869 HKDF vectors, the two-layer AEAD (AAD-flip/epoch-replay/nonce-uniqueness), Ed25519 KATs cross-validated against `@noble/curves` + the RFC 9180 HPKE interop vector + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, the forward-secrecy + fuzz properties; the **WS-S.4.2/5** reducer suites — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/§14.4-conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; AND the **WS-S.6** sync suites — blind rendezvous derivation/authorization/mitigations, X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import; the §10.4 device-blind derivation + the buildOpIntakeContext seal→open-against-state composition + the PrivateRoomEngine lifecycle + sync surface + two-engine archive convergence + the WS-S.7.1 room-lifecycle (createPrivateRoom/inviteDevice/joinRoom/buildMemberAddOp + MLS KeyPackage codec) with the full two-device invite→join→converge membership flow + content authoring + §10.9 removal-with-forward-secrecy + §13.6 chunked media + §10.3/§12.3 invite+join + §14.5 snapshots/compaction; AND the **WS-S.11 audit** legs — the 3+-peer convergence matrix (star/chain-relay/concurrent-author/out-of-order+duplicate, identical `roomStateCommitment`) + the pinned known-answer SAS (safety-number) vector — crypto + reducer + sync all ≳ 92% coverage) | node | `pnpm --filter @licio/private-p2p test` |

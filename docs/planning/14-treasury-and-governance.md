@@ -2,6 +2,17 @@
 
 **Milestone:** M4-M5 | **Priority:** 4-5 | **Dependencies:** WS-L (Knomosis gateway/wallets — **shipped**, residuals in `docs/knomosis/README.md`), WS-U (AI-governed rooms — **runtime shipped**, residuals in `docs/governance/README.md`), WS-G (forum/conversation — complete), WS-J (trust and safety — complete), WS-N (compliance — planned) | **Wave:** 8 | **Estimated duration:** 5-6 weeks
 
+> **Status: SHIPPED (2026-07-14)** behind the fail-closed `cryptoEnabled`/`governanceEnabled`
+> flags.  The implementation reference is `docs/treasury/README.md` (source layout, route
+> surface, invariants, operations, and the tracked residuals: the WS-N compliance engine,
+> the delegation/grant-review web forms, the m-of-n multisig ceremony UI, and the
+> WS-L-owned external-audit gates that precede any capped real-funds pilot).  This
+> document remains the design rationale + task decomposition; where it says "extend the
+> shipped artifact," that extension has now landed (migration `0082`, the
+> `apps/api/src/treasury/` services, the mode-aware `room-governance.ts` extensions, the
+> `treasury-governance.ts` route surface, and the `apps/web/src/components/treasury/`
+> member/steward surfaces).
+
 ---
 
 ## Overview

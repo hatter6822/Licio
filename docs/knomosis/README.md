@@ -139,12 +139,15 @@ production-deployment prerequisite.
    SIWE builder are WalletConnect-agnostic, so this plugs in without reworking
    the link flow.
 
-3. **Real-funds compliance engine (WS-N) + real treasury / payment intents
-   (WS-M).**  The compliance port (`ports.ts`) fails closed: unknown
-   jurisdiction / unavailable screening rejects fund transfers in real-fund
-   environments.  The WS-M obligation seam returns no obligations yet.  The
-   payment-intent kill switch (WS-L.3.5b) currently gates the simulated-deposit
-   path.  **Closure:** WS-N.2.2 / WS-M.2-M.3.  The real-funds preflight arms
+3. **Real-funds compliance engine (WS-N).**  The WS-M half of this residual
+   **shipped** (2026-07-14; `docs/treasury/README.md`): the real treasury,
+   the 13-state payment-intent machine, and the production proposal lifecycle
+   now consume this gateway (the payment-intent kill switch gates the REAL
+   deposit path, and `pinnedDeployment` + the manifest drive the WS-M EIP-712
+   domain and real-funds arms).  The compliance port (`ports.ts`) still fails
+   closed: unknown jurisdiction / unavailable screening rejects fund transfers
+   in real-fund environments, and the WS-M preflight mirrors that posture.
+   **Closure:** WS-N.2.2.  The real-funds preflight arms
    (`sanctions/jurisdiction/fraud === … && realFunds`) are exercised the moment
    a capped/mature deployment is pinned (they are annotated as deliberately
    unexercised on testnet/local).

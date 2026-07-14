@@ -258,13 +258,21 @@ hypothetical `knomosis → public.rooms` FK is caught.
   tighten the agent below the model's request). The deterministic lawmaking
   *facilitation* primitives (`lawmaking.summarize/schedule/attest`) are now
   **shipped** and capability-gated (summary wired to a steward route; see Stage 4
-  above). What remains is the WS-M proposal-lifecycle *trigger* that drives
-  schedule/attest end-to-end, the on-chain election mode, and the full §17.5
-  anti-capture suite — the kernel/tally/facilitation semantics are shipped; these
-  are the next slices.
+  above). The WS-M production proposal lifecycle has since **shipped**
+  (2026-07-14; `docs/treasury/README.md`): deliberation/voting windows,
+  deadline-driven tallies, challenges, and execution — including
+  `law_pack_upgrade` / `charter_update` / `steward_rotation` proposals routed
+  through their owning services — plus delegation with anti-capture eligibility
+  gates (cooling-off, COI recusal, capped weights). What remains is binding the
+  agent's `lawmaking.schedule/attest` primitives to that lifecycle as the
+  *agent-driven* trigger, the on-chain election mode, and the remainder of the
+  §17.5 anti-capture suite.
 - **Treasury execution** (`executeTreasuryAction`) — implemented and fail-closed
-  behind the crypto flag (off by default); its caller is the WS-L/WS-M wallet +
-  proposal flow, so it stays a tracked residual until that lands.
+  behind the crypto flag (off by default).  **Its production caller has shipped**
+  (2026-07-14, WS-M): the production proposal lifecycle
+  (`apps/api/src/treasury/proposals.ts` → `buildTreasuryExecutorPort` in
+  `apps/api/src/treasury/services.ts`) routes every fund-moving execution through
+  this kernel executor — see `docs/treasury/README.md`.  This residual is closed.
 - **Web surfaces** — the in-room "governed by" panel, the steward propose surface,
   the member-downloadable proposal registry, AND the **member ratification voting
   panel** (open vote → Approve/Reject + live tally, now **membership-gated** — a
