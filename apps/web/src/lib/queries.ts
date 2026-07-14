@@ -48,6 +48,7 @@ import {
 } from './privacy-api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
+import * as treasuryApi from './treasury-api.js';
 import * as wallet from './wallet-api.js';
 
 // --- Reads ----------------------------------------------------------------
@@ -774,5 +775,168 @@ export function useSubmitComprehensionMutation(roomId: string) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.comprehensionQuiz(roomId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.governanceTab(roomId) });
     },
+  });
+}
+
+// --- WS-M treasury + production governance ----------------------------------
+
+/** Invalidate every room-scoped governance read after a lifecycle write. */
+function invalidateRoomGovernance(
+  queryClient: ReturnType<typeof useQueryClient>,
+  roomId: string,
+): void {
+  // Every WS-M key is room-prefixed, so ONE prefix invalidation covers the
+  // profile, readiness, treasury tab, proposals, grants, and audit reads —
+  // and the room detail itself (`governance_mode` lives on it).
+  void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+}
+
+/** WS-M.1.1a — the room governance profile (mode, law-pack, freeze, pauses). */
+export function useGovernanceProfileQuery(roomId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.governanceProfile(roomId),
+    queryFn: () => treasuryApi.fetchGovernanceProfile(roomId),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+/** WS-M.1.2e — the extended per-item readiness checklist for a target mode. */
+export function useRoomReadinessQuery(roomId: string, targetMode: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.roomReadiness(roomId, targetMode ?? 'next'),
+    queryFn: () => treasuryApi.fetchReadinessForTarget(roomId, targetMode ?? undefined),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+/** WS-M.1.1b — request a mode transition (the full edge table server-side). */
+export function useModeTransitionMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { target_mode: string; reason: string }) =>
+      treasuryApi.requestModeTransition(roomId, input),
+    onSuccess: () => invalidateRoomGovernance(queryClient, roomId),
+  });
+}
+
+/** WS-M.2.2c — the mode-aware treasury view (dashboard OR simulated ledger). */
+export function useTreasuryTabQuery(roomId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.treasuryTab(roomId),
+    queryFn: () => treasuryApi.fetchTreasuryTab(roomId),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+/** WS-M.4.1a — the mode-aware proposal list (production OR simulated). */
+export function useProposalListQuery(roomId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.governanceProposals(roomId),
+    queryFn: () => treasuryApi.fetchProposals(roomId),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+export function useCreateProposalMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Parameters<typeof treasuryApi.createProductionProposal>[1]) =>
+      treasuryApi.createProductionProposal(roomId, input),
+    onSuccess: () => invalidateRoomGovernance(queryClient, roomId),
+  });
+}
+
+/** The simulated-room create (the WS-L.4 template shape on the same path). */
+export function useCreateSimProposalMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Parameters<typeof treasuryApi.createSimulatedProposal>[1]) =>
+      treasuryApi.createSimulatedProposal(roomId, input),
+    onSuccess: () => invalidateRoomGovernance(queryClient, roomId),
+  });
+}
+
+export function useSignProposalMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      proposalId: string;
+      request: Parameters<typeof treasuryApi.signProposal>[2];
+    }) => treasuryApi.signProposal(roomId, input.proposalId, input.request),
+    onSuccess: () => invalidateRoomGovernance(queryClient, roomId),
+  });
+}
+
+export function useExecuteProposalMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (proposalId: string) => treasuryApi.executeProposal(roomId, proposalId),
+    onSuccess: () => invalidateRoomGovernance(queryClient, roomId),
+  });
+}
+
+export function useFileChallengeMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      proposalId: string;
+      request: Parameters<typeof treasuryApi.fileChallenge>[2];
+    }) => treasuryApi.fileChallenge(roomId, input.proposalId, input.request),
+    onSuccess: () => invalidateRoomGovernance(queryClient, roomId),
+  });
+}
+
+/** WS-M.5.1a — the room's grants (member-visible transparency read). */
+export function useRoomGrantsQuery(roomId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.roomGrants(roomId),
+    queryFn: () => treasuryApi.fetchGrants(roomId),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+/** WS-M.3.1 — one payment intent, polled while it is in flight. */
+export function usePaymentIntentQuery(roomId: string, intentId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.paymentIntent(roomId, intentId ?? 'none'),
+    queryFn: () => treasuryApi.fetchPaymentIntent(roomId, intentId as string),
+    // In-flight intents settle via the reconcile sweep; poll until terminal.
+    refetchInterval: 15_000,
+    enabled: intentId !== null,
+  });
+}
+
+/** WS-M.6.1 — on-demand audit-chain integrity verification. */
+export function useAuditChainQuery(roomId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.auditChainVerification(roomId),
+    queryFn: () => treasuryApi.fetchAuditChainVerification(roomId),
+    ...cachePolicy.room,
+    enabled,
+  });
+}
+
+/** WS-L.1.1a-1 — a pinned deployment's manifest (EIP-712 domain source). */
+export function useKnomosisManifestQuery(deploymentId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.knomosisManifest(deploymentId ?? 'none'),
+    queryFn: () => wallet.fetchDeploymentManifest(deploymentId as string),
+    ...cachePolicy.profile,
+    enabled: deploymentId !== null,
+  });
+}
+
+/** WS-L.1.1a-1 — the active pinned deployments (signing fallback source). */
+export function useKnomosisDeploymentsQuery(enabled: boolean) {
+  return useQuery({
+    queryKey: ['knomosis-deployments'] as const,
+    queryFn: () => wallet.fetchDeployments(),
+    ...cachePolicy.profile,
+    enabled,
   });
 }

@@ -18,6 +18,7 @@ import {
   formatMinorUnits,
   type GovernanceMode,
   getTypedDataStruct,
+  KNOMOSIS_ASSET_DECIMALS,
   KNOMOSIS_EIP712_DOMAIN_NAME,
   type KnomosisEip712Domain,
   type KnomosisEnvironment,
@@ -156,17 +157,12 @@ export function buildEip712Domain(deployment: PinnedDeployment): KnomosisEip712D
   };
 }
 
-/**
- * Minor-unit precision per SUPPORTED asset (the interim validated metadata until a
- * formal asset registry ships).  An asset NOT listed here has no validated
- * precision, so its amount is shown as RAW minor units rather than mis-scaled at a
- * guessed 6 decimals — an 18-decimal asset formatted as 6 would grossly misstate
- * the value in the signed summary + receipt (WS-L.3.1a).
- */
-export const KNOMOSIS_ASSET_DECIMALS: Readonly<Record<string, number>> = {
-  USDC: 6,
-  'SIM-USDC': 6,
-};
+// Minor-unit precision per SUPPORTED asset now lives in `@licio/shared`
+// (`KNOMOSIS_ASSET_DECIMALS`) so the client deposit entry and this server-side
+// summary can never scale the same asset differently.  An asset NOT listed
+// there has no validated precision, so its amount is shown as RAW minor units
+// rather than mis-scaled at a guessed 6 decimals (WS-L.3.1a).
+export { KNOMOSIS_ASSET_DECIMALS } from '@licio/shared';
 
 /** Deterministic plain-language summary the §23.5 hash pairing covers. */
 export function buildHumanSummary(

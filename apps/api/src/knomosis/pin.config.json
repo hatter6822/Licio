@@ -1,7 +1,7 @@
 {
   "$comment": "WS-L.1.1a — THE version-controlled Knomosis pin file (SPEC §25.6, §30.7 K0). Deployment pipelines, the config-sync boot job (WS-L.1.1a-1), the contract allowlist (WS-L.3.1b-1), and the cross-stack fixture gate (WS-L.1.1d) all consume THIS file; no deployment value is ever hardcoded or derived at runtime. Changing any pinned value requires a reviewed PR with justification. The `local` deployment pins the in-memory dev/fake gateway: its commit/hash values are WELL-FORMED SENTINELS (all-zero). Both the boot-time loader (apps/api/src/knomosis/pin.ts) and the CI gate (scripts/check-knomosis-pins.ts, `pnpm check:knomosis-pins`) accept sentinels ONLY for environment=local — a testnet or production deployment with sentinel values fails closed (rejected at boot AND blocked in CI). Reversibility statements and confirmation depths are sourced from docs/knomosis/finality-validation-memo.md (WS-L.1.1b-1); values marked provisional there are launch-blocking for testnet promotion.",
   "version": 1,
-  "typed_data_registry_version": "1",
+  "typed_data_registry_version": "2",
   "validation_memo": "docs/knomosis/finality-validation-memo.md",
   "gateway_contract_version": "v0.4",
   "toolchains": {

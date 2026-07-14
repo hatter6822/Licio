@@ -568,6 +568,48 @@
       "idx": 80,
       "when": 1783728000005,
       "tag": "0081_drop_scoi_context_actions"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 81,
+      "when": 1783728000006,
+      "tag": "0082_ws_m_treasury_and_governance"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 82,
+      "when": 1783728000007,
+      "tag": "0083_ws_m_room_owned_intent_idempotency"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 83,
+      "when": 1783728000008,
+      "tag": "0084_ws_m_signature_purpose_scope"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 84,
+      "when": 1783728000009,
+      "tag": "0085_ws_m_treasury_freeze_cascade"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 85,
+      "when": 1783728000010,
+      "tag": "0086_ws_m_room_idem_payout_scope"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 86,
+      "when": 1783728000011,
+      "tag": "0087_ws_m_intent_action_unique"
     }
   ]
 }

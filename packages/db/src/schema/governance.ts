@@ -238,7 +238,18 @@ export const modelRatificationBallots = knomosisSchema.table(
 );
 export type ModelRatificationBallotRow = typeof modelRatificationBallots.$inferSelect;
 
-/** The room's machine-readable, community-voted law-pack (WS-U.4.1a; SPEC §17.3.4). */
+/** WS-M.1.3a law-pack review lifecycle (draft → reviewed → audited). */
+export const lawPackAuditStateEnum = knomosisSchema.enum('law_pack_audit_state', [
+  'draft',
+  'reviewed',
+  'audited',
+]);
+
+/** The room's machine-readable, community-voted law-pack (WS-U.4.1a; SPEC
+ *  §17.3.4).  WS-M.1.3a/d extends it in place: published versions are
+ *  IMMUTABLE (trigger in migration 0082 — document/version/hash/fixtures
+ *  frozen once `published`), hash-committed over the canonical bundle, and
+ *  chained by `supersedes_law_pack_id` for the upgrade lineage. */
 export const roomLawPacks = knomosisSchema.table(
   'room_law_pack',
   {
@@ -247,6 +258,16 @@ export const roomLawPacks = knomosisSchema.table(
     version: text('version').notNull(),
     document: jsonb('document').notNull(), // the LawPack
     createdAt: tz('created_at').notNull().defaultNow(),
+    // --- WS-M.1.3a/c/d (migration 0082; all nullable/defaulted for WS-U rows).
+    /** SHA-256 hex over the canonical bundle minus this field (WS-M.1.3a). */
+    hashCommitment: text('hash_commitment'),
+    auditState: lawPackAuditStateEnum('audit_state').notNull().default('draft'),
+    /** The fixture corpus proving the pack's behavior (WS-M.1.3c). */
+    fixtures: jsonb('fixtures'),
+    humanSummary: text('human_summary'),
+    published: boolean('published').notNull().default(false),
+    effectiveAt: tz('effective_at'),
+    supersedesLawPackId: uuid('supersedes_law_pack_id'),
   },
   (t) => [index('room_law_pack_room_idx').on(t.roomId)],
 );

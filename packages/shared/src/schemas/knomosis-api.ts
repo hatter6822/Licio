@@ -409,14 +409,38 @@ export type KillSwitchAdminRequest = z.infer<typeof killSwitchAdminRequestSchema
 // Governance simulation (WS-L.4; SPEC §17.4, §22.2 GovernanceProposal)
 // ---------------------------------------------------------------------------
 
-/** The three K1 proposal templates (WS-L.4.1b; §17.3.4 MVP law pack). */
-export const PROPOSAL_TYPES = ['charter_update', 'bounty', 'capped_grant'] as const;
+/** The proposal templates: the three K1 sim templates (WS-L.4.1b; §17.3.4 MVP
+ *  law pack) plus the WS-M production types (steward rotation, law-pack
+ *  upgrade, treasury-policy update). */
+export const PROPOSAL_TYPES = [
+  'charter_update',
+  'bounty',
+  'capped_grant',
+  'steward_rotation',
+  'law_pack_upgrade',
+  'treasury_policy_update',
+] as const;
 export type ProposalType = (typeof PROPOSAL_TYPES)[number];
 export const proposalTypeSchema = z.enum(PROPOSAL_TYPES);
 
 export const PROPOSAL_PREFLIGHT_STATES = ['pending', 'passed', 'failed'] as const;
-export const PROPOSAL_VOTING_STATES = ['open', 'passed', 'rejected', 'quorum_not_met'] as const;
-export const PROPOSAL_CHALLENGE_STATES = ['none', 'open', 'upheld', 'dismissed'] as const;
+/** Sim rows use open→settled; WS-M production rows prefix draft→deliberation. */
+export const PROPOSAL_VOTING_STATES = [
+  'open',
+  'passed',
+  'rejected',
+  'quorum_not_met',
+  'draft',
+  'deliberation',
+] as const;
+export const PROPOSAL_CHALLENGE_STATES = [
+  'none',
+  'open',
+  'upheld',
+  'dismissed',
+  // WS-M.4.3a platform escalation.
+  'escalated',
+] as const;
 export const PROPOSAL_EXECUTION_STATES = [
   'not_executed',
   'timelocked',
@@ -425,7 +449,12 @@ export const PROPOSAL_EXECUTION_STATES = [
   'executing',
   'executed',
   'blocked',
+  // WS-M: a passed proposal whose execution window lapsed.
+  'expired',
 ] as const;
+export type ProposalVotingState = (typeof PROPOSAL_VOTING_STATES)[number];
+export type ProposalChallengeColumnState = (typeof PROPOSAL_CHALLENGE_STATES)[number];
+export type ProposalExecutionState = (typeof PROPOSAL_EXECUTION_STATES)[number];
 
 /** The simulated asset ledger prefix — fake assets are ALWAYS SIM-* (WS-L.4.1c). */
 export const SIM_ASSET_PREFIX = 'SIM-' as const;
@@ -551,6 +580,30 @@ export const GOVERNANCE_AUDIT_ACTION_TYPES = [
   'mode_transition_requested',
   'mode_transition_applied',
   'comprehension_passed',
+  // --- WS-M production governance (docs/planning/14-treasury-and-governance.md).
+  'proposal_published',
+  'vote_signature_recorded',
+  'proposal_voting_settled',
+  'challenge_filed',
+  'challenge_resolved',
+  'proposal_executed',
+  'proposal_execution_failed',
+  'treasury_created',
+  'deposit_recorded',
+  'payment_intent_created',
+  'payment_intent_transition',
+  'treasury_freeze_set',
+  'treasury_freeze_cleared',
+  'treasury_pause_changed',
+  'grant_created',
+  'grant_milestone_updated',
+  'law_pack_registered',
+  'law_pack_adopted',
+  'charter_version_created',
+  'readiness_attested',
+  'delegation_created',
+  'delegation_revoked',
+  'reconciliation_snapshot',
 ] as const;
 export type GovernanceAuditActionType = (typeof GOVERNANCE_AUDIT_ACTION_TYPES)[number];
 
@@ -563,6 +616,12 @@ export const governanceAuditEntrySchema = z
     action_details: z.record(z.string(), z.unknown()),
     simulation_mode: z.boolean(),
     created_at: isoTimestampSchema,
+    /** WS-M.4.3c hash chain (per-room).  Absent on pre-chain (WS-L.4) entries. */
+    prev_hash: hash32Schema.nullable().optional(),
+    integrity_hash: hash32Schema.nullable().optional(),
+    /** WS-M linkage columns (absent on WS-L.4 entries). */
+    proposal_id: uuidSchema.nullable().optional(),
+    treasury_id: uuidSchema.nullable().optional(),
   })
   .strict();
 export type GovernanceAuditEntry = z.infer<typeof governanceAuditEntrySchema>;
@@ -584,13 +643,42 @@ export const READINESS_REQUIREMENTS = [
   'safety_override_acknowledged',
   'comprehension_passed',
   'simulation_track_record',
+  // WS-M.1.2e extensions (docs/planning/14-treasury-and-governance.md):
+  'jurisdiction_supported',
+  'law_pack_valid',
+  'governance_model_ratified',
+  'external_audit_passed',
 ] as const;
 export type ReadinessRequirement = (typeof READINESS_REQUIREMENTS)[number];
+
+/** Target modes a readiness item can be required for (WS-M.1.2e `requiredFor`). */
+export const READINESS_TARGET_MODES = [
+  'simulated',
+  'testnet',
+  'capped_production',
+  'mature_production',
+] as const;
+export type ReadinessTargetMode = (typeof READINESS_TARGET_MODES)[number];
+
+/** One evaluated checklist item (WS-M.1.2e — the per-item extension of the
+ *  shipped `unmet` list; `not_applicable` items never block a transition). */
+export const readinessItemSchema = z
+  .object({
+    requirement: z.enum(READINESS_REQUIREMENTS),
+    status: z.enum(['pass', 'fail', 'not_applicable']),
+    description: z.string().min(1).max(500),
+    required_for: z.array(z.enum(READINESS_TARGET_MODES)).max(READINESS_TARGET_MODES.length),
+    evaluated_at: isoTimestampSchema,
+  })
+  .strict();
+export type ReadinessItem = z.infer<typeof readinessItemSchema>;
 
 export const roomReadinessResponseSchema = z
   .object({
     room_id: uuidSchema,
     current_mode: z.string().min(1).max(32),
+    /** The evaluated target (WS-M.1.2e); absent on the legacy next-mode read. */
+    target_mode: z.enum(READINESS_TARGET_MODES).optional(),
     ready: z.boolean(),
     unmet: z
       .array(
@@ -602,13 +690,27 @@ export const roomReadinessResponseSchema = z
           .strict(),
       )
       .max(READINESS_REQUIREMENTS.length),
+    /** Full per-item checklist (WS-M.1.2e); absent on the legacy shape. */
+    items: z.array(readinessItemSchema).max(READINESS_REQUIREMENTS.length).optional(),
   })
   .strict();
 export type RoomReadinessResponse = z.infer<typeof roomReadinessResponseSchema>;
 
+/** Every governance mode a transition may target (WS-M.1.1b edge table; the
+ *  gate decides which edges are legal from the current mode). */
+export const MODE_TRANSITION_TARGETS = [
+  'ordinary',
+  'simulated',
+  'testnet',
+  'capped_production',
+  'mature_production',
+  'frozen',
+  'migrating',
+] as const;
+
 export const modeTransitionRequestSchema = z
   .object({
-    target_mode: z.enum(['simulated', 'testnet']),
+    target_mode: z.enum(MODE_TRANSITION_TARGETS),
     reason: z.string().trim().min(1).max(1_000),
   })
   .strict();

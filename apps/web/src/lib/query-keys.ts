@@ -66,5 +66,14 @@ export const queryKeys = {
   governanceTab: (roomId: string) => ['room', roomId, 'governance-tab'] as const,
   governanceProposals: (roomId: string) => ['room', roomId, 'governance-proposals'] as const,
   comprehensionQuiz: (roomId: string) => ['room', roomId, 'comprehension-quiz'] as const,
-  roomReadiness: (roomId: string) => ['room', roomId, 'readiness'] as const,
+  roomReadiness: (roomId: string, target = 'next') =>
+    ['room', roomId, 'readiness', target] as const,
+  // WS-M treasury + production governance.
+  governanceProfile: (roomId: string) => ['room', roomId, 'governance-profile'] as const,
+  treasuryTab: (roomId: string) => ['room', roomId, 'treasury-tab'] as const,
+  roomGrants: (roomId: string) => ['room', roomId, 'grants'] as const,
+  paymentIntent: (roomId: string, intentId: string) =>
+    ['room', roomId, 'payment-intent', intentId] as const,
+  auditChainVerification: (roomId: string) => ['room', roomId, 'audit-chain'] as const,
+  knomosisManifest: (deploymentId: string) => ['knomosis-manifest', deploymentId] as const,
 } as const;

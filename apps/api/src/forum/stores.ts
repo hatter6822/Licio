@@ -365,6 +365,15 @@ export interface RoomStore {
       >
     >,
   ): Promise<RoomRecord | null>;
+  /** WS-M.1.1b — COMPARE-AND-SET governance-mode transition: the mode is
+   *  written only when the stored mode still equals `expected`, so two racing
+   *  transitions serialize (the loser re-reads and re-validates).  Written ONLY
+   *  by the knomosis/WS-M transition gates, never by settings surfaces. */
+  updateGovernanceModeIf(
+    roomId: string,
+    expected: RoomRecord['governanceMode'],
+    next: RoomRecord['governanceMode'],
+  ): Promise<boolean>;
   /** WS-S.9 (phase 5) — set the room READ-ONLY and record the OPAQUE P2P
    *  destination id it migrated to (a UUID, never an FK). Idempotent: freezing
    *  an already-frozen room keeps it frozen and updates the destination if
@@ -396,6 +405,9 @@ export interface RoomStore {
    *  role holder can vote without an active subscription). Used as the governance
    *  quorum/turnout denominator so it matches who can actually cast a ballot. */
   countEligibleVoters(roomId: string): Promise<number>;
+  /** The SAME electorate as `countEligibleVoters`, as ids — WS-M applies the
+   *  law-pack eligibility predicate per member for the quorum basis. */
+  listEligibleVoterIds(roomId: string): Promise<string[]>;
   listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]>;
   getJoinRequest(requestId: string): Promise<RoomSubscriptionRecord | null>;
   /** Remove every subscription and steward row for a user (WS-D.2.4
@@ -1018,6 +1030,18 @@ export class InMemoryRoomStore implements RoomStore {
     return room;
   }
 
+  async updateGovernanceModeIf(
+    roomId: string,
+    expected: RoomRecord['governanceMode'],
+    next: RoomRecord['governanceMode'],
+  ): Promise<boolean> {
+    const room = this.#rooms.get(roomId);
+    if (!room || room.governanceMode !== expected) return false;
+    room.governanceMode = next;
+    room.updatedAt = iso(this.#now);
+    return true;
+  }
+
   async freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null> {
     const room = this.#rooms.get(roomId);
     if (!room) return null;
@@ -1104,6 +1128,10 @@ export class InMemoryRoomStore implements RoomStore {
   }
 
   async countEligibleVoters(roomId: string): Promise<number> {
+    return (await this.listEligibleVoterIds(roomId)).length;
+  }
+
+  async listEligibleVoterIds(roomId: string): Promise<string[]> {
     // Distinct users who may vote: active subscribers ∪ stewards (a steward can
     // vote via their role without an active subscription).
     const ids = new Set<string>();
@@ -1113,7 +1141,7 @@ export class InMemoryRoomStore implements RoomStore {
     for (const steward of this.#stewards) {
       if (steward.roomId === roomId) ids.add(steward.userId);
     }
-    return ids.size;
+    return [...ids];
   }
 
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {

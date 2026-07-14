@@ -109,3 +109,18 @@ export function decAdd(x: DecimalInput, y: DecimalInput): string {
 export function decSum(values: readonly DecimalInput[]): string {
   return values.reduce<string>((acc, v) => decAdd(acc, v), '0');
 }
+
+/**
+ * Exact product as a canonical decimal string.  Units multiply and scales add,
+ * so a quorum/threshold fraction times a weight total is exact — the WS-M
+ * proposal tally compares `approve > decided × minAffirmativeFraction` without
+ * ever rounding through a double (a 2/3 supermajority written as `0.667` is the
+ * exact decimal the law-pack author wrote, not a binary approximation of it).
+ */
+export function decMul(x: DecimalInput, y: DecimalInput): string {
+  const pa = parseDecimal(x);
+  const pb = parseDecimal(y);
+  const units = pa.units * pb.units;
+  const neg = pa.neg !== pb.neg && units !== 0n;
+  return render(neg ? -units : units, pa.scale + pb.scale);
+}

@@ -13,11 +13,19 @@ import {
   comprehensionQuizResponseSchema,
   comprehensionSubmitResponseSchema,
   type GovernanceProposalListResponse,
-  type GovernanceTabResponse,
+  type GovernanceTabWithProduction,
   governanceProposalListResponseSchema,
-  governanceTabResponseSchema,
+  governanceTabWithProductionSchema,
+  type KnomosisDeploymentListResponse,
   type KnomosisManifestResponse,
+  type KnomosisPreflightRequest,
+  type KnomosisPreflightResponse,
+  type KnomosisSubmitRequest,
+  type KnomosisSubmitResponse,
+  knomosisDeploymentListResponseSchema,
   knomosisManifestResponseSchema,
+  knomosisPreflightResponseSchema,
+  knomosisSubmitResponseSchema,
   type RoomReadinessResponse,
   roomReadinessResponseSchema,
   type WalletLinkResponse,
@@ -88,6 +96,11 @@ export async function requestWalletUnlink(walletId: string): Promise<WalletUnlin
 
 // --- Knomosis deployment manifest (WS-L.1.1a-1) ----------------------------
 
+export async function fetchDeployments(): Promise<KnomosisDeploymentListResponse> {
+  const response = await client.v1.knomosis.deployments.$get();
+  return parseResponse(response, knomosisDeploymentListResponseSchema);
+}
+
 export async function fetchDeploymentManifest(
   deploymentId: string,
 ): Promise<KnomosisManifestResponse> {
@@ -97,11 +110,29 @@ export async function fetchDeploymentManifest(
   return parseResponse(response, knomosisManifestResponseSchema);
 }
 
+// --- Signed actions (WS-L.3.1/3.2) ------------------------------------------
+
+export async function preflightKnomosisAction(
+  input: KnomosisPreflightRequest,
+): Promise<KnomosisPreflightResponse> {
+  const response = await client.v1.knomosis.actions.preflight.$post({ json: input });
+  return parseResponse(response, knomosisPreflightResponseSchema);
+}
+
+export async function submitKnomosisAction(
+  input: KnomosisSubmitRequest,
+): Promise<KnomosisSubmitResponse> {
+  const response = await client.v1.knomosis.actions.submit.$post({ json: input });
+  // Submission requires fresh step-up (WS-L.3.2a): surface a step-up 401 as the
+  // typed error so the retry dialog opens instead of a generic API failure.
+  return parseWithStepUp(response, knomosisSubmitResponseSchema);
+}
+
 // --- Governance simulation (WS-L.4) ----------------------------------------
 
-export async function fetchGovernanceTab(roomId: string): Promise<GovernanceTabResponse> {
+export async function fetchGovernanceTab(roomId: string): Promise<GovernanceTabWithProduction> {
   const response = await client.v1.rooms[':roomId'].governance.$get({ param: { roomId } });
-  return parseResponse(response, governanceTabResponseSchema);
+  return parseResponse(response, governanceTabWithProductionSchema);
 }
 
 export async function fetchGovernanceProposals(
@@ -134,6 +165,7 @@ export async function submitComprehensionQuiz(
 export async function fetchRoomReadiness(roomId: string): Promise<RoomReadinessResponse> {
   const response = await client.v1.rooms[':roomId'].governance.readiness.$get({
     param: { roomId },
+    query: {},
   });
   return parseResponse(response, roomReadinessResponseSchema);
 }

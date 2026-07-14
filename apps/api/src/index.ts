@@ -279,6 +279,16 @@ import {
 } from './telemetry/drizzle-telemetry-stores.js';
 import { startTelemetryScheduler, TELEMETRY_SCHEDULER_INTERVAL_MS } from './telemetry/scheduler.js';
 import { createInMemoryTelemetryServices, setTelemetryServices } from './telemetry/service.js';
+import { createDrizzleTreasuryStores } from './treasury/drizzle-treasury-stores.js';
+import { buildWsmReadinessChecklistPort } from './treasury/readiness.js';
+import {
+  buildMembershipFactsPort,
+  buildStewardElectionPort,
+  buildTreasuryExecutorPort,
+  buildTreasuryObligationsPort,
+  createInMemoryTreasuryServices,
+  setTreasuryServices,
+} from './treasury/services.js';
 
 const env = validateServerEnv(process.env);
 const logger = createLogger(env.LOG_LEVEL);
@@ -1166,8 +1176,19 @@ if (env.REDIS_URL !== undefined) {
 // actions + signatures + private receipts purged on account deletion).
 identityServices.exportFinancialWallets = (userId) =>
   exportFinancialWalletData(knomosisServices, userId);
-identityServices.purgeFinancialWallets = (userId) =>
-  purgeFinancialWalletData(knomosisServices, userId);
+identityServices.purgeFinancialWallets = async (userId) => {
+  await purgeFinancialWalletData(knomosisServices, userId);
+  // WS-M: the tombstoned users row never fires payment_intent's SET NULL —
+  // scrub the intent owner explicitly (room financial history survives the
+  // erasure ownerless, exactly like the FK intended) (W12).  Lazy lookup:
+  // the treasury container is wired later in this boot.
+  const { getTreasuryServices, treasuryServicesConfigured } = await import(
+    './treasury/services.js'
+  );
+  if (treasuryServicesConfigured()) {
+    await getTreasuryServices().intents.anonymizeUser(userId);
+  }
+};
 // The WS-U governance stores are SHARED with the law-pack port below.
 const governanceStores = db ? createDrizzleGovernanceStores(db) : createInMemoryGovernanceStores();
 knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
@@ -1429,6 +1450,29 @@ setGovernanceService(
 // service binds.
 knomosisServices.lawPacks = buildLawPackPort(governanceStores);
 knomosisServices.readinessChecklist = buildReadinessChecklistPort(forumServices, governanceStores);
+// WS-M: the treasury-and-governance container over the SAME substrate — the
+// production Drizzle stores when a database is configured, the REAL membership
+// facts (forum subscription age + in-context governance participation +
+// identity verification), the shipped fail-closed treasury executor (WS-M is
+// its production caller), and forced elections for community-voted rotations.
+const treasuryServices = createInMemoryTreasuryServices({
+  knomosis: knomosisServices,
+  governanceStores,
+  membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
+  treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
+  elections: buildStewardElectionPort(getGovernanceService()),
+});
+if (db) {
+  Object.assign(treasuryServices, createDrizzleTreasuryStores(db));
+}
+setTreasuryServices(treasuryServices);
+// The WS-L.4.1g checklist port now consumes the REAL WS-M.1.2 evaluators
+// (charter + elected seat/appeals + treasury policy + safety attestation),
+// replacing the fail-closed defaults.
+knomosisServices.readinessChecklist = buildWsmReadinessChecklistPort(treasuryServices);
+// WS-L.2.5b: wallet unlink now sees the LIVE WS-M obligations (unsettled
+// user: grants + in-flight intents), replacing the empty default (W12).
+knomosisServices.treasuryObligations = buildTreasuryObligationsPort(treasuryServices);
 // The forum contribution path consults the in-room agent (subordinate to the
 // platform floor) for any room with an active community-approved binding. The
 // agent's author-history signals are read from the real identity + forum +

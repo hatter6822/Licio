@@ -30,7 +30,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { knomosisSchema } from './governance.js';
+import { knomosisSchema, roomLawPacks } from './governance.js';
 import { users } from './user.js';
 import { walletAccounts } from './wallet/wallet-account.js';
 
@@ -266,6 +266,10 @@ export const proposalTypeEnum = knomosisSchema.enum('governance_proposal_type', 
   'charter_update',
   'bounty',
   'capped_grant',
+  // WS-M production proposal types (migration 0082).
+  'steward_rotation',
+  'law_pack_upgrade',
+  'treasury_policy_update',
 ]);
 
 export const proposalPreflightStateEnum = knomosisSchema.enum('proposal_preflight_state', [
@@ -278,12 +282,18 @@ export const proposalVotingStateEnum = knomosisSchema.enum('proposal_voting_stat
   'passed',
   'rejected',
   'quorum_not_met',
+  // WS-M production lifecycle prefix (migration 0082): draft → deliberation →
+  // open (voting) → passed/rejected/quorum_not_met.  Sim rows start at 'open'.
+  'draft',
+  'deliberation',
 ]);
 export const proposalChallengeStateEnum = knomosisSchema.enum('proposal_challenge_state', [
   'none',
   'open',
   'upheld',
   'dismissed',
+  // WS-M.4.3a platform escalation (migration 0082).
+  'escalated',
 ]);
 export const proposalExecutionStateEnum = knomosisSchema.enum('proposal_execution_state', [
   'not_executed',
@@ -295,6 +305,8 @@ export const proposalExecutionStateEnum = knomosisSchema.enum('proposal_executio
   'executing',
   'executed',
   'blocked',
+  // WS-M: a passed proposal whose execution window lapsed (migration 0082).
+  'expired',
 ]);
 
 export const governanceProposals = knomosisSchema.table(
@@ -331,11 +343,27 @@ export const governanceProposals = knomosisSchema.table(
      *  live manual execution is never raced (and its `execution_simulated` audit
      *  row never mis-attributed to the null-actor sweep) — WS-L.4.1c / N2. */
     executionClaimedAt: tz('execution_claimed_at'),
+    // --- WS-M production lifecycle columns (migration 0082; null on sim rows).
+    /** The law-pack version PINNED at publication (WS-M.1.3d) — the rules the
+     *  proposal is evaluated under for its whole lifetime. */
+    lawPackVersionId: uuid('law_pack_version_id').references(() => roomLawPacks.lawPackId, {
+      onDelete: 'set null',
+    }),
+    /** Spend category for treasury proposals (kernel cap category). */
+    category: text('category'),
+    deliberationEndsAt: tz('deliberation_ends_at'),
+    votingEndsAt: tz('voting_ends_at'),
+    challengeWindowEndsAt: tz('challenge_window_ends_at'),
+    /** The settled tally snapshot (proposalTallyWireSchema) — recorded once at
+     *  settle so later weight/eligibility changes cannot rewrite history. */
+    tallySnapshot: jsonb('tally_snapshot'),
   },
   (t) => [
     index('governance_proposal_room_idx').on(t.roomId, t.createdAt),
     // Serves the recovery-sweep query: stranded (`executing`) proposals by claim age.
     index('governance_proposal_recovery_idx').on(t.executionState, t.executionClaimedAt),
+    // Serves the WS-M deadline sweeps (voting settle + challenge-window close).
+    index('governance_proposal_deadline_idx').on(t.votingState, t.votingEndsAt),
   ],
 );
 export type GovernanceProposalRow = typeof governanceProposals.$inferSelect;
@@ -357,7 +385,10 @@ export const governanceProposalVotes = knomosisSchema.table(
 );
 export type GovernanceProposalVoteRow = typeof governanceProposalVotes.$inferSelect;
 
-/** Wallet signatures over proposals (SPEC §22.2 GovernanceSignature). */
+/** Wallet signatures over proposals (SPEC §22.2 GovernanceSignature).
+ *  WS-M.2.3b-1 evolves it in place: `purpose` separates votes from approvals/
+ *  multisig legs (the crypto scheme stays in `signature_type`), `choice`
+ *  records the vote, and `nonce` is the per-proposal anti-replay handle. */
 export const governanceSignatures = knomosisSchema.table(
   'governance_signature',
   {
@@ -377,8 +408,25 @@ export const governanceSignatures = knomosisSchema.table(
     weightSnapshot: numeric('weight_snapshot'),
     eligibilityReason: text('eligibility_reason').notNull(),
     createdAt: tz('created_at').notNull().defaultNow(),
+    // --- WS-M.2.3b-1 (migration 0082; defaults cover the WS-L.4 rows).
+    purpose: text('purpose').notNull().default('vote'), // vote|approval|multisig|delegation (CHECK)
+    choice: text('choice'), // approve|reject|abstain for purpose=vote (CHECK)
+    nonce: text('nonce'),
   },
-  (t) => [uniqueIndex('governance_signature_unique_idx').on(t.proposalId, t.walletAccountId)],
+  (t) => [
+    // One signature per (proposal, wallet, PURPOSE): a designated signer who
+    // voted must still be able to record the execution co-signature required
+    // by a multisig pack (migration 0084 rescoped the old two-column unique).
+    uniqueIndex('governance_signature_unique_idx').on(t.proposalId, t.walletAccountId, t.purpose),
+    // One VOTE per user per proposal — regardless of how many wallets they hold.
+    uniqueIndex('governance_signature_one_vote_uq')
+      .on(t.proposalId, t.userId)
+      .where(sql`${t.purpose} = 'vote'`),
+    // A nonce is single-use within a proposal (anti-replay, WS-M.3.1c).
+    uniqueIndex('governance_signature_nonce_uq')
+      .on(t.proposalId, t.nonce)
+      .where(sql`${t.nonce} IS NOT NULL`),
+  ],
 );
 export type GovernanceSignatureRow = typeof governanceSignatures.$inferSelect;
 
@@ -441,6 +489,14 @@ export const governanceAuditLogs = knomosisSchema.table(
      *  `execution_simulated` keyed by proposal — without duplicating it
      *  (WS-L.4.1c / P2). */
     dedupeKey: text('dedupe_key'),
+    // --- WS-M.4.3c per-room hash chain (migration 0082; null on WS-L.4 rows).
+    /** The previous CHAINED entry's integrity hash (null = chain genesis). */
+    prevHash: text('prev_hash'),
+    /** H(prevHash ‖ actionType ‖ canonical(details) ‖ createdAt ‖ roomId). */
+    integrityHash: text('integrity_hash'),
+    /** WS-M linkage (soft-typed; null on room-level / WS-L.4 entries). */
+    proposalId: uuid('proposal_id'),
+    treasuryId: uuid('treasury_id'),
   },
   // (room_id, created_at, entry_id): the entry_id tail makes the keyset page
   // cursor a STRICT total order, so `ORDER BY created_at DESC, entry_id DESC`
@@ -449,6 +505,15 @@ export const governanceAuditLogs = knomosisSchema.table(
   (t) => [
     index('governance_audit_log_room_idx').on(t.roomId, t.createdAt, t.entryId),
     uniqueIndex('governance_audit_log_dedupe_idx').on(t.dedupeKey),
+    // Chain-fork prevention (WS-M.4.3c): a parent hash may have at most ONE
+    // child per room, and a room has at most ONE chained genesis — two racing
+    // appends collide here instead of silently forking the chain.
+    uniqueIndex('governance_audit_chain_parent_uq')
+      .on(t.roomId, t.prevHash)
+      .where(sql`${t.prevHash} IS NOT NULL`),
+    uniqueIndex('governance_audit_chain_genesis_uq')
+      .on(t.roomId)
+      .where(sql`${t.prevHash} IS NULL AND ${t.integrityHash} IS NOT NULL`),
   ],
 );
 export type GovernanceAuditLogRow = typeof governanceAuditLogs.$inferSelect;

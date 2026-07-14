@@ -14,6 +14,10 @@ import type {
   GovernanceAuditActionType,
   KnomosisEnvironment,
   KnomosisSignedActionType,
+  ProposalChallengeColumnState,
+  ProposalExecutionState,
+  ProposalType,
+  ProposalVotingState,
   ReconciliationState,
   SubmissionState,
   UnlinkState,
@@ -118,7 +122,7 @@ export interface GovernanceProposalRecord {
    *  votes/signatures are preserved; only the deleting user's authorship link is
    *  scrubbed (WS-L data-rights; never cascade-delete co-participants). */
   proposerUserId: string | null;
-  proposalType: 'charter_update' | 'bounty' | 'capped_grant';
+  proposalType: ProposalType;
   title: string;
   plainLanguageSummary: string;
   requestedAmount: string | null;
@@ -129,14 +133,14 @@ export interface GovernanceProposalRecord {
   requestedAction: Record<string, unknown>;
   expectedDeliverable: string;
   preflightState: 'pending' | 'passed' | 'failed';
-  votingState: 'open' | 'passed' | 'rejected' | 'quorum_not_met';
-  challengeState: 'none' | 'open' | 'upheld' | 'dismissed';
+  votingState: ProposalVotingState;
+  challengeState: ProposalChallengeColumnState;
   // `executing` is a RECOVERABLE in-progress state (WS-L.4.1c): a proposal is
   // claimed `timelocked`→`executing` BEFORE the simulated debit, and advanced to
   // `executed` ONLY after the debit + ledger are durable.  A crash mid-execution
   // leaves it `executing` — honest (never falsely `executed`) and never re-run by
   // the timelocked-only sweep, so the treasury is never double-debited.
-  executionState: 'not_executed' | 'timelocked' | 'executing' | 'executed' | 'blocked';
+  executionState: ProposalExecutionState;
   simulationMode: boolean;
   executableAfter: string | null;
   createdAt: string;
@@ -147,6 +151,16 @@ export interface GovernanceProposalRecord {
    *  scheduler, which would otherwise mis-attribute the `execution_simulated` audit
    *  row to the (null-actor) sweep instead of the initiating user (WS-L.4.1c / N2). */
   executionClaimedAt: string | null;
+  // --- WS-M production lifecycle (migration 0082; null on sim rows). ---------
+  /** The law-pack version PINNED at publication (WS-M.1.3d). */
+  lawPackVersionId?: string | null;
+  /** Spend category for treasury proposals (kernel cap category). */
+  category?: string | null;
+  deliberationEndsAt?: string | null;
+  votingEndsAt?: string | null;
+  challengeWindowEndsAt?: string | null;
+  /** The settled tally snapshot (proposalTallyWireSchema shape). */
+  tallySnapshot?: Record<string, unknown> | null;
 }
 
 export type ProposalVoteChoice = 'approve' | 'reject' | 'abstain';
@@ -169,6 +183,13 @@ export interface GovernanceSignatureRecord {
   weightSnapshot: string | null;
   eligibilityReason: string;
   createdAt: string;
+  // --- WS-M.2.3b-1 (migration 0082; defaults cover WS-L.4 rows). -------------
+  /** What the signature authorizes (the crypto scheme stays in signatureType). */
+  purpose?: 'vote' | 'approval' | 'multisig' | 'delegation';
+  /** Vote choice for purpose=vote (null otherwise). */
+  choice?: ProposalVoteChoice | null;
+  /** Per-proposal single-use nonce (anti-replay). */
+  nonce?: string | null;
 }
 
 export interface SimTreasuryRecord {
@@ -209,6 +230,15 @@ export interface GovernanceAuditRecord {
    *  by proposal so the execution row is written exactly once even if the executing
    *  proposal is re-driven by the recovery sweep (WS-L.4.1c / P2). */
   dedupeKey?: string;
+  // --- WS-M.4.3c per-room hash chain (migration 0082; absent on WS-L.4 rows).
+  /** The previous CHAINED entry's integrity hash (null = chain genesis). */
+  prevHash?: string | null;
+  /** 0x-prefixed SHA-256 over (prevHash ‖ actionType ‖ canonical(details) ‖
+   *  createdAt ‖ roomId) — computed by the WS-M audit-chain writer only. */
+  integrityHash?: string | null;
+  /** WS-M linkage (soft; null on room-level / WS-L.4 entries). */
+  proposalId?: string | null;
+  treasuryId?: string | null;
 }
 
 export interface ReconciliationResultRecord {
@@ -347,6 +377,15 @@ export interface KnomosisActionStore {
   getById(actionRecordId: string): Promise<KnomosisActionRecordEntity | null>;
   getByIdempotencyKey(
     actorUserId: string,
+    idempotencyKey: string,
+  ): Promise<KnomosisActionRecordEntity | null>;
+  /** Room-scoped orphan lookup for the WS-M auto-attach sweep (W14): a
+   *  ROOM-owned payout intent (null owner) recovers the steward-signed action
+   *  by the intent's attempt key regardless of WHICH steward signed it.
+   *  Idempotency is actor-scoped, so several stewards may have raced the same
+   *  key — returns the earliest inserted row for determinism. */
+  getByRoomIdempotencyKey(
+    roomId: string,
     idempotencyKey: string,
   ): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
@@ -507,6 +546,17 @@ export interface GovernanceProposalStore {
   insert(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   getById(proposalId: string): Promise<GovernanceProposalRecord | null>;
   listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]>;
+  /** PRODUCTION rows with live settle work (deliberation/open voting, or a
+   *  passed row still timelocked/executing) — bounded by open work, never by
+   *  history, so the sweep can't starve behind a full newest-N page (WS-M). */
+  /** Keyset-paged (proposalId ascending): the settle sweep walks EVERY
+   *  unsettled row — a fixed newest-first slice would let a busy room's
+   *  not-yet-due proposals starve older due ones (PR #144 W7). */
+  listUnsettledByRoom(
+    roomId: string,
+    limit: number,
+    afterId?: string | null,
+  ): Promise<GovernanceProposalRecord[]>;
   update(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   /** ATOMICALLY claim a passed, timelocked proposal for execution: CAS the
    *  executionState `timelocked` → `executing`, returning the claimed row, or null
@@ -540,6 +590,50 @@ export interface GovernanceProposalStore {
       | { votingState: 'passed'; executionState: 'timelocked'; executableAfter: string }
       | { votingState: 'rejected' },
   ): Promise<GovernanceProposalRecord | null>;
+  /** WS-M.4.2d — generalized voting-state CAS for the PRODUCTION lifecycle:
+   *  apply `patch` only while `votingState` still equals `from`, returning the
+   *  updated row or null on a lost race.  Drives `deliberation → open` and
+   *  `open → passed/rejected/quorum_not_met` (with tally snapshot, challenge
+   *  window, and timelock columns) without racing a concurrent settle. */
+  casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Partial<
+      Pick<
+        GovernanceProposalRecord,
+        | 'executionState'
+        | 'executableAfter'
+        | 'challengeWindowEndsAt'
+        | 'votingEndsAt'
+        | 'tallySnapshot'
+        | 'challengeState'
+      >
+    >,
+  ): Promise<GovernanceProposalRecord | null>;
+  /** COLUMN-scoped execution-state CAS (sweep): the settle/expiry/failure
+   *  paths write ONLY the execution columns against an expected from-state —
+   *  a whole-row snapshot here could clobber a concurrent challenge
+   *  projection or vote settlement. */
+  casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options?: { clearClaim?: boolean },
+  ): Promise<boolean>;
+  /** COLUMN-scoped challenge projection (PR #144 W11): challenge resolution
+   *  must never write a stale whole-row snapshot back over a concurrent
+   *  execution.  `blockExecution` blocks only a not-yet-executed row;
+   *  `executableAfterFloor` restarts the execution window for a still-
+   *  timelocked row whose window elapsed under challenge review. */
+  applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean>;
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
   /** Proposals stranded mid-execution (claimed `executing` but never finalized —
@@ -648,6 +742,17 @@ export interface AuditLogCursor {
 
 export interface GovernanceAuditStore {
   append(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord>;
+  /** WS-M.4.3c: append a HASH-CHAINED entry.  The store enforces the two
+   *  fork-proof uniques from migration 0082 — at most one child per
+   *  (room, prevHash) and one chained genesis per room — and returns NULL on a
+   *  collision so the chain writer re-reads the head and retries.  Entries must
+   *  carry non-null integrityHash (and prevHash except at genesis). */
+  appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null>;
+  /** WS-M.4.3c: the room's current chain head — the chained entry whose
+   *  integrityHash is no other chained entry's prevHash (null ⇒ no chain yet). */
+  chainHead(roomId: string): Promise<GovernanceAuditRecord | null>;
+  /** WS-M.4.3c: every chained entry for a room (for the chain verifier). */
+  listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]>;
   listByRoom(
     roomId: string,
     limit: number,
@@ -657,6 +762,10 @@ export interface GovernanceAuditStore {
   /** Count only qualifying simulated-practice actions for the readiness gate
    *  (WS-L.4.1f) — never the meta mode-transition/comprehension rows. */
   countQualifyingByRoom(roomId: string): Promise<number>;
+  /** WS-M.4.2c-2: one member's qualifying governance participation in a room —
+   *  the `minContributions` eligibility basis (an in-context metric; never a
+   *  cross-context content join). */
+  countQualifyingByRoomActor(roomId: string, userId: string): Promise<number>;
   /** WS-L data-rights: ANONYMIZE the actor on account deletion — the audit log
    *  is append-only, so the actor id is scrubbed, not the row.  Returns the rows
    *  anonymized. */
@@ -1027,6 +1136,20 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
     return null;
   }
 
+  async getByRoomIdempotencyKey(
+    roomId: string,
+    idempotencyKey: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    // Insertion order IS creation order here — the first match is the
+    // earliest row, mirroring the Drizzle adapter's createdAt ordering.
+    for (const row of this.#rows.values()) {
+      if (row.roomId === roomId && row.idempotencyKey === idempotencyKey) {
+        return structuredClone(row);
+      }
+    }
+    return null;
+  }
+
   async update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity> {
     if (!this.#rows.has(record.actionRecordId)) throw new Error('action record not found');
     this.#rows.set(record.actionRecordId, structuredClone(record));
@@ -1390,6 +1513,27 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     return row ? structuredClone(row) : null;
   }
 
+  async listUnsettledByRoom(
+    roomId: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<GovernanceProposalRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.roomId === roomId &&
+          !row.simulationMode &&
+          (row.votingState === 'deliberation' ||
+            row.votingState === 'open' ||
+            (row.votingState === 'passed' &&
+              (row.executionState === 'timelocked' || row.executionState === 'executing'))),
+      )
+      .sort((a, b) => (a.proposalId < b.proposalId ? -1 : 1))
+      .filter((row) => afterId === null || row.proposalId > afterId)
+      .slice(0, limit)
+      .map((row) => structuredClone(row));
+  }
+
   async listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]> {
     return [...this.#rows.values()]
       .filter((r) => r.roomId === roomId)
@@ -1439,6 +1583,59 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     const resolved = { ...row, ...resolution };
     this.#rows.set(proposalId, structuredClone(resolved));
     return structuredClone(resolved);
+  }
+
+  async casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Parameters<GovernanceProposalStore['casVotingState']>[3],
+  ): Promise<GovernanceProposalRecord | null> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || row.votingState !== from) return null;
+    const updated = { ...row, ...patch, votingState: to };
+    this.#rows.set(proposalId, structuredClone(updated));
+    return structuredClone(updated);
+  }
+
+  async casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options: { clearClaim?: boolean } = {},
+  ): Promise<boolean> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || !fromStates.includes(row.executionState)) return false;
+    row.executionState = to;
+    if (options.clearClaim === true) row.executionClaimedAt = null;
+    return true;
+  }
+
+  async applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined) return false;
+    row.challengeState = projection.challengeState;
+    if (
+      projection.blockExecution === true &&
+      (row.executionState === 'not_executed' || row.executionState === 'timelocked')
+    ) {
+      row.executionState = 'blocked';
+    }
+    if (
+      projection.executableAfterFloor !== undefined &&
+      row.executionState === 'timelocked' &&
+      (row.executableAfter === null || row.executableAfter < projection.executableAfterFloor)
+    ) {
+      row.executableAfter = projection.executableAfterFloor;
+    }
+    return true;
   }
 
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
@@ -1557,9 +1754,34 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
   }
 
   async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
-    const key = `${record.proposalId}:${record.walletAccountId}`;
+    // Emulate ALL THREE unique indexes from migrations 0059 + 0082 + 0084 so
+    // tests exercise database semantics: (proposal, wallet, PURPOSE) — a
+    // designated signer who voted can still record the execution co-signature
+    // — one VOTE per (proposal, user), and single-use nonce per proposal.
     for (const row of this.#rows.values()) {
-      if (`${row.proposalId}:${row.walletAccountId}` === key) return null;
+      if (row.proposalId !== record.proposalId) continue;
+      if (
+        row.walletAccountId === record.walletAccountId &&
+        (row.purpose ?? 'vote') === (record.purpose ?? 'vote')
+      ) {
+        return null;
+      }
+      if (
+        (row.purpose ?? 'vote') === 'vote' &&
+        (record.purpose ?? 'vote') === 'vote' &&
+        row.userId === record.userId
+      ) {
+        return null;
+      }
+      if (
+        row.nonce !== undefined &&
+        row.nonce !== null &&
+        record.nonce !== undefined &&
+        record.nonce !== null &&
+        row.nonce === record.nonce
+      ) {
+        return null;
+      }
     }
     this.#rows.set(record.signatureId, { ...record });
     return { ...record };
@@ -1698,6 +1920,49 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
     return structuredClone(entry);
   }
 
+  async appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null> {
+    // Emulate migration 0082's fork-proof partial uniques exactly: at most one
+    // child per (room, prevHash) and at most one chained genesis per room.
+    if (entry.integrityHash === undefined || entry.integrityHash === null) {
+      throw new Error('appendChained requires an integrityHash');
+    }
+    const chained = this.#rows.filter(
+      (r) => r.roomId === entry.roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+    );
+    const prev = entry.prevHash ?? null;
+    if (prev === null) {
+      if (chained.length > 0) return null; // second genesis collides
+    } else if (chained.some((r) => (r.prevHash ?? null) === prev)) {
+      return null; // second child of the same parent collides
+    }
+    this.#rows.push(structuredClone(entry));
+    return structuredClone(entry);
+  }
+
+  async chainHead(roomId: string): Promise<GovernanceAuditRecord | null> {
+    const chained = this.#rows.filter(
+      (r) => r.roomId === roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+    );
+    const referenced = new Set(
+      chained.map((r) => r.prevHash).filter((h): h is string => h !== undefined && h !== null),
+    );
+    const head = chained.find(
+      (r) =>
+        r.integrityHash !== undefined &&
+        r.integrityHash !== null &&
+        !referenced.has(r.integrityHash),
+    );
+    return head ? structuredClone(head) : null;
+  }
+
+  async listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]> {
+    return this.#rows
+      .filter(
+        (r) => r.roomId === roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+      )
+      .map((r) => structuredClone(r));
+  }
+
   async listByRoom(
     roomId: string,
     limit: number,
@@ -1731,6 +1996,15 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
       (r) =>
         r.roomId === roomId &&
         r.simulationMode &&
+        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
+    ).length;
+  }
+
+  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+    return this.#rows.filter(
+      (r) =>
+        r.roomId === roomId &&
+        r.actorUserId === userId &&
         READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
     ).length;
   }

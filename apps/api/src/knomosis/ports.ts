@@ -71,8 +71,10 @@ export interface ExternalObligation {
 
 /** WS-M seam: pending grants / payment intents that block an unlink.  WS-L's
  *  own obligation sources (open signed actions, open proposal signatures) are
- *  computed from its stores; this seam adds the WS-M-owned ones when WS-M
- *  ships.  Default: none (WS-M has no live obligations yet). */
+ *  computed from its stores; the boot wires the LIVE WS-M port
+ *  (`buildTreasuryObligationsPort`) over the treasury container.  The empty
+ *  default remains only for surfaces without a WS-M container (tests, the
+ *  bare sim boot). */
 export interface TreasuryObligationsPort {
   obligationsForWallet(walletAccountId: string): Promise<ExternalObligation[]>;
 }

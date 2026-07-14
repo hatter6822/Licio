@@ -996,6 +996,7 @@ describe('WS-L.4.1g readiness gate + mode transitions', () => {
     fixture.knomosis.roomMode = {
       currentMode: async () => 'simulated',
       setMode: async () => true,
+      setModeIf: async (_r, expected) => expected === 'simulated',
     };
     const readinessDeps = {
       checklist: fixture.knomosis.readinessChecklist,
@@ -1027,6 +1028,11 @@ describe('WS-L.4.1g readiness gate + mode transitions', () => {
     fixture.knomosis.roomMode = {
       currentMode: async () => mode as never,
       setMode: async (_r, m) => {
+        mode = m;
+        return true;
+      },
+      setModeIf: async (_r, expected, m) => {
+        if (mode !== expected) return false;
         mode = m;
         return true;
       },

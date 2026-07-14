@@ -804,6 +804,21 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0] ? this.#toRoom(rows[0]) : null;
   }
 
+  async updateGovernanceModeIf(
+    roomId: string,
+    expected: RoomRecord['governanceMode'],
+    next: RoomRecord['governanceMode'],
+  ): Promise<boolean> {
+    // Conditional UPDATE — the WHERE carries the expectation, so two racing
+    // transitions serialize at the row (the loser matches zero rows).
+    const rows = await this.#db
+      .update(roomsTable)
+      .set({ governanceMode: next, updatedAt: new Date() })
+      .where(and(eq(roomsTable.roomId, roomId), eq(roomsTable.governanceMode, expected)))
+      .returning({ roomId: roomsTable.roomId });
+    return rows.length > 0;
+  }
+
   async freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null> {
     const rows = await this.#db
       .update(roomsTable)
@@ -991,6 +1006,20 @@ export class DrizzleRoomStore implements RoomStore {
       ) voters
     `)) as unknown as Array<{ value: number }>;
     return rows[0]?.value ?? 0;
+  }
+
+  async listEligibleVoterIds(roomId: string): Promise<string[]> {
+    const rows = (await this.#db.execute(sql`
+      SELECT voters.user_id AS value FROM (
+        SELECT ${roomSubscriptionsTable.userId} AS user_id FROM ${roomSubscriptionsTable}
+          WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
+            AND ${roomSubscriptionsTable.status} = 'active'
+        UNION
+        SELECT ${roomStewardsTable.userId} AS user_id FROM ${roomStewardsTable}
+          WHERE ${roomStewardsTable.roomId} = ${roomId}
+      ) voters
+    `)) as unknown as Array<{ value: string }>;
+    return rows.map((row) => row.value);
   }
 
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {

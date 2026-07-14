@@ -81,6 +81,7 @@ function ingestDeps(fixture: KnomosisFixture) {
   return {
     actions: s.actions,
     proposalSignatures: s.proposalSignatures,
+    proposals: s.proposals,
     actorMappings: s.actorMappings,
     events: s.events,
     reconciliation: s.reconciliation,
@@ -489,6 +490,8 @@ describe('WS-L.3.1 preflight pipeline', () => {
     const message = {
       roomId: ROOM,
       proposalId: '88888888-8888-4888-8888-888888888888', // no such open proposal
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),
@@ -547,6 +550,8 @@ describe('WS-L.3.1 preflight pipeline', () => {
     const message = {
       roomId: ROOM,
       proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),
@@ -947,7 +952,7 @@ describe('WS-L.3.2 submission + state machine', () => {
     expect(await fixture.knomosis.actions.listByRoom(ROOM, 100)).toHaveLength(1);
   });
 
-  it('a proposal_sign submit DURABLY records a governance signature (WS-L.3.2a)', async () => {
+  it('a production proposal_sign submit records the ACTION but no ledger row (W14)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     fixture.knomosis.rooms = {
@@ -987,6 +992,8 @@ describe('WS-L.3.2 submission + state machine', () => {
     const message = {
       roomId: ROOM,
       proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),
@@ -1015,19 +1022,22 @@ describe('WS-L.3.2 submission + state machine', () => {
       signature,
     });
     expect(result.ok).toBe(true);
-    // The signature is now in the governance ledger — powering the tally + the
-    // WS-L.2.5b unlink-obligation check, not just the on-chain action row.
+    // W14: a PRODUCTION ballot's ledger lives on the WS-M sign surface — the
+    // generic WS-L acceptance records NO null-snapshot row here (it would
+    // occupy the (proposal, wallet, purpose) unique and BLOCK the same
+    // wallet's real WS-M vote).  The ballot that COUNTS — and carries the
+    // WS-L.2.5b unlink obligation — is the row `signProposal` inserts.
     const sigs = await fixture.knomosis.proposalSignatures.listByProposal(proposalId);
-    expect(sigs).toHaveLength(1);
-    expect(sigs[0]).toMatchObject({
-      proposalId,
-      userId,
-      walletAccountId,
-      signatureType: 'eip712_ecdsa',
-    });
-    // The open proposal makes this an unlink obligation on the wallet.
+    expect(sigs).toHaveLength(0);
     const open = await fixture.knomosis.proposalSignatures.listOpenByWallet(walletAccountId);
-    expect(open).toHaveLength(1);
+    expect(open).toHaveLength(0);
+    // The DURABLE WS-L artifact remains the action record itself (WS-L.3.2a).
+    const actions = await fixture.knomosis.actions.listByRoom(ROOM, 10);
+    expect(
+      actions.some(
+        (a) => a.actionType === 'proposal_sign' && a.actorWalletAccountId === walletAccountId,
+      ),
+    ).toBe(true);
   });
 
   it('rejects a proposal_sign whose proposal CLOSED between preflight and submit (F9)', async () => {
@@ -1069,6 +1079,8 @@ describe('WS-L.3.2 submission + state machine', () => {
     const message = {
       roomId: ROOM,
       proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),

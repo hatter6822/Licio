@@ -88,6 +88,18 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
   'knomosis.knomosis_reconciliation_result',
   'knomosis.knomosis_receipt',
   'knomosis.comprehension_result',
+  // WS-M treasury and governance (migration 0082).
+  'knomosis.room_governance_profile',
+  'knomosis.governance_charter_version',
+  'knomosis.room_treasury',
+  'knomosis.treasury_reservation',
+  'knomosis.payment_intent',
+  'knomosis.treasury_grant',
+  'knomosis.action_budget',
+  'knomosis.delegation_record',
+  'knomosis.governance_challenge',
+  'knomosis.treasury_reconciliation_snapshot',
+  'knomosis.room_readiness_attestation',
 ]);
 
 /**
