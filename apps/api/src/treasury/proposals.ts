@@ -61,7 +61,7 @@ import type {
   GovernanceSignatureStore,
 } from '../knomosis/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
-import { chargeRoomActionBudget, NO_BUDGET_RULES } from './budgets.js';
+import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { incomingDelegationsFor } from './delegations.js';
 import { createGrantFromProposal, type GrantDeps } from './grants.js';
 import { activeLawPack, adoptLawPack, type LawPackDeps } from './law-packs.js';
@@ -336,6 +336,23 @@ export async function createProductionProposal(
       return tgErr(409, 'no_cap_configured', `No spend cap for "${spendCategory}".`);
     }
     const { decCompare } = await import('@licio/governance');
+    // Per-ACTION cap preflight: a request above `perActionMax` can never be
+    // reserved, so publishing it would only burn deliberation/voting time
+    // before `reserveForProposal()` blocks it at approval.  Reject up front.
+    const actionCap = active.pack.treasury.caps.find((c) => c.category === spendCategory);
+    if (actionCap !== undefined) {
+      const perAction =
+        typeof actionCap.perActionMax === 'number'
+          ? String(actionCap.perActionMax)
+          : actionCap.perActionMax;
+      if (decCompare(input.create.requested_amount, perAction) > 0) {
+        return tgErr(
+          409,
+          'per_action_cap_exceeded',
+          `Requested ${input.create.requested_amount} exceeds the per-action cap ${perAction}.`,
+        );
+      }
+    }
     if (decCompare(input.create.requested_amount, headroom.headroom) > 0) {
       return tgErr(
         409,
@@ -377,15 +394,22 @@ export async function createProductionProposal(
       deployment !== undefined &&
       (deployment.environment === 'capped_production' ||
         deployment.environment === 'mature_production');
-    const screen = await deps.compliance.screenAddress({
-      addressLower: (input.create.recipient_ref ?? '').toLowerCase(),
-      deploymentId: treasury.deploymentId,
-    });
-    if (screen === 'blocked') {
-      return tgErr(422, 'sanctions_blocked', 'This proposal cannot be completed.');
-    }
-    if (screen === 'unavailable' && realFunds) {
-      return tgErr(503, 'screening_unavailable', 'Recipient screening is unavailable.');
+    // Address screening applies to ADDRESS-shaped recipients only — an opaque
+    // ref (`user:…`, a co-op name) is not an on-chain address and would either
+    // fail closed spuriously or be screened as meaningless text.  The eventual
+    // on-chain payout is screened again at the WS-L action layer regardless.
+    const recipientLower = (input.create.recipient_ref ?? '').toLowerCase();
+    if (/^0x[0-9a-f]{40}$/.test(recipientLower)) {
+      const screen = await deps.compliance.screenAddress({
+        addressLower: recipientLower,
+        deploymentId: treasury.deploymentId,
+      });
+      if (screen === 'blocked') {
+        return tgErr(422, 'sanctions_blocked', 'This proposal cannot be completed.');
+      }
+      if (screen === 'unavailable' && realFunds) {
+        return tgErr(503, 'screening_unavailable', 'Recipient screening is unavailable.');
+      }
     }
   }
 
@@ -436,7 +460,18 @@ export async function createProductionProposal(
     for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
       if ((current as { code?: string }).code === '23505') {
         const winner = await deps.proposals.getById(proposalId);
-        if (winner !== null) return { ok: true, proposal: winner };
+        if (winner !== null) {
+          // The loser charged the action budget above but published nothing —
+          // credit the charge back so a retry storm cannot drain the
+          // allowance for one accepted proposal.
+          await refundActionBudget(deps, {
+            roomId: input.roomId,
+            userId: input.userId,
+            units: budget.charged,
+            rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
+          });
+          return { ok: true, proposal: winner };
+        }
         break;
       }
       current = (current as { cause?: unknown }).cause;

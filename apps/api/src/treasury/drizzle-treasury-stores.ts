@@ -515,6 +515,15 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     return rows[0] ? mapIntent(rows[0]) : null;
   }
 
+  async findByActionRecordId(actionRecordId: string): Promise<PaymentIntentRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(paymentIntents)
+      .where(eq(paymentIntents.actionRecordId, actionRecordId))
+      .limit(1);
+    return rows[0] ? mapIntent(rows[0]) : null;
+  }
+
   async insert(record: PaymentIntentRecord): Promise<PaymentIntentRecord> {
     try {
       await this.db.insert(paymentIntents).values({

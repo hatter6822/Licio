@@ -196,6 +196,12 @@ function buildDeps(overrides: Partial<WsmReadinessDeps> = {}): WsmReadinessDeps 
     treasuries: new InMemoryTreasuryStore(),
     charters: new InMemoryCharterStore(),
     attestations: new InMemoryAttestationStore(),
+    rooms: {
+      roomGovernance: async () => ({ mode: mode.value, name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => true,
+      contentVisibleToUser: async () => true,
+    },
     lawPacks: new InMemoryLawPackStore(),
     seats: new InMemorySeatStore(),
     bindings: new InMemoryBindingStore(),

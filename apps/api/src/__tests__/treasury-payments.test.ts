@@ -401,6 +401,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect(signed).toMatchObject({ ok: true });
 
     // Simulate the WS-L submit path minting an action record.
+    const treasuryId = created.intent.treasuryId;
     const actionRecordId = crypto.randomUUID();
     const action: KnomosisActionRecordEntity = {
       actionRecordId,
@@ -411,7 +412,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       actorUserId: USER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
+      signedAction: { message: { amount: '100', asset: 'USDC', treasuryId }, signature: '0xsig' },
       submissionState: 'submitted' as SubmissionState,
       failureReason: null,
       indexedEventRef: null,
@@ -455,6 +456,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     const created = await create(deps);
     if (!('intent' in created)) throw new Error('expected intent');
     const id = created.intent.paymentIntentId;
+    const treasuryId = created.intent.treasuryId;
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
@@ -468,7 +470,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       actorUserId: USER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
+      signedAction: { message: { amount: '100', asset: 'USDC', treasuryId }, signature: '0xsig' },
       submissionState: 'failed' as SubmissionState,
       failureReason: 'gateway rejected',
       indexedEventRef: null,
@@ -529,6 +531,7 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
     });
     if (!('intent' in created)) throw new Error('expected intent');
     const id = created.intent.paymentIntentId;
+    const treasuryId = created.intent.treasuryId;
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
@@ -542,7 +545,10 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
       actorUserId: USER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: { amount: opts.amount, asset: 'USDC' }, signature: '0xsig' },
+      signedAction: {
+        message: { amount: opts.amount, asset: 'USDC', treasuryId },
+        signature: '0xsig',
+      },
       submissionState: 'finalized' as SubmissionState,
       failureReason: null,
       indexedEventRef: opts.withEvent ? crypto.randomUUID() : null,
@@ -646,6 +652,7 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
 });
 
 describe('intent–action binding (PR #144 review: attach validation)', () => {
+  let treasuryId = '';
   const actionOf = (
     over: Partial<KnomosisActionRecordEntity> = {},
   ): KnomosisActionRecordEntity => ({
@@ -657,7 +664,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     actorUserId: USER,
     payloadHash: `0x${'1'.repeat(64)}`,
     typedDataHash: `0x${'2'.repeat(64)}`,
-    signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
+    signedAction: { message: { amount: '100', asset: 'USDC', treasuryId }, signature: '0xsig' },
     submissionState: 'submitted' as SubmissionState,
     failureReason: null,
     indexedEventRef: null,
@@ -681,6 +688,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     });
     if (!('intent' in created)) throw new Error('expected intent');
     const id = created.intent.paymentIntentId;
+    treasuryId = created.intent.treasuryId;
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
@@ -694,8 +702,20 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       { roomId: crypto.randomUUID() }, // foreign room
       { actorUserId: OTHER }, // foreign actor
       { actionType: 'grant_payout' as KnomosisSignedActionType }, // wrong type
-      { signedAction: { message: { amount: '999', asset: 'USDC' }, signature: '0xsig' } },
-      { signedAction: { message: { amount: '100', asset: 'DOGE' }, signature: '0xsig' } },
+      {
+        signedAction: { message: { amount: '999', asset: 'USDC', treasuryId }, signature: '0xsig' },
+      },
+      {
+        signedAction: { message: { amount: '100', asset: 'DOGE', treasuryId }, signature: '0xsig' },
+      },
+      {
+        // The signed TARGET is a different treasury: the P1 cross-intent
+        // mirroring vector — amount/asset agree but the money goes elsewhere.
+        signedAction: {
+          message: { amount: '100', asset: 'USDC', treasuryId: crypto.randomUUID() },
+          signature: '0xsig',
+        },
+      },
     ];
     for (const [index, over] of cases.entries()) {
       const action = actionOf(over);
@@ -710,6 +730,35 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect(await attachIntentSubmission(deps, id, good.actionRecordId, USER)).toMatchObject({
       ok: true,
     });
+  });
+
+  it('rejects an action record already settling another intent', async () => {
+    const deps = buildDeps();
+    const first = await signedIntent(deps);
+    const second = await createPaymentIntent(deps, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: ROOM,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    if (!('intent' in second)) throw new Error('expected intent');
+    const secondId = second.intent.paymentIntentId;
+    await preflightIntent(deps, secondId, USER);
+    await quoteIntent(deps, secondId, USER);
+    await markIntentSigned(deps, secondId, USER);
+    const action = actionOf();
+    await deps.actions.insert(action);
+    expect(await attachIntentSubmission(deps, first, action.actionRecordId, USER)).toMatchObject({
+      ok: true,
+    });
+    // The SAME on-chain action cannot settle a second intent — that would
+    // double-count one transfer in balances and the accounting export.
+    const reused = await attachIntentSubmission(deps, secondId, action.actionRecordId, USER);
+    if (!('code' in reused)) throw new Error('unexpectedly attached');
+    expect(reused.code).toBe('action_in_use');
   });
 });
 
@@ -773,7 +822,10 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
       actorUserId: USER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
+      signedAction: {
+        message: { amount: '100', asset: 'USDC', grantId: inserted.grantId },
+        signature: '0xsig',
+      },
       submissionState: 'finalized' as SubmissionState,
       failureReason: null,
       indexedEventRef: null,

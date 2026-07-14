@@ -531,6 +531,92 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     expect(status.available_units).toBe(0);
     expect(status.transferable).toBe(false);
   });
+
+  it('rejects a request above the per-action cap BEFORE publication (PR #144 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps); // perActionMax 5000, perWindowMax 10000, balance 100000
+    // 6000 fits the window headroom and the balance but can NEVER be
+    // reserved — it must fail at create, not after a full vote.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_amount: '6000' }),
+      }),
+    ).toMatchObject({ ok: false, code: 'per_action_cap_exceeded' });
+  });
+
+  it('screens ONLY address-shaped recipients; opaque refs skip sanctions (PR #144 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    // An opaque recipient ref never reaches the sanctions port at all.
+    deps.compliance = {
+      ...deps.compliance,
+      screenAddress: async () => {
+        throw new Error('screenAddress must not be called for an opaque ref');
+      },
+    };
+    const opaque = await createProductionProposal(deps, {
+      roomId: ROOM,
+      userId: PROPOSER,
+      create: draft({ recipient_ref: 'coop:the-translation-collective' }),
+    });
+    expect(opaque).toMatchObject({ ok: true });
+    // An address-shaped recipient IS screened — a blocked verdict rejects.
+    deps.compliance = { ...deps.compliance, screenAddress: async () => 'blocked' };
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ recipient_ref: `0x${'99'.repeat(20)}` }),
+      }),
+    ).toMatchObject({ ok: false, code: 'sanctions_blocked' });
+  });
+
+  it('refunds the action budget to the idempotent-race loser (PR #144 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps); // cost 5, max 10 ⇒ two funded creates
+    // Simulate the duplicate-key race: the loser's pre-check misses, the
+    // charge lands, then the insert collides (SQLSTATE 23505 on the Drizzle
+    // cause chain) and the winner's row is returned.
+    const winner = await createProposal(deps);
+    const raw = deps.proposals;
+    let firstLookup = true;
+    deps.proposals = new Proxy(raw, {
+      get(target, prop) {
+        if (prop === 'getById') {
+          return async (_id: string) => {
+            if (firstLookup) {
+              firstLookup = false;
+              return null; // the race window: the winner's row is not yet visible
+            }
+            return target.getById(winner.proposalId);
+          };
+        }
+        if (prop === 'insert') {
+          return async () => {
+            throw Object.assign(new Error('duplicate key'), { cause: { code: '23505' } });
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const replay = await createProductionProposal(deps, {
+      roomId: ROOM,
+      userId: PROPOSER,
+      create: draft(),
+    });
+    expect(replay).toMatchObject({ ok: true });
+    if (!('proposal' in replay)) throw new Error('expected the winner row');
+    expect(replay.proposal.proposalId).toBe(winner.proposalId);
+    // The loser's charge was credited back: a THIRD funded create still fits
+    // the 10-unit budget (5 charged for the winner + 5 for this one).
+    deps.proposals = raw;
+    expect(
+      await createProductionProposal(deps, { roomId: ROOM, userId: PROPOSER, create: draft() }),
+    ).toMatchObject({ ok: true });
+  });
 });
 
 describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {

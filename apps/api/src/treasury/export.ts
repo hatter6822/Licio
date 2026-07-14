@@ -45,7 +45,9 @@ export async function buildAccountingExport(
   const intents = await allIntentsForTreasury(deps.intents, treasury.treasuryId);
   for (const asset of new Set(intents.map((intent) => intent.asset))) {
     const latest = await deps.snapshots.latestByTreasuryAsset(treasury.treasuryId, asset);
-    assetResult.set(asset, latest?.result ?? 'explained');
+    // NO snapshot yet ⇒ the asset has never passed zero-or-explained
+    // reconciliation: its rows are EXCLUDED + counted, never exported on faith.
+    assetResult.set(asset, latest?.result ?? 'divergent');
   }
 
   const rows: AccountingExportRow[] = [];

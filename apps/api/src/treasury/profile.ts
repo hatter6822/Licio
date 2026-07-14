@@ -150,13 +150,22 @@ export async function setGovernanceFreeze(
     });
   }
   // A room-scope freeze also freezes the treasury; a treasury-scope action
-  // touches the treasury only.
+  // touches the treasury only.  A room-scope UNFREEZE clears the treasury
+  // ONLY when its freeze was the room freeze's cascade (same recorded
+  // reason) — an independent treasury-only hold survives the room clearing.
   if (treasury !== null) {
-    await deps.treasuries.setFreeze(
-      treasury.treasuryId,
-      frozen ? 'frozen' : 'active',
-      frozen ? input.reason : null,
-    );
+    const roomUnfreezeClearsCascade =
+      frozen ||
+      input.scope === 'treasury' ||
+      treasury.freezeState !== 'frozen' ||
+      treasury.freezeReason === profile.freezeReason;
+    if (roomUnfreezeClearsCascade) {
+      await deps.treasuries.setFreeze(
+        treasury.treasuryId,
+        frozen ? 'frozen' : 'active',
+        frozen ? input.reason : null,
+      );
+    }
   } else if (input.scope === 'treasury') {
     return tgErr(404, 'no_treasury', 'This room has no treasury.');
   }

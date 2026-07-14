@@ -124,6 +124,36 @@ export async function reserveForProposal(
     if (existing !== null) return { ok: true, reservation: existing };
     return tgErr(409, 'reservation_contended', 'The reservation ledger is busy; retry.');
   }
+  // The headroom read and the insert are not one atomic step: two DIFFERENT
+  // proposals settling together can each pass the pre-insert check.  RE-VERIFY
+  // with this reservation included using RAW sums (categoryHeadroom floors at
+  // zero, which would hide the overshoot) — an overshoot releases ITSELF,
+  // keeping the window cap inviolable (fail-closed; retryable once headroom
+  // frees up).
+  const openRows = await deps.reservations.listActiveByTreasury(input.treasuryId, input.category);
+  const consumedRows = await deps.reservations.listConsumedByTreasury(
+    input.treasuryId,
+    input.category,
+  );
+  const windowStart = deps.now() - cap.windowSeconds * 1000;
+  const committed = decSum([
+    ...openRows.map((r) => r.amount),
+    ...consumedRows.filter((r) => Date.parse(r.updatedAt) >= windowStart).map((r) => r.amount),
+  ]);
+  const capMax = typeof cap.perWindowMax === 'number' ? String(cap.perWindowMax) : cap.perWindowMax;
+  if (decCompare(committed, capMax) > 0) {
+    await deps.reservations.transition(
+      inserted.reservationId,
+      'reserved',
+      'released',
+      new Date(deps.now()).toISOString(),
+    );
+    return tgErr(
+      409,
+      'per_window_cap_exceeded',
+      'A concurrent approval consumed the remaining headroom; the reservation was released.',
+    );
+  }
   return { ok: true, reservation: inserted };
 }
 

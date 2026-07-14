@@ -18,9 +18,11 @@ import { createPaymentIntent, retryIntent } from '../treasury/intents.js';
 import {
   assertGovernanceWritable,
   ensureProfile,
+  setGovernanceFreeze,
   setGovernancePause,
 } from '../treasury/profile.js';
 import { executeProposal } from '../treasury/proposals.js';
+import { recordReadinessAttestation } from '../treasury/readiness.js';
 import {
   consumeReservation,
   releaseReservation,
@@ -32,6 +34,7 @@ import {
   type TreasuryServices,
 } from '../treasury/services.js';
 import type { TreasuryRecord } from '../treasury/stores.js';
+import { createTreasury } from '../treasury/treasury.js';
 import { freshKnomosisServices, resetKnomosisFixture } from './knomosis-test-helpers.js';
 
 const ROOM = '77777777-7777-4777-8777-777777777777';
@@ -982,5 +985,296 @@ describe('third review wave (PR #144): liquidity, sweeps, recovery, charter free
       actorUserId: USER,
     });
     expect('code' in blocked && blocked.code).toBe('governance_frozen');
+  });
+});
+
+describe('fourth review wave (PR #144): races, freezes, attestations, exports', () => {
+  it('replays an existing intent even after the room freezes (idempotency-first)', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const key = randomUUID();
+    const first = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '50',
+      idempotencyKey: key,
+    });
+    if ('code' in first) throw new Error(first.message);
+    const frozen = await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Routine review.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    if ('code' in frozen) throw new Error(frozen.message);
+    // The retrying client gets its EXISTING row back — the freeze landing
+    // after the original create must not hide it.
+    const replay = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '50',
+      idempotencyKey: key,
+    });
+    expect(replay).toMatchObject({ ok: true, existing: true });
+    if ('code' in replay) throw new Error('unreachable');
+    expect(replay.intent.paymentIntentId).toBe(first.intent.paymentIntentId);
+    // A NEW intent is still refused while frozen.
+    const fresh = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '50',
+      idempotencyKey: randomUUID(),
+    });
+    expect('code' in fresh && fresh.code).toBe('governance_frozen');
+  });
+
+  it('self-abandons a deposit that a concurrent create pushed over the allowance', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services); // perUserPerPeriod 1000
+    const raw = services.intents;
+    let intercepted = false;
+    services.intents = new Proxy(raw, {
+      get(target, prop) {
+        if (prop === 'insert' && !intercepted) {
+          return async (record: Parameters<typeof raw.insert>[0]) => {
+            intercepted = true;
+            const inserted = await target.insert(record);
+            // The concurrent competitor lands between the insert and the
+            // post-insert re-verify: 950 + 100 = 1050 > the 1000 cap.
+            await target.insert({
+              ...record,
+              paymentIntentId: randomUUID(),
+              idempotencyKey: randomUUID(),
+              amount: '950',
+            });
+            return inserted;
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const result = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: randomUUID(),
+    });
+    expect('code' in result && result.code).toBe('deposit_limit_exceeded');
+    services.intents = raw;
+    // The overshooting row abandoned ITSELF — the competitor survives.
+    const epoch = new Date(0).toISOString();
+    const rows = await services.intents.listDepositsInPeriod(ROOM, epoch);
+    expect(rows.find((r) => r.amount === '100')?.executionState).toBe('abandoned');
+    expect(rows.find((r) => r.amount === '950')?.executionState).toBe('created');
+  });
+
+  it('self-releases a reservation that a concurrent approval pushed over the window cap', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services); // BOUNDS: window cap 150
+    const proposalId = randomUUID();
+    const competitorId = randomUUID();
+    const raw = services.reservations;
+    let intercepted = false;
+    services.reservations = new Proxy(raw, {
+      get(target, prop) {
+        if (prop === 'insert' && !intercepted) {
+          return async (record: Parameters<typeof raw.insert>[0]) => {
+            intercepted = true;
+            const inserted = await target.insert(record);
+            // A second approval settles in the race window: 100 + 100 > 150.
+            await target.insert({
+              ...record,
+              reservationId: randomUUID(),
+              proposalId: competitorId,
+            });
+            return inserted;
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const result = await reserveForProposal(services, {
+      treasuryId: treasury.treasuryId,
+      proposalId,
+      category: 'grant',
+      asset: 'USDC',
+      amount: '100',
+      bounds: BOUNDS,
+    });
+    expect('code' in result && result.code).toBe('per_window_cap_exceeded');
+    services.reservations = raw;
+    expect((await services.reservations.getByProposal(proposalId))?.state).toBe('released');
+    expect((await services.reservations.getByProposal(competitorId))?.state).toBe('reserved');
+  });
+
+  it('a room unfreeze clears its own cascade but never an independent treasury hold', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    // Room freeze cascades to the treasury under the SAME reason…
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Room-level review.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    // …then platform staff place an INDEPENDENT treasury-scope hold.
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'treasury',
+      source: 'legal',
+      reason: 'Legal hold on funds.',
+      actorUserId: null,
+      isPlatformStaff: true,
+    });
+    // Lifting the ROOM freeze must not lift the legal hold.
+    const lifted = await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'unfreeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Review complete.',
+      actorUserId: null,
+      isPlatformStaff: true,
+    });
+    if ('code' in lifted) throw new Error(lifted.message);
+    expect(lifted.profile.freezeState).toBe('active');
+    const held = await services.treasuries.getById(treasury.treasuryId);
+    expect(held?.freezeState).toBe('frozen');
+    expect(held?.freezeReason).toBe('Legal hold on funds.');
+    // A PURE cascade (no independent hold) clears with the room.
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'treasury',
+      source: 'legal',
+      reason: 'Room-level review 2.',
+      actorUserId: null,
+      isPlatformStaff: true,
+    });
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Room-level review 2.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'unfreeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Cleared.',
+      actorUserId: null,
+      isPlatformStaff: true,
+    });
+    expect((await services.treasuries.getById(treasury.treasuryId))?.freezeState).toBe('active');
+  });
+
+  it('excludes settled rows whose asset has NO reconciliation snapshot at all', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const created = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '5',
+      idempotencyKey: randomUUID(),
+    });
+    if ('code' in created) throw new Error(created.message);
+    const nowIso = new Date().toISOString();
+    for (const [from, to] of [
+      ['created', 'preflighted'],
+      ['preflighted', 'quoted'],
+      ['quoted', 'signed'],
+      ['signed', 'submitted'],
+      ['submitted', 'pending'],
+      ['pending', 'confirmed'],
+      ['confirmed', 'finalized'],
+    ] as const) {
+      await services.intents.transition(created.intent.paymentIntentId, from, to, {}, nowIso);
+    }
+    // NO snapshot appended: an unreconciled asset is treated as divergent —
+    // excluded and COUNTED, never silently exported as clean.
+    const built = await buildAccountingExport(services, {
+      roomId: ROOM,
+      periodStartIso: new Date(Date.now() - 3_600_000).toISOString(),
+      periodEndIso: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    if ('code' in built) throw new Error(built.message);
+    expect(built.export.rows).toHaveLength(0);
+    expect(built.export.excluded_unreconciled).toBe(1);
+  });
+
+  it('provisioning validates the deployment against the ACTIVE pin', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const unknown = await createTreasury(services, {
+      roomId: ROOM,
+      deploymentId: randomUUID(), // not in the pinned manifest
+      treasuryAddress: `0x${'ab'.repeat(20)}`,
+      acceptedAssets: ['USDC'],
+      depositLimits: {
+        perUserPerPeriod: '1000',
+        perRoomPerPeriod: '5000',
+        perDepositMax: '100',
+        periodSeconds: 86_400,
+      },
+      actorUserId: USER,
+    });
+    expect('code' in unknown && unknown.code).toBe('deployment_unknown');
+  });
+
+  it('only a room steward can record the safety-override acknowledgment', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const notSteward = {
+      ...services,
+      rooms: { ...services.rooms, isSteward: async () => false },
+    };
+    const refused = await recordReadinessAttestation(notSteward, {
+      roomId: ROOM,
+      item: 'safety_override_acknowledged',
+      note: 'We acknowledge the platform moderation floor.',
+      actorUserId: USER,
+      isPlatformStaff: true, // staff CANNOT acknowledge on the room's behalf
+    });
+    expect('code' in refused && refused.code).toBe('steward_required');
+    const accepted = await recordReadinessAttestation(services, {
+      roomId: ROOM,
+      item: 'safety_override_acknowledged',
+      note: 'We acknowledge the platform moderation floor.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    expect(accepted).toMatchObject({ ok: true });
   });
 });

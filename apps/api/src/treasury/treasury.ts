@@ -10,7 +10,7 @@
 
 import { decSum } from '@licio/governance';
 import type { RoomTreasuryWire } from '@licio/shared';
-import { KNOMOSIS_PIN } from '../knomosis/pin.js';
+import { KNOMOSIS_PIN, pinnedDeployment } from '../knomosis/pin.js';
 import { KNOMOSIS_ASSET_DECIMALS } from '../knomosis/preflight.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { ensureProfile, type ProfileDeps, type TreasuryGovernanceError, tgErr } from './profile.js';
@@ -50,6 +50,12 @@ export async function createTreasury(
   deps: TreasuryServiceDeps,
   input: CreateTreasuryInput,
 ): Promise<TreasuryGovernanceError | { ok: true; treasury: TreasuryRecord }> {
+  // The deployment must be a pinned ACTIVE one: an arbitrary/retired id
+  // would provision a treasury whose deposits can never preflight correctly.
+  const deployment = pinnedDeployment(input.deploymentId);
+  if (deployment?.status !== 'active') {
+    return tgErr(409, 'deployment_unknown', 'Unknown or inactive deployment.');
+  }
   const address = input.treasuryAddress.toLowerCase();
   if (platformOperatingAddresses(input.deploymentId).has(address)) {
     return tgErr(

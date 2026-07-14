@@ -279,6 +279,9 @@ export interface PaymentIntentStore {
     roomId: string,
     idempotencyKey: string,
   ): Promise<PaymentIntentRecord | null>;
+  /** The intent (if any) already bound to a WS-L action record — one action
+   *  settles exactly one intent, or a single transfer would double-count. */
+  findByActionRecordId(actionRecordId: string): Promise<PaymentIntentRecord | null>;
   /** Returns the EXISTING intent on an idempotency-key collision (WS-M.3.1c:
    *  the key row and the intent are one write — the unique index is the record). */
   insert(record: PaymentIntentRecord): Promise<PaymentIntentRecord>;
@@ -589,6 +592,13 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
       if (row.userId === userId && row.roomId === roomId && row.idempotencyKey === idempotencyKey) {
         return clone(row);
       }
+    }
+    return null;
+  }
+
+  async findByActionRecordId(actionRecordId: string): Promise<PaymentIntentRecord | null> {
+    for (const row of this.#rows.values()) {
+      if (row.actionRecordId === actionRecordId) return clone(row);
     }
     return null;
   }

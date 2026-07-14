@@ -122,6 +122,17 @@ export async function createPaymentIntent(
   deps: IntentDeps,
   input: CreateIntentInput,
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord; existing: boolean }> {
+  // Idempotency FIRST — even before the mutable gates: a replay of an
+  // ALREADY-CREATED intent has no new side effects, so a freeze/kill-switch/
+  // asset-policy change landing after the original create must not hide the
+  // existing row from the retrying client.
+  const replayed = await deps.intents.findByIdempotencyKey(
+    input.userId,
+    input.roomId,
+    input.idempotencyKey,
+  );
+  if (replayed !== null) return { ok: true, intent: replayed, existing: true };
+
   const operation = operationFor(input.targetType);
   const guard = await assertGovernanceWritable(deps, input.roomId, operation);
   if (guard !== null) return guard;
@@ -140,15 +151,6 @@ export async function createPaymentIntent(
   if (!treasury.acceptedAssets.includes(input.asset)) {
     return tgErr(400, 'asset_not_accepted', `This treasury does not accept "${input.asset}".`);
   }
-
-  // Idempotency FIRST: a replay returns the existing intent with no checks
-  // re-run (the original passed them) and no side effects.
-  const existing = await deps.intents.findByIdempotencyKey(
-    input.userId,
-    input.roomId,
-    input.idempotencyKey,
-  );
-  if (existing !== null) return { ok: true, intent: existing, existing: true };
 
   if (DEPOSIT_TARGETS.has(input.targetType)) {
     // WS-M.2.2a deposit limits: single, per-user-period, per-room-period.
@@ -201,6 +203,37 @@ export async function createPaymentIntent(
   };
   const intent = await deps.intents.insert(record);
   const wasExisting = intent.paymentIntentId !== record.paymentIntentId;
+  if (!wasExisting && DEPOSIT_TARGETS.has(input.targetType)) {
+    // The allowance read and the insert are not one atomic step: two racing
+    // creates can each pass the pre-insert check.  RE-VERIFY with this row
+    // included — an overshoot abandons ITSELF (fail-closed; the client
+    // retries and the survivors fit the cap serially).
+    const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
+    const inPeriod = (
+      await deps.intents.listDepositsInPeriod(input.roomId, new Date(periodStart).toISOString())
+    ).filter((row) => ALLOWANCE_STATES.has(row.executionState));
+    const roomUsed = decSum(inPeriod.map((row) => row.amount));
+    const userUsed = decSum(
+      inPeriod.filter((row) => row.userId === input.userId).map((row) => row.amount),
+    );
+    if (
+      decCompare(userUsed, treasury.depositLimits.perUserPerPeriod) > 0 ||
+      decCompare(roomUsed, treasury.depositLimits.perRoomPerPeriod) > 0
+    ) {
+      await deps.intents.transition(
+        intent.paymentIntentId,
+        'created',
+        'abandoned',
+        {},
+        new Date(deps.now()).toISOString(),
+      );
+      return tgErr(
+        409,
+        'deposit_limit_exceeded',
+        'A concurrent deposit consumed the remaining allowance; please retry.',
+      );
+    }
+  }
   if (!wasExisting) {
     await appendChainedAudit(deps, {
       roomId: input.roomId,
@@ -395,6 +428,15 @@ const ACTION_TYPE_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
   steward_compensation: 'grant_payout',
 };
 
+/** The SIGNED message field carrying each target's identity: two same-shape
+ *  intents (same room/type/amount/asset) must still bind distinct actions. */
+const TARGET_FIELD_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
+  treasury_deposit: 'treasuryId',
+  bounty_contribution: 'bountyId',
+  grant_payout: 'grantId',
+  steward_compensation: 'grantId',
+};
+
 /**
  * `signed → submitted`: bind the WS-L action record minted by the submit path.
  * The action must BELONG to this intent — same room, same actor, the target's
@@ -434,6 +476,22 @@ export async function attachIntentSubmission(
       'action_mismatch',
       'The signed amount/asset differs from this payment intent.',
     );
+  }
+  // The SIGNED TARGET must be this intent's target: with two same-shape
+  // intents, a foreign grant/bounty/treasury action would otherwise settle
+  // the wrong record (deposit intents carry the treasury id as their target).
+  const targetField = TARGET_FIELD_FOR_TARGET[intent.targetType];
+  const signedTarget = message[targetField];
+  const expectedTarget =
+    intent.targetType === 'treasury_deposit' ? intent.treasuryId : intent.targetId;
+  if (signedTarget !== expectedTarget) {
+    return tgErr(422, 'action_mismatch', 'The signed target differs from this payment intent.');
+  }
+  // One WS-L action settles exactly ONE intent — a record already bound to
+  // another intent would double-count a single transfer in the ledger/export.
+  const alreadyBound = await deps.intents.findByActionRecordId(actionRecordId);
+  if (alreadyBound !== null && alreadyBound.paymentIntentId !== intent.paymentIntentId) {
+    return tgErr(409, 'action_in_use', 'This action record settles another payment intent.');
   }
   const updated = await transitionIntent(
     deps,

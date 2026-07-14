@@ -40,6 +40,7 @@ import type { BindingStore, ModelStore, SeatStore } from '../governance/stores.j
 import type { AuditStore } from '../identity/audit.js';
 import type { KnomosisRuntimeConfig } from '../knomosis/config.js';
 import type { CompliancePort, RegionResolverPort } from '../knomosis/ports.js';
+import type { RoomGovernancePort } from '../knomosis/preflight.js';
 import type { ReadinessChecklistPort, RoomModePort } from '../knomosis/readiness.js';
 import { hasPassedComprehension } from '../knomosis/simulation.js';
 import type { ComprehensionStore } from '../knomosis/stores.js';
@@ -51,6 +52,7 @@ import type { AttestationStore, CharterStore } from './stores.js';
 export interface WsmReadinessDeps extends LawPackDeps {
   charters: CharterStore;
   attestations: AttestationStore;
+  rooms: RoomGovernancePort;
   seats: SeatStore;
   bindings: BindingStore;
   models: ModelStore;
@@ -460,6 +462,15 @@ export async function recordReadinessAttestation(
       'platform_review_required',
       'Only platform staff can record an external-audit sign-off.',
     );
+  }
+  // The safety-override acknowledgment is the ROOM's own commitment to the
+  // platform-moderation supremacy — a room steward must record it; platform
+  // staff cannot acknowledge it on the room's behalf.
+  if (
+    input.item === 'safety_override_acknowledged' &&
+    !(await deps.rooms.isSteward(input.roomId, input.actorUserId))
+  ) {
+    return tgErr(403, 'steward_required', 'A room steward must record this acknowledgment.');
   }
   await deps.attestations.upsert({
     roomId: input.roomId,

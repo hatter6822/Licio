@@ -78,6 +78,30 @@ export async function chargeRoomActionBudget(
   return tgErr(409, 'budget_contended', 'The action budget is busy; please retry.');
 }
 
+/** Credit BACK a charge whose side effect turned out to be a duplicate
+ *  (the idempotent-create race loser): CAS-guarded, capped at the refill max
+ *  so a refund can never mint capacity beyond the budget ceiling. */
+export async function refundActionBudget(
+  deps: BudgetDeps,
+  input: { roomId: string; userId: string; units: number; rules: ActionBudgetRules },
+): Promise<void> {
+  if (input.units <= 0) return;
+  const actorKey = `user:${input.userId}`;
+  for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt += 1) {
+    const existing = await deps.budgets.get(input.roomId, actorKey);
+    if (existing === null) return; // nothing was ever charged
+    const written = await deps.budgets.put(
+      {
+        ...existing,
+        availableUnits: Math.min(input.rules.refill.max, existing.availableUnits + input.units),
+        updatedAt: new Date(deps.now()).toISOString(),
+      },
+      existing.updatedAt,
+    );
+    if (written !== null) return;
+  }
+}
+
 /** The §17.7 status view (consumption shown BEFORE signing). */
 export async function actionBudgetStatus(
   deps: BudgetDeps,

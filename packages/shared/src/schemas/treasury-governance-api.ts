@@ -659,7 +659,9 @@ export const treasuryFreezeRequestSchema = z
     action: z.enum(['freeze', 'unfreeze']),
     scope: z.enum(['treasury', 'room']),
     source: z.enum(TREASURY_FREEZE_SOURCES),
-    reason: z.string().trim().min(1).max(1_000),
+    /** Capped at the READ schemas' 500 (profile/dashboard `freeze_reason`) —
+     *  a longer stored reason would fail every subsequent response parse. */
+    reason: z.string().trim().min(1).max(500),
   })
   .strict();
 export type TreasuryFreezeRequest = z.infer<typeof treasuryFreezeRequestSchema>;
