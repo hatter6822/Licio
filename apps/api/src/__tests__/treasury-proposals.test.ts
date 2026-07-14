@@ -597,6 +597,29 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
         signature: await signedTypedData('proposal_sign', forged, stranger),
       }),
     ).toMatchObject({ ok: false, code: 'signature_invalid' });
+    // The SIGNED deployment binding must match the recording deployment
+    // (PR #144 review: the §17.3.1 quartet includes deploymentId).
+    const foreignDeployment: Record<string, string> = {
+      roomId: ROOM,
+      proposalId: proposal.proposalId,
+      actor: testAccount2.address.toLowerCase(),
+      nonce: '4243',
+      expiration: String(Math.floor(deps.now() / 1000) + 600),
+      deploymentId: '00000000-0000-4000-8000-00000000dead',
+    };
+    expect(
+      await signProposal(deps, {
+        roomId: ROOM,
+        proposalId: proposal.proposalId,
+        userId: VOTER_2,
+        purpose: 'vote',
+        choice: 'approve',
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+        walletAccountId: WALLET_2,
+        typedDataMessage: foreignDeployment,
+        signature: await signedTypedData('proposal_sign', foreignDeployment, testAccount2),
+      }),
+    ).toMatchObject({ ok: false, code: 'payload_mismatch' });
   });
 
   it('enforces the cooling-off for treasury-controlling votes (WS-M.4.2c-2)', async () => {
@@ -927,7 +950,9 @@ describe('grants (WS-M.5.1a)', () => {
     if (!('grant' in accepted)) throw new Error(JSON.stringify(accepted));
     const tranche = accepted.grant.milestones.find((m) => m.milestoneId === first.milestoneId);
     expect(tranche?.paymentIntentId).not.toBeNull();
-    expect(accepted.grant.payoutState).toBe('partially_paid');
+    // Scheduling an intent never claims payment: `partially_paid`/`paid` are
+    // reconciliation verdicts at on-chain finality (PR #144 review).
+    expect(accepted.grant.payoutState).toBe('scheduled');
     // The tranche intent exists with the milestone amount.
     const intent = await deps.intents.getById(tranche?.paymentIntentId ?? '');
     expect(intent).toMatchObject({ targetType: 'grant_payout', amount: '1500' });

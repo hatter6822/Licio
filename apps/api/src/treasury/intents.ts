@@ -32,12 +32,14 @@ import {
   type TreasuryGovernanceError,
   tgErr,
 } from './profile.js';
-import type { PaymentIntentRecord, PaymentIntentStore } from './stores.js';
+import type { GrantStore, PaymentIntentRecord, PaymentIntentStore } from './stores.js';
 
 export interface IntentDeps extends ProfileDeps {
   intents: PaymentIntentStore;
   actions: KnomosisActionStore;
   receipts: KnomosisReceiptStore;
+  /** Payout finality projects onto the linked grant (WS-M.5.1a). */
+  grants: GrantStore;
   compliance: CompliancePort;
   regionResolver: RegionResolverPort;
   configStore: PwattConfigStore;
@@ -355,7 +357,22 @@ export async function markIntentSigned(
   return { ok: true, intent: updated };
 }
 
-/** `signed → submitted`: bind the WS-L action record minted by the submit path. */
+/** The WS-L signed-action type each payment target rides (fail-closed map). */
+const ACTION_TYPE_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
+  treasury_deposit: 'treasury_deposit',
+  bounty_contribution: 'bounty_contribution',
+  grant_payout: 'grant_payout',
+  steward_compensation: 'grant_payout',
+};
+
+/**
+ * `signed → submitted`: bind the WS-L action record minted by the submit path.
+ * The action must BELONG to this intent — same room, same actor, the target's
+ * action type, and the signed amount/asset the intent carries — otherwise any
+ * known action-record id (another room's, another user's, another type's)
+ * would let `reconcileIntents` mirror a foreign action's states and receipts
+ * into this intent's ledger and accounting export.
+ */
 export async function attachIntentSubmission(
   deps: IntentDeps,
   paymentIntentId: string,
@@ -366,6 +383,22 @@ export async function attachIntentSubmission(
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
+  if (
+    action.roomId !== intent.roomId ||
+    intent.userId === null ||
+    action.actorUserId !== intent.userId ||
+    action.actionType !== ACTION_TYPE_FOR_TARGET[intent.targetType]
+  ) {
+    return tgErr(422, 'action_mismatch', 'The action record does not belong to this intent.');
+  }
+  const message = action.signedAction.message;
+  if (message['amount'] !== intent.amount || message['asset'] !== intent.asset) {
+    return tgErr(
+      422,
+      'action_mismatch',
+      'The signed amount/asset differs from this payment intent.',
+    );
+  }
   const updated = await transitionIntent(
     deps,
     intent,
@@ -445,10 +478,42 @@ export async function reconcileIntents(deps: IntentDeps, limit = 200): Promise<n
           treasuryId: updated.treasuryId,
         });
       }
+      if (
+        next === 'finalized' &&
+        (updated.targetType === 'grant_payout' || updated.targetType === 'steward_compensation')
+      ) {
+        await settleGrantPayout(deps, updated);
+      }
       current = updated;
     }
   }
   return advanced;
+}
+
+/**
+ * A payout intent reached ON-CHAIN FINALITY: project the linked grant's payout
+ * state from its milestones' intent finality — `paid` only when EVERY scheduled
+ * milestone's intent finalized, `partially_paid` while some have (WS-M.5.1a;
+ * scheduling alone never claims payment).
+ */
+async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord): Promise<void> {
+  const grant = await deps.grants.getById(intent.targetId);
+  if (grant === null || grant.payoutState === 'clawed_back') return;
+  let finalized = 0;
+  let scheduled = 0;
+  for (const milestone of grant.milestones) {
+    if (milestone.paymentIntentId === null) continue;
+    scheduled += 1;
+    const linked = await deps.intents.getById(milestone.paymentIntentId);
+    if (linked?.executionState === 'finalized') finalized += 1;
+  }
+  if (finalized === 0) return;
+  const payoutState =
+    finalized === grant.milestones.length && scheduled === grant.milestones.length
+      ? ('paid' as const)
+      : ('partially_paid' as const);
+  if (payoutState === grant.payoutState) return;
+  await deps.grants.update({ ...grant, payoutState });
 }
 
 /** The expiry sweep: timed pre-submission states past their TTL → abandoned. */

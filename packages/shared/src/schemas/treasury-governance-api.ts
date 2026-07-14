@@ -344,7 +344,9 @@ export type TreasuryDepositRequest = z.infer<typeof treasuryDepositRequestSchema
 export const paymentIntentSchema = z
   .object({
     payment_intent_id: uuidSchema,
-    user_id: uuidSchema,
+    /** Null once the owner exercised right-to-erasure — the record is never
+     *  re-attributed to whoever happens to read it. */
+    user_id: uuidSchema.nullable(),
     room_id: uuidSchema,
     target_type: paymentTargetTypeSchema,
     /** Target entity (treasury / grant / proposal), per target_type. */

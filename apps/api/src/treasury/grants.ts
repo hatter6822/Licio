@@ -214,13 +214,15 @@ export async function updateGrantMilestone(
       : milestones.some((m) => m.state !== 'pending')
         ? ('in_progress' as const)
         : ('pending' as const);
+  // Scheduling only ever moves the grant to `scheduled`: a freshly created
+  // payout intent has not been submitted, let alone finalized — `paid` /
+  // `partially_paid` are RECONCILIATION verdicts, set by the intent sweep
+  // when the linked payout intents actually reach on-chain finality.
   const scheduled = milestones.filter((m) => m.paymentIntentId !== null).length;
   const payoutState =
-    scheduled === 0
+    scheduled === 0 || grant.payoutState === 'partially_paid' || grant.payoutState === 'paid'
       ? grant.payoutState
-      : scheduled < milestones.length
-        ? ('partially_paid' as const)
-        : ('paid' as const);
+      : ('scheduled' as const);
   const updated = await deps.grants.update({
     ...grant,
     milestones,

@@ -311,6 +311,96 @@ describe('WS-M treasury + payment intents', () => {
     expect(((await replay.json()) as { existing: boolean }).existing).toBe(true);
   });
 
+  it('a stranger cannot advance someone else’s payment intent (PR #144 review)', async () => {
+    const fixture = await wsmFixture({ steward: false });
+    const owner = await seedUserWithSession(fixture.identity, { handle: 'intent_owner' });
+    const stranger = await seedUserWithSession(fixture.identity, { handle: 'intent_stranger' });
+    // Provision via the container directly (the fixture's rooms port treats
+    // everyone as a member but NOT a steward here).
+    const inserted = await fixture.treasury.treasuries.insert({
+      treasuryId: crypto.randomUUID(),
+      roomId: ROOM,
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      treasuryAddress: ADDRESS,
+      acceptedAssets: ['USDC'],
+      balanceSnapshot: null,
+      balancesReconciledAt: null,
+      depositLimits: {
+        perUserPerPeriod: '1000000',
+        perRoomPerPeriod: '10000000',
+        perDepositMax: '500000',
+        periodSeconds: 86_400,
+      },
+      freezeState: 'active',
+      freezeReason: null,
+      pauseFlags: { deposits: false, proposals: false, executions: false },
+      reconciliationState: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+    expect(inserted).not.toBeNull();
+    const created = await req('POST', `/rooms/${ROOM}/treasury/payment-intents`, owner.cookie, {
+      target_type: 'treasury_deposit',
+      target_id: ROOM,
+      asset: 'USDC',
+      amount: '1000',
+      idempotency_key: crypto.randomUUID(),
+    });
+    expect(created.status).toBe(201);
+    const intentId = ((await created.json()) as { payment_intent_id: string }).payment_intent_id;
+
+    // The stranger (member, not owner, not steward) cannot drive the lifecycle…
+    const foreign = await req(
+      'POST',
+      `/rooms/${ROOM}/treasury/payment-intents/${intentId}/advance`,
+      stranger.cookie,
+      { step: 'preflight' },
+    );
+    expect(foreign.status).toBe(404);
+    // …and a room mismatch 404s even for the owner.
+    const wrongRoom = await req(
+      'POST',
+      `/rooms/${crypto.randomUUID()}/treasury/payment-intents/${intentId}/advance`,
+      owner.cookie,
+      { step: 'preflight' },
+    );
+    expect(wrongRoom.status).toBe(404);
+    // The owner still advances it.
+    const owned = await req(
+      'POST',
+      `/rooms/${ROOM}/treasury/payment-intents/${intentId}/advance`,
+      owner.cookie,
+      { step: 'preflight' },
+    );
+    expect(owned.status).toBe(200);
+  });
+
+  it('a frozen room cannot provision a treasury (PR #144 review)', async () => {
+    const fixture = await wsmFixture();
+    const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
+    const frozen = await req('POST', `/rooms/${ROOM}/governance/freeze`, cookie, {
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'incident under review',
+    });
+    expect(frozen.status).toBe(200);
+    const blocked = await req('POST', `/rooms/${ROOM}/treasury`, cookie, {
+      deployment_id: LOCAL_DEPLOYMENT.deployment_id,
+      treasury_address: ADDRESS,
+      accepted_assets: ['USDC'],
+      deposit_limits: {
+        per_user_per_period: '1000000',
+        per_room_per_period: '10000000',
+        per_deposit_max: '500000',
+        period_seconds: 86_400,
+      },
+    });
+    expect(blocked.status).toBe(403);
+    expect(((await blocked.json()) as { error: { code: string } }).error.code).toBe(
+      'governance_frozen',
+    );
+  });
+
   it('the accounting export is steward-gated and versioned', async () => {
     const fixture = await wsmFixture();
     const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });

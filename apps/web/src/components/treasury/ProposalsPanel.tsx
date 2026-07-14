@@ -10,6 +10,7 @@
 
 import {
   assembleTransactionPreview,
+  CHARTER_SECTIONS,
   type GovernanceProposal,
   type KnomosisEip712Domain,
   PROPOSAL_CHALLENGE_TYPES,
@@ -52,6 +53,21 @@ import { TransactionPreviewCard } from '../wallet/TransactionPreview.js';
 /** Spend-bearing types mirror the server's SPEND_CATEGORY map (UI hint only —
  *  the server is authoritative and rejects a mismatch). */
 const SPEND_TYPES: ReadonlySet<string> = new Set(['capped_grant', 'bounty']);
+
+/** The server's fail-closed classifier requires an ALLOWLISTED
+ *  `requested_action.kind` per proposal type (WS-M.1.2d) — an empty action is
+ *  rejected as `unclassifiable_action` before the proposal exists. */
+const ACTION_KIND_FOR_TYPE: Readonly<Record<string, string>> = {
+  capped_grant: 'grant',
+  bounty: 'bounty',
+  charter_update: 'charter_update',
+  steward_rotation: 'steward_rotation',
+  law_pack_upgrade: 'law_pack_upgrade',
+  treasury_policy_update: 'law_pack_upgrade',
+};
+
+/** Types whose execution adopts a registered law-pack by id. */
+const LAW_PACK_TYPES: ReadonlySet<string> = new Set(['law_pack_upgrade', 'treasury_policy_update']);
 
 const VOTING_TONE: Record<string, 'success' | 'warning' | 'error' | 'info' | 'neutral'> = {
   draft: 'neutral',
@@ -412,8 +428,24 @@ function CreateProposalForm({
   const [asset, setAsset] = useState('');
   const [recipient, setRecipient] = useState('');
   const [coi, setCoi] = useState('');
+  const [lawPackId, setLawPackId] = useState('');
+  const [charterSections, setCharterSections] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const spend = SPEND_TYPES.has(proposalType);
+  const needsLawPack = LAW_PACK_TYPES.has(proposalType);
+  const isCharter = proposalType === 'charter_update';
+
+  /** The classifier-allowlisted action payload the EXECUTION step consumes:
+   *  the kind for every type, the target law-pack id for upgrades, and the
+   *  full voted sections for a charter update. */
+  function requestedAction(): Record<string, unknown> {
+    const action: Record<string, unknown> = {
+      kind: ACTION_KIND_FOR_TYPE[proposalType] ?? proposalType,
+    };
+    if (needsLawPack) action['law_pack_id'] = lawPackId.trim();
+    if (isCharter) action['sections'] = charterSections;
+    return action;
+  }
 
   async function submit(): Promise<void> {
     setError(null);
@@ -428,7 +460,7 @@ function CreateProposalForm({
         recipient_ref: spend && recipient.trim() !== '' ? recipient.trim() : null,
         conflict_disclosures: coi.trim() === '' ? null : coi.trim(),
         risk_assessment: risk.trim(),
-        requested_action: {},
+        requested_action: requestedAction(),
         expected_deliverable: deliverable.trim(),
         idempotency_key: crypto.randomUUID(),
       });
@@ -440,6 +472,8 @@ function CreateProposalForm({
       setAsset('');
       setRecipient('');
       setCoi('');
+      setLawPackId('');
+      setCharterSections({});
       onCreated();
     } catch (e) {
       setError(
@@ -451,7 +485,13 @@ function CreateProposalForm({
   }
 
   const complete =
-    title.trim() !== '' && summary.trim() !== '' && risk.trim() !== '' && deliverable.trim() !== '';
+    title.trim() !== '' &&
+    summary.trim() !== '' &&
+    risk.trim() !== '' &&
+    deliverable.trim() !== '' &&
+    (!needsLawPack || lawPackId.trim() !== '') &&
+    (!isCharter ||
+      CHARTER_SECTIONS.every((section) => (charterSections[section] ?? '').trim().length >= 20));
 
   return (
     <form
@@ -544,6 +584,42 @@ function CreateProposalForm({
           />
         </>
       ) : null}
+      {needsLawPack ? (
+        <Input
+          label={t('room.proposals.create.lawPackId', 'Registered law-pack id to adopt')}
+          value={lawPackId}
+          onChange={(event) => setLawPackId(event.target.value)}
+          helperText={t(
+            'room.proposals.create.lawPackId.help',
+            'From the law-pack history (registration publishes the id).',
+          )}
+          maxLength={36}
+          required
+        />
+      ) : null}
+      {isCharter
+        ? CHARTER_SECTIONS.map((section) => (
+            <TextArea
+              key={section}
+              label={t(
+                `room.proposals.create.charter.${section}`,
+                `Charter — ${section.replaceAll('_', ' ')}`,
+              )}
+              value={charterSections[section] ?? ''}
+              onChange={(event) =>
+                setCharterSections((current) => ({ ...current, [section]: event.target.value }))
+              }
+              rows={3}
+              minLength={20}
+              maxLength={10_000}
+              helperText={t(
+                'room.proposals.create.charter.help',
+                'Plain language, at least 20 characters.',
+              )}
+              required
+            />
+          ))
+        : null}
       <div>
         <Button type="submit" disabled={create.isPending || !complete}>
           {t('room.proposals.create.submit', 'Open proposal')}

@@ -225,7 +225,92 @@ describe('ProposalsPanel (WS-M.4)', () => {
           asset: 'USDC',
           recipient_ref: 'hydrologist-coop',
           conflict_disclosures: 'None.',
+          // The classifier-allowlisted kind rides automatically (PR #144 review:
+          // an empty requested_action is rejected server-side as unclassifiable).
+          requested_action: { kind: 'grant' },
           idempotency_key: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        }),
+      ),
+    );
+  });
+
+  it('law-pack upgrades require the target pack id and send its action payload', async () => {
+    mockProposals.mockReturnValue({ isLoading: false, data: [] });
+    mockCreate.mockResolvedValue(PRODUCTION_PROPOSAL);
+    render(<ProposalsPanel roomId="r1" joined isRoomSteward={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /open a proposal/i }));
+    // The house Select is a combobox trigger + listbox options.
+    fireEvent.click(screen.getByRole('combobox', { name: /proposal type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /law pack upgrade/i }));
+    fireEvent.change(screen.getByLabelText(/^title/i), { target: { value: 'Adopt pack v2' } });
+    fireEvent.change(screen.getByLabelText(/plain-language summary/i), {
+      target: { value: 'Move to the audited pack.' },
+    });
+    fireEvent.change(screen.getByLabelText(/risk assessment/i), { target: { value: 'Low.' } });
+    fireEvent.change(screen.getByLabelText(/expected deliverable/i), {
+      target: { value: 'Adoption.' },
+    });
+    // Incomplete without the law-pack id…
+    expect(screen.getByRole('button', { name: /^open proposal$/i })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    fireEvent.change(screen.getByLabelText(/registered law-pack id/i), {
+      target: { value: '55555555-5555-4555-8555-555555555555' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^open proposal$/i }));
+    await waitFor(() =>
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          proposal_type: 'law_pack_upgrade',
+          requested_action: {
+            kind: 'law_pack_upgrade',
+            law_pack_id: '55555555-5555-4555-8555-555555555555',
+          },
+        }),
+      ),
+    );
+  });
+
+  it('charter updates collect the eight voted sections into the action payload', async () => {
+    mockProposals.mockReturnValue({ isLoading: false, data: [] });
+    mockCreate.mockResolvedValue(PRODUCTION_PROPOSAL);
+    render(<ProposalsPanel roomId="r1" joined isRoomSteward={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /open a proposal/i }));
+    fireEvent.click(screen.getByRole('combobox', { name: /proposal type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /charter update/i }));
+    fireEvent.change(screen.getByLabelText(/^title/i), { target: { value: 'New charter' } });
+    fireEvent.change(screen.getByLabelText(/plain-language summary/i), {
+      target: { value: 'A clearer charter.' },
+    });
+    fireEvent.change(screen.getByLabelText(/risk assessment/i), { target: { value: 'Low.' } });
+    fireEvent.change(screen.getByLabelText(/expected deliverable/i), {
+      target: { value: 'Charter v2.' },
+    });
+    const TEXT = 'This section is written in plain language for every member.';
+    for (const section of [
+      'purpose',
+      'decision making',
+      'fund management',
+      'member rights',
+      'dispute resolution',
+      'amendment process',
+      'safety override acknowledgment',
+      'appeals path',
+    ]) {
+      fireEvent.change(screen.getByLabelText(new RegExp(`charter — ${section}`, 'i')), {
+        target: { value: TEXT },
+      });
+    }
+    fireEvent.click(screen.getByRole('button', { name: /^open proposal$/i }));
+    await waitFor(() =>
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          proposal_type: 'charter_update',
+          requested_action: expect.objectContaining({
+            kind: 'charter_update',
+            sections: expect.objectContaining({ purpose: TEXT, appeals_path: TEXT }),
+          }),
         }),
       ),
     );

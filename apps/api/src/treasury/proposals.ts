@@ -389,7 +389,24 @@ export async function createProductionProposal(
     challengeWindowEndsAt: null,
     tallySnapshot: null,
   };
-  await deps.proposals.insert(record);
+  try {
+    await deps.proposals.insert(record);
+  } catch (error) {
+    // Two concurrent creates with the same idempotency key both passed the
+    // read above; the primary key (the deterministic id IS the idempotency
+    // record) makes the loser land here — return the winner's row instead of
+    // surfacing a 500.  The SQLSTATE rides the Drizzle cause chain.
+    let current: unknown = error;
+    for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
+      if ((current as { code?: string }).code === '23505') {
+        const winner = await deps.proposals.getById(proposalId);
+        if (winner !== null) return { ok: true, proposal: winner };
+        break;
+      }
+      current = (current as { cause?: unknown }).cause;
+    }
+    throw error;
+  }
   await appendChainedAudit(deps, {
     roomId: input.roomId,
     actionType: 'proposal_published',
@@ -485,6 +502,12 @@ export async function signProposal(
   const message = input.typedDataMessage;
   if (message['proposalId'] !== input.proposalId || message['roomId'] !== input.roomId) {
     return tgErr(422, 'payload_mismatch', 'The signed payload targets a different proposal.');
+  }
+  // The §17.3.1 binding quartet includes the deployment: what the voter SAW
+  // in the signed message must be the deployment this ballot is recorded
+  // under (parity with the WS-L preflight path).
+  if (message['deploymentId'] !== input.deploymentId) {
+    return tgErr(422, 'payload_mismatch', 'The signed payload binds a different deployment.');
   }
   const nonce = message['nonce'] ?? '';
   if (nonce === '') return tgErr(422, 'nonce_required', 'The signed payload needs a nonce.');

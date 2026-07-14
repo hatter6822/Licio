@@ -13,11 +13,13 @@ import { KNOMOSIS_PIN } from '../knomosis/pin.js';
 import { defaultCompliancePort, defaultRegionResolverPort } from '../knomosis/ports.js';
 import {
   InMemoryGovernanceAuditStore,
+  InMemoryGovernanceProposalStore,
   InMemoryKnomosisActionStore,
   InMemoryKnomosisReceiptStore,
   type KnomosisActionRecordEntity,
 } from '../knomosis/stores.js';
 import { buildAccountingExport } from '../treasury/export.js';
+import { updateGrantMilestone } from '../treasury/grants.js';
 import {
   attachIntentSubmission,
   createPaymentIntent,
@@ -39,6 +41,7 @@ import {
 } from '../treasury/reservations.js';
 import {
   InMemoryGovernanceProfileStore,
+  InMemoryGrantStore,
   InMemoryPaymentIntentStore,
   InMemoryReservationStore,
   InMemorySnapshotStore,
@@ -83,6 +86,7 @@ function buildDeps(): TestDeps & {
     treasuries: new InMemoryTreasuryStore(),
     reservations: new InMemoryReservationStore(),
     intents: new InMemoryPaymentIntentStore(),
+    grants: new InMemoryGrantStore(),
     actions: new InMemoryKnomosisActionStore(),
     receipts: new InMemoryKnomosisReceiptStore(),
     snapshots: new InMemorySnapshotStore(),
@@ -407,7 +411,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       actorUserId: USER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: {}, signature: '0xsig' },
+      signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
       submissionState: 'submitted' as SubmissionState,
       failureReason: null,
       indexedEventRef: null,
@@ -464,7 +468,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       actorUserId: USER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: {}, signature: '0xsig' },
+      signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
       submissionState: 'failed' as SubmissionState,
       failureReason: 'gateway rejected',
       indexedEventRef: null,
@@ -538,7 +542,7 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
       actorUserId: USER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
-      signedAction: { message: {}, signature: '0xsig' },
+      signedAction: { message: { amount: opts.amount, asset: 'USDC' }, signature: '0xsig' },
       submissionState: 'finalized' as SubmissionState,
       failureReason: null,
       indexedEventRef: opts.withEvent ? crypto.randomUUID() : null,
@@ -638,5 +642,152 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
       usd_equivalent_at_event: null,
     });
     expect(result.export.excluded_unreconciled).toBe(0);
+  });
+});
+
+describe('intent–action binding (PR #144 review: attach validation)', () => {
+  const actionOf = (
+    over: Partial<KnomosisActionRecordEntity> = {},
+  ): KnomosisActionRecordEntity => ({
+    actionRecordId: crypto.randomUUID(),
+    deploymentId: DEPLOYMENT,
+    actionType: 'treasury_deposit' as KnomosisSignedActionType,
+    roomId: ROOM,
+    actorWalletAccountId: crypto.randomUUID(),
+    actorUserId: USER,
+    payloadHash: `0x${'1'.repeat(64)}`,
+    typedDataHash: `0x${'2'.repeat(64)}`,
+    signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
+    submissionState: 'submitted' as SubmissionState,
+    failureReason: null,
+    indexedEventRef: null,
+    reconciliationState: 'pending',
+    idempotencyKey: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...over,
+  });
+
+  async function signedIntent(deps: TestDeps): Promise<string> {
+    await provisionTreasury(deps);
+    const created = await createPaymentIntent(deps, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: ROOM,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    return id;
+  }
+
+  it('rejects an action from another room, actor, type, or payload', async () => {
+    const deps = buildDeps();
+    const id = await signedIntent(deps);
+    const cases: Array<Partial<KnomosisActionRecordEntity>> = [
+      { roomId: crypto.randomUUID() }, // foreign room
+      { actorUserId: OTHER }, // foreign actor
+      { actionType: 'grant_payout' as KnomosisSignedActionType }, // wrong type
+      { signedAction: { message: { amount: '999', asset: 'USDC' }, signature: '0xsig' } },
+      { signedAction: { message: { amount: '100', asset: 'DOGE' }, signature: '0xsig' } },
+    ];
+    for (const [index, over] of cases.entries()) {
+      const action = actionOf(over);
+      await deps.actions.insert(action);
+      const outcome = await attachIntentSubmission(deps, id, action.actionRecordId, USER);
+      if (!('code' in outcome)) throw new Error(`case ${index} unexpectedly attached`);
+      expect(outcome.code).toBe('action_mismatch');
+    }
+    // The matching action still attaches.
+    const good = actionOf();
+    await deps.actions.insert(good);
+    expect(await attachIntentSubmission(deps, id, good.actionRecordId, USER)).toMatchObject({
+      ok: true,
+    });
+  });
+});
+
+describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)', () => {
+  it('stays scheduled until the payout intent finalizes, then pays', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const milestoneId = crypto.randomUUID();
+    const inserted = await deps.grants.insert({
+      grantId: crypto.randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: crypto.randomUUID(),
+      recipientRef: 'coop',
+      purpose: 'Finality fixture',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [
+        {
+          milestoneId,
+          description: 'All',
+          amount: '100',
+          state: 'submitted',
+          paymentIntentId: null,
+        },
+      ],
+      milestoneState: 'submitted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (inserted === null) throw new Error('fixture grant collision');
+
+    // Acceptance schedules the payout intent — the grant is SCHEDULED, not paid.
+    const grantDeps = { ...deps, proposals: new InMemoryGovernanceProposalStore() };
+    const accepted = await updateGrantMilestone(grantDeps, {
+      roomId: ROOM,
+      grantId: inserted.grantId,
+      milestoneId,
+      state: 'accepted',
+      actorUserId: USER,
+    });
+    if ('code' in accepted) throw new Error(accepted.message);
+    expect(accepted.grant.payoutState).toBe('scheduled');
+    const intentId = accepted.grant.milestones[0]?.paymentIntentId;
+    if (intentId == null) throw new Error('payout intent missing');
+
+    // Walk the payout intent to on-chain finality via the reconcile sweep.
+    await preflightIntent(deps, intentId, USER);
+    await quoteIntent(deps, intentId, USER);
+    await markIntentSigned(deps, intentId, USER);
+    const action: KnomosisActionRecordEntity = {
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'grant_payout' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: { message: { amount: '100', asset: 'USDC' }, signature: '0xsig' },
+      submissionState: 'finalized' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'matched',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await deps.actions.insert(action);
+    const attached = await attachIntentSubmission(deps, intentId, action.actionRecordId, USER);
+    expect(attached).toMatchObject({ ok: true });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(intentId))?.executionState).toBe('finalized');
+    // Reconciliation — not scheduling — declares the grant paid.
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('paid');
   });
 });

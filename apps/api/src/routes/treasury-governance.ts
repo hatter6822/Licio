@@ -42,7 +42,13 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getKnomosisServices } from '../knomosis/services.js';
-import { type AuthEnv, authMiddleware, requireAuth } from '../middleware/auth.js';
+import {
+  type AuthEnv,
+  authMiddleware,
+  requireAdult,
+  requireAuth,
+  requireVerifiedAccount,
+} from '../middleware/auth.js';
 import { denyCapability, type StewardActor } from '../moderation/authz.js';
 import { verifyAuditChain } from '../treasury/audit-chain.js';
 import { createCharterVersion } from '../treasury/charter.js';
@@ -59,6 +65,7 @@ import {
 } from '../treasury/intents.js';
 import { adoptLawPack, registerLawPack, validateLawPackDocument } from '../treasury/law-packs.js';
 import {
+  assertGovernanceWritable,
   ensureProfile,
   setGovernanceFreeze,
   setGovernancePause,
@@ -407,6 +414,8 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/treasury',
         authMiddleware(),
+        requireVerifiedAccount(),
+        requireAdult(),
         roomParam,
         zValidator('json', treasuryCreateRequestSchema),
         async (c) => {
@@ -418,6 +427,10 @@ export function createTreasuryGovernanceRoutes() {
           if (!(await services.rooms.isSteward(roomId, auth.userId))) {
             return c.json(notFound, 404);
           }
+          // An emergency/platform freeze blocks provisioning too — the guard is
+          // documented as covering EVERY WS-M mutation (WS-M.2.4a-1).
+          const frozen = await assertGovernanceWritable(services, roomId, 'configuration');
+          if (frozen !== null) return tgError(c, frozen);
           const body = c.req.valid('json');
           const result = await createTreasury(services, {
             roomId,
@@ -454,6 +467,8 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/treasury/payment-intents',
         authMiddleware(),
+        requireVerifiedAccount(),
+        requireAdult(),
         roomParam,
         zValidator('json', paymentIntentCreateRequestSchema),
         async (c) => {
@@ -504,7 +519,7 @@ export function createTreasuryGovernanceRoutes() {
           return c.json({
             intent: {
               payment_intent_id: intent.paymentIntentId,
-              user_id: intent.userId ?? auth.userId,
+              user_id: intent.userId,
               room_id: intent.roomId,
               target_type: intent.targetType,
               target_id: intent.targetId,
@@ -526,6 +541,8 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/treasury/payment-intents/:paymentIntentId/advance',
         authMiddleware(),
+        requireVerifiedAccount(),
+        requireAdult(),
         zValidator('param', z.object({ roomId: uuidSchema, paymentIntentId: uuidSchema })),
         zValidator(
           'json',
@@ -541,7 +558,18 @@ export function createTreasuryGovernanceRoutes() {
           const gate = flagGate('crypto');
           if (gate) return c.json(deny(gate.code, gate.message), 503);
           const services = getTreasuryServices();
-          const { paymentIntentId } = c.req.valid('param');
+          const { roomId, paymentIntentId } = c.req.valid('param');
+          // A lifecycle step mutates SOMEONE'S financial intent: it must belong
+          // to this room and to the caller (or a room steward) — an intent id
+          // alone is never authorization (mirrors the GET above).
+          const target = await services.intents.getById(paymentIntentId);
+          if (target === null || target.roomId !== roomId) return c.json(notFound, 404);
+          if (
+            target.userId !== auth.userId &&
+            !(await services.rooms.isSteward(roomId, auth.userId))
+          ) {
+            return c.json(notFound, 404);
+          }
           const body = c.req.valid('json');
           const result =
             body.step === 'preflight'
@@ -691,6 +719,10 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/governance/proposals/:proposalId/sign',
         authMiddleware(),
+        // Parity with the WS-L signed-action routes: a wallet signature is a
+        // real-asset governance act — verified account + adult gate required.
+        requireVerifiedAccount(),
+        requireAdult(),
         zValidator('param', z.object({ roomId: uuidSchema, proposalId: uuidSchema })),
         zValidator('json', proposalSignRequestSchema),
         async (c) => {
