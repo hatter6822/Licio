@@ -23,6 +23,7 @@ import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import {
   useCreateProposalMutation,
+  useCreateSimProposalMutation,
   useExecuteProposalMutation,
   useFileChallengeMutation,
   useKnomosisDeploymentsQuery,
@@ -167,6 +168,10 @@ function ProductionProposalCard({
     const message: Record<string, string> = {
       roomId,
       proposalId: proposal.proposal_id,
+      // Registry v2: the BALLOT is part of the signed struct — the wallet
+      // shows exactly the choice being recorded.
+      purpose: 'vote',
+      choice,
       actor: address,
       nonce: freshNonce(),
       expiration: signatureExpiration(),
@@ -412,13 +417,17 @@ function SimProposalCard({ proposal }: { proposal: GovernanceProposal }): React.
 
 function CreateProposalForm({
   roomId,
+  simulated,
   onCreated,
 }: {
   roomId: string;
+  /** Simulated rooms post the WS-L.4 template shape (no production fields). */
+  simulated: boolean;
   onCreated: () => void;
 }): React.ReactElement {
   const t = useT();
   const create = useCreateProposalMutation(roomId);
+  const createSim = useCreateSimProposalMutation(roomId);
   const [proposalType, setProposalType] = useState<string>('capped_grant');
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
@@ -450,11 +459,10 @@ function CreateProposalForm({
   async function submit(): Promise<void> {
     setError(null);
     try {
-      await create.mutateAsync({
+      const draft = {
         proposal_type: proposalType,
         title: title.trim(),
         plain_language_summary: summary.trim(),
-        category: null, // the server derives the category from the type
         requested_amount: spend && amount.trim() !== '' ? amount.trim() : null,
         asset: spend && asset.trim() !== '' ? asset.trim() : null,
         recipient_ref: spend && recipient.trim() !== '' ? recipient.trim() : null,
@@ -462,8 +470,17 @@ function CreateProposalForm({
         risk_assessment: risk.trim(),
         requested_action: requestedAction(),
         expected_deliverable: deliverable.trim(),
-        idempotency_key: crypto.randomUUID(),
-      });
+      };
+      if (simulated) {
+        // The strict WS-L.4 template schema rejects production-only fields.
+        await createSim.mutateAsync(draft as never);
+      } else {
+        await create.mutateAsync({
+          ...draft,
+          category: null, // the server derives the category from the type
+          idempotency_key: crypto.randomUUID(),
+        });
+      }
       setTitle('');
       setSummary('');
       setRisk('');
@@ -621,7 +638,7 @@ function CreateProposalForm({
           ))
         : null}
       <div>
-        <Button type="submit" disabled={create.isPending || !complete}>
+        <Button type="submit" disabled={create.isPending || createSim.isPending || !complete}>
           {t('room.proposals.create.submit', 'Open proposal')}
         </Button>
       </div>
@@ -639,6 +656,9 @@ export interface ProposalsPanelProps {
   joined: boolean;
   isRoomSteward: boolean;
   roomName?: string;
+  /** The room's server-derived governance mode — a `simulated` room posts the
+   *  WS-L.4 template create shape (the same path parses strictly per mode). */
+  governanceMode?: string;
   enabled?: boolean;
 }
 
@@ -647,6 +667,7 @@ export function ProposalsPanel({
   joined,
   isRoomSteward,
   roomName,
+  governanceMode,
   enabled = true,
 }: ProposalsPanelProps): React.ReactElement {
   const t = useT();
@@ -707,7 +728,11 @@ export function ProposalsPanel({
         </div>
       ) : null}
       {showCreate ? (
-        <CreateProposalForm roomId={roomId} onCreated={() => setShowCreate(false)} />
+        <CreateProposalForm
+          roomId={roomId}
+          simulated={governanceMode === 'simulated'}
+          onCreated={() => setShowCreate(false)}
+        />
       ) : null}
 
       {proposals.data.length === 0 ? (

@@ -144,6 +144,7 @@ export function RoomGovernanceDialog({
                 joined={room.joined}
                 isRoomSteward={isRoomSteward}
                 roomName={room.name}
+                governanceMode={room.governance_mode}
               />
             ) : null}
             {active === 'settings' && showSettings ? (

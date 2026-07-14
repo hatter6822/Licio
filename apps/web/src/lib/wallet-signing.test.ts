@@ -26,6 +26,8 @@ const DOMAIN = {
 const MESSAGE = {
   roomId: '77777777-7777-4777-8777-777777777777',
   proposalId: '11111111-1111-4111-8111-111111111111',
+  purpose: 'vote',
+  choice: 'approve',
   actor: ADDRESS,
   nonce: '42',
   expiration: '9999999999',

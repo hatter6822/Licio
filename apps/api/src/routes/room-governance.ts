@@ -655,7 +655,24 @@ export function createRoomGovernanceSimRoutes() {
             return c.json(deny('governance_disabled', 'Governance is not enabled.'), 503);
           }
           // Transitions are steward/staff-only (WS-L.4.1g), audited in the gate.
-          if (services.rooms === null || !(await services.rooms.isSteward(roomId, auth.userId))) {
+          // PLATFORM STAFF pass even without room stewardship: the recovery
+          // edges (frozen → migrating, post-remediation) are platform-only and
+          // would otherwise be unreachable.
+          const platformStaff =
+            denyCapability(
+              {
+                userId: auth.userId,
+                platformRoles: auth.roles,
+                stewardRoles: auth.stewardRoles,
+                mfaActive: auth.mfaActive,
+                mfaVerified: auth.mfaVerified,
+              },
+              'restrict',
+            ) === null;
+          if (
+            !platformStaff &&
+            (services.rooms === null || !(await services.rooms.isSteward(roomId, auth.userId)))
+          ) {
             return c.json(notFound, 404); // 404-over-403 (no steward oracle)
           }
           const body = c.req.valid('json');
@@ -664,17 +681,6 @@ export function createRoomGovernanceSimRoutes() {
           // readiness and a CAS mode write.  Falls back to the WS-L.4.1g
           // two-edge gate when the WS-M container is not wired.
           if (treasuryServicesConfigured()) {
-            const platformStaff =
-              denyCapability(
-                {
-                  userId: auth.userId,
-                  platformRoles: auth.roles,
-                  stewardRoles: auth.stewardRoles,
-                  mfaActive: auth.mfaActive,
-                  mfaVerified: auth.mfaVerified,
-                },
-                'restrict',
-              ) === null;
             const outcome = await requestWsmModeTransition(getTreasuryServices(), {
               roomId,
               targetMode: body.target_mode,

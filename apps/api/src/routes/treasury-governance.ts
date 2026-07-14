@@ -481,6 +481,20 @@ export function createTreasuryGovernanceRoutes() {
             return c.json(notFound, 404);
           }
           const body = c.req.valid('json');
+          // The member-facing path CONTRIBUTES only: payout-class intents
+          // (grant_payout/steward_compensation) are minted exclusively by the
+          // grant-milestone service against an accepted milestone — a public
+          // payout intent with an arbitrary target/amount would become a
+          // disbursement the moment a matching signed action attaches.
+          if (
+            body.target_type !== 'treasury_deposit' &&
+            body.target_type !== 'bounty_contribution'
+          ) {
+            return c.json(
+              deny('target_not_allowed', 'Only deposit-class intents can be created here.'),
+              403,
+            );
+          }
           const result = await createPaymentIntent(services, {
             userId: auth.userId,
             roomId,

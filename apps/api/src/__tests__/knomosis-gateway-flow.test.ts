@@ -489,6 +489,8 @@ describe('WS-L.3.1 preflight pipeline', () => {
     const message = {
       roomId: ROOM,
       proposalId: '88888888-8888-4888-8888-888888888888', // no such open proposal
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),
@@ -547,6 +549,8 @@ describe('WS-L.3.1 preflight pipeline', () => {
     const message = {
       roomId: ROOM,
       proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),
@@ -987,6 +991,8 @@ describe('WS-L.3.2 submission + state machine', () => {
     const message = {
       roomId: ROOM,
       proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),
@@ -1069,6 +1075,8 @@ describe('WS-L.3.2 submission + state machine', () => {
     const message = {
       roomId: ROOM,
       proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address,
       nonce: '1',
       expiration: String(Math.floor(Date.now() / 1000) + 600),

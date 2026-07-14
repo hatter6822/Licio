@@ -22,7 +22,7 @@
 import { z } from 'zod';
 
 /** Registry version, pinned alongside the deployment (WS-L.2.4d). */
-export const KNOMOSIS_TYPED_DATA_REGISTRY_VERSION = '1' as const;
+export const KNOMOSIS_TYPED_DATA_REGISTRY_VERSION = '2' as const;
 
 /** EIP-712 domain `name` for every Licio signed action. */
 export const KNOMOSIS_EIP712_DOMAIN_NAME = 'Licio' as const;
@@ -94,6 +94,12 @@ export const proposalSignatureMessageSchema = z
   .object({
     roomId: uuidStringSchema,
     proposalId: uuidStringSchema,
+    /** What the signature authorizes (registry v2): the ballot purpose and
+     *  the vote choice ride INSIDE the signed struct, so a wallet-approved
+     *  payload can never be replayed as a different vote ('none' for
+     *  non-vote purposes — EIP-712 strings cannot be null). */
+    purpose: z.enum(['vote', 'approval', 'multisig']),
+    choice: z.enum(['approve', 'reject', 'abstain', 'none']),
     ...bindingShape,
   })
   .strict();
@@ -191,6 +197,8 @@ export const KNOMOSIS_TYPED_DATA_REGISTRY: Readonly<
     fields: structFields([
       { name: 'roomId', type: 'string', label: 'Room' },
       { name: 'proposalId', type: 'string', label: 'Proposal' },
+      { name: 'purpose', type: 'string', label: 'Signature purpose' },
+      { name: 'choice', type: 'string', label: 'Vote choice' },
     ]),
     messageSchema: proposalSignatureMessageSchema,
     actionName: 'Sign governance proposal',

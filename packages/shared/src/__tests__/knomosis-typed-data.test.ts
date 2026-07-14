@@ -41,7 +41,13 @@ const binding = {
 };
 
 const MESSAGES: Record<string, Record<string, string>> = {
-  proposal_sign: { roomId: UUID, proposalId: UUID2, ...binding },
+  proposal_sign: {
+    roomId: UUID,
+    proposalId: UUID2,
+    purpose: 'vote',
+    choice: 'approve',
+    ...binding,
+  },
   treasury_deposit: {
     roomId: UUID,
     treasuryId: UUID2,
@@ -92,7 +98,8 @@ describe('typed-data registry (WS-L.2.4d)', () => {
       encodeStructType(KNOMOSIS_TYPED_DATA_REGISTRY[t]),
     );
     expect(encoded).toEqual([
-      'ProposalSignature(string roomId,string proposalId,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
+      // Registry v2: the ballot (purpose + choice) is INSIDE the signed struct.
+      'ProposalSignature(string roomId,string proposalId,string purpose,string choice,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
       'TreasuryDeposit(string roomId,string treasuryId,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
       'GrantPayout(string roomId,string grantId,address recipient,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
       'CharterUpdate(string roomId,string charterVersionId,bytes32 contentHash,address actor,uint256 nonce,uint256 expiration,string deploymentId)',

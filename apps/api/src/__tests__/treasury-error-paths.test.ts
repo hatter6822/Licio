@@ -611,3 +611,130 @@ describe('execution routing (WS-M.4.3b)', () => {
     expect('code' in waiting && waiting.code).toBe('challenge_window_open');
   });
 });
+
+describe('second review wave (PR #144): TTL, freeze re-checks, grant-failure ordering', () => {
+  it('an expired timed intent can only be abandoned, never advanced', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const created = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '1',
+      idempotencyKey: randomUUID(),
+    });
+    if ('code' in created) throw new Error(created.message);
+    // Force the TTL into the past without touching the state machine.
+    await services.intents.transition(
+      created.intent.paymentIntentId,
+      'created',
+      'preflighted',
+      { expiresAt: new Date(Date.now() - 1_000).toISOString() },
+      new Date().toISOString(),
+    );
+    const { quoteIntent: quote } = await import('../treasury/intents.js');
+    const stale = await quote(services, created.intent.paymentIntentId, USER);
+    expect('code' in stale && stale.code).toBe('invalid_transition');
+    // The expiry sweep still moves it to abandoned.
+    const { expireIntents } = await import('../treasury/intents.js');
+    expect(await expireIntents(services)).toBeGreaterThanOrEqual(1);
+    expect((await services.intents.getById(created.intent.paymentIntentId))?.executionState).toBe(
+      'abandoned',
+    );
+  });
+
+  it('a freeze landed after preflight stops quote/sign/attach/retry', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const created = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '1',
+      idempotencyKey: randomUUID(),
+    });
+    if ('code' in created) throw new Error(created.message);
+    const { preflightIntent, quoteIntent: quote } = await import('../treasury/intents.js');
+    const preflighted = await preflightIntent(services, created.intent.paymentIntentId, USER);
+    if ('code' in preflighted) throw new Error(preflighted.message);
+    // The emergency lands between preflight and quote.
+    const { setGovernanceFreeze } = await import('../treasury/profile.js');
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'incident',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    const blocked = await quote(services, created.intent.paymentIntentId, USER);
+    expect('code' in blocked && blocked.code).toBe('governance_frozen');
+  });
+
+  it('a malformed milestone plan blocks execution and releases the reservation', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const proposalId = randomUUID();
+    const past = new Date(Date.now() - 60_000).toISOString();
+    await services.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'capped_grant',
+      title: 'Bad milestones',
+      plainLanguageSummary: 'Tranches do not sum.',
+      requestedAmount: '100',
+      asset: 'USDC',
+      recipientRef: 'coop',
+      conflictDisclosures: 'None.',
+      riskAssessment: 'Low.',
+      // Tranches sum to 90 ≠ the approved 100 — the grant plan must reject.
+      requestedAction: {
+        kind: 'grant',
+        milestones: [
+          { description: 'half', amount: '45' },
+          { description: 'other', amount: '45' },
+        ],
+      },
+      expectedDeliverable: 'None.',
+      preflightState: 'passed',
+      votingState: 'passed',
+      challengeState: 'none',
+      executionState: 'timelocked',
+      simulationMode: false,
+      executableAfter: past,
+      createdAt: past,
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: null,
+      category: 'grant',
+      deliberationEndsAt: null,
+      votingEndsAt: past,
+      challengeWindowEndsAt: past,
+      tallySnapshot: null,
+    });
+    const reserved = await reserveForProposal(services, {
+      treasuryId: treasury.treasuryId,
+      proposalId,
+      category: 'grant',
+      asset: 'USDC',
+      amount: '100',
+      bounds: BOUNDS,
+    });
+    if ('code' in reserved) throw new Error(reserved.message);
+    const blocked = await executeProposal(services, { roomId: ROOM, proposalId, userId: USER });
+    expect('code' in blocked && blocked.code).toBe('grant_creation_failed');
+    expect((await services.proposals.getById(proposalId))?.executionState).toBe('blocked');
+    // The headroom came back: released, never consumed.
+    expect((await services.reservations.getByProposal(proposalId))?.state).toBe('released');
+    expect(await services.grants.getByProposal(proposalId)).toBeNull();
+  });
+});

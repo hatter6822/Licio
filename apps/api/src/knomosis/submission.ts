@@ -634,6 +634,10 @@ export async function recordAcceptedProposalSignature(
   // The signature already passed low-s verification before submit, so a 65-byte
   // ECDSA blob is `ok`; anything else is an EIP-1271 contract signature.
   const isEcdsa = classifyEcdsaSignature(record.signedAction.signature) === 'ok';
+  // Registry v2 signs the ballot itself: persist the SIGNED purpose/choice so
+  // the ledger row reflects what the wallet approved, never request JSON.
+  const signedPurpose = record.signedAction.message['purpose'];
+  const signedChoice = record.signedAction.message['choice'];
   await deps.signatures.insert({
     signatureId: deps.uuid(),
     proposalId,
@@ -645,6 +649,12 @@ export async function recordAcceptedProposalSignature(
     weightSnapshot: null,
     eligibilityReason: 'proposal_sign accepted by the gateway (WS-L.3.2a)',
     createdAt: new Date(deps.now()).toISOString(),
+    ...(signedPurpose === 'vote' || signedPurpose === 'approval' || signedPurpose === 'multisig'
+      ? { purpose: signedPurpose }
+      : {}),
+    ...(signedChoice === 'approve' || signedChoice === 'reject' || signedChoice === 'abstain'
+      ? { choice: signedChoice }
+      : {}),
   });
 }
 

@@ -335,6 +335,12 @@ async function castVote(
   const message: Record<string, string> = {
     roomId: ROOM,
     proposalId,
+    // Registry v2: the ballot itself is inside the signed struct.
+    purpose: (overrides.purpose as string | undefined) ?? 'vote',
+    choice:
+      (overrides.purpose as string | undefined) === 'vote' || overrides.purpose === undefined
+        ? choice
+        : 'none',
     actor: account.address.toLowerCase(),
     nonce,
     expiration: String(Math.floor(deps.now() / 1000) + 600),
@@ -556,6 +562,8 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     const expired: Record<string, string> = {
       roomId: ROOM,
       proposalId: proposal.proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount2.address.toLowerCase(),
       nonce,
       expiration: String(Math.floor(deps.now() / 1000) - 10),
@@ -579,6 +587,8 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     const forged: Record<string, string> = {
       roomId: ROOM,
       proposalId: proposal.proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount.address.toLowerCase(),
       nonce: '99',
       expiration: String(Math.floor(deps.now() / 1000) + 600),
@@ -602,6 +612,8 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     const foreignDeployment: Record<string, string> = {
       roomId: ROOM,
       proposalId: proposal.proposalId,
+      purpose: 'vote',
+      choice: 'approve',
       actor: testAccount2.address.toLowerCase(),
       nonce: '4243',
       expiration: String(Math.floor(deps.now() / 1000) + 600),
@@ -620,6 +632,26 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
         signature: await signedTypedData('proposal_sign', foreignDeployment, testAccount2),
       }),
     ).toMatchObject({ ok: false, code: 'payload_mismatch' });
+    // Registry v2: the request cannot repurpose a signed ballot — the wallet
+    // approved 'approve', the JSON asks to record 'reject'.
+    expect(
+      await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve', {
+        choice: 'reject',
+      }),
+    ).toMatchObject({ ok: false, code: 'payload_mismatch' });
+  });
+
+  it('rejects ballots after the voting deadline even before the sweep settles', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    // Past the deadline, the row still says `open` (the sweep has not run).
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 60_000);
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'voting_closed' });
   });
 
   it('enforces the cooling-off for treasury-controlling votes (WS-M.4.2c-2)', async () => {
@@ -693,6 +725,63 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     if (settled === null) throw new Error('proposal lost');
     return settled;
   }
+
+  it('escalation is steward/platform-gated and survives sibling dismissals', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    const first = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'coi',
+      description: 'Undisclosed conflict.',
+      evidenceRefs: [],
+    });
+    if ('code' in first) throw new Error(first.message);
+    const second = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'fraud',
+      description: 'Numbers look fabricated.',
+      evidenceRefs: [],
+    });
+    if ('code' in second) throw new Error(second.message);
+
+    // A plain member cannot escalate (it blocks execution — a free veto).
+    const memberEscalate = await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: first.challenge.challengeId,
+      resolution: 'escalated',
+      resolutionNote: 'Send it up.',
+      actorUserId: VOTER_2,
+      isPlatformStaff: false,
+    });
+    expect('code' in memberEscalate && memberEscalate.code).toBe('steward_required');
+
+    // A steward escalates the first…
+    const escalated = await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: first.challenge.challengeId,
+      resolution: 'escalated',
+      resolutionNote: 'Platform should look.',
+      actorUserId: STEWARD,
+      isPlatformStaff: false,
+    });
+    if ('code' in escalated) throw new Error(escalated.message);
+    // …and dismissing the SECOND must not clear the live escalation.
+    const dismissed = await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: second.challenge.challengeId,
+      resolution: 'dismissed',
+      resolutionNote: 'Unfounded.',
+      actorUserId: STEWARD,
+      isPlatformStaff: false,
+    });
+    if ('code' in dismissed) throw new Error(dismissed.message);
+    expect((await deps.proposals.getById(settled.proposalId))?.challengeState).toBe('escalated');
+  });
 
   it('settles a quorum-meeting majority to passed with timelock + reservation', async () => {
     const deps = buildHarness();

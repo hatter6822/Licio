@@ -18,8 +18,10 @@ import {
   type DelegationWire,
   delegationListResponseSchema,
   type GovernanceProposal,
+  type GovernanceProposalCreate,
   type GrantMilestoneUpdateRequest,
   governanceProposalListResponseSchema,
+  governanceProposalSchema,
   grantListResponseSchema,
   modeTransitionRequestSchema,
   type PaymentIntentCreateRequest,
@@ -294,6 +296,21 @@ export async function createProductionProposal(
     json: input,
   });
   return (await parseResponse(res, productionProposalResponseSchema)).proposal;
+}
+
+/** The SAME mode-aware path, but the simulated create shape: a `simulated`
+ *  room's server branch parses the strict WS-L.4 template schema, which
+ *  rejects production-only fields like `idempotency_key`. */
+export async function createSimulatedProposal(
+  roomId: string,
+  input: GovernanceProposalCreate,
+): Promise<GovernanceProposal> {
+  const res = await client.v1.rooms[':roomId'].governance.proposals.$post({
+    param: { roomId },
+    json: input,
+  });
+  return (await parseResponse(res, z.object({ proposal: governanceProposalSchema }).strict()))
+    .proposal;
 }
 
 export async function signProposal(

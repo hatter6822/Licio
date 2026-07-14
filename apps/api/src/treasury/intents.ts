@@ -218,6 +218,14 @@ export async function createPaymentIntent(
   return { ok: true, intent, existing: wasExisting };
 }
 
+/** Pre-submission states whose TTL gates further advancement (WS-M.3.1b). */
+const TIMED_STATES: ReadonlySet<PaymentIntentState> = new Set([
+  'created',
+  'preflighted',
+  'quoted',
+  'signed',
+]);
+
 /** Shared CAS + audit for every lifecycle step. */
 async function transitionIntent(
   deps: IntentDeps,
@@ -227,6 +235,15 @@ async function transitionIntent(
   actorUserId: string | null,
 ): Promise<PaymentIntentRecord | null> {
   if (!paymentIntentTransitionAllowed(intent.executionState, to)) return null;
+  // An expired timed state may only move to `abandoned`: a delayed expiry
+  // sweep must never let stale compliance/quote/signing state keep advancing.
+  if (
+    to !== 'abandoned' &&
+    TIMED_STATES.has(intent.executionState) &&
+    intent.expiresAt <= new Date(deps.now()).toISOString()
+  ) {
+    return null;
+  }
   const updated = await deps.intents.transition(
     intent.paymentIntentId,
     intent.executionState,
@@ -321,6 +338,13 @@ export async function quoteIntent(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  // A freeze/pause landed AFTER preflight must stop the lifecycle here too.
+  const guard = await assertGovernanceWritable(
+    deps,
+    intent.roomId,
+    operationFor(intent.targetType),
+  );
+  if (guard !== null) return guard;
   const updated = await transitionIntent(
     deps,
     intent,
@@ -346,6 +370,12 @@ export async function markIntentSigned(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  const guard = await assertGovernanceWritable(
+    deps,
+    intent.roomId,
+    operationFor(intent.targetType),
+  );
+  if (guard !== null) return guard;
   const updated = await transitionIntent(
     deps,
     intent,
@@ -381,6 +411,12 @@ export async function attachIntentSubmission(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  const guard = await assertGovernanceWritable(
+    deps,
+    intent.roomId,
+    operationFor(intent.targetType),
+  );
+  if (guard !== null) return guard;
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
   if (
@@ -535,6 +571,12 @@ export async function retryIntent(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  const guard = await assertGovernanceWritable(
+    deps,
+    intent.roomId,
+    operationFor(intent.targetType),
+  );
+  if (guard !== null) return guard;
   if (intent.retryCount >= deps.wsmConfig().wsmIntentMaxRetries) {
     return tgErr(409, 'retries_exhausted', 'This intent has no retries left.');
   }

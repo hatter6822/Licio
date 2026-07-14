@@ -10,6 +10,7 @@ import { checkA11y } from '../../test/axe.js';
 
 const mockProposals = vi.fn();
 const mockCreate = vi.fn();
+const mockCreateSim = vi.fn();
 const mockExecute = vi.fn();
 const mockSignMutation = vi.fn();
 const mockChallenge = vi.fn();
@@ -24,6 +25,7 @@ vi.mock('../../lib/queries.js', () => ({
   useKnomosisManifestQuery: () => mockManifest(),
   useWalletsQuery: () => mockWallets(),
   useCreateProposalMutation: () => ({ mutateAsync: mockCreate, isPending: false }),
+  useCreateSimProposalMutation: () => ({ mutateAsync: mockCreateSim, isPending: false }),
   useSignProposalMutation: () => ({ mutateAsync: mockSignMutation, isPending: false }),
   useExecuteProposalMutation: () => ({ mutateAsync: mockExecute, isPending: false }),
   useFileChallengeMutation: () => ({ mutateAsync: mockChallenge, isPending: false }),

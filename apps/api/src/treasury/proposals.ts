@@ -468,6 +468,13 @@ export async function signProposal(
         : 'Voting on this proposal has closed.',
     );
   }
+  // The DEADLINE closes voting, not the (possibly lagging) settle sweep: a
+  // signature recorded after votingEndsAt would still count in the eventual
+  // tally, letting scheduler lag change a decided outcome.
+  const nowIsoForVote = new Date(deps.now()).toISOString();
+  if (proposal.votingEndsAt != null && proposal.votingEndsAt <= nowIsoForVote) {
+    return tgErr(409, 'voting_closed', 'Voting on this proposal has closed.');
+  }
   if (input.purpose === 'vote' && input.choice === null) {
     return tgErr(400, 'choice_required', 'A vote requires a choice.');
   }
@@ -508,6 +515,12 @@ export async function signProposal(
   // under (parity with the WS-L preflight path).
   if (message['deploymentId'] !== input.deploymentId) {
     return tgErr(422, 'payload_mismatch', 'The signed payload binds a different deployment.');
+  }
+  // Registry v2: the BALLOT ITSELF is signed — the wallet-approved payload
+  // carries purpose + choice, so the unsigned JSON can never repurpose one
+  // signature as a different vote.
+  if (message['purpose'] !== input.purpose || message['choice'] !== (input.choice ?? 'none')) {
+    return tgErr(422, 'payload_mismatch', 'The signed ballot differs from the request.');
   }
   const nonce = message['nonce'] ?? '';
   if (nonce === '') return tgErr(422, 'nonce_required', 'The signed payload needs a nonce.');
@@ -843,7 +856,14 @@ export async function resolveChallenge(
   // staff can give them a final disposition; stewards may escalate.
   const platformClass =
     challenge.challengeType === 'legal' || challenge.challengeType === 'capture';
-  if (input.resolution !== 'escalated') {
+  if (input.resolution === 'escalated') {
+    // Escalation BLOCKS execution, so it is a steward/platform act too — any
+    // member reaching this state at will would be a free execution veto.
+    if (!input.isPlatformStaff) {
+      const isSteward = await deps.rooms.isSteward(input.roomId, input.actorUserId);
+      if (!isSteward) return tgErr(403, 'steward_required', 'Only stewards escalate challenges.');
+    }
+  } else {
     if (platformClass && !input.isPlatformStaff) {
       return tgErr(403, 'platform_review_required', 'This challenge class needs platform review.');
     }
@@ -876,10 +896,18 @@ export async function resolveChallenge(
   } else if (input.resolution === 'escalated') {
     await deps.proposals.update({ ...proposal, challengeState: 'escalated' });
   } else {
-    const openLeft = await deps.challenges.countOpenByProposal(proposal.proposalId);
-    if (openLeft === 0) {
-      await deps.proposals.update({ ...proposal, challengeState: 'dismissed' });
-    }
+    // The proposal-level column is an AGGREGATE over all its challenges:
+    // dismissing one must never clear a sibling escalation/upheld verdict
+    // (executeProposal gates on this column).
+    const siblings = await deps.challenges.listByProposal(proposal.proposalId);
+    const aggregate = siblings.some((c) => c.state === 'upheld')
+      ? ('upheld' as const)
+      : siblings.some((c) => c.state === 'escalated')
+        ? ('escalated' as const)
+        : siblings.some((c) => c.state === 'open')
+          ? ('open' as const)
+          : ('dismissed' as const);
+    await deps.proposals.update({ ...proposal, challengeState: aggregate });
   }
   await appendChainedAudit(deps, {
     roomId: input.roomId,
@@ -952,9 +980,15 @@ export async function executeProposal(
     if (!verdict.accepted) {
       failure = verdict.code ?? 'kernel_rejected';
     } else {
-      await consumeReservation(deps, claimed.proposalId);
+      // The grant record is the payout ledger: create it BEFORE consuming the
+      // reservation so a malformed milestone plan blocks the execution (with
+      // the headroom released) instead of finalizing a spend with no grant.
       if (claimed.proposalType === 'capped_grant' || claimed.proposalType === 'bounty') {
-        await createGrantFromProposal(deps, claimed);
+        const grant = await createGrantFromProposal(deps, claimed);
+        if (grant === null) failure = 'grant_creation_failed';
+      }
+      if (failure === null) {
+        await consumeReservation(deps, claimed.proposalId);
       }
     }
   } else if (claimed.proposalType === 'charter_update') {

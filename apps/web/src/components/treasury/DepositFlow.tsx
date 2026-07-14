@@ -213,7 +213,10 @@ export function DepositFlow({
       const submitted = await gate.guard(() =>
         submitKnomosisAction({
           preflight_token: preflight.preflight_token,
-          idempotency_key: crypto.randomUUID(),
+          // STABLE per intent: a retry after a lost attach response replays
+          // the SAME submission and recovers the existing action_record_id
+          // instead of stranding the intent in `signed`.
+          idempotency_key: pending.paymentIntentId,
           action_type: 'treasury_deposit',
           room_id: roomId,
           deployment_id: treasury.deployment_id,

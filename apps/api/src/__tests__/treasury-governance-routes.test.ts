@@ -374,6 +374,52 @@ describe('WS-M treasury + payment intents', () => {
     expect(owned.status).toBe(200);
   });
 
+  it('the public intent path is deposit-class only (PR #144 review)', async () => {
+    const fixture = await wsmFixture();
+    const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
+    await req('POST', `/rooms/${ROOM}/treasury`, cookie, {
+      deployment_id: LOCAL_DEPLOYMENT.deployment_id,
+      treasury_address: ADDRESS,
+      accepted_assets: ['USDC'],
+      deposit_limits: {
+        per_user_per_period: '1000000',
+        per_room_per_period: '10000000',
+        per_deposit_max: '500000',
+        period_seconds: 86_400,
+      },
+    });
+    const payout = await req('POST', `/rooms/${ROOM}/treasury/payment-intents`, cookie, {
+      target_type: 'grant_payout',
+      target_id: ROOM,
+      asset: 'USDC',
+      amount: '1000',
+      idempotency_key: crypto.randomUUID(),
+    });
+    expect(payout.status).toBe(403);
+    expect(((await payout.json()) as { error: { code: string } }).error.code).toBe(
+      'target_not_allowed',
+    );
+  });
+
+  it('platform staff reach the mode machine without room stewardship (PR #144 review)', async () => {
+    const fixture = await wsmFixture({ steward: false });
+    const staff = await seedUserWithSession(fixture.identity, { admin: true });
+    // NOT a 404: the staff account passes the precheck and the edge table
+    // answers (an unknown/simulated→simulated edge is a clean 409 here).
+    const outcome = await req('POST', `/rooms/${ROOM}/governance/mode`, staff.cookie, {
+      target_mode: 'simulated',
+      reason: 'platform recovery drill',
+    });
+    expect(outcome.status).not.toBe(404);
+    // A plain member still 404s (no steward oracle).
+    const member = await seedUserWithSession(fixture.identity, { handle: 'plain_member' });
+    const blocked = await req('POST', `/rooms/${ROOM}/governance/mode`, member.cookie, {
+      target_mode: 'simulated',
+      reason: 'not mine to move',
+    });
+    expect(blocked.status).toBe(404);
+  });
+
   it('a frozen room cannot provision a treasury (PR #144 review)', async () => {
     const fixture = await wsmFixture();
     const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });

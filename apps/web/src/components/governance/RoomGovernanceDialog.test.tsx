@@ -47,6 +47,7 @@ vi.mock('../../lib/queries.js', () => ({
   useKnomosisManifestQuery: () => ({ data: undefined }),
   useWalletsQuery: () => ({ data: undefined }),
   useCreateProposalMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
+  useCreateSimProposalMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
   useSignProposalMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
   useExecuteProposalMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),
   useFileChallengeMutation: () => ({ mutateAsync: () => Promise.resolve(), isPending: false }),

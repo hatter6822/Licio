@@ -850,6 +850,16 @@ export function useCreateProposalMutation(roomId: string) {
   });
 }
 
+/** The simulated-room create (the WS-L.4 template shape on the same path). */
+export function useCreateSimProposalMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Parameters<typeof treasuryApi.createSimulatedProposal>[1]) =>
+      treasuryApi.createSimulatedProposal(roomId, input),
+    onSuccess: () => invalidateRoomGovernance(queryClient, roomId),
+  });
+}
+
 export function useSignProposalMutation(roomId: string) {
   const queryClient = useQueryClient();
   return useMutation({
