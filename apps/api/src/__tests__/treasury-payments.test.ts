@@ -882,6 +882,79 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     });
   });
 
+  it('binds payout actions to the APPROVED grant recipient (W6 review)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const approvedRecipient = `0x${'aa'.repeat(20)}`;
+    const grant = await deps.grants.insert({
+      grantId: crypto.randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: crypto.randomUUID(),
+      recipientRef: approvedRecipient,
+      purpose: 'Translation sprint',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [],
+      milestoneState: 'accepted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    const created = await createPaymentIntent(deps, {
+      userId: null,
+      roomId: ROOM,
+      targetType: 'grant_payout',
+      targetId: grant.grantId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    const payoutAction = (recipient: string): KnomosisActionRecordEntity => ({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'grant_payout' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: {
+        message: { amount: '100', asset: 'USDC', grantId: grant.grantId, recipient },
+        signature: '0xsig',
+      },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // A same-grant/same-amount action paying a DIFFERENT address rejects —
+    // otherwise a steward could route the tranche to their own wallet.
+    const foreign = payoutAction(`0x${'bb'.repeat(20)}`);
+    await deps.actions.insert(foreign);
+    const rejected = await attachIntentSubmission(deps, id, foreign.actionRecordId, USER);
+    if (!('code' in rejected)) throw new Error('unexpectedly attached');
+    expect(rejected.code).toBe('action_mismatch');
+    // The action paying the APPROVED recipient attaches.
+    const good = payoutAction(approvedRecipient);
+    await deps.actions.insert(good);
+    expect(await attachIntentSubmission(deps, id, good.actionRecordId, USER)).toMatchObject({
+      ok: true,
+    });
+  });
+
   it('rejects an action record already settling another intent', async () => {
     const deps = buildDeps();
     const first = await signedIntent(deps);

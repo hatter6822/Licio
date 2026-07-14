@@ -192,6 +192,18 @@ describe('validateLawPackBundle (WS-M.1.3c structural)', () => {
     expect(validateLawPackBundle(fullPack())).toEqual([]);
   });
 
+  it('rejects a role_class quorum basis without a multisig signer set (W6 review)', () => {
+    const pack = fullPack();
+    const quorum = pack.quorumRules ?? {};
+    const firstType = Object.keys(quorum)[0] ?? 'capped_grant';
+    const problems = validateLawPackBundle({
+      ...pack,
+      multisig: undefined,
+      quorumRules: { ...quorum, [firstType]: { basis: 'role_class', minFraction: 0.5 } },
+    });
+    expect(problems.some((p) => p.path === `quorumRules.${firstType}`)).toBe(true);
+  });
+
   it('accepts a minimal shipped WS-U pack (no WS-M blocks)', () => {
     const minimal = lawPackSchema.parse({
       lawPackId: 'mod-only',

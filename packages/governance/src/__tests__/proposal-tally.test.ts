@@ -45,6 +45,32 @@ describe('tallyProposalVotes (WS-M.4.2d)', () => {
     expect(result.quorumMet).toBe(false);
   });
 
+  it('measures quorum over the basis participants when narrower than the voter set', () => {
+    // role_class basis: 2 designated signers; only ONE voted.  Three room-wide
+    // voters must NOT satisfy a 1.0 role-class quorum (PR #144 W6 review).
+    const result = tallyProposalVotes(
+      [vote('signer-a', 'approve'), vote('member-x', 'approve'), vote('member-y', 'approve')],
+      {
+        quorum: { basis: 'role_class', minFraction: 1 },
+        threshold: { minAffirmativeFraction: 0.5 },
+      },
+      { eligibleCount: 2, deadlinePassed: true, quorumParticipants: 1 },
+    );
+    expect(result.outcome).toBe('quorum_not_met');
+    // With BOTH signers participating the same votes pass — threshold still
+    // counts every recorded ballot (the basis narrows who must show up).
+    const met = tallyProposalVotes(
+      [vote('signer-a', 'approve'), vote('signer-b', 'approve'), vote('member-x', 'reject')],
+      {
+        quorum: { basis: 'role_class', minFraction: 1 },
+        threshold: { minAffirmativeFraction: 0.5 },
+      },
+      { eligibleCount: 2, deadlinePassed: true, quorumParticipants: 2 },
+    );
+    expect(met.outcome).toBe('passed');
+    expect(met.reject).toBe('1');
+  });
+
   it('passes when the affirmative weight strictly exceeds the threshold bar', () => {
     const result = tallyProposalVotes(
       [vote('a', 'approve'), vote('b', 'approve'), vote('c', 'reject')],

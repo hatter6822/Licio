@@ -125,6 +125,9 @@ export function buildTreasuryExecutorPort(service: GovernanceService): TreasuryE
         asset: action.asset,
         coiDeclared: action.coiDeclared,
         proposedAt: action.proposedAt,
+        // The proposal's PINNED pack (WS-M.4.3b): kernel caps evaluate under
+        // the rules the spend was voted with, agent binding not required.
+        lawPack: action.lawPack ?? null,
       });
       if (!result.ok) return { accepted: false, code: result.code };
       return result.value.accepted

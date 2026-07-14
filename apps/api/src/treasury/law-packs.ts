@@ -25,6 +25,7 @@ import {
   validateLawPackForRealAssets,
 } from '@licio/governance';
 import type { LawPackRecord, LawPackStore } from '../governance/stores.js';
+import type { RoomModePort } from '../knomosis/readiness.js';
 import { appendChainedAudit } from './audit-chain.js';
 import {
   assertGovernanceWritable,
@@ -36,6 +37,7 @@ import {
 
 export interface LawPackDeps extends ProfileDeps {
   lawPacks: LawPackStore;
+  roomMode: RoomModePort;
 }
 
 export interface LawPackValidationReport {
@@ -184,6 +186,25 @@ export async function adoptLawPack(
   // (the same guard charter publishing runs).
   const writable = await assertGovernanceWritable(deps, input.roomId, 'configuration');
   if (writable !== null) return writable;
+  // Registration allows real-asset-INCOMPLETE packs (simulated rooms iterate);
+  // a room already past the readiness gate must not adopt one — re-run the
+  // real-asset validation here so a passed upgrade proposal cannot regress the
+  // active pack below the production bar until the next mode transition.
+  const mode = await deps.roomMode.currentMode(input.roomId);
+  if (mode === 'testnet' || mode === 'capped_production' || mode === 'mature_production') {
+    const parsed = lawPackSchema.safeParse(record.lawPack);
+    const problems = parsed.success ? validateLawPackForRealAssets(parsed.data) : null;
+    if (problems === null || problems.length > 0) {
+      const first = problems?.[0];
+      return tgErr(
+        409,
+        'law_pack_not_real_asset_ready',
+        first
+          ? `${first.path}: ${first.problem}`
+          : 'The law-pack does not meet the real-asset bar.',
+      );
+    }
+  }
   const profile = await ensureProfile(deps, input.roomId);
   await deps.profiles.upsert({
     ...profile,

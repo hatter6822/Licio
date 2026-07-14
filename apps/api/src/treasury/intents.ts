@@ -508,6 +508,30 @@ export async function attachIntentSubmission(
   if (signedTarget !== expectedTarget) {
     return tgErr(422, 'action_mismatch', 'The signed target differs from this payment intent.');
   }
+  // Payout actions must pay the APPROVED recipient: for an address-shaped
+  // grant recipient, the signed `recipient` field has to match — otherwise a
+  // steward could attach a same-grant/same-amount action paying their own
+  // address and reconciliation would mark the grant paid.  (Opaque refs
+  // (`user:…`, a co-op name) have no on-chain address to compare; the WS-L
+  // action layer screens the actual payout address regardless.)
+  if (intent.targetType === 'grant_payout' || intent.targetType === 'steward_compensation') {
+    const grant = await deps.grants.getById(intent.targetId);
+    if (grant === null) {
+      return tgErr(422, 'action_mismatch', 'The payout intent has no backing grant.');
+    }
+    const approvedRecipient = grant.recipientRef.toLowerCase();
+    if (/^0x[0-9a-f]{40}$/.test(approvedRecipient)) {
+      const signedRecipient =
+        typeof message['recipient'] === 'string' ? message['recipient'].toLowerCase() : '';
+      if (signedRecipient !== approvedRecipient) {
+        return tgErr(
+          422,
+          'action_mismatch',
+          'The signed recipient differs from the approved grant recipient.',
+        );
+      }
+    }
+  }
   // One WS-L action settles exactly ONE intent — a record already bound to
   // another intent would double-count a single transfer in the ledger/export.
   const alreadyBound = await deps.intents.findByActionRecordId(actionRecordId);
@@ -677,6 +701,25 @@ export async function retryIntent(
   if (intent.retryCount >= deps.wsmConfig().wsmIntentMaxRetries) {
     return tgErr(409, 'retries_exhausted', 'This intent has no retries left.');
   }
+  // A failed/reverted deposit left the allowance aggregate — the room/user may
+  // have consumed the freed headroom since.  Re-apply the SAME deposit-limit
+  // checks the create path runs before re-entering the in-flight set.
+  if (DEPOSIT_TARGETS.has(intent.targetType) && intent.userId !== null) {
+    const treasury = await deps.treasuries.getById(intent.treasuryId);
+    if (treasury === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
+    const allowance = await depositAllowance(deps, intent.roomId, intent.userId);
+    if (allowance === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
+    if (
+      decCompare(intent.amount, allowance.userRemaining) > 0 ||
+      decCompare(intent.amount, allowance.roomRemaining) > 0
+    ) {
+      return tgErr(
+        409,
+        'deposit_limit_exceeded',
+        'The remaining deposit allowance no longer covers this retry.',
+      );
+    }
+  }
   const updated = await transitionIntent(
     deps,
     intent,
@@ -689,5 +732,38 @@ export async function retryIntent(
     actorUserId,
   );
   if (updated === null) return tgErr(409, 'invalid_transition', 'The intent cannot retry.');
+  // The allowance read and the transition are not one atomic step: RE-VERIFY
+  // with this row re-included (raw sums; same fail-closed shape as create) —
+  // an overshoot abandons the retry, never the cap.
+  if (DEPOSIT_TARGETS.has(updated.targetType) && updated.userId !== null) {
+    const treasury = await deps.treasuries.getById(updated.treasuryId);
+    if (treasury !== null) {
+      const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
+      const inPeriod = (
+        await deps.intents.listDepositsInPeriod(updated.roomId, new Date(periodStart).toISOString())
+      ).filter((row) => ALLOWANCE_STATES.has(row.executionState));
+      const roomUsed = decSum(inPeriod.map((row) => row.amount));
+      const userUsed = decSum(
+        inPeriod.filter((row) => row.userId === updated.userId).map((row) => row.amount),
+      );
+      if (
+        decCompare(userUsed, treasury.depositLimits.perUserPerPeriod) > 0 ||
+        decCompare(roomUsed, treasury.depositLimits.perRoomPerPeriod) > 0
+      ) {
+        await deps.intents.transition(
+          updated.paymentIntentId,
+          'created',
+          'abandoned',
+          {},
+          new Date(deps.now()).toISOString(),
+        );
+        return tgErr(
+          409,
+          'deposit_limit_exceeded',
+          'A concurrent deposit consumed the remaining allowance; the retry was abandoned.',
+        );
+      }
+    }
+  }
   return { ok: true, intent: updated };
 }

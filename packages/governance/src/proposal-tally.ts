@@ -22,6 +22,12 @@ export interface ProposalTallyContext {
   eligibleCount: number;
   /** Whether the voting deadline has passed (drives terminal outcomes). */
   deadlinePassed: boolean;
+  /** Participants counted toward QUORUM when the basis population is narrower
+   *  than the voter set (`basis: 'role_class'`: the distinct role-class voters).
+   *  Omitted ⇒ every distinct voter counts (the `eligible_voters` basis).
+   *  Threshold arithmetic always uses ALL recorded votes — the basis narrows
+   *  who must SHOW UP, never whose ballot counts. */
+  quorumParticipants?: number;
 }
 
 /**
@@ -62,12 +68,15 @@ export function tallyProposalVotes(
     else abstain = decAdd(abstain, vote.weightSnapshot);
   }
   const distinctVoters = unique.length;
+  // Participants toward quorum: the basis-population voters (role_class) or
+  // every distinct voter (eligible_voters).
+  const quorumVoters = ctx.quorumParticipants ?? distinctVoters;
   // Turnout clamps to [0,1]: membership can shrink between casting and settling.
-  const turnout = ctx.eligibleCount > 0 ? Math.min(1, distinctVoters / ctx.eligibleCount) : 0;
+  const turnout = ctx.eligibleCount > 0 ? Math.min(1, quorumVoters / ctx.eligibleCount) : 0;
 
-  // Quorum: distinct participants ≥ basis × minFraction (exact decimal compare).
+  // Quorum: basis participants ≥ basis × minFraction (exact decimal compare).
   const quorumBar = decMul(ctx.eligibleCount, rules.quorum.minFraction);
-  const quorumMet = ctx.eligibleCount > 0 && decCompare(distinctVoters, quorumBar) >= 0;
+  const quorumMet = ctx.eligibleCount > 0 && decCompare(quorumVoters, quorumBar) >= 0;
 
   const decided = decAdd(approve, reject);
   const base = {

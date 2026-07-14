@@ -132,7 +132,7 @@ const fullLawPack = (overrides: Partial<LawPack> = {}): Record<string, unknown> 
 interface TestHarness extends ProposalDeps {
   mode: { value: GovernanceMode };
   clockAdvance: (ms: number) => void;
-  executorCalls: { category: string; amount: string }[];
+  executorCalls: { category: string; amount: string; pinned: boolean }[];
   executorAccepts: { value: boolean };
   electionsOpened: string[];
   memberFactsOverride: Map<
@@ -205,7 +205,13 @@ function buildHarness(): TestHarness {
     membership,
     treasuryExecutor: {
       execute: async (_roomId, action) => {
-        executorCalls.push({ category: action.category, amount: action.amount });
+        // `pinned` records whether the caller supplied the proposal's pinned
+        // law-pack (W6 review: execution must ride the pinned rules).
+        executorCalls.push({
+          category: action.category,
+          amount: action.amount,
+          pinned: action.lawPack != null,
+        });
         return executorAccepts.value
           ? { accepted: true, code: null }
           : { accepted: false, code: 'per_action_cap_exceeded' };
@@ -616,6 +622,68 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     expect(
       await createProductionProposal(deps, { roomId: ROOM, userId: PROPOSER, create: draft() }),
     ).toMatchObject({ ok: true });
+  });
+
+  it('rejects malformed charter sections at publication (W6 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      allowedProposalTypes: ['capped_grant', 'charter_update'],
+    });
+    // Missing/short sections must die at CREATE — not after a full vote when
+    // `createCharterVersion()` refuses them at execution.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({
+          proposal_type: 'charter_update',
+          category: null,
+          requested_amount: null,
+          asset: null,
+          recipient_ref: null,
+          requested_action: { kind: 'charter_update', sections: { purpose: 'too short' } },
+        }),
+      }),
+    ).toMatchObject({ ok: false, code: 'charter_sections_invalid' });
+  });
+
+  it('a role_class quorum basis without a signer set cannot publish (W6 review)', async () => {
+    const deps = buildHarness();
+    const registered = await registerLawPack(deps, {
+      roomId: ROOM,
+      document: fullLawPack({
+        quorumRules: {
+          capped_grant: { basis: 'role_class', minFraction: 0.5 },
+          charter_update: { basis: 'eligible_voters', minFraction: 0.2 },
+        },
+      }),
+      fixtures: null,
+      actorUserId: STEWARD,
+    });
+    expect(registered).toMatchObject({ ok: false, code: 'law_pack_invalid' });
+  });
+
+  it('a real-asset room cannot adopt a pack below the production bar (W6 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps); // testnet room with the full pack adopted
+    // Registration permits a real-asset-INCOMPLETE pack (simulated rooms
+    // iterate)…
+    const { appealRules: _omit, ...incomplete } = fullLawPack({ version: '1.2.0' });
+    const registered = await registerLawPack(deps, {
+      roomId: ROOM,
+      document: incomplete,
+      fixtures: null,
+      actorUserId: STEWARD,
+    });
+    if (!('record' in registered)) throw new Error(JSON.stringify(registered));
+    // …but a room already past the readiness gate must not ACTIVATE it.
+    expect(
+      await adoptLawPack(deps, {
+        roomId: ROOM,
+        lawPackId: registered.record.lawPackId,
+        actorUserId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'law_pack_not_real_asset_ready' });
   });
 
   it('a frozen room cannot adopt a different law-pack (W5 review)', async () => {
@@ -1156,7 +1224,8 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     });
     if (!('proposal' in executed)) throw new Error(JSON.stringify(executed));
     expect(executed.proposal.executionState).toBe('executed');
-    expect(deps.executorCalls).toEqual([{ category: 'grant', amount: '4000' }]);
+    // The kernel check rode the proposal's PINNED pack (W6 review).
+    expect(deps.executorCalls).toEqual([{ category: 'grant', amount: '4000', pinned: true }]);
     expect((await deps.reservations.getByProposal(settled.proposalId))?.state).toBe('consumed');
     const grant = await deps.grants.getByProposal(settled.proposalId);
     expect(grant).toMatchObject({ amount: '4000', payoutState: 'not_started' });
@@ -1271,6 +1340,86 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     await settleDueProposals(deps, ROOM);
     expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('expired');
     expect((await deps.reservations.getByProposal(settled.proposalId))?.state).toBe('released');
+  });
+
+  it('a role_class quorum counts ONLY designated-signer participation (W6 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      multisig: { signers: [PROPOSER, VOTER_2], required: 2 },
+      quorumRules: {
+        capped_grant: { basis: 'role_class', minFraction: 1 },
+        charter_update: { basis: 'eligible_voters', minFraction: 0.2 },
+      },
+    });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, STEWARD, testAccount2.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    // TWO voters — but only ONE is in the role class.  Before the fix the
+    // room-wide voter count satisfied quorum; the basis demands BOTH signers.
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, STEWARD, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('quorum_not_met');
+  });
+
+  it('multisig execution requires the designated-signer approvals (W6 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, { multisig: { signers: [STEWARD, VOTER_2], required: 2 } });
+    const settled = await passProposal(deps); // votes: PROPOSER (W1) + VOTER_2 (W2)
+    deps.clockAdvance(3_600 * 1000 + 1_000);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    // Timelock elapsed, challenges clear — but no designated-signer approvals.
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'multisig_required' });
+    // The two designated signers record APPROVAL signatures (fresh wallets —
+    // the (proposal, wallet) unique holds one signature per wallet).
+    const WALLET_3 = '33333333-3333-4333-8333-333333333333';
+    const WALLET_4 = '44444444-4444-4444-8444-444444444444';
+    const signer3 = privateKeyToAccount(`0x${'59'.repeat(32)}`);
+    const signer4 = privateKeyToAccount(`0x${'5a'.repeat(32)}`);
+    await linkWallet(deps, WALLET_3, STEWARD, signer3.address);
+    await linkWallet(deps, WALLET_4, VOTER_2, signer4.address);
+    const approve1 = await castVote(
+      deps,
+      settled.proposalId,
+      STEWARD,
+      WALLET_3,
+      signer3,
+      'approve',
+      { purpose: 'approval', choice: null },
+    );
+    expect(approve1).toMatchObject({ ok: true });
+    // One approval of the required two still refuses.
+    expect(
+      await executeProposal(deps, {
+        roomId: ROOM,
+        proposalId: settled.proposalId,
+        userId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'multisig_required' });
+    const approve2 = await castVote(
+      deps,
+      settled.proposalId,
+      VOTER_2,
+      WALLET_4,
+      signer4,
+      'approve',
+      { purpose: 'approval', choice: null },
+    );
+    expect(approve2).toMatchObject({ ok: true });
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: STEWARD,
+    });
+    expect(executed).toMatchObject({ ok: true });
   });
 
   it('a disposed challenge is immutable: no re-resolution, no late escalation (W5 review)', async () => {
@@ -1436,6 +1585,37 @@ describe('grants (WS-M.5.1a)', () => {
     await executeProposal(deps, { roomId: ROOM, proposalId: proposal.proposalId, userId: STEWARD });
     // The malformed plan yields NO grant (execution still settles the treasury
     // action; grant creation refuses the unsound tranche split).
+    expect(await deps.grants.getByProposal(proposal.proposalId)).toBeNull();
+  });
+
+  it('rejects tranches that are negative, zero, or above the approved amount (W6 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    // `-100` + `4100` SUMS to the approved 4000 — but accepting the 4100
+    // milestone first would disburse above the voted authorization.
+    const proposal = await createProposal(deps, {
+      requested_action: {
+        kind: 'grant',
+        milestones: [
+          { description: 'Offset', amount: '-100' },
+          { description: 'Over', amount: '4100' },
+        ],
+      },
+    });
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const executed = await executeProposal(deps, {
+      roomId: ROOM,
+      proposalId: proposal.proposalId,
+      userId: STEWARD,
+    });
+    expect(executed).toMatchObject({ ok: false, code: 'grant_creation_failed' });
     expect(await deps.grants.getByProposal(proposal.proposalId)).toBeNull();
   });
 });

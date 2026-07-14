@@ -90,6 +90,17 @@ export function validateLawPackBundle(pack: LawPack): LawPackProblem[] {
     const quorum = pack.quorumRules ?? {};
     const threshold = pack.thresholdRules ?? {};
     const timelock = pack.timelockRules ?? {};
+    // A role-class quorum basis needs a DEFINED role class: the multisig
+    // signer set is the only pack-defined role membership, so `role_class`
+    // without `multisig` has an empty basis and could never meet quorum.
+    for (const [type, rule] of Object.entries(quorum)) {
+      if (rule?.basis === 'role_class' && pack.multisig === undefined) {
+        problems.push({
+          path: `quorumRules.${type}`,
+          problem: 'basis "role_class" requires a multisig signer set (the role class)',
+        });
+      }
+    }
     // Every allowed proposal type needs its three rules.
     for (const type of pack.allowedProposalTypes) {
       if (quorum[type] === undefined) {

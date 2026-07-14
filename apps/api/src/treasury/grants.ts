@@ -41,10 +41,22 @@ function milestonePlan(
       ) {
         return null;
       }
+      const trancheAmount = (entry as { amount: string }).amount;
+      // Every tranche must be a POSITIVE minor-unit integer no larger than the
+      // approved amount: the sum check alone would accept `-100` + `200` for a
+      // 100-unit grant, and accepting the 200 milestone first disburses above
+      // the voted authorization before any offset lands.
+      if (
+        !/^[0-9]{1,78}$/.test(trancheAmount) ||
+        decCompare(trancheAmount, '0') <= 0 ||
+        decCompare(trancheAmount, amount) > 0
+      ) {
+        return null;
+      }
       tranches.push({
         milestoneId: deps.uuid(),
         description: (entry as { description: string }).description,
-        amount: (entry as { amount: string }).amount,
+        amount: trancheAmount,
         state: 'pending',
         paymentIntentId: null,
       });

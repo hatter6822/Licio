@@ -1474,3 +1474,53 @@ describe('fifth review wave (PR #144): clawback, freezes, CAS tokens, owner pref
     ).toMatchObject({ ok: false, code: 'owner_required' });
   });
 });
+
+describe('sixth review wave (PR #144): deposit retry caps', () => {
+  it('a deposit retry re-checks the allowance the failure released', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services); // perUserPerPeriod 1000
+    const created = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: randomUUID(),
+    });
+    if ('code' in created) throw new Error(created.message);
+    const id = created.intent.paymentIntentId;
+    // Walk to a FAILED submission: the amount leaves the allowance aggregate.
+    const nowIso = new Date().toISOString();
+    for (const [from, to] of [
+      ['created', 'preflighted'],
+      ['preflighted', 'quoted'],
+      ['quoted', 'signed'],
+      ['signed', 'submitted'],
+      ['submitted', 'pending'],
+      ['pending', 'failed'],
+    ] as const) {
+      await services.intents.transition(id, from, to, {}, nowIso);
+    }
+    // Ten fresh deposits consume the ENTIRE 1000 allowance the failure freed.
+    for (let i = 0; i < 10; i += 1) {
+      const filler = await createPaymentIntent(services, {
+        userId: USER,
+        roomId: ROOM,
+        targetType: 'treasury_deposit',
+        targetId: treasury.treasuryId,
+        asset: 'USDC',
+        amount: '100',
+        idempotencyKey: randomUUID(),
+      });
+      if ('code' in filler) throw new Error(filler.message);
+    }
+    // The retry would push in-flight deposits to 1100 > the 1000 cap — it
+    // must re-run the allowance check instead of silently re-entering
+    // `created`.
+    const retried = await retryIntent(services, id, USER);
+    expect('code' in retried && retried.code).toBe('deposit_limit_exceeded');
+    expect((await services.intents.getById(id))?.executionState).toBe('failed');
+  });
+});

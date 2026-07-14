@@ -39,11 +39,12 @@ import {
   type VoterFacts,
   type WeightResolution,
 } from '@licio/governance';
-import type {
-  GovernanceMode,
-  ProductionProposalCreate,
-  ProposalTallyWire,
-  ProposalType,
+import {
+  charterSectionsSchema,
+  type GovernanceMode,
+  type ProductionProposalCreate,
+  type ProposalTallyWire,
+  type ProposalType,
 } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
@@ -62,6 +63,7 @@ import type {
 } from '../knomosis/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
+import { readabilityProblems } from './charter.js';
 import { incomingDelegationsFor } from './delegations.js';
 import { createGrantFromProposal, type GrantDeps } from './grants.js';
 import { activeLawPack, adoptLawPack, type LawPackDeps } from './law-packs.js';
@@ -112,6 +114,11 @@ export interface TreasuryExecutorPort {
       asset: string | null;
       coiDeclared: boolean;
       proposedAt: string;
+      /** The proposal's PINNED law-pack: the kernel evaluates the voted spend
+       *  under the rules it was authorized with, and a community-passed
+       *  execution needs no AI-agent binding (null falls back to the agent
+       *  binding's pack — the autonomous-agent path). */
+      lawPack?: LawPack | null;
     },
   ): Promise<{ accepted: boolean; code: string | null }>;
 }
@@ -216,6 +223,26 @@ async function tallyFor(
   const threshold = pack.thresholdRules?.[proposal.proposalType] ?? {
     minAffirmativeFraction: 0.5,
   };
+  // The `role_class` basis measures quorum over the pack's DESIGNATED role
+  // class (the multisig signer set — the only pack-defined role membership):
+  // the population is the signers and only signer ballots count toward
+  // showing up.  Threshold arithmetic still uses every recorded vote.
+  if (quorum.basis === 'role_class') {
+    const signers = new Set(pack.multisig?.signers ?? []);
+    const votes = recordedVotes(signatures);
+    const signerVoters = new Set(
+      votes.filter((v) => signers.has(v.voterUserId)).map((v) => v.voterUserId),
+    );
+    return tallyProposalVotes(
+      votes,
+      { quorum, threshold },
+      {
+        eligibleCount: signers.size,
+        deadlinePassed,
+        quorumParticipants: signerVoters.size,
+      },
+    );
+  }
   const eligibleCount = await deps.membership.eligibleMemberCount(proposal.roomId, {
     rules: pack.eligibility ?? {
       minMembershipDays: 0,
@@ -312,6 +339,24 @@ export async function createProductionProposal(
   // Prohibited-target classifier (WS-M.1.2d, fail-closed).
   const target = classifyProposalTarget(proposalType, input.create.requested_action);
   if (!target.allowed) return tgErr(422, target.code, target.reason);
+
+  // A charter update carries its FULL proposed sections: validate them at
+  // publication so a malformed draft can never consume a deliberation/voting
+  // cycle only to fail inside `createCharterVersion()` at execution.
+  if (proposalType === 'charter_update') {
+    const sections = charterSectionsSchema.safeParse(input.create.requested_action['sections']);
+    if (!sections.success) {
+      return tgErr(
+        400,
+        'charter_sections_invalid',
+        'A charter update must carry the complete valid sections.',
+      );
+    }
+    const readability = readabilityProblems(sections.data);
+    if (readability.length > 0) {
+      return tgErr(400, 'charter_sections_invalid', readability[0] ?? 'Sections are unreadable.');
+    }
+  }
 
   // Action budget (§17.7): charge BEFORE side effects; free when unconfigured.
   const budget = await chargeRoomActionBudget(deps, {
@@ -530,24 +575,35 @@ export async function signProposal(
   if (proposal === null || proposal.roomId !== input.roomId || proposal.simulationMode) {
     return tgErr(404, 'not_found', 'Resource not found');
   }
-  if (proposal.votingState !== 'open') {
+  // BALLOTS live inside the voting window; approval/multisig signatures are
+  // an EXECUTION-phase act (§17.5: designated signers co-sign a PASSED
+  // proposal before it may execute) and are gated by the phase check below.
+  if (input.purpose === 'vote') {
+    if (proposal.votingState !== 'open') {
+      return tgErr(
+        409,
+        proposal.votingState === 'deliberation' ? 'still_deliberating' : 'voting_closed',
+        proposal.votingState === 'deliberation'
+          ? 'The deliberation window has not ended yet.'
+          : 'Voting on this proposal has closed.',
+      );
+    }
+    // The DEADLINE closes voting, not the (possibly lagging) settle sweep: a
+    // signature recorded after votingEndsAt would still count in the eventual
+    // tally, letting scheduler lag change a decided outcome.
+    const nowIsoForVote = new Date(deps.now()).toISOString();
+    if (proposal.votingEndsAt != null && proposal.votingEndsAt <= nowIsoForVote) {
+      return tgErr(409, 'voting_closed', 'Voting on this proposal has closed.');
+    }
+    if (input.choice === null) {
+      return tgErr(400, 'choice_required', 'A vote requires a choice.');
+    }
+  } else if (proposal.votingState !== 'open' && proposal.votingState !== 'passed') {
     return tgErr(
       409,
-      proposal.votingState === 'deliberation' ? 'still_deliberating' : 'voting_closed',
-      proposal.votingState === 'deliberation'
-        ? 'The deliberation window has not ended yet.'
-        : 'Voting on this proposal has closed.',
+      'not_approvable',
+      'Approval signatures apply to open or passed proposals only.',
     );
-  }
-  // The DEADLINE closes voting, not the (possibly lagging) settle sweep: a
-  // signature recorded after votingEndsAt would still count in the eventual
-  // tally, letting scheduler lag change a decided outcome.
-  const nowIsoForVote = new Date(deps.now()).toISOString();
-  if (proposal.votingEndsAt != null && proposal.votingEndsAt <= nowIsoForVote) {
-    return tgErr(409, 'voting_closed', 'Voting on this proposal has closed.');
-  }
-  if (input.purpose === 'vote' && input.choice === null) {
-    return tgErr(400, 'choice_required', 'A vote requires a choice.');
   }
 
   // --- WS-L signature verification (the SAME verifiers, never a parallel path).
@@ -1148,6 +1204,39 @@ export async function executeProposal(
     return tgErr(409, 'challenge_blocking', 'Unresolved challenges block execution.');
   }
 
+  // The proposal executes under ITS pinned pack (WS-M.1.3d): a pack swap
+  // between publication and the timelock elapsing must not re-cap or
+  // re-authorize an already-voted spend under different rules.
+  const pinnedRecord =
+    proposal.lawPackVersionId != null ? await deps.lawPacks.get(proposal.lawPackVersionId) : null;
+  const pinnedPack: LawPack | null =
+    pinnedRecord !== null
+      ? (pinnedRecord.lawPack as LawPack)
+      : ((await activeLawPack(deps, input.roomId))?.pack ?? null);
+
+  // §17.5 multisig-steward execution: when the pinned pack designates N-of-M
+  // signers, a single steward cannot execute — the required count of DISTINCT
+  // designated signers must have recorded approval/multisig signatures.
+  if (pinnedPack?.multisig !== undefined) {
+    const signerSet = new Set(pinnedPack.multisig.signers);
+    const signatures = await deps.proposalSignatures.listByProposal(input.proposalId);
+    const approvals = new Set(
+      signatures
+        .filter(
+          (s) => (s.purpose === 'approval' || s.purpose === 'multisig') && signerSet.has(s.userId),
+        )
+        .map((s) => s.userId),
+    );
+    if (approvals.size < pinnedPack.multisig.required) {
+      return tgErr(
+        409,
+        'multisig_required',
+        `Execution needs ${pinnedPack.multisig.required} designated-signer approvals; ` +
+          `${approvals.size} recorded.`,
+      );
+    }
+  }
+
   // ATOMIC claim (the shipped CAS): two executes cannot both proceed.
   const claimed = await deps.proposals.claimForExecution(input.proposalId, nowIso);
   if (claimed === null) {
@@ -1169,6 +1258,10 @@ export async function executeProposal(
         asset: claimed.asset,
         coiDeclared: claimed.conflictDisclosures !== null,
         proposedAt: claimed.createdAt,
+        // The PINNED pack rides into the kernel check: the spend was voted and
+        // reserved under these caps, and a WS-M room needs no AI-agent binding
+        // for a community-passed execution.
+        lawPack: pinnedPack,
       });
       if (!verdict.accepted) {
         failure = verdict.code ?? 'kernel_rejected';
