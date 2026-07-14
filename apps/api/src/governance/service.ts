@@ -284,12 +284,18 @@ export class GovernanceService {
     return this.deps.stores.seats.get(roomId);
   }
 
-  /** Schedule an election when the term has elapsed and none is open (ADR-7). */
-  async scheduleElection(roomId: string): Promise<GovernanceResult<string>> {
+  /** Schedule an election when the term has elapsed and none is open (ADR-7).
+   *  `options.force` skips the term-elapsed check for a COMMUNITY-VOTED early
+   *  rotation (a WS-M `steward_rotation` proposal execution) — the one-open-
+   *  per-room guard still applies unconditionally. */
+  async scheduleElection(
+    roomId: string,
+    options: { force?: boolean } = {},
+  ): Promise<GovernanceResult<string>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat) return err('no_seat', 'Room has no steward seat.');
     if (seat.currentElectionId) return err('election_open', 'An election is already open.');
-    if (this.deps.now().getTime() < Date.parse(seat.termEnd)) {
+    if (!options.force && this.deps.now().getTime() < Date.parse(seat.termEnd)) {
       return err('term_active', 'The current term has not elapsed.');
     }
     const electionId = this.deps.uuid();

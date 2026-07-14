@@ -210,6 +210,8 @@ export interface AttestationRecord {
 export interface GovernanceProfileStore {
   get(roomId: string): Promise<GovernanceProfileRecord | null>;
   upsert(record: GovernanceProfileRecord): Promise<GovernanceProfileRecord>;
+  /** Every governed room (the scheduler's sweep population). */
+  listAll(): Promise<GovernanceProfileRecord[]>;
   clear(): Promise<void>;
 }
 
@@ -380,6 +382,10 @@ export class InMemoryGovernanceProfileStore implements GovernanceProfileStore {
   async upsert(record: GovernanceProfileRecord): Promise<GovernanceProfileRecord> {
     this.#rows.set(record.roomId, clone(record));
     return clone(record);
+  }
+
+  async listAll(): Promise<GovernanceProfileRecord[]> {
+    return [...this.#rows.values()].map(clone);
   }
 
   async clear(): Promise<void> {

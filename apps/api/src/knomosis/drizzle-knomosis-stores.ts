@@ -1929,6 +1929,20 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
     return rows[0]?.count ?? 0;
   }
 
+  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+    const rows = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(governanceAuditLogs)
+      .where(
+        and(
+          eq(governanceAuditLogs.roomId, roomId),
+          eq(governanceAuditLogs.actorUserId, userId),
+          inArray(governanceAuditLogs.actionType, [...READINESS_QUALIFYING_AUDIT_ACTIONS]),
+        ),
+      );
+    return rows[0]?.count ?? 0;
+  }
+
   async anonymizeActor(userId: string): Promise<number> {
     // The append-only trigger EXPLICITLY permits the right-to-erasure NULLing of
     // `actor_user_id` (migration 0059), so scrub the actor WITHOUT disabling it —

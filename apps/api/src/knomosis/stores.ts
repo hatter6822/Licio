@@ -719,6 +719,10 @@ export interface GovernanceAuditStore {
   /** Count only qualifying simulated-practice actions for the readiness gate
    *  (WS-L.4.1f) — never the meta mode-transition/comprehension rows. */
   countQualifyingByRoom(roomId: string): Promise<number>;
+  /** WS-M.4.2c-2: one member's qualifying governance participation in a room —
+   *  the `minContributions` eligibility basis (an in-context metric; never a
+   *  cross-context content join). */
+  countQualifyingByRoomActor(roomId: string, userId: string): Promise<number>;
   /** WS-L data-rights: ANONYMIZE the actor on account deletion — the audit log
    *  is append-only, so the actor id is scrubbed, not the row.  Returns the rows
    *  anonymized. */
@@ -1868,6 +1872,15 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
       (r) =>
         r.roomId === roomId &&
         r.simulationMode &&
+        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
+    ).length;
+  }
+
+  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+    return this.#rows.filter(
+      (r) =>
+        r.roomId === roomId &&
+        r.actorUserId === userId &&
         READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
     ).length;
   }

@@ -279,6 +279,15 @@ import {
 } from './telemetry/drizzle-telemetry-stores.js';
 import { startTelemetryScheduler, TELEMETRY_SCHEDULER_INTERVAL_MS } from './telemetry/scheduler.js';
 import { createInMemoryTelemetryServices, setTelemetryServices } from './telemetry/service.js';
+import { createDrizzleTreasuryStores } from './treasury/drizzle-treasury-stores.js';
+import { buildWsmReadinessChecklistPort } from './treasury/readiness.js';
+import {
+  buildMembershipFactsPort,
+  buildStewardElectionPort,
+  buildTreasuryExecutorPort,
+  createInMemoryTreasuryServices,
+  setTreasuryServices,
+} from './treasury/services.js';
 
 const env = validateServerEnv(process.env);
 const logger = createLogger(env.LOG_LEVEL);
@@ -1429,6 +1438,26 @@ setGovernanceService(
 // service binds.
 knomosisServices.lawPacks = buildLawPackPort(governanceStores);
 knomosisServices.readinessChecklist = buildReadinessChecklistPort(forumServices, governanceStores);
+// WS-M: the treasury-and-governance container over the SAME substrate — the
+// production Drizzle stores when a database is configured, the REAL membership
+// facts (forum subscription age + in-context governance participation +
+// identity verification), the shipped fail-closed treasury executor (WS-M is
+// its production caller), and forced elections for community-voted rotations.
+const treasuryServices = createInMemoryTreasuryServices({
+  knomosis: knomosisServices,
+  governanceStores,
+  membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
+  treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
+  elections: buildStewardElectionPort(getGovernanceService()),
+});
+if (db) {
+  Object.assign(treasuryServices, createDrizzleTreasuryStores(db));
+}
+setTreasuryServices(treasuryServices);
+// The WS-L.4.1g checklist port now consumes the REAL WS-M.1.2 evaluators
+// (charter + elected seat/appeals + treasury policy + safety attestation),
+// replacing the fail-closed defaults.
+knomosisServices.readinessChecklist = buildWsmReadinessChecklistPort(treasuryServices);
 // The forum contribution path consults the in-room agent (subordinate to the
 // platform floor) for any room with an active community-approved binding. The
 // agent's author-history signals are read from the real identity + forum +

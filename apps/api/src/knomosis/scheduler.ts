@@ -11,6 +11,8 @@
 import { hostname } from 'node:os';
 import type { KnomosisSignedActionType } from '@licio/shared';
 import type { JobLeaseStore } from '../identity/job-lease.js';
+import { runWsmTick, type WsmSchedulerTask } from '../treasury/scheduler.js';
+import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/services.js';
 import { ingestGatewayEvents } from './ingest.js';
 import { ACTION_KILL_SWITCH, killSwitchDecision } from './killswitch.js';
 import { reconcileDeployment } from './reconciliation.js';
@@ -30,7 +32,8 @@ export type KnomosisSchedulerTask =
   | 'resubmit'
   | 'fail_stale_reservations'
   | 'reconcile'
-  | 'sim_execute';
+  | 'sim_execute'
+  | WsmSchedulerTask;
 
 export async function runKnomosisTick(
   services: KnomosisServices,
@@ -164,6 +167,16 @@ export async function runKnomosisTick(
       await executeElapsedSimProposals(simulationDeps(services));
     } catch (error) {
       onError(error, 'sim_execute');
+    }
+    // The WS-M production sweeps (intent expiry/reconcile, proposal settlement,
+    // treasury reconciliation) ride the same lease + governance flag; each task
+    // isolates its own failures.
+    if (treasuryServicesConfigured()) {
+      try {
+        await runWsmTick(getTreasuryServices(), (error, task) => onError(error, task));
+      } catch (error) {
+        onError(error, 'wsm_treasury_reconcile');
+      }
     }
   }
 }

@@ -104,6 +104,7 @@ import { createRankingAdminRoutes } from './ranking-admin.js';
 import { createRoomGovernanceSimRoutes } from './room-governance.js';
 import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
+import { createTreasuryGovernanceRoutes } from './treasury-governance.js';
 import { createTrustSafetyRoutes } from './trust-safety.js';
 import { createWalletRoutes } from './wallet.js';
 
@@ -545,6 +546,7 @@ export function createV1Routes() {
       .route('/', createWalletRoutes())
       .route('/knomosis', createKnomosisRoutes())
       .route('/', createRoomGovernanceSimRoutes())
+      .route('/', createTreasuryGovernanceRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', async (c) => {
