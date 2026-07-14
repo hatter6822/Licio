@@ -360,6 +360,30 @@ describe('WS-I.4.1b chronological fallback ordering', () => {
     ]);
     expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(3), uuidOf(1), uuidOf(2)]);
   });
+
+  it('an unparseable timestamp sorts as epoch 0 and keeps the order permutation-stable', () => {
+    // `freshness_timestamp` is `z.string()`, so a malformed value would make
+    // `Date.parse` return NaN. A NaN comparator term is NOT a total order — it
+    // silently drops to the id tie-break for the bad pair only, which can form
+    // an intransitive cycle and make V8's sort input-order-dependent (breaking
+    // the serving↔replay byte-identity gate). Coercing NaN→0 keeps the order
+    // total: the garbage-timestamp item sinks to last, identically for EVERY
+    // input permutation.
+    const base = [
+      makeCandidate(1, { freshness_timestamp: new Date(T0 + 10_000).toISOString() }),
+      makeCandidate(2, { freshness_timestamp: new Date(T0 + 1000).toISOString() }),
+      makeCandidate(3, { freshness_timestamp: 'not-a-real-date' }),
+    ] as const;
+    const expected = [uuidOf(1), uuidOf(2), uuidOf(3)];
+    for (const perm of [
+      [base[0], base[1], base[2]],
+      [base[2], base[0], base[1]],
+      [base[1], base[2], base[0]],
+      [base[2], base[1], base[0]],
+    ]) {
+      expect(chronologicalOrder(perm).map((c) => c.item_id)).toEqual(expected);
+    }
+  });
 });
 
 describe('§11.6 user metric sort orders (metricOrder)', () => {

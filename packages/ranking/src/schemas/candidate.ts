@@ -68,6 +68,23 @@ export type Candidate = z.infer<typeof candidateSchema>;
 export const candidatePoolSchema = z.array(candidateSchema);
 
 /**
+ * Parse an ISO instant to epoch-ms for ordering, mapping an unparseable value
+ * to 0. The timestamp fields the ordering comparators read (`freshness_
+ * timestamp`, `created_at`) are typed `z.string()`, so a malformed value would
+ * make `Date.parse` return NaN — and a NaN term in a `Date.parse(a) -
+ * Date.parse(b)` comparator is NOT a total order (it silently drops to the id
+ * tie-break for the bad pair while valid pairs still compare by time, which can
+ * form an intransitive cycle and make V8's sort input-order-dependent). Coercing
+ * to 0 keeps every comparator a TOTAL order, so the serving↔replay byte-identity
+ * guarantee (the M3 reproducibility gate) holds for any input, not just today's
+ * ISO-only production data.
+ */
+export function parseTimestampOrZero(iso: string): number {
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
  * Merge candidates produced by multiple retrievers into a deduplicated pool
  * keyed by `item_id` (WS-I.1.1d): origins are concatenated (deduplicated,
  * highest-scoring origin first) and the highest retrieval score is retained.
@@ -105,7 +122,7 @@ export function mergeCandidates(batches: ReadonlyArray<readonly Candidate[]>): C
   return [...byId.values()].sort(
     (a, b) =>
       b.retrieval_score - a.retrieval_score ||
-      Date.parse(b.freshness_timestamp) - Date.parse(a.freshness_timestamp) ||
+      parseTimestampOrZero(b.freshness_timestamp) - parseTimestampOrZero(a.freshness_timestamp) ||
       a.item_id.localeCompare(b.item_id),
   );
 }
