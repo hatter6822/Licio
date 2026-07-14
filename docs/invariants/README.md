@@ -535,3 +535,20 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 - **WS-P** wires the GWEI release gate and the CID model-release gate into
   the experiment framework, and owns the transparency-report pipeline the
   export feeds.
+- **PHI session-health path signature (`classifySessionHealth`, WS-H.7.6b):**
+  the action×time Lévy area (`actionTimeArea = signedArea(sig, 1, 2)`) is
+  computed, returned in `features`, and PERSISTED on the PHI invariant output's
+  score vector (`services-impl.ts`, key `action_time_area`) — a recorded,
+  order-sensitive calibration signal. The classification chain deliberately uses
+  only the interpretable scalar heuristics (rapid-reply/return, revisit ratio,
+  deep-action share) and does NOT threshold on the area. This is not an
+  oversight: execution shows the area's SIGN is a geometric pacing signal that
+  does not separate the health classes — a constructive `read→open_source→
+  question` (+0.70) and a bursty `scroll→reply→scroll` (+0.75) both circulate
+  POSITIVELY, and a genuine rage burst is also positive (+0.17), so no simple
+  sign/threshold on this one projection is a valid classifier. **Closure
+  target:** the principled consumer is a LEARNED model over the full truncated
+  signature (all level-2/level-3 terms, not this single projection), delivered
+  through the WS-P experiment/calibration framework; until then the signature is
+  recorded per session and the classifier stays on the scalar heuristics (no
+  speculative threshold on a wellbeing signal).

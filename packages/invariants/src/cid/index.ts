@@ -173,6 +173,10 @@ export interface CidGateDecision {
 /** Model-release gate (WS-H.7.5b): CID above threshold blocks the launch. */
 export function cidReleaseGate(cid: number, threshold: number): CidGateDecision {
   if (!(threshold > 0)) throw new Error('CID gate threshold must be positive');
+  // Fail CLOSED on a non-finite CID: a NaN would make `cid > threshold` false
+  // and silently let a launch through this SAFETY gate. An unmeasurable
+  // counterfactual-invariance defect must block, never pass.
+  if (!Number.isFinite(cid)) return { blocked: true, cid, threshold };
   return { blocked: cid > threshold, cid, threshold };
 }
 

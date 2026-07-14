@@ -9,6 +9,7 @@ import {
   DEFAULT_FEED_MODE,
   type FeedMode,
   feedModeCompatSchema,
+  legacyPreservingFeedMode,
   normalizeFeedMode,
 } from '@licio/shared';
 import { z } from 'zod';
@@ -73,7 +74,14 @@ function persistSlice(state: UIState): void {
   savePersisted(PERSIST, {
     theme: state.theme,
     reducedMotion: state.reducedMotion,
-    feedMode: state.feedMode,
+    // Persist the legacy-preserving spelling for the SAME reason the durable
+    // wire writes do: a pre-redesign bundle re-served during rollout (a
+    // background tab, an SW rollback) validates this slice against the OLD
+    // feed-mode enum, and an unparseable `feedMode` would drop the WHOLE slice
+    // (theme + motion + focus with it). `best`/`new` round-trip losslessly
+    // (normalizeFeedMode maps them back on read); the genuinely new sorts have
+    // no legacy spelling and store canonically (documented, self-healing).
+    feedMode: legacyPreservingFeedMode(state.feedMode),
     focusMode: state.focusMode,
   });
 }

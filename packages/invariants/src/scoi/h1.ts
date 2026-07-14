@@ -54,8 +54,14 @@ export function h1Diagnostic(structure: SheafStructure): H1Diagnostic {
   }
   const delta1 = matMul(d0, transpose(d0));
   const { values } = jacobiEigSym(delta1);
-  const scale = Math.max(1, values[0] ?? 0);
-  const rank = values.filter((v) => v > RANK_TOLERANCE * scale).length;
+  // Rank tolerance RELATIVE to the largest eigenvalue (values are descending;
+  // Δ₁ is PSD so values[0] = λmax ≥ 0), so the rank is SCALE-INVARIANT:
+  // rank(c·d₀) = rank(d₀). An absolute floor (the former `Math.max(1, λmax)`)
+  // pinned the threshold to 1e-9 whenever λmax < 1, mis-ranking a small-scale
+  // coboundary as full rank and reporting a false H¹ obstruction. λmax ≤ 0 ⇒
+  // d₀ is the zero map ⇒ rank 0.
+  const largest = values[0] ?? 0;
+  const rank = largest <= 0 ? 0 : values.filter((v) => v > RANK_TOLERANCE * largest).length;
   const dimH1 = totalOverlapDim - rank;
   return {
     dimH1,
@@ -87,12 +93,15 @@ export function harmonicRepresentative(
   }
   const delta1 = matMul(d0, transpose(d0));
   const { values, vectors } = jacobiEigSym(delta1);
-  const scale = Math.max(1, values[0] ?? 0);
+  // Same scale-invariant, relative rank tolerance as h1Diagnostic: an eigenpair
+  // enters the im(d₀) projector only above `RANK_TOLERANCE · λmax`. λmax ≤ 0 ⇒
+  // im(d₀) = 0 ⇒ no projection (the whole cochain is harmonic).
+  const largest = values[0] ?? 0;
 
   // h = g − Σ_{λ_k > tol} v_k ⟨v_k, g⟩  (projection onto im(d₀)^⊥).
   const h = [...observedCochain];
-  for (let k = 0; k < values.length; k += 1) {
-    if ((values[k] ?? 0) <= RANK_TOLERANCE * scale) continue;
+  for (let k = 0; largest > 0 && k < values.length; k += 1) {
+    if ((values[k] ?? 0) <= RANK_TOLERANCE * largest) continue;
     const v = vectors[k];
     if (!v) continue;
     let coefficient = 0;

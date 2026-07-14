@@ -297,6 +297,51 @@ describe('feed sort modes (SPEC §11.6)', () => {
     expect(rankedById.get(risky.storyId)?.safety_state).toBe('under-review');
   });
 
+  it('degradation fallbacks still carry the MFCI safety posture (kill-switch parity)', async () => {
+    // The WS-I.4.1b degradation fallbacks (kill switch / GWEI gate / empty pool)
+    // serve FEATURE-BLIND so no PWAtt value leaks under §30.5 — but the MFCI
+    // safety posture is a WS-H integrity signal read from the DURABLE store, so
+    // a high/severe-MFCI story must STILL read "under-review" on a killed feed,
+    // exactly as the un-gated story-detail read does (before the parity fix a
+    // degraded card read "ok" while story-detail read "under review"). NO
+    // feature batch runs here — the durable posture is the whole point.
+    const risky = await seedStory(fixture.ingestion, {
+      publishedAt: new Date(Date.now() - 2 * HOUR).toISOString(),
+    });
+    const calm = await seedStory(fixture.ingestion, {
+      publishedAt: new Date(Date.now() - 1 * HOUR).toISOString(),
+    });
+    await fixture.invariants.mfciRiskStates.set({
+      targetId: risky.storyId,
+      state: 'severe',
+      score: 9,
+      reason: 'score',
+      updatedAt: new Date().toISOString(),
+    });
+    await engageKillSwitch(
+      fixture.events,
+      {
+        global: true,
+        surfaces: [],
+        profileIds: [],
+        owner: 'oncall',
+        triggerCondition: 'incident drill',
+        rollbackPath: 'release via admin',
+        reviewDate: new Date().toISOString(),
+      },
+      new Date().toISOString(),
+    );
+    const served = await serve('best');
+    const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
+    expect(log?.fallback_reason).toBe('kill_switch');
+    const byId = new Map(served.items.map((i) => [i.story_id, i]));
+    expect(byId.get(risky.storyId)?.safety_state).toBe('under-review');
+    expect(byId.get(calm.storyId)?.safety_state).toBe('ok');
+    // §30.5 preserved: the degraded serve carries NO PWAtt-derived value, so
+    // the legacy rating_label rides only the (integrity) safety posture.
+    expect(byId.get(risky.storyId)?.rating_label).toBe('under-review');
+  });
+
   it('a user sort never logs a GWEI gate application it did not serve under', async () => {
     // A promoted, over-threshold GWEI gate blocks RANKED deployment — but a
     // user-selected ordering is not a deployment of the ranked objective, so

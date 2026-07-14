@@ -75,4 +75,28 @@ describe('detectHarassmentCascade — trust-weighted threshold', () => {
     // Fresh: threshold 2×3×0.5 = 3, volume 5 → detected (hostile share 1.0).
     expect(detectHarassmentCascade({ ...base, trustFactor: 0.5 }).detected).toBe(true);
   });
+
+  it('a threshold of 1.0 yields a finite confidence (no 0/0 NaN at the schema)', () => {
+    // hostileShareThreshold = 1 is schema-legal; detection then forces
+    // hostileShare === 1, making the `1 - threshold` span zero. The confidence
+    // must saturate to 1, never NaN (which the integrity-signal schema rejects).
+    const result = detectHarassmentCascade(
+      {
+        eventCount: 100,
+        distinctActors: 6,
+        contributionCounts: { low_info_reply: 10 },
+        trailingEventCounts: [],
+      },
+      {
+        minDistinctActors: 5,
+        minContributions: 8,
+        hostileShareThreshold: 1,
+        volumeMultiplier: 2,
+        baseRateFloor: 3,
+      },
+    );
+    expect(result.detected).toBe(true);
+    expect(Number.isFinite(result.confidence)).toBe(true);
+    expect(result.confidence).toBe(1);
+  });
 });

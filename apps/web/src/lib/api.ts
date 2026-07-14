@@ -28,11 +28,8 @@ import {
   debateArenaResponseSchema,
   type FeatureFlags,
   type FeedMode,
-  type FeedPreferences,
-  type FeedPreferencesPatch,
   type FeedResponse,
   featureFlagsResponseSchema,
-  feedPreferencesSchema,
   feedResponseSchema,
   type LensCreateRequest,
   type LensPublic,
@@ -338,16 +335,6 @@ export async function createLens(roomId: string, request: LensCreateRequest): Pr
     json: request,
   });
   return parseResponse(response, lensPublicSchema);
-}
-
-export async function fetchFeedPreferences(): Promise<FeedPreferences> {
-  const response = await client.v1.feed.preferences.$get();
-  return parseResponse(response, feedPreferencesSchema);
-}
-
-export async function updateFeedPreferences(patch: FeedPreferencesPatch): Promise<FeedPreferences> {
-  const response = await client.v1.feed.preferences.$patch({ json: patch });
-  return parseResponse(response, feedPreferencesSchema);
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatusResponse> {

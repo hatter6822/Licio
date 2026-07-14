@@ -168,12 +168,17 @@ export function detectHarassmentCascade(
     total >= config.minContributions &&
     hostileShare >= config.hostileShareThreshold &&
     input.eventCount > config.volumeMultiplier * expected * clampTrustFactor(input.trustFactor);
-  // Confidence grows with how far the hostile share clears the threshold.
+  // Confidence grows with how far the hostile share clears the threshold. A
+  // threshold of 1.0 is a schema-legal config (`z.number().min(0).max(1)`),
+  // which makes the `1 - threshold` span zero; detection then implies
+  // hostileShare === 1 (fully saturated), so the confidence is the maximum.
+  // Guarding the degenerate span keeps a 0/0 NaN out of the downstream
+  // `integrity.signal.detected` schema (whose `confidence` rejects NaN).
+  const span = 1 - config.hostileShareThreshold;
   const confidence = detected
-    ? Math.min(
-        1,
-        (hostileShare - config.hostileShareThreshold) / (1 - config.hostileShareThreshold) + 0.5,
-      )
+    ? span <= 0
+      ? 1
+      : Math.min(1, Math.max(0, (hostileShare - config.hostileShareThreshold) / span + 0.5))
     : 0;
   return { detected, confidence, hostileShare };
 }

@@ -119,7 +119,7 @@ every build command; consult it before adding new scripts.
 
 **Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 9.15.4 (pinned
 in `package.json` `packageManager`), TypeScript 6.0.3, Vite 8.0.16,
-Biome 2.5.0.
+Biome 2.5.3.
 
 ## Pre-commit verification (mandatory)
 
@@ -183,7 +183,7 @@ licio/
 ├── tsconfig.base.json           -- base TypeScript config (shared settings)
 ├── vitest.config.ts             -- Vitest root run + cross-workspace coverage gate
 ├── vitest.shared.ts             -- per-project test settings SSOT (root + per-workspace)
-├── biome.json                   -- Biome linter/formatter (2.5.0)
+├── biome.json                   -- Biome linter/formatter (2.5.3)
 ├── lefthook.yml                 -- Git hooks
 ├── docker-compose.yml           -- local dev services (pgvector-enabled PostgreSQL, Redis;
 │                                   opt-in `llm` profile: loopback-only Ollama runtime)
@@ -1224,12 +1224,22 @@ preventing concurrent nonce sharing.  GETs bypass the chain.
 
 Exempt paths: `/health`, `/api/security/csp-report`, `/v1/telemetry`
 (sendBeacon cannot set custom headers), `/v1/takedowns` (public copyright
-intake — no session to ride), and the WS-R.12.4 native LCAP sync surface
-`/api/lcap/v2/{packs,pulse,exchange}` (device-certificate-authenticated
-content / public frontier reads with no session cookie; abuse bounded by
-each endpoint's own rate limit + the §27 caps + the graph guard).  The
-web-UI `/api/lcap/v2/bundles/import` alias is NOT exempt — a session-bearing
-browser flow keeps the double-submit token.
+intake — no session to ride), and the decentralized-plane surfaces, all of
+which are session-less (the request carries no cookie for CSRF to ride) and
+individually rate-limited: the WS-R.12.4 native LCAP sync surface
+`/api/lcap/v2/{packs,pulse,exchange}` (device-COSE-authenticated content /
+public frontier reads; abuse bounded by each endpoint's own rate limit + the
+§27 caps + the graph guard), the WS-R.15.6a server-blind WebRTC signaling
+rendezvous `/api/lcap/v2/p2p/signal{,/poll}` (opaque sealed blob to/from an
+opaque peer key), the §29.8 device-signed bundle export
+`/api/lcap/v2/bundles/export` (a device-signed `export_request` capability is
+the authentication), and the WS-S.6.6 server-blind Private P2P rendezvous
+`/v1/private-rendezvous/{announce,poll,signal,signal/poll}` (opaque blind
+ids + ciphertext under a short TTL).  The web-UI
+`/api/lcap/v2/bundles/import` alias is NOT exempt — a session-bearing browser
+flow keeps the double-submit token.  `/v1/auth/*` and `/v1/privacy/*` are
+token-exempt but STILL Origin-checked (they rely on `SameSite=Strict` + the
+opaque session model + a per-flow `login_attempt_id`).
 
 ### Cookie security
 

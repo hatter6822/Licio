@@ -19,7 +19,7 @@
 
 import { applyBalancing, type BalancingInput } from './diversify/balancing.js';
 import { applyMatroidDedup, type DedupInput } from './diversify/dedup.js';
-import { type Candidate, mergeCandidates } from './schemas/candidate.js';
+import { type Candidate, mergeCandidates, parseTimestampOrZero } from './schemas/candidate.js';
 import type { ConstraintApplication } from './schemas/decision-log.js';
 import { FEATURE_SCHEMA_VERSION, type FeatureVector } from './schemas/feature-vector.js';
 import type { RankingProfileConfig } from './schemas/profile.js';
@@ -166,7 +166,7 @@ function orderScored(
   return [...scored].sort(
     (a, b) =>
       b.item.pwatt_score - a.item.pwatt_score ||
-      Date.parse(b.features.created_at) - Date.parse(a.features.created_at) ||
+      parseTimestampOrZero(b.features.created_at) - parseTimestampOrZero(a.features.created_at) ||
       a.item.item_id.localeCompare(b.item.item_id),
   );
 }
@@ -292,7 +292,7 @@ export function emptyFeatureVector(candidate: Candidate, nowMs: number): Feature
 export function chronologicalOrder(candidates: readonly Candidate[]): Candidate[] {
   return [...candidates].sort(
     (a, b) =>
-      Date.parse(b.freshness_timestamp) - Date.parse(a.freshness_timestamp) ||
+      parseTimestampOrZero(b.freshness_timestamp) - parseTimestampOrZero(a.freshness_timestamp) ||
       a.item_id.localeCompare(b.item_id),
   );
 }
@@ -320,7 +320,7 @@ export function metricOrder(
   return [...candidates].sort(
     (a, b) =>
       metric(b) - metric(a) ||
-      Date.parse(b.freshness_timestamp) - Date.parse(a.freshness_timestamp) ||
+      parseTimestampOrZero(b.freshness_timestamp) - parseTimestampOrZero(a.freshness_timestamp) ||
       a.item_id.localeCompare(b.item_id),
   );
 }

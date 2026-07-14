@@ -8,9 +8,23 @@
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 
-/** A browser PushSubscription serialised to JSON for server registration. */
+/** A browser PushSubscription serialised to JSON for server registration.
+ *  The `endpoint` MUST be `https:` — the Web Push protocol (RFC 8030) mandates
+ *  it, and it is the registration-time half of the SSRF defense: it rejects a
+ *  client that registers an `http://<internal-host>` (or any non-https scheme)
+ *  before it can ever be stored and POSTed to. The send leg re-checks the
+ *  resolved address against the shared block ranges (`lib/ssrf-guard.ts`). */
 export const pushSubscriptionSchema = z.object({
-  endpoint: z.string().url(),
+  endpoint: z
+    .string()
+    .url()
+    .refine((value) => {
+      try {
+        return new URL(value).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }, 'push endpoint must be an https URL'),
   expirationTime: z.number().nullable().optional(),
   keys: z.object({
     p256dh: z.string().min(1),

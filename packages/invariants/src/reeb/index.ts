@@ -104,9 +104,14 @@ function sweep(
     return a < b ? a : b;
   };
 
-  const sortedNodes = [...nodes].sort((x, y) => y.value - x.value || x.id.localeCompare(y.id));
+  // Codepoint order, NOT localeCompare: this sweep fixes merge pairing and
+  // `connectingEdges` when ≥3 basins join, so its ordering must be deterministic
+  // across runtimes/ICU versions (the same rule cid/index.ts pins). ASCII ids
+  // are unaffected; non-ASCII ids would otherwise be locale-dependent.
+  const cp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  const sortedNodes = [...nodes].sort((x, y) => y.value - x.value || cp(x.id, y.id));
   const levels = [...new Set(sortedNodes.map((n) => n.value))].sort((a, b) => b - a);
-  const sortedEdges = [...edges].sort((x, y) => x.a.localeCompare(y.a) || x.b.localeCompare(y.b));
+  const sortedEdges = [...edges].sort((x, y) => cp(x.a, y.a) || cp(x.b, y.b));
 
   const active = new Set<string>();
   const peaks: Array<{ basin: string; level: number }> = [];

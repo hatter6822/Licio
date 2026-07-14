@@ -304,14 +304,23 @@ async function attentionVelocity(
     const start = Date.parse(row.timeWindow.start);
     if (Date.parse(row.timeWindow.end) - start !== spanMs) continue;
     if (start >= currentStart) continue;
-    if (
-      previous === null ||
-      start > Date.parse(previous.timeWindow.start) ||
-      (start === Date.parse(previous.timeWindow.start) &&
-        Date.parse(row.createdAt) > Date.parse(previous.createdAt))
-    ) {
-      previous = row;
+    // Pick the latest same-size window strictly before `current`, by window
+    // start, then creation time, then — for two revisions written in the same
+    // instant — the lexicographically greatest `version`. The last tie-break
+    // makes the choice REPLAY-STABLE independent of the store's row order
+    // (`listForTarget` carries no inherent ordering); `version` is part of the
+    // record's natural key, so it is distinct within a (target, type, window).
+    if (previous !== null) {
+      const prevStart = Date.parse(previous.timeWindow.start);
+      if (start < prevStart) continue;
+      if (start === prevStart) {
+        const created = Date.parse(row.createdAt);
+        const prevCreated = Date.parse(previous.createdAt);
+        if (created < prevCreated) continue;
+        if (created === prevCreated && row.version <= previous.version) continue;
+      }
     }
+    previous = row;
   }
   if (previous === null) return null;
   const previousAttention = num(previous.scoreVector['active_attention']);
