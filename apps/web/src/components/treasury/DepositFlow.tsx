@@ -19,7 +19,7 @@ import {
   type RoomTreasuryWire,
   type TransactionPreview,
 } from '@licio/shared';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import { useKnomosisManifestQuery, useWalletsQuery } from '../../lib/queries.js';
@@ -68,6 +68,11 @@ export function DepositFlow({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingSignature | null>(null);
+  // ONE idempotency key per (asset, amount) attempt: a retry after a lost
+  // create response must recover the SAME intent instead of minting a second
+  // allowance-consuming one.  Editing the amount/asset starts a new attempt;
+  // the key rotates only then or after a successful submit.
+  const attemptRef = useRef<{ asset: string; amount: string; key: string } | null>(null);
   const wallets = useWalletsQuery(true);
   const manifest = useKnomosisManifestQuery(treasury.deployment_id);
   const gate = useStepUpGate();
@@ -103,12 +108,16 @@ export function DepositFlow({
     }
     setBusy(true);
     try {
+      const attempt = attemptRef.current;
+      if (attempt === null || attempt.asset !== asset || attempt.amount !== minorUnits) {
+        attemptRef.current = { asset, amount: minorUnits, key: crypto.randomUUID() };
+      }
       const created = await createPaymentIntent(roomId, {
         target_type: 'treasury_deposit',
         target_id: treasury.treasury_id,
         asset,
         amount: minorUnits,
-        idempotency_key: crypto.randomUUID(),
+        idempotency_key: attemptRef.current?.key ?? crypto.randomUUID(),
       });
       await advancePaymentIntent(roomId, created.payment_intent_id, 'preflight');
       const quoted = await advancePaymentIntent(roomId, created.payment_intent_id, 'quote');
@@ -232,6 +241,7 @@ export function DepositFlow({
         submitted.action_record_id,
       );
       onIntentCreated(pending.paymentIntentId);
+      attemptRef.current = null; // the attempt completed — the next deposit is new
       setPending(null);
       setAmount('');
       setBusy(false);

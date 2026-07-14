@@ -272,6 +272,64 @@ describe('DepositFlow (WS-M.3.1)', () => {
     expect(mockCreateIntent).not.toHaveBeenCalled();
   });
 
+  it('reuses ONE idempotency key across retries of the same attempt (W5 review)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    // First submit: the create succeeds but the preflight advance dies — the
+    // classic lost-response window.
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockRejectedValueOnce(new ApiClientError('network', 'Connection lost.', 503));
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1.5');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    // The retry (same asset + amount) must REPLAY the same key: a fresh key
+    // would mint a second allowance-consuming intent.
+    mockAdvance.mockResolvedValueOnce({ execution_state: 'preflighted' }).mockResolvedValueOnce({
+      execution_state: 'quoted',
+      quote: { estimated_fee: '1000', quoted_at: '2026-07-01T00:00:00.000Z' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    expect(mockCreateIntent).toHaveBeenCalledTimes(2);
+    const bodies = mockCreateIntent.mock.calls.map(
+      (call) => call[1] as { idempotency_key: string },
+    );
+    expect(bodies[1]?.idempotency_key).toBe(bodies[0]?.idempotency_key);
+  });
+
+  it('rotates the idempotency key when the amount changes (new attempt)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockRejectedValue(new ApiClientError('network', 'Connection lost.', 503));
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1.5');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    // A DIFFERENT amount is a new attempt — replaying the old key would
+    // recover an intent for the wrong amount.
+    enterAmount('2.5');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() => expect(mockCreateIntent).toHaveBeenCalledTimes(2));
+    const bodies = mockCreateIntent.mock.calls.map(
+      (call) => call[1] as { idempotency_key: string },
+    );
+    expect(bodies[0]?.idempotency_key).toBeDefined();
+    expect(bodies[1]?.idempotency_key).not.toBe(bodies[0]?.idempotency_key);
+  });
+
   it('blocks the flow when deposits are paused', () => {
     render(
       <DepositFlow

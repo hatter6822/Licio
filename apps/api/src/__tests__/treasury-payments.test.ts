@@ -595,12 +595,14 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
     const deps = buildDeps();
     const treasury = await provisionTreasury(deps);
     await finalizedDeposit(deps, { amount: '100', withReceipt: true, withEvent: true });
-    // A RECENTLY finalized deposit whose receipt has not been written yet: the
-    // receipts source lags the ledger by 40 — explainable settlement lag.
+    // A RECENTLY finalized deposit whose INDEXED EVENT has not landed yet: the
+    // observed source lags the ledger by 40 — explainable settlement lag.
+    // (A missing RECEIPT can no longer reach finality at all: the sweep holds
+    // the intent at `confirmed` until the receipt row is visible.)
     const lagged = await finalizedDeposit(deps, {
       amount: '40',
-      withReceipt: false,
-      withEvent: true,
+      withReceipt: true,
+      withEvent: false,
     });
     const snapshots = await reconcileTreasury(deps, treasury.treasuryId);
     const usdc = snapshots.find((s) => s.asset === 'USDC');
@@ -616,9 +618,9 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
   it('an unexplained gap is divergent: alert + expansion block', async () => {
     const deps = buildDeps();
     const treasury = await provisionTreasury(deps);
-    // Finalized with NO receipt and NO indexed event; once the grace window
-    // passes with the linkage still missing, the gap has no explanation.
-    await finalizedDeposit(deps, { amount: '100', withReceipt: false, withEvent: false });
+    // Finalized whose indexed event NEVER lands; once the grace window passes
+    // with the linkage still missing, the gap has no explanation.
+    await finalizedDeposit(deps, { amount: '100', withReceipt: true, withEvent: false });
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.reconciliationIntervalMs + 60_000);
     const snapshots = await reconcileTreasury(deps, treasury.treasuryId);
     expect(snapshots.find((s) => s.asset === 'USDC')?.result).toBe('divergent');
@@ -648,6 +650,154 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
       usd_equivalent_at_event: null,
     });
     expect(result.export.excluded_unreconciled).toBe(0);
+  });
+
+  it('a zero NET gap with persistent missing linkage is divergent, not synced (W5 review)', async () => {
+    const deps = buildDeps();
+    const treasury = await provisionTreasury(deps);
+    // A deposit and a payout that OFFSET to zero — both finalized long ago
+    // with receipts but no indexed event ever landing.  The arithmetic gap is
+    // 0, the audit trail is not.
+    const staleIso = new Date(Date.parse('2026-07-13T00:00:00.000Z') - 86_400_000).toISOString();
+    const mkAction = async (): Promise<string> => {
+      const actionRecordId = crypto.randomUUID();
+      await deps.actions.insert({
+        actionRecordId,
+        deploymentId: DEPLOYMENT,
+        actionType: 'treasury_deposit' as KnomosisSignedActionType,
+        roomId: ROOM,
+        actorWalletAccountId: crypto.randomUUID(),
+        actorUserId: USER,
+        payloadHash: `0x${'1'.repeat(64)}`,
+        typedDataHash: `0x${'2'.repeat(64)}`,
+        signedAction: { message: {}, signature: '0xsig' },
+        submissionState: 'finalized' as SubmissionState,
+        failureReason: null,
+        indexedEventRef: null, // the event linkage NEVER landed
+        reconciliationState: 'pending',
+        idempotencyKey: crypto.randomUUID(),
+        createdAt: staleIso,
+        updatedAt: staleIso,
+      });
+      return actionRecordId;
+    };
+    const mkIntent = async (targetType: 'treasury_deposit' | 'grant_payout'): Promise<void> => {
+      await deps.intents.insert({
+        paymentIntentId: crypto.randomUUID(),
+        userId: USER,
+        roomId: ROOM,
+        treasuryId: treasury.treasuryId,
+        targetType,
+        targetId: treasury.treasuryId,
+        asset: 'USDC',
+        amount: '100',
+        jurisdictionState: 'allowed',
+        complianceState: 'cleared',
+        executionState: 'finalized',
+        retryCount: 0,
+        quoteRef: null,
+        actionRecordId: await mkAction(),
+        receiptId: crypto.randomUUID(),
+        idempotencyKey: crypto.randomUUID(),
+        expiresAt: staleIso,
+        createdAt: staleIso,
+        updatedAt: staleIso,
+      });
+    };
+    await mkIntent('treasury_deposit');
+    await mkIntent('grant_payout');
+    const snapshots = await reconcileTreasury(deps, treasury.treasuryId);
+    const usdc = snapshots.find((s) => s.asset === 'USDC');
+    expect(usdc?.gap).toBe('0');
+    expect(usdc?.result).toBe('divergent');
+    expect((await deps.treasuries.getById(treasury.treasuryId))?.reconciliationState).toBe(
+      'divergent',
+    );
+  });
+
+  it('the reconcile sweep reaches live work behind a full page of stuck intents (W5 review)', async () => {
+    const deps = buildDeps();
+    const treasury = await provisionTreasury(deps);
+    const nowIso = new Date().toISOString();
+    // 250 stuck submitted rows with LOW ids fill the first keyset page…
+    for (let i = 0; i < 250; i += 1) {
+      await deps.intents.insert({
+        paymentIntentId: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+        userId: USER,
+        roomId: ROOM,
+        treasuryId: treasury.treasuryId,
+        targetType: 'treasury_deposit',
+        targetId: treasury.treasuryId,
+        asset: 'USDC',
+        amount: '1',
+        jurisdictionState: 'allowed',
+        complianceState: 'cleared',
+        executionState: 'submitted',
+        retryCount: 0,
+        quoteRef: null,
+        actionRecordId: null, // cannot advance — permanently stuck
+        receiptId: null,
+        idempotencyKey: crypto.randomUUID(),
+        expiresAt: nowIso,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    }
+    // …and one LIVE intent (finalized action + receipt) hides behind them.
+    const actionRecordId = crypto.randomUUID();
+    await deps.actions.insert({
+      actionRecordId,
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: { message: {}, signature: '0xsig' },
+      submissionState: 'finalized' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: 'evt-1',
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await deps.receipts.upsert({
+      receiptId: crypto.randomUUID(),
+      actionRecordId,
+      kind: 'public',
+      payload: {},
+      summaryPayloadHash: `0x${'3'.repeat(64)}`,
+      ownerUserId: null,
+      finalState: 'finalized',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    const liveId = `ffffffff-ffff-4fff-8fff-${'f'.repeat(12)}`;
+    await deps.intents.insert({
+      paymentIntentId: liveId,
+      userId: USER,
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '5',
+      jurisdictionState: 'allowed',
+      complianceState: 'cleared',
+      executionState: 'submitted',
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId,
+      receiptId: null,
+      idempotencyKey: crypto.randomUUID(),
+      expiresAt: nowIso,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(liveId))?.executionState).toBe('finalized');
   });
 });
 
@@ -813,13 +963,18 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
     await preflightIntent(deps, intentId, USER);
     await quoteIntent(deps, intentId, USER);
     await markIntentSigned(deps, intentId, USER);
+    // The payout intent is ROOM-owned: acceptance by one steward must not
+    // pin the lifecycle to them (W5 review — steward handoff).
+    expect((await deps.intents.getById(intentId))?.userId).toBeNull();
     const action: KnomosisActionRecordEntity = {
       actionRecordId: crypto.randomUUID(),
       deploymentId: DEPLOYMENT,
       actionType: 'grant_payout' as KnomosisSignedActionType,
       roomId: ROOM,
       actorWalletAccountId: crypto.randomUUID(),
-      actorUserId: USER,
+      // A DIFFERENT steward executes the on-chain payout than the one who
+      // accepted the milestone — the attach must still bind.
+      actorUserId: OTHER,
       payloadHash: `0x${'1'.repeat(64)}`,
       typedDataHash: `0x${'2'.repeat(64)}`,
       signedAction: {
@@ -837,6 +992,23 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
     await deps.actions.insert(action);
     const attached = await attachIntentSubmission(deps, intentId, action.actionRecordId, USER);
     expect(attached).toMatchObject({ ok: true });
+    // Finality WAITS for the receipt: with the action finalized but no receipt
+    // row visible yet, the sweep holds the intent at `confirmed` (a finalized
+    // intent leaves the working set, so a missing receipt would never attach).
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(intentId))?.executionState).toBe('confirmed');
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('scheduled');
+    await deps.receipts.upsert({
+      receiptId: crypto.randomUUID(),
+      actionRecordId: action.actionRecordId,
+      kind: 'public',
+      payload: {},
+      summaryPayloadHash: `0x${'3'.repeat(64)}`,
+      ownerUserId: null,
+      finalState: 'finalized',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
     await reconcileIntents(deps);
     expect((await deps.intents.getById(intentId))?.executionState).toBe('finalized');
     // Reconciliation — not scheduling — declares the grant paid.

@@ -575,6 +575,13 @@
       "idx": 81,
       "when": 1783728000006,
       "tag": "0082_ws_m_treasury_and_governance"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 82,
+      "when": 1783728000007,
+      "tag": "0083_ws_m_room_owned_intent_idempotency"
     }
   ]
 }

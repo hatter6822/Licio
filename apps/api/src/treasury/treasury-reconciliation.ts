@@ -142,7 +142,11 @@ export async function reconcileTreasury(
 
     let result: SnapshotRecord['result'];
     let explanation: Record<string, unknown> | null = null;
-    if (decCompare(gap, 0) === 0) {
+    // A zero NET gap is not enough: old finalized movements whose receipt/
+    // event linkage never arrived can offset each other to zero while the
+    // audit trail stays incomplete (WS-L.3.4a) — any persistent missing
+    // linkage blocks `synced` regardless of the arithmetic.
+    if (decCompare(gap, 0) === 0 && !persistentGap) {
       result = 'synced';
     } else if (
       !persistentGap &&

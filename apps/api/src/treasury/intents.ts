@@ -77,7 +77,9 @@ const ALLOWANCE_STATES: ReadonlySet<PaymentIntentState> = new Set([
 ]);
 
 export interface CreateIntentInput {
-  userId: string;
+  /** null = ROOM-owned (grant/compensation payouts): idempotency scopes to
+   *  (room, key) and any room steward may drive the lifecycle. */
+  userId: string | null;
   roomId: string;
   targetType: PaymentTargetType;
   targetId: string;
@@ -122,6 +124,11 @@ export async function createPaymentIntent(
   deps: IntentDeps,
   input: CreateIntentInput,
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord; existing: boolean }> {
+  // Deposits are MEMBER actions — the per-user allowance math is meaningless
+  // without an owner, so a room-owned deposit intent cannot exist.
+  if (input.userId === null && DEPOSIT_TARGETS.has(input.targetType)) {
+    return tgErr(400, 'owner_required', 'Deposit-class intents require an owning member.');
+  }
   // Idempotency FIRST — even before the mutable gates: a replay of an
   // ALREADY-CREATED intent has no new side effects, so a freeze/kill-switch/
   // asset-policy change landing after the original create must not hide the
@@ -137,7 +144,8 @@ export async function createPaymentIntent(
   const guard = await assertGovernanceWritable(deps, input.roomId, operation);
   if (guard !== null) return guard;
 
-  const region = await deps.regionResolver.regionForUser(input.userId);
+  const region =
+    input.userId === null ? null : await deps.regionResolver.regionForUser(input.userId);
   const killSwitch = await killSwitchDecision(deps.configStore, 'payment_intent_creation', {
     roomId: input.roomId,
     region,
@@ -153,6 +161,10 @@ export async function createPaymentIntent(
   }
 
   if (DEPOSIT_TARGETS.has(input.targetType)) {
+    if (input.userId === null) {
+      // Unreachable (guarded at the top) — restated here for the narrowing.
+      return tgErr(400, 'owner_required', 'Deposit-class intents require an owning member.');
+    }
     // WS-M.2.2a deposit limits: single, per-user-period, per-room-period.
     if (decCompare(input.amount, treasury.depositLimits.perDepositMax) > 0) {
       return tgErr(
@@ -319,8 +331,14 @@ export async function preflightIntent(
   const deployment = pinnedDeployment(treasury.deploymentId);
   const realFunds = deployment !== undefined && REAL_FUNDS_ENVIRONMENTS.has(deployment.environment);
 
-  const region = await deps.regionResolver.regionForUser(actorUserId);
-  const jurisdiction = await deps.compliance.jurisdiction({ userId: actorUserId, region });
+  // Jurisdiction binds the intent's OWNER, not whoever drives the lifecycle:
+  // a steward preflighting a member's deposit must evaluate the MEMBER's
+  // region, or an allowed steward could clear an intent for a blocked-region
+  // member.  Room-owned payouts (null owner) evaluate the acting steward —
+  // the party actually executing the on-chain movement.
+  const subjectUserId = intent.userId ?? actorUserId;
+  const region = await deps.regionResolver.regionForUser(subjectUserId);
+  const jurisdiction = await deps.compliance.jurisdiction({ userId: subjectUserId, region });
   if (jurisdiction === 'blocked') {
     return tgErr(403, 'jurisdiction_blocked', 'This feature is not available in your region.');
   }
@@ -461,10 +479,13 @@ export async function attachIntentSubmission(
   if (guard !== null) return guard;
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
+  // Member-owned intents bind the action's ACTOR to the owner; room-owned
+  // intents (null owner: grant/compensation payouts) accept any steward's
+  // signed action — the route enforces stewardship, and the room + type +
+  // amount/asset + signed-target bindings below still hold in full.
   if (
     action.roomId !== intent.roomId ||
-    intent.userId === null ||
-    action.actorUserId !== intent.userId ||
+    (intent.userId !== null && action.actorUserId !== intent.userId) ||
     action.actionType !== ACTION_TYPE_FOR_TARGET[intent.targetType]
   ) {
     return tgErr(422, 'action_mismatch', 'The action record does not belong to this intent.');
@@ -536,50 +557,68 @@ function mapActionState(
  * (`deposit_recorded`) — the dashboard balance itself moves only when the
  * treasury reconciliation worker republishes the snapshot (WS-M.2.2c).
  */
-export async function reconcileIntents(deps: IntentDeps, limit = 200): Promise<number> {
-  const candidates = await deps.intents.listByStates(['submitted', 'pending', 'confirmed'], limit);
+export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promise<number> {
   let advanced = 0;
-  for (const intent of candidates) {
-    if (intent.actionRecordId === null) continue;
-    const action = await deps.actions.getById(intent.actionRecordId);
-    if (action === null) continue;
-    // Walk as many implied transitions as the action state supports (e.g. a
-    // submitted intent whose action already finalized: submitted→pending→
-    // confirmed→finalized in one sweep pass).
-    let current = intent;
-    for (;;) {
-      const next = mapActionState(current.executionState, action.submissionState);
-      if (next === null) break;
-      const patch: Parameters<PaymentIntentStore['transition']>[3] = {};
-      if (next === 'finalized') {
-        const receipt = await deps.receipts.getByAction(action.actionRecordId, 'public');
-        if (receipt !== null) patch.receiptId = receipt.receiptId;
+  let afterId: string | null = null;
+  // Keyset pages over EVERY reconcilable intent: a fixed first-N slice would
+  // let long-lived stuck rows starve later intents whose actions have
+  // finalized, freezing deposits and payouts short of ledger finality.
+  for (;;) {
+    const candidates = await deps.intents.listByStates(
+      ['submitted', 'pending', 'confirmed'],
+      pageSize,
+      afterId,
+    );
+    if (candidates.length === 0) break;
+    afterId = candidates[candidates.length - 1]?.paymentIntentId ?? null;
+    for (const intent of candidates) {
+      if (intent.actionRecordId === null) continue;
+      const action = await deps.actions.getById(intent.actionRecordId);
+      if (action === null) continue;
+      // Walk as many implied transitions as the action state supports (e.g. a
+      // submitted intent whose action already finalized: submitted→pending→
+      // confirmed→finalized in one sweep pass).
+      let current = intent;
+      for (;;) {
+        const next = mapActionState(current.executionState, action.submissionState);
+        if (next === null) break;
+        const patch: Parameters<PaymentIntentStore['transition']>[3] = {};
+        if (next === 'finalized') {
+          const receipt = await deps.receipts.getByAction(action.actionRecordId, 'public');
+          // Finality REQUIRES the receipt: a finalized intent leaves the sweep's
+          // working set, so finalizing before the receipt row is visible would
+          // orphan the linkage forever (a permanent missing receipt in every
+          // reconciliation).  Hold at `confirmed`; the next sweep attaches it.
+          if (receipt === null) break;
+          patch.receiptId = receipt.receiptId;
+        }
+        const updated = await transitionIntent(deps, current, next, patch, null);
+        if (updated === null) break;
+        advanced += 1;
+        if (next === 'finalized' && DEPOSIT_TARGETS.has(updated.targetType)) {
+          await appendChainedAudit(deps, {
+            roomId: updated.roomId,
+            actionType: 'deposit_recorded',
+            actorUserId: updated.userId,
+            details: {
+              payment_intent_id: updated.paymentIntentId,
+              asset: updated.asset,
+              amount: updated.amount,
+              receipt_id: updated.receiptId,
+            },
+            treasuryId: updated.treasuryId,
+          });
+        }
+        if (
+          next === 'finalized' &&
+          (updated.targetType === 'grant_payout' || updated.targetType === 'steward_compensation')
+        ) {
+          await settleGrantPayout(deps, updated);
+        }
+        current = updated;
       }
-      const updated = await transitionIntent(deps, current, next, patch, null);
-      if (updated === null) break;
-      advanced += 1;
-      if (next === 'finalized' && DEPOSIT_TARGETS.has(updated.targetType)) {
-        await appendChainedAudit(deps, {
-          roomId: updated.roomId,
-          actionType: 'deposit_recorded',
-          actorUserId: updated.userId,
-          details: {
-            payment_intent_id: updated.paymentIntentId,
-            asset: updated.asset,
-            amount: updated.amount,
-            receipt_id: updated.receiptId,
-          },
-          treasuryId: updated.treasuryId,
-        });
-      }
-      if (
-        next === 'finalized' &&
-        (updated.targetType === 'grant_payout' || updated.targetType === 'steward_compensation')
-      ) {
-        await settleGrantPayout(deps, updated);
-      }
-      current = updated;
     }
+    if (candidates.length < pageSize) break;
   }
   return advanced;
 }

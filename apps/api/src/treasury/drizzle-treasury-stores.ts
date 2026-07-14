@@ -21,7 +21,7 @@ import {
   treasuryReservations,
 } from '@licio/db';
 import type { PauseFlags, PaymentIntentState } from '@licio/shared';
-import { and, asc, desc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import type {
   ActionBudgetRecord,
   ActionBudgetStore,
@@ -497,7 +497,7 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
   }
 
   async findByIdempotencyKey(
-    userId: string,
+    userId: string | null,
     roomId: string,
     idempotencyKey: string,
   ): Promise<PaymentIntentRecord | null> {
@@ -506,7 +506,7 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
       .from(paymentIntents)
       .where(
         and(
-          eq(paymentIntents.userId, userId),
+          userId === null ? isNull(paymentIntents.userId) : eq(paymentIntents.userId, userId),
           eq(paymentIntents.roomId, roomId),
           eq(paymentIntents.idempotencyKey, idempotencyKey),
         ),
@@ -549,7 +549,10 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
       });
       return record;
     } catch (error) {
-      if (isUniqueViolation(error) && record.userId !== null) {
+      // Both idempotency scopes collide here: (user, room, key) via the
+      // member unique index, (room, key) via the room-owned partial index
+      // (migration 0083) — either way the EXISTING row is the answer.
+      if (isUniqueViolation(error)) {
         const existing = await this.findByIdempotencyKey(
           record.userId,
           record.roomId,
@@ -655,11 +658,18 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
   async listByStates(
     states: readonly PaymentIntentState[],
     limit: number,
+    afterId: string | null = null,
   ): Promise<PaymentIntentRecord[]> {
     const rows = await this.db
       .select()
       .from(paymentIntents)
-      .where(inArray(paymentIntents.executionState, [...states]))
+      .where(
+        and(
+          inArray(paymentIntents.executionState, [...states]),
+          afterId === null ? undefined : gt(paymentIntents.paymentIntentId, afterId),
+        ),
+      )
+      .orderBy(asc(paymentIntents.paymentIntentId))
       .limit(limit);
     return rows.map(mapIntent);
   }

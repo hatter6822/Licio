@@ -167,6 +167,11 @@ export async function updateGrantMilestone(
   if (grant === null || grant.roomId !== input.roomId) {
     return tgErr(404, 'not_found', 'Resource not found');
   }
+  // A clawed-back grant is DEAD: no milestone may advance (least of all to
+  // `accepted`, which would mint a fresh payout intent past the clawback).
+  if (grant.payoutState === 'clawed_back') {
+    return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; milestones are closed.');
+  }
   const milestone = grant.milestones.find((m) => m.milestoneId === input.milestoneId);
   if (milestone === undefined) return tgErr(404, 'not_found', 'Unknown milestone.');
   const legal: Record<string, readonly string[]> = {
@@ -191,7 +196,12 @@ export async function updateGrantMilestone(
   let paymentIntentId = milestone.paymentIntentId;
   if (input.state === 'accepted') {
     const intent = await createPaymentIntent(deps, {
-      userId: input.actorUserId,
+      // ROOM-owned: the payout belongs to the treasury, not to whichever
+      // steward happened to accept the milestone.  A null owner makes the
+      // milestone-keyed idempotency hold ACROSS stewards (two stewards
+      // accepting race to ONE intent) and lets a different steward attach
+      // the signed payout action later (no per-user actor binding).
+      userId: null,
       roomId: input.roomId,
       targetType: 'grant_payout',
       targetId: grant.grantId,
@@ -227,7 +237,7 @@ export async function updateGrantMilestone(
     ...grant,
     milestones,
     milestoneState: aggregate,
-    payoutState: grant.payoutState === 'clawed_back' ? 'clawed_back' : payoutState,
+    payoutState,
   });
   if (updated === null) return tgErr(404, 'not_found', 'Resource not found');
   await appendChainedAudit(deps, {

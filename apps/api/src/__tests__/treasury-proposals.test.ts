@@ -617,6 +617,34 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
       await createProductionProposal(deps, { roomId: ROOM, userId: PROPOSER, create: draft() }),
     ).toMatchObject({ ok: true });
   });
+
+  it('a frozen room cannot adopt a different law-pack (W5 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const second = await registerLawPack(deps, {
+      roomId: ROOM,
+      document: fullLawPack({ version: '1.1.0' }),
+      fixtures: null,
+      actorUserId: STEWARD,
+    });
+    if (!('record' in second)) throw new Error(JSON.stringify(second));
+    const profile = await deps.profiles.get(ROOM);
+    if (profile === null) throw new Error('profile missing');
+    await deps.profiles.upsert({
+      ...profile,
+      freezeState: 'frozen',
+      freezeReason: 'Emergency review.',
+    });
+    // Swapping the active quorum/threshold/timelock rules is a configuration
+    // mutation — frozen rooms refuse it like charter publishing.
+    expect(
+      await adoptLawPack(deps, {
+        roomId: ROOM,
+        lawPackId: second.record.lawPackId,
+        actorUserId: STEWARD,
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
 });
 
 describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
@@ -875,6 +903,133 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
       await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
     ).toMatchObject({ ok: false, code: 'wallet_cooling_off' });
   });
+
+  it('treasury-RULE proposals are treasury-controlling: cooling-off applies (W5 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      allowedProposalTypes: ['capped_grant', 'charter_update', 'treasury_policy_update'],
+      quorumRules: {
+        capped_grant: { basis: 'eligible_voters', minFraction: 0.2 },
+        charter_update: { basis: 'eligible_voters', minFraction: 0.2 },
+        treasury_policy_update: { basis: 'eligible_voters', minFraction: 0.2 },
+      },
+      thresholdRules: {
+        capped_grant: { minAffirmativeFraction: 0.5 },
+        charter_update: { minAffirmativeFraction: 0.5 },
+        treasury_policy_update: { minAffirmativeFraction: 0.5 },
+      },
+      timelockRules: {
+        capped_grant: { seconds: 3_600 },
+        charter_update: { seconds: 3_600 },
+        treasury_policy_update: { seconds: 3_600 },
+      },
+    });
+    // Steward-only type; carries NO spend category — before the fix a fresh
+    // wallet could vote to rewrite the treasury's rules.
+    const created = await createProductionProposal(deps, {
+      roomId: ROOM,
+      userId: STEWARD,
+      create: draft({
+        proposal_type: 'treasury_policy_update',
+        category: null,
+        requested_amount: null,
+        asset: null,
+        recipient_ref: null,
+        requested_action: { kind: 'law_pack_upgrade' },
+      }),
+    });
+    if (!('proposal' in created)) throw new Error(JSON.stringify(created));
+    await openVoting(deps);
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address, 1); // 1d < 7d cooling-off
+    expect(
+      await castVote(deps, created.proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'wallet_cooling_off' });
+  });
+
+  it('the grant RECIPIENT is recused from their own payout vote (W5 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, {
+      coiRequirements: {
+        disclosureTriggers: ['financial relationship'],
+        recusalRequired: true,
+        independentReviewFor: ['capped_grant'],
+      },
+    });
+    const proposal = await createProposal(deps, { recipient_ref: `user:${VOTER_2}` });
+    await openVoting(deps);
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    // The member being PAID cannot weigh in on paying themselves.
+    expect(
+      await castVote(deps, proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'coi_recusal' });
+  });
+
+  it('one delegator contributes ONE delegated weight even with two matching scopes (W5 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    // PROPOSER holds BOTH an all-scope and a type-scope delegation to VOTER_2:
+    // without the dedup the same delegator would double-boost the ballot.
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { proposal_type: 'capped_grant' },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    expect(vote.signature.weightSnapshot).toBe('2'); // own 1 + PROPOSER once
+  });
+
+  it('a delegator who already voted keeps their ballot out of the delegate weight (W5 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    await linkWallet(deps, WALLET_2, PROPOSER, testAccount2.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    // The delegator votes THEMSELVES first — their weight is spent.
+    const own = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_2,
+      testAccount2,
+      'reject',
+    );
+    if (!('signature' in own)) throw new Error(JSON.stringify(own));
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    expect(vote.signature.weightSnapshot).toBe('1'); // own only — no double-count
+  });
 });
 
 describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
@@ -1116,6 +1271,53 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     await settleDueProposals(deps, ROOM);
     expect((await deps.proposals.getById(settled.proposalId))?.executionState).toBe('expired');
     expect((await deps.reservations.getByProposal(settled.proposalId))?.state).toBe('released');
+  });
+
+  it('a disposed challenge is immutable: no re-resolution, no late escalation (W5 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const settled = await passProposal(deps);
+    const filed = await fileChallenge(deps, {
+      roomId: ROOM,
+      proposalId: settled.proposalId,
+      userId: VOTER_2,
+      challengeType: 'coi',
+      description: 'Undisclosed conflict.',
+      evidenceRefs: [],
+    });
+    if ('code' in filed) throw new Error(filed.message);
+    const dismissed = await resolveChallenge(deps, {
+      roomId: ROOM,
+      challengeId: filed.challenge.challengeId,
+      resolution: 'dismissed',
+      resolutionNote: 'No conflict found.',
+      actorUserId: STEWARD,
+      isPlatformStaff: false,
+    });
+    expect(dismissed).toMatchObject({ ok: true });
+    // Replaying a resolve against the DISMISSED record must not rewrite the
+    // disposition (dismissed → upheld would retro-block an executed proposal).
+    expect(
+      await resolveChallenge(deps, {
+        roomId: ROOM,
+        challengeId: filed.challenge.challengeId,
+        resolution: 'upheld',
+        resolutionNote: 'Changed my mind.',
+        actorUserId: STEWARD,
+        isPlatformStaff: true,
+      }),
+    ).toMatchObject({ ok: false, code: 'already_resolved' });
+    // And a disposed challenge cannot be escalated either.
+    expect(
+      await resolveChallenge(deps, {
+        roomId: ROOM,
+        challengeId: filed.challenge.challengeId,
+        resolution: 'escalated',
+        resolutionNote: 'Too late.',
+        actorUserId: STEWARD,
+        isPlatformStaff: false,
+      }),
+    ).toMatchObject({ ok: false, code: 'already_resolved' });
   });
 });
 

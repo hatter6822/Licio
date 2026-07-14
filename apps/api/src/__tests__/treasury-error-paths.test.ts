@@ -11,10 +11,11 @@ import { randomUUID } from 'node:crypto';
 import type { TreasuryBounds } from '@licio/governance';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
+import { chargeRoomActionBudget, refundActionBudget } from '../treasury/budgets.js';
 import { createDelegation, revokeDelegation } from '../treasury/delegations.js';
 import { buildAccountingExport } from '../treasury/export.js';
-import { setGrantReview } from '../treasury/grants.js';
-import { createPaymentIntent, retryIntent } from '../treasury/intents.js';
+import { markGrantClawedBack, setGrantReview, updateGrantMilestone } from '../treasury/grants.js';
+import { createPaymentIntent, preflightIntent, retryIntent } from '../treasury/intents.js';
 import {
   assertGovernanceWritable,
   ensureProfile,
@@ -1276,5 +1277,200 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
       isPlatformStaff: false,
     });
     expect(accepted).toMatchObject({ ok: true });
+  });
+});
+
+describe('fifth review wave (PR #144): clawback, freezes, CAS tokens, owner preflight', () => {
+  it('a clawed-back grant refuses every milestone update', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services);
+    const milestoneId = randomUUID();
+    const grant = await services.grants.insert({
+      grantId: randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: randomUUID(),
+      recipientRef: `user:${OTHER}`,
+      purpose: 'Translation sprint',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [
+        {
+          milestoneId,
+          description: 'All',
+          amount: '100',
+          state: 'submitted',
+          paymentIntentId: null,
+        },
+      ],
+      milestoneState: 'submitted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    const clawed = await markGrantClawedBack(services, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      actorUserId: USER,
+      note: 'Upheld dispute.',
+    });
+    expect(clawed).toMatchObject({ ok: true });
+    // Acceptance after clawback would mint a fresh payout intent past the
+    // reversal — every milestone transition is closed.
+    expect(
+      await updateGrantMilestone(services, {
+        roomId: ROOM,
+        grantId: grant.grantId,
+        milestoneId,
+        state: 'accepted',
+        actorUserId: USER,
+      }),
+    ).toMatchObject({ ok: false, code: 'grant_clawed_back' });
+  });
+
+  it('a frozen room refuses NEW delegations but still allows revocation', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const created = await createDelegation(services, {
+      roomId: ROOM,
+      delegatorUserId: USER,
+      delegateUserId: OTHER,
+      scope: { all: true },
+    });
+    if ('code' in created) throw new Error(created.message);
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Emergency review.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    expect(
+      await createDelegation(services, {
+        roomId: ROOM,
+        delegatorUserId: OTHER,
+        delegateUserId: USER,
+        scope: { all: true },
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+    // Withdrawing power stays open under a freeze.
+    expect(
+      await revokeDelegation(services, {
+        roomId: ROOM,
+        delegationId: created.delegation.delegationId,
+        actorUserId: USER,
+        isPlatformStaff: false,
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('every budget write advances the CAS token, even inside one millisecond', async () => {
+    const services = await wsmServices();
+    const frozenNow = Date.now();
+    const deps = { ...services, now: () => frozenNow };
+    const rules = {
+      costs: { proposal_submission: 2 },
+      refill: { periodSeconds: 86_400, units: 0, max: 10 },
+    };
+    const first = await chargeRoomActionBudget(deps, {
+      roomId: ROOM,
+      userId: USER,
+      actionType: 'proposal_submission',
+      rules,
+    });
+    expect(first).toMatchObject({ ok: true, remaining: 8 });
+    const afterFirst = await services.budgets.get(ROOM, `user:${USER}`);
+    // Same-millisecond second charge: the token must STILL move, or a stale
+    // concurrent writer could re-satisfy the compare and double-spend.
+    const second = await chargeRoomActionBudget(deps, {
+      roomId: ROOM,
+      userId: USER,
+      actionType: 'proposal_submission',
+      rules,
+    });
+    expect(second).toMatchObject({ ok: true, remaining: 6 });
+    const afterSecond = await services.budgets.get(ROOM, `user:${USER}`);
+    expect(afterSecond?.updatedAt).not.toBe(afterFirst?.updatedAt);
+    expect(Date.parse(afterSecond?.updatedAt ?? '')).toBeGreaterThan(
+      Date.parse(afterFirst?.updatedAt ?? ''),
+    );
+    // The refund advances it too, capped at the refill max.
+    await refundActionBudget(deps, { roomId: ROOM, userId: USER, units: 99, rules });
+    const afterRefund = await services.budgets.get(ROOM, `user:${USER}`);
+    expect(afterRefund?.availableUnits).toBe(10);
+    expect(Date.parse(afterRefund?.updatedAt ?? '')).toBeGreaterThan(
+      Date.parse(afterSecond?.updatedAt ?? ''),
+    );
+  });
+
+  it('preflight evaluates the intent OWNER, not the steward driving it', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const created = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '50',
+      idempotencyKey: randomUUID(),
+    });
+    if ('code' in created) throw new Error(created.message);
+    // The OWNER's region is blocked; the steward's is fine.  A steward-driven
+    // preflight must still evaluate the member the money belongs to.
+    const deps = {
+      ...services,
+      compliance: {
+        ...services.compliance,
+        jurisdiction: async ({ userId }: { userId: string; region: string | null }) =>
+          userId === USER ? ('blocked' as const) : ('allowed' as const),
+      },
+    };
+    expect(await preflightIntent(deps, created.intent.paymentIntentId, OTHER)).toMatchObject({
+      ok: false,
+      code: 'jurisdiction_blocked',
+    });
+  });
+
+  it('room-owned intents (null owner) are idempotent per (room, key)', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    await provisionTreasury(services);
+    const key = randomUUID();
+    const make = () =>
+      createPaymentIntent(services, {
+        userId: null,
+        roomId: ROOM,
+        targetType: 'grant_payout',
+        targetId: randomUUID(),
+        asset: 'USDC',
+        amount: '10',
+        idempotencyKey: key,
+      });
+    const first = await make();
+    if ('code' in first) throw new Error(first.message);
+    expect(first.intent.userId).toBeNull();
+    // A second steward accepting the same milestone converges on ONE intent.
+    const replay = await make();
+    if ('code' in replay) throw new Error(replay.message);
+    expect(replay.existing).toBe(true);
+    expect(replay.intent.paymentIntentId).toBe(first.intent.paymentIntentId);
+    // Deposits stay member-owned: a null-owner deposit is a contract error.
+    expect(
+      await createPaymentIntent(services, {
+        userId: null,
+        roomId: ROOM,
+        targetType: 'treasury_deposit',
+        targetId: randomUUID(),
+        asset: 'USDC',
+        amount: '10',
+        idempotencyKey: randomUUID(),
+      }),
+    ).toMatchObject({ ok: false, code: 'owner_required' });
   });
 });

@@ -9,10 +9,15 @@
 
 import type { DelegationCreateRequest } from '@licio/shared';
 import { type AuditChainDeps, appendChainedAudit } from './audit-chain.js';
-import { type TreasuryGovernanceError, tgErr } from './profile.js';
+import {
+  assertGovernanceWritable,
+  type ProfileDeps,
+  type TreasuryGovernanceError,
+  tgErr,
+} from './profile.js';
 import type { DelegationRecordEntity, DelegationStore } from './stores.js';
 
-export interface DelegationDeps extends AuditChainDeps {
+export interface DelegationDeps extends AuditChainDeps, ProfileDeps {
   delegations: DelegationStore;
 }
 
@@ -32,6 +37,11 @@ export async function createDelegation(
   if (input.delegatorUserId === input.delegateUserId) {
     return tgErr(400, 'self_delegation', 'You cannot delegate your vote to yourself.');
   }
+  // A frozen room pauses every other WS-M voting/configuration mutation —
+  // shifting future voting power mid-review must pause with them.  Revocation
+  // stays open (withdrawing power is always allowed).
+  const writable = await assertGovernanceWritable(deps, input.roomId, 'voting');
+  if (writable !== null) return writable;
   const record: DelegationRecordEntity = {
     delegationId: deps.uuid(),
     roomId: input.roomId,
@@ -92,7 +102,13 @@ export async function revokeDelegation(
   return { ok: true, delegation: revoked };
 }
 
-/** Active incoming delegations that match a proposal type (`all` or `type:x`). */
+/**
+ * Active incoming delegations that match a proposal type — ONE effective
+ * delegation per delegator.  A member holding both an `all` and a matching
+ * `type:x` delegation contributes a single delegated weight (the
+ * type-specific scope wins as the more explicit instruction); without the
+ * dedup one delegator would double-boost the same ballot.
+ */
 export async function incomingDelegationsFor(
   delegations: DelegationStore,
   roomId: string,
@@ -100,5 +116,16 @@ export async function incomingDelegationsFor(
   proposalType: string,
 ): Promise<DelegationRecordEntity[]> {
   const active = await delegations.listActiveByDelegate(roomId, delegateUserId);
-  return active.filter((d) => d.scopeKey === 'all' || d.scopeKey === `type:${proposalType}`);
+  const matching = active.filter(
+    (d) => d.scopeKey === 'all' || d.scopeKey === `type:${proposalType}`,
+  );
+  const effective = new Map<string, DelegationRecordEntity>();
+  for (const delegation of matching) {
+    const key = delegation.delegatorUserId ?? delegation.delegationId;
+    const held = effective.get(key);
+    if (held === undefined || (held.scopeKey === 'all' && delegation.scopeKey !== 'all')) {
+      effective.set(key, delegation);
+    }
+  }
+  return [...effective.values()];
 }

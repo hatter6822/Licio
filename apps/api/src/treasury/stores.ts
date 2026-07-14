@@ -274,8 +274,10 @@ export interface ReservationStore {
 
 export interface PaymentIntentStore {
   getById(paymentIntentId: string): Promise<PaymentIntentRecord | null>;
+  /** null userId = the ROOM-owned scope (grant/compensation payouts):
+   *  idempotency is (room, key) so retries and steward handoffs converge. */
   findByIdempotencyKey(
-    userId: string,
+    userId: string | null,
     roomId: string,
     idempotencyKey: string,
   ): Promise<PaymentIntentRecord | null>;
@@ -319,10 +321,13 @@ export interface PaymentIntentStore {
   listDepositsInPeriod(roomId: string, sinceIso: string): Promise<PaymentIntentRecord[]>;
   /** Timed-out pre-submission intents for the expiry sweep (WS-M.3.1b). */
   listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]>;
-  /** Post-submission intents to reconcile against their action records. */
+  /** Post-submission intents to reconcile against their action records —
+   *  keyset-paged (paymentIntentId ascending) so a stuck first slice can
+   *  never starve later reconcilable rows. */
   listByStates(
     states: readonly PaymentIntentState[],
     limit: number,
+    afterId?: string | null,
   ): Promise<PaymentIntentRecord[]>;
   clear(): Promise<void>;
 }
@@ -584,7 +589,7 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   }
 
   async findByIdempotencyKey(
-    userId: string,
+    userId: string | null,
     roomId: string,
     idempotencyKey: string,
   ): Promise<PaymentIntentRecord | null> {
@@ -604,14 +609,14 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   }
 
   async insert(record: PaymentIntentRecord): Promise<PaymentIntentRecord> {
-    if (record.userId !== null) {
-      const existing = await this.findByIdempotencyKey(
-        record.userId,
-        record.roomId,
-        record.idempotencyKey,
-      );
-      if (existing !== null) return existing;
-    }
+    // Both scopes dedupe: (user, room, key) for member intents, (room, key)
+    // for room-owned ones — mirrors the two partial unique indexes.
+    const existing = await this.findByIdempotencyKey(
+      record.userId,
+      record.roomId,
+      record.idempotencyKey,
+    );
+    if (existing !== null) return existing;
     this.#rows.set(record.paymentIntentId, clone(record));
     return clone(record);
   }
@@ -680,9 +685,12 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   async listByStates(
     states: readonly PaymentIntentState[],
     limit: number,
+    afterId: string | null = null,
   ): Promise<PaymentIntentRecord[]> {
     return [...this.#rows.values()]
       .filter((r) => states.includes(r.executionState))
+      .sort((a, b) => (a.paymentIntentId < b.paymentIntentId ? -1 : 1))
+      .filter((r) => afterId === null || r.paymentIntentId > afterId)
       .slice(0, limit)
       .map(clone);
   }

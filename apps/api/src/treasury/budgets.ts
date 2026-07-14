@@ -20,6 +20,15 @@ export interface BudgetDeps {
 
 const MAX_CAS_RETRIES = 8;
 
+/** A CAS token that CHANGES on every successful write: two charges landing in
+ *  the same millisecond would otherwise write an `updatedAt` equal to the one
+ *  they both read, letting the second stale write satisfy the compare and
+ *  double-spend the same starting balance. */
+const nextCasToken = (nowMs: number, existing: ActionBudgetRecord | null): string =>
+  new Date(
+    existing === null ? nowMs : Math.max(nowMs, Date.parse(existing.updatedAt) + 1),
+  ).toISOString();
+
 /** The §17.7 default when the law-pack configures no budget rules: budgeted
  *  actions are FREE (a room without budget rules has no capacity mechanism),
  *  but the structure exists so enabling rules later needs no migration. */
@@ -68,7 +77,7 @@ export async function chargeRoomActionBudget(
       availableUnits: result.state.availableUnits,
       lastRefillAt: new Date(result.state.lastRefillAtMs).toISOString(),
       rateLimitState: existing?.rateLimitState ?? null,
-      updatedAt: new Date(nowMs).toISOString(),
+      updatedAt: nextCasToken(nowMs, existing),
     };
     const written = await deps.budgets.put(record, existing?.updatedAt ?? null);
     if (written !== null) {
@@ -94,7 +103,7 @@ export async function refundActionBudget(
       {
         ...existing,
         availableUnits: Math.min(input.rules.refill.max, existing.availableUnits + input.units),
-        updatedAt: new Date(deps.now()).toISOString(),
+        updatedAt: nextCasToken(deps.now(), existing),
       },
       existing.updatedAt,
     );

@@ -611,7 +611,14 @@ export async function signProposal(
   if (evalPack === null) return tgErr(409, 'no_law_pack', 'No law-pack applies to this proposal.');
 
   const facts = await deps.membership.memberFacts(input.roomId, input.userId);
-  const spendControlling = proposal.category !== null;
+  // Treasury-CONTROLLING is broader than spend-bearing: a vote that rewrites
+  // the treasury's rules (law-pack upgrade, treasury policy) controls the
+  // treasury as surely as a vote that spends from it — the wallet cooling-off
+  // and the other treasury-specific voter gates apply to both.
+  const spendControlling =
+    proposal.category !== null ||
+    proposal.proposalType === 'law_pack_upgrade' ||
+    proposal.proposalType === 'treasury_policy_update';
   // The cooling-off binds the member's NEWEST active wallet — voting with an
   // older wallet while a fresh one exists would bypass the §17.5 control.
   const activeWallets = (await deps.wallets.listByUser(input.userId, false)).filter(
@@ -629,8 +636,13 @@ export async function signProposal(
     verifiedIdentity: facts?.verifiedIdentity ?? false,
     newestWalletAgeDays: walletAgeDays,
     walletClusterId: null, // cluster heuristics: WS-N seam (null = no cluster)
+    // Conflicted voters: the proposer who disclosed a COI, AND the actual
+    // grant/bounty RECIPIENT — a member being paid by the proposal has the
+    // definitional stake, whether or not anyone disclosed it (WS-M.2.3d).
     hasDisclosedConflict:
-      proposal.conflictDisclosures !== null && proposal.proposerUserId === input.userId,
+      (proposal.conflictDisclosures !== null && proposal.proposerUserId === input.userId) ||
+      proposal.recipientRef === input.userId ||
+      proposal.recipientRef === `user:${input.userId}`,
     roleClasses: (await deps.rooms.isSteward(input.roomId, input.userId)) ? ['steward'] : [],
     reputationScore: 0,
     tokenVoteUnits: 0,
@@ -664,8 +676,17 @@ export async function signProposal(
     input.userId,
     proposal.proposalType,
   );
+  // A delegator who already cast their OWN ballot on this proposal keeps it —
+  // their weight must not also ride the delegate's signature (double-count).
+  const priorSignatures = await deps.proposalSignatures.listByProposal(input.proposalId);
+  const alreadyVoted = new Set(
+    priorSignatures.filter((s) => s.purpose === 'vote').map((s) => s.userId),
+  );
   const incoming = [];
   for (const delegation of delegations) {
+    if (delegation.delegatorUserId !== null && alreadyVoted.has(delegation.delegatorUserId)) {
+      continue;
+    }
     let delegatorEligible = false;
     if (
       delegation.delegatorUserId !== null &&
@@ -1034,7 +1055,17 @@ export async function resolveChallenge(
       }
     }
   }
+  // A DISPOSED challenge is immutable: replaying a resolve against a
+  // dismissed/upheld record would rewrite history (e.g. dismissed → upheld
+  // after the proposal already executed).  Only open/escalated may resolve,
+  // and escalation itself applies only to an open challenge.
   const from = challenge.state;
+  if (from !== 'open' && from !== 'escalated') {
+    return tgErr(409, 'already_resolved', 'This challenge already has a final disposition.');
+  }
+  if (input.resolution === 'escalated' && from !== 'open') {
+    return tgErr(409, 'invalid_transition', 'Only an open challenge can escalate.');
+  }
   const resolved = await deps.challenges.transition(input.challengeId, from, input.resolution, {
     note: input.resolutionNote,
     resolvedByUserId: input.actorUserId,

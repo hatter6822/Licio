@@ -26,7 +26,13 @@ import {
 } from '@licio/governance';
 import type { LawPackRecord, LawPackStore } from '../governance/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
-import { ensureProfile, type ProfileDeps, type TreasuryGovernanceError, tgErr } from './profile.js';
+import {
+  assertGovernanceWritable,
+  ensureProfile,
+  type ProfileDeps,
+  type TreasuryGovernanceError,
+  tgErr,
+} from './profile.js';
 
 export interface LawPackDeps extends ProfileDeps {
   lawPacks: LawPackStore;
@@ -173,6 +179,11 @@ export async function adoptLawPack(
   if (record.published !== true) {
     return tgErr(409, 'law_pack_unpublished', 'Only a published law-pack can be adopted.');
   }
+  // Adoption swaps the ACTIVE quorum/threshold/timelock rules — a frozen room
+  // must not change its governance configuration during an emergency review
+  // (the same guard charter publishing runs).
+  const writable = await assertGovernanceWritable(deps, input.roomId, 'configuration');
+  if (writable !== null) return writable;
   const profile = await ensureProfile(deps, input.roomId);
   await deps.profiles.upsert({
     ...profile,

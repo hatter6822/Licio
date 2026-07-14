@@ -436,6 +436,31 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
         (i) => i.paymentIntentId === record.paymentIntentId,
       ),
     ).toBe(true);
+    // Keyset paging (W5 review): an afterId cursor excludes rows at/below it.
+    expect(
+      (await stores.intents.listByStates(['quoted'], 10, record.paymentIntentId)).some(
+        (i) => i.paymentIntentId === record.paymentIntentId,
+      ),
+    ).toBe(false);
+
+    // ROOM-owned scope (W5 review): user_id NULL dedupes on (room, key) via
+    // the 0083 partial unique index — the insert collision returns the row.
+    const roomKey = randomUUID();
+    const roomOwned: PaymentIntentRecord = {
+      ...record,
+      paymentIntentId: randomUUID(),
+      userId: null,
+      targetType: 'grant_payout',
+      targetId: randomUUID(),
+      idempotencyKey: roomKey,
+    };
+    const roomInserted = await stores.intents.insert(roomOwned);
+    expect(roomInserted.paymentIntentId).toBe(roomOwned.paymentIntentId);
+    const roomReplay = await stores.intents.insert({ ...roomOwned, paymentIntentId: randomUUID() });
+    expect(roomReplay.paymentIntentId).toBe(roomOwned.paymentIntentId);
+    expect(
+      (await stores.intents.findByIdempotencyKey(null, roomId, roomKey))?.paymentIntentId,
+    ).toBe(roomOwned.paymentIntentId);
   });
 
   it('lists only timed-out PRE-SUBMISSION intents as expired', async () => {
