@@ -16,6 +16,7 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   index,
   integer,
   jsonb,
@@ -218,6 +219,9 @@ export const roomTreasuries = knomosisSchema.table(
     depositLimits: jsonb('deposit_limits').notNull(),
     freezeState: treasuryFreezeStateEnum('freeze_state').notNull().default('active'),
     freezeReason: text('freeze_reason'),
+    /** True when the freeze is a room-scope CASCADE (migration 0085): the
+     *  structural marker room unfreezes clear by — never reason-text equality. */
+    freezeCascade: boolean('freeze_cascaded').notNull().default(false),
     pauseFlags: jsonb('pause_flags')
       .notNull()
       .default(sql`'{"deposits":false,"proposals":false,"executions":false}'::jsonb`),

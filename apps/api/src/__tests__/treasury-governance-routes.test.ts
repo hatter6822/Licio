@@ -403,6 +403,7 @@ describe('WS-M treasury + payment intents', () => {
       },
       freezeState: 'active',
       freezeReason: null,
+      freezeCascade: false,
       pauseFlags: { deposits: false, proposals: false, executions: false },
       reconciliationState: 'pending',
       createdAt: new Date().toISOString(),

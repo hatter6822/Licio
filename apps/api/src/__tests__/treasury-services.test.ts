@@ -189,6 +189,7 @@ describe('runWsmTick (WS-M sweeps)', () => {
       },
       freezeState: 'active',
       freezeReason: null,
+      freezeCascade: false,
       pauseFlags: { deposits: false, proposals: false, executions: false },
       reconciliationState: 'pending',
       createdAt: new Date().toISOString(),

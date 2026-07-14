@@ -303,6 +303,7 @@ function mapTreasury(row: typeof roomTreasuries.$inferSelect): TreasuryRecord {
     depositLimits: limits,
     freezeState: row.freezeState,
     freezeReason: row.freezeReason,
+    freezeCascade: row.freezeCascade,
     pauseFlags: row.pauseFlags as PauseFlags,
     reconciliationState: row.reconciliationState,
     createdAt: iso(row.createdAt),
@@ -343,6 +344,7 @@ export class DrizzleTreasuryStore implements TreasuryStore {
         depositLimits: record.depositLimits,
         freezeState: record.freezeState,
         freezeReason: record.freezeReason,
+        freezeCascade: record.freezeCascade,
         pauseFlags: record.pauseFlags,
         reconciliationState: record.reconciliationState,
         createdAt: new Date(record.createdAt),
@@ -358,10 +360,15 @@ export class DrizzleTreasuryStore implements TreasuryStore {
     treasuryId: string,
     state: 'active' | 'frozen',
     reason: string | null,
+    cascaded: boolean,
   ): Promise<boolean> {
     const rows = await this.db
       .update(roomTreasuries)
-      .set({ freezeState: state, freezeReason: reason })
+      .set({
+        freezeState: state,
+        freezeReason: reason,
+        freezeCascade: state === 'frozen' ? cascaded : false,
+      })
       .where(eq(roomTreasuries.treasuryId, treasuryId))
       .returning({ treasuryId: roomTreasuries.treasuryId });
     return rows.length > 0;

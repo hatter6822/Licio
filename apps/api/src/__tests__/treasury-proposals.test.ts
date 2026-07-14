@@ -1724,6 +1724,32 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('passed');
   });
 
+  it('a treasury-scope freeze defers pass settlement and reservations (W10 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    // A TREASURY-scope freeze leaves the room profile active — the room-level
+    // deferral does not cover it, but a pass reserves headroom (fund
+    // movement), so the executions guard must defer this settlement too.
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('treasury missing');
+    await deps.treasuries.setFreeze(treasury.treasuryId, 'frozen', 'Treasury hold.', false);
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('open');
+    expect(await deps.reservations.getByProposal(proposal.proposalId)).toBeNull();
+    // The hold lifts; the same sweep settles and reserves.
+    await deps.treasuries.setFreeze(treasury.treasuryId, 'active', null, false);
+    await settleDueProposals(deps, ROOM);
+    expect((await deps.proposals.getById(proposal.proposalId))?.votingState).toBe('passed');
+    expect((await deps.reservations.getByProposal(proposal.proposalId))?.state).toBe('reserved');
+  });
+
   it('a conflicted delegator is recused from delegated weight too (W8 review)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps, {

@@ -50,6 +50,7 @@ function treasuryOf(over: Partial<TreasuryRecord> = {}): TreasuryRecord {
     },
     freezeState: 'active',
     freezeReason: null,
+    freezeCascade: false,
     pauseFlags: { deposits: false, proposals: false, executions: false },
     reconciliationState: 'pending',
     createdAt: NOW(),
@@ -93,8 +94,8 @@ describe('in-memory WS-M stores (the Drizzle contract, no I/O)', () => {
         treasuryOf({ roomId: randomUUID(), treasuryAddress: record.treasuryAddress }),
       ),
     ).toBeNull(); // same address
-    expect(await store.setFreeze(record.treasuryId, 'frozen', 'why')).toBe(true);
-    expect(await store.setFreeze(randomUUID(), 'frozen', null)).toBe(false);
+    expect(await store.setFreeze(record.treasuryId, 'frozen', 'why', false)).toBe(true);
+    expect(await store.setFreeze(randomUUID(), 'frozen', null, false)).toBe(false);
     expect(await store.setReconciliation(record.treasuryId, 'synced', { USDC: '5' }, NOW())).toBe(
       true,
     );

@@ -986,6 +986,15 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
       const tally = await tallyFor(deps, proposal, pack, true);
       const config = deps.wsmProposalConfig();
       if (tally.outcome === 'passed') {
+        // A PASS starts the timelock and RESERVES spend headroom — fund
+        // movement.  A treasury-scope freeze leaves the room profile active,
+        // so the room-level deferral above does not cover it: run the same
+        // executions guard the payment lifecycle uses and DEFER this
+        // proposal while the treasury is frozen/divergent (it settles once
+        // the hold lifts; ballots stayed deadline-gated throughout) (W10).
+        if ((await assertGovernanceWritable(deps, roomId, 'executions')) !== null) {
+          continue;
+        }
         const timelockSeconds =
           pack.timelockRules?.[proposal.proposalType]?.seconds ?? config.wsmChallengeWindowSeconds;
         const settledRow = await deps.proposals.casVotingState(

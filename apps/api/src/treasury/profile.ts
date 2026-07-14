@@ -160,22 +160,27 @@ export async function setGovernanceFreeze(
       updatedAt: new Date(deps.now()).toISOString(),
     });
   }
-  // A room-scope freeze also freezes the treasury; a treasury-scope action
-  // touches the treasury only.  A room-scope UNFREEZE clears the treasury
-  // ONLY when its freeze was the room freeze's cascade (same recorded
-  // reason) — an independent treasury-only hold survives the room clearing.
+  // A room-scope freeze also freezes the treasury (marked as a CASCADE); a
+  // treasury-scope action touches the treasury only.  A room-scope UNFREEZE
+  // clears the treasury ONLY when its freeze carries the cascade marker — an
+  // independent treasury-only hold survives the room clearing even when its
+  // free-form reason text happens to match (PR #144 W10).
   if (treasury !== null) {
-    const roomUnfreezeClearsCascade =
-      frozen ||
-      input.scope === 'treasury' ||
-      treasury.freezeState !== 'frozen' ||
-      treasury.freezeReason === profile.freezeReason;
-    if (roomUnfreezeClearsCascade) {
+    if (input.scope === 'treasury') {
       await deps.treasuries.setFreeze(
         treasury.treasuryId,
         frozen ? 'frozen' : 'active',
         frozen ? input.reason : null,
+        false, // an explicit treasury-scope hold is never a cascade
       );
+    } else if (frozen) {
+      // Room freeze: cascade onto the treasury UNLESS an independent hold
+      // already stands (overwriting it would relabel the hold as clearable).
+      if (treasury.freezeState !== 'frozen' || treasury.freezeCascade) {
+        await deps.treasuries.setFreeze(treasury.treasuryId, 'frozen', input.reason, true);
+      }
+    } else if (treasury.freezeState === 'frozen' && treasury.freezeCascade) {
+      await deps.treasuries.setFreeze(treasury.treasuryId, 'active', null, false);
     }
   } else if (input.scope === 'treasury') {
     return tgErr(404, 'no_treasury', 'This room has no treasury.');

@@ -115,6 +115,7 @@ function treasuryOf(roomId: string, deploymentId: string): TreasuryRecord {
     },
     freezeState: 'active',
     freezeReason: null,
+    freezeCascade: false,
     pauseFlags: { deposits: false, proposals: false, executions: false },
     reconciliationState: 'pending',
     createdAt: NOW(),
@@ -302,9 +303,9 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
       }),
     ).toBeNull();
 
-    expect(await stores.treasuries.setFreeze(treasury.treasuryId, 'frozen', 'divergence')).toBe(
-      true,
-    );
+    expect(
+      await stores.treasuries.setFreeze(treasury.treasuryId, 'frozen', 'divergence', false),
+    ).toBe(true);
     expect(
       await stores.treasuries.setPauseFlags(treasury.treasuryId, {
         deposits: true,
@@ -331,7 +332,9 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
       (await stores.treasuries.listAll()).some((t) => t.treasuryId === treasury.treasuryId),
     ).toBe(true);
     // Unfreeze for the intent tests below.
-    expect(await stores.treasuries.setFreeze(treasury.treasuryId, 'active', null)).toBe(true);
+    expect(await stores.treasuries.setFreeze(treasury.treasuryId, 'active', null, false)).toBe(
+      true,
+    );
   });
 
   // --- Reservations --------------------------------------------------------------

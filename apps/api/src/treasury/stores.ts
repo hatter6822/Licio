@@ -78,6 +78,10 @@ export interface TreasuryRecord {
   };
   freezeState: 'active' | 'frozen';
   freezeReason: string | null;
+  /** True when the freeze is the CASCADE of a room-scope freeze — the
+   *  structural marker a room unfreeze keys on (free-form reason text can
+   *  coincide across independent holds, PR #144 W10). */
+  freezeCascade: boolean;
   pauseFlags: PauseFlags;
   reconciliationState: 'synced' | 'pending' | 'divergent';
   createdAt: string;
@@ -250,11 +254,13 @@ export interface TreasuryStore {
   /** Returns null when the room already has a treasury OR the address is
    *  taken (mirrors both unique indexes). */
   insert(record: TreasuryRecord): Promise<TreasuryRecord | null>;
-  /** Column-scoped updates (never whole-record clobbering). */
+  /** Column-scoped updates (never whole-record clobbering).  `cascaded`
+   *  marks a room-freeze cascade — the flag a room unfreeze clears by. */
   setFreeze(
     treasuryId: string,
     state: 'active' | 'frozen',
     reason: string | null,
+    cascaded: boolean,
   ): Promise<boolean>;
   setPauseFlags(treasuryId: string, flags: PauseFlags): Promise<boolean>;
   /** A null snapshot PRESERVES the last-reconciled balances (a divergent or
@@ -602,11 +608,13 @@ export class InMemoryTreasuryStore implements TreasuryStore {
     treasuryId: string,
     state: 'active' | 'frozen',
     reason: string | null,
+    cascaded: boolean,
   ): Promise<boolean> {
     const row = this.#rows.get(treasuryId);
     if (!row) return false;
     row.freezeState = state;
     row.freezeReason = reason;
+    row.freezeCascade = state === 'frozen' ? cascaded : false;
     return true;
   }
 

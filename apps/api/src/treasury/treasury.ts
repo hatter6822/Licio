@@ -80,6 +80,7 @@ export async function createTreasury(
     depositLimits: { ...input.depositLimits },
     freezeState: 'active',
     freezeReason: null,
+    freezeCascade: false,
     pauseFlags: { deposits: false, proposals: false, executions: false },
     reconciliationState: 'pending',
     createdAt: new Date(deps.now()).toISOString(),

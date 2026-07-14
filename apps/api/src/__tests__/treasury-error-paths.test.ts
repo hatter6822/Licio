@@ -101,6 +101,7 @@ async function provisionTreasury(services: TreasuryServices): Promise<TreasuryRe
     },
     freezeState: 'active',
     freezeReason: null,
+    freezeCascade: false,
     pauseFlags: { deposits: false, proposals: false, executions: false },
     reconciliationState: 'synced',
     createdAt: new Date().toISOString(),
@@ -334,7 +335,7 @@ describe('writability guard + intent limits (WS-M.2.4a-1 / 3.1)', () => {
     const services = await wsmServices();
     await ensureProfile(services, ROOM);
     const treasury = await provisionTreasury(services);
-    await services.treasuries.setFreeze(treasury.treasuryId, 'frozen', 'divergence');
+    await services.treasuries.setFreeze(treasury.treasuryId, 'frozen', 'divergence', false);
     expect((await assertGovernanceWritable(services, ROOM, 'deposits'))?.code).toBe(
       'treasury_frozen',
     );
@@ -1170,13 +1171,15 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
     const held = await services.treasuries.getById(treasury.treasuryId);
     expect(held?.freezeState).toBe('frozen');
     expect(held?.freezeReason).toBe('Legal hold on funds.');
-    // A PURE cascade (no independent hold) clears with the room.
+    // The independent hold survives EVEN with identical wording (W10: the
+    // cascade is a structural marker, never reason-text equality).  Lift it
+    // explicitly, then prove a PURE cascade clears with the room.
     await setGovernanceFreeze(services, {
       roomId: ROOM,
-      action: 'freeze',
+      action: 'unfreeze',
       scope: 'treasury',
       source: 'legal',
-      reason: 'Room-level review 2.',
+      reason: 'Legal hold released.',
       actorUserId: null,
       isPlatformStaff: true,
     });
@@ -1189,6 +1192,7 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
       actorUserId: USER,
       isPlatformStaff: false,
     });
+    expect((await services.treasuries.getById(treasury.treasuryId))?.freezeState).toBe('frozen');
     await setGovernanceFreeze(services, {
       roomId: ROOM,
       action: 'unfreeze',
@@ -1984,5 +1988,47 @@ describe('ninth review wave (PR #144): clawback closure, milestone CAS, freeze-s
     // The column-scoped write changed the FLAGS and left the freeze intact.
     expect(current?.freezeState).toBe('frozen');
     expect(current?.pauseFlags.deposits).toBe(true);
+  });
+});
+
+describe('tenth review wave (PR #144): the cascade marker', () => {
+  it('an independent treasury hold with IDENTICAL wording survives the room unfreeze', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const WORDING = 'Pending review.';
+    // Room freeze cascades (marker set)…
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: WORDING,
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    // …then platform staff place an EXPLICIT treasury hold using the SAME
+    // common wording — the free-form text must not relabel it as a cascade.
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'treasury',
+      source: 'legal',
+      reason: WORDING,
+      actorUserId: null,
+      isPlatformStaff: true,
+    });
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'unfreeze',
+      scope: 'room',
+      source: 'steward',
+      reason: WORDING,
+      actorUserId: null,
+      isPlatformStaff: true,
+    });
+    const held = await services.treasuries.getById(treasury.treasuryId);
+    expect(held?.freezeState).toBe('frozen');
+    expect(held?.freezeCascade).toBe(false);
   });
 });

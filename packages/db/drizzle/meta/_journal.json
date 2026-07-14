@@ -589,6 +589,13 @@
       "idx": 83,
       "when": 1783728000008,
       "tag": "0084_ws_m_signature_purpose_scope"
+    },
+    {
+      "version": "7",
+      "breakpoints": true,
+      "idx": 84,
+      "when": 1783728000009,
+      "tag": "0085_ws_m_treasury_freeze_cascade"
     }
   ]
 }
