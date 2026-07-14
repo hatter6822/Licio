@@ -140,6 +140,7 @@ const PUSH_TIMEOUT_MS = 10_000;
 function guardedPushPost(
   endpoint: string,
   headers: Record<string, string>,
+  requestImpl: typeof https.request = https.request,
 ): Promise<SendPushResult> {
   const failed: SendPushResult = { ok: false, statusCode: 0, gone: false };
   let url: URL;
@@ -163,7 +164,7 @@ function guardedPushPost(
       settled = true;
       resolve(value);
     };
-    const request = https.request(
+    const request = requestImpl(
       url,
       { method: 'POST', headers, timeout: PUSH_TIMEOUT_MS, lookup: guardedLookup() },
       (response) => {
@@ -176,6 +177,12 @@ function guardedPushPost(
             gone: status === 404 || status === 410,
           }),
         );
+        // A client-registered host can send headers then reset before the body
+        // completes — that emits `error` (or `aborted`) on the RESPONSE, not the
+        // request. Without these listeners the stream error is unhandled and can
+        // crash the API during delivery. Settle to `failed` (no prune) instead.
+        response.on('error', () => settle(failed));
+        response.on('aborted', () => settle(failed));
       },
     );
     request.on('timeout', () => {
@@ -196,20 +203,26 @@ function guardedPushPost(
  * Production uses the SSRF-gated `node:https` transport above. An injected
  * `fetchImpl` (tests) owns its own transport and bypasses the gate — the gate's
  * purpose is to constrain what the SERVER dials on the real network.
+ * `requestImpl` is a test-only seam to exercise the guarded `node:https`
+ * transport's response/stream-error handling without real TLS.
  */
 export async function sendWebPush(
   subscription: PushSubscriptionJson,
   config: VapidConfig,
-  options: { ttlSeconds?: number; fetchImpl?: typeof fetch } = {},
+  options: {
+    ttlSeconds?: number;
+    fetchImpl?: typeof fetch;
+    requestImpl?: typeof https.request;
+  } = {},
 ): Promise<SendPushResult> {
-  const { ttlSeconds = 28 * 24 * 60 * 60, fetchImpl } = options;
+  const { ttlSeconds = 28 * 24 * 60 * 60, fetchImpl, requestImpl } = options;
   const headers = {
     ...buildVapidHeaders(subscription.endpoint, config),
     TTL: String(ttlSeconds),
     'Content-Length': '0',
   };
   if (fetchImpl === undefined) {
-    return guardedPushPost(subscription.endpoint, headers);
+    return guardedPushPost(subscription.endpoint, headers, requestImpl);
   }
   const response = await fetchImpl(subscription.endpoint, { method: 'POST', headers });
   return {

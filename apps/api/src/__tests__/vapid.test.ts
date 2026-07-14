@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { verify } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import type https from 'node:https';
 import { describe, expect, it } from 'vitest';
 import {
   audienceFor,
@@ -12,6 +14,30 @@ import {
 } from '../lib/vapid.js';
 
 const config = (): VapidConfig => ({ ...generateVapidKeys(), subject: 'mailto:ops@licio.test' });
+
+/** A fake `https.request` that drives the guarded transport: it delivers a
+ *  response with `status`, then emits `terminal` (`end` for a normal reply, or
+ *  `error`/`aborted` for a host that resets mid-body). Emitting `error` on an
+ *  EventEmitter with NO listener throws — so this also proves the response
+ *  error handler is wired. No TLS / network. */
+function fakeGuardedTransport(
+  status: number,
+  terminal: 'end' | 'error' | 'aborted',
+): typeof https.request {
+  return ((_url: unknown, _options: unknown, responseHandler: (r: unknown) => void) => {
+    const response = Object.assign(new EventEmitter(), { statusCode: status, resume() {} });
+    const request = Object.assign(new EventEmitter(), {
+      end() {
+        responseHandler(response);
+        queueMicrotask(() =>
+          response.emit(terminal, terminal === 'end' ? undefined : new Error('reset')),
+        );
+      },
+      destroy() {},
+    });
+    return request;
+  }) as unknown as typeof https.request;
+}
 
 describe('generateVapidKeys', () => {
   it('produces a 65-byte uncompressed public point and 32-byte private scalar', () => {
@@ -130,6 +156,30 @@ describe('sendWebPush', () => {
       config(),
       // No fetchImpl ⇒ the real SSRF-gated node:https transport, which resolves
       // the literal address synchronously and refuses it (no network I/O).
+    );
+    expect(result).toEqual({ ok: false, statusCode: 0, gone: false });
+  });
+
+  it('the guarded node:https transport maps a normal reply to the outcome', async () => {
+    const result = await sendWebPush(
+      { endpoint: 'https://push.example/hostname/1', keys: { p256dh: 'x', auth: 'y' } },
+      config(),
+      { requestImpl: fakeGuardedTransport(201, 'end') },
+    );
+    expect(result).toEqual({ ok: true, statusCode: 201, gone: false });
+  });
+
+  it.each([
+    'error',
+    'aborted',
+  ] as const)('the guarded transport settles (no crash) when the response emits %s mid-body', async (terminal) => {
+    // A client-registered host that resets after headers emits `%s` on the
+    // RESPONSE — unhandled, that would crash the API during delivery. The
+    // transport must settle to a failed (non-pruning) result instead.
+    const result = await sendWebPush(
+      { endpoint: 'https://push.example/hostname/2', keys: { p256dh: 'x', auth: 'y' } },
+      config(),
+      { requestImpl: fakeGuardedTransport(200, terminal) },
     );
     expect(result).toEqual({ ok: false, statusCode: 0, gone: false });
   });

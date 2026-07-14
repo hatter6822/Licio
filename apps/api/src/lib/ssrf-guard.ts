@@ -15,7 +15,7 @@
 // a DNS answer that changes between "check" and "connect" cannot smuggle a
 // private address (TOCTOU/DNS-rebinding defense).
 
-import { lookup as dnsLookup } from 'node:dns';
+import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
 import { isIP, type LookupFunction } from 'node:net';
 
 /** Whether a literal IPv4 address is in a blocked range. */
@@ -134,24 +134,47 @@ export function guardedLookup(
   gate: (address: string, family: number) => boolean = isBlockedAddress,
 ): LookupFunction {
   return (hostname, options, callback) => {
-    dnsLookup(hostname, { ...options, all: true }, (error, addresses) => {
-      if (error) {
-        callback(error, '', 4);
-        return;
-      }
-      const list = Array.isArray(addresses) ? addresses : [addresses];
-      for (const entry of list) {
-        if (gate(entry.address, entry.family)) {
-          callback(new Error('blocked address range'), '', 4);
+    // Node's autoSelectFamily (Happy Eyeballs; default in Node 20+) calls this
+    // with `options.all === true` and expects an ARRAY back; the legacy path
+    // expects a single (address, family) tuple. Honor BOTH shapes: returning a
+    // tuple when an array was requested raises ERR_INVALID_IP_ADDRESS, which
+    // silently fails EVERY hostname request (literal-IP hosts skip lookup, so
+    // this only bites real DNS names — e.g. every FCM/Apple/Mozilla push
+    // endpoint and every hostname content fetch). Either way the WHOLE resolved
+    // set is validated first, so a blocked answer aborts before connect
+    // (rebinding-safe).
+    const wantsAll = typeof options === 'object' && options !== null && options.all === true;
+    const cb = callback as (
+      err: NodeJS.ErrnoException | null,
+      address: string | LookupAddress[],
+      family?: number,
+    ) => void;
+    dnsLookup(
+      hostname,
+      { ...(typeof options === 'object' ? options : {}), all: true },
+      (error, addresses) => {
+        if (error) {
+          cb(error, '', 4);
           return;
         }
-      }
-      const first = list[0];
-      if (first === undefined) {
-        callback(new Error('no addresses resolved'), '', 4);
-        return;
-      }
-      callback(null, first.address, first.family);
-    });
+        const list = Array.isArray(addresses) ? addresses : [addresses];
+        for (const entry of list) {
+          if (gate(entry.address, entry.family)) {
+            cb(new Error('blocked address range'), '', 4);
+            return;
+          }
+        }
+        const first = list[0];
+        if (first === undefined) {
+          cb(new Error('no addresses resolved'), '', 4);
+          return;
+        }
+        if (wantsAll) {
+          cb(null, list);
+        } else {
+          cb(null, first.address, first.family);
+        }
+      },
+    );
   };
 }
