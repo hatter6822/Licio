@@ -1242,6 +1242,43 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect(reused.code).toBe('action_in_use');
   });
 
+  it('a freeze landing between submit and attach never strands the bookkeeping (W15)', async () => {
+    const deps = buildDeps();
+    const id = await signedIntent(deps);
+    const action = actionOf();
+    await deps.actions.insert(action);
+    // The transfer is ALREADY on chain when the pause/freeze lands: refusing
+    // the bind would let it finalize outside the WS-M ledger and export.
+    await setGovernancePause(deps, {
+      roomId: ROOM,
+      patch: { deposits: true },
+      reason: 'incident',
+      actorUserId: USER,
+    });
+    const profile = await deps.profiles.get(ROOM);
+    if (profile === null) throw new Error('profile missing');
+    await deps.profiles.upsert({
+      ...profile,
+      freezeState: 'frozen',
+      freezeReason: 'platform review',
+    });
+    expect(await attachIntentSubmission(deps, id, action.actionRecordId, USER)).toMatchObject({
+      ok: true,
+    });
+    // The guard still bites where fund movement is AUTHORIZED: no new intent.
+    expect(
+      await createPaymentIntent(deps, {
+        userId: USER,
+        roomId: ROOM,
+        targetType: 'treasury_deposit',
+        targetId: ROOM,
+        asset: 'USDC',
+        amount: '100',
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+
   it('the sweep recovers a ROOM-OWNED payout whose steward died pre-attach (W14)', async () => {
     const deps = buildDeps();
     await provisionTreasury(deps);

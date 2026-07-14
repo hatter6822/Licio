@@ -652,6 +652,34 @@ describe('WS-M treasury + payment intents', () => {
     );
   });
 
+  it('staff cannot bootstrap WS-M state for a room the gate refuses (W15)', async () => {
+    const fixture = await wsmFixture({ steward: false });
+    // The port answers null for p2p and unknown rooms (WS-S §8): freeze,
+    // pause, and attestations all CREATE profile/attestation state, so the
+    // staff bypass must still resolve the room first.
+    Object.assign(fixture.knomosis.rooms ?? {}, {
+      roomGovernance: async () => null,
+    });
+    const staff = await seedUserWithSession(fixture.identity, { admin: true });
+    const freeze = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
+      action: 'freeze',
+      scope: 'room',
+      source: 'platform_security',
+      reason: 'not a server room',
+    });
+    expect(freeze.status).toBe(404);
+    const pause = await req('POST', `/rooms/${ROOM}/governance/pause`, staff.cookie, {
+      deposits: true,
+      reason: 'not a server room',
+    });
+    expect(pause.status).toBe(404);
+    const attest = await req('POST', `/rooms/${ROOM}/governance/attestations`, staff.cookie, {
+      item: 'external_audit_passed',
+      note: 'not a server room',
+    });
+    expect(attest.status).toBe(404);
+  });
+
   it('platform staff reach the mode machine without room stewardship (PR #144 review)', async () => {
     const fixture = await wsmFixture({ steward: false });
     const staff = await seedUserWithSession(fixture.identity, { admin: true });

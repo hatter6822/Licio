@@ -23,13 +23,19 @@ export interface GrantDeps extends IntentDeps {
 
 /** Build the milestone plan from the proposal's requested action: an explicit
  *  `milestones` array whose tranches sum EXACTLY to the amount, else one
- *  milestone covering the full amount. */
+ *  milestone covering the full amount.  A SUPPLIED schedule that fails any
+ *  bound (shape, 1..16 entries, tranche math) is INVALID — never silently
+ *  replaced by the full-amount fallback, which would disburse everything in
+ *  one tranche despite members approving a multi-tranche plan (W15). */
 function milestonePlan(
   deps: GrantDeps,
   proposal: GovernanceProposalRecord,
 ): GrantMilestoneRecord[] | null {
   const amount = proposal.requestedAmount ?? '0';
   const raw = proposal.requestedAction['milestones'];
+  if (raw !== undefined && (!Array.isArray(raw) || raw.length === 0 || raw.length > 16)) {
+    return null;
+  }
   if (Array.isArray(raw) && raw.length > 0 && raw.length <= 16) {
     const tranches: GrantMilestoneRecord[] = [];
     for (const entry of raw) {
@@ -85,15 +91,20 @@ function milestonePlan(
 /**
  * Whether the proposal's milestone plan CAN build (W9): execution validates
  * this BEFORE the kernel appends accepted-spend history, so a malformed plan
- * blocks with no phantom cap consumption.  Mirrors `milestonePlan` exactly.
+ * blocks with no phantom cap consumption — and publication validates it too,
+ * so a bad schedule never burns a deliberation/voting cycle.  Mirrors
+ * `milestonePlan` exactly.
  */
-export function hasValidMilestonePlan(proposal: GovernanceProposalRecord): boolean {
+export function hasValidMilestonePlan(
+  proposal: Pick<GovernanceProposalRecord, 'requestedAmount' | 'asset' | 'requestedAction'>,
+): boolean {
   if (proposal.requestedAmount === null || proposal.asset === null) return false;
   const amount = proposal.requestedAmount;
   const raw = proposal.requestedAction['milestones'];
-  // No explicit array (or one outside 1..16 entries) falls through to the
-  // single full-amount milestone — the same branch `milestonePlan` takes.
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 16) return true;
+  // ONLY an absent key falls through to the single full-amount milestone; a
+  // supplied schedule that is not an array of 1..16 entries is invalid (W15).
+  if (raw === undefined) return true;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 16) return false;
   const amounts: string[] = [];
   for (const entry of raw) {
     if (

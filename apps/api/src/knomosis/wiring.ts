@@ -19,17 +19,29 @@ import type { LawPackPort, RoomGovernancePort } from './preflight.js';
 import type { ReadinessChecklistPort, RoomModePort } from './readiness.js';
 import type { KnomosisServices } from './services.js';
 
-/** The forum-backed room governance port (mode/name + member/steward reads). */
+/** The forum-backed room governance port (mode/name + member/steward reads).
+ *
+ *  SERVER rooms only (W15): WS-L/WS-M/WS-U governance is server-side state —
+ *  treasuries, proposals, ballots, profiles — and a Private P2P room places
+ *  NO governance/treasury state on the server (WS-S §8; its governance lives
+ *  client-side under MLS).  A synced `storageMode='p2p'` row therefore fails
+ *  every gate here: unknown room to `roomGovernance`, no members, no
+ *  stewards, nothing visible. */
 export function buildRoomGovernancePort(
   forum: ForumServices,
   identity: IdentityServices,
 ): RoomGovernancePort {
+  const serverRoom = async (roomId: string) => {
+    const room = await forum.rooms.getById(roomId);
+    return room === null || room.storageMode !== 'server' ? null : room;
+  };
   return {
     roomGovernance: async (roomId) => {
-      const room = await forum.rooms.getById(roomId);
+      const room = await serverRoom(roomId);
       return room === null ? null : { mode: room.governanceMode, name: room.name };
     },
     isMember: async (roomId, userId) => {
+      if ((await serverRoom(roomId)) === null) return false;
       const subscription = await forum.rooms.getSubscription(roomId, userId);
       if (subscription !== null && subscription.status === 'active') return true;
       // The governance-eligible set is active subscribers ∪ STEWARDS: a room steward
@@ -41,12 +53,14 @@ export function buildRoomGovernancePort(
       return isRoomSteward(forum, roomId, userId, user?.roles ?? []);
     },
     isSteward: async (roomId, userId) => {
+      if ((await serverRoom(roomId)) === null) return false;
       const user = await identity.store.getUser(userId);
       return isRoomSteward(forum, roomId, userId, user?.roles ?? []);
     },
     contentVisibleToUser: async (roomId, userId) => {
-      const room = await forum.rooms.getById(roomId);
-      // Unknown room ⇒ not visible (the caller maps to 404 on its own null check).
+      const room = await serverRoom(roomId);
+      // Unknown or non-server room ⇒ not visible (the caller maps to 404 on
+      // its own null check).
       return room === null ? false : roomContentVisibleToUser(forum, room, userId);
     },
   };

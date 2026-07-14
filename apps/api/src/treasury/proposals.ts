@@ -363,8 +363,28 @@ export async function createProductionProposal(
     if (input.create.category !== null && input.create.category !== spendCategory) {
       return tgErr(400, 'category_mismatch', `"${proposalType}" spends from "${spendCategory}".`);
     }
-  } else if (input.create.requested_amount !== null || input.create.asset !== null) {
-    return tgErr(400, 'draft_invalid', 'This proposal type carries no budget fields.');
+    // The milestone SCHEDULE is part of the voted authorization: validate it
+    // at publication so a malformed plan never burns a deliberation/voting
+    // cycle only to die at execution (execution re-checks regardless) (W15).
+    if (
+      !hasValidMilestonePlan({
+        requestedAmount: input.create.requested_amount,
+        asset: input.create.asset,
+        requestedAction: input.create.requested_action,
+      })
+    ) {
+      return tgErr(400, 'milestones_invalid', 'The milestone schedule is malformed.');
+    }
+  } else if (
+    input.create.requested_amount !== null ||
+    input.create.asset !== null ||
+    // A recipient on a NON-spend proposal is a recusal weapon: `signProposal`
+    // treats a matching `recipientRef` as a conflicted recipient, so naming
+    // `user:<member>` on a policy/charter proposal would disenfranchise that
+    // member (and their delegated unit) from a vote with no recipient (W15).
+    input.create.recipient_ref !== null
+  ) {
+    return tgErr(400, 'draft_invalid', 'This proposal type carries no spend fields.');
   }
 
   // Prohibited-target classifier (WS-M.1.2d, fail-closed).
@@ -413,15 +433,6 @@ export async function createProductionProposal(
       return tgErr(400, 'charter_sections_invalid', readability[0] ?? 'Sections are unreadable.');
     }
   }
-
-  // Action budget (§17.7): charge BEFORE side effects; free when unconfigured.
-  const budget = await chargeRoomActionBudget(deps, {
-    roomId: input.roomId,
-    userId: input.userId,
-    actionType: 'proposal_submission',
-    rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
-  });
-  if ('code' in budget) return budget;
 
   // Spend preflight (WS-M.4.1c): headroom incl. reservations + reconciled funds.
   if (spendCategory !== null && input.create.requested_amount !== null) {
@@ -544,6 +555,18 @@ export async function createProductionProposal(
       }
     }
   }
+
+  // Action budget (§17.7): charge AFTER every rejection-only check above (a
+  // rejected draft must not silently burn the member's allowance, W15) and
+  // BEFORE the insert side effect; free when unconfigured.  The only failure
+  // past this point is the duplicate-insert race, which refunds below.
+  const budget = await chargeRoomActionBudget(deps, {
+    roomId: input.roomId,
+    userId: input.userId,
+    actionType: 'proposal_submission',
+    rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
+  });
+  if ('code' in budget) return budget;
 
   const nowMs = deps.now();
   const config = deps.wsmProposalConfig();

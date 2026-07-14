@@ -497,12 +497,12 @@ export async function attachIntentSubmission(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
-  const guard = await assertGovernanceWritable(
-    deps,
-    intent.roomId,
-    operationFor(intent.targetType),
-  );
-  if (guard !== null) return guard;
+  // NO writability guard here (W15): the attach is BOOKKEEPING of an action
+  // the WS-L submit already placed on chain — a freeze/pause/divergence
+  // landing between submit and attach must not strand the signed intent until
+  // the expiry sweep abandons it while the transfer finalizes OUTSIDE the
+  // ledger/export.  The guard bites where fund movement is authorized: at
+  // create/preflight/quote/signing/retry, all upstream of the submit.
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
   // A DEAD action can settle nothing: manually binding a failed/reverted

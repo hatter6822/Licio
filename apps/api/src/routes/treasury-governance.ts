@@ -346,6 +346,12 @@ export function createTreasuryGovernanceRoutes() {
           const roomId = c.req.valid('param').roomId;
           const body = c.req.valid('json');
           const staff = isPlatformStaff(auth);
+          // Staff bypass isSteward, so the SERVER-room existence gate must run
+          // explicitly: attestations create WS-M state, and a p2p/unknown room
+          // holds none (W15).
+          if ((await services.rooms.roomGovernance(roomId)) === null) {
+            return c.json(notFound, 404);
+          }
           if (!staff && !(await services.rooms.isSteward(roomId, auth.userId))) {
             return c.json(notFound, 404);
           }
@@ -375,6 +381,11 @@ export function createTreasuryGovernanceRoutes() {
           const roomId = c.req.valid('param').roomId;
           const body = c.req.valid('json');
           const staff = isPlatformStaff(auth);
+          // Freeze bootstraps the room's profile — never for a p2p/unknown
+          // room, staff included (W15).
+          if ((await services.rooms.roomGovernance(roomId)) === null) {
+            return c.json(notFound, 404);
+          }
           if (!staff && !(await services.rooms.isSteward(roomId, auth.userId))) {
             return c.json(notFound, 404);
           }
@@ -403,6 +414,11 @@ export function createTreasuryGovernanceRoutes() {
           const services = getTreasuryServices();
           const roomId = c.req.valid('param').roomId;
           const body = c.req.valid('json');
+          // Pause bootstraps the room's profile — never for a p2p/unknown
+          // room, staff included (W15).
+          if ((await services.rooms.roomGovernance(roomId)) === null) {
+            return c.json(notFound, 404);
+          }
           if (!isPlatformStaff(auth) && !(await services.rooms.isSteward(roomId, auth.userId))) {
             return c.json(notFound, 404);
           }

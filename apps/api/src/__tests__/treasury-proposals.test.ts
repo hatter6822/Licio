@@ -635,6 +635,97 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     expect(status.transferable).toBe(false);
   });
 
+  it('a preflight-rejected draft burns NO action budget (W15)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps); // cost 5, max 10 ⇒ two funded creates
+    // Two drafts die at the per-action cap — rejection-only checks now run
+    // BEFORE the charge, so the member's allowance is untouched.
+    for (let i = 0; i < 2; i += 1) {
+      expect(
+        await createProductionProposal(deps, {
+          roomId: ROOM,
+          userId: PROPOSER,
+          create: draft({ requested_amount: '6000', idempotency_key: crypto.randomUUID() }),
+        }),
+      ).toMatchObject({ ok: false, code: 'per_action_cap_exceeded' });
+    }
+    // Under the old order those two failures drained the whole budget; both
+    // funded creates still succeed.
+    await createProposal(deps);
+    await createProposal(deps);
+    expect(
+      await createProductionProposal(deps, { roomId: ROOM, userId: PROPOSER, create: draft() }),
+    ).toMatchObject({ ok: false, code: 'insufficient_budget' });
+  });
+
+  it('non-spend proposals reject a recipient_ref — the recusal weapon (W15)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    // Naming `user:<member>` on a policy/charter proposal would recuse that
+    // member (and their delegated unit) from a vote with no recipient.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: STEWARD,
+        create: draft({
+          proposal_type: 'charter_update',
+          category: null,
+          requested_amount: null,
+          asset: null,
+          recipient_ref: `user:${VOTER_2}`,
+          requested_action: { kind: 'charter_update', sections: {} },
+        }),
+      }),
+    ).toMatchObject({ ok: false, code: 'draft_invalid' });
+  });
+
+  it('a supplied milestone schedule outside 1..16 entries is INVALID, never the fallback (W15)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    // 17 tranches: before the fix both plan builders silently replaced the
+    // voted schedule with ONE full-amount milestone.
+    const seventeen = Array.from({ length: 17 }, (_, i) => ({
+      description: `Tranche ${i + 1}`,
+      amount: i === 0 ? '400' : '225',
+    }));
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_action: { kind: 'grant', milestones: seventeen } }),
+      }),
+    ).toMatchObject({ ok: false, code: 'milestones_invalid' });
+    // A supplied non-array (or empty) schedule is equally invalid.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({
+          requested_action: { kind: 'grant', milestones: 'all-at-once' },
+          idempotency_key: crypto.randomUUID(),
+        }),
+      }),
+    ).toMatchObject({ ok: false, code: 'milestones_invalid' });
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({
+          requested_action: { kind: 'grant', milestones: [] },
+          idempotency_key: crypto.randomUUID(),
+        }),
+      }),
+    ).toMatchObject({ ok: false, code: 'milestones_invalid' });
+    // An ABSENT key still falls through to the single full-amount milestone.
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ idempotency_key: crypto.randomUUID() }),
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('rejects a request above the per-action cap BEFORE publication (PR #144 review)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps); // perActionMax 5000, perWindowMax 10000, balance 100000
@@ -2221,30 +2312,42 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     expect(alerts).toContain('wsm.proposal.execute_audit_failed');
   });
 
-  it('milestone descriptions carry the wire bounds at execution preflight (W13)', async () => {
+  it('milestone descriptions carry the wire bounds at BOTH gates (W13/W15)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps);
     await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
     await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
-    const proposal = await createProposal(deps, {
-      requested_action: {
-        kind: 'grant',
-        milestones: [{ description: 'x'.repeat(1_001), amount: '4000' }],
-      },
-    });
+    const malformed = {
+      kind: 'grant',
+      milestones: [{ description: 'x'.repeat(1_001), amount: '4000' }],
+    };
+    // PUBLICATION rejects the plan up front — no governance cycle burned (W15).
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_action: malformed }),
+      }),
+    ).toMatchObject({ ok: false, code: 'milestones_invalid' });
+    // EXECUTION still re-checks independently: a row predating the create
+    // gate (mutated in place here) dies before the kernel — an over-bound
+    // description would otherwise make every later grants read fail response
+    // validation for the room (W13).
+    const proposal = await createProposal(deps);
     await openVoting(deps);
     await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
     await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
     await settleDueProposals(deps, ROOM);
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const row = await deps.proposals.getById(proposal.proposalId);
+    if (row === null) throw new Error('proposal lost');
+    await deps.proposals.update({ ...row, requestedAction: malformed });
     const executed = await executeProposal(deps, {
       roomId: ROOM,
       proposalId: proposal.proposalId,
       userId: STEWARD,
     });
-    // Rejected BEFORE the kernel: an over-bound description would otherwise
-    // make every later grants read fail response validation for the room.
     expect(executed).toMatchObject({ ok: false, code: 'grant_creation_failed' });
     expect(deps.executorCalls).toEqual([]);
   });
@@ -2414,21 +2517,30 @@ describe('grants (WS-M.5.1a)', () => {
     await prepareRoom(deps);
     await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
     await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
-    const proposal = await createProposal(deps, {
-      requested_action: {
-        kind: 'grant',
-        milestones: [{ description: 'Only', amount: '9999' }], // ≠ 4000
-      },
-    });
+    const malformed = {
+      kind: 'grant',
+      milestones: [{ description: 'Only', amount: '9999' }], // ≠ 4000
+    };
+    // Publication refuses the unsound split up front (W15)…
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_action: malformed }),
+      }),
+    ).toMatchObject({ ok: false, code: 'milestones_invalid' });
+    // …and execution re-checks a row that slipped past it: no grant lands.
+    const proposal = await createProposal(deps);
     await openVoting(deps);
     await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
     await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
     await settleDueProposals(deps, ROOM);
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const row = await deps.proposals.getById(proposal.proposalId);
+    if (row === null) throw new Error('proposal lost');
+    await deps.proposals.update({ ...row, requestedAction: malformed });
     await executeProposal(deps, { roomId: ROOM, proposalId: proposal.proposalId, userId: STEWARD });
-    // The malformed plan yields NO grant (execution still settles the treasury
-    // action; grant creation refuses the unsound tranche split).
     expect(await deps.grants.getByProposal(proposal.proposalId)).toBeNull();
   });
 
@@ -2439,21 +2551,32 @@ describe('grants (WS-M.5.1a)', () => {
     await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
     // `-100` + `4100` SUMS to the approved 4000 — but accepting the 4100
     // milestone first would disburse above the voted authorization.
-    const proposal = await createProposal(deps, {
-      requested_action: {
-        kind: 'grant',
-        milestones: [
-          { description: 'Offset', amount: '-100' },
-          { description: 'Over', amount: '4100' },
-        ],
-      },
-    });
+    const malformed = {
+      kind: 'grant',
+      milestones: [
+        { description: 'Offset', amount: '-100' },
+        { description: 'Over', amount: '4100' },
+      ],
+    };
+    // Publication refuses it up front (W15)…
+    expect(
+      await createProductionProposal(deps, {
+        roomId: ROOM,
+        userId: PROPOSER,
+        create: draft({ requested_action: malformed }),
+      }),
+    ).toMatchObject({ ok: false, code: 'milestones_invalid' });
+    // …and execution re-checks a row that slipped past it.
+    const proposal = await createProposal(deps);
     await openVoting(deps);
     await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
     await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
     await settleDueProposals(deps, ROOM);
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
+    const row = await deps.proposals.getById(proposal.proposalId);
+    if (row === null) throw new Error('proposal lost');
+    await deps.proposals.update({ ...row, requestedAction: malformed });
     const executed = await executeProposal(deps, {
       roomId: ROOM,
       proposalId: proposal.proposalId,
