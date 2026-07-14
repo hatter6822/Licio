@@ -368,6 +368,18 @@ export async function requestWsmModeTransition(
     if (!isReadinessTarget(input.targetMode)) {
       return tgErr(409, 'transition_not_permitted', 'The target mode cannot be readiness-gated.');
     }
+    // §28.3 expansion blocker: an unexplained treasury divergence hard-blocks
+    // any escalation into (or within) the production modes.
+    if (input.targetMode === 'capped_production' || input.targetMode === 'mature_production') {
+      const treasury = await deps.treasuries.getByRoom(input.roomId);
+      if (treasury !== null && treasury.reconciliationState === 'divergent') {
+        return tgErr(
+          409,
+          'reconciliation_divergent',
+          'Treasury reconciliation has an unexplained divergence; expansion is blocked (§28.3).',
+        );
+      }
+    }
     const readiness = await evaluateWsmReadiness(
       deps,
       input.roomId,

@@ -53,6 +53,22 @@ export interface KnomosisRuntimeConfig {
   reconciliationIntervalMs: number;
   /** Unexplained-delta threshold (minor units) that classifies as critical. */
   divergenceCriticalThresholdMinorUnits: string;
+  // --- WS-M treasury-and-governance tunables (WS-M.3.1b timeouts, WS-M.4 windows).
+  /** Payment-intent per-state TTLs (created/preflighted/quoted/signed). */
+  wsmIntentCreatedTtlMs: number;
+  wsmIntentPreflightedTtlMs: number;
+  wsmIntentQuotedTtlMs: number;
+  wsmIntentSignedTtlMs: number;
+  /** Bounded retries for failed/reverted intents (WS-M.3.1b). */
+  wsmIntentMaxRetries: number;
+  /** Default proposal windows where the law-pack sets none (WS-M.4.2a/2d/3a). */
+  wsmDeliberationSeconds: number;
+  wsmVotingSeconds: number;
+  wsmChallengeWindowSeconds: number;
+  /** A passed proposal expires if unexecuted this long after clearance. */
+  wsmExecutionWindowSeconds: number;
+  /** Flat estimated network fee shown in deposit/payout quotes (minor units). */
+  wsmEstimatedFeeMinorUnits: string;
 }
 
 export const DEFAULT_KNOMOSIS_CONFIG: KnomosisRuntimeConfig = {
@@ -77,6 +93,16 @@ export const DEFAULT_KNOMOSIS_CONFIG: KnomosisRuntimeConfig = {
   readinessMinSimActions: 5,
   reconciliationIntervalMs: 15 * 60_000,
   divergenceCriticalThresholdMinorUnits: '1',
+  wsmIntentCreatedTtlMs: 30 * 60_000,
+  wsmIntentPreflightedTtlMs: 10 * 60_000,
+  wsmIntentQuotedTtlMs: 5 * 60_000,
+  wsmIntentSignedTtlMs: 5 * 60_000,
+  wsmIntentMaxRetries: 3,
+  wsmDeliberationSeconds: 24 * 3600,
+  wsmVotingSeconds: 3 * 24 * 3600,
+  wsmChallengeWindowSeconds: 2 * 24 * 3600,
+  wsmExecutionWindowSeconds: 14 * 24 * 3600,
+  wsmEstimatedFeeMinorUnits: '0',
 };
 
 const CONFIG_PREFIX = 'knomosis.';
@@ -105,6 +131,32 @@ const VALIDATORS: Readonly<Record<keyof KnomosisRuntimeConfig, z.ZodType>> = {
   readinessMinSimActions: z.number().int().min(0).max(10_000),
   reconciliationIntervalMs: z.number().int().min(60_000).max(86_400_000),
   divergenceCriticalThresholdMinorUnits: minorUnits,
+  wsmIntentCreatedTtlMs: z.number().int().min(60_000).max(86_400_000),
+  wsmIntentPreflightedTtlMs: z.number().int().min(60_000).max(86_400_000),
+  wsmIntentQuotedTtlMs: z.number().int().min(60_000).max(86_400_000),
+  wsmIntentSignedTtlMs: z.number().int().min(60_000).max(86_400_000),
+  wsmIntentMaxRetries: z.number().int().min(0).max(10),
+  wsmDeliberationSeconds: z
+    .number()
+    .int()
+    .min(60)
+    .max(90 * 24 * 3600),
+  wsmVotingSeconds: z
+    .number()
+    .int()
+    .min(60)
+    .max(90 * 24 * 3600),
+  wsmChallengeWindowSeconds: z
+    .number()
+    .int()
+    .min(60)
+    .max(90 * 24 * 3600),
+  wsmExecutionWindowSeconds: z
+    .number()
+    .int()
+    .min(3600)
+    .max(90 * 24 * 3600),
+  wsmEstimatedFeeMinorUnits: z.string().regex(/^\d{1,78}$/),
 };
 
 export const KNOMOSIS_CONFIG_KEYS = Object.keys(VALIDATORS) as Array<keyof KnomosisRuntimeConfig>;
