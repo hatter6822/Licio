@@ -1614,6 +1614,11 @@ const TREASURY_ACTION_CAPABILITY: Record<TreasuryCategory, Capability> = {
   grant: 'treasury.grant',
   bounty: 'treasury.grant',
   investment_rebalance: 'treasury.invest',
+  // WS-M spend categories (proposal-driven disbursements, SPEC §17.6): routine
+  // operational costs are distributions; steward compensation is grant-class
+  // (COI-sensitive, independent-review-eligible).
+  operational: 'treasury.distribute',
+  steward_compensation: 'treasury.grant',
 };
 
 /**
