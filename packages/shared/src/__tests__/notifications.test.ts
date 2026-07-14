@@ -81,6 +81,21 @@ describe('notification + push schemas', () => {
     ).not.toThrow();
   });
 
+  // SSRF defense (registration boundary): a non-https endpoint — the vector for
+  // pointing the server's push POST at an internal http service — is rejected
+  // before it can be stored. RFC 8030 mandates https, so no real push service
+  // is lost. The send leg additionally re-checks the resolved address.
+  it.each([
+    'http://push.example/abc',
+    'http://10.0.0.5:6379/x',
+    'ftp://push.example/abc',
+    'javascript:alert(1)',
+  ])('rejects a non-https push endpoint (%s)', (endpoint) => {
+    expect(() =>
+      pushSubscriptionSchema.parse({ endpoint, keys: { p256dh: 'x', auth: 'y' } }),
+    ).toThrow();
+  });
+
   it('accepts bodyless reply notifications and rejects score/body/raw/financial fields', () => {
     const item = {
       notification_id: '00000000-0000-4000-8000-000000000001',

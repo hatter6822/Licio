@@ -8,7 +8,10 @@
 // payload), so a push carries NO sensitive content (SPEC §6.7); the service
 // worker fetches the actual, minimal notification text after waking.
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'node:crypto';
+import https from 'node:https';
+import { isIP } from 'node:net';
 import type { PushSubscriptionJson } from '@licio/shared';
+import { guardedLookup, isBlockedAddress } from './ssrf-guard.js';
 
 export interface VapidKeys {
   /** base64url uncompressed P-256 point (65 bytes: 0x04 ‖ X ‖ Y). */
@@ -119,26 +122,96 @@ export interface SendPushResult {
   gone: boolean;
 }
 
+/** How long a bodyless push POST may take before we give up (delivery is
+ *  best-effort — a slow push service must not tie up a worker). */
+const PUSH_TIMEOUT_MS = 10_000;
+
+/**
+ * The PRODUCTION transport: a bodyless `https:` POST whose DNS resolution is
+ * gated by the shared SSRF policy (`lib/ssrf-guard.ts`). The `endpoint` is a
+ * value the CLIENT registered, so — exactly like a user-submitted link — it
+ * must never let the API reach a private/loopback/link-local address. Built on
+ * `node:https` rather than `fetch` because the `lookup` option is the only
+ * rebinding-safe place to validate the resolved address (the address checked
+ * is the address dialed). A blocked address / connection error resolves to a
+ * non-`ok`, non-`gone` result: delivery failed, but the subscription is NOT
+ * pruned (a transient network fault must not drop a legitimate subscription).
+ */
+function guardedPushPost(
+  endpoint: string,
+  headers: Record<string, string>,
+): Promise<SendPushResult> {
+  const failed: SendPushResult = { ok: false, statusCode: 0, gone: false };
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return Promise.resolve(failed);
+  }
+  // Defense in depth with the schema `https:` refinement + a literal-IP host
+  // pre-check (no DNS step to intercept for a bare address).
+  if (url.protocol !== 'https:') return Promise.resolve(failed);
+  const literal = url.hostname.replace(/^\[|\]$/g, '');
+  const literalFamily = isIP(literal);
+  if (literalFamily !== 0 && isBlockedAddress(literal, literalFamily)) {
+    return Promise.resolve(failed);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: SendPushResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const request = https.request(
+      url,
+      { method: 'POST', headers, timeout: PUSH_TIMEOUT_MS, lookup: guardedLookup() },
+      (response) => {
+        response.resume(); // drain — the push is bodyless, we read no payload back
+        const status = response.statusCode ?? 0;
+        response.on('end', () =>
+          settle({
+            ok: status >= 200 && status < 300,
+            statusCode: status,
+            gone: status === 404 || status === 410,
+          }),
+        );
+      },
+    );
+    request.on('timeout', () => {
+      request.destroy();
+      settle(failed);
+    });
+    request.on('error', () => settle(failed));
+    request.end();
+  });
+}
+
 /**
  * Send a bodyless Web Push to one subscription. Carries no payload — the push is
  * a wake signal only (privacy: no sensitive content on the wire). Returns the
  * delivery outcome; a 404/410 marks the subscription stale for pruning
  * (WS-C.2.4a observability).
+ *
+ * Production uses the SSRF-gated `node:https` transport above. An injected
+ * `fetchImpl` (tests) owns its own transport and bypasses the gate — the gate's
+ * purpose is to constrain what the SERVER dials on the real network.
  */
 export async function sendWebPush(
   subscription: PushSubscriptionJson,
   config: VapidConfig,
   options: { ttlSeconds?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<SendPushResult> {
-  const { ttlSeconds = 28 * 24 * 60 * 60, fetchImpl = fetch } = options;
-  const response = await fetchImpl(subscription.endpoint, {
-    method: 'POST',
-    headers: {
-      ...buildVapidHeaders(subscription.endpoint, config),
-      TTL: String(ttlSeconds),
-      'Content-Length': '0',
-    },
-  });
+  const { ttlSeconds = 28 * 24 * 60 * 60, fetchImpl } = options;
+  const headers = {
+    ...buildVapidHeaders(subscription.endpoint, config),
+    TTL: String(ttlSeconds),
+    'Content-Length': '0',
+  };
+  if (fetchImpl === undefined) {
+    return guardedPushPost(subscription.endpoint, headers);
+  }
+  const response = await fetchImpl(subscription.endpoint, { method: 'POST', headers });
   return {
     ok: response.ok,
     statusCode: response.status,

@@ -113,4 +113,24 @@ describe('sendWebPush', () => {
     expect(result.gone).toBe(true);
     expect(result.ok).toBe(false);
   });
+
+  // SSRF: the endpoint is client-registered, so the PRODUCTION transport (no
+  // injected fetchImpl) must refuse a private/loopback/link-local or non-https
+  // target BEFORE any packet leaves the host — and it must never prune, so a
+  // hostile registration can't be distinguished from a live one by the caller.
+  it.each([
+    ['https://127.0.0.1/x', 'loopback'],
+    ['https://10.0.0.5:6379/x', 'RFC 1918'],
+    ['https://169.254.169.254/latest/meta-data', 'cloud metadata link-local'],
+    ['https://[::1]/x', 'IPv6 loopback'],
+    ['http://example.com/x', 'non-https scheme'],
+  ])('the default transport blocks a %s endpoint without connecting (%s)', async (endpoint) => {
+    const result = await sendWebPush(
+      { endpoint, keys: { p256dh: 'x', auth: 'y' } },
+      config(),
+      // No fetchImpl ⇒ the real SSRF-gated node:https transport, which resolves
+      // the literal address synchronously and refuses it (no network I/O).
+    );
+    expect(result).toEqual({ ok: false, statusCode: 0, gone: false });
+  });
 });
