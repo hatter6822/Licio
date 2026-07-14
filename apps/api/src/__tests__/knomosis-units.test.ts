@@ -1287,6 +1287,11 @@ describe('readiness + simulation additional branches', () => {
           mode = m;
           return true;
         },
+        setModeIf: async (_r: string, expected: string, m: string) => {
+          if (mode !== expected) return false;
+          mode = m;
+          return true;
+        },
       },
       governanceAudit: fixture.knomosis.governanceAudit,
       comprehension: fixture.knomosis.comprehension,
@@ -1311,7 +1316,11 @@ describe('readiness + simulation additional branches', () => {
     const { requestModeTransition } = await import('../knomosis/readiness.js');
     const deps = {
       checklist: fixture.knomosis.readinessChecklist,
-      roomMode: { currentMode: async () => null, setMode: async () => false },
+      roomMode: {
+        currentMode: async () => null,
+        setMode: async () => false,
+        setModeIf: async () => false,
+      },
       governanceAudit: fixture.knomosis.governanceAudit,
       comprehension: fixture.knomosis.comprehension,
       audit: fixture.knomosis.audit,

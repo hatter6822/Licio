@@ -678,6 +678,17 @@ export interface AuditLogCursor {
 
 export interface GovernanceAuditStore {
   append(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord>;
+  /** WS-M.4.3c: append a HASH-CHAINED entry.  The store enforces the two
+   *  fork-proof uniques from migration 0082 — at most one child per
+   *  (room, prevHash) and one chained genesis per room — and returns NULL on a
+   *  collision so the chain writer re-reads the head and retries.  Entries must
+   *  carry non-null integrityHash (and prevHash except at genesis). */
+  appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null>;
+  /** WS-M.4.3c: the room's current chain head — the chained entry whose
+   *  integrityHash is no other chained entry's prevHash (null ⇒ no chain yet). */
+  chainHead(roomId: string): Promise<GovernanceAuditRecord | null>;
+  /** WS-M.4.3c: every chained entry for a room (for the chain verifier). */
+  listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]>;
   listByRoom(
     roomId: string,
     limit: number,
@@ -1726,6 +1737,49 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
     // Append-only by construction: the array is never mutated except push.
     this.#rows.push(structuredClone(entry));
     return structuredClone(entry);
+  }
+
+  async appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null> {
+    // Emulate migration 0082's fork-proof partial uniques exactly: at most one
+    // child per (room, prevHash) and at most one chained genesis per room.
+    if (entry.integrityHash === undefined || entry.integrityHash === null) {
+      throw new Error('appendChained requires an integrityHash');
+    }
+    const chained = this.#rows.filter(
+      (r) => r.roomId === entry.roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+    );
+    const prev = entry.prevHash ?? null;
+    if (prev === null) {
+      if (chained.length > 0) return null; // second genesis collides
+    } else if (chained.some((r) => (r.prevHash ?? null) === prev)) {
+      return null; // second child of the same parent collides
+    }
+    this.#rows.push(structuredClone(entry));
+    return structuredClone(entry);
+  }
+
+  async chainHead(roomId: string): Promise<GovernanceAuditRecord | null> {
+    const chained = this.#rows.filter(
+      (r) => r.roomId === roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+    );
+    const referenced = new Set(
+      chained.map((r) => r.prevHash).filter((h): h is string => h !== undefined && h !== null),
+    );
+    const head = chained.find(
+      (r) =>
+        r.integrityHash !== undefined &&
+        r.integrityHash !== null &&
+        !referenced.has(r.integrityHash),
+    );
+    return head ? structuredClone(head) : null;
+  }
+
+  async listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]> {
+    return this.#rows
+      .filter(
+        (r) => r.roomId === roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+      )
+      .map((r) => structuredClone(r));
   }
 
   async listByRoom(

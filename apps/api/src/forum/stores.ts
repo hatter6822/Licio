@@ -365,6 +365,15 @@ export interface RoomStore {
       >
     >,
   ): Promise<RoomRecord | null>;
+  /** WS-M.1.1b — COMPARE-AND-SET governance-mode transition: the mode is
+   *  written only when the stored mode still equals `expected`, so two racing
+   *  transitions serialize (the loser re-reads and re-validates).  Written ONLY
+   *  by the knomosis/WS-M transition gates, never by settings surfaces. */
+  updateGovernanceModeIf(
+    roomId: string,
+    expected: RoomRecord['governanceMode'],
+    next: RoomRecord['governanceMode'],
+  ): Promise<boolean>;
   /** WS-S.9 (phase 5) — set the room READ-ONLY and record the OPAQUE P2P
    *  destination id it migrated to (a UUID, never an FK). Idempotent: freezing
    *  an already-frozen room keeps it frozen and updates the destination if
@@ -1016,6 +1025,18 @@ export class InMemoryRoomStore implements RoomStore {
     Object.assign(room, patch);
     room.updatedAt = iso(this.#now);
     return room;
+  }
+
+  async updateGovernanceModeIf(
+    roomId: string,
+    expected: RoomRecord['governanceMode'],
+    next: RoomRecord['governanceMode'],
+  ): Promise<boolean> {
+    const room = this.#rooms.get(roomId);
+    if (!room || room.governanceMode !== expected) return false;
+    room.governanceMode = next;
+    room.updatedAt = iso(this.#now);
+    return true;
   }
 
   async freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null> {

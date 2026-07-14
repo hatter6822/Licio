@@ -270,6 +270,11 @@ describe('WS-L.4.1g readiness + mode transition over HTTP', () => {
         mode = m;
         return true;
       },
+      setModeIf: async (_r, expected, m) => {
+        if (mode !== expected) return false;
+        mode = m;
+        return true;
+      },
     };
     const { cookie } = await seedUserWithSession(fixture.identity);
     const readiness = await req('GET', `/rooms/${ROOM}/governance/readiness`, cookie);
@@ -298,6 +303,11 @@ describe('WS-L.4.1g readiness + mode transition over HTTP', () => {
     fixture.knomosis.roomMode = {
       currentMode: async () => mode as never,
       setMode: async (_r, m) => {
+        mode = m;
+        return true;
+      },
+      setModeIf: async (_r, expected, m) => {
+        if (mode !== expected) return false;
         mode = m;
         return true;
       },
@@ -357,6 +367,7 @@ describe('governance surface fail-closed gates', () => {
     fixture.knomosis.roomMode = {
       currentMode: async () => 'simulated',
       setMode: async () => true,
+      setModeIf: async (_r, expected) => expected === 'simulated',
     };
     const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
     const res = await req('POST', `/rooms/${ROOM}/governance/mode`, cookie, {

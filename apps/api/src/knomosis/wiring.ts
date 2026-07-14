@@ -52,7 +52,7 @@ export function buildRoomGovernancePort(
   };
 }
 
-/** Governance-mode read/write over the forum room store (WS-L.4.1g only). */
+/** Governance-mode read/write over the forum room store (WS-L.4.1g + WS-M.1.1b). */
 export function buildRoomModePort(forum: ForumServices): RoomModePort {
   return {
     currentMode: async (roomId) => {
@@ -63,6 +63,8 @@ export function buildRoomModePort(forum: ForumServices): RoomModePort {
       const updated = await forum.rooms.update(roomId, { governanceMode: mode });
       return updated !== null;
     },
+    setModeIf: async (roomId, expected: GovernanceMode, next: GovernanceMode) =>
+      forum.rooms.updateGovernanceModeIf(roomId, expected, next),
   };
 }
 

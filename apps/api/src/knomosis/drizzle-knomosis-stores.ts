@@ -32,6 +32,7 @@ import {
   eq,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lt,
   lte,
@@ -1758,6 +1759,81 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
       })
       .onConflictDoNothing({ target: governanceAuditLogs.dedupeKey });
     return entry;
+  }
+
+  async appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null> {
+    if (entry.integrityHash === undefined || entry.integrityHash === null) {
+      throw new Error('appendChained requires an integrityHash');
+    }
+    try {
+      await this.db.insert(governanceAuditLogs).values({
+        entryId: entry.entryId,
+        roomId: entry.roomId,
+        actionType: entry.actionType,
+        actorUserId: entry.actorUserId,
+        actionDetails: entry.actionDetails,
+        simulationMode: entry.simulationMode,
+        createdAt: new Date(entry.createdAt),
+        dedupeKey: entry.dedupeKey ?? null,
+        prevHash: entry.prevHash ?? null,
+        integrityHash: entry.integrityHash,
+        proposalId: entry.proposalId ?? null,
+        treasuryId: entry.treasuryId ?? null,
+      });
+      return entry;
+    } catch (error) {
+      // 23505 = unique_violation on the fork-proof chain indexes (migration
+      // 0082) — the writer re-reads the head and retries; anything else rethrows.
+      if ((error as { code?: string }).code === '23505') return null;
+      throw error;
+    }
+  }
+
+  async chainHead(roomId: string): Promise<GovernanceAuditRecord | null> {
+    // The chain head is the chained entry whose integrity hash no other chained
+    // entry references as its parent — unique by the fork-proof indexes.
+    const rows = await this.db
+      .select()
+      .from(governanceAuditLogs)
+      .where(
+        and(
+          eq(governanceAuditLogs.roomId, roomId),
+          isNotNull(governanceAuditLogs.integrityHash),
+          sql`${governanceAuditLogs.integrityHash} NOT IN (
+            SELECT gal."prev_hash" FROM "knomosis"."governance_audit_log" gal
+            WHERE gal."room_id" = ${roomId} AND gal."prev_hash" IS NOT NULL
+          )`,
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    return row ? this.#mapChained(row) : null;
+  }
+
+  async listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(governanceAuditLogs)
+      .where(
+        and(eq(governanceAuditLogs.roomId, roomId), isNotNull(governanceAuditLogs.integrityHash)),
+      );
+    return rows.map((row) => this.#mapChained(row));
+  }
+
+  #mapChained(row: typeof governanceAuditLogs.$inferSelect): GovernanceAuditRecord {
+    return {
+      entryId: row.entryId,
+      roomId: row.roomId,
+      actionType: row.actionType as GovernanceAuditRecord['actionType'],
+      actorUserId: row.actorUserId,
+      actionDetails: row.actionDetails as Record<string, unknown>,
+      simulationMode: row.simulationMode,
+      createdAt: iso(row.createdAt),
+      prevHash: row.prevHash,
+      integrityHash: row.integrityHash,
+      proposalId: row.proposalId,
+      treasuryId: row.treasuryId,
+    };
   }
 
   async listByRoom(
