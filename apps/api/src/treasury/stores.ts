@@ -213,6 +213,11 @@ export interface GovernanceProfileStore {
   /** COLUMN-scoped charter-pointer update: a whole-record upsert built from a
    *  stale read could clobber a freeze written in between (PR #144 W7). */
   setCharterPointer(roomId: string, charterVersionId: string, updatedAt: string): Promise<boolean>;
+  /** COLUMN-scoped treasury pointer (same stale-clobber hazard). */
+  setTreasuryPointer(roomId: string, treasuryId: string, updatedAt: string): Promise<boolean>;
+  /** COLUMN-scoped pause flags — a whole-record write from a stale read could
+   *  silently unfreeze a room mid-emergency (PR #144 W9). */
+  setProfilePauseFlags(roomId: string, flags: PauseFlags, updatedAt: string): Promise<boolean>;
   /** COLUMN-scoped law-pack adoption refs (same stale-clobber hazard). */
   setLawPackRefs(
     roomId: string,
@@ -346,12 +351,57 @@ export interface PaymentIntentStore {
   clear(): Promise<void>;
 }
 
+/** The coarse milestone + payout projections over a milestone set — shared by
+ *  both adapters so a milestone-scoped write re-projects IDENTICALLY. */
+export function projectGrantAggregates(
+  milestones: readonly GrantMilestoneRecord[],
+  currentPayoutState: GrantRecord['payoutState'],
+): Pick<GrantRecord, 'milestoneState' | 'payoutState'> {
+  const milestoneState = milestones.every((m) => m.state === 'accepted')
+    ? ('accepted' as const)
+    : milestones.some((m) => m.state === 'rejected')
+      ? ('rejected' as const)
+      : milestones.some((m) => m.state !== 'pending')
+        ? ('in_progress' as const)
+        : ('pending' as const);
+  // Scheduling only ever moves the grant to `scheduled`: `paid`/`partially_paid`
+  // are RECONCILIATION verdicts and `clawed_back` is terminal.
+  const scheduled = milestones.filter((m) => m.paymentIntentId !== null).length;
+  const payoutState =
+    scheduled === 0 ||
+    currentPayoutState === 'partially_paid' ||
+    currentPayoutState === 'paid' ||
+    currentPayoutState === 'clawed_back'
+      ? currentPayoutState
+      : ('scheduled' as const);
+  return { milestoneState, payoutState };
+}
+
 export interface GrantStore {
   getById(grantId: string): Promise<GrantRecord | null>;
   getByProposal(proposalId: string): Promise<GrantRecord | null>;
   /** Returns null when the proposal already has a grant. */
   insert(record: GrantRecord): Promise<GrantRecord | null>;
   update(record: GrantRecord): Promise<GrantRecord | null>;
+  /** MILESTONE-scoped CAS: patches ONE milestone against the CURRENT row and
+   *  re-projects the aggregates — two stewards updating different milestones
+   *  can never clobber each other's writes (a whole-record `update` from a
+   *  snapshot would).  Returns null when the milestone's stored state ≠
+   *  `fromState` (the CAS lost) or the grant/milestone is unknown. */
+  applyMilestoneTransition(
+    grantId: string,
+    milestoneId: string,
+    fromState: GrantMilestoneRecord['state'],
+    toState: GrantMilestoneRecord['state'],
+    paymentIntentId: string | null,
+  ): Promise<GrantRecord | null>;
+  /** UNSETTLED grants for a treasury (payout not paid/clawed_back), keyset-
+   *  paged by grantId — the liquidity encumbrance walks EVERY page (W9). */
+  listUnsettledByTreasury(
+    treasuryId: string,
+    limit: number,
+    afterId?: string | null,
+  ): Promise<GrantRecord[]>;
   listByRoom(roomId: string, limit: number): Promise<GrantRecord[]>;
   clear(): Promise<void>;
 }
@@ -432,6 +482,30 @@ export class InMemoryGovernanceProfileStore implements GovernanceProfileStore {
     const row = this.#rows.get(roomId);
     if (row === undefined) return false;
     row.charterVersionId = charterVersionId;
+    row.updatedAt = updatedAt;
+    return true;
+  }
+
+  async setTreasuryPointer(
+    roomId: string,
+    treasuryId: string,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const row = this.#rows.get(roomId);
+    if (row === undefined) return false;
+    row.treasuryId = treasuryId;
+    row.updatedAt = updatedAt;
+    return true;
+  }
+
+  async setProfilePauseFlags(
+    roomId: string,
+    flags: PauseFlags,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const row = this.#rows.get(roomId);
+    if (row === undefined) return false;
+    row.pauseFlags = clone(flags);
     row.updatedAt = updatedAt;
     return true;
   }
@@ -773,6 +847,43 @@ export class InMemoryGrantStore implements GrantStore {
     if (!this.#rows.has(record.grantId)) return null;
     this.#rows.set(record.grantId, clone(record));
     return clone(record);
+  }
+
+  async applyMilestoneTransition(
+    grantId: string,
+    milestoneId: string,
+    fromState: GrantMilestoneRecord['state'],
+    toState: GrantMilestoneRecord['state'],
+    paymentIntentId: string | null,
+  ): Promise<GrantRecord | null> {
+    const row = this.#rows.get(grantId);
+    if (row === undefined) return null;
+    const milestone = row.milestones.find((m) => m.milestoneId === milestoneId);
+    if (milestone === undefined || milestone.state !== fromState) return null;
+    milestone.state = toState;
+    if (paymentIntentId !== null) milestone.paymentIntentId = paymentIntentId;
+    const aggregates = projectGrantAggregates(row.milestones, row.payoutState);
+    row.milestoneState = aggregates.milestoneState;
+    row.payoutState = aggregates.payoutState;
+    return clone(row);
+  }
+
+  async listUnsettledByTreasury(
+    treasuryId: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<GrantRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.treasuryId === treasuryId &&
+          r.payoutState !== 'paid' &&
+          r.payoutState !== 'clawed_back',
+      )
+      .sort((a, b) => (a.grantId < b.grantId ? -1 : 1))
+      .filter((r) => afterId === null || r.grantId > afterId)
+      .slice(0, limit)
+      .map(clone);
   }
 
   async listByRoom(roomId: string, limit: number): Promise<GrantRecord[]> {

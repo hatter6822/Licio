@@ -324,6 +324,13 @@ export function createRoomGovernanceSimRoutes() {
           const body: unknown = c.req.valid('json');
           if (gate.mode !== 'simulated') {
             // WS-M production proposals (real-asset modes; WS-M.4.1a-c + 4.2a).
+            // Real-asset governance is ADULT-gated like signing, deposits, and
+            // treasury actions — the shared sim/production route makes the gate
+            // conditional here rather than middleware-wide (simulated practice
+            // stays age-open) (W9).
+            if (auth.ageBand !== 'adult') {
+              return c.json(deny('adult_required', 'This feature is not available'), 403);
+            }
             if (!treasuryServicesConfigured()) {
               return c.json(
                 deny('mode_invalid', 'Proposal templates are available in simulated mode.'),

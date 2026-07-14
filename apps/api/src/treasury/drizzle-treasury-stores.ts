@@ -21,7 +21,7 @@ import {
   treasuryReservations,
 } from '@licio/db';
 import type { PauseFlags, PaymentIntentState } from '@licio/shared';
-import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import type {
   ActionBudgetRecord,
   ActionBudgetStore,
@@ -35,6 +35,7 @@ import type {
   DelegationStore,
   GovernanceProfileRecord,
   GovernanceProfileStore,
+  GrantMilestoneRecord,
   GrantRecord,
   GrantStore,
   PaymentIntentRecord,
@@ -47,6 +48,7 @@ import type {
   TreasuryRecord,
   TreasuryStore,
 } from './stores.js';
+import { projectGrantAggregates } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -141,6 +143,32 @@ export class DrizzleGovernanceProfileStore implements GovernanceProfileStore {
     const rows = await this.db
       .update(roomGovernanceProfiles)
       .set({ charterVersionId, updatedAt: new Date(updatedAt) })
+      .where(eq(roomGovernanceProfiles.roomId, roomId))
+      .returning({ roomId: roomGovernanceProfiles.roomId });
+    return rows.length > 0;
+  }
+
+  async setTreasuryPointer(
+    roomId: string,
+    treasuryId: string,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(roomGovernanceProfiles)
+      .set({ treasuryId, updatedAt: new Date(updatedAt) })
+      .where(eq(roomGovernanceProfiles.roomId, roomId))
+      .returning({ roomId: roomGovernanceProfiles.roomId });
+    return rows.length > 0;
+  }
+
+  async setProfilePauseFlags(
+    roomId: string,
+    flags: PauseFlags,
+    updatedAt: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(roomGovernanceProfiles)
+      .set({ pauseFlags: flags, updatedAt: new Date(updatedAt) })
       .where(eq(roomGovernanceProfiles.roomId, roomId))
       .returning({ roomId: roomGovernanceProfiles.roomId });
     return rows.length > 0;
@@ -798,6 +826,63 @@ export class DrizzleGrantStore implements GrantStore {
       .where(eq(treasuryGrants.grantId, record.grantId))
       .returning();
     return rows[0] ? mapGrant(rows[0]) : null;
+  }
+
+  async applyMilestoneTransition(
+    grantId: string,
+    milestoneId: string,
+    fromState: GrantMilestoneRecord['state'],
+    toState: GrantMilestoneRecord['state'],
+    paymentIntentId: string | null,
+  ): Promise<GrantRecord | null> {
+    // Row-locked read-modify-write: the transaction serializes concurrent
+    // milestone updates so neither snapshot can clobber the other's tranche.
+    return this.db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(treasuryGrants)
+        .where(eq(treasuryGrants.grantId, grantId))
+        .for('update')
+        .limit(1);
+      const row = rows[0];
+      if (row === undefined) return null;
+      const grant = mapGrant(row);
+      const milestone = grant.milestones.find((m) => m.milestoneId === milestoneId);
+      if (milestone === undefined || milestone.state !== fromState) return null;
+      milestone.state = toState;
+      if (paymentIntentId !== null) milestone.paymentIntentId = paymentIntentId;
+      const aggregates = projectGrantAggregates(grant.milestones, grant.payoutState);
+      const updated = await tx
+        .update(treasuryGrants)
+        .set({
+          milestones: grant.milestones,
+          milestoneState: aggregates.milestoneState,
+          payoutState: aggregates.payoutState,
+        })
+        .where(eq(treasuryGrants.grantId, grantId))
+        .returning();
+      return updated[0] ? mapGrant(updated[0]) : null;
+    });
+  }
+
+  async listUnsettledByTreasury(
+    treasuryId: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<GrantRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(treasuryGrants)
+      .where(
+        and(
+          eq(treasuryGrants.treasuryId, treasuryId),
+          notInArray(treasuryGrants.payoutState, ['paid', 'clawed_back']),
+          afterId === null ? undefined : gt(treasuryGrants.grantId, afterId),
+        ),
+      )
+      .orderBy(asc(treasuryGrants.grantId))
+      .limit(limit);
+    return rows.map(mapGrant);
   }
 
   async listByRoom(roomId: string, limit: number): Promise<GrantRecord[]> {

@@ -75,9 +75,13 @@ export function buildMembershipFactsPort(
       // Without rules the electorate is the room membership; with rules the
       // SAME predicate that gates ballots filters the quorum basis — members
       // who could never vote must not inflate the denominator (WS-M.4.2c).
+      // Treasury-controlling votes NEVER take the shortcut: null member facts
+      // fail closed at signing (a steward without an active subscription
+      // cannot cast a spend ballot), so they must not count in the basis.
       const trivial =
         eligibility === undefined ||
-        ((eligibility.rules.minMembershipDays ?? 0) === 0 &&
+        (!eligibility.treasuryControlling &&
+          (eligibility.rules.minMembershipDays ?? 0) === 0 &&
           (eligibility.rules.minContributions ?? 0) === 0 &&
           eligibility.rules.requireVerifiedIdentity !== true);
       if (trivial) return forum.rooms.countEligibleVoters(roomId);

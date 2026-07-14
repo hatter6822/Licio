@@ -206,11 +206,13 @@ export async function setGovernancePause(
 ): Promise<TreasuryGovernanceError | { ok: true; profile: GovernanceProfileRecord }> {
   const profile = await ensureProfile(deps, input.roomId);
   const nextFlags: PauseFlags = { ...profile.pauseFlags, ...input.patch };
-  await deps.profiles.upsert({
-    ...profile,
-    pauseFlags: nextFlags,
-    updatedAt: new Date(deps.now()).toISOString(),
-  });
+  // COLUMN-scoped: writing the whole record from the read above would restore
+  // a stale freezeState if an emergency freeze landed in between (W9).
+  await deps.profiles.setProfilePauseFlags(
+    input.roomId,
+    nextFlags,
+    new Date(deps.now()).toISOString(),
+  );
   const treasury = await deps.treasuries.getByRoom(input.roomId);
   if (treasury !== null) {
     await deps.treasuries.setPauseFlags(treasury.treasuryId, {

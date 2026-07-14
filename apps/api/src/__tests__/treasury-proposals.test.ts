@@ -248,6 +248,98 @@ function buildHarness(): TestHarness {
   });
 }
 
+/** A fixture corpus that PROVES the given pack (WS-M.1.3c): one passing
+ *  tally per allowed type, one accepted action per cap category, and an
+ *  eligibility fixture matched to the pack's rules — real-asset adoption
+ *  re-runs the corpus, so the harness registers proven packs (W9). */
+function corpusFor(pack: Record<string, unknown>): Record<string, unknown> {
+  const allowed = (pack['allowedProposalTypes'] as string[] | undefined) ?? [];
+  const caps = ((pack['treasury'] as { caps?: { category: string }[] } | undefined)?.caps ??
+    []) as {
+    category: string;
+  }[];
+  const rules = pack['eligibility'] as
+    | { minMembershipDays: number; newWalletCoolingOffDays: number }
+    | undefined;
+  const eligibilityFixture =
+    rules !== undefined && rules.newWalletCoolingOffDays > 0
+      ? {
+          kind: 'eligibility',
+          label: 'cooling-off recusal',
+          facts: {
+            userId: 'v1',
+            membershipDays: Math.max(60, rules.minMembershipDays),
+            contributionCount: 10,
+            verifiedIdentity: true,
+            newestWalletAgeDays: 0,
+            walletClusterId: null,
+            hasDisclosedConflict: false,
+            roleClasses: [],
+            reputationScore: 0,
+            tokenVoteUnits: 0,
+            isDesignatedSigner: false,
+          },
+          treasuryControlling: true,
+          recusalRequired: false,
+          clustersAlreadyVoted: [],
+          expect: 'wallet_cooling_off',
+        }
+      : {
+          kind: 'eligibility',
+          label: 'fully eligible member',
+          facts: {
+            userId: 'v1',
+            membershipDays: Math.max(60, rules?.minMembershipDays ?? 0),
+            contributionCount: 10,
+            verifiedIdentity: true,
+            newestWalletAgeDays: 365,
+            walletClusterId: null,
+            hasDisclosedConflict: false,
+            roleClasses: [],
+            reputationScore: 0,
+            tokenVoteUnits: 0,
+            isDesignatedSigner: false,
+          },
+          treasuryControlling: true,
+          recusalRequired: false,
+          clustersAlreadyVoted: [],
+          expect: 'eligible',
+        };
+  return {
+    fixtures: [
+      ...allowed.map((type) => ({
+        kind: 'proposal_tally',
+        label: `${type} passes majority`,
+        proposalType: type,
+        votes: [
+          { voterUserId: 'a', choice: 'approve', weightSnapshot: 1 },
+          { voterUserId: 'b', choice: 'approve', weightSnapshot: 1 },
+          { voterUserId: 'c', choice: 'reject', weightSnapshot: 1 },
+        ],
+        eligibleCount: 3,
+        deadlinePassed: true,
+        expect: 'passed',
+      })),
+      ...caps.map((cap) => ({
+        kind: 'treasury_action',
+        label: `${cap.category} within caps accepts`,
+        action: {
+          category: cap.category,
+          amount: '1',
+          asset: 'USDC',
+          coiDeclared: true,
+          proposedAt: '2026-07-01T00:00:00.000Z',
+          targetAllocation: null,
+        },
+        history: [],
+        now: '2026-07-02T00:00:00.000Z',
+        expect: 'accepted',
+      })),
+      eligibilityFixture,
+    ],
+  };
+}
+
 /** Provision treasury (with a reconciled balance) + adopt the law-pack. */
 async function prepareRoom(deps: TestHarness, packOverrides: Partial<LawPack> = {}) {
   const created = await createTreasury(deps, {
@@ -270,18 +362,20 @@ async function prepareRoom(deps: TestHarness, packOverrides: Partial<LawPack> = 
     { USDC: '100000' },
     new Date().toISOString(),
   );
+  const document = fullLawPack(packOverrides);
   const registered = await registerLawPack(deps, {
     roomId: ROOM,
-    document: fullLawPack(packOverrides),
-    fixtures: null,
+    document,
+    fixtures: corpusFor(document),
     actorUserId: STEWARD,
   });
   if (!('record' in registered)) throw new Error(JSON.stringify(registered));
-  await adoptLawPack(deps, {
+  const adopted = await adoptLawPack(deps, {
     roomId: ROOM,
     lawPackId: registered.record.lawPackId,
     actorUserId: STEWARD,
   });
+  if ('code' in adopted) throw new Error(JSON.stringify(adopted));
   return created.treasury;
 }
 
@@ -490,18 +584,20 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
       actorUserId: STEWARD,
     });
     void t2;
+    const document = fullLawPack();
     const registered = await registerLawPack(fresh, {
       roomId: ROOM,
-      document: fullLawPack(),
-      fixtures: null,
+      document,
+      fixtures: corpusFor(document),
       actorUserId: STEWARD,
     });
     if (!('record' in registered)) throw new Error('law pack');
-    await adoptLawPack(fresh, {
+    const adopted = await adoptLawPack(fresh, {
       roomId: ROOM,
       lawPackId: registered.record.lawPackId,
       actorUserId: STEWARD,
     });
+    if ('code' in adopted) throw new Error(JSON.stringify(adopted));
     expect(
       await createProductionProposal(fresh, { roomId: ROOM, userId: PROPOSER, create: draft() }),
     ).toMatchObject({ ok: false, code: 'treasury_not_synced' });
@@ -721,6 +817,26 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
         actorUserId: STEWARD,
       }),
     ).toMatchObject({ ok: false, code: 'law_pack_not_real_asset_ready' });
+  });
+
+  it('a real-asset room cannot adopt a pack registered WITHOUT fixtures (W9 review)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const registered = await registerLawPack(deps, {
+      roomId: ROOM,
+      document: fullLawPack({ version: '1.3.0' }),
+      fixtures: null, // structurally valid, never fixture-proven
+      actorUserId: STEWARD,
+    });
+    if (!('record' in registered)) throw new Error(JSON.stringify(registered));
+    const adopted = await adoptLawPack(deps, {
+      roomId: ROOM,
+      lawPackId: registered.record.lawPackId,
+      actorUserId: STEWARD,
+    });
+    expect(adopted).toMatchObject({ ok: false, code: 'law_pack_not_real_asset_ready' });
+    if (!('code' in adopted)) throw new Error('unreachable');
+    expect(adopted.message).toMatch(/fixture corpus/i);
   });
 
   it('a frozen room cannot adopt a different law-pack (W5 review)', async () => {
@@ -1146,6 +1262,17 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
 });
 
 describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
+  /** Vote an ALREADY-OPEN proposal to `passed` (wallets pre-linked). */
+  async function passProposalVotes(deps: TestHarness, proposal: { proposalId: string }) {
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    const settled = await deps.proposals.getById(proposal.proposalId);
+    if (settled === null) throw new Error('proposal lost');
+    return settled;
+  }
+
   /** Drive a proposal to `passed` with quorum met (2 approvals of 3 eligible). */
   async function passProposal(deps: TestHarness) {
     await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
@@ -1412,7 +1539,19 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
   it('multisig execution requires the designated-signer approvals (W6 review)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps, { multisig: { signers: [STEWARD, VOTER_2], required: 2 } });
-    const settled = await passProposal(deps); // votes: PROPOSER (W1) + VOTER_2 (W2)
+    // While voting is still OPEN, an approval cannot be recorded (W9): stale
+    // pre-pass approvals would later satisfy the execution count.
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const draftProposal = await createProposal(deps);
+    await openVoting(deps);
+    expect(
+      await castVote(deps, draftProposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve', {
+        purpose: 'approval',
+        choice: null,
+      }),
+    ).toMatchObject({ ok: false, code: 'not_approvable' });
+    const settled = await passProposalVotes(deps, draftProposal);
     deps.clockAdvance(3_600 * 1000 + 1_000);
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmChallengeWindowSeconds * 1000 + 1_000);
     // Timelock elapsed, challenges clear — but no designated-signer approvals.
@@ -1821,5 +1960,8 @@ describe('grants (WS-M.5.1a)', () => {
     });
     expect(executed).toMatchObject({ ok: false, code: 'grant_creation_failed' });
     expect(await deps.grants.getByProposal(proposal.proposalId)).toBeNull();
+    // The kernel was NEVER invoked: a plan failure after the kernel append
+    // would leave a phantom accepted spend consuming future cap headroom (W9).
+    expect(deps.executorCalls).toEqual([]);
   });
 });

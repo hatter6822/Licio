@@ -192,6 +192,17 @@ describe('validateLawPackBundle (WS-M.1.3c structural)', () => {
     expect(validateLawPackBundle(fullPack())).toEqual([]);
   });
 
+  it('rejects duplicate multisig signers (W9 review)', () => {
+    const pack = fullPack();
+    // Execution counts DISTINCT approvals: [u1, u1] with required 2 could
+    // never execute any proposal.
+    const parsed = lawPackSchema.safeParse({
+      ...pack,
+      multisig: { signers: ['u1', 'u1'], required: 2 },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
   it('rejects a role_class quorum basis without a multisig signer set (W6 review)', () => {
     const pack = fullPack();
     const quorum = pack.quorumRules ?? {};

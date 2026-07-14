@@ -36,7 +36,11 @@ import {
 } from '../treasury/services.js';
 import type { TreasuryRecord } from '../treasury/stores.js';
 import { createTreasury } from '../treasury/treasury.js';
-import { freshKnomosisServices, resetKnomosisFixture } from './knomosis-test-helpers.js';
+import {
+  freshKnomosisServices,
+  LOCAL_DEPLOYMENT,
+  resetKnomosisFixture,
+} from './knomosis-test-helpers.js';
 
 const ROOM = '77777777-7777-4777-8777-777777777777';
 const USER = '88888888-8888-4888-8888-888888888888';
@@ -1713,5 +1717,272 @@ describe('eighth review wave (PR #144): frozen grant review', () => {
         reviewerUserId: USER,
       }),
     ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+});
+
+describe('ninth review wave (PR #144): clawback closure, milestone CAS, freeze-safe pointers', () => {
+  const SECTION_MS = {
+    milestoneId: '',
+    description: 'Tranche',
+    amount: '50',
+    state: 'submitted' as const,
+    paymentIntentId: null,
+  };
+
+  async function seedGrant(services: TreasuryServices, treasuryId: string) {
+    const a = { ...SECTION_MS, milestoneId: randomUUID() };
+    const b = { ...SECTION_MS, milestoneId: randomUUID() };
+    const grant = await services.grants.insert({
+      grantId: randomUUID(),
+      roomId: ROOM,
+      treasuryId,
+      proposalId: randomUUID(),
+      recipientRef: `user:${OTHER}`,
+      purpose: 'Translation sprint',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [a, b],
+      milestoneState: 'submitted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (grant === null) throw new Error('fixture grant collision');
+    return { grant, a, b };
+  }
+
+  it('clawback abandons open payout intents and closes attach/retry', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const { grant, a } = await seedGrant(services, treasury.treasuryId);
+    const accepted = await updateGrantMilestone(services, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      milestoneId: a.milestoneId,
+      state: 'accepted',
+      actorUserId: USER,
+    });
+    if ('code' in accepted) throw new Error(accepted.message);
+    const intentId = accepted.grant.milestones.find(
+      (m) => m.milestoneId === a.milestoneId,
+    )?.paymentIntentId;
+    if (intentId == null) throw new Error('payout intent missing');
+    // A failed-retryable intent for the OTHER milestone (the retry guard leg).
+    const failedIntent = await services.intents.insert({
+      paymentIntentId: randomUUID(),
+      userId: null,
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      targetType: 'grant_payout',
+      targetId: grant.grantId,
+      asset: 'USDC',
+      amount: '50',
+      jurisdictionState: 'allowed',
+      complianceState: 'cleared',
+      executionState: 'failed',
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: null,
+      idempotencyKey: randomUUID(),
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const clawed = await markGrantClawedBack(services, {
+      roomId: ROOM,
+      grantId: grant.grantId,
+      actorUserId: USER,
+      note: 'Upheld dispute.',
+    });
+    expect(clawed).toMatchObject({ ok: true });
+    // The scheduled (pre-submission) payout intent was ABANDONED with it.
+    expect((await services.intents.getById(intentId))?.executionState).toBe('abandoned');
+    // A failed payout against the clawed-back grant cannot retry…
+    expect(await retryIntent(services, failedIntent.paymentIntentId, USER)).toMatchObject({
+      ok: false,
+      code: 'grant_clawed_back',
+    });
+  });
+
+  it('a frozen room refuses every milestone transition, not just acceptance', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const treasury = await provisionTreasury(services);
+    const { grant } = await seedGrant(services, treasury.treasuryId);
+    await setGovernanceFreeze(services, {
+      roomId: ROOM,
+      action: 'freeze',
+      scope: 'room',
+      source: 'steward',
+      reason: 'Emergency review.',
+      actorUserId: USER,
+      isPlatformStaff: false,
+    });
+    expect(
+      await updateGrantMilestone(services, {
+        roomId: ROOM,
+        grantId: grant.grantId,
+        milestoneId: grant.milestones[1]?.milestoneId ?? '',
+        state: 'rejected',
+        actorUserId: USER,
+      }),
+    ).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+
+  it('milestone updates are CAS-scoped: siblings survive, stale writes lose', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services);
+    const { grant, a, b } = await seedGrant(services, treasury.treasuryId);
+    // Two "concurrent" single-milestone transitions: both persist.
+    const first = await services.grants.applyMilestoneTransition(
+      grant.grantId,
+      a.milestoneId,
+      'submitted',
+      'rejected',
+      null,
+    );
+    expect(first?.milestones.find((m) => m.milestoneId === a.milestoneId)?.state).toBe('rejected');
+    const second = await services.grants.applyMilestoneTransition(
+      grant.grantId,
+      b.milestoneId,
+      'submitted',
+      'accepted',
+      randomUUID(),
+    );
+    expect(second?.milestones.find((m) => m.milestoneId === a.milestoneId)?.state).toBe('rejected');
+    expect(second?.milestones.find((m) => m.milestoneId === b.milestoneId)?.state).toBe('accepted');
+    // A STALE write (expecting the pre-transition state) loses the CAS.
+    expect(
+      await services.grants.applyMilestoneTransition(
+        grant.grantId,
+        a.milestoneId,
+        'submitted',
+        'accepted',
+        null,
+      ),
+    ).toBeNull();
+  });
+
+  it('unsettled-grant paging filters settled rows and honors the cursor', async () => {
+    const services = await wsmServices();
+    const treasury = await provisionTreasury(services);
+    const mk = async (payoutState: 'not_started' | 'paid' | 'clawed_back') => {
+      const row = await services.grants.insert({
+        grantId: randomUUID(),
+        roomId: ROOM,
+        treasuryId: treasury.treasuryId,
+        proposalId: randomUUID(),
+        recipientRef: 'r',
+        purpose: 'p',
+        amount: '10',
+        asset: 'USDC',
+        milestones: [],
+        milestoneState: 'pending',
+        reviewState: 'pending',
+        payoutState,
+        auditSummary: null,
+        createdAt: new Date().toISOString(),
+      });
+      if (row === null) throw new Error('collision');
+      return row;
+    };
+    await mk('not_started');
+    await mk('not_started');
+    await mk('paid');
+    await mk('clawed_back');
+    const pageOne = await services.grants.listUnsettledByTreasury(treasury.treasuryId, 1, null);
+    expect(pageOne).toHaveLength(1);
+    const pageTwo = await services.grants.listUnsettledByTreasury(
+      treasury.treasuryId,
+      10,
+      pageOne[0]?.grantId ?? null,
+    );
+    expect(pageTwo).toHaveLength(1);
+    expect(pageTwo[0]?.payoutState).toBe('not_started');
+  });
+
+  it('a freeze landing mid-provision survives the treasury pointer write', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    const rawTreasuries = services.treasuries;
+    const deps = {
+      ...services,
+      treasuries: new Proxy(rawTreasuries, {
+        get(target, prop) {
+          if (prop === 'insert') {
+            return async (record: Parameters<typeof rawTreasuries.insert>[0]) => {
+              const inserted = await target.insert(record);
+              const profile = await services.profiles.get(ROOM);
+              if (profile !== null) {
+                await services.profiles.upsert({
+                  ...profile,
+                  freezeState: 'frozen',
+                  freezeReason: 'Emergency mid-provision.',
+                });
+              }
+              return inserted;
+            };
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }),
+    };
+    const created = await createTreasury(deps, {
+      roomId: ROOM,
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      treasuryAddress: `0x${'cd'.repeat(20)}`,
+      acceptedAssets: ['USDC'],
+      depositLimits: {
+        perUserPerPeriod: '1000',
+        perRoomPerPeriod: '5000',
+        perDepositMax: '100',
+        periodSeconds: 86_400,
+      },
+      actorUserId: USER,
+    });
+    if (!('treasury' in created)) throw new Error(JSON.stringify(created));
+    const profile = await services.profiles.get(ROOM);
+    expect(profile?.freezeState).toBe('frozen');
+    expect(profile?.treasuryId).toBe(created.treasury.treasuryId);
+  });
+
+  it('a pause write from a stale read cannot clear a freeze', async () => {
+    const services = await wsmServices();
+    await ensureProfile(services, ROOM);
+    // The STORED profile freezes; the pause path reads a STALE active copy.
+    const stale = await services.profiles.get(ROOM);
+    if (stale === null) throw new Error('profile missing');
+    await services.profiles.upsert({
+      ...stale,
+      freezeState: 'frozen',
+      freezeReason: 'Emergency.',
+    });
+    const deps = {
+      ...services,
+      profiles: new Proxy(services.profiles, {
+        get(target, prop) {
+          if (prop === 'get') {
+            return async () => structuredClone(stale); // the pre-freeze snapshot
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }),
+    };
+    const paused = await setGovernancePause(deps, {
+      roomId: ROOM,
+      patch: { deposits: true },
+      reason: 'Maintenance.',
+      actorUserId: USER,
+    });
+    if ('code' in paused) throw new Error(paused.message);
+    const current = await services.profiles.get(ROOM);
+    // The column-scoped write changed the FLAGS and left the freeze intact.
+    expect(current?.freezeState).toBe('frozen');
+    expect(current?.pauseFlags.deposits).toBe(true);
   });
 });

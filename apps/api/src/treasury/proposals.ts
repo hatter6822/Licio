@@ -65,7 +65,7 @@ import { appendChainedAudit } from './audit-chain.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { readabilityProblems } from './charter.js';
 import { incomingDelegationsFor } from './delegations.js';
-import { createGrantFromProposal, type GrantDeps } from './grants.js';
+import { createGrantFromProposal, type GrantDeps, hasValidMilestonePlan } from './grants.js';
 import { activeLawPack, adoptLawPack, type LawPackDeps } from './law-packs.js';
 import { assertGovernanceWritable, type TreasuryGovernanceError, tgErr } from './profile.js';
 import { classifyProposalTarget } from './prohibited-targets.js';
@@ -477,23 +477,25 @@ export async function createProductionProposal(
     );
     const alreadyReserved = decSum(reservedRows.map((r) => r.amount));
     const obligationParts: string[] = [];
-    for (const grant of await deps.grants.listByRoom(input.roomId, 500)) {
-      if (
-        grant.treasuryId !== treasury.treasuryId ||
-        grant.asset !== input.create.asset ||
-        grant.payoutState === 'paid' ||
-        grant.payoutState === 'clawed_back'
-      ) {
-        continue;
+    // EVERY unsettled grant, via keyset pages — a fixed newest-N slice would
+    // let older outstanding obligations slip out of the liquidity math (W9).
+    let grantCursor: string | null = null;
+    for (;;) {
+      const page = await deps.grants.listUnsettledByTreasury(treasury.treasuryId, 500, grantCursor);
+      for (const grant of page) {
+        if (grant.asset !== input.create.asset) continue;
+        const finalizedParts: string[] = [];
+        for (const milestone of grant.milestones) {
+          if (milestone.paymentIntentId === null) continue;
+          const linked = await deps.intents.getById(milestone.paymentIntentId);
+          if (linked?.executionState === 'finalized') finalizedParts.push(milestone.amount);
+        }
+        const outstanding = decSum([grant.amount, `-${decSum(finalizedParts)}`]);
+        if (!outstanding.startsWith('-')) obligationParts.push(outstanding);
       }
-      const finalizedParts: string[] = [];
-      for (const milestone of grant.milestones) {
-        if (milestone.paymentIntentId === null) continue;
-        const linked = await deps.intents.getById(milestone.paymentIntentId);
-        if (linked?.executionState === 'finalized') finalizedParts.push(milestone.amount);
-      }
-      const outstanding = decSum([grant.amount, `-${decSum(finalizedParts)}`]);
-      if (!outstanding.startsWith('-')) obligationParts.push(outstanding);
+      if (page.length < 500) break;
+      grantCursor = page[page.length - 1]?.grantId ?? null;
+      if (grantCursor === null) break;
     }
     const encumbered = decSum(obligationParts);
     const liquid = decSum([balance, `-${alreadyReserved}`, `-${encumbered}`]);
@@ -666,12 +668,11 @@ export async function signProposal(
       return tgErr(400, 'choice_required', 'A vote requires a choice.');
     }
   } else {
-    if (proposal.votingState !== 'open' && proposal.votingState !== 'passed') {
-      return tgErr(
-        409,
-        'not_approvable',
-        'Approval signatures apply to open or passed proposals only.',
-      );
+    // An execution co-signature attests a DECIDED outcome: recording it while
+    // voting is still open would let signers pre-approve a proposal that has
+    // not passed, with the stale rows later satisfying the multisig count (W9).
+    if (proposal.votingState !== 'passed') {
+      return tgErr(409, 'not_approvable', 'Approval signatures apply to passed proposals only.');
     }
     // An approval/multisig co-signature is CHOICE-NEUTRAL: execution counts
     // every such row as affirmative, so a signed `reject` choice riding an
@@ -1371,20 +1372,37 @@ export async function executeProposal(
   let failure: string | null = null;
   try {
     if (claimed.category !== null && claimed.category !== undefined) {
-      const verdict = await deps.treasuryExecutor.execute(input.roomId, {
-        category: claimed.category,
-        amount: claimed.requestedAmount ?? '0',
-        asset: claimed.asset,
-        coiDeclared: claimed.conflictDisclosures !== null,
-        proposedAt: claimed.createdAt,
-        // The PINNED pack rides into the kernel check: the spend was voted and
-        // reserved under these caps, and a WS-M room needs no AI-agent binding
-        // for a community-passed execution.
-        lawPack: pinnedPack,
-      });
-      if (!verdict.accepted) {
+      // Validate the GRANT PLAN before the kernel call: `executeTreasuryAction`
+      // appends accepted-spend history immediately, so a malformed milestone
+      // plan failing AFTER it would leave a phantom spend consuming future cap
+      // headroom (W9).  With the plan proven, grant creation below can only
+      // collide idempotently.
+      if (
+        (claimed.proposalType === 'capped_grant' || claimed.proposalType === 'bounty') &&
+        !hasValidMilestonePlan(claimed)
+      ) {
+        failure = 'grant_creation_failed';
+      }
+      if (failure === null && (await deps.treasuries.getByRoom(input.roomId)) === null) {
+        failure = 'grant_creation_failed';
+      }
+      const verdict =
+        failure !== null
+          ? null
+          : await deps.treasuryExecutor.execute(input.roomId, {
+              category: claimed.category,
+              amount: claimed.requestedAmount ?? '0',
+              asset: claimed.asset,
+              coiDeclared: claimed.conflictDisclosures !== null,
+              proposedAt: claimed.createdAt,
+              // The PINNED pack rides into the kernel check: the spend was
+              // voted and reserved under these caps, and a WS-M room needs no
+              // AI-agent binding for a community-passed execution.
+              lawPack: pinnedPack,
+            });
+      if (verdict !== null && !verdict.accepted) {
         failure = verdict.code ?? 'kernel_rejected';
-      } else {
+      } else if (verdict !== null) {
         // The grant record is the payout ledger: create it BEFORE consuming the
         // reservation so a malformed milestone plan blocks the execution (with
         // the headroom released) instead of finalizing a spend with no grant.

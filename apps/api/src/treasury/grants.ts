@@ -12,7 +12,7 @@
 import { decCompare, decSum } from '@licio/governance';
 import type { GovernanceProposalRecord, GovernanceProposalStore } from '../knomosis/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
-import { createPaymentIntent, type IntentDeps } from './intents.js';
+import { abandonOpenIntent, createPaymentIntent, type IntentDeps } from './intents.js';
 import { assertGovernanceWritable, type TreasuryGovernanceError, tgErr } from './profile.js';
 import type { GrantMilestoneRecord, GrantRecord, GrantStore } from './stores.js';
 
@@ -75,6 +75,41 @@ function milestonePlan(
       paymentIntentId: null,
     },
   ];
+}
+
+/**
+ * Whether the proposal's milestone plan CAN build (W9): execution validates
+ * this BEFORE the kernel appends accepted-spend history, so a malformed plan
+ * blocks with no phantom cap consumption.  Mirrors `milestonePlan` exactly.
+ */
+export function hasValidMilestonePlan(proposal: GovernanceProposalRecord): boolean {
+  if (proposal.requestedAmount === null || proposal.asset === null) return false;
+  const amount = proposal.requestedAmount;
+  const raw = proposal.requestedAction['milestones'];
+  // No explicit array (or one outside 1..16 entries) falls through to the
+  // single full-amount milestone — the same branch `milestonePlan` takes.
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 16) return true;
+  const amounts: string[] = [];
+  for (const entry of raw) {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      typeof (entry as { description?: unknown }).description !== 'string' ||
+      typeof (entry as { amount?: unknown }).amount !== 'string'
+    ) {
+      return false;
+    }
+    const trancheAmount = (entry as { amount: string }).amount;
+    if (
+      !/^[0-9]{1,78}$/.test(trancheAmount) ||
+      decCompare(trancheAmount, '0') <= 0 ||
+      decCompare(trancheAmount, amount) > 0
+    ) {
+      return false;
+    }
+    amounts.push(trancheAmount);
+  }
+  return decCompare(decSum(amounts), amount) === 0;
 }
 
 /** Called by proposal execution (WS-M.4.3b) — the ONLY creation path. */
@@ -183,6 +218,10 @@ export async function updateGrantMilestone(
   if (grant === null || grant.roomId !== input.roomId) {
     return tgErr(404, 'not_found', 'Resource not found');
   }
+  // EVERY milestone transition changes disbursement readiness — a frozen room
+  // pauses them all, not just the accept that mints a payout intent (W9).
+  const writable = await assertGovernanceWritable(deps, input.roomId, 'executions');
+  if (writable !== null) return writable;
   // A clawed-back grant is DEAD: no milestone may advance (least of all to
   // `accepted`, which would mint a fresh payout intent past the clawback).
   if (grant.payoutState === 'clawed_back') {
@@ -229,33 +268,21 @@ export async function updateGrantMilestone(
     if ('code' in intent) return intent;
     paymentIntentId = intent.intent.paymentIntentId;
   }
-  const milestones = grant.milestones.map((m) =>
-    m.milestoneId === input.milestoneId ? { ...m, state: input.state, paymentIntentId } : m,
+  // MILESTONE-scoped CAS against the CURRENT row: a whole-record write from
+  // the snapshot above would restore another steward's concurrent milestone
+  // to its old state (orphaning a scheduled payout or losing an acceptance).
+  // The store re-projects the aggregates from the post-patch milestones; the
+  // CAS loses when the milestone moved since the legal-transition check.
+  const updated = await deps.grants.applyMilestoneTransition(
+    input.grantId,
+    input.milestoneId,
+    milestone.state,
+    input.state,
+    paymentIntentId,
   );
-  // Aggregate projections: the coarse milestone state + the payout state.
-  const aggregate = milestones.every((m) => m.state === 'accepted')
-    ? ('accepted' as const)
-    : milestones.some((m) => m.state === 'rejected')
-      ? ('rejected' as const)
-      : milestones.some((m) => m.state !== 'pending')
-        ? ('in_progress' as const)
-        : ('pending' as const);
-  // Scheduling only ever moves the grant to `scheduled`: a freshly created
-  // payout intent has not been submitted, let alone finalized — `paid` /
-  // `partially_paid` are RECONCILIATION verdicts, set by the intent sweep
-  // when the linked payout intents actually reach on-chain finality.
-  const scheduled = milestones.filter((m) => m.paymentIntentId !== null).length;
-  const payoutState =
-    scheduled === 0 || grant.payoutState === 'partially_paid' || grant.payoutState === 'paid'
-      ? grant.payoutState
-      : ('scheduled' as const);
-  const updated = await deps.grants.update({
-    ...grant,
-    milestones,
-    milestoneState: aggregate,
-    payoutState,
-  });
-  if (updated === null) return tgErr(404, 'not_found', 'Resource not found');
+  if (updated === null) {
+    return tgErr(409, 'invalid_transition', 'The milestone changed concurrently; re-check.');
+  }
   await appendChainedAudit(deps, {
     roomId: input.roomId,
     actionType: 'grant_milestone_updated',
@@ -286,6 +313,15 @@ export async function markGrantClawedBack(
     auditSummary: input.note,
   });
   if (updated === null) return tgErr(404, 'not_found', 'Resource not found');
+  // A clawback CANCELS the grant's open payout intents: a scheduled tranche
+  // still in a pre-submission state must not remain attachable after the
+  // reversal (in-flight on-chain movements cannot be stopped here; the
+  // attach/retry guards reject them against the clawed-back grant).
+  for (const milestone of grant.milestones) {
+    if (milestone.paymentIntentId !== null) {
+      await abandonOpenIntent(deps, milestone.paymentIntentId);
+    }
+  }
   await appendChainedAudit(deps, {
     roomId: input.roomId,
     actionType: 'grant_milestone_updated',

@@ -519,6 +519,10 @@ export async function attachIntentSubmission(
     if (grant === null) {
       return tgErr(422, 'action_mismatch', 'The payout intent has no backing grant.');
     }
+    // A clawed-back grant must never receive a new settlement (W9).
+    if (grant.payoutState === 'clawed_back') {
+      return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; payouts are closed.');
+    }
     const approvedRecipient = grant.recipientRef.toLowerCase();
     if (/^0x[0-9a-f]{40}$/.test(approvedRecipient)) {
       const signedRecipient =
@@ -673,6 +677,21 @@ async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord):
   await deps.grants.update({ ...grant, payoutState });
 }
 
+/**
+ * Abandon ONE intent still in a pre-submission timed state (the clawback
+ * cancellation path, W9): same table-checked + audited transition the expiry
+ * sweep uses.  Post-submission states are untouched — an on-chain movement in
+ * flight cannot be cancelled here; the attach/retry guards handle the rest.
+ */
+export async function abandonOpenIntent(
+  deps: IntentDeps,
+  paymentIntentId: string,
+): Promise<boolean> {
+  const intent = await deps.intents.getById(paymentIntentId);
+  if (intent === null || !TIMED_STATES.has(intent.executionState)) return false;
+  return (await transitionIntent(deps, intent, 'abandoned', {}, null)) !== null;
+}
+
 /** The expiry sweep: timed pre-submission states past their TTL → abandoned. */
 export async function expireIntents(deps: IntentDeps, limit = 200): Promise<number> {
   const expired = await deps.intents.listExpired(new Date(deps.now()).toISOString(), limit);
@@ -700,6 +719,12 @@ export async function retryIntent(
   if (guard !== null) return guard;
   if (intent.retryCount >= deps.wsmConfig().wsmIntentMaxRetries) {
     return tgErr(409, 'retries_exhausted', 'This intent has no retries left.');
+  }
+  if (intent.targetType === 'grant_payout' || intent.targetType === 'steward_compensation') {
+    const grant = await deps.grants.getById(intent.targetId);
+    if (grant === null || grant.payoutState === 'clawed_back') {
+      return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; payouts are closed.');
+    }
   }
   // A failed/reverted deposit left the allowance aggregate — the room/user may
   // have consumed the freed headroom since.  Re-apply the SAME deposit-limit

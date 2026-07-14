@@ -204,6 +204,11 @@ export const multisigPolicySchema = z
     /** Required signatures (n of m). */
     required: z.number().int().min(2),
   })
+  .refine((p) => new Set(p.signers).size === p.signers.length, {
+    // Execution counts DISTINCT signer approvals: `[u1, u1], required: 2`
+    // would publish a policy no proposal could ever satisfy.
+    message: 'multisig signers must be distinct',
+  })
   .refine((p) => p.required <= p.signers.length, {
     message: 'required signatures cannot exceed the signer count',
   });

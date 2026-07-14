@@ -380,4 +380,40 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
       }),
     ).toBe(1);
   });
+
+  it('treasury-controlling counts skip the shortcut: null-facts members leave the basis (W9)', async () => {
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(5);
+    const now = fixture.knomosis.now();
+    const old = new Date(now - 90 * 86_400_000).toISOString();
+    // Two ids in the electorate; one (a steward with no active subscription)
+    // has NULL member facts — signProposal rejects their treasury-controlling
+    // ballot, so they must not inflate the spend-quorum denominator even
+    // under TRIVIAL rules.
+    const port = buildMembershipFactsPort(
+      forumOf({ member: { requestedAt: old }, subless_steward: null }),
+      { store: { getAuth: async () => ({ emailVerified: true }) } } as never,
+      fixture.knomosis,
+    );
+    const trivialRules = {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    };
+    // Non-treasury votes keep the cheap shortcut (both ids count)…
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules: trivialRules,
+        treasuryControlling: false,
+      }),
+    ).toBe(2);
+    // …but a treasury-controlling basis walks the fail-closed gate.
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules: trivialRules,
+        treasuryControlling: true,
+      }),
+    ).toBe(1);
+  });
 });

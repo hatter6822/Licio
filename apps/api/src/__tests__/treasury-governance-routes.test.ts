@@ -311,6 +311,30 @@ describe('WS-M treasury + payment intents', () => {
     expect(((await replay.json()) as { existing: boolean }).existing).toBe(true);
   });
 
+  it('production proposal creation is adult-gated (W9 review)', async () => {
+    const fixture = await wsmFixture();
+    fixture.mode.value = 'testnet';
+    const { cookie, userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.identity.store.updateUser(userId, { ageBand: 'teen_16_17' });
+    const res = await req('POST', `/rooms/${ROOM}/governance/proposals`, cookie, {
+      proposal_type: 'capped_grant',
+      title: 'Teen spend attempt',
+      plain_language_summary: 'Should never reach the service.',
+      category: 'grant',
+      requested_amount: '100',
+      asset: 'USDC',
+      recipient_ref: 'coop:alpha',
+      conflict_disclosures: 'None.',
+      risk_assessment: 'Low.',
+      requested_action: { kind: 'grant' },
+      expected_deliverable: 'None.',
+      idempotency_key: crypto.randomUUID(),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('adult_required');
+  });
+
   it('the proposal DETAIL read returns the production shape in real-asset rooms (W7)', async () => {
     const fixture = await wsmFixture();
     fixture.mode.value = 'testnet';

@@ -193,15 +193,57 @@ export async function adoptLawPack(
   const mode = await deps.roomMode.currentMode(input.roomId);
   if (mode === 'testnet' || mode === 'capped_production' || mode === 'mature_production') {
     const parsed = lawPackSchema.safeParse(record.lawPack);
-    const problems = parsed.success ? validateLawPackForRealAssets(parsed.data) : null;
-    if (problems === null || problems.length > 0) {
-      const first = problems?.[0];
+    if (!parsed.success) {
+      return tgErr(
+        409,
+        'law_pack_not_real_asset_ready',
+        'The law-pack does not meet the real-asset bar.',
+      );
+    }
+    const problems = validateLawPackForRealAssets(parsed.data);
+    if (problems.length > 0) {
+      const first = problems[0];
       return tgErr(
         409,
         'law_pack_not_real_asset_ready',
         first
           ? `${first.path}: ${first.problem}`
           : 'The law-pack does not meet the real-asset bar.',
+      );
+    }
+    // The FULL `law_pack_valid` readiness bar, not just the document check: a
+    // pack registered with no fixtures (or a failing/uncovered corpus) must
+    // not become the ACTIVE rules of a real-asset room via an upgrade vote —
+    // the same live fixture re-run the mode-transition checklist performs.
+    if (record.fixtures === null || record.fixtures === undefined) {
+      return tgErr(
+        409,
+        'law_pack_not_real_asset_ready',
+        'The law-pack has no fixture corpus (WS-M.1.3c).',
+      );
+    }
+    const corpus = lawPackFixtureCorpusSchema.safeParse(record.fixtures);
+    if (!corpus.success) {
+      return tgErr(
+        409,
+        'law_pack_not_real_asset_ready',
+        'The stored fixture corpus does not parse.',
+      );
+    }
+    const run = runLawPackFixtures(parsed.data, corpus.data);
+    if (!run.passed) {
+      return tgErr(
+        409,
+        'law_pack_not_real_asset_ready',
+        `Fixture "${run.failures[0]?.label}" fails.`,
+      );
+    }
+    const coverage = fixtureCoverageProblems(parsed.data, corpus.data);
+    if (coverage.length > 0) {
+      return tgErr(
+        409,
+        'law_pack_not_real_asset_ready',
+        `Fixture coverage gap: ${coverage[0]?.problem}`,
       );
     }
   }

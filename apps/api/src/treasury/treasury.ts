@@ -92,12 +92,14 @@ export async function createTreasury(
       'This room already has a treasury, or the address is already in use.',
     );
   }
-  const profile = await ensureProfile(deps, input.roomId);
-  await deps.profiles.upsert({
-    ...profile,
-    treasuryId: inserted.treasuryId,
-    updatedAt: new Date(deps.now()).toISOString(),
-  });
+  await ensureProfile(deps, input.roomId);
+  // COLUMN-scoped pointer: a whole-record upsert from the stale read could
+  // clobber a freeze recorded after the route's writability check (W9).
+  await deps.profiles.setTreasuryPointer(
+    input.roomId,
+    inserted.treasuryId,
+    new Date(deps.now()).toISOString(),
+  );
   await appendChainedAudit(deps, {
     roomId: input.roomId,
     actionType: 'treasury_created',
