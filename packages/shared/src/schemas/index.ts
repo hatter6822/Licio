@@ -40,5 +40,6 @@ export * from './story.js';
 export * from './takedown.js';
 export * from './telemetry.js';
 export * from './thread.js';
+export * from './treasury-governance-api.js';
 export * from './user.js';
 export * from './wallet-api.js';

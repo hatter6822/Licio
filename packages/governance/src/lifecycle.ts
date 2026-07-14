@@ -3,30 +3,29 @@
 // WS-M pure lifecycle tables (SPEC §22.2, §17.4).  The payment-intent state
 // machine (13 states) and the governance-mode transition table are DATA here —
 // deterministic, I/O-free — so the api services, the client display logic, and
-// the tests all consult one source of truth.  The api layer is the single
-// WRITER of these states; this module only answers "is this edge legal, and
-// what gate does it require?".
+// the tests all consult one source of truth.  The STATE VOCABULARIES themselves
+// live in @licio/shared (the wire contracts) and are imported here, so the wire
+// and the domain can never drift; this module owns the EDGES.  The api layer is
+// the single WRITER of these states; this module only answers "is this edge
+// legal, and what gate does it require?".
+
+import {
+  CHALLENGE_RECORD_STATES,
+  GOVERNANCE_MODES,
+  type GovernanceMode,
+  PAYMENT_INTENT_STATES,
+  type PaymentIntentState,
+  PROPOSAL_CHALLENGE_TYPES,
+  type ProposalChallengeState,
+  type ProposalChallengeType,
+} from '@licio/shared';
 
 // ---------------------------------------------------------------------------
 // Payment-intent lifecycle (WS-M.3.1b; SPEC §22.2 — 13 states).
 // ---------------------------------------------------------------------------
 
-export const PAYMENT_INTENT_STATES = [
-  'created',
-  'preflighted',
-  'quoted',
-  'signed',
-  'submitted',
-  'pending',
-  'confirmed',
-  'finalized',
-  'reverted',
-  'reorged',
-  'disputed',
-  'abandoned',
-  'failed',
-] as const;
-export type PaymentIntentState = (typeof PAYMENT_INTENT_STATES)[number];
+export type { PaymentIntentState };
+export { PAYMENT_INTENT_STATES };
 
 /** The authoritative transition table (WS-M.3.1b).  Anything absent is illegal. */
 const PAYMENT_INTENT_EDGES: Readonly<Record<PaymentIntentState, readonly PaymentIntentState[]>> = {
@@ -71,16 +70,8 @@ export const PAYMENT_INTENT_DEFAULT_MAX_RETRIES = 3;
 // Governance-mode transitions (WS-M.1.1b; SPEC §17.4).
 // ---------------------------------------------------------------------------
 
-export const GOVERNANCE_MODES_ORDERED = [
-  'ordinary',
-  'simulated',
-  'testnet',
-  'capped_production',
-  'mature_production',
-  'frozen',
-  'migrating',
-] as const;
-export type GovernanceModeName = (typeof GOVERNANCE_MODES_ORDERED)[number];
+export const GOVERNANCE_MODES_ORDERED = GOVERNANCE_MODES;
+export type GovernanceModeName = GovernanceMode;
 
 /**
  * What an accepted edge requires.
@@ -142,11 +133,11 @@ export function modeTransitionGate(
 // Proposal challenge lifecycle (WS-M.4.3a).
 // ---------------------------------------------------------------------------
 
-export const CHALLENGE_TYPES = ['coi', 'fraud', 'capture', 'legal', 'evidence_defect'] as const;
-export type ChallengeType = (typeof CHALLENGE_TYPES)[number];
+export const CHALLENGE_TYPES = PROPOSAL_CHALLENGE_TYPES;
+export type ChallengeType = ProposalChallengeType;
 
-export const CHALLENGE_STATES = ['open', 'upheld', 'dismissed', 'escalated'] as const;
-export type ChallengeState = (typeof CHALLENGE_STATES)[number];
+export const CHALLENGE_STATES = CHALLENGE_RECORD_STATES;
+export type ChallengeState = ProposalChallengeState;
 
 const CHALLENGE_EDGES: Readonly<Record<ChallengeState, readonly ChallengeState[]>> = {
   open: ['upheld', 'dismissed', 'escalated'],
