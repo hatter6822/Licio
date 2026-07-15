@@ -569,6 +569,10 @@ export async function runPreflight(
     // governance (or the reverse), and the verdict must answer for the cell
     // this signature exercises — not for the region in aggregate.
     featureCell: ACTION_FEATURE_CELL[actionType],
+    // …and its asset, which `asset_flags` bars independently of the cell (a
+    // region can allow payments and still prohibit one asset).  The
+    // governance signatures move nothing and carry no asset.
+    ...(message['asset'] !== undefined ? { asset: message['asset'] } : {}),
   });
   if (jurisdiction === 'blocked') {
     return audited(

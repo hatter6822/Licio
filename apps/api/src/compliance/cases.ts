@@ -85,6 +85,12 @@ export interface CreateCaseInput {
   partnerCaseRef?: string | null;
   /** Trigger-derived incident key — the same incident never opens two cases. */
   idempotencyKey?: string | null;
+  /** The reviewer who opened this case by hand, if any.  Automated triggers
+   *  (velocity, sanctions, the high-value review) leave it undefined and the
+   *  genesis entry reads `system`; a console-created case must name its
+   *  author, or a manual fraud/scam case is indistinguishable from one the
+   *  engine raised. */
+  actorUserId?: string | null;
 }
 
 export async function createCase(deps: CaseDeps, input: CreateCaseInput): Promise<CaseOutcome> {
@@ -129,7 +135,10 @@ export async function createCase(deps: CaseDeps, input: CreateCaseInput): Promis
     entry: {
       caseId: inserted.caseId,
       action: 'created',
-      actorRef: 'system',
+      actorRef:
+        input.actorUserId === undefined || input.actorUserId === null
+          ? 'system'
+          : deps.opaqueRef(input.actorUserId),
       beforeState: null,
       afterState: 'open',
       note: input.note,

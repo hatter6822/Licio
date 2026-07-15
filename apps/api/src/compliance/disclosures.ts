@@ -59,17 +59,31 @@ export async function disclosureGate(
   for (const ref of outcome.policy.disclosure_refs) {
     let acknowledged = false;
     try {
-      // An INFORMATIONAL version (requires_acknowledgment: false) is published
-      // to be read, not signed: the client renders no acknowledge button for
-      // it, so demanding an ack would strand the user behind a gate with no
-      // way to clear it.  A ref with no published version stays missing —
-      // fail-closed, since the region's policy demands a disclosure counsel
-      // has not published yet.
-      const version = await deps.disclosures.get(ref.id, resolution.region, ref.version);
-      if (version !== null && !version.requiresAcknowledgment) continue;
-      // Region-scoped: this region's policy demands THIS region's text, so an
-      // acknowledgment given elsewhere (same id + version, different content)
-      // does not satisfy it.
+      const published = await deps.disclosures.listForVersion(
+        ref.id,
+        resolution.region,
+        ref.version,
+      );
+      // The ref names the locales the region's legal coverage MUST include, so
+      // every one of them has to exist: a ref satisfied by whichever
+      // localization happened to be published would clear the gate while the
+      // text some members actually read was never written.  Missing any
+      // required locale (or the version entirely) stays missing — fail-closed;
+      // counsel publishes the rest.
+      const locales = new Set(published.map((version) => version.locale));
+      if (!ref.locales.every((required) => locales.has(required))) {
+        missing.push(ref);
+        continue;
+      }
+      // An INFORMATIONAL disclosure (no locale requires acknowledgment) is
+      // published to be read, not signed: the client renders no acknowledge
+      // button for it, so demanding an ack would strand the user behind a gate
+      // with no way to clear it.
+      if (!published.some((version) => version.requiresAcknowledgment)) continue;
+      // Region-scoped, locale-agnostic: the member reads ONE localization, and
+      // the ack is evidence for this region's disclosure — but an
+      // acknowledgment given in ANOTHER region (same id + version, different
+      // text) does not satisfy it.
       acknowledged = await deps.acks.has(userId, ref.id, ref.version, resolution.region);
     } catch {
       acknowledged = false; // fail-closed

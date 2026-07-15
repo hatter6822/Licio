@@ -204,7 +204,13 @@ export interface ComplianceCaseStore {
   getById(caseId: string): Promise<ComplianceCaseRecord | null>;
   findByIdempotencyKey(key: string): Promise<ComplianceCaseRecord | null>;
   listByStates(states: readonly CaseReviewState[], limit: number): Promise<ComplianceCaseRecord[]>;
-  listBySubject(subjectRef: string, limit: number): Promise<ComplianceCaseRecord[]>;
+  /** `offset` pages the DSAR export to completeness — an archive that silently
+   *  stops at one page is not the user's full compliance footprint. */
+  listBySubject(
+    subjectRef: string,
+    limit: number,
+    offset?: number,
+  ): Promise<ComplianceCaseRecord[]>;
   /** CAS on review_state; null ⇔ the state moved concurrently. */
   transition(
     caseId: string,
@@ -263,6 +269,15 @@ export interface DisclosureStore {
     region: string,
     version: number,
   ): Promise<DisclosureVersionRecord | null>;
+  /** EVERY published locale of one version.  A policy ref names the locales it
+   *  must cover, and the DB keys versions by (id, region, version, locale), so
+   *  a single-row read cannot tell whether the region's legal coverage is
+   *  complete or which of several localizations the caller got. */
+  listForVersion(
+    disclosureId: string,
+    region: string,
+    version: number,
+  ): Promise<DisclosureVersionRecord[]>;
 }
 
 export interface DisclosureAckStore {
@@ -465,11 +480,15 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore {
       .map((r) => ({ ...r }));
   }
 
-  async listBySubject(subjectRef: string, limit: number): Promise<ComplianceCaseRecord[]> {
+  async listBySubject(
+    subjectRef: string,
+    limit: number,
+    offset = 0,
+  ): Promise<ComplianceCaseRecord[]> {
     return [...this.#rows.values()]
       .filter((r) => r.userIdOrRoomId === subjectRef)
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-      .slice(0, limit)
+      .slice(offset, offset + limit)
       .map((r) => ({ ...r }));
   }
 
@@ -505,7 +524,15 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore {
 
   async listExpired(nowIso: string, limit: number): Promise<ComplianceCaseRecord[]> {
     return [...this.#rows.values()]
-      .filter((r) => !r.retentionPolicy.legal_hold && r.retentionPolicy.deletion_date <= nowIso)
+      .filter(
+        (r) =>
+          !r.retentionPolicy.legal_hold &&
+          // An already-anonymized case has discharged its retention action:
+          // its deletion date stays in the past forever, so without this it
+          // would be re-selected and re-anonymized on every round.
+          (r.retentionPolicy.anonymized_at ?? null) === null &&
+          r.retentionPolicy.deletion_date <= nowIso,
+      )
       .slice(0, limit)
       .map((r) => ({ ...r }));
   }
@@ -538,6 +565,10 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore {
       userIdOrRoomId: null,
       partnerCaseRef: null,
       resolution: row.resolution === null ? null : { ...row.resolution, notes: '[anonymized]' },
+      // Marks the retention action DONE: the deletion date stays in the past
+      // forever, so without this the sweep would re-select and re-anonymize
+      // this row on every round (mirrors the Drizzle adapter).
+      retentionPolicy: { ...row.retentionPolicy, anonymized_at: updatedAt },
       updatedAt,
     });
   }
@@ -647,6 +678,18 @@ export class InMemoryDisclosureStore implements DisclosureStore {
       (r) => r.disclosureId === disclosureId && r.region === region && r.version === version,
     );
     return row ? { ...row } : null;
+  }
+
+  async listForVersion(
+    disclosureId: string,
+    region: string,
+    version: number,
+  ): Promise<DisclosureVersionRecord[]> {
+    return this.#rows
+      .filter(
+        (r) => r.disclosureId === disclosureId && r.region === region && r.version === version,
+      )
+      .map((r) => ({ ...r }));
   }
 }
 

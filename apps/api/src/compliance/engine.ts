@@ -35,6 +35,12 @@
 //   • without one — the region-wide reading (production eligibility off the
 //     two real-funds cells).  Claims no cell, so it grants no cell.
 //
+// ASSET SCOPE.  `asset_flags` gates the asset SEPARATELY from the cell: a
+// region may permit payments and still bar one asset, so every fund-moving
+// caller names the asset it would move and a barred one is `blocked` no matter
+// how open its cell is.  An asset the region never approved reaches no
+// decision (`unknown`).
+//
 // The verified-basis requirement for the real-funds cells is DELIBERATELY
 // hard-coded, not configurable: with no geolocated baseline (§19.1), the
 // WS-N.1.1f verification IS the anti-circumvention control, and a config
@@ -163,17 +169,29 @@ export function evaluateAvailability(input: AvailabilityInput): FeatureAvailabil
 /**
  * The `CompliancePort.jurisdiction` verdict (pure; see the header).  `cell`
  * scopes it to the policy cell the caller is about to exercise; omitting it
- * keeps the region-wide reading.
+ * keeps the region-wide reading.  `asset` names the asset a fund-moving action
+ * would move, which the policy gates INDEPENDENTLY of the cell.
  */
 export function coarseVerdict(
   input: AvailabilityInput,
   cell?: CryptoFeatureCell,
+  asset?: string,
 ): JurisdictionVerdict {
   if (input.ageBand !== null && isMinorBand(input.ageBand)) return 'blocked';
   if (input.complianceHold) return 'blocked';
   const policy = policyOf(input.policy);
   if (policy !== null && CRYPTO_FEATURE_CELLS.every((c) => policy.feature_flags[c] === 'blocked')) {
     return 'blocked';
+  }
+  if (asset !== undefined && policy !== null) {
+    // `asset_flags` is a prohibition list in its own right: a region can allow
+    // payments while barring a specific asset, so the cell's approval alone
+    // must not carry a barred one.  Explicit `false` PROHIBITS; an asset the
+    // region never approved reaches no decision (`unknown` — real funds
+    // reject, testnet proceeds), exactly like an unaddressed cell.
+    const allowed = policy.asset_flags[asset];
+    if (allowed === false) return 'blocked';
+    if (allowed !== true) return 'unknown';
   }
   if (cell !== undefined) {
     // Cell-scoped: the region has spoken about THIS cell, so honor it.  A

@@ -430,6 +430,11 @@ export async function submitAction(
     // that disables `governance` while payments stay enabled would still see
     // `allowed` and forward the prohibited signature (WS-N.1.1c).
     featureCell: ACTION_FEATURE_CELL[actionType],
+    // …and the same asset gate: a region can bar an asset between preflight
+    // and submit, which is exactly what this re-check exists to catch.
+    ...(input.typedDataMessage['asset'] !== undefined
+      ? { asset: input.typedDataMessage['asset'] }
+      : {}),
   });
   if (jurisdiction === 'blocked') {
     return {

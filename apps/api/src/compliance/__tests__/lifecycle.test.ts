@@ -528,3 +528,47 @@ describe('createCase is atomic with its genesis audit (WS-N.2.1b)', () => {
     expect(await services.caseAudit.listChained(outcome.record.caseId)).toHaveLength(1);
   });
 });
+
+describe('anonymized cases leave the retention queue (WS-N.2.1d)', () => {
+  it('an anonymized case is not re-anonymized on later rounds or runs', async () => {
+    await services.configStore.set('compliance.retentionAnonymizeTriggers', {
+      value: ['velocity'],
+    });
+    await services.reloadConfig();
+    const record = await seedCase({ triggerType: 'velocity' });
+
+    const first = await runRetentionSweep(sweepDeps());
+    expect(first).toMatchObject({ anonymized: 1, drained: true });
+    const trail = await services.caseAudit.listChained(record.caseId);
+    expect(trail.filter((e) => e.action === 'retention_anonymized')).toHaveLength(1);
+
+    // Its deletion date stays in the past forever, so without the marker the
+    // sweep would keep selecting it — re-anonymizing and re-auditing it every
+    // round, and never draining a full page of them.
+    expect(await services.cases.listExpired(new Date(nowMs).toISOString(), 10)).toHaveLength(0);
+    const second = await runRetentionSweep(sweepDeps());
+    expect(second).toMatchObject({ anonymized: 0, deleted: 0, drained: true });
+    const after = await services.caseAudit.listChained(record.caseId);
+    expect(after.filter((e) => e.action === 'retention_anonymized')).toHaveLength(1);
+  });
+
+  it('a full page of anonymize-class cases DRAINS instead of spinning', async () => {
+    await services.configStore.set('compliance.retentionAnonymizeTriggers', {
+      value: ['velocity'],
+    });
+    await services.reloadConfig();
+    for (let i = 0; i < 501; i += 1) await seedCase({ triggerType: 'velocity' });
+    const summary = await runRetentionSweep(sweepDeps());
+    expect(summary).toMatchObject({ anonymized: 501, errors: 0, drained: true });
+  });
+});
+
+describe('the DSAR export is complete (WS-N.2.1a)', () => {
+  it('pages past the 200-case cap instead of silently truncating', async () => {
+    const userId = randomUUID();
+    for (let i = 0; i < 205; i += 1) await seedCase({ userIdOrRoomId: userId });
+    const exported = await buildComplianceExport(services)(userId);
+    // The archive is the user's WHOLE compliance footprint, not a list view.
+    expect((exported['compliance_cases'] as unknown[]).length).toBe(205);
+  });
+});

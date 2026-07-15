@@ -77,6 +77,12 @@ export const caseRetentionPolicySchema = z
     retention_period_days: z.number().int().min(1).max(36_500),
     deletion_date: isoTimestampSchema,
     legal_hold: z.boolean(),
+    /** Set when the retention sweep ANONYMIZED this case in place instead of
+     *  deleting it (WS-N.2.1d): the schedule's obligation is discharged and
+     *  the stripped row is kept indefinitely.  It marks the case done, so the
+     *  sweep stops re-selecting a row whose `deletion_date` is forever in the
+     *  past — which would re-anonymize it and re-audit it every round. */
+    anonymized_at: isoTimestampSchema.nullish(),
   })
   .strict();
 export type CaseRetentionPolicy = z.infer<typeof caseRetentionPolicySchema>;

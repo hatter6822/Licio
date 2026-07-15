@@ -65,11 +65,18 @@ export interface CompliancePort {
    * signature would ride a payments-enabled `allowed`.  Every real signed
    * action therefore passes its cell; omitting it keeps the region-wide
    * reading (no cell claimed, so no cell-specific permission is implied).
+   *
+   * `asset` names the asset a fund-moving action would move.  A policy's
+   * `asset_flags` are a per-region prohibition list in their own right — a
+   * region can permit payments while barring a specific asset — so a
+   * cell-only verdict would let a barred asset through on its cell's
+   * approval.  Actions that move no asset (the governance signatures) omit it.
    */
   jurisdiction(args: {
     userId: string;
     region: string | null;
     featureCell?: CryptoFeatureCell;
+    asset?: string;
   }): Promise<JurisdictionVerdict>;
   /** Coarse wallet risk assessment (WS-L.2.5c-1); label + safe explanation
    *  only — raw sanctions/fraud internals never cross this seam. */

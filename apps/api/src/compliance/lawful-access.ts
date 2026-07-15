@@ -11,7 +11,8 @@
 // The workflow records that determination explicitly rather than an empty or
 // misleading production, and never represents a decryption capability that
 // does not exist.
-import { type CaseDeps, createCase, setLegalHold } from './cases.js';
+import { appendCaseAudit } from './audit.js';
+import { type CaseDeps, createCase, setLegalHold, transitionCase } from './cases.js';
 import type { LawfulAccessRecord, LawfulAccessStore } from './stores.js';
 
 type Clock = () => number;
@@ -69,37 +70,65 @@ export async function intakeLawfulAccessRequest(
     riskLevel: 'high',
     note: `Lawful-access request intake (${input.legalBasis}); legal review required before any production.`,
   });
-  const caseId = linked.ok ? linked.record.caseId : null;
-  if (caseId !== null) {
-    const held = await setLegalHold(deps.caseDeps, {
-      caseId,
-      hold: true,
-      actorUserId: input.actorUserId,
-      reason: 'Legal hold applied for a lawful-access request (WS-N.2.3d).',
-    });
-    // The hold is the point of linking the case: without it retention could
-    // anonymize or delete the very records the request obliges us to keep.
-    // Recording the request while the hold failed would look compliant and
-    // not be, so intake aborts and the requester retries.
-    if (!held.ok) return laErr(held.status, held.code, held.message);
-  }
-  const record = await deps.requests.insert({
-    requestId: deps.uuid(),
-    agency: input.agency,
-    jurisdiction: input.jurisdiction,
-    legalBasis: input.legalBasis,
-    scope: input.scope,
-    contact: input.contact,
-    status: 'received',
-    reviewNote: null,
-    reviewedByRef: null,
-    productionSummary: null,
-    userNotifiedAt: null,
+  // A request with no case has no legal hold, so retention or an account
+  // deletion could purge the scoped records while it is outstanding —
+  // recording it anyway would look compliant and not be.  Intake aborts.
+  if (!linked.ok) return laErr(linked.status, linked.code, linked.message);
+  const caseId = linked.record.caseId;
+  const held = await setLegalHold(deps.caseDeps, {
     caseId,
-    createdAt: nowIso,
-    updatedAt: nowIso,
+    hold: true,
+    actorUserId: input.actorUserId,
+    reason: 'Legal hold applied for a lawful-access request (WS-N.2.3d).',
   });
-  return { ok: true, record };
+  // Same reasoning for the hold itself: it IS the point of linking the case.
+  if (!held.ok) {
+    await discardIntakeCase(deps, caseId);
+    return laErr(held.status, held.code, held.message);
+  }
+  try {
+    const record = await deps.requests.insert({
+      requestId: deps.uuid(),
+      agency: input.agency,
+      jurisdiction: input.jurisdiction,
+      legalBasis: input.legalBasis,
+      scope: input.scope,
+      contact: input.contact,
+      status: 'received',
+      reviewNote: null,
+      reviewedByRef: null,
+      productionSummary: null,
+      userNotifiedAt: null,
+      caseId,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    return { ok: true, record };
+  } catch {
+    // With no request row the case + hold are orphans: nothing will ever
+    // release them (retention cannot clear a hold), and intake has no
+    // idempotency key, so each retry would strand another held case.  The
+    // case exists only for this request, so it goes with it.
+    const discarded = await discardIntakeCase(deps, caseId);
+    return laErr(
+      503,
+      'intake_unavailable',
+      discarded
+        ? 'The request could not be recorded; no changes were kept.'
+        : 'The request could not be recorded and its linked case could not be cleaned up; contact the platform team.',
+    );
+  }
+}
+
+/** Remove an intake case this request created but never used (its hold would
+ *  otherwise pin records forever for a request that does not exist). */
+async function discardIntakeCase(deps: LawfulAccessDeps, caseId: string): Promise<boolean> {
+  try {
+    await deps.caseDeps.cases.deleteCascade(caseId);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Counsel review: received/under_review → approved | denied.  Emergency
@@ -129,7 +158,56 @@ export async function reviewLawfulAccessRequest(
     new Date(deps.now()).toISOString(),
   );
   if (updated === null) return laErr(404, 'not_found', 'Resource not found');
+  // A DENIED request obliges nothing: leaving its legal hold on would keep
+  // retention and the account-deletion scrub skipping the subject's records
+  // indefinitely, and leaving the high-risk case open would keep the
+  // subject's crypto features disabled (an open high/critical case IS the
+  // compliance hold) — both on the strength of a request counsel rejected.
+  if (input.decision === 'denied' && updated.caseId !== null) {
+    await setLegalHold(deps.caseDeps, {
+      caseId: updated.caseId,
+      hold: false,
+      actorUserId: input.actorUserId,
+      reason: 'Legal hold released: the lawful-access request was denied on legal review.',
+    });
+    await closeDeniedIntakeCase(deps, updated.caseId, input.actorUserId, input.note);
+  }
   return { ok: true, record: updated };
+}
+
+/**
+ * Walk a denied request's intake case to `resolved` along the sanctioned
+ * transitions (the WS-N.2.1c table has no open→resolved edge, and inventing
+ * one for an automated path would put a shortcut into the reviewers' machine).
+ * Best-effort: the hold release above is what protects the subject's data, and
+ * a case left open is visible in the queue for a reviewer to close by hand.
+ */
+async function closeDeniedIntakeCase(
+  deps: LawfulAccessDeps,
+  caseId: string,
+  actorUserId: string,
+  note: string,
+): Promise<void> {
+  const resolution = {
+    outcome: 'cleared' as const,
+    notes: `Lawful-access request denied on legal review: ${note}`,
+    resolved_by: actorUserId,
+    resolved_at: new Date(deps.now()).toISOString(),
+  };
+  const steps = [
+    { to: 'assigned' as const, assigneeUserId: actorUserId },
+    { to: 'investigating' as const },
+    { to: 'resolved' as const, resolution },
+  ];
+  for (const step of steps) {
+    const moved = await transitionCase(deps.caseDeps, {
+      caseId,
+      actorUserId,
+      isSenior: true,
+      ...step,
+    });
+    if (!moved.ok) return;
+  }
 }
 
 /**
@@ -168,5 +246,21 @@ export async function recordLawfulAccessProduction(
     nowIso,
   );
   if (updated === null) return laErr(404, 'not_found', 'Resource not found');
+  // WHO disclosed the data — the record itself keeps only `reviewedByRef`, and
+  // the approver is often not the producer.  A scoped production log that
+  // cannot name the discloser is not a production log, so the act lands on the
+  // linked case's hash chain (which intake guarantees exists).
+  if (updated.caseId !== null) {
+    await appendCaseAudit(deps.caseDeps, {
+      caseId: updated.caseId,
+      action: 'lawful_access_produced',
+      actorRef: deps.opaqueRef(input.actorUserId),
+      beforeState: null,
+      afterState: null,
+      note: `Lawful-access production recorded for request ${updated.requestId}; user ${
+        input.userNotified ? 'notified' : 'not notified'
+      }.`,
+    });
+  }
   return { ok: true, record: updated };
 }

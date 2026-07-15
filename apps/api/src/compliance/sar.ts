@@ -39,6 +39,12 @@ export async function createSarDraft(
   deps: SarDeps,
   input: { caseId: string; jurisdiction: string; narrative: string; actorUserId: string },
 ): Promise<SarOutcome> {
+  // The hold state BEFORE this draft touches it: the case may already be held
+  // for an EARLIER SAR or lawful-access request, and that obligation is not
+  // this draft's to undo (see the rollback below).
+  const before = await deps.caseDeps.cases.getById(input.caseId);
+  if (before === null) return sarErr(404, 'not_found', 'Resource not found');
+  const alreadyHeld = before.retentionPolicy.legal_hold;
   const held = await setLegalHold(deps.caseDeps, {
     caseId: input.caseId,
     hold: true,
@@ -65,16 +71,20 @@ export async function createSarDraft(
       updatedAt: nowIso,
     });
   } catch {
-    // The hold exists FOR the report.  With no report it would pin the case
-    // out of retention indefinitely for a draft that does not exist, and each
-    // retry would stack another hold + audit entry — so the hold is released
-    // (itself audited, keeping the chain honest about what happened).
-    const released = await setLegalHold(deps.caseDeps, {
-      caseId: input.caseId,
-      hold: false,
-      actorUserId: input.actorUserId,
-      reason: 'Legal hold released: the regulatory record it was applied for was not created.',
-    });
+    // Undo only what THIS draft did.  The hold exists for the report, so with
+    // no report it would pin the case out of retention indefinitely and every
+    // retry would stack another hold + entry — but if an EARLIER SAR or
+    // lawful-access request already held the case, that obligation is still
+    // live and releasing it here would let retention reach records the other
+    // request still protects.  So: release only a hold this call introduced.
+    const released = alreadyHeld
+      ? { ok: true as const }
+      : await setLegalHold(deps.caseDeps, {
+          caseId: input.caseId,
+          hold: false,
+          actorUserId: input.actorUserId,
+          reason: 'Legal hold released: the regulatory record it was applied for was not created.',
+        });
     return sarErr(
       503,
       'sar_unavailable',

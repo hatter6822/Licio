@@ -670,3 +670,103 @@ describe('the disclosure gate honors requires_acknowledgment (WS-N.1.2d)', () =>
     expect(gate.missing[0]?.id).toBe('never-published');
   });
 });
+
+describe('the disclosure gate requires EVERY locale the policy names (WS-N.1.2d)', () => {
+  async function regionRequiring(s: ReturnType<typeof services>, locales: string[]) {
+    await s.declarations.upsert({
+      userId: USER,
+      declaredRegion: 'DE',
+      status: 'verified',
+      verificationLevel: 'reviewer_verified',
+      evidenceRef: null,
+      verifiedAt: new Date(NOW).toISOString(),
+      verifiedBy: null,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    await s.policies.insert({
+      policyId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      countryOrRegion: 'DE',
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      document: {
+        policy_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        country_or_region: 'DE',
+        feature_flags: {
+          wallet_connection: 'testnet',
+          testnet_transactions: 'testnet',
+          production_payments: 'disabled',
+          treasury_operations: 'disabled',
+          governance: 'disabled',
+        },
+        asset_flags: {},
+        age_gate_policy: {
+          wallet_connection: { required_band: 'adult' },
+          testnet_transactions: { required_band: 'adult' },
+          production_payments: { required_band: 'adult' },
+          treasury_operations: { required_band: 'adult' },
+          governance: { required_band: 'adult' },
+        },
+        kyc_policy: {},
+        disclosure_refs: [{ id: 'risk-general', version: 1, locales }],
+        legal_approval_ref: null,
+        effective_at: '2026-01-01T00:00:00.000Z',
+      },
+      createdAt: new Date(NOW).toISOString(),
+    });
+  }
+  const publish = (s: ReturnType<typeof services>, locale: string, requiresAck = true) =>
+    s.disclosures.publish({
+      id: `${locale}-1111-4111-8111-111111111111`,
+      disclosureId: 'risk-general',
+      region: 'DE',
+      version: 1,
+      locale,
+      title: `Risk (${locale})`,
+      contentMd: `Localized legal text for ${locale}.`,
+      requiresAcknowledgment: requiresAck,
+      publishedAt: new Date(NOW).toISOString(),
+    });
+
+  it('a ref whose OTHER required locale was never published keeps blocking', async () => {
+    const s = services();
+    await regionRequiring(s, ['en', 'de']);
+    await publish(s, 'en');
+    const deps = buildDisclosureDeps(s);
+    // Acknowledging the one published localization must NOT clear a gate whose
+    // policy also demands German — that text does not exist yet.
+    expect(
+      (
+        await acknowledgeDisclosure(deps, {
+          userId: USER,
+          disclosureId: 'risk-general',
+          version: 1,
+        })
+      ).ok,
+    ).toBe(true);
+    expect((await disclosureGate(deps, USER)).required).toBe(true);
+
+    // Once counsel publishes the missing locale, the ack stands (a member
+    // reads ONE language — the array is a publication requirement).
+    await publish(s, 'de');
+    expect((await disclosureGate(deps, USER)).required).toBe(false);
+  });
+
+  it('is informational only when NO required locale requires acknowledgment', async () => {
+    const s = services();
+    await regionRequiring(s, ['en', 'de']);
+    await publish(s, 'en', false);
+    await publish(s, 'de', false);
+    expect((await disclosureGate(buildDisclosureDeps(s), USER)).required).toBe(false);
+  });
+
+  it('one ack-requiring locale makes the whole ref ack-requiring', async () => {
+    const s = services();
+    await regionRequiring(s, ['en', 'de']);
+    await publish(s, 'en', false);
+    await publish(s, 'de', true);
+    const deps = buildDisclosureDeps(s);
+    expect((await disclosureGate(deps, USER)).required).toBe(true);
+    await acknowledgeDisclosure(deps, { userId: USER, disclosureId: 'risk-general', version: 1 });
+    expect((await disclosureGate(deps, USER)).required).toBe(false);
+  });
+});

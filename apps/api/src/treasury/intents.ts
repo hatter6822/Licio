@@ -18,7 +18,7 @@
 // computed with exact decimal math.
 
 import { decCompare, decSum, paymentIntentTransitionAllowed } from '@licio/governance';
-import type { PaymentIntentState, PaymentTargetType } from '@licio/shared';
+import type { CryptoFeatureCell, PaymentIntentState, PaymentTargetType } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import { killSwitchDecision } from '../knomosis/killswitch.js';
@@ -70,6 +70,17 @@ const DEPOSIT_TARGETS: ReadonlySet<PaymentTargetType> = new Set([
 
 const operationFor = (target: PaymentTargetType): 'deposits' | 'executions' =>
   DEPOSIT_TARGETS.has(target) ? 'deposits' : 'executions';
+
+/**
+ * The §22.2 jurisdiction cell an intent exercises (WS-N.1.1c), derived from
+ * the SAME deposit/payout split above so the two classifications cannot drift:
+ * paying in is a payment, disbursing is a treasury operation.  Asking the
+ * region-wide question instead would demand BOTH real-funds cells and so
+ * reject a deposit in a region that enables deposits and disables treasury
+ * operations — its own cell being open.
+ */
+const featureCellFor = (target: PaymentTargetType): CryptoFeatureCell =>
+  DEPOSIT_TARGETS.has(target) ? 'production_payments' : 'treasury_operations';
 
 /** States that count toward the deposit-period aggregates: anything not
  *  conclusively dead (abandoned/failed) or reverted still claims allowance —
@@ -364,7 +375,15 @@ export async function preflightIntent(
   // the party actually executing the on-chain movement.
   const subjectUserId = intent.userId ?? actorUserId;
   const region = await deps.regionResolver.regionForUser(subjectUserId);
-  const jurisdiction = await deps.compliance.jurisdiction({ userId: subjectUserId, region });
+  const jurisdiction = await deps.compliance.jurisdiction({
+    userId: subjectUserId,
+    region,
+    // The intent's OWN cell + asset (WS-N.1.1c): the region-wide reading would
+    // demand both real-funds cells and reject a deposit whose cell is enabled,
+    // and would carry an asset the region bars on the cell's approval.
+    featureCell: featureCellFor(intent.targetType),
+    asset: intent.asset,
+  });
   if (jurisdiction === 'blocked') {
     return tgErr(403, 'jurisdiction_blocked', 'This feature is not available in your region.');
   }

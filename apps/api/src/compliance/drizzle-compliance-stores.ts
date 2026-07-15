@@ -369,13 +369,18 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
     return rows.map(toCaseRecord);
   }
 
-  async listBySubject(subjectRef: string, limit: number): Promise<ComplianceCaseRecord[]> {
+  async listBySubject(
+    subjectRef: string,
+    limit: number,
+    offset = 0,
+  ): Promise<ComplianceCaseRecord[]> {
     const rows = await this.#db
       .select()
       .from(financialComplianceCases)
       .where(eq(financialComplianceCases.userIdOrRoomId, subjectRef))
       .orderBy(desc(financialComplianceCases.createdAt))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
     return rows.map(toCaseRecord);
   }
 
@@ -434,6 +439,10 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
       .where(
         and(
           sql`(${financialComplianceCases.retentionPolicy}->>'legal_hold')::boolean = false`,
+          // An already-anonymized case has discharged its retention action:
+          // its deletion date stays in the past forever, so without this it
+          // would be re-selected and re-anonymized on every sweep round.
+          sql`(${financialComplianceCases.retentionPolicy}->>'anonymized_at') IS NULL`,
           sql`(${financialComplianceCases.retentionPolicy}->>'deletion_date') <= ${nowIso}`,
         ),
       )
@@ -473,6 +482,10 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
         partnerCaseRef: null,
         resolution: sql`CASE WHEN ${financialComplianceCases.resolution} IS NULL THEN NULL
           ELSE jsonb_set(${financialComplianceCases.resolution}, '{notes}', '"[anonymized]"') END`,
+        // Marks the retention action DONE, so `listExpired` stops returning a
+        // row whose deletion date is permanently in the past (it would
+        // otherwise be re-anonymized and re-audited every sweep round).
+        retentionPolicy: sql`jsonb_set(${financialComplianceCases.retentionPolicy}, '{anonymized_at}', ${JSON.stringify(updatedAt)}::jsonb)`,
         updatedAt: new Date(updatedAt),
       })
       .where(eq(financialComplianceCases.caseId, caseId));
@@ -750,6 +763,24 @@ export class DrizzleDisclosureStore implements DisclosureStore {
       )
       .limit(1);
     return rows[0] ? toDisclosure(rows[0]) : null;
+  }
+
+  async listForVersion(
+    disclosureId: string,
+    region: string,
+    version: number,
+  ): Promise<DisclosureVersionRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(disclosureVersions)
+      .where(
+        and(
+          eq(disclosureVersions.disclosureId, disclosureId),
+          eq(disclosureVersions.region, region),
+          eq(disclosureVersions.version, version),
+        ),
+      );
+    return rows.map(toDisclosure);
   }
 }
 

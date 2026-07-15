@@ -38,15 +38,20 @@ modified** in their verdict semantics:
   second transfer of the same amount is a different attempt with its own
   review, and a caller naming no attempt never gets the cleared-review exit.
 - `jurisdiction` → `'allowed' | 'blocked' | 'unknown'` — takes the
-  `featureCell` the caller is about to exercise (`ACTION_FEATURE_CELL` maps
-  each signed action to its §22.2 cell), at preflight **and** at the submit
-  re-check (a policy can change during the token TTL — that is what the
-  re-check is for). A policy is **per-cell**, so a region that enables
-  payments while disabling `governance` answers `blocked` for a
-  `proposal_sign` — the region-wide reading would have said `allowed` off the
-  payments cells and let it through. `unknown` preserves the shipped testnet
-  behaviour; `allowed` additionally requires a **verified** declaration basis
-  and the relevant cell(s) `enabled`.
+  `featureCell` the caller is about to exercise and the `asset` it would move.
+  Every fund/action path passes both: the WS-L preflight, its submit re-check
+  (a policy can change during the token TTL — that is what the re-check is
+  for), and the WS-M intent preflight. A policy is **per-cell**, so a region
+  enabling payments while disabling `governance` answers `blocked` for a
+  `proposal_sign` (the region-wide reading would have said `allowed` off the
+  payments cells), and demanding *both* real-funds cells would wrongly reject
+  a deposit in a deposits-only region. `asset_flags` gates the asset
+  **independently**: a barred asset is `blocked` however open its cell is, and
+  an asset the region never approved is `unknown`. The region-wide reading
+  survives for the one caller that wants it — the `jurisdiction_supported`
+  readiness item, which genuinely asks whether a region is production-ready
+  overall. `unknown` preserves the shipped testnet behaviour; `allowed`
+  additionally requires a **verified** declaration basis.
 - `walletRisk` — risk pins + open critical/high cases (wallet addresses are
   stored hashed; plaintext exists only at link time, which is why sanctions
   screening hooks `linkWallet` via `onSanctionedWalletLink`).
@@ -212,14 +217,28 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   entry are already committed and are the record of truth, so a failed
   notification alerts rather than destroying an audited case.
 - **A hold and the record it exists for are one unit.**  A SAR draft that
-  cannot be stored releases the hold it applied (otherwise the hold pins a
-  case out of retention forever for a draft that does not exist), and a
-  lawful-access intake whose hold fails aborts rather than record a request
-  whose obligations retention could then sweep away.
+  cannot be stored releases the hold it applied — but **only** a hold that
+  draft introduced: a case already held for an earlier SAR or lawful-access
+  request keeps it, since that obligation is not this draft's to undo. A
+  lawful-access intake aborts (discarding its own case) rather than record a
+  request whose obligations retention could sweep away, and a **denied**
+  request releases its hold and closes its case: it obliges nothing, and
+  leaving it would keep the subject's records pinned and their crypto features
+  disabled on a request counsel rejected.
 - **Retention retries and drains.**  The sweep's cadence marker advances only
   on a *drained* run — neither a transient failure nor a >500-case backlog may
   burn the window, or expired cases would stay readable for another full
-  interval.  An un-drained run alerts and the next tick resumes.
+  interval.  An un-drained run alerts and the next tick resumes.  An
+  anonymized case is marked `anonymized_at`: its deletion date is permanently
+  in the past, so without the marker the sweep would re-select and re-audit it
+  every round and a full page could never drain.
+- **Reviews are clearable.**  Anything a human is asked to review must have an
+  exit, or "manual review" is just a block: a cleared high-value review lets
+  its attempt through, and a cleared **partial** sanctions match returns
+  `clear` once the short partial-cache TTL lapses. (A *full* match is never
+  review-clearable here.)  Counsel-only surfaces work the same way — the
+  retention-schedule config keys take the counsel capability, since they are
+  the counsel-approved schedule.
 - **Acknowledgments are region-scoped.**  The same `(disclosure_id, version)`
   carries different counsel-authored text per region, so the ack key and the
   gate both include the region — changing regions re-prompts rather than

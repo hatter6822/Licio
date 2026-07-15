@@ -45,6 +45,7 @@ import { createFraudRisk } from './risk.js';
 import { createScreenAddress, type SanctionsProvider } from './screening.js';
 import {
   type CaseAuditStore,
+  type ComplianceCaseRecord,
   type ComplianceCaseStore,
   type DisclosureAckStore,
   type DisclosureStore,
@@ -411,10 +412,10 @@ export function buildCompliancePort(services: ComplianceServices): CompliancePor
         return 'unavailable';
       }
     },
-    jurisdiction: async ({ userId, featureCell }) => {
+    jurisdiction: async ({ userId, featureCell, asset }) => {
       try {
         const input = await assembleAvailabilityInput(services, userId);
-        const verdict = coarseVerdict(input, featureCell);
+        const verdict = coarseVerdict(input, featureCell, asset);
         services.metrics.increment(`compliance.jurisdiction.${verdict}`);
         return verdict;
       } catch {
@@ -474,7 +475,16 @@ export function buildComplianceExport(
   return async (userId) => {
     const declaration = await services.declarations.get(userId);
     const acks = await services.acks.listByUser(userId);
-    const cases = await services.cases.listBySubject(userId, 200);
+    // Paged to COMPLETENESS: this is the user's whole compliance footprint in
+    // their DSAR archive, not an admin list view — a silent cap would omit
+    // older case metadata from a legally-complete export.
+    const cases: ComplianceCaseRecord[] = [];
+    const pageSize = 200;
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await services.cases.listBySubject(userId, pageSize, offset);
+      cases.push(...page);
+      if (page.length < pageSize) break;
+    }
     return {
       region_declaration:
         declaration === null

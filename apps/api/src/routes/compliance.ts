@@ -104,6 +104,17 @@ const FRAUD_CLASS_TRIGGERS: ReadonlySet<CaseTriggerType> = new Set([
   'scam',
 ]);
 
+/** The `compliance.*` keys that ARE the counsel-approved retention schedule
+ *  (WS-N.2.1d): how long compliance and legal records are kept, and which are
+ *  anonymized rather than deleted.  Counsel-only — the rest of the runtime
+ *  config is operational and open to the compliance role. */
+const RETENTION_SCHEDULE_KEYS: ReadonlySet<string> = new Set([
+  'retentionDaysByTrigger',
+  'retentionAnonymizeTriggers',
+  'retentionScheduleRef',
+  'eventRetentionOverrides',
+]);
+
 /** Status-typed error responder (the tgError house idiom). */
 function failJson(
   c: { json: (body: unknown, status: never) => Response },
@@ -176,20 +187,38 @@ function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): s
   return new Date(Date.parse(record.createdAt) + hours * 3_600_000).toISOString();
 }
 
-/** The subject's newest OPEN fraud-class case — the review a held payment is
- *  about.  One rule, shared by the queue's rows and the decision record. */
+/** A flagged intent, as much of it as the queue needs to find its review. */
+interface HeldIntent {
+  paymentIntentId: string;
+  userId: string | null;
+  targetType: string;
+  amount: string;
+}
+
+/**
+ * THIS intent's review case.  Keyed by the intent, never by its owner: a user
+ * can have two flagged intents at once, and a subject-wide "newest fraud case"
+ * would show one intent's row against the other's review — then a release
+ * would clear funds for one intent while appending the decision to the other's
+ * chain, leaving the first unaudited.  One rule, shared by the queue's rows and
+ * the decision record.
+ */
 async function relatedFraudCase(
   services: ComplianceServices,
-  userId: string | null,
+  intent: HeldIntent,
 ): Promise<ComplianceCaseRecord | null> {
-  if (userId === null) return null;
-  const candidates = await services.cases.listBySubject(userId, 50);
-  return (
-    candidates.find(
-      (candidate) =>
-        candidate.reviewState !== 'resolved' && FRAUD_CLASS_TRIGGERS.has(candidate.triggerType),
-    ) ?? null
-  );
+  if (intent.userId === null) return null;
+  // The high-value review `risk.ts` opens for this exact intent (its
+  // `reviewRef` IS the intent id), then the case this queue opened for it.
+  const keys = [
+    `highvalue:${intent.userId}:payment_intent:${intent.targetType}:${intent.amount}:${intent.paymentIntentId}`,
+    `intent-review:${intent.paymentIntentId}`,
+  ];
+  for (const key of keys) {
+    const found = await services.cases.findByIdempotencyKey(key);
+    if (found !== null && FRAUD_CLASS_TRIGGERS.has(found.triggerType)) return found;
+  }
+  return null;
 }
 
 /**
@@ -204,23 +233,22 @@ async function relatedFraudCase(
 async function recordIntentReviewDecision(
   services: ComplianceServices,
   input: {
-    paymentIntentId: string;
-    subjectUserId: string | null;
+    intent: HeldIntent;
     decision: 'release' | 'reject';
     reason: string;
     actorUserId: string;
   },
 ): Promise<boolean> {
   try {
-    let record = await relatedFraudCase(services, input.subjectUserId);
+    let record = await relatedFraudCase(services, input.intent);
     if (record === null) {
       const opened = await createCase(buildCaseDeps(services), {
         subjectKind: 'user',
-        subjectRef: input.subjectUserId ?? input.paymentIntentId,
+        subjectRef: input.intent.userId ?? input.intent.paymentIntentId,
         triggerType: 'pattern',
         riskLevel: 'medium',
-        note: `Payment intent ${input.paymentIntentId} held for fraud review.`,
-        idempotencyKey: `intent-review:${input.paymentIntentId}`,
+        note: `Payment intent ${input.intent.paymentIntentId} held for fraud review.`,
+        idempotencyKey: `intent-review:${input.intent.paymentIntentId}`,
       });
       if (!opened.ok) return false;
       record = opened.record;
@@ -231,7 +259,7 @@ async function recordIntentReviewDecision(
       actorRef: services.opaqueRef(input.actorUserId),
       beforeState: record.reviewState,
       afterState: record.reviewState,
-      note: `Payment intent ${input.paymentIntentId} ${
+      note: `Payment intent ${input.intent.paymentIntentId} ${
         input.decision === 'release' ? 'released' : 'rejected'
       }: ${input.reason}`,
     });
@@ -520,18 +548,32 @@ export function createComplianceRoutes() {
             503,
           );
         }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'compliance_policy_change',
-          context: {
-            setting: policyInput.country_or_region,
-            new_value: previous === null ? 'create' : 'update',
-          },
-        });
-        // Hot reload: this instance immediately, siblings via the broadcaster.
+        // Hot reload FIRST: the policy is live and hash-audited from here on,
+        // so serving a stale cached verdict until the TTL would be the real
+        // harm.  (The identity audit below is a secondary index over the
+        // authoritative chain entry just written — it must not be able to
+        // strand an applied change behind an un-invalidated cache.)
         services.policyCache.invalidate(policyInput.country_or_region);
         await services.broadcaster.publish(policyInput.country_or_region);
         services.metrics.increment('compliance.policy.written');
+        // Best-effort: a transient identity-audit outage cannot un-apply a
+        // committed, chained policy, and returning 500 would send the operator
+        // into a retry that collides with the existing row for nothing.
+        try {
+          await getIdentityServices().audit.append({
+            actorUserId: auth.userId,
+            eventType: 'compliance_policy_change',
+            context: {
+              setting: policyInput.country_or_region,
+              new_value: previous === null ? 'create' : 'update',
+            },
+          });
+        } catch (error) {
+          services.alert('compliance.policy.identity_audit_failed', {
+            region: policyInput.country_or_region,
+            message: error instanceof Error ? error.message : 'unknown',
+          });
+        }
         return c.json({ policy: validated.policy }, 201);
       },
     )
@@ -625,6 +667,7 @@ export function createComplianceRoutes() {
       requireCompliance(),
       zValidator('json', caseCreateRequestSchema),
       async (c) => {
+        const auth = requireAuth(c);
         const services = getComplianceServices();
         const body = c.req.valid('json');
         const result = await createCase(buildCaseDeps(services), {
@@ -634,6 +677,10 @@ export function createComplianceRoutes() {
           riskLevel: body.risk_level,
           note: body.note,
           partnerCaseRef: body.partner_case_ref ?? null,
+          // A console-opened case names the reviewer who opened it; without
+          // this its genesis entry would read `system` and be
+          // indistinguishable from one the engine raised.
+          actorUserId: auth.userId,
         });
         if (!result.ok) return failJson(c, result);
         return c.json({ case: caseToWire(result.record) }, 201);
@@ -827,7 +874,12 @@ export function createComplianceRoutes() {
             // the reviewer the wrong trigger, risk, and SLA for the held
             // payment; with no such case the synthetic row below describes the
             // intent itself.
-            const record = await relatedFraudCase(services, intent.userId);
+            const record = await relatedFraudCase(services, {
+              paymentIntentId: intent.paymentIntentId,
+              userId: intent.userId,
+              targetType: intent.targetType,
+              amount: intent.amount,
+            });
             return {
               case:
                 record !== null
@@ -888,8 +940,12 @@ export function createComplianceRoutes() {
         // cannot be recorded, the hold goes back on rather than release funds
         // with no durable account of who allowed it or why.
         const recorded = await recordIntentReviewDecision(services, {
-          paymentIntentId: body.payment_intent_id,
-          subjectUserId: updated.userId,
+          intent: {
+            paymentIntentId: updated.paymentIntentId,
+            userId: updated.userId,
+            targetType: updated.targetType,
+            amount: updated.amount,
+          },
           decision: 'release',
           reason: body.reason,
           actorUserId: auth.userId,
@@ -941,8 +997,12 @@ export function createComplianceRoutes() {
         // A block is as consequential as a release — it stops a member's
         // funds — so it is recorded the same way, or reverted to `flagged`.
         const recorded = await recordIntentReviewDecision(services, {
-          paymentIntentId: body.payment_intent_id,
-          subjectUserId: updated.userId,
+          intent: {
+            paymentIntentId: updated.paymentIntentId,
+            userId: updated.userId,
+            targetType: updated.targetType,
+            amount: updated.amount,
+          },
           decision: 'reject',
           reason: body.reason,
           actorUserId: auth.userId,
@@ -1025,6 +1085,19 @@ export function createComplianceRoutes() {
         const services = getComplianceServices();
         const { key } = c.req.valid('param');
         const { value } = c.req.valid('json');
+        // The retention schedule is a COUNSEL artifact (WS-N.2.1d: "a
+        // counsel-approved retention schedule"), and these keys are how long
+        // compliance and legal records live.  A compliance reviewer may tune
+        // the operational knobs; rewriting the schedule takes counsel.
+        if (RETENTION_SCHEDULE_KEYS.has(key) && !isCounsel(auth.roles)) {
+          return c.json(
+            deny(
+              'counsel_approval_required',
+              'The retention schedule is counsel-approved; changing it requires legal counsel.',
+            ),
+            403,
+          );
+        }
         const problem = validateComplianceConfigValue(key, value);
         if (problem !== null) return c.json(deny('invalid_config_value', problem), 400);
         await services.configStore.set(`compliance.${key}`, { value });

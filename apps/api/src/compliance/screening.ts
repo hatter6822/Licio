@@ -121,7 +121,7 @@ export function createScreenAddress(deps: ScreeningDeps): CompliancePort['screen
     }
     // A match opens the review case (idempotent per address per day).
     const partial = result === 'partial';
-    await createCase(deps.caseDeps, {
+    const opened = await createCase(deps.caseDeps, {
       subjectKind: 'address',
       subjectRef: addressLower,
       triggerType: 'sanctions',
@@ -132,6 +132,20 @@ export function createScreenAddress(deps: ScreeningDeps): CompliancePort['screen
       idempotencyKey: `sanctions:${result}:${addressLower}:${dayBucket(deps.now())}`,
     });
     if (partial) {
+      // A partial match is a MAYBE that a human resolves.  The idempotent key
+      // means this returns that review once it exists, so honor its outcome:
+      // without this the verdict stays `unavailable` until the UTC-day key
+      // rolls over and a reviewer literally cannot clear a false positive.
+      // (A FULL match is never review-clearable here — it stays blocked.)
+      if (
+        opened.ok &&
+        opened.record.reviewState === 'resolved' &&
+        opened.record.resolution?.outcome === 'cleared'
+      ) {
+        deps.metric('compliance.screening.partial_cleared');
+        await deps.cache.set(key, 'clear', config.screeningCacheTtlMs).catch(() => {});
+        return 'clear';
+      }
       deps.metric('compliance.screening.partial');
       // Short-TTL cache: fail-closed pending review, re-screened soon after.
       await deps.cache.set(key, 'unavailable', config.screeningPartialCacheTtlMs).catch(() => {});

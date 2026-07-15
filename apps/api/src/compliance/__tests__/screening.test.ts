@@ -8,14 +8,21 @@
 // store outage answers unavailable (the shipped read-through keeps `pending`).
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
+import { transitionCase } from '../cases.js';
+import { DEFAULT_COMPLIANCE_CONFIG } from '../config.js';
 import { createScreenAddress, HttpSanctionsProvider } from '../screening.js';
-import { buildCaseDeps, createInMemoryComplianceServices } from '../services.js';
+import {
+  buildCaseDeps,
+  type ComplianceServices,
+  createInMemoryComplianceServices,
+} from '../services.js';
 import { createWalletRisk } from '../wallet-risk.js';
 
 const NOW = Date.parse('2026-07-15T12:00:00.000Z');
 const USER = '6f9619ff-8b86-4d01-b42d-00cf4fc964ff';
 const WALLET = '9a9619ff-8b86-4d01-b42d-00cf4fc964bb';
 const ADDRESS = '0x00000000000000000000000000000000000000aa';
+const REVIEWER = '7a8619ff-8b86-4d01-b42d-00cf4fc96411';
 
 function fixture(results: Array<'clear' | 'partial' | 'full'> | 'error' | null) {
   const services = createInMemoryComplianceServices({
@@ -243,5 +250,96 @@ describe('createWalletRisk (WS-N.2.2e)', () => {
       metric: () => {},
     });
     expect(await walletRisk({ walletAccountId: WALLET, userId: USER })).toBe('unavailable');
+  });
+});
+
+/** Like `fixture`, but with a clock the test can advance so the partial
+ *  match's SHORT cache TTL lapses the way it does in real time. */
+function reviewableFixture(results: Array<'clear' | 'partial' | 'full'>) {
+  let clock = NOW;
+  const services = createInMemoryComplianceServices({
+    configStore: new InMemoryPwattConfigStore(),
+    now: () => clock,
+  });
+  let calls = 0;
+  const screen = createScreenAddress({
+    provider: {
+      screen: async () => {
+        calls += 1;
+        return results[Math.min(calls - 1, results.length - 1)] as 'partial' | 'full';
+      },
+    },
+    cache: services.screeningCache,
+    config: services.config,
+    caseDeps: buildCaseDeps(services),
+    metric: () => {},
+    log: () => {},
+    alert: () => {},
+    now: () => clock,
+  });
+  return { services, screen, advance: (ms: number) => (clock += ms) };
+}
+
+/** Walk a case to resolved-cleared through the sanctioned transitions. */
+async function clearCase(services: ComplianceServices, caseId: string, at: number): Promise<void> {
+  const deps = buildCaseDeps(services);
+  await transitionCase(deps, {
+    caseId,
+    to: 'assigned',
+    actorUserId: REVIEWER,
+    isSenior: false,
+    assigneeUserId: REVIEWER,
+  });
+  await transitionCase(deps, {
+    caseId,
+    to: 'investigating',
+    actorUserId: REVIEWER,
+    isSenior: false,
+  });
+  await transitionCase(deps, {
+    caseId,
+    to: 'resolved',
+    actorUserId: REVIEWER,
+    isSenior: false,
+    resolution: {
+      outcome: 'cleared',
+      notes: 'name collision, not the sanctioned party',
+      resolved_by: REVIEWER,
+      resolved_at: new Date(at).toISOString(),
+    },
+  });
+}
+
+describe('a reviewed PARTIAL match can actually be cleared (WS-N.2.2a)', () => {
+  it('honors the review outcome instead of failing closed until the day rolls over', async () => {
+    const { services, screen, advance } = reviewableFixture(['partial', 'partial']);
+    const args = { addressLower: ADDRESS, deploymentId: 'd1' };
+    // A partial match is a MAYBE: held pending review.
+    expect(await screen(args)).toBe('unavailable');
+    const record = (await services.cases.listByStates(['open'], 10))[0];
+    expect(record?.triggerType).toBe('sanctions');
+    expect(record?.riskLevel).toBe('high');
+
+    // A reviewer works the false positive and clears it.
+    await clearCase(services, record?.caseId as string, NOW);
+    // Once the SHORT partial-cache TTL lapses (its whole purpose — "re-screened
+    // soon after"), the re-screen honors the review. Before this fix the
+    // verdict stayed `unavailable` until the UTC-DAY idempotency key rolled
+    // over, so a reviewer literally could not clear a false positive.
+    advance(DEFAULT_COMPLIANCE_CONFIG.screeningPartialCacheTtlMs + 1);
+    expect(await screen(args)).toBe('clear');
+  });
+
+  it('a FULL match is never review-clearable here — it stays blocked', async () => {
+    const { services, screen, advance } = reviewableFixture(['full', 'full']);
+    const args = { addressLower: ADDRESS, deploymentId: 'd1' };
+    expect(await screen(args)).toBe('blocked');
+    await clearCase(
+      services,
+      (await services.cases.listByStates(['open'], 10))[0]?.caseId as string,
+      NOW,
+    );
+    advance(DEFAULT_COMPLIANCE_CONFIG.screeningCacheTtlMs + 1);
+    expect(await screen(args)).toBe('blocked');
   });
 });

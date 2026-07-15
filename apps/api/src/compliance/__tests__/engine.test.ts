@@ -254,3 +254,39 @@ describe('coarseVerdict — the cell-scoped reading (WS-N.1.1c)', () => {
     expect(coarseVerdict({ ...ELIGIBLE, complianceHold: true }, 'governance')).toBe('blocked');
   });
 });
+
+describe('coarseVerdict — the asset gate (WS-N.1.1a asset_flags)', () => {
+  it('a BARRED asset is blocked however open its cell is', () => {
+    // The fixture region has production_payments ENABLED and bars SIM-USDC.
+    expect(coarseVerdict(ELIGIBLE, 'production_payments')).toBe('allowed');
+    expect(coarseVerdict(ELIGIBLE, 'production_payments', 'USDC')).toBe('allowed');
+    // Before the asset was passed, this barred asset rode the cell's approval.
+    expect(coarseVerdict(ELIGIBLE, 'production_payments', 'SIM-USDC')).toBe('blocked');
+  });
+
+  it('an asset the region never approved reaches no decision', () => {
+    // Real funds reject `unknown`; testnet proceeds — the same posture as an
+    // unaddressed cell, never a silent pass.
+    expect(coarseVerdict(ELIGIBLE, 'production_payments', 'DAI')).toBe('unknown');
+    const noAssets: AvailabilityInput = {
+      ...ELIGIBLE,
+      policy: { kind: 'active', policy: { ...POLICY, asset_flags: {} } },
+    };
+    expect(coarseVerdict(noAssets, 'production_payments', 'USDC')).toBe('unknown');
+    // …while the cell-only question still answers for the cell.
+    expect(coarseVerdict(noAssets, 'production_payments')).toBe('allowed');
+  });
+
+  it('the asset gate never overrides a prohibition or a minor', () => {
+    expect(
+      coarseVerdict({ ...ELIGIBLE, ageBand: 'teen_16_17' }, 'production_payments', 'USDC'),
+    ).toBe('blocked');
+    expect(
+      coarseVerdict({ ...ELIGIBLE, complianceHold: true }, 'production_payments', 'USDC'),
+    ).toBe('blocked');
+    // A missing policy has no asset flags to consult: no decision.
+    expect(coarseVerdict({ ...ELIGIBLE, policy: { kind: 'missing' } }, undefined, 'USDC')).toBe(
+      'unknown',
+    );
+  });
+});

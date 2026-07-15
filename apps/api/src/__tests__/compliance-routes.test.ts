@@ -683,6 +683,7 @@ describe('the fraud queue + wallet pins + runtime config', () => {
 
   it('config PUT validates, applies, and pushes retention overrides to the events job', async () => {
     const reviewer = await seedReviewer();
+    const counsel = await seedCounsel();
     const bad = await app().request(
       put('/v1/compliance/admin/config/retentionSweepIntervalMs', { value: -5 }, reviewer.cookie),
     );
@@ -699,11 +700,24 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     );
     expect(ok.status).toBe(200);
     expect(compliance.config().retentionSweepIntervalMs).toBe(3_600_000);
-    const overrides = await app().request(
+    // The retention SCHEDULE is counsel-approved: a reviewer may tune the
+    // operational knobs above but cannot rewrite how long records are kept.
+    const byReviewer = await app().request(
       put(
         '/v1/compliance/admin/config/eventRetentionOverrides',
         { value: { sensitive: 30 } },
         reviewer.cookie,
+      ),
+    );
+    expect(byReviewer.status).toBe(403);
+    expect(((await byReviewer.json()) as { error: { code: string } }).error.code).toBe(
+      'counsel_approval_required',
+    );
+    const overrides = await app().request(
+      put(
+        '/v1/compliance/admin/config/eventRetentionOverrides',
+        { value: { sensitive: 30 } },
+        counsel.cookie,
       ),
     );
     expect(overrides.status).toBe(200);
@@ -926,22 +940,52 @@ describe('policy write ↔ audit atomicity (WS-N.1.1g)', () => {
 });
 
 describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)', () => {
-  it('rides the open fraud-class case, never a newer unrelated one', async () => {
+  it('rides the review case of THIS intent, never another intent’s', async () => {
     const reviewer = await seedReviewer();
     const subject = randomUUID();
     const intentId = randomUUID();
-    // The review this hold is about…
-    const fraudCase = await createCaseVia(reviewer.cookie, {
-      trigger_type: 'velocity',
-      risk_level: 'high',
-      user_id_or_room_id: subject,
+    const otherIntentId = randomUUID();
+    // The high-value review `risk.ts` opened for THIS intent (its reviewRef IS
+    // the intent id, so the case is keyed to the attempt).
+    const own = await compliance.cases.insert({
+      caseId: randomUUID(),
+      userIdOrRoomId: subject,
+      subjectKind: 'user',
+      triggerType: 'pattern',
+      riskLevel: 'high',
+      partnerCaseRef: null,
+      reviewState: 'open',
+      assignedTo: null,
+      resolution: null,
+      retentionPolicy: {
+        retention_period_days: 730,
+        deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
+        legal_hold: false,
+      },
+      idempotencyKey: `highvalue:${subject}:payment_intent:treasury_deposit:5000:${intentId}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     });
-    // …plus a NEWER, unrelated case for the same subject (an impersonation
-    // report is not what a flagged payment is held for).
-    await createCaseVia(reviewer.cookie, {
-      trigger_type: 'impersonation',
-      risk_level: 'low',
-      user_id_or_room_id: subject,
+    // …plus a NEWER fraud-class case for the SAME user, belonging to a
+    // DIFFERENT flagged intent.  A subject-keyed lookup would attach this one.
+    await compliance.cases.insert({
+      caseId: randomUUID(),
+      userIdOrRoomId: subject,
+      subjectKind: 'user',
+      triggerType: 'velocity',
+      riskLevel: 'low',
+      partnerCaseRef: null,
+      reviewState: 'open',
+      assignedTo: null,
+      resolution: null,
+      retentionPolicy: {
+        retention_period_days: 730,
+        deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
+        legal_hold: false,
+      },
+      idempotencyKey: `highvalue:${subject}:payment_intent:treasury_deposit:9000:${otherIntentId}`,
+      createdAt: new Date(Date.now() + 1000).toISOString(),
+      updatedAt: new Date(Date.now() + 1000).toISOString(),
     });
     setTreasuryServices({
       intents: {
@@ -949,6 +993,8 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
           {
             paymentIntentId: intentId,
             userId: subject,
+            targetType: 'treasury_deposit',
+            amount: '5000',
             complianceState: 'flagged',
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -966,10 +1012,10 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
       }>;
     };
     const held = queue.items.find((item) => item.payment_intent_id === intentId);
-    // The held row carries the FRAUD case's trigger/risk (and therefore its
-    // SLA) — an unfiltered "newest case" would have shown impersonation/low.
-    expect(held?.case.case_id).toBe(fraudCase);
-    expect(held?.case.trigger_type).toBe('velocity');
+    // The held row carries ITS OWN review's trigger/risk (and therefore its
+    // SLA) — a subject-keyed lookup would have shown the other intent's case,
+    // and a release would then have audited the wrong chain.
+    expect(held?.case.case_id).toBe(own.caseId);
     expect(held?.case.risk_level).toBe('high');
   });
 
@@ -977,9 +1023,9 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
     const reviewer = await seedReviewer();
     const subject = randomUUID();
     const intentId = randomUUID();
-    // Only a non-fraud case exists for this subject.
+    // A fraud-class case exists for the subject but belongs to NO intent.
     await createCaseVia(reviewer.cookie, {
-      trigger_type: 'impersonation',
+      trigger_type: 'velocity',
       risk_level: 'low',
       user_id_or_room_id: subject,
     });
@@ -989,6 +1035,8 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
           {
             paymentIntentId: intentId,
             userId: subject,
+            targetType: 'treasury_deposit',
+            amount: '5000',
             complianceState: 'flagged',
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -1141,5 +1189,135 @@ describe('the declaration-verification audit records its subject (WS-N.1.1f)', (
     // The decision + note ride the allowlisted context keys.
     expect(entry?.context.setting).toBe('verify');
     expect(entry?.context.reason).toBe('passport reviewed');
+  });
+});
+
+describe('a rolled-back SAR never releases an EARLIER hold (WS-N.2.1e)', () => {
+  it('leaves a pre-existing legal hold intact when its own insert fails', async () => {
+    const counsel = await seedCounsel();
+    const caseId = await createCaseVia(counsel.cookie, { trigger_type: 'sanctions' });
+    // An EARLIER obligation already holds this case (a first SAR).
+    const first = await app().request(
+      post(
+        `/v1/compliance/admin/cases/${caseId}/sar`,
+        { jurisdiction: 'DE', narrative: 'The first report, which persists.' },
+        counsel.cookie,
+      ),
+    );
+    expect(first.status).toBe(201);
+    expect((await compliance.cases.getById(caseId))?.retentionPolicy.legal_hold).toBe(true);
+
+    // A SECOND draft fails to store. Its rollback must undo only what IT did.
+    compliance.sars.insert = async () => {
+      throw new Error('sar store down');
+    };
+    const second = await app().request(
+      post(
+        `/v1/compliance/admin/cases/${caseId}/sar`,
+        { jurisdiction: 'FR', narrative: 'The second report, which does not persist.' },
+        counsel.cookie,
+      ),
+    );
+    expect(second.status).toBe(503);
+    // Blindly clearing the hold here would expose records the FIRST report
+    // still obliges us to keep.
+    expect((await compliance.cases.getById(caseId))?.retentionPolicy.legal_hold).toBe(true);
+  });
+});
+
+describe('a DENIED lawful-access request releases its hold (WS-N.2.3d)', () => {
+  it('frees the subject once counsel rejects the legal basis', async () => {
+    const counsel = await seedCounsel();
+    const subject = await seedUser({ handle: `s${randomUUID().slice(0, 8)}` });
+    const intake = await app().request(
+      post(
+        '/v1/compliance/admin/lawful-access',
+        {
+          agency: 'Court',
+          jurisdiction: 'DE',
+          legal_basis: 'subpoena',
+          scope: {
+            subject_kind: 'user',
+            subject_ref: subject.userId,
+            time_range_start: null,
+            time_range_end: null,
+          },
+          contact: 'court@example.test',
+        },
+        counsel.cookie,
+      ),
+    );
+    const request = ((await intake.json()) as { request: { request_id: string; case_id: string } })
+      .request;
+    expect((await compliance.cases.getById(request.case_id))?.retentionPolicy.legal_hold).toBe(
+      true,
+    );
+
+    const denied = await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/review`,
+        { decision: 'denied', note: 'the legal basis does not hold' },
+        counsel.cookie,
+      ),
+    );
+    expect(denied.status).toBe(200);
+    // A rejected request obliges nothing: leaving the hold would keep
+    // retention and the erasure scrub skipping the subject's records, and the
+    // open high-risk case would keep their crypto features disabled.
+    const record = await compliance.cases.getById(request.case_id);
+    expect(record?.retentionPolicy.legal_hold).toBe(false);
+    expect(record?.reviewState).toBe('resolved');
+    expect(await compliance.cases.countOpenHighRisk(subject.userId)).toBe(0);
+  });
+
+  it('an APPROVED request keeps its hold, and production records who disclosed', async () => {
+    const counsel = await seedCounsel();
+    const subject = await seedUser({ handle: `s${randomUUID().slice(0, 8)}` });
+    const intake = await app().request(
+      post(
+        '/v1/compliance/admin/lawful-access',
+        {
+          agency: 'Court',
+          jurisdiction: 'DE',
+          legal_basis: 'warrant',
+          scope: {
+            subject_kind: 'user',
+            subject_ref: subject.userId,
+            time_range_start: null,
+            time_range_end: null,
+          },
+          contact: 'court@example.test',
+        },
+        counsel.cookie,
+      ),
+    );
+    const request = ((await intake.json()) as { request: { request_id: string; case_id: string } })
+      .request;
+    await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/review`,
+        { decision: 'approved', note: 'valid warrant' },
+        counsel.cookie,
+      ),
+    );
+    expect((await compliance.cases.getById(request.case_id))?.retentionPolicy.legal_hold).toBe(
+      true,
+    );
+
+    // A second counsel user performs the production — the approver is not
+    // necessarily the discloser, and the record keeps only `reviewedByRef`.
+    const producer = await seedCounsel();
+    await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/produce`,
+        { production_summary: 'account identity records', user_notified: true },
+        producer.cookie,
+      ),
+    );
+    const trail = await compliance.caseAudit.listChained(request.case_id);
+    const produced = trail.find((entry) => entry.action === 'lawful_access_produced');
+    expect(produced).toBeDefined();
+    expect(produced?.actorRef).toBe(compliance.opaqueRef(producer.userId));
+    expect(produced?.actorRef).not.toBe(compliance.opaqueRef(counsel.userId));
   });
 });
