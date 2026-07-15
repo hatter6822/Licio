@@ -222,11 +222,17 @@ describe('POST /v1/reports', () => {
     // The matched value was DISCARDED: no report row exists.
     const mod = getModerationServices();
     expect(await mod.reports.countByReporterSince('any', '2000-01-01T00:00:00.000Z')).toBe(0);
-    // A tx hash (0x + 64 hex) in the same field passes — the support flow
-    // legitimately collects transaction references (WS-N.2.3a).
-    const tx = `0x${'e9873d79c6d87dc0fb6a5778633389f4453213303da61f20bd67fc233aa33262'}`;
+    // A 0x-prefixed 64-hex value is blocked too: it is BOTH a transaction
+    // hash and a private-key export, and nothing can tell them apart. The
+    // warning points at the structured evidence field for real references.
+    const hex = `0x${'e9873d79c6d87dc0fb6a5778633389f4453213303da61f20bd67fc233aa33262'}`;
+    const keyLike = await app().request(
+      post('/v1/reports', reportBody({ context: `wrong transfer ${hex}` }), cookie),
+    );
+    expect(keyLike.status).toBe(422);
+    // …while an ordinary report still goes through untouched.
     const ok = await app().request(
-      post('/v1/reports', reportBody({ context: `wrong transfer ${tx}` }), cookie),
+      post('/v1/reports', reportBody({ context: 'this post is spam' }), cookie),
     );
     expect(ok.status).toBe(201);
   });

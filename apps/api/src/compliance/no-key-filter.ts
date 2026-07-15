@@ -20,7 +20,8 @@ import { BIP39_ENGLISH } from './bip39-english.js';
 export const NO_KEY_WARNING =
   'Never share your private key or seed phrase with anyone, including Licio support. ' +
   'Licio support will never ask for them; any request for a seed phrase is fraudulent. ' +
-  'Your message was not submitted — please remove the sensitive material and try again.';
+  'Your message was not submitted — please remove the sensitive material and try again. ' +
+  'To point at a transaction, put its link in the evidence field rather than in the text.';
 
 export type KeyMaterialKind = 'private_key_hex' | 'seed_phrase';
 
@@ -31,13 +32,22 @@ export interface KeyMaterialScan {
 }
 
 const CLEAN: KeyMaterialScan = { detected: false, kind: null, warning: null };
-/** A BARE 64-hex run (the raw 256-bit private-key export format), not part
- *  of a longer hex string.  A `0x`-prefixed 64-hex value is deliberately NOT
- *  flagged: that is the transaction-hash format the mistaken-transfer
- *  support flow (WS-N.2.3a) legitimately collects, and blocking it would
- *  break the primary support path — while raw wallet key exports are bare
- *  hex.  Seed phrases (the dominant phishing target) are always flagged. */
-const HEX_KEY_RE = /(?<!0x)(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])/;
+/**
+ * A 64-hex run — the raw 256-bit private-key export format — with or without
+ * the `0x` prefix, and not part of a longer hex string (a longer run is a
+ * different artifact, e.g. a signature).
+ *
+ * A `0x`-prefixed 64-hex value is ALSO a transaction hash: the two are
+ * syntactically identical and no scanner can tell them apart, so this is a
+ * choice about which error to make.  Storing a pasted private key is
+ * catastrophic and irreversible (it reaches the database, reviewers, and
+ * backups); refusing a hash in free text costs one warning, and this filter
+ * guards exactly one field — the WS-J report `context` blurb — while links
+ * belong in the structured `evidence_urls` array the filter never scans.
+ * Fail-closed therefore flags both forms.  Seed phrases (the dominant
+ * phishing target) are always flagged.
+ */
+const HEX_KEY_RE = /(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])/;
 const MIN_PHRASE_RUN = 12;
 
 /** Scan free text for key-like material.  O(words). */

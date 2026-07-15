@@ -33,6 +33,7 @@ import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import { buildSessionCookie, createSession } from '../identity/sessions.js';
 import { createV1Routes } from '../routes/v1.js';
+import { resetTreasuryServicesForTests, setTreasuryServices } from '../treasury/services.js';
 import { freshEventServices } from './event-test-helpers.js';
 
 function app() {
@@ -162,6 +163,7 @@ const VALID_POLICY_BODY = {
 
 beforeEach(async () => {
   resetComplianceServicesForTests();
+  resetTreasuryServicesForTests();
   const fresh = freshEventServices();
   identity = fresh.identity;
   compliance = createInMemoryComplianceServices({
@@ -920,5 +922,120 @@ describe('policy write ↔ audit atomicity (WS-N.1.1g)', () => {
     expect(retry.status).toBe(201);
     expect(await compliance.policies.listByRegion('DE')).toHaveLength(1);
     expect(await compliance.policyAudit.listChained()).toHaveLength(1);
+  });
+});
+
+describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)', () => {
+  it('rides the open fraud-class case, never a newer unrelated one', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    // The review this hold is about…
+    const fraudCase = await createCaseVia(reviewer.cookie, {
+      trigger_type: 'velocity',
+      risk_level: 'high',
+      user_id_or_room_id: subject,
+    });
+    // …plus a NEWER, unrelated case for the same subject (an impersonation
+    // report is not what a flagged payment is held for).
+    await createCaseVia(reviewer.cookie, {
+      trigger_type: 'impersonation',
+      risk_level: 'low',
+      user_id_or_room_id: subject,
+    });
+    setTreasuryServices({
+      intents: {
+        listByComplianceState: async () => [
+          {
+            paymentIntentId: intentId,
+            userId: subject,
+            complianceState: 'flagged',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+      },
+    } as never);
+
+    const queue = (await (
+      await app().request(get('/v1/compliance/admin/fraud-queue', reviewer.cookie))
+    ).json()) as {
+      items: Array<{
+        case: { case_id: string; trigger_type: string; risk_level: string };
+        payment_intent_id: string | null;
+      }>;
+    };
+    const held = queue.items.find((item) => item.payment_intent_id === intentId);
+    // The held row carries the FRAUD case's trigger/risk (and therefore its
+    // SLA) — an unfiltered "newest case" would have shown impersonation/low.
+    expect(held?.case.case_id).toBe(fraudCase);
+    expect(held?.case.trigger_type).toBe('velocity');
+    expect(held?.case.risk_level).toBe('high');
+  });
+
+  it('falls back to the synthetic intent row when no fraud-class case is open', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    // Only a non-fraud case exists for this subject.
+    await createCaseVia(reviewer.cookie, {
+      trigger_type: 'impersonation',
+      risk_level: 'low',
+      user_id_or_room_id: subject,
+    });
+    setTreasuryServices({
+      intents: {
+        listByComplianceState: async () => [
+          {
+            paymentIntentId: intentId,
+            userId: subject,
+            complianceState: 'flagged',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+      },
+    } as never);
+    const queue = (await (
+      await app().request(get('/v1/compliance/admin/fraud-queue', reviewer.cookie))
+    ).json()) as {
+      items: Array<{ case: { case_id: string }; payment_intent_id: string | null }>;
+    };
+    const held = queue.items.find((item) => item.payment_intent_id === intentId);
+    // The synthetic row describes the INTENT itself, not the unrelated case.
+    expect(held?.case.case_id).toBe(intentId);
+  });
+});
+
+describe('lawful access preserves the scope kind (WS-N.2.3d)', () => {
+  it('a transaction-scoped request opens a TRANSACTION case, not a user one', async () => {
+    const counsel = await seedCounsel();
+    const txRef = `0x${'ab'.repeat(32)}`;
+    const intake = await app().request(
+      post(
+        '/v1/compliance/admin/lawful-access',
+        {
+          agency: 'Financial Unit',
+          jurisdiction: 'DE',
+          legal_basis: 'subpoena',
+          scope: {
+            subject_kind: 'transaction',
+            subject_ref: txRef,
+            time_range_start: null,
+            time_range_end: null,
+          },
+          contact: 'unit@example.test',
+        },
+        counsel.cookie,
+      ),
+    );
+    expect(intake.status).toBe(201);
+    const caseId = ((await intake.json()) as { request: { case_id: string | null } }).request
+      .case_id as string;
+    const record = await compliance.cases.getById(caseId);
+    // Filing a transaction id as a `user` subject would put it in the user
+    // queue, the erasure scrub, and user subject searches.
+    expect(record?.subjectKind).toBe('transaction');
+    expect(record?.userIdOrRoomId).toBe(txRef);
   });
 });

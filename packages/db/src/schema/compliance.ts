@@ -73,6 +73,7 @@ export const caseSubjectKindEnum = complianceSchema.enum('case_subject_kind', [
   'user',
   'room',
   'address',
+  'transaction',
 ]);
 
 export const declarationStatusEnum = complianceSchema.enum('region_declaration_status', [

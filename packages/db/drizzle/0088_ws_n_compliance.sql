@@ -26,7 +26,7 @@ CREATE SCHEMA "compliance";--> statement-breakpoint
 CREATE TYPE "compliance"."case_trigger_type" AS ENUM('velocity', 'pattern', 'sanctions', 'manual', 'fraud', 'scam', 'impersonation', 'bribery', 'coercion');--> statement-breakpoint
 CREATE TYPE "compliance"."case_risk_level" AS ENUM('low', 'medium', 'high', 'critical');--> statement-breakpoint
 CREATE TYPE "compliance"."case_review_state" AS ENUM('open', 'assigned', 'investigating', 'resolved', 'escalated');--> statement-breakpoint
-CREATE TYPE "compliance"."case_subject_kind" AS ENUM('user', 'room', 'address');--> statement-breakpoint
+CREATE TYPE "compliance"."case_subject_kind" AS ENUM('user', 'room', 'address', 'transaction');--> statement-breakpoint
 CREATE TYPE "compliance"."region_declaration_status" AS ENUM('pending', 'verified', 'revoked');--> statement-breakpoint
 CREATE TYPE "compliance"."region_declaration_verification" AS ENUM('unverified', 'reviewer_verified');--> statement-breakpoint
 CREATE TYPE "compliance"."sar_status" AS ENUM('draft', 'approved', 'filed');--> statement-breakpoint

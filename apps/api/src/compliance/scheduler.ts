@@ -30,7 +30,6 @@ export async function runComplianceTick(
   }
   const nowMs = services.now();
   if (nowMs - lastSweepAtMs >= services.config().retentionSweepIntervalMs) {
-    lastSweepAtMs = nowMs;
     try {
       const summary = await runRetentionSweep({
         caseDeps: buildCaseDeps(services),
@@ -38,6 +37,11 @@ export async function runComplianceTick(
         log: services.log,
         now: services.now,
       });
+      // The marker advances ONLY on success: a failed sweep that burned the
+      // window would leave expired cases readable for another full interval
+      // (a day by default), so a transient outage retries on the next tick
+      // instead.  The sweep is idempotent, so an extra attempt is free.
+      lastSweepAtMs = nowMs;
       services.metrics.increment('compliance.retention.deleted', summary.deleted);
       services.metrics.increment('compliance.retention.anonymized', summary.anonymized);
     } catch (err) {

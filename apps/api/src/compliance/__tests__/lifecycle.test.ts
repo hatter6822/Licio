@@ -253,6 +253,24 @@ describe('the compliance scheduler (WS-N lease-guarded tick)', () => {
     expect(failures).toEqual(['retention_sweep']);
   });
 
+  it('a FAILED sweep does not burn the window — the next tick retries', async () => {
+    const record = await seedCase();
+    let broken = true;
+    const realListExpired = services.cases.listExpired.bind(services.cases);
+    services.cases.listExpired = async (nowIso, limit) => {
+      if (broken) throw new Error('transient outage');
+      return realListExpired(nowIso, limit);
+    };
+    await runComplianceTick(services, () => {});
+    expect(await services.cases.getById(record.caseId)).not.toBeNull();
+
+    // The very next tick — WITHOUT waiting out the (day-long) interval —
+    // sweeps, because a failure must not advance the cadence marker.
+    broken = false;
+    await runComplianceTick(services, () => {});
+    expect(await services.cases.getById(record.caseId)).toBeNull();
+  });
+
   it('with a lease runner only ONE instance executes per window', async () => {
     vi.useFakeTimers();
     const lease = new InMemoryJobLeaseStore();

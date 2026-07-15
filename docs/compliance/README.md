@@ -178,11 +178,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   capability even to READ; the case audit shows a neutral
   `legal_hold_applied`; the SAR→case FK is `RESTRICT` so a case with a filed
   SAR cannot be swept out from under the record.
-- **The no-key filter blocks bare key material only.**  ≥12 consecutive
-  BIP-39 words is a seed phrase; a BARE 64-hex string is a private key; but a
-  `0x`-prefixed 64-hex value is ALSO the transaction-hash format the support
-  flow legitimately needs, so it passes.  This is a documented trade-off, not
-  an oversight.
+- **The no-key filter fails closed on both hex forms.**  ≥12 consecutive
+  BIP-39 words is a seed phrase; a 64-hex run — bare or `0x`-prefixed — is a
+  private-key export.  A `0x`-prefixed 64-hex value is *also* a transaction
+  hash and the two are syntactically identical, so this is a choice about
+  which error to make: storing a pasted key is catastrophic and irreversible,
+  refusing a hash in the one field this guards (the WS-J report `context`
+  blurb) costs a warning, and real references belong in the structured
+  `evidence_urls` array the filter never scans.
 - **RBAC separation is deliberate.**  `compliance` and `counsel` are distinct
   roles with distinct capabilities; `steward` and `admin` do NOT inherit them.
   Enabling any cell in a jurisdiction policy takes the **counsel capability**
@@ -190,11 +193,16 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   real funds on for a region by quoting a reference at themselves. Narrowing
   writes (disabled/testnet/simulated/pending-legal) stay open to the
   compliance role: they can only reduce availability.
-- **A live policy always has a chain entry.**  The audit table is append-only,
-  so the audit cannot be written first and undone; instead an insert whose
-  audit entry fails to commit is **compensated away**, which also frees the
-  `(region, effective_at)` slot so the operator's retry is not blocked by a
-  half-written change.
+- **No change outlives its audit entry.**  The chains are append-only, so an
+  audit cannot be written first and undone; instead the mutation is
+  **compensated away** when its entry will not commit — a policy insert is
+  deleted (which also frees the `(region, effective_at)` slot so the retry is
+  not blocked by a half-written change), and a case transition or legal hold
+  is put back exactly where it was. An unaudited state change is worse than a
+  refused action, and a retry could never recreate the missing entry.
+- **Retention retries.**  The sweep's cadence marker only advances on success,
+  so a transient outage retries on the next hourly tick instead of leaving
+  expired cases readable for another full interval.
 - **Acknowledgments are region-scoped.**  The same `(disclosure_id, version)`
   carries different counsel-authored text per region, so the ack key and the
   gate both include the region — changing regions re-prompts rather than

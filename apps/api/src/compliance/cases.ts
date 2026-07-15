@@ -14,7 +14,7 @@ import type {
   CaseSubjectKind,
   CaseTriggerType,
 } from '@licio/shared';
-import { appendCaseAudit } from './audit.js';
+import { appendCaseAudit, type CaseAuditInput } from './audit.js';
 import type { ComplianceRuntimeConfig } from './config.js';
 import type { CaseAuditStore, ComplianceCaseRecord, ComplianceCaseStore } from './stores.js';
 
@@ -201,15 +201,65 @@ export async function transitionCase(deps: CaseDeps, input: TransitionInput): Pr
   if (updated === null) {
     return caseErr(409, 'concurrent_transition', 'Another reviewer raced this transition.');
   }
-  await appendCaseAudit(deps, {
-    caseId: input.caseId,
-    action: `transition:${input.to}`,
-    actorRef: deps.opaqueRef(input.actorUserId),
-    beforeState: record.reviewState,
-    afterState: input.to,
-    note: input.reason ?? (input.to === 'resolved' ? (input.resolution?.notes ?? null) : null),
+  // A state change with no chain entry would be an UNAUDITED transition that
+  // no retry can repair (the retry reads the new state and the move is gone),
+  // so an unappendable audit rolls the case back to exactly where it was.
+  const audited = await appendAuditOrRollback(deps, {
+    entry: {
+      caseId: input.caseId,
+      action: `transition:${input.to}`,
+      actorRef: deps.opaqueRef(input.actorUserId),
+      beforeState: record.reviewState,
+      afterState: input.to,
+      note: input.reason ?? (input.to === 'resolved' ? (input.resolution?.notes ?? null) : null),
+    },
+    rollback: async () => {
+      await deps.cases.transition(
+        input.caseId,
+        input.to,
+        {
+          reviewState: record.reviewState,
+          assignedTo: record.assignedTo,
+          resolution: record.resolution,
+        },
+        new Date(deps.now()).toISOString(),
+      );
+    },
   });
+  if (audited !== null) return audited;
   return { ok: true, record: updated };
+}
+
+/**
+ * Append a case-audit entry, undoing the caller's mutation when the chain
+ * cannot record it.  Returns a typed error when the append failed (the
+ * mutation is rolled back first), or null on success.
+ *
+ * The chain is the compliance-grade artifact: a mutation the chain does not
+ * carry is worse than a refused action, and this is the ONE place both live.
+ */
+async function appendAuditOrRollback(
+  deps: CaseDeps,
+  args: { entry: CaseAuditInput; rollback: () => Promise<void> },
+): Promise<CaseError | null> {
+  try {
+    await appendCaseAudit(deps, args.entry);
+    return null;
+  } catch {
+    let rolledBack = true;
+    try {
+      await args.rollback();
+    } catch {
+      rolledBack = false;
+    }
+    return caseErr(
+      503,
+      'audit_unavailable',
+      rolledBack
+        ? 'The change was not applied: its audit entry could not be recorded.'
+        : 'The change could not be audited and could not be rolled back; contact the platform team.',
+    );
+  }
 }
 
 /** An investigation note (audited; no state change). */
@@ -243,13 +293,25 @@ export async function setLegalHold(
     new Date(deps.now()).toISOString(),
   );
   if (updated === null) return caseErr(404, 'not_found', 'Resource not found');
-  await appendCaseAudit(deps, {
-    caseId: input.caseId,
-    action: input.hold ? 'legal_hold_applied' : 'legal_hold_released',
-    actorRef: deps.opaqueRef(input.actorUserId),
-    beforeState: record.reviewState,
-    afterState: record.reviewState,
-    note: input.reason,
+  // Same rule as a transition: a legal hold the chain does not record is an
+  // unaudited change to what retention may delete, so it is rolled back.
+  const audited = await appendAuditOrRollback(deps, {
+    entry: {
+      caseId: input.caseId,
+      action: input.hold ? 'legal_hold_applied' : 'legal_hold_released',
+      actorRef: deps.opaqueRef(input.actorUserId),
+      beforeState: record.reviewState,
+      afterState: record.reviewState,
+      note: input.reason,
+    },
+    rollback: async () => {
+      await deps.cases.update(
+        input.caseId,
+        { retentionPolicy: record.retentionPolicy },
+        new Date(deps.now()).toISOString(),
+      );
+    },
   });
+  if (audited !== null) return audited;
   return { ok: true, record: updated };
 }

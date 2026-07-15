@@ -58,7 +58,12 @@ export async function intakeLawfulAccessRequest(
 ): Promise<LawfulAccessOutcome> {
   const nowIso = new Date(deps.now()).toISOString();
   const linked = await createCase(deps.caseDeps, {
-    subjectKind: input.scope.subject_kind === 'room' ? 'room' : 'user',
+    // The scope's kind carries through 1:1.  Collapsing `transaction` onto
+    // `user` would file a transaction id as though it were an account, and
+    // the queue, legal hold, erasure scrub, export, and subject searches all
+    // key off this pairing — each would then be reasoning about the wrong
+    // kind of subject.
+    subjectKind: input.scope.subject_kind,
     subjectRef: input.scope.subject_ref,
     triggerType: 'manual',
     riskLevel: 'high',

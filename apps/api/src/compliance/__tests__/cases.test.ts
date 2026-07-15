@@ -288,3 +288,50 @@ describe('legal holds (WS-N.2.1d interaction)', () => {
     expect(await services.cases.listExpired('2999-01-01T00:00:00.000Z', 10)).toHaveLength(0);
   });
 });
+
+describe('mutation ↔ audit atomicity (WS-N.2.1c)', () => {
+  it('a transition whose audit cannot commit is ROLLED BACK, never left unaudited', async () => {
+    const { services, deps } = fixture();
+    const record = await openCase(deps);
+    const caseId = record.caseId;
+
+    // The chain goes down AFTER the state write would land.
+    services.caseAudit.appendChained = async () => {
+      throw new Error('audit store down');
+    };
+    const outcome = await transitionCase(deps, {
+      caseId,
+      to: 'assigned',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      assigneeUserId: REVIEWER,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error('unreachable');
+    expect(outcome.status).toBe(503);
+    expect(outcome.code).toBe('audit_unavailable');
+    // The case is exactly where it was: an unaudited move is worse than a
+    // refused one, and a retry could never recreate the missing entry.
+    const after = await services.cases.getById(caseId);
+    expect(after?.reviewState).toBe('open');
+    expect(after?.assignedTo).toBeNull();
+  });
+
+  it('a legal hold whose audit cannot commit is rolled back too', async () => {
+    const { services, deps } = fixture();
+    const record = await openCase(deps);
+    expect(record.retentionPolicy.legal_hold).toBe(false);
+    services.caseAudit.appendChained = async () => {
+      throw new Error('audit store down');
+    };
+    const held = await setLegalHold(deps, {
+      caseId: record.caseId,
+      hold: true,
+      actorUserId: REVIEWER,
+      reason: 'pending regulatory review',
+    });
+    expect(held.ok).toBe(false);
+    // The hold governs what retention may delete — it never applies silently.
+    expect((await services.cases.getById(record.caseId))?.retentionPolicy.legal_hold).toBe(false);
+  });
+});

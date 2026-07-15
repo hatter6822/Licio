@@ -18,6 +18,7 @@
 import { zValidator } from '@hono/zod-validator';
 import {
   type CaseResolution,
+  type CaseTriggerType,
   caseAssignRequestSchema,
   caseCreateRequestSchema,
   caseListResponseSchema,
@@ -91,6 +92,17 @@ import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/ser
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
+
+/** The triggers the WS-N.2.2c fraud queue reviews (the rest are case-console
+ *  work).  One definition: the queue's own listing and the related-case lookup
+ *  a held payment rides must agree on what "fraud-class" means. */
+const FRAUD_CLASS_TRIGGERS: ReadonlySet<CaseTriggerType> = new Set([
+  'velocity',
+  'pattern',
+  'sanctions',
+  'fraud',
+  'scam',
+]);
 
 /** Status-typed error responder (the tgError house idiom). */
 function failJson(
@@ -722,9 +734,7 @@ export function createComplianceRoutes() {
         ['open', 'assigned', 'investigating', 'escalated'],
         200,
       );
-      const fraudClass = open.filter((record) =>
-        ['velocity', 'pattern', 'sanctions', 'fraud', 'scam'].includes(record.triggerType),
-      );
+      const fraudClass = open.filter((record) => FRAUD_CLASS_TRIGGERS.has(record.triggerType));
       const flagged = treasuryServicesConfigured()
         ? await getTreasuryServices().intents.listByComplianceState('flagged', 200)
         : [];
@@ -737,10 +747,20 @@ export function createComplianceRoutes() {
         })),
         ...(await Promise.all(
           flagged.map(async (intent) => {
-            // The flagged intent's queue row rides its subject's newest
-            // fraud-class case when one exists (context for the reviewer).
+            // The flagged intent's queue row rides the subject's newest OPEN
+            // FRAUD-CLASS case (the review this hold is about).  An unfiltered
+            // "newest case" would happily attach an unrelated resolved or
+            // non-fraud case and show the reviewer the wrong trigger, risk,
+            // and SLA for the held payment; with no such case the synthetic
+            // row below describes the intent itself.
             const related =
-              intent.userId === null ? [] : await services.cases.listBySubject(intent.userId, 1);
+              intent.userId === null
+                ? []
+                : (await services.cases.listBySubject(intent.userId, 50)).filter(
+                    (candidate) =>
+                      candidate.reviewState !== 'resolved' &&
+                      FRAUD_CLASS_TRIGGERS.has(candidate.triggerType),
+                  );
             const record = related[0] ?? null;
             return {
               case:

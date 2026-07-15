@@ -175,17 +175,28 @@ describe('the policy audit chain (WS-N.1.1g)', () => {
 });
 
 describe('the no-key content filter (WS-N.2.3e)', () => {
-  it('detects bare 64-hex private keys but NOT 0x-prefixed tx hashes', () => {
+  it('detects 64-hex private keys in BOTH the bare and 0x-prefixed forms', () => {
     const key = 'e9873d79c6d87dc0fb6a5778633389f4453213303da61f20bd67fc233aa33262';
     expect(scanForKeyMaterial(`here is my key ${key} please help`)).toEqual({
       detected: true,
       kind: 'private_key_hex',
       warning: NO_KEY_WARNING,
     });
-    // A tx hash (0x + 64 hex) is the SUPPORT-FLOW format — permitted.
-    expect(scanForKeyMaterial(`my transfer 0x${key} went to the wrong room`).detected).toBe(false);
-    // Part of a LONGER hex blob is a hash, not a key.
+    // A 0x-prefixed 64-hex value is a private key AND a transaction hash —
+    // the syntax is identical, so the scanner cannot tell them apart. Storing
+    // a pasted key is irreversible; refusing a hash in this free-text blurb
+    // costs a warning (links belong in the structured evidence field), so it
+    // fails closed.
+    expect(scanForKeyMaterial(`my transfer 0x${key} went to the wrong room`)).toEqual({
+      detected: true,
+      kind: 'private_key_hex',
+      warning: NO_KEY_WARNING,
+    });
+    // Part of a LONGER hex blob is a different artifact (e.g. a signature).
     expect(scanForKeyMaterial(`${key}ff`).detected).toBe(false);
+    expect(scanForKeyMaterial(`0x${key}ff`).detected).toBe(false);
+    // A shorter hex run is not a key.
+    expect(scanForKeyMaterial(`0x${key.slice(0, 40)}`).detected).toBe(false);
   });
 
   it('detects 12/24-word BIP-39 phrases, embedded mid-sentence included', () => {

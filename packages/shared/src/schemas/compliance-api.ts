@@ -81,10 +81,13 @@ export const caseRetentionPolicySchema = z
   .strict();
 export type CaseRetentionPolicy = z.infer<typeof caseRetentionPolicySchema>;
 
-/** Case subjects: a user, a room, or an EXTERNAL counterparty address (a
+/** Case subjects: a user, a room, an EXTERNAL counterparty address (a
  *  sanctions screening hit has no user/room subject — the address is the
- *  investigation subject; §19.5 treats it as personal data, confined here). */
-export const CASE_SUBJECT_KINDS = ['user', 'room', 'address'] as const;
+ *  investigation subject; §19.5 treats it as personal data, confined here),
+ *  or a transaction (a lawful-access request may target one; typing it as a
+ *  user would make the queue, holds, erasure, and subject searches all treat
+ *  a transaction id as an account — WS-N.2.3d). */
+export const CASE_SUBJECT_KINDS = ['user', 'room', 'address', 'transaction'] as const;
 export type CaseSubjectKind = (typeof CASE_SUBJECT_KINDS)[number];
 
 export const financialComplianceCaseSchema = z
