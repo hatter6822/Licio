@@ -168,7 +168,9 @@ function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): s
 const declarationBudget = rateLimit({ windowMs: 60_000, limit: 60 });
 const policyWriteBudget = rateLimit({ windowMs: 60_000, limit: 30 });
 
-export function createComplianceRoutes(): Hono<AuthEnv> {
+// Return type INFERRED (never annotated as bare Hono<AuthEnv>): the chained
+// route types must flow into AppType so the web RPC client stays typed.
+export function createComplianceRoutes() {
   const app = new Hono<AuthEnv>()
     // -----------------------------------------------------------------------
     // USER surface.

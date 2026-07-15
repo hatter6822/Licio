@@ -32,6 +32,7 @@ import {
   signatureExpiration,
   signTypedData,
 } from '../../lib/wallet-signing.js';
+import { RiskDisclosures } from '../compliance/index.js';
 import { StepUpDialog, useStepUpGate } from '../security/StepUpDialog/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Input } from '../ui/Input/index.js';
@@ -67,6 +68,8 @@ export function DepositFlow({
   const [amount, setAmount] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** WS-N.1.2d: the server requires disclosure acknowledgment first. */
+  const [needsDisclosures, setNeedsDisclosures] = useState(false);
   const [pending, setPending] = useState<PendingSignature | null>(null);
   // ONE idempotency key per (asset, amount) attempt: a retry after a lost
   // create response must recover the SAME intent instead of minting a second
@@ -175,6 +178,14 @@ export function DepositFlow({
       });
       setBusy(false);
     } catch (e) {
+      // WS-N.1.2d: the first-financial-action disclosure gate — surface the
+      // acknowledgment flow instead of a bare error (the server re-checks on
+      // every attempt; acknowledging clears it).
+      if (e instanceof ApiClientError && e.code === 'disclosure_ack_required') {
+        setNeedsDisclosures(true);
+        setBusy(false);
+        return;
+      }
       fail(e, t('room.deposit.startError', 'Could not start the deposit.'));
     }
   }
@@ -268,6 +279,19 @@ export function DepositFlow({
           </p>
         ) : null}
         <StepUpDialog {...gate.dialog} />
+      </div>
+    );
+  }
+
+  if (needsDisclosures) {
+    // WS-N.1.2d: read + acknowledge the region's current risk disclosures,
+    // then return to the form (the next attempt passes the server gate).
+    return (
+      <div className="flex flex-col gap-3">
+        <h3 className="text-sm font-medium">
+          {t('room.deposit.disclosures', 'Before your first contribution')}
+        </h3>
+        <RiskDisclosures onAcknowledged={() => setNeedsDisclosures(false)} />
       </div>
     );
   }

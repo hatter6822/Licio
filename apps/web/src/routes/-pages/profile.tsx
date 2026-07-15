@@ -9,6 +9,7 @@ import type { PrivacyLevel, SignalLedgerEntry } from '@licio/shared';
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
 import { type ReactNode, useEffect } from 'react';
+import { RegionDeclarationCard } from '../../components/compliance/index.js';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
 import {
   type SignalKind,
@@ -560,6 +561,12 @@ export function PrivacyPage(): React.ReactElement {
                 'This controls how identifiable your stored attention aggregates are. The strongest option, Minimum, replaces your account id with a coarse bucket, so those aggregates aren’t directly tied to your account — though they still record coarse context such as which story and a session bucket. Whichever you choose is enforced on the server, not just this device.',
               )}
             </p>
+          </Section>
+          <Section title={t('privacy.region', 'Region')}>
+            {/* WS-N.1.1f: the identity-free region declaration — Licio never
+                detects location, so financial-feature jurisdiction is
+                self-declared here (and verified for real funds). */}
+            <RegionDeclarationCard />
           </Section>
           <Section title={t('privacy.data', 'Your data')}>
             <DataRightsSection />
