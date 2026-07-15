@@ -59,6 +59,8 @@ pnpm typecheck                      # TypeScript strict-mode across all workspac
 # Security and static gates.
 pnpm lint:security                  # innerHTML, eval, javascript: URL scan
 pnpm lint:lockfile                  # lockfile integrity
+pnpm audit:advisories               # dependency advisories via the npm BULK endpoint
+                                    #   (the retired-classic-endpoint `pnpm audit` replacement)
 pnpm check:deps                     # dependency-budget enforcement
 pnpm check:workspace-deps           # workspace boundary enforcement (pkg.json + imports)
 pnpm check:policy                   # doctrine/policy document validation
@@ -1103,7 +1105,7 @@ dependency:
 *exactly*, which carries GHSA-96hv-2xvq-fx4p (a WebSocket-server
 memory-exhaustion DoS).  `viem@2.52.2` is the latest release and no `viem`
 version yet pins a patched `ws`, so the override is the only remediation
-(8.20.1 → 8.21.0 is an API-compatible patch; `pnpm audit --audit-level=high`
+(8.20.1 → 8.21.0 is an API-compatible patch; the `audit:advisories` gate
 is clean with it).  `ws` is viem's RPC WebSocket transport; Licio uses
 `viem` only for offline SIWE signature verification and runs no `ws`
 server, so exploitability is low regardless.  Remove this override once
@@ -1118,10 +1120,10 @@ TLS certificate-validation bypass via dropped `requestTls` in the SOCKS5
 disclosure), both patched in 7.28.0.  `jsdom@29.1.1` does not yet ship a
 release pinning a patched `undici`, so the override is the remediation
 (7.27.2 → 7.28.0 is the latest 7.x and within jsdom's `^7.25.0` range, so
-it is API-compatible; `pnpm audit --audit-level=high` is clean with it).
+it is API-compatible; the `audit:advisories` gate is clean with it).
 `undici` is a test-only transitive dependency (jsdom's `fetch`
 implementation); it never reaches the production bundle, so exploitability
-is low regardless, but the `pnpm audit --audit-level=high` CI gate flags it
+is low regardless, but the `audit:advisories` CI gate flags it
 tree-wide.  Remove this override once `jsdom` ships a release pinning
 `undici >= 7.28.0`.
 
@@ -1731,7 +1733,10 @@ production app).  Both run in CI's E2E job.
    `check:lcap-scheduler` step, the WS-R.5.4 LCAP lane anti-starvation gate)
 6. Build & size check (production build + bundle-size gate)
 7. E2E tests (Playwright, requires build)
-8. Security audit (pnpm audit, SBOM, build validation, AGPL headers,
+8. Security audit (`pnpm audit:advisories` — the lockfile posted to the npm
+   BULK advisory endpoint at the high/critical threshold; the registry
+   retired the classic endpoint `pnpm audit` itself calls — plus SBOM,
+   build validation, AGPL headers,
    secret scanning, install-script detection)
 9. Native courier APK (WS-R.15.4a: builds the debug APK from the
    unchanged web build behind the byte-identity no-fork gate)

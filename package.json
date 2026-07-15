@@ -37,6 +37,7 @@
     "check:update-channel": "tsx scripts/check-update-channel.ts",
     "check:sw": "tsx scripts/check-sw-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
+    "audit:advisories": "tsx scripts/audit-advisories.ts --audit-level=high",
     "typecheck": "tsc -b",
     "typecheck:ci": "tsc -b --force",
     "check:deps": "tsx scripts/check-dep-budget.ts",
