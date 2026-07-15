@@ -14,7 +14,13 @@ import type {
 } from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 import { hasVerifiedCredential } from '../identity/auth-methods.js';
-import { isAiTeam, isSteward, type Role } from '../identity/rbac.js';
+import {
+  isAiTeam,
+  isComplianceReviewer,
+  isCounsel,
+  isSteward,
+  type Role,
+} from '../identity/rbac.js';
 import {
   authMethodInventory,
   getIdentityServices,
@@ -230,6 +236,50 @@ export function requireAiTeam(): MiddlewareHandler<AuthEnv> {
     }
     if (!auth.mfaActive || !auth.mfaVerified) {
       return c.json(deny('mfa_required', 'Verify MFA to manage AI models'), 403);
+    }
+    await next();
+    return;
+  };
+}
+
+/**
+ * Require the financial-compliance reviewer capability (`compliance.review`)
+ * AND active MFA (WS-N.2.1c-2).  Gates every WS-N case/queue/policy-admin
+ * surface.  Compliance data is a separate least-privilege plane: neither
+ * steward nor admin roles pass this guard.
+ */
+export function requireCompliance(): MiddlewareHandler<AuthEnv> {
+  return async (c, next) => {
+    const auth = c.get('auth');
+    if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+    if (!isComplianceReviewer(auth.roles)) {
+      await denyAudit(auth.userId);
+      return c.json(deny('forbidden', 'Compliance role required'), 403);
+    }
+    if (!auth.mfaActive || !auth.mfaVerified) {
+      return c.json(deny('mfa_required', 'Verify MFA to perform compliance actions'), 403);
+    }
+    await next();
+    return;
+  };
+}
+
+/**
+ * Require the legal-counsel approval capability (`compliance.counsel.approve`)
+ * AND active MFA (WS-N.2.1c-2).  Gates SAR/STR records (READ included —
+ * anti-tipping-off, WS-N.2.1e), lawful-access review/production (WS-N.2.3d),
+ * and jurisdiction-policy enablement approvals (WS-N.1.1e four-eyes).
+ */
+export function requireCounsel(): MiddlewareHandler<AuthEnv> {
+  return async (c, next) => {
+    const auth = c.get('auth');
+    if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+    if (!isCounsel(auth.roles)) {
+      await denyAudit(auth.userId);
+      return c.json(deny('forbidden', 'Legal-counsel capability required'), 403);
+    }
+    if (!auth.mfaActive || !auth.mfaVerified) {
+      return c.json(deny('mfa_required', 'Verify MFA to perform counsel actions'), 403);
     }
     await next();
     return;

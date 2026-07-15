@@ -1,0 +1,460 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-N foundations: the identity-free region ladder (WS-N.1.1b), the two
+// hash chains (WS-N.1.1g / 2.1c — append, verify, tamper, fork), the no-key
+// content filter (WS-N.2.3e), the disclosure gate (WS-N.1.2d), retention +
+// erasure (WS-N.2.1d), and the fail-closed compliance.* config loader.
+import { describe, expect, it } from 'vitest';
+import { InMemoryPwattConfigStore } from '../../events/stores.js';
+import {
+  appendPolicyAudit,
+  computeCaseAuditHash,
+  computePolicyAuditHash,
+  verifyPolicyAuditChain,
+} from '../audit.js';
+import { createCase, setLegalHold } from '../cases.js';
+import { loadComplianceConfig, validateComplianceConfigValue } from '../config.js';
+import { acknowledgeDisclosure, disclosureGate, listDisclosuresForUser } from '../disclosures.js';
+import { NO_KEY_WARNING, scanForKeyMaterial } from '../no-key-filter.js';
+import { resolveRegion } from '../region.js';
+import { runRetentionSweep, scrubUserSubjectForErasure } from '../retention.js';
+import {
+  buildCaseDeps,
+  buildDisclosureDeps,
+  createInMemoryComplianceServices,
+} from '../services.js';
+import { InMemoryRegionDeclarationStore } from '../stores.js';
+
+const NOW = Date.parse('2026-07-15T12:00:00.000Z');
+const USER = '6f9619ff-8b86-4d01-b42d-00cf4fc964ff';
+
+function services() {
+  return createInMemoryComplianceServices({
+    configStore: new InMemoryPwattConfigStore(),
+    now: () => NOW,
+  });
+}
+
+describe('the region resolution ladder (WS-N.1.1b — identity-free)', () => {
+  it('verified declaration > locale subtag > unknown, with the basis reported', async () => {
+    const declarations = new InMemoryRegionDeclarationStore();
+    const deps = { declarations, localeRegion: async () => 'GB' };
+    expect(await resolveRegion(deps, USER)).toEqual({ region: 'GB', basis: 'locale_subtag' });
+    await declarations.upsert({
+      userId: USER,
+      declaredRegion: 'DE',
+      status: 'verified',
+      verificationLevel: 'reviewer_verified',
+      evidenceRef: null,
+      verifiedAt: new Date(NOW).toISOString(),
+      verifiedBy: null,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    expect(await resolveRegion(deps, USER)).toEqual({
+      region: 'DE',
+      basis: 'verified_declaration',
+    });
+    expect(
+      await resolveRegion(
+        { declarations: new InMemoryRegionDeclarationStore(), localeRegion: async () => null },
+        USER,
+      ),
+    ).toEqual({ region: null, basis: 'unknown' });
+  });
+
+  it('pending/revoked declarations are never a basis; store outages degrade DOWN', async () => {
+    const declarations = new InMemoryRegionDeclarationStore();
+    await declarations.upsert({
+      userId: USER,
+      declaredRegion: 'DE',
+      status: 'pending',
+      verificationLevel: 'unverified',
+      evidenceRef: null,
+      verifiedAt: null,
+      verifiedBy: null,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    expect(await resolveRegion({ declarations, localeRegion: async () => 'FR' }, USER)).toEqual({
+      region: 'FR',
+      basis: 'locale_subtag',
+    });
+    const broken = {
+      declarations: {
+        get: async () => {
+          throw new Error('down');
+        },
+      } as never,
+      localeRegion: async () => 'FR',
+    };
+    expect(await resolveRegion(broken, USER)).toEqual({ region: 'FR', basis: 'locale_subtag' });
+  });
+});
+
+describe('the policy audit chain (WS-N.1.1g)', () => {
+  it('appends, verifies, and detects tampering + attribution rewrites', async () => {
+    const s = services();
+    const deps = { policyAudit: s.policyAudit, now: s.now, uuid: s.uuid };
+    await appendPolicyAudit(deps, {
+      policyId: '11111111-1111-4111-8111-111111111111',
+      countryOrRegion: 'DE',
+      changeType: 'create',
+      changedByRef: 'ref-a',
+      previousValue: null,
+      newValue: { v: 1 },
+      reason: 'initial',
+      approvalRef: null,
+    });
+    await appendPolicyAudit(deps, {
+      policyId: '11111111-1111-4111-8111-111111111111',
+      countryOrRegion: 'DE',
+      changeType: 'update',
+      changedByRef: 'ref-a',
+      previousValue: { v: 1 },
+      newValue: { v: 2 },
+      reason: 'tighten',
+      approvalRef: 'FOUR-EYES-1',
+    });
+    expect((await verifyPolicyAuditChain({ policyAudit: s.policyAudit })).valid).toBe(true);
+    // Tamper: recompute must fail if ANY attribution field changes (W13).
+    const entries = await s.policyAudit.listChained();
+    const entry = entries[1];
+    if (!entry) throw new Error('setup');
+    expect(computePolicyAuditHash({ ...entry, changedByRef: 'ref-EVIL' })).not.toBe(
+      entry.integrityHash,
+    );
+    expect(computePolicyAuditHash({ ...entry, reason: 'loosen' })).not.toBe(entry.integrityHash);
+  });
+
+  it('the fork-proof store rejects a second child for the same parent', async () => {
+    const s = services();
+    const head = await s.policyAudit.chainHead();
+    expect(head).toBeNull();
+    const base = {
+      changeId: '22222222-2222-4222-8222-222222222222',
+      policyId: '11111111-1111-4111-8111-111111111111',
+      countryOrRegion: 'DE',
+      changeType: 'create' as const,
+      changedByRef: 'r',
+      previousValue: null,
+      newValue: {},
+      reason: 'x',
+      approvalRef: null,
+      prevHash: null,
+      createdAt: new Date(NOW).toISOString(),
+    };
+    const genesis = { ...base, integrityHash: computePolicyAuditHash(base) };
+    expect(await s.policyAudit.appendChained(genesis)).not.toBeNull();
+    // A SECOND genesis (same null parent) collides.
+    const rival = {
+      ...base,
+      changeId: '33333333-3333-4333-8333-333333333333',
+      integrityHash: computePolicyAuditHash({ ...base, reason: 'rival' }),
+    };
+    expect(await s.policyAudit.appendChained(rival)).toBeNull();
+  });
+
+  it('case-audit hashes cover every attribution field too', () => {
+    const base = {
+      auditId: 'a',
+      caseId: 'c',
+      action: 'note',
+      actorRef: 'ref',
+      beforeState: 'open',
+      afterState: 'open',
+      note: 'n',
+      prevHash: null,
+      createdAt: new Date(NOW).toISOString(),
+    };
+    const hash = computeCaseAuditHash(base);
+    expect(computeCaseAuditHash({ ...base, actorRef: 'other' })).not.toBe(hash);
+    expect(computeCaseAuditHash({ ...base, note: 'changed' })).not.toBe(hash);
+    expect(computeCaseAuditHash({ ...base, afterState: 'resolved' })).not.toBe(hash);
+  });
+});
+
+describe('the no-key content filter (WS-N.2.3e)', () => {
+  it('detects bare 64-hex private keys but NOT 0x-prefixed tx hashes', () => {
+    const key = 'e9873d79c6d87dc0fb6a5778633389f4453213303da61f20bd67fc233aa33262';
+    expect(scanForKeyMaterial(`here is my key ${key} please help`)).toEqual({
+      detected: true,
+      kind: 'private_key_hex',
+      warning: NO_KEY_WARNING,
+    });
+    // A tx hash (0x + 64 hex) is the SUPPORT-FLOW format — permitted.
+    expect(scanForKeyMaterial(`my transfer 0x${key} went to the wrong room`).detected).toBe(false);
+    // Part of a LONGER hex blob is a hash, not a key.
+    expect(scanForKeyMaterial(`${key}ff`).detected).toBe(false);
+  });
+
+  it('detects 12/24-word BIP-39 phrases, embedded mid-sentence included', () => {
+    const phrase12 =
+      'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    expect(scanForKeyMaterial(phrase12)).toEqual({
+      detected: true,
+      kind: 'seed_phrase',
+      warning: NO_KEY_WARNING,
+    });
+    expect(
+      scanForKeyMaterial(`please help, my phrase is ${phrase12}, did I lose it?`).detected,
+    ).toBe(true);
+    // Ordinary prose never trips it (non-wordlist words break the run).
+    expect(
+      scanForKeyMaterial(
+        'I sent a payment to the wrong room yesterday and would like to understand what options exist for recovery, thanks so much for the help',
+      ).detected,
+    ).toBe(false);
+    // Eleven wordlist words in a row (below the shortest real phrase) pass.
+    expect(
+      scanForKeyMaterial(
+        'abandon ability able about above absent absorb abstract absurd abuse access',
+      ).detected,
+    ).toBe(false);
+  });
+});
+
+describe('the disclosure gate (WS-N.1.2d)', () => {
+  async function withPolicy(s = services()) {
+    await s.declarations.upsert({
+      userId: USER,
+      declaredRegion: 'DE',
+      status: 'verified',
+      verificationLevel: 'reviewer_verified',
+      evidenceRef: null,
+      verifiedAt: new Date(NOW).toISOString(),
+      verifiedBy: null,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    await s.policies.insert({
+      policyId: '44444444-4444-4444-8444-444444444444',
+      countryOrRegion: 'DE',
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      document: {
+        policy_id: '44444444-4444-4444-8444-444444444444',
+        country_or_region: 'DE',
+        feature_flags: {
+          wallet_connection: 'testnet',
+          testnet_transactions: 'testnet',
+          production_payments: 'disabled',
+          treasury_operations: 'disabled',
+          governance: 'disabled',
+        },
+        asset_flags: {},
+        age_gate_policy: {
+          wallet_connection: { required_band: 'adult' },
+          testnet_transactions: { required_band: 'adult' },
+          production_payments: { required_band: 'adult' },
+          treasury_operations: { required_band: 'adult' },
+          governance: { required_band: 'adult' },
+        },
+        kyc_policy: {},
+        disclosure_refs: [{ id: 'risk-general', version: 2, locales: ['en'] }],
+        legal_approval_ref: null,
+        effective_at: '2026-01-01T00:00:00.000Z',
+      },
+      createdAt: new Date(NOW).toISOString(),
+    });
+    await s.disclosures.publish({
+      id: '55555555-5555-4555-8555-555555555555',
+      disclosureId: 'risk-general',
+      region: 'DE',
+      version: 2,
+      locale: 'en',
+      title: 'Risk disclosure',
+      contentMd: 'On-chain transactions are irreversible. Crypto is optional.',
+      requiresAcknowledgment: true,
+      publishedAt: new Date(NOW).toISOString(),
+    });
+    return s;
+  }
+
+  it('requires the CURRENT version before the first financial action; a new version re-prompts', async () => {
+    const s = await withPolicy();
+    const deps = buildDisclosureDeps(s);
+    let gate = await disclosureGate(deps, USER);
+    expect(gate.required).toBe(true);
+    expect(gate.missing[0]?.id).toBe('risk-general');
+    // Acknowledging a NON-EXISTENT version is rejected (no gate bypass).
+    const wrong = await acknowledgeDisclosure(deps, {
+      userId: USER,
+      disclosureId: 'risk-general',
+      version: 9,
+    });
+    expect(wrong.ok).toBe(false);
+    const ack = await acknowledgeDisclosure(deps, {
+      userId: USER,
+      disclosureId: 'risk-general',
+      version: 2,
+    });
+    expect(ack.ok).toBe(true);
+    gate = await disclosureGate(deps, USER);
+    expect(gate.required).toBe(false);
+    const listed = await listDisclosuresForUser(deps, USER);
+    expect(listed[0]?.acknowledged).toBe(true);
+    // Idempotent re-ack.
+    const again = await acknowledgeDisclosure(deps, {
+      userId: USER,
+      disclosureId: 'risk-general',
+      version: 2,
+    });
+    expect(again.ok).toBe(true);
+  });
+
+  it('fails closed: an unreadable ack store reports the requirement missing', async () => {
+    const s = await withPolicy();
+    s.acks.has = async () => {
+      throw new Error('down');
+    };
+    const gate = await disclosureGate(buildDisclosureDeps(s), USER);
+    expect(gate.required).toBe(true);
+  });
+
+  it('publish-immutability: the same version cannot be re-published', async () => {
+    const s = await withPolicy();
+    await expect(
+      s.disclosures.publish({
+        id: '66666666-6666-4666-8666-666666666666',
+        disclosureId: 'risk-general',
+        region: 'DE',
+        version: 2,
+        locale: 'en',
+        title: 'Edited',
+        contentMd: 'weakened wording',
+        requiresAcknowledgment: true,
+        publishedAt: new Date(NOW).toISOString(),
+      }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('retention + erasure (WS-N.2.1d / WS-N.2.1a)', () => {
+  it('deletes expired cases thoroughly, skips legal holds, reports the summary', async () => {
+    const s = services();
+    const deps = buildCaseDeps(s);
+    const expired = await createCase(deps, {
+      subjectKind: 'user',
+      subjectRef: USER,
+      triggerType: 'velocity',
+      riskLevel: 'low',
+      note: 'old',
+    });
+    const held = await createCase(deps, {
+      subjectKind: 'user',
+      subjectRef: USER,
+      triggerType: 'sanctions',
+      riskLevel: 'critical',
+      note: 'held',
+    });
+    if (!expired.ok || !held.ok) throw new Error('setup');
+    // Force both past their deletion dates; hold the second.
+    await s.cases.update(
+      expired.record.caseId,
+      {
+        retentionPolicy: {
+          retention_period_days: 1,
+          deletion_date: '2026-01-01T00:00:00.000Z',
+          legal_hold: false,
+        },
+      },
+      new Date(NOW).toISOString(),
+    );
+    await setLegalHold(deps, {
+      caseId: held.record.caseId,
+      hold: true,
+      actorUserId: USER,
+      reason: 'regulatory',
+    });
+    await s.cases.update(
+      held.record.caseId,
+      {
+        retentionPolicy: {
+          retention_period_days: 1,
+          deletion_date: '2026-01-01T00:00:00.000Z',
+          legal_hold: true,
+        },
+      },
+      new Date(NOW).toISOString(),
+    );
+    const summary = await runRetentionSweep({
+      caseDeps: deps,
+      config: s.config,
+      log: () => {},
+      now: s.now,
+    });
+    expect(summary.deleted).toBe(1);
+    expect(summary.held).toBe(1);
+    expect(summary.errors).toBe(0);
+    expect(await s.cases.getById(expired.record.caseId)).toBeNull();
+    expect(await s.caseAudit.listChained(expired.record.caseId)).toHaveLength(0); // thorough
+    expect(await s.cases.getById(held.record.caseId)).not.toBeNull();
+    // Idempotent: a re-run finds nothing left.
+    const rerun = await runRetentionSweep({
+      caseDeps: deps,
+      config: s.config,
+      log: () => {},
+      now: s.now,
+    });
+    expect(rerun.deleted).toBe(0);
+  });
+
+  it('erasure scrubs user subjects EXCEPT under legal hold (audited skip)', async () => {
+    const s = services();
+    const deps = buildCaseDeps(s);
+    const plain = await createCase(deps, {
+      subjectKind: 'user',
+      subjectRef: USER,
+      triggerType: 'fraud',
+      riskLevel: 'high',
+      note: 'a',
+    });
+    const held = await createCase(deps, {
+      subjectKind: 'user',
+      subjectRef: USER,
+      triggerType: 'sanctions',
+      riskLevel: 'critical',
+      note: 'b',
+    });
+    if (!plain.ok || !held.ok) throw new Error('setup');
+    await setLegalHold(deps, {
+      caseId: held.record.caseId,
+      hold: true,
+      actorUserId: USER,
+      reason: 'regulatory',
+    });
+    const result = await scrubUserSubjectForErasure({ caseDeps: deps, log: () => {} }, USER);
+    expect(result).toEqual({ scrubbed: 1, heldBack: 1 });
+    expect((await s.cases.getById(plain.record.caseId))?.userIdOrRoomId).toBeNull();
+    expect((await s.cases.getById(held.record.caseId))?.userIdOrRoomId).toBe(USER);
+    const trail = await s.caseAudit.listChained(held.record.caseId);
+    expect(trail.some((entry) => entry.action === 'erasure_skipped_legal_hold')).toBe(true);
+  });
+});
+
+describe('the fail-closed compliance.* config loader', () => {
+  it('keeps the default on an invalid stored value and reports it', async () => {
+    const store = new InMemoryPwattConfigStore();
+    await store.set('compliance.policyCacheTtlMs', { value: -5 });
+    await store.set('compliance.screeningTimeoutMs', { value: 10_000 });
+    const problems: string[] = [];
+    const config = await loadComplianceConfig(store, (key) => problems.push(key));
+    expect(config.policyCacheTtlMs).toBe(5 * 60_000); // default kept
+    expect(config.screeningTimeoutMs).toBe(10_000); // valid override applied
+    expect(problems).toContain('policyCacheTtlMs');
+  });
+
+  it('rejects unknown keys and malformed velocity limits', () => {
+    expect(validateComplianceConfigValue('nonsense', 1)).not.toBeNull();
+    expect(
+      validateComplianceConfigValue('velocityLimits', [
+        { periodSeconds: 60, maxCount: 1, maxVolumeMinorUnits: '1.5' },
+      ]),
+    ).not.toBeNull();
+    expect(
+      validateComplianceConfigValue('velocityLimits', [
+        { periodSeconds: 60, maxCount: 1, maxVolumeMinorUnits: '10' },
+      ]),
+    ).toBeNull();
+  });
+});

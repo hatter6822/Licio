@@ -91,6 +91,16 @@ export const AUDIT_EVENT_TYPES = [
   'knomosis_config_change',
   'governance_mode_change',
   'governance_sim_action',
+  // WS-N compliance: identity-free region declarations (declare/revoke/
+  // verify — WS-N.1.1f), jurisdiction-policy admin writes + force refreshes
+  // (WS-N.1.1e; the tamper-evident before/after log is the separate
+  // hash-chained `jurisdiction_policy_audit`), risk-disclosure publication
+  // (WS-N.1.2d), and validated compliance.* runtime-config writes.  Case
+  // review actions chain in `compliance_case_audit`, not here.
+  'region_declaration_change',
+  'compliance_policy_change',
+  'disclosure_change',
+  'compliance_config_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 /** The LIVE vocabulary — what a writer may append today. */

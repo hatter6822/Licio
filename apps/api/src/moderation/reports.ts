@@ -21,6 +21,7 @@ import {
   reasonCodeSlaHours,
   toEventSeverity,
 } from '@licio/shared';
+import { NO_KEY_WARNING, scanForKeyMaterial } from '../compliance/no-key-filter.js';
 import { autoAssignCase } from './assignment.js';
 import { writeAudit } from './audit.js';
 import { coordinationScore } from './prechecks.js';
@@ -63,7 +64,10 @@ export function maxSeverity(a: ReportSeverity, b: ReportSeverity): ReportSeverit
 
 export type SubmitReportOutcome =
   | { ok: true; response: ReportCreatedResponse }
-  | { ok: false; code: 'rate_limited'; retryAfter: number };
+  | { ok: false; code: 'rate_limited'; retryAfter: number }
+  /** WS-N.2.3e: key-like material in the free text — blocked with the
+   *  standing warning; the matched value is discarded, never stored. */
+  | { ok: false; code: 'key_material_blocked'; message: string };
 
 function toResponse(report: ModerationReportRecord, idempotent: boolean): ReportCreatedResponse {
   return {
@@ -109,6 +113,19 @@ export async function submitReport(
   const emergency = isEmergencyReasonCode(reasonCode);
   const nowMs = services.now();
   const nowIso = new Date(nowMs).toISOString();
+
+  // 0. WS-N.2.3e — the no-private-key filter on the support channel: a report
+  // whose free text carries key-like material (a bare 64-hex key, a BIP-39
+  // seed phrase) is BLOCKED with the standing warning, and the matched value
+  // is DISCARDED — never logged, stored, or echoed (§18.5: real support never
+  // asks; users pasting keys are the phishing target this trains against).
+  if (request.context !== undefined && request.context !== null) {
+    const scan = scanForKeyMaterial(request.context);
+    if (scan.detected) {
+      services.metrics.increment('reports.key_material_blocked');
+      return { ok: false, code: 'key_material_blocked', message: scan.warning ?? NO_KEY_WARNING };
+    }
+  }
 
   // 1. Idempotency by client operation id (offline-replay safe).
   const byOp = await services.reports.findByOperationId(reporterUserId, request.local_operation_id);

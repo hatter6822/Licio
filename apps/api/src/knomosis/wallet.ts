@@ -56,6 +56,11 @@ export interface WalletServiceDeps {
   log: (event: string, meta: Record<string, unknown>) => void;
   /** Integrity alert sink (WS-L.2.5d excessive-activity escalation). */
   alert: (event: string, meta: Record<string, unknown>) => void;
+  /** WS-N.2.2a/e — the sanctioned-wallet-link response: the boot wires the
+   *  compliance pin+case hook here (the ONLY moment the plaintext address
+   *  exists server-side, so link-time screening must act HERE).  Absent ⇒
+   *  the wallet simply stays `pending` (fail-closed: it cannot move funds). */
+  onSanctionedWalletLink?: ((walletAccountId: string, userId: string) => Promise<void>) | undefined;
 }
 
 export type WalletServiceError = {
@@ -117,6 +122,34 @@ export interface LinkWalletResult {
 }
 
 /** WS-L.2.5a — verify SIWE and create/reactivate the WalletAccount. */
+/**
+ * WS-N.2.2a — the FIRST assessment's screening leg, at the only moment the
+ * plaintext address exists server-side (WS-D stores financial addresses as
+ * keyed hashes).  A `blocked` verdict fires the compliance hook (pin `high`
+ * + a critical sanctions case); `clear`/`unavailable` leave the fail-closed
+ * `pending` state for the read-through to resolve.  Never throws: a
+ * screening outage can only under-clear, and `pending` cannot move funds.
+ */
+async function screenLinkedWallet(
+  deps: WalletServiceDeps,
+  addressLower: string,
+  walletAccountId: string,
+  userId: string,
+): Promise<void> {
+  try {
+    const verdict = await deps.compliance.screenAddress({
+      addressLower,
+      deploymentId: 'wallet-link',
+    });
+    if (verdict === 'blocked' && deps.onSanctionedWalletLink !== undefined) {
+      await deps.onSanctionedWalletLink(walletAccountId, userId);
+      deps.alert('knomosis.wallet.link_sanctioned', { wallet_account_id: walletAccountId });
+    }
+  } catch {
+    // Fail-closed by inaction: the wallet stays `pending`.
+  }
+}
+
 export async function linkWallet(
   deps: WalletServiceDeps,
   args: {
@@ -231,6 +264,12 @@ export async function linkWallet(
         targetRef: reactivated.addressTruncated,
         context: { setting: 'relink' },
       });
+      await screenLinkedWallet(
+        deps,
+        verified.addressLower,
+        reactivated.walletAccountId,
+        args.userId,
+      );
       return { ok: true, wallet: reactivated, alreadyLinked: false };
     }
     // active or pending_unlink: idempotent re-link; a pending unlink is
@@ -292,6 +331,12 @@ export async function linkWallet(
     chain_id: inserted.wallet.chainId,
     type: inserted.wallet.walletType,
   });
+  await screenLinkedWallet(
+    deps,
+    verified.addressLower,
+    inserted.wallet.walletAccountId,
+    args.userId,
+  );
   return { ok: true, wallet: inserted.wallet, alreadyLinked: false };
 }
 

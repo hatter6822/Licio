@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-N scheduler (the house lease-guarded pattern): the hourly tick reloads
+// the fail-closed config and runs the retention sweep on its own (daily by
+// default) cadence — the lease makes this the durable distributed runner
+// (every instance ticks, at most one executes per window), and retention is
+// ALSO enforced at read time by `listExpired`, so a missed tick never
+// extends retention.
+import { hostname } from 'node:os';
+import type { JobLeaseStore } from '../identity/job-lease.js';
+import { runRetentionSweep } from './retention.js';
+import { buildCaseDeps, type ComplianceServices } from './services.js';
+
+export type ComplianceSchedulerTask = 'config_reload' | 'retention_sweep' | 'lease';
+
+export const COMPLIANCE_SCHEDULER_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const COMPLIANCE_JOB_LEASE = 'scheduler:compliance';
+
+/** The last sweep boundary this process observed (lease-holder local). */
+let lastSweepAtMs = 0;
+
+export async function runComplianceTick(
+  services: ComplianceServices,
+  onError: (err: unknown, task: ComplianceSchedulerTask) => void = () => {},
+): Promise<void> {
+  try {
+    await services.reloadConfig();
+  } catch (err) {
+    onError(err, 'config_reload');
+  }
+  const nowMs = services.now();
+  if (nowMs - lastSweepAtMs >= services.config().retentionSweepIntervalMs) {
+    lastSweepAtMs = nowMs;
+    try {
+      const summary = await runRetentionSweep({
+        caseDeps: buildCaseDeps(services),
+        config: services.config,
+        log: services.log,
+        now: services.now,
+      });
+      services.metrics.increment('compliance.retention.deleted', summary.deleted);
+      services.metrics.increment('compliance.retention.anonymized', summary.anonymized);
+    } catch (err) {
+      onError(err, 'retention_sweep');
+    }
+  }
+}
+
+export function startComplianceScheduler(
+  services: ComplianceServices,
+  onError: (err: unknown, task: ComplianceSchedulerTask) => void = () => {},
+  intervalMs: number = COMPLIANCE_SCHEDULER_INTERVAL_MS,
+  runner?: { lease: JobLeaseStore; holder?: string },
+): () => void {
+  const holder = runner?.holder ?? `${hostname()}:${process.pid}`;
+  const leaseTtlMs = Math.max(1, Math.floor(intervalMs * 0.9));
+  const tick = async (): Promise<void> => {
+    if (runner) {
+      try {
+        if (!(await runner.lease.tryAcquire(COMPLIANCE_JOB_LEASE, leaseTtlMs, holder))) return;
+      } catch (err) {
+        onError(err, 'lease');
+        return;
+      }
+    }
+    await runComplianceTick(services, onError);
+  };
+  const timer = setInterval(() => void tick(), intervalMs);
+  if (typeof timer === 'object' && 'unref' in timer) timer.unref();
+  void tick();
+  return () => clearInterval(timer);
+}
+
+/** Test hook: reset the per-process sweep boundary. */
+export function resetComplianceSchedulerForTests(): void {
+  lastSweepAtMs = 0;
+}

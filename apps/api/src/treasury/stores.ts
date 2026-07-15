@@ -368,6 +368,20 @@ export interface PaymentIntentStore {
     limit: number,
     afterId?: string | null,
   ): Promise<PaymentIntentRecord[]>;
+  /** Intents in one COMPLIANCE state (the WS-N.2.2c fraud-queue read). */
+  listByComplianceState(
+    state: PaymentIntentRecord['complianceState'],
+    limit: number,
+  ): Promise<PaymentIntentRecord[]>;
+  /** CAS on the ORTHOGONAL compliance column (WS-N.2.2c release/reject:
+   *  flagged → cleared/blocked) — never touches executionState.  Returns
+   *  null when the stored compliance state ≠ `from`. */
+  updateComplianceState(
+    paymentIntentId: string,
+    from: PaymentIntentRecord['complianceState'],
+    to: PaymentIntentRecord['complianceState'],
+    updatedAt: string,
+  ): Promise<PaymentIntentRecord | null>;
   clear(): Promise<void>;
 }
 
@@ -911,6 +925,30 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
       .filter((r) => afterId === null || r.paymentIntentId > afterId)
       .slice(0, limit)
       .map(clone);
+  }
+
+  async listByComplianceState(
+    state: PaymentIntentRecord['complianceState'],
+    limit: number,
+  ): Promise<PaymentIntentRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.complianceState === state)
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+      .slice(0, limit)
+      .map(clone);
+  }
+
+  async updateComplianceState(
+    paymentIntentId: string,
+    from: PaymentIntentRecord['complianceState'],
+    to: PaymentIntentRecord['complianceState'],
+    updatedAt: string,
+  ): Promise<PaymentIntentRecord | null> {
+    const row = this.#rows.get(paymentIntentId);
+    if (!row || row.complianceState !== from) return null;
+    row.complianceState = to;
+    row.updatedAt = updatedAt;
+    return clone(row);
   }
 
   async clear(): Promise<void> {

@@ -29,6 +29,11 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import {
+  buildSanctionedWalletLinkHook,
+  complianceServicesConfigured,
+  getComplianceServices,
+} from '../compliance/services.js';
 import { killSwitchDecision } from '../knomosis/killswitch.js';
 import { KNOMOSIS_PIN } from '../knomosis/pin.js';
 import { getKnomosisServices, type KnomosisServices } from '../knomosis/services.js';
@@ -82,6 +87,12 @@ function walletDeps(services: KnomosisServices): WalletServiceDeps {
     uuid: services.uuid,
     log: services.log,
     alert: services.alert,
+    // WS-N.2.2a: a FULL sanctions match at link pins the wallet high + opens
+    // a critical case.  Absent compliance services (bare test containers) the
+    // wallet simply stays `pending` — fail-closed, it cannot move funds.
+    onSanctionedWalletLink: complianceServicesConfigured()
+      ? buildSanctionedWalletLinkHook(getComplianceServices())
+      : undefined,
   };
 }
 

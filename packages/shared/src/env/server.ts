@@ -41,6 +41,15 @@ const KNOMOSIS_GATEWAY_REQUIRED_KEYS = [
  *  startup.  Both unset ⇒ the bridge is simply OFF (the opt-in default). */
 const LCAP_IPFS_REQUIRED_KEYS = ['LCAP_IPFS_GATEWAY_URL', 'LCAP_IPFS_PINNING_URL'] as const;
 
+/** The WS-N sanctions screening provider is all-or-none: a URL with no token
+ *  file (or vice versa) is a deployment typo that would silently leave every
+ *  screen `unavailable` — which real-fund environments REJECT — so fail fast
+ *  at startup.  Both unset ⇒ no provider (the fail-closed default). */
+const COMPLIANCE_SCREENING_REQUIRED_KEYS = [
+  'COMPLIANCE_SCREENING_URL',
+  'COMPLIANCE_SCREENING_TOKEN_FILE',
+] as const;
+
 /** Report a partial all-or-none env group as a validation issue. */
 function refineGroup(
   env: Record<string, unknown>,
@@ -213,6 +222,17 @@ export const serverEnvSchema = z.object({
     .string()
     .url({ message: 'LCAP_IPFS_PINNING_URL must be a valid URL' })
     .optional(),
+  // WS-N.2.2a sanctions screening provider (BFF → provider, the documented
+  // minimal JSON contract in docs/compliance/README.md).  ALL-OR-NONE: when
+  // unset, no provider is configured — every screen answers `unavailable`
+  // and real-fund actions stay rejected (fail-closed).  The bearer token is
+  // FILE-loaded (never inline env, never logged), the same posture as the
+  // knomosis gateway token.
+  COMPLIANCE_SCREENING_URL: z
+    .string()
+    .url({ message: 'COMPLIANCE_SCREENING_URL must be a valid URL' })
+    .optional(),
+  COMPLIANCE_SCREENING_TOKEN_FILE: z.string().min(1).optional(),
 });
 
 /** True for an http(s) URL whose host is the loopback interface — the rule
@@ -260,6 +280,7 @@ export const serverEnvSchemaRefined = serverEnvSchema
     refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
     refineGroup(env, ctx, KNOMOSIS_GATEWAY_REQUIRED_KEYS, 'KNOMOSIS_GATEWAY');
     refineGroup(env, ctx, LCAP_IPFS_REQUIRED_KEYS, 'LCAP_IPFS');
+    refineGroup(env, ctx, COMPLIANCE_SCREENING_REQUIRED_KEYS, 'COMPLIANCE_SCREENING');
     // WS-U ADR-9: LLM-backend requirements fail FAST at startup in every
     // environment — never a silent boot with a half-configured backend that
     // would then silently serve deterministic. The value-level checks run

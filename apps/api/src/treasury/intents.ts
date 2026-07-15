@@ -280,6 +280,17 @@ const TIMED_STATES: ReadonlySet<PaymentIntentState> = new Set([
   'signed',
 ]);
 
+/** Advancing targets a COMPLIANCE HOLD blocks (WS-N.2.2c): a `flagged` or
+ *  `blocked` intent cannot proceed toward execution — release (`→ cleared`)
+ *  or reject (`→ blocked` + abandon) happens in the fraud queue, never here.
+ *  The hold is the orthogonal compliance column; the 13-state execution
+ *  machine itself is closed and unchanged. */
+const COMPLIANCE_GATED_TARGETS: ReadonlySet<PaymentIntentState> = new Set([
+  'quoted',
+  'signed',
+  'submitted',
+]);
+
 /** Shared CAS + audit for every lifecycle step. */
 async function transitionIntent(
   deps: IntentDeps,
@@ -289,6 +300,12 @@ async function transitionIntent(
   actorUserId: string | null,
 ): Promise<PaymentIntentRecord | null> {
   if (!paymentIntentTransitionAllowed(intent.executionState, to)) return null;
+  if (
+    COMPLIANCE_GATED_TARGETS.has(to) &&
+    (intent.complianceState === 'flagged' || intent.complianceState === 'blocked')
+  ) {
+    return null;
+  }
   // An expired timed state may only move to `abandoned`: a delayed expiry
   // sweep must never let stale compliance/quote/signing state keep advancing.
   if (
@@ -373,13 +390,31 @@ export async function preflightIntent(
     );
   }
 
+  // WS-N.2.2b/c — velocity/pattern risk through the same seam the gateway
+  // preflight runs (step 8): `blocked` rejects, `unavailable` rejects on real
+  // funds, and `elevated` (the high-value review threshold) FLAGS the intent
+  // into the fraud queue — it preflights but cannot advance until a
+  // compliance reviewer releases it (the orthogonal compliance column).
+  const fraud = await deps.compliance.fraudRisk({
+    userId: subjectUserId,
+    actionType: `payment_intent:${intent.targetType}`,
+    amountMinorUnits: intent.amount,
+  });
+  if (fraud === 'blocked') {
+    return tgErr(403, 'fraud_risk', 'This action was flagged by risk checks.');
+  }
+  if (fraud === 'unavailable' && realFunds) {
+    return tgErr(503, 'fraud_risk', 'Risk checks are unavailable; real-fund actions are paused.');
+  }
+
   const updated = await transitionIntent(
     deps,
     intent,
     'preflighted',
     {
       jurisdictionState: jurisdiction === 'allowed' ? 'allowed' : 'restricted',
-      complianceState: sanctions === 'clear' ? 'cleared' : 'pending',
+      complianceState:
+        fraud === 'elevated' ? 'flagged' : sanctions === 'clear' ? 'cleared' : 'pending',
       expiresAt: new Date(deps.now() + deps.wsmConfig().wsmIntentPreflightedTtlMs).toISOString(),
     },
     actorUserId,

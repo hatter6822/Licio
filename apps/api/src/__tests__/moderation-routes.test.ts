@@ -208,6 +208,29 @@ describe('POST /v1/reports', () => {
     expect(((await b.json()) as { idempotent: boolean }).idempotent).toBe(true);
   });
 
+  it('WS-N.2.3e: key-like material in the free text is BLOCKED with the warning, never stored', async () => {
+    const { cookie } = await seedUser({ handle: `r${randomUUID().slice(0, 6)}` });
+    const phrase =
+      'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    const res = await app().request(
+      post('/v1/reports', reportBody({ context: `help, my seed is ${phrase}` }), cookie),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('key_material_blocked');
+    expect(body.error.message).toContain('Never share your private key or seed phrase');
+    // The matched value was DISCARDED: no report row exists.
+    const mod = getModerationServices();
+    expect(await mod.reports.countByReporterSince('any', '2000-01-01T00:00:00.000Z')).toBe(0);
+    // A tx hash (0x + 64 hex) in the same field passes — the support flow
+    // legitimately collects transaction references (WS-N.2.3a).
+    const tx = `0x${'e9873d79c6d87dc0fb6a5778633389f4453213303da61f20bd67fc233aa33262'}`;
+    const ok = await app().request(
+      post('/v1/reports', reportBody({ context: `wrong transfer ${tx}` }), cookie),
+    );
+    expect(ok.status).toBe(201);
+  });
+
   it('404s an account report against a non-existent target', async () => {
     const { cookie } = await seedUser({ handle: `r${randomUUID().slice(0, 6)}` });
     const res = await app().request(

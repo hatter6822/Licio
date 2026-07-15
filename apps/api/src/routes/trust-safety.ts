@@ -114,6 +114,14 @@ export function createTrustSafetyRoutes() {
             resolvedSubjectUserId,
           );
           if (!outcome.ok) {
+            // WS-N.2.3e: key-like material blocked with the standing warning
+            // (the matched value was discarded, never stored or echoed).
+            if (outcome.code === 'key_material_blocked') {
+              return c.json(
+                { error: { code: 'key_material_blocked', message: outcome.message } },
+                422,
+              );
+            }
             return c.json(
               {
                 error: {

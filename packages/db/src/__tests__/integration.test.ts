@@ -150,16 +150,18 @@ describe.skipIf(!DB_URL)('WS-D Postgres integration', () => {
     const graph = await introspectSchemaGraph(runQuery);
     expect(checkSchemaIsolation(graph, ISOLATION_CONTEXTS).isolated).toBe(true);
 
-    // Every table in a context schema must be classified (fail-closed).
+    // Every table in a context schema must be classified (fail-closed) —
+    // wallet, knomosis, AND the WS-N compliance schema (migration 0088).
     const rels = await client.unsafe(
-      `SELECT table_schema, table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema = 'wallet'`,
+      `SELECT table_schema, table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema IN ('wallet', 'knomosis', 'compliance')`,
     );
     const relations = (rels as unknown as Array<{ table_schema: string; table_name: string }>).map(
       (r) => `${r.table_schema}.${r.table_name}`,
     );
-    expect(assertContextsClassified(relations, ISOLATION_CONTEXTS, ['wallet']).classified).toBe(
-      true,
-    );
+    expect(
+      assertContextsClassified(relations, ISOLATION_CONTEXTS, ['wallet', 'knomosis', 'compliance'])
+        .classified,
+    ).toBe(true);
 
     // Every LIVE partition of the events log must itself be a classified
     // ranking table: partitions are ordinary relations a view or FK can

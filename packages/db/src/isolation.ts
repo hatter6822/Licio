@@ -103,6 +103,26 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
 ]);
 
 /**
+ * WS-N `compliance` bounded-context tables (migration 0088).  A THIRD isolated
+ * finance-adjacent context: every table seeds the same BFS proof as the wallet
+ * context (compliance state must never join ranking/attention — SPEC §21.5,
+ * WS-N.2.2d), and the fail-closed classification covers the `compliance`
+ * schema so an unclassified new table fails the suite.
+ */
+export const COMPLIANCE_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
+  'compliance.jurisdiction_feature_policy',
+  'compliance.jurisdiction_policy_audit',
+  'compliance.financial_compliance_case',
+  'compliance.compliance_case_audit',
+  'compliance.region_declaration',
+  'compliance.disclosure_version',
+  'compliance.disclosure_acknowledgment',
+  'compliance.wallet_risk_pin',
+  'compliance.sar_report',
+  'compliance.lawful_access_request',
+]);
+
+/**
  * Ranking/attention bounded-context tables (WS-E.3.1).  These are the BFS
  * targets of the pay-to-rank isolation proof: no FK/view join path may connect
  * them to the wallet context (transiting `public.users` does not count — it is
@@ -164,11 +184,13 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
 ]);
 
 /** Schemas whose every table must be classified into a context (fail-closed). */
-export const CONTEXT_SCHEMAS: readonly string[] = ['wallet', 'knomosis'];
+export const CONTEXT_SCHEMAS: readonly string[] = ['wallet', 'knomosis', 'compliance'];
 
-/** The canonical isolation contexts consumed by the CI test (WS-D.3.2). */
+/** The canonical isolation contexts consumed by the CI test (WS-D.3.2).
+ *  The BFS seed set is the UNION of the wallet/knomosis and compliance
+ *  contexts: both finance-adjacent planes must be unreachable from ranking. */
 export const ISOLATION_CONTEXTS: IsolationContexts = {
-  walletTables: WALLET_CONTEXT_TABLES,
+  walletTables: new Set<Relation>([...WALLET_CONTEXT_TABLES, ...COMPLIANCE_CONTEXT_TABLES]),
   rankingTables: RANKING_CONTEXT_TABLES,
   articulationNodes: DEFAULT_ARTICULATION,
 };

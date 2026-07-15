@@ -806,6 +806,39 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     return rows.map(mapIntent);
   }
 
+  async listByComplianceState(
+    state: PaymentIntentRecord['complianceState'],
+    limit: number,
+  ): Promise<PaymentIntentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(paymentIntents)
+      .where(eq(paymentIntents.complianceState, state))
+      .orderBy(asc(paymentIntents.createdAt))
+      .limit(limit);
+    return rows.map(mapIntent);
+  }
+
+  async updateComplianceState(
+    paymentIntentId: string,
+    from: PaymentIntentRecord['complianceState'],
+    to: PaymentIntentRecord['complianceState'],
+    updatedAt: string,
+  ): Promise<PaymentIntentRecord | null> {
+    const rows = await this.db
+      .update(paymentIntents)
+      .set({ complianceState: to, updatedAt: new Date(updatedAt) })
+      .where(
+        and(
+          eq(paymentIntents.paymentIntentId, paymentIntentId),
+          eq(paymentIntents.complianceState, from),
+        ),
+      )
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapIntent(row);
+  }
+
   async clear(): Promise<void> {
     await this.db.delete(paymentIntents);
   }

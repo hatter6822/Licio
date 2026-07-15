@@ -82,6 +82,11 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'knomosis_config_change',
   'governance_mode_change',
   'governance_sim_action',
+  // WS-N compliance (mirrors AUDIT_EVENT_TYPES; migration 0088).
+  'region_declaration_change',
+  'compliance_policy_change',
+  'disclosure_change',
+  'compliance_config_change',
 ]);
 
 export const auditLog = pgTable(

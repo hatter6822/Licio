@@ -41,6 +41,12 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { disclosureGate } from '../compliance/disclosures.js';
+import {
+  buildDisclosureDeps,
+  complianceServicesConfigured,
+  getComplianceServices,
+} from '../compliance/services.js';
 import { getKnomosisServices } from '../knomosis/services.js';
 import {
   type AuthEnv,
@@ -521,6 +527,29 @@ export function createTreasuryGovernanceRoutes() {
               deny('target_not_allowed', 'Only deposit-class intents can be created here.'),
               403,
             );
+          }
+          // WS-N.1.2d — the first-financial-action disclosure gate: where the
+          // user's region policy lists risk disclosures, the CURRENT version
+          // of each must be acknowledged before any intent is created here
+          // (fail-closed: an unreadable ack store reports them missing).
+          if (complianceServicesConfigured()) {
+            const disclosureCheck = await disclosureGate(
+              buildDisclosureDeps(getComplianceServices()),
+              auth.userId,
+            );
+            if (disclosureCheck.required) {
+              return c.json(
+                {
+                  error: {
+                    code: 'disclosure_ack_required',
+                    message:
+                      'Acknowledge the current risk disclosures before your first financial action.',
+                  },
+                  missing: disclosureCheck.missing,
+                },
+                403,
+              );
+            }
           }
           const result = await createPaymentIntent(services, {
             userId: auth.userId,

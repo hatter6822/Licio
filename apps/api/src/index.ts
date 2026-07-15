@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { createDbClient, pingDatabase } from '@licio/db';
-import { stewardRolesQueues } from '@licio/shared';
+import { type PrivacyClassification, type RetentionTier, stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
 import { createDrizzleAiGovernanceStores } from './ai-governance/drizzle-ai-governance-stores.js';
 import { ProhibitedUseGuard } from './ai-governance/guard.js';
@@ -39,6 +39,26 @@ import {
 } from './ai-governance/services.js';
 import { registerAiGovernanceConsumers } from './ai-governance/wiring.js';
 import { createApp } from './app.js';
+import { createDrizzleComplianceStores } from './compliance/drizzle-compliance-stores.js';
+import { bindPolicyInvalidation } from './compliance/policy.js';
+import {
+  RedisPolicyInvalidationBroadcaster,
+  RedisScreeningCacheStore,
+  RedisVelocityStore,
+} from './compliance/redis-compliance-stores.js';
+import { buildEventRetentionOverrides } from './compliance/retention.js';
+import {
+  COMPLIANCE_SCHEDULER_INTERVAL_MS,
+  startComplianceScheduler,
+} from './compliance/scheduler.js';
+import { HttpSanctionsProvider } from './compliance/screening.js';
+import {
+  buildComplianceExport,
+  buildCompliancePort,
+  buildCompliancePurge,
+  createInMemoryComplianceServices,
+  setComplianceServices,
+} from './compliance/services.js';
 import { registerDefaultConsumers } from './events/consumers.js';
 import {
   DrizzleAggregationWindowStore,
@@ -114,6 +134,7 @@ import {
   setGovernanceService,
 } from './governance/services.js';
 import { createInMemoryGovernanceStores } from './governance/stores.js';
+import { accountRef } from './identity/crypto.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -1257,6 +1278,128 @@ setKnomosisServices(knomosisServices);
 // The WS-E event pipeline's crypto gate reads the SAME runtime flag (live).
 eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
 
+// WS-N compliance: the jurisdiction policy engine, sanctions screening,
+// velocity/fraud risk, wallet-risk assessment, cases, disclosures, and the
+// counsel surfaces — the PRODUCTION CompliancePort behind every shipped
+// fund-moving gate (replacing `defaultCompliancePort`).  In-memory container
+// first, then the gated Drizzle adapters, the Redis hot-path adapters, the
+// operator-configured sanctions provider (fail-closed absent), and the REAL
+// sibling closures.  Wired BEFORE the treasury container below, which copies
+// `knomosis.compliance` by reference at construction.
+const complianceServices = createInMemoryComplianceServices({
+  configStore: eventServices.configStore,
+  log: (event, meta) => logger.info(meta, event),
+  alert: (event, meta) => logger.error(meta, `ALERT ${event}`),
+});
+if (db) {
+  Object.assign(complianceServices, createDrizzleComplianceStores(db));
+}
+if (env.REDIS_URL !== undefined) {
+  const IORedis = (await import('ioredis')).default;
+  const complianceRedis = new IORedis(env.REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 3,
+  });
+  complianceRedis.on('error', (err) => logger.warn({ err }, 'Redis connection error (compliance)'));
+  // The invalidation channel needs a DEDICATED subscriber connection.
+  const complianceSubscriber = new IORedis(env.REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 3,
+  });
+  complianceSubscriber.on('error', (err) =>
+    logger.warn({ err }, 'Redis connection error (compliance subscriber)'),
+  );
+  complianceServices.velocity = new RedisVelocityStore(complianceRedis);
+  complianceServices.screeningCache = new RedisScreeningCacheStore(complianceRedis);
+  complianceServices.broadcaster = new RedisPolicyInvalidationBroadcaster(
+    complianceRedis,
+    complianceSubscriber,
+  );
+  bindPolicyInvalidation(complianceServices.broadcaster, complianceServices.policyCache);
+}
+// The sanctions provider (WS-N.2.2a): configured ⇒ HTTP; a set-but-broken
+// token file is a fatal misconfiguration of a financial surface (the same
+// posture as the knomosis gateway token).  Unset ⇒ null ⇒ every screen
+// answers `unavailable` and real-fund actions stay rejected (fail-closed).
+if (
+  env.COMPLIANCE_SCREENING_URL !== undefined &&
+  env.COMPLIANCE_SCREENING_TOKEN_FILE !== undefined
+) {
+  let screeningToken: string;
+  try {
+    screeningToken = readFileSync(env.COMPLIANCE_SCREENING_TOKEN_FILE, 'utf8').trim();
+  } catch (error) {
+    throw new Error(
+      `COMPLIANCE_SCREENING_TOKEN_FILE (${env.COMPLIANCE_SCREENING_TOKEN_FILE}) is set but unreadable — refusing to start with a broken screening surface`,
+      { cause: error },
+    );
+  }
+  if (screeningToken.length === 0) {
+    throw new Error(
+      `COMPLIANCE_SCREENING_TOKEN_FILE (${env.COMPLIANCE_SCREENING_TOKEN_FILE}) is empty — refusing to start with a broken screening surface`,
+    );
+  }
+  complianceServices.provider = new HttpSanctionsProvider({
+    baseUrl: env.COMPLIANCE_SCREENING_URL,
+    bearerToken: screeningToken,
+    timeoutMs: () => complianceServices.config().screeningTimeoutMs,
+  });
+}
+// Sibling closures (replacing the fail-closed defaults): the shipped
+// locale-subtag region resolver, the WS-D age band, the single runtime
+// crypto/governance flags, the WS-S room storage axis, keyed opaque refs,
+// and durable persist + router publish for the registered compliance topics.
+complianceServices.localeRegion = (userId) => knomosisServices.regionResolver.regionForUser(userId);
+complianceServices.ageBand = async (userId) =>
+  (await identityServices.store.getUser(userId))?.ageBand ?? null;
+complianceServices.knomosisFlags = () => ({
+  cryptoEnabled: knomosisServices.config().cryptoEnabled,
+  governanceEnabled: knomosisServices.config().governanceEnabled,
+});
+complianceServices.roomStorageMode = async (roomId) =>
+  (await forumServices.rooms.getById(roomId))?.storageMode ?? null;
+complianceServices.opaqueRef = (id) => accountRef(identityServices.config.masterSecret, id);
+complianceServices.emitEvent = async (event) => {
+  const envelope = event as {
+    event_id: string;
+    event_type: string;
+    timestamp: string;
+    privacy_classification: PrivacyClassification;
+    retention_tier: RetentionTier;
+  };
+  await eventServices.eventStore.insertMany([
+    {
+      eventId: envelope.event_id,
+      eventType: envelope.event_type,
+      topic: envelope.event_type,
+      timestamp: envelope.timestamp,
+      privacyClassification: envelope.privacy_classification,
+      retentionTier: envelope.retention_tier,
+      payload: event,
+      // Restricted compliance events are not user-owned content (no DSAR
+      // linkage; subject refs are opaque).
+      ownerUserId: null,
+      purgeAfter: null,
+    },
+  ]);
+  await eventServices.router.publish(event as never);
+};
+await complianceServices.reloadConfig();
+setComplianceServices(complianceServices);
+// The production CompliancePort replaces the fail-closed default (WS-N):
+// every shipped consumer — gateway preflight/submit, intent preflight, the
+// jurisdiction readiness item, wallet risk — lights up through this seam.
+knomosisServices.compliance = buildCompliancePort(complianceServices);
+// WS-E.1.4: the jurisdictional retention overrides (shorten-only; re-pushed
+// by the compliance admin config surface on change).
+eventServices.retention.overrides = buildEventRetentionOverrides(complianceServices.config);
+// WS-D data rights: the compliance footprint joins the export and the
+// deletion sweep (legal holds skip the case scrub — audited, erased on lapse).
+identityServices.exportComplianceData = buildComplianceExport(complianceServices);
+identityServices.purgeCompliance = buildCompliancePurge(complianceServices, async (userId) =>
+  (await knomosisServices.wallets.listByUser(userId, true)).map((w) => w.walletAccountId),
+);
+
 // WS-U ADR-3/ADR-9: the governed NL provider behind the agent's advisory
 // facilitation surfaces. Fail-closed at every layer — explicit env opt-in +
 // the backend's requirements (key, or loopback URL + model), registration must
@@ -1707,6 +1850,17 @@ startKnomosisScheduler(
   { lease: makeJobLease() },
 );
 
+// Hourly WS-N compliance maintenance: the fail-closed config reload plus the
+// counsel-scheduled retention sweep (daily by default; legal holds skip and
+// log; a SAR-referenced case can never delete).  Lease-guarded like every
+// other distributed runner.
+startComplianceScheduler(
+  complianceServices,
+  (err, task) => logger.error({ err, task }, 'compliance scheduler task failed'),
+  COMPLIANCE_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
 // Hourly WS-R LCAP maintenance: §24.1 checkpoint issuance — issue a fresh
 // authority-signed `room_checkpoint` for every room whose log grew (WS-R.9.2b /
 // WS-R.12.1c "checkpoint trigger"), under its own job lease.  A node holding no
@@ -1762,6 +1916,7 @@ if (env.NODE_ENV === 'production') {
     moderation: moderationServices,
     aiGovernance: aiGovernanceServices,
     knomosis: knomosisServices,
+    compliance: complianceServices,
     telemetry: telemetryServices,
     csrf: { tokenStore: getTokenStore() },
   });
