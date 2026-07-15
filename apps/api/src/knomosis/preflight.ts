@@ -84,6 +84,9 @@ export interface PreflightDeps {
 export interface PreflightRequestInput {
   userId: string;
   actionType: string;
+  /** The WS-M intent this action settles (see the wire schema); its review
+   *  and this one are the same attempt. */
+  paymentIntentId?: string | undefined;
   roomId: string;
   deploymentId: string;
   walletAccountId: string;
@@ -605,11 +608,13 @@ export async function runPreflight(
     userId: input.userId,
     actionType,
     amountMinorUnits: message['amount'] ?? null,
-    // The bound typed-data hash identifies THIS attempted action: submit
-    // re-checks under the same ref (the token binds the hash), so one review
-    // covers the pair — while a second transfer of the same amount carries a
-    // different nonce, hence a different hash and its own review.
-    reviewRef: verified.typedDataHash,
+    // The attempt this action belongs to.  An intent-backed transfer names
+    // its INTENT, so the WS-M preflight's review and this one are one review
+    // — otherwise a reviewer's release of the held intent would run straight
+    // into a second review here that no queue action could clear.  A direct
+    // action has no intent, so its bound typed-data hash is the attempt
+    // (submit re-checks under the same hash: the token binds it).
+    reviewRef: input.paymentIntentId ?? verified.typedDataHash,
   });
   if (fraud === 'blocked') {
     return audited(

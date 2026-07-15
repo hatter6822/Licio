@@ -233,6 +233,7 @@ export function createKnomosisRoutes() {
           const response = await runPreflight(deps, {
             userId: auth.userId,
             actionType: body.action_type,
+            paymentIntentId: body.payment_intent_id,
             roomId: body.room_id,
             deploymentId: body.deployment_id,
             walletAccountId: body.wallet_account_id,
@@ -295,6 +296,7 @@ export function createKnomosisRoutes() {
             preflightToken: body.preflight_token,
             idempotencyKey: body.idempotency_key,
             actionType: body.action_type,
+            paymentIntentId: body.payment_intent_id,
             roomId: body.room_id,
             deploymentId: body.deployment_id,
             walletAccountId: body.wallet_account_id,

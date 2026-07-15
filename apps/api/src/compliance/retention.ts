@@ -15,7 +15,7 @@
 // `scrubUserSubjectForErasure` — user subjects are NULLed EXCEPT under a
 // legal hold / counsel retention window; the skip itself is audited and the
 // data is erased when the hold lapses (this sweep re-scrubs resolved holds).
-import { appendCaseAudit } from './audit.js';
+import { appendCaseAudit, appendCaseAuditInTx, runChainedUnit } from './audit.js';
 import type { CaseDeps } from './cases.js';
 import type { ComplianceRuntimeConfig } from './config.js';
 
@@ -71,15 +71,25 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
     for (const record of expired) {
       try {
         if (anonymizeTriggers.has(record.triggerType)) {
-          await appendCaseAudit(deps.caseDeps, {
-            caseId: record.caseId,
-            action: 'retention_anonymized',
-            actorRef: 'system',
-            beforeState: record.reviewState,
-            afterState: record.reviewState,
-            note: `Retention expired (${config.retentionScheduleRef}); anonymized in place.`,
-          });
-          await deps.caseDeps.cases.anonymize(record.caseId, nowIso);
+          // ONE unit: the entry must not outlive the act.  Appending first and
+          // anonymizing after would let a failed anonymize leave the chain
+          // permanently claiming the subject data was stripped while the live
+          // row still holds it — and a retry could only add a second entry.
+          await runChainedUnit(
+            deps.caseDeps.transactor,
+            async (stores) => {
+              await appendCaseAuditInTx(stores, deps.caseDeps, {
+                caseId: record.caseId,
+                action: 'retention_anonymized',
+                actorRef: 'system',
+                beforeState: record.reviewState,
+                afterState: record.reviewState,
+                note: `Retention expired (${config.retentionScheduleRef}); anonymized in place.`,
+              });
+              await stores.cases.anonymize(record.caseId, nowIso);
+            },
+            'retention anonymize',
+          );
           summary.anonymized += 1;
         } else {
           // Thorough deletion through the SINGLE transactional store operation:

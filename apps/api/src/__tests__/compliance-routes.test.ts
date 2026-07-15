@@ -962,7 +962,7 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
         deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
         legal_hold: false,
       },
-      idempotencyKey: `highvalue:${subject}:payment_intent:treasury_deposit:5000:${intentId}`,
+      idempotencyKey: `highvalue:${subject}:5000:${intentId}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -983,7 +983,7 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
         deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
         legal_hold: false,
       },
-      idempotencyKey: `highvalue:${subject}:payment_intent:treasury_deposit:9000:${otherIntentId}`,
+      idempotencyKey: `highvalue:${subject}:9000:${otherIntentId}`,
       createdAt: new Date(Date.now() + 1000).toISOString(),
       updatedAt: new Date(Date.now() + 1000).toISOString(),
     });
@@ -1052,6 +1052,139 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
     const held = queue.items.find((item) => item.payment_intent_id === intentId);
     // The synthetic row describes the INTENT itself, not the unrelated case.
     expect(held?.case.case_id).toBe(intentId);
+  });
+});
+
+describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () => {
+  /** A flagged intent whose state the fake treasury actually tracks. */
+  function wireFlaggedIntent(intentId: string, subject: string) {
+    const intent = {
+      paymentIntentId: intentId,
+      userId: subject,
+      targetType: 'treasury_deposit',
+      amount: '5000',
+      complianceState: 'flagged',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    setTreasuryServices({
+      intents: {
+        listByComplianceState: async (state: string) =>
+          intent.complianceState === state ? [intent] : [],
+        updateComplianceState: async (id: string, from: string, to: string) => {
+          if (id !== intentId || intent.complianceState !== from) return null;
+          intent.complianceState = to;
+          return intent;
+        },
+      },
+    } as never);
+    return intent;
+  }
+
+  /** The high-value review `risk.ts` opens for this intent. */
+  async function seedReview(subject: string, intentId: string) {
+    return await compliance.cases.insert({
+      caseId: randomUUID(),
+      userIdOrRoomId: subject,
+      subjectKind: 'user',
+      triggerType: 'pattern',
+      riskLevel: 'medium',
+      partnerCaseRef: null,
+      reviewState: 'open',
+      assignedTo: null,
+      resolution: null,
+      retentionPolicy: {
+        retention_period_days: 730,
+        deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
+        legal_hold: false,
+      },
+      idempotencyKey: `highvalue:${subject}:5000:${intentId}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  it('a release resolves the case `cleared` and the queue drains', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    wireFlaggedIntent(intentId, subject);
+    const review = await seedReview(subject, intentId);
+
+    const released = await app().request(
+      post(
+        '/v1/compliance/admin/fraud-queue/release',
+        { payment_intent_id: intentId, reason: 'verified with the depositor' },
+        reviewer.cookie,
+      ),
+    );
+    expect(released.status).toBe(200);
+
+    // `risk.ts` reads the CASE, not the intent's column: a review left open
+    // would meet the released deposit again at the WS-L leg and block it.
+    const closed = await compliance.cases.getById(review.caseId);
+    expect(closed?.reviewState).toBe('resolved');
+    expect(closed?.resolution?.outcome).toBe('cleared');
+
+    // …and the queue drains rather than showing a decided review forever.
+    const queue = (await (
+      await app().request(get('/v1/compliance/admin/fraud-queue', reviewer.cookie))
+    ).json()) as { items: Array<{ payment_intent_id: string | null }> };
+    expect(queue.items.find((item) => item.payment_intent_id === intentId)).toBeUndefined();
+  });
+
+  it('a rejection resolves the case `restricted`, so the retry stays blocked', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    wireFlaggedIntent(intentId, subject);
+    const review = await seedReview(subject, intentId);
+
+    const rejected = await app().request(
+      post(
+        '/v1/compliance/admin/fraud-queue/reject',
+        { payment_intent_id: intentId, reason: 'unexplained source of funds' },
+        reviewer.cookie,
+      ),
+    );
+    expect(rejected.status).toBe(200);
+    const closed = await compliance.cases.getById(review.caseId);
+    expect(closed?.reviewState).toBe('resolved');
+    // NOT `cleared`: the high-value loop's exit is cleared-only, so the
+    // attempt's retry keeps returning `elevated`.
+    expect(closed?.resolution?.outcome).toBe('restricted');
+  });
+
+  it('the decision entry and the resolution are ONE unit: neither lands alone', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    const intent = wireFlaggedIntent(intentId, subject);
+    const review = await seedReview(subject, intentId);
+
+    // The chain append fails mid-unit (a store fault at the worst moment).
+    const original = compliance.caseAudit.appendChained.bind(compliance.caseAudit);
+    compliance.caseAudit.appendChained = async () => {
+      throw new Error('chain unavailable');
+    };
+    try {
+      const released = await app().request(
+        post(
+          '/v1/compliance/admin/fraud-queue/release',
+          { payment_intent_id: intentId, reason: 'ok' },
+          reviewer.cookie,
+        ),
+      );
+      expect(released.status).toBe(503);
+    } finally {
+      compliance.caseAudit.appendChained = original;
+    }
+    // The case never moved (no resolution recorded with no entry to show for
+    // it), and the compensator put the hold back rather than release funds.
+    const untouched = await compliance.cases.getById(review.caseId);
+    expect(untouched?.reviewState).toBe('open');
+    expect(untouched?.resolution).toBeNull();
+    expect(intent.complianceState).toBe('flagged');
   });
 });
 

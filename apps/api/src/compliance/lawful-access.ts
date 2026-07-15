@@ -14,14 +14,8 @@
 
 import type { LawfulAccessStatus } from '@licio/shared';
 import { appendCaseAuditInTx, runChainedUnit } from './audit.js';
-import {
-  type CaseDeps,
-  createCaseInTx,
-  setLegalHold,
-  setLegalHoldInTx,
-  transitionCase,
-} from './cases.js';
-import type { LawfulAccessRecord, LawfulAccessStore } from './stores.js';
+import { type CaseDeps, createCaseInTx, setLegalHoldInTx, transitionCaseInTx } from './cases.js';
+import type { ComplianceTxStores, LawfulAccessRecord, LawfulAccessStore } from './stores.js';
 
 /** The stored column and the response schema share this cap. */
 const MAX_PRODUCTION_SUMMARY = 10_000;
@@ -145,53 +139,71 @@ export async function reviewLawfulAccessRequest(
   if (!REVIEWABLE_STATUSES.includes(record.status)) {
     return laErr(409, 'invalid_transition', 'This request has already been reviewed.');
   }
-  const updated = await deps.requests.update(
-    input.requestId,
-    {
-      status: input.decision,
-      reviewNote: input.note,
-      reviewedByRef: deps.opaqueRef(input.actorUserId),
+  return runChainedUnit(
+    deps.caseDeps.transactor,
+    async (stores) => {
+      const updated = await stores.lawfulAccess.update(
+        input.requestId,
+        {
+          status: input.decision,
+          reviewNote: input.note,
+          reviewedByRef: deps.opaqueRef(input.actorUserId),
+        },
+        new Date(deps.now()).toISOString(),
+        // CAS on the state read above: two counsel reviewers racing an approve
+        // and a deny would otherwise both pass the check and let the last
+        // write win — leaving the request `approved` after the denial already
+        // released its hold and closed its case.
+        REVIEWABLE_STATUSES,
+      );
+      if (updated === null) {
+        return laErr(409, 'concurrent_review', 'Another reviewer decided this request first.');
+      }
+      // A DENIED request obliges nothing, and its cleanup is part of the
+      // decision, not a follow-up: leaving the hold on would keep retention
+      // and the erasure scrub skipping the subject's records, and leaving the
+      // high-risk case open would keep their crypto features disabled (an open
+      // high/critical case IS the compliance hold) — both on the strength of a
+      // request counsel rejected.  Reporting "denied" while that cleanup
+      // silently failed would be the worst of both, so it commits together.
+      if (input.decision === 'denied' && updated.caseId !== null) {
+        const released = await setLegalHoldInTx(stores, deps.caseDeps, {
+          caseId: updated.caseId,
+          hold: false,
+          actorUserId: input.actorUserId,
+          reason: 'Legal hold released: the lawful-access request was denied on legal review.',
+        });
+        if (!released.ok) return laErr(released.status, released.code, released.message);
+        const closed = await closeDeniedIntakeCase(
+          stores,
+          deps,
+          updated.caseId,
+          input.actorUserId,
+          input.note,
+        );
+        if (closed !== null) return closed;
+      }
+      return { ok: true as const, record: updated };
     },
-    new Date(deps.now()).toISOString(),
-    // CAS on the state we read above: two counsel reviewers racing an approve
-    // and a deny would otherwise both pass the check and let the last write
-    // win — leaving the request `approved` after the denial already released
-    // its hold and closed its case.
-    REVIEWABLE_STATUSES,
+    'lawful-access review',
+  ).catch(() =>
+    laErr(503, 'review_unavailable', 'The review could not be recorded; nothing was kept.'),
   );
-  if (updated === null) {
-    return laErr(409, 'concurrent_review', 'Another reviewer decided this request first.');
-  }
-  // A DENIED request obliges nothing: leaving its legal hold on would keep
-  // retention and the account-deletion scrub skipping the subject's records
-  // indefinitely, and leaving the high-risk case open would keep the
-  // subject's crypto features disabled (an open high/critical case IS the
-  // compliance hold) — both on the strength of a request counsel rejected.
-  if (input.decision === 'denied' && updated.caseId !== null) {
-    await setLegalHold(deps.caseDeps, {
-      caseId: updated.caseId,
-      hold: false,
-      actorUserId: input.actorUserId,
-      reason: 'Legal hold released: the lawful-access request was denied on legal review.',
-    });
-    await closeDeniedIntakeCase(deps, updated.caseId, input.actorUserId, input.note);
-  }
-  return { ok: true, record: updated };
 }
 
 /**
  * Walk a denied request's intake case to `resolved` along the sanctioned
  * transitions (the WS-N.2.1c table has no open→resolved edge, and inventing
  * one for an automated path would put a shortcut into the reviewers' machine).
- * Best-effort: the hold release above is what protects the subject's data, and
- * a case left open is visible in the queue for a reviewer to close by hand.
+ * Returns a typed error when a step fails, so the denial rolls back with it.
  */
 async function closeDeniedIntakeCase(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
   deps: LawfulAccessDeps,
   caseId: string,
   actorUserId: string,
   note: string,
-): Promise<void> {
+): Promise<LawfulAccessError | null> {
   const resolution = {
     outcome: 'cleared' as const,
     notes: `Lawful-access request denied on legal review: ${note}`,
@@ -204,22 +216,17 @@ async function closeDeniedIntakeCase(
     { to: 'resolved' as const, resolution },
   ];
   for (const step of steps) {
-    const moved = await transitionCase(deps.caseDeps, {
+    const moved = await transitionCaseInTx(stores, deps.caseDeps, {
       caseId,
       actorUserId,
       isSenior: true,
       ...step,
     });
-    if (!moved.ok) return;
+    if (!moved.ok) return laErr(moved.status, moved.code, moved.message);
   }
+  return null;
 }
 
-/**
- * Record the scoped production (approved → produced).  For a `private_p2p`
- * room scope the summary is FORCED to carry the honest §8/§11.4
- * determination — the workflow cannot record a production that implies a
- * capability Licio does not have.
- */
 export async function recordLawfulAccessProduction(
   deps: LawfulAccessDeps,
   input: {

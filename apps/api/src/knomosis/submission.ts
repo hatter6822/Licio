@@ -126,6 +126,9 @@ export interface SubmitActionInput {
   preflightToken: string;
   idempotencyKey: string;
   actionType: string;
+  /** The WS-M intent this action settles — the same attempt the preflight
+   *  named, so the re-check lands on the same review. */
+  paymentIntentId?: string | undefined;
   roomId: string;
   deploymentId: string;
   walletAccountId: string;
@@ -454,9 +457,10 @@ export async function submitAction(
     userId: input.userId,
     actionType,
     amountMinorUnits: input.typedDataMessage['amount'] ?? null,
-    // Same attempt as the preflight (the token binds this hash), so the pair
-    // shares ONE high-value review instead of opening a second one here.
-    reviewRef: typedDataHash,
+    // The same attempt the preflight named (an intent-backed transfer names
+    // its intent; a direct one, the hash the token binds), so the re-check
+    // lands on that review rather than opening a second.
+    reviewRef: input.paymentIntentId ?? typedDataHash,
   });
   if (fraud === 'blocked' || (fraud === 'unavailable' && realFunds)) {
     return {

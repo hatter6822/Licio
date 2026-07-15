@@ -306,36 +306,38 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
   }
 
   async insert(record: ComplianceCaseRecord): Promise<ComplianceCaseRecord> {
-    try {
-      const rows = await this.#db
-        .insert(financialComplianceCases)
-        .values({
-          caseId: record.caseId,
-          userIdOrRoomId: record.userIdOrRoomId,
-          subjectKind: record.subjectKind,
-          triggerType: record.triggerType,
-          riskLevel: record.riskLevel,
-          partnerCaseRef: record.partnerCaseRef,
-          reviewState: record.reviewState,
-          assignedTo: record.assignedTo,
-          resolution: record.resolution,
-          retentionPolicy: record.retentionPolicy,
-          idempotencyKey: record.idempotencyKey,
-          createdAt: new Date(record.createdAt),
-          updatedAt: new Date(record.updatedAt),
-        })
-        .returning();
-      const row = rows[0];
-      if (row === undefined) throw new Error('compliance case insert returned no row');
-      return toCaseRecord(row);
-    } catch (error) {
-      // The idempotency unique arbitrates a concurrent duplicate: theirs wins.
-      if (isUniqueViolation(error) && record.idempotencyKey !== null) {
-        const existing = await this.findByIdempotencyKey(record.idempotencyKey);
-        if (existing !== null) return existing;
-      }
-      throw error;
+    // ON CONFLICT DO NOTHING, never catch-and-query: inside a unit of work a
+    // raised unique violation ABORTS the transaction, so the follow-up read
+    // for the winner would fail and take an idempotent duplicate — the whole
+    // point of the key — down with it as a 503.  Conflicting quietly keeps the
+    // transaction healthy enough to go find the row that won.
+    const rows = await this.#db
+      .insert(financialComplianceCases)
+      .values({
+        caseId: record.caseId,
+        userIdOrRoomId: record.userIdOrRoomId,
+        subjectKind: record.subjectKind,
+        triggerType: record.triggerType,
+        riskLevel: record.riskLevel,
+        partnerCaseRef: record.partnerCaseRef,
+        reviewState: record.reviewState,
+        assignedTo: record.assignedTo,
+        resolution: record.resolution,
+        retentionPolicy: record.retentionPolicy,
+        idempotencyKey: record.idempotencyKey,
+        createdAt: new Date(record.createdAt),
+        updatedAt: new Date(record.updatedAt),
+      })
+      .onConflictDoNothing()
+      .returning();
+    const row = rows[0];
+    if (row !== undefined) return toCaseRecord(row);
+    // No row inserted ⇒ the idempotency slot is taken; theirs is THE case.
+    if (record.idempotencyKey !== null) {
+      const existing = await this.findByIdempotencyKey(record.idempotencyKey);
+      if (existing !== null) return existing;
     }
+    throw new Error('compliance case insert returned no row');
   }
 
   async getById(caseId: string): Promise<ComplianceCaseRecord | null> {
@@ -928,30 +930,28 @@ export class DrizzleWalletRiskPinStore implements WalletRiskPinStore {
   }
 
   async pin(record: WalletRiskPinRecord): Promise<WalletRiskPinRecord> {
-    try {
-      const rows = await this.#db
-        .insert(walletRiskPins)
-        .values({
-          id: record.id,
-          walletAccountId: record.walletAccountId,
-          reason: record.reason,
-          pinnedByRef: record.pinnedByRef,
-          createdAt: new Date(record.createdAt),
-          releasedAt: null,
-          releasedByRef: null,
-        })
-        .returning();
-      const row = rows[0];
-      if (row === undefined) throw new Error('wallet pin insert returned no row');
-      return toPin(row);
-    } catch (error) {
-      // The active-pin partial unique makes pinning idempotent.
-      if (isUniqueViolation(error)) {
-        const existing = await this.activeForWallet(record.walletAccountId);
-        if (existing !== null) return existing;
-      }
-      throw error;
-    }
+    // ON CONFLICT DO NOTHING for the same reason as the case insert: pins now
+    // run inside the unit of work (the sanctioned-link hook), where a raised
+    // unique would abort the transaction before the active-pin read below.
+    const rows = await this.#db
+      .insert(walletRiskPins)
+      .values({
+        id: record.id,
+        walletAccountId: record.walletAccountId,
+        reason: record.reason,
+        pinnedByRef: record.pinnedByRef,
+        createdAt: new Date(record.createdAt),
+        releasedAt: null,
+        releasedByRef: null,
+      })
+      .onConflictDoNothing()
+      .returning();
+    const row = rows[0];
+    if (row !== undefined) return toPin(row);
+    // The active-pin partial unique makes pinning idempotent.
+    const existing = await this.activeForWallet(record.walletAccountId);
+    if (existing !== null) return existing;
+    throw new Error('wallet pin insert returned no row');
   }
 
   async release(

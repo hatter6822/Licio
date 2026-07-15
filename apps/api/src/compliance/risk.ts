@@ -126,17 +126,24 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
         triggerType: 'pattern',
         riskLevel: 'medium',
         note: `High-value ${actionType} at/above the manual-review threshold (WS-N.2.2c).`,
-        // Scoped to the ATTEMPT (`reviewRef`: the bound typed-data hash / the
-        // payment-intent id), so one attempt's preflight and submit share a
-        // review while a DIFFERENT transfer of the same amount opens its own —
-        // a day-bucket key would let one cleared review wave through every
-        // later identical transfer that day.  With no ref the attempts are
-        // indistinguishable, so the case is still deduped per day (no spam)
-        // but the cleared-review exit below is withheld (fail-closed).
+        // Scoped to the ATTEMPT (`reviewRef`), NOT to the action type: ONE
+        // transfer is reviewed once even though it crosses legs with different
+        // action types — a deposit is checked as `payment_intent:…` by the WS-M
+        // intent preflight and again as `treasury_deposit` by the WS-L action
+        // preflight, and keying on the type would open a second review the
+        // fraud-queue release could never clear, leaving released money stuck.
+        // A DIFFERENT transfer of the same amount carries a different ref and
+        // gets its own review.  With no ref the attempts are indistinguishable,
+        // so the case is still deduped per day (no spam) but the cleared-review
+        // exit below is withheld (fail-closed).
+        //
+        // Safety note: `userId` and `amount` are part of the key and come from
+        // the SESSION and the signed payload — a client that quotes someone
+        // else's cleared ref lands on a different key, hence a new review.
         idempotencyKey:
           attempt === null
             ? `highvalue:${userId}:${actionType}:${amount}:${dayBucket(nowMs)}`
-            : `highvalue:${userId}:${actionType}:${amount}:${attempt}`,
+            : `highvalue:${userId}:${amount}:${attempt}`,
       });
       // The review loop's exit: a reviewer who CLEARED THIS attempt lets its
       // retry through.  Anything else — in flight, or resolved to a

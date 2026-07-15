@@ -18,6 +18,7 @@
 import { zValidator } from '@hono/zod-validator';
 import {
   type CaseResolution,
+  type CaseReviewState,
   type CaseTriggerType,
   caseAssignRequestSchema,
   caseCreateRequestSchema,
@@ -53,12 +54,19 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
-  appendCaseAudit,
+  appendCaseAuditInTx,
   appendPolicyAuditInTx,
   runChainedUnit,
   verifyPolicyAuditChain,
 } from '../compliance/audit.js';
-import { addCaseNote, createCase, transitionCase } from '../compliance/cases.js';
+import {
+  addCaseNote,
+  type CaseDeps,
+  createCase,
+  type TransitionInput,
+  transitionCase,
+  transitionCaseInTx,
+} from '../compliance/cases.js';
 import { validateComplianceConfigValue } from '../compliance/config.js';
 import {
   acknowledgeDisclosure,
@@ -80,7 +88,11 @@ import {
   getComplianceServices,
   resolveRegionForUser,
 } from '../compliance/services.js';
-import type { ComplianceCaseRecord, RegionDeclarationRecord } from '../compliance/stores.js';
+import type {
+  ComplianceCaseRecord,
+  ComplianceTxStores,
+  RegionDeclarationRecord,
+} from '../compliance/stores.js';
 import { getEventPipelineServices } from '../events/services.js';
 import { isComplianceReviewer, isCounsel } from '../identity/rbac.js';
 import { getIdentityServices } from '../identity/services.js';
@@ -211,6 +223,62 @@ function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): s
   return new Date(Date.parse(record.createdAt) + hours * 3_600_000).toISOString();
 }
 
+/**
+ * The states a fraud-queue decision can start from, and the sanctioned route
+ * each takes to `resolved`.  The WS-N.2.1c table has no open→resolved edge and
+ * this path does not get to invent one: a shortcut here would be a shortcut in
+ * the reviewers' state machine.  Both routes are unguarded ('ok' in
+ * `CASE_TRANSITIONS`) — `escalated` reaches `resolved` only via `investigating`
+ * precisely so the queue never exercises the counsel-only edge.
+ */
+const RESOLUTION_ROUTE: Partial<Record<CaseReviewState, readonly CaseReviewState[]>> = {
+  open: ['assigned', 'investigating', 'resolved'],
+  assigned: ['investigating', 'resolved'],
+  investigating: ['resolved'],
+  escalated: ['investigating', 'resolved'],
+};
+
+/**
+ * Walk a reviewed case to `resolved` from wherever it currently sits, inside
+ * the CALLER's unit.  The walk is not idempotent step-by-step (a second run
+ * reads the moved state and finds no edge back), so it must be atomic: either
+ * the case lands on `resolved` or it never left, and the retry re-drives the
+ * whole route.  Returns false when a step is refused — the caller reports the
+ * decision as unrecorded rather than move funds against a review it did not
+ * close.
+ */
+async function resolveReviewedCaseInTx(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
+  deps: CaseDeps,
+  record: ComplianceCaseRecord,
+  input: { decision: 'release' | 'reject'; reason: string; actorUserId: string; nowIso: string },
+): Promise<boolean> {
+  if (record.reviewState === 'resolved') return true;
+  const route = RESOLUTION_ROUTE[record.reviewState];
+  if (route === undefined) return false;
+  const resolution = {
+    outcome: input.decision === 'release' ? ('cleared' as const) : ('restricted' as const),
+    notes: `Fraud-queue ${input.decision}: ${input.reason}`,
+    resolved_by: input.actorUserId,
+    resolved_at: input.nowIso,
+  };
+  for (const to of route) {
+    // Never `senior`: every edge on both routes is unguarded, so the queue
+    // claims no capability it was not granted.
+    const step: TransitionInput = {
+      caseId: record.caseId,
+      to,
+      actorUserId: input.actorUserId,
+      isSenior: false,
+      ...(to === 'assigned' ? { assigneeUserId: input.actorUserId } : {}),
+      ...(to === 'resolved' ? { resolution } : {}),
+    };
+    const moved = await transitionCaseInTx(stores, deps, step);
+    if (!moved.ok) return false;
+  }
+  return true;
+}
+
 /** A flagged intent, as much of it as the queue needs to find its review. */
 interface HeldIntent {
   paymentIntentId: string;
@@ -233,9 +301,11 @@ async function relatedFraudCase(
 ): Promise<ComplianceCaseRecord | null> {
   if (intent.userId === null) return null;
   // The high-value review `risk.ts` opens for this exact intent (its
-  // `reviewRef` IS the intent id), then the case this queue opened for it.
+  // `reviewRef` IS the intent id, and the key carries no action type — that is
+  // what lets the intent leg and the WS-L leg share ONE review), then the case
+  // this queue opened for it.
   const keys = [
-    `highvalue:${intent.userId}:payment_intent:${intent.targetType}:${intent.amount}:${intent.paymentIntentId}`,
+    `highvalue:${intent.userId}:${intent.amount}:${intent.paymentIntentId}`,
     `intent-review:${intent.paymentIntentId}`,
   ];
   for (const key of keys) {
@@ -287,17 +357,35 @@ async function recordIntentReviewDecision(
       if (!opened.ok) return false;
       record = opened.record;
     }
-    await appendCaseAudit(buildCaseDeps(services), {
-      caseId: record.caseId,
-      action: input.decision === 'release' ? 'fraud_queue_released' : 'fraud_queue_rejected',
-      actorRef: services.opaqueRef(input.actorUserId),
-      beforeState: record.reviewState,
-      afterState: record.reviewState,
-      note: `Payment intent ${input.intent.paymentIntentId} ${
-        input.decision === 'release' ? 'released' : 'rejected'
-      }: ${input.reason}`,
-    });
-    return true;
+    // The decision entry AND the resolution it records are one unit.  The
+    // decision must close the review, for two reasons: an open case sits in the
+    // queue forever (a queue that never drains), and `risk.ts` reads the CASE —
+    // not the intent's column — to decide whether a high-value transfer has
+    // been cleared, so a still-open review would meet the released deposit
+    // again at the WS-L leg and block it a second time.  Recording "released"
+    // while the review stayed open would be a chain entry that lies.
+    const deps = buildCaseDeps(services);
+    const closed = record;
+    return await runChainedUnit(
+      services.transactor,
+      async (stores) => {
+        await appendCaseAuditInTx(stores, deps, {
+          caseId: closed.caseId,
+          action: input.decision === 'release' ? 'fraud_queue_released' : 'fraud_queue_rejected',
+          actorRef: services.opaqueRef(input.actorUserId),
+          beforeState: closed.reviewState,
+          afterState: 'resolved',
+          note: `Payment intent ${input.intent.paymentIntentId} ${
+            input.decision === 'release' ? 'released' : 'rejected'
+          }: ${input.reason}`,
+        });
+        return await resolveReviewedCaseInTx(stores, deps, closed, {
+          ...input,
+          nowIso: new Date(services.now()).toISOString(),
+        });
+      },
+      'fraud-queue decision',
+    );
   } catch {
     return false;
   }

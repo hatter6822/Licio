@@ -32,11 +32,37 @@ modified** in their verdict semantics:
   and a direct WS-L fund transfer (which has no intent to hold) is rejected
   pending the same review, at preflight **and** at the submit re-check. The
   review is a loop, not a dead end: the pattern case is idempotent per
-  **attempt** (`reviewRef` — the bound typed-data hash, or the payment-intent
-  id), so once a reviewer resolves it `cleared` that attempt's retry returns
-  `normal` and proceeds. The clearance covers only the attempt reviewed: a
-  second transfer of the same amount is a different attempt with its own
-  review, and a caller naming no attempt never gets the cleared-review exit.
+  **attempt** (`reviewRef` — the payment-intent id, or the bound typed-data
+  hash for a direct action), so once a reviewer resolves it `cleared` that
+  attempt's retry returns `normal` and proceeds. The clearance covers only the
+  attempt reviewed: a second transfer of the same amount is a different attempt
+  with its own review, and a caller naming no attempt never gets the
+  cleared-review exit.
+
+  **One transfer, one review — across both legs.** An intent-backed transfer
+  (`DepositFlow`) crosses the seam twice with different action types: the WS-M
+  intent preflight checks it as `payment_intent:treasury_deposit`, then the
+  WS-L action preflight/submit checks it as `treasury_deposit`. Both name the
+  same attempt — the **intent** (`payment_intent_id` on the preflight/submit
+  wire contracts, defaulting to the typed-data hash when there is no intent) —
+  and the case key carries no action type, so the two legs land on ONE review.
+  Keyed per leg they would not: a reviewer's release of the held intent would
+  run straight into a second review at the WS-L leg that no fraud-queue action
+  could clear, leaving released money stuck. Safety comes from the key's other
+  parts: `userId` is the session's and `amount` is the signed payload's, so a
+  client quoting someone else's cleared intent id lands on a different key and
+  gets its own review.
+
+  **A decision closes the review it decided.** The fraud queue's release/reject
+  records the decision on the case chain **and** resolves the case (`cleared` /
+  `restricted`) in one unit — it walks the sanctioned `CASE_TRANSITIONS` route
+  to `resolved` rather than inventing an open→resolved edge, and never claims
+  the counsel (`senior`) capability, because both routes are unguarded. It must
+  close it for two reasons: `risk.ts` reads the **case**, not the intent's
+  compliance column, so a still-open review would block the released deposit
+  again at the WS-L leg; and a decided-but-open case would sit in the queue
+  forever. Atomic in both directions — a chain fault leaves the case unmoved
+  and the compensator puts the hold back rather than move funds unaudited.
 - `jurisdiction` → `'allowed' | 'blocked' | 'unknown'` — takes the
   `featureCell` the caller is about to exercise and the `asset` it would move.
   Every fund/action path passes both: the WS-L preflight, its submit re-check
@@ -242,8 +268,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   exceptions: the case-created **event** is best-effort (the case and its entry
   are already committed and are the record of truth, so a failed notification
   alerts rather than destroying an audited case), and the **fraud-queue
-  decision** stays compensated because its two halves live in different bounded
-  contexts — see the note in `routes/compliance.ts`.
+  decision** is compensated across ONE seam only: its compliance-side halves
+  (the chain entry and the case's resolution) are a unit, but the intent's
+  compliance column belongs to the WS-M treasury's own bounded context, and a
+  transaction spanning them would couple two schemas the WS-D.3.2 isolation
+  proof deliberately keeps apart. So that one pairing stays compensated, and
+  the revert is narrow: a single CAS back to `flagged` — see the note in
+  `routes/compliance.ts`.
 - **Counsel acts are attributed on counsel-only rows.**  A SAR's filing —
   the legally consequential step, and often not the approver's doing — is
   recorded as `filed_by_ref` on the report itself, NOT as a case-chain entry:

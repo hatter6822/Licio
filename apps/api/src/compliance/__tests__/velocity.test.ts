@@ -226,6 +226,78 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(await check()).toBe('normal');
   });
 
+  it('an intent-backed transfer is reviewed ONCE across both legs, and the clearance releases it', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    // ONE deposit crosses two compliance legs with DIFFERENT action types: the
+    // WS-M intent preflight, then the WS-L action preflight/submit.  Both name
+    // the same attempt — the intent — so both must land on ONE review.
+    const intentId = '5b1c9b5e-4a2f-4e34-9d5a-2f6b8c0d1e2f';
+    const intentLeg = () =>
+      fraudRisk({
+        userId: USER,
+        actionType: 'payment_intent:treasury_deposit',
+        amountMinorUnits: '5000',
+        reviewRef: intentId,
+      });
+    const actionLeg = () =>
+      fraudRisk({
+        userId: USER,
+        actionType: 'treasury_deposit',
+        amountMinorUnits: '5000',
+        reviewRef: intentId,
+      });
+    expect(await intentLeg()).toBe('elevated');
+    expect(await actionLeg()).toBe('elevated');
+    // Keying on the action type would have opened a SECOND case here — one the
+    // fraud queue's release could never clear, stranding the released deposit.
+    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(1);
+
+    const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
+    const deps = buildCaseDeps(services);
+    for (const step of ['assigned', 'investigating', 'resolved'] as const) {
+      await transitionCase(deps, {
+        caseId,
+        to: step,
+        actorUserId: REVIEWER,
+        isSenior: false,
+        ...(step === 'assigned' ? { assigneeUserId: REVIEWER } : {}),
+        ...(step === 'resolved'
+          ? {
+              resolution: {
+                outcome: 'cleared' as const,
+                notes: 'released by the fraud queue',
+                resolved_by: REVIEWER,
+                resolved_at: new Date(NOW).toISOString(),
+              },
+            }
+          : {}),
+      });
+    }
+    // The release actually unblocks the deposit: BOTH legs now pass.
+    expect(await intentLeg()).toBe('normal');
+    expect(await actionLeg()).toBe('normal');
+  });
+
+  it('a DIFFERENT transfer of the same amount gets its OWN review', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    const check = (reviewRef: string) =>
+      fraudRisk({
+        userId: USER,
+        actionType: 'treasury_deposit',
+        amountMinorUnits: '5000',
+        reviewRef,
+      });
+    expect(await check('11111111-1111-4111-8111-111111111111')).toBe('elevated');
+    expect(await check('22222222-2222-4222-8222-222222222222')).toBe('elevated');
+    // Dropping the action type from the key must not collapse two transfers
+    // into one review: the ATTEMPT still separates them.
+    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(2);
+  });
+
   it('a review resolved to a NON-cleared outcome keeps the action held', async () => {
     const { services, fraudRisk } = fraudFixture({
       highValueReviewThresholdMinorUnits: '1000',

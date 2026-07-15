@@ -120,6 +120,25 @@ function policyMissingReason(outcome: ActivePolicyOutcome): FeatureDisableReason
  * unmeetable requirement meetable, so the cell is closed either way until the
  * partner seam exists.
  */
+/**
+ * The asset's own verdict, or null when it has nothing to say (no asset was
+ * named).  `asset_flags` is a prohibition list in its own right — a region can
+ * allow payments while barring one asset — but it ranks BELOW an explicit cell
+ * prohibition: a blocked cell is blocked whatever the asset.
+ */
+function assetGate(
+  policy: JurisdictionFeaturePolicy,
+  asset: string | null,
+): JurisdictionVerdict | null {
+  if (asset === null) return null;
+  const allowed = policy.asset_flags[asset];
+  if (allowed === false) return 'blocked'; // explicitly barred here
+  // An asset the region never approved reaches no decision (`unknown` — real
+  // funds reject, testnet proceeds), exactly like an unaddressed cell.
+  if (allowed !== true) return 'unknown';
+  return null;
+}
+
 function kycUnmet(
   policy: JurisdictionFeaturePolicy,
   cell: CryptoFeatureCell,
@@ -216,25 +235,21 @@ export function coarseVerdict(
   if (policy !== null && CRYPTO_FEATURE_CELLS.every((c) => policy.feature_flags[c] === 'blocked')) {
     return 'blocked';
   }
-  if (asset !== null && policy !== null) {
-    // `asset_flags` is a prohibition list in its own right: a region can allow
-    // payments while barring a specific asset, so the cell's approval alone
-    // must not carry a barred one.  Explicit `false` PROHIBITS; an asset the
-    // region never approved reaches no decision (`unknown` — real funds
-    // reject, testnet proceeds), exactly like an unaddressed cell.
-    const allowed = policy.asset_flags[asset];
-    if (allowed === false) return 'blocked';
-    if (allowed !== true) return 'unknown';
-  }
   if (cell !== null) {
     // Cell-scoped: the region has spoken about THIS cell, so honor it.  A
     // missing/invalid policy stays `unknown` (no decision was reached — the
     // shipped testnet behavior), never a silent block or pass.
     if (policy === null) return 'unknown';
     const state = policy.feature_flags[cell];
+    // A PROHIBITED cell outranks everything below, including anything the
+    // asset check would say: the region has explicitly refused this feature,
+    // and answering `unknown` (because the asset happens to be unlisted)
+    // would downgrade a hard prohibition into a verdict testnet callers pass.
     if (state === 'blocked' || state === 'disabled' || state === 'pending-legal') {
       return 'blocked';
     }
+    const assetVerdict = assetGate(policy, asset);
+    if (assetVerdict !== null) return assetVerdict;
     // `enabled` is the only production-eligible state, and (like the
     // region-wide reading) it still requires the verified basis + the adult
     // band + the global flag; `simulated`/`testnet` reach no real-funds
@@ -251,6 +266,12 @@ export function coarseVerdict(
       return 'allowed';
     }
     return 'unknown';
+  }
+  // The region-wide reading gates the asset too (no cell was named, so no
+  // cell prohibition can outrank it).
+  if (policy !== null) {
+    const assetVerdict = assetGate(policy, asset);
+    if (assetVerdict !== null) return assetVerdict;
   }
   if (
     input.cryptoEnabled &&

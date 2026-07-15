@@ -220,6 +220,12 @@ export function DepositFlow({
         room_id: roomId,
         deployment_id: treasury.deployment_id,
         wallet_account_id: pending.walletAccountId,
+        // This action SETTLES that intent — naming it makes both compliance
+        // legs one attempt, so a high-value deposit is reviewed once and a
+        // reviewer's release of the intent actually lets the deposit through
+        // (WS-N.2.2c).  Unnamed, the WS-L leg would open a second review no
+        // fraud-queue action could clear.
+        payment_intent_id: pending.paymentIntentId,
         typed_data_message: signed.message,
         signature: signed.signature,
       });
@@ -241,6 +247,7 @@ export function DepositFlow({
           room_id: roomId,
           deployment_id: treasury.deployment_id,
           wallet_account_id: pending.walletAccountId,
+          payment_intent_id: pending.paymentIntentId,
           typed_data_message: signed.message,
           signature: signed.signature,
         }),
