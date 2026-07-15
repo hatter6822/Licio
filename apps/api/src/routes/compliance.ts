@@ -232,6 +232,16 @@ function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): s
  * `CASE_TRANSITIONS`) — `escalated` reaches `resolved` only via `investigating`
  * precisely so the queue never exercises the counsel-only edge.
  */
+/** The decided case could not be closed (a racing transition moved it).  Not a
+ *  store fault: it aborts the unit so the decision entry cannot outlive the
+ *  resolution it claims. */
+class DecisionNotClosedError extends Error {
+  constructor(caseId: string) {
+    super(`case ${caseId} could not be resolved by the fraud-queue decision`);
+    this.name = 'DecisionNotClosedError';
+  }
+}
+
 const RESOLUTION_ROUTE: Partial<Record<CaseReviewState, readonly CaseReviewState[]>> = {
   open: ['assigned', 'investigating', 'resolved'],
   assigned: ['investigating', 'resolved'],
@@ -396,10 +406,20 @@ async function recordIntentReviewDecision(
             input.decision === 'release' ? 'released' : 'rejected'
           }: ${input.reason}`,
         });
-        return await resolveReviewedCaseInTx(stores, deps, closed, {
-          ...input,
-          nowIso: new Date(services.now()).toISOString(),
-        });
+        // A closure the state machine refuses (a reviewer moved the case under
+        // us) must take the entry with it: returning `false` here would COMMIT
+        // a `fraud_queue_released` entry for a review that stayed open while
+        // the route reverted the intent — a chain that records a release which
+        // never took effect.  Throwing abandons the unit whole.
+        if (
+          !(await resolveReviewedCaseInTx(stores, deps, closed, {
+            ...input,
+            nowIso: new Date(services.now()).toISOString(),
+          }))
+        ) {
+          throw new DecisionNotClosedError(closed.caseId);
+        }
+        return true;
       },
       'fraud-queue decision',
     );
@@ -464,6 +484,11 @@ export function createComplianceRoutes() {
           createdAt: existing?.createdAt ?? nowIso,
           updatedAt: nowIso,
         });
+        // Unconditional (the member is declaring their OWN region — there is no
+        // decision-about-a-prior-row to lose), so a null is a store fault.
+        if (record === null) {
+          return c.json(deny('unavailable', 'The declaration could not be stored.'), 503);
+        }
         await getIdentityServices().audit.append({
           actorUserId: auth.userId,
           eventType: 'region_declaration_change',
@@ -746,14 +771,35 @@ export function createComplianceRoutes() {
         const existing = await services.declarations.get(userId);
         if (existing === null || existing.status === 'revoked') return c.json(notFound, 404);
         const nowIso = new Date(services.now()).toISOString();
-        const record = await services.declarations.upsert({
-          ...existing,
-          status: body.decision === 'verify' ? 'verified' : 'pending',
-          verificationLevel: body.decision === 'verify' ? 'reviewer_verified' : 'unverified',
-          verifiedAt: body.decision === 'verify' ? nowIso : null,
-          verifiedBy: body.decision === 'verify' ? auth.userId : null,
-          updatedAt: nowIso,
-        });
+        const record = await services.declarations.upsert(
+          {
+            ...existing,
+            status: body.decision === 'verify' ? 'verified' : 'pending',
+            verificationLevel: body.decision === 'verify' ? 'reviewer_verified' : 'unverified',
+            verifiedAt: body.decision === 'verify' ? nowIso : null,
+            verifiedBy: body.decision === 'verify' ? auth.userId : null,
+            updatedAt: nowIso,
+          },
+          // CAS on the PREMISES this decision was made about.  A member who
+          // revoked or re-declared since it was read keeps their change: a
+          // verified declaration is the real-funds region basis, so
+          // resurrecting a revoked one — or verifying evidence against a region
+          // the member has left — is exactly what must not happen.
+          {
+            declaredRegion: existing.declaredRegion,
+            status: existing.status,
+            updatedAt: existing.updatedAt,
+          },
+        );
+        if (record === null) {
+          return c.json(
+            deny(
+              'declaration_changed',
+              'The declaration changed while under review; re-read it and decide again.',
+            ),
+            409,
+          );
+        }
         await getIdentityServices().audit.append({
           actorUserId: auth.userId,
           eventType: 'region_declaration_change',

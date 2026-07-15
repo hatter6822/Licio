@@ -16,6 +16,7 @@ import {
   isDeEscalation,
   type ModerationReasonCode,
 } from '@licio/shared';
+import { NO_KEY_WARNING, scanForKeyMaterial } from '../compliance/no-key-filter.js';
 import {
   ACCOUNT_ACTIONS,
   accountStateFor,
@@ -93,13 +94,24 @@ export type SubmitAppealOutcome =
   | { ok: true; response: AppealCreatedResponse }
   | { ok: false; code: 'action_not_found' }
   | { ok: false; code: 'action_not_appealable'; reason: string; availableAt: string | null }
-  | { ok: false; code: 'appeal_already_exists'; appealId: string };
+  | { ok: false; code: 'appeal_already_exists'; appealId: string }
+  | { ok: false; code: 'key_material_blocked'; message: string };
 
 export async function submitAppeal(
   services: ModerationServices,
   appellantUserId: string,
   request: CreateAppealRequest,
 ): Promise<SubmitAppealOutcome> {
+  // WS-N.2.3e — the no-private-key filter, the SAME gate the report edge runs.
+  // An appeal is the other free-text lane into this queue and into reviewer
+  // views, so a user pasting a seed phrase while appealing an action would put
+  // the secret exactly where the report filter exists to keep it out of.  The
+  // matched value is DISCARDED — never logged, stored, or echoed (§18.5).
+  const scan = scanForKeyMaterial(request.user_statement);
+  if (scan.detected) {
+    services.metrics.increment('appeals.key_material_blocked');
+    return { ok: false, code: 'key_material_blocked', message: scan.warning ?? NO_KEY_WARNING };
+  }
   const action = await services.actions.getById(request.action_id);
   if (!action || action.subjectUserId !== appellantUserId) {
     return { ok: false, code: 'action_not_found' };

@@ -140,34 +140,51 @@ export async function createCase(deps: CaseDeps, input: CreateCaseInput): Promis
     return unitFailure(deps, 'case creation', error);
   }
   if (!result.ok || !result.created) return result;
-  // The registered restricted topic: opaque subject ref, never an identity.
-  // Best-effort BY DESIGN: the case + its chain entry are the record of truth
-  // and are already committed, so a failed notification must not destroy an
-  // audited case — nor report a false failure that sends the caller into a
-  // retry the idempotency key would short-circuit anyway.  The alert is the
-  // repair signal.
+  await announceCaseCreated(deps, result.record, input.subjectRef);
+  return { ok: true, record: result.record };
+}
+
+/**
+ * The post-commit announcement of a new case: the registered restricted topic
+ * (opaque subject ref, never an identity) plus its metrics.
+ *
+ * EVERY path that opens a case owes this — `createCase` discharges it for its
+ * own callers, and a caller that composes `createCaseInTx` into a larger unit
+ * (the lawful-access intake) must call it once that unit commits, or its cases
+ * never reach consumers or monitoring while every other trigger's do.
+ *
+ * Called AFTER the unit commits, and best-effort BY DESIGN: the case and its
+ * chain entry are the record of truth and are already committed, so a failed
+ * notification must not destroy an audited case — nor report a false failure
+ * that sends the caller into a retry the idempotency key would short-circuit
+ * anyway.  The alert is the repair signal.
+ */
+export async function announceCaseCreated(
+  deps: CaseDeps,
+  record: ComplianceCaseRecord,
+  subjectRef: string,
+): Promise<void> {
   try {
     await deps.emitCaseCreated({
-      caseId: result.record.caseId,
-      triggerType: result.record.triggerType,
-      subjectRef: deps.opaqueRef(input.subjectRef),
-      riskLevel: result.record.riskLevel,
+      caseId: record.caseId,
+      triggerType: record.triggerType,
+      subjectRef: deps.opaqueRef(subjectRef),
+      riskLevel: record.riskLevel,
     });
   } catch (error) {
     deps.metric('compliance.case.event_emit_failed');
     deps.log('compliance.case.event_emit_failed', {
-      caseId: result.record.caseId,
-      triggerType: result.record.triggerType,
+      caseId: record.caseId,
+      triggerType: record.triggerType,
       message: error instanceof Error ? error.message : 'unknown',
     });
   }
-  deps.metric(`compliance.case.created.${result.record.triggerType}`);
+  deps.metric(`compliance.case.created.${record.triggerType}`);
   deps.log('compliance.case.created', {
-    caseId: result.record.caseId,
-    triggerType: result.record.triggerType,
-    riskLevel: result.record.riskLevel,
+    caseId: record.caseId,
+    triggerType: record.triggerType,
+    riskLevel: record.riskLevel,
   });
-  return { ok: true, record: result.record };
 }
 
 /** `createCase` within an EXISTING unit (a SAR draft, a lawful-access intake).

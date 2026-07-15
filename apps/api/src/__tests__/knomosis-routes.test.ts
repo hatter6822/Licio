@@ -10,6 +10,7 @@ import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import { createV1Routes } from '../routes/v1.js';
+import { resetTreasuryServicesForTests, setTreasuryServices } from '../treasury/services.js';
 import { seedUserWithSession } from './event-test-helpers.js';
 import {
   freshKnomosisServices,
@@ -619,6 +620,121 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     expect(submit.status).toBe(202);
     const standing = await get(`/knomosis/standing/${walletAccountId}/${deploymentId}`, cookie);
     expect(standing.status).not.toBe(200);
+  });
+
+  describe('a claimed payment_intent_id must BE this transfer (WS-N.2.2c)', () => {
+    /** A treasury intent store the test drives directly. */
+    function wireIntent(intent: Record<string, unknown> | null) {
+      setTreasuryServices({
+        intents: { getById: async () => intent },
+      } as never);
+    }
+
+    const liveIntent = (overrides: Record<string, unknown> = {}) => ({
+      paymentIntentId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      userId: null,
+      roomId: ROOM,
+      asset: 'USDC',
+      amount: '1000000',
+      executionState: 'quoted',
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      ...overrides,
+    });
+
+    afterEach(() => {
+      resetTreasuryServicesForTests();
+    });
+
+    async function preflightClaiming(
+      intentId: string,
+      overrides: Record<string, unknown> = {},
+    ): Promise<Response> {
+      const fixture = await freshKnomosisServices();
+      fixture.knomosis.rooms = {
+        roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+        isMember: async () => true,
+        isSteward: async () => false,
+        contentVisibleToUser: async () => true,
+      };
+      const { userId, cookie } = await seedUserWithSession(fixture.identity);
+      const walletAccountId = await linkAndMapWallet(fixture, userId);
+      const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+      const message = depositMessage(deploymentId);
+      wireIntent(liveIntent({ userId, ...overrides }));
+      return await post('/knomosis/actions/preflight', cookie, {
+        action_type: 'treasury_deposit',
+        room_id: ROOM,
+        deployment_id: deploymentId,
+        wallet_account_id: walletAccountId,
+        payment_intent_id: intentId,
+        typed_data_message: message,
+        signature: await signedTypedData('treasury_deposit', message),
+      });
+    }
+
+    const INTENT = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+    it('accepts the intent that matches the signed transfer', async () => {
+      const res = await preflightClaiming(INTENT);
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects an intent for a DIFFERENT amount — the clearance-theft path', async () => {
+      // The attack the verification exists to stop: a member whose high-value
+      // intent for amount X was cleared names that id on a later transfer.  The
+      // review case key names the same subject and amount, so `createCase` would
+      // hand the new transfer the OLD cleared case and it would skip review.
+      const res = await preflightClaiming(INTENT, { amount: '999' });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'intent_mismatch',
+      );
+    });
+
+    it('rejects another member’s intent, a different room, and a different asset', async () => {
+      for (const overrides of [
+        { userId: '11111111-1111-4111-8111-111111111111' },
+        { roomId: '22222222-2222-4222-8222-222222222222' },
+        { asset: 'DAI' },
+      ]) {
+        const res = await preflightClaiming(INTENT, overrides);
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('rejects an intent past the pre-submission window, or expired', async () => {
+      // `submitted` and beyond: the intent's action already exists, so naming it
+      // in a NEW preflight would resurrect a spent clearance.
+      expect((await preflightClaiming(INTENT, { executionState: 'submitted' })).status).toBe(400);
+      expect(
+        (await preflightClaiming(INTENT, { expiresAt: new Date(Date.now() - 1).toISOString() }))
+          .status,
+      ).toBe(400);
+    });
+
+    it('rejects an intent that does not exist', async () => {
+      const fixture = await freshKnomosisServices();
+      fixture.knomosis.rooms = {
+        roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+        isMember: async () => true,
+        isSteward: async () => false,
+        contentVisibleToUser: async () => true,
+      };
+      const { userId, cookie } = await seedUserWithSession(fixture.identity);
+      const walletAccountId = await linkAndMapWallet(fixture, userId);
+      const message = depositMessage(LOCAL_DEPLOYMENT.deployment_id);
+      wireIntent(null);
+      const res = await post('/knomosis/actions/preflight', cookie, {
+        action_type: 'treasury_deposit',
+        room_id: ROOM,
+        deployment_id: LOCAL_DEPLOYMENT.deployment_id,
+        wallet_account_id: walletAccountId,
+        payment_intent_id: INTENT,
+        typed_data_message: message,
+        signature: await signedTypedData('treasury_deposit', message),
+      });
+      expect(res.status).toBe(400);
+    });
   });
 
   it('a preflight failure returns a typed reason (unknown action type)', async () => {

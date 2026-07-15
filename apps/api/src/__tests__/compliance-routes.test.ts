@@ -1160,6 +1160,63 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
   });
 });
 
+describe('a declaration decision cannot overwrite a member’s change (WS-N.1.1f)', () => {
+  it('409s when the member re-declares between the reviewer’s read and write', async () => {
+    const reviewer = await seedReviewer();
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}` });
+    await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'DE' }, member.cookie),
+    );
+    // The member moves and re-declares in the window between the reviewer's
+    // handler reading the declaration and writing its decision back.
+    const store = compliance.declarations;
+    const originalGet = store.get.bind(store);
+    let raced = false;
+    store.get = async (userId: string) => {
+      const row = await originalGet(userId);
+      if (!raced && row !== null) {
+        raced = true;
+        await app().request(
+          post('/v1/compliance/region/declaration', { declared_region: 'FR' }, member.cookie),
+        );
+      }
+      return row; // the reviewer's handler holds the STALE row
+    };
+    let verify: Response;
+    try {
+      verify = await app().request(
+        post(
+          `/v1/compliance/admin/declarations/${member.userId}/verify`,
+          { decision: 'verify', note: 'passport checked' },
+          reviewer.cookie,
+        ),
+      );
+    } finally {
+      store.get = originalGet;
+    }
+    // A verified declaration IS the real-funds region basis, so verifying
+    // evidence for a region the member has left must not stand.
+    expect(verify.status).toBe(409);
+    expect(((await verify.json()) as { error: { code: string } }).error.code).toBe(
+      'declaration_changed',
+    );
+    const current = await compliance.declarations.get(member.userId);
+    expect(current?.declaredRegion).toBe('FR');
+    expect(current?.status).toBe('pending'); // NOT resurrected as verified DE
+
+    // Deciding on the CURRENT declaration works.
+    const again = await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'verify', note: 'passport checked' },
+        reviewer.cookie,
+      ),
+    );
+    expect(again.status).toBe(200);
+    expect((await compliance.declarations.get(member.userId))?.declaredRegion).toBe('FR');
+  });
+});
+
 describe('the fraud queue shows every fraud case, not just the first page (WS-N.2.2c)', () => {
   it('caps fraud-class cases, not the case table', async () => {
     const reviewer = await seedReviewer();

@@ -521,6 +521,31 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect(anonymized?.retentionPolicy.anonymized_at).not.toBeNull();
   });
 
+  it('the erasure scrub reports a row held at WRITE time as held back', async () => {
+    const subject = randomUUID();
+    const held = track(
+      await stores.cases.insert(
+        caseOf(subject, {
+          retentionPolicy: {
+            retention_period_days: 1825,
+            deletion_date: hoursAhead(24),
+            legal_hold: true,
+            legal_hold_refs: ['sar-hold'],
+          },
+        }),
+      ),
+    );
+    const plain = track(await stores.cases.insert(caseOf(subject)));
+    const outcome = await stores.cases.scrubUserSubject(subject);
+    // The update carries `NOT_HELD` in its WHERE, so the held row cannot be
+    // nulled even if the candidate read had let it through — and `returning`
+    // is what decides which rows are reported scrubbed, rather than the read's
+    // guess about them.
+    expect(outcome.scrubbed).toEqual([plain.caseId]);
+    expect(outcome.heldBack).toEqual([held.caseId]);
+    expect((await stores.cases.getById(held.caseId))?.userIdOrRoomId).toBe(subject);
+  });
+
   it('deleteCascade refuses a case a legal hold claimed after the page was read', async () => {
     const subject = randomUUID();
     // The sweep selects it: expired, not held.
@@ -605,7 +630,30 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       createdAt: at,
       updatedAt: NOW(),
     });
+    if (verified === null) throw new Error('verify upsert returned null');
     expect(verified.status).toBe('verified');
+    // The CAS refuses a write whose premises no longer hold — the guarantee
+    // the reviewer's decision path rides.  A decision made about a 'FR' row
+    // matches nothing now that the stored declaration says otherwise.
+    expect(
+      await stores.declarations.upsert(
+        { ...verified, status: 'revoked', updatedAt: NOW() },
+        { declaredRegion: 'FR', status: verified.status, updatedAt: verified.updatedAt },
+      ),
+    ).toBeNull();
+    expect((await stores.declarations.get(userId))?.status).toBe('verified');
+    // …and honours one whose premises DO hold.
+    expect(
+      await stores.declarations.upsert(
+        { ...verified, status: 'revoked', updatedAt: NOW() },
+        {
+          declaredRegion: verified.declaredRegion,
+          status: verified.status,
+          updatedAt: verified.updatedAt,
+        },
+      ),
+    ).not.toBeNull();
+    expect((await stores.declarations.get(userId))?.status).toBe('revoked');
     expect((await stores.declarations.get(userId))?.verificationLevel).toBe('reviewer_verified');
     expect(await stores.declarations.delete(userId)).toBe(true);
     expect(await stores.declarations.get(userId)).toBeNull();

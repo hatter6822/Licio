@@ -787,6 +787,26 @@ describe('trust-safety route branches', () => {
     expect(
       (await app().request(get(`/v1/appeals/eligibility/${actionId}`, safety.cookie))).status,
     ).toBe(404);
+    // WS-N.2.3e: an appeal is the OTHER free-text lane into this queue, so it
+    // runs the same no-key filter the report edge does — a user pasting a seed
+    // phrase while appealing would otherwise put the secret straight into the
+    // appeal queue and reviewer views.
+    const keyed = await app().request(
+      post(
+        '/v1/appeals',
+        {
+          action_id: actionId,
+          user_statement:
+            'my seed is abandon ability able about above absent absorb abstract absurd abuse access accident',
+        },
+        AUTHOR_COOKIE,
+      ),
+    );
+    expect(keyed.status).toBe(422);
+    expect(((await keyed.json()) as { error: { code: string } }).error.code).toBe(
+      'key_material_blocked',
+    );
+    // …and the blocked appeal was DISCARDED, so the real one still goes through.
     // First appeal succeeds; the duplicate is 409.
     expect(
       (

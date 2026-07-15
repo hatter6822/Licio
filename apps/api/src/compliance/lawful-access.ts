@@ -14,7 +14,13 @@
 
 import type { LawfulAccessStatus } from '@licio/shared';
 import { appendCaseAuditInTx, runChainedUnit } from './audit.js';
-import { type CaseDeps, createCaseInTx, setLegalHoldInTx, transitionCaseInTx } from './cases.js';
+import {
+  announceCaseCreated,
+  type CaseDeps,
+  createCaseInTx,
+  setLegalHoldInTx,
+  transitionCaseInTx,
+} from './cases.js';
 import type { ComplianceTxStores, LawfulAccessRecord, LawfulAccessStore } from './stores.js';
 
 /** This request's hold on its intake case — opaque, so the reviewer-visible
@@ -77,7 +83,7 @@ export async function intakeLawfulAccessRequest(
   },
 ): Promise<LawfulAccessOutcome> {
   try {
-    return await runChainedUnit(
+    const outcome = await runChainedUnit(
       deps.caseDeps.transactor,
       async (stores) => {
         const nowIso = new Date(deps.now()).toISOString();
@@ -119,10 +125,24 @@ export async function intakeLawfulAccessRequest(
           createdAt: nowIso,
           updatedAt: nowIso,
         });
-        return { ok: true, record };
+        return {
+          ok: true as const,
+          record,
+          openedCase: linked.created ? linked.record : null,
+        };
       },
       'lawful-access intake',
     );
+    // The case-created announcement, AFTER the unit commits (a chain fork can
+    // run the unit twice; the topic must not be published twice with it).  This
+    // path composes `createCaseInTx` into its own unit, so it owes the
+    // announcement `createCase` would otherwise have made — without it these
+    // high-risk cases would be the only trigger invisible to consumers and
+    // monitoring.
+    if (outcome.ok && outcome.openedCase !== null) {
+      await announceCaseCreated(deps.caseDeps, outcome.openedCase, input.scope.subject_ref);
+    }
+    return outcome.ok ? { ok: true as const, record: outcome.record } : outcome;
   } catch {
     // The unit kept nothing: no case, no hold, no request.
     return laErr(503, 'intake_unavailable', 'The request could not be recorded; nothing was kept.');

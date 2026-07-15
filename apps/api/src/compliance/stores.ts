@@ -279,9 +279,27 @@ export interface CaseAuditStore {
   deleteByCase(caseId: string): Promise<number>;
 }
 
+/** What a declaration decision was made ABOUT — the CAS token. */
+export type DeclarationPremises = Pick<
+  RegionDeclarationRecord,
+  'declaredRegion' | 'status' | 'updatedAt'
+>;
+
 export interface RegionDeclarationStore {
   get(userId: string): Promise<RegionDeclarationRecord | null>;
-  upsert(record: RegionDeclarationRecord): Promise<RegionDeclarationRecord>;
+  /** `expected` makes the write a CAS: null ⇔ the member changed their
+   *  declaration under us.  A verified declaration IS the real-funds region
+   *  basis, so a reviewer's decision must not write back a row the member has
+   *  since revoked or re-declared — that would resurrect a revoked declaration,
+   *  or verify evidence against a region the member has left.
+   *
+   *  It compares the DECISION'S PREMISES (the region and status it was made
+   *  about), not just `updatedAt`: two changes inside one millisecond share a
+   *  timestamp, so a timestamp alone would wave the stale decision through. */
+  upsert(
+    record: RegionDeclarationRecord,
+    expected?: DeclarationPremises,
+  ): Promise<RegionDeclarationRecord | null>;
   delete(userId: string): Promise<boolean>;
 }
 
@@ -748,11 +766,15 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
     const heldBack: string[] = [];
     for (const row of this.#rows.values()) {
       if (row.subjectKind !== 'user' || row.userIdOrRoomId !== userId) continue;
-      if (row.retentionPolicy.legal_hold) {
+      // Re-read at write time (the CAS the Drizzle adapter puts in its WHERE):
+      // a hold applied since the candidates were chosen must defeat the scrub,
+      // or the held case loses the subject the obligation is about.
+      const live = this.#rows.get(row.caseId);
+      if (live === undefined || live.retentionPolicy.legal_hold) {
         heldBack.push(row.caseId);
         continue;
       }
-      this.#rows.set(row.caseId, { ...row, userIdOrRoomId: null });
+      this.#rows.set(row.caseId, { ...live, userIdOrRoomId: null });
       scrubbed.push(row.caseId);
     }
     return { scrubbed, heldBack };
@@ -811,7 +833,22 @@ export class InMemoryRegionDeclarationStore implements RegionDeclarationStore {
     return row ? { ...row } : null;
   }
 
-  async upsert(record: RegionDeclarationRecord): Promise<RegionDeclarationRecord> {
+  async upsert(
+    record: RegionDeclarationRecord,
+    expected?: DeclarationPremises,
+  ): Promise<RegionDeclarationRecord | null> {
+    // The CAS the Drizzle adapter gets from its WHERE clause.
+    if (expected !== undefined) {
+      const current = this.#rows.get(record.userId);
+      if (
+        current === undefined ||
+        current.declaredRegion !== expected.declaredRegion ||
+        current.status !== expected.status ||
+        current.updatedAt !== expected.updatedAt
+      ) {
+        return null;
+      }
+    }
     this.#rows.set(record.userId, { ...record });
     return { ...record };
   }

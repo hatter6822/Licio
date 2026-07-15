@@ -67,6 +67,20 @@ modified** in their verdict semantics:
   `userId` stays the **actor** throughout — velocity is per-person, and a room
   does not declare a jurisdiction.
 
+  **A claimed `payment_intent_id` is a claim, not a fact.**  It buys the naming
+  action a share of that intent's review, so unverified it is a clearance to
+  steal: a member whose high-value intent for amount X was cleared could put
+  that id on ANY later signed transfer of X and skip manual review — the case
+  key names the same subject and amount, so `createCase` would hand the new
+  transfer the old cleared case. Both WS-L legs therefore verify the intent IS
+  this transfer: the caller's own (or their room's), this room, this asset, this
+  amount, and still inside `PAYMENT_INTENT_TIMED_STATES` (the pre-submission
+  window — past it the intent's action already exists, so naming it would
+  resurrect a spent clearance) and unexpired. A mismatch is **rejected**, never
+  silently dropped: dropping it would quietly split the transfer's review in
+  two, the defect the id exists to prevent. The read crosses into WS-M, so it
+  lives at the route composition layer, never inside the WS-L domain module.
+
   **A decision closes the review it decided.** The fraud queue's release/reject
   records the decision on the case chain **and** resolves the case (`cleared` /
   `restricted`) in one unit — it walks the sanctioned `CASE_TRANSITIONS` route
@@ -76,7 +90,9 @@ modified** in their verdict semantics:
   compliance column, so a still-open review would block the released deposit
   again at the WS-L leg; and a decided-but-open case would sit in the queue
   forever. Atomic in both directions — a chain fault leaves the case unmoved
-  and the compensator puts the hold back rather than move funds unaudited.
+  and the compensator puts the hold back rather than move funds unaudited, and
+  a closure the state machine refuses aborts the unit rather than commit an
+  entry recording a release that never took effect.
 - `jurisdiction` → `'allowed' | 'blocked' | 'unknown'` — takes the
   `featureCell` the caller is about to exercise and the `asset` it would move.
   Every fund/action path passes both: the WS-L preflight, its submit re-check
@@ -101,7 +117,10 @@ gate** (`403 disclosure_ack_required` until every current counsel-published
 version for the user's region is acknowledged) on BOTH first-financial-action
 chokepoints — payment-intent creation and the WS-L `/actions/preflight` route
 for fund-transfer actions, since a signed transfer can be minted without ever
-passing through an intent — and the **compliance-hold gate** in
+passing through an intent, and **again at `/actions/submit`**, since a token
+stays valid for its TTL and counsel can publish or bump a disclosure inside that
+window (the same reason submit re-checks sanctions, jurisdiction, and fraud
+rather than trusting the token) — and the **compliance-hold gate** in
 `transitionIntent` (a `flagged`/`blocked` intent cannot reach
 `quoted`/`signed`/`submitted` until released).
 
@@ -253,9 +272,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   private-key export.  A `0x`-prefixed 64-hex value is *also* a transaction
   hash and the two are syntactically identical, so this is a choice about
   which error to make: storing a pasted key is catastrophic and irreversible,
-  refusing a hash in the one field this guards (the WS-J report `context`
-  blurb) costs a warning, and real references belong in the structured
-  `evidence_urls` array the filter never scans.
+  refusing a hash in the free-text fields this guards costs a warning, and real
+  references belong in the structured `evidence_urls` array the filter never
+  scans.  It guards **both** free-text lanes into the WS-J queue — the report
+  `context` blurb and the appeal `user_statement` — because a user pasting a
+  seed phrase while appealing an action reaches the same queue and the same
+  reviewer views.  (`new_evidence` is URL-schema'd, not free text, so it is not
+  scanned.)
 - **RBAC separation is deliberate.**  `compliance` and `counsel` are distinct
   roles with distinct capabilities; `steward` and `admin` do NOT inherit them.
   Enabling any cell in a jurisdiction policy takes the **counsel capability**
@@ -324,6 +347,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   says `released` only when the last obligation lets go — a release that leaves
   the case held is not a release of the case. It is a SET, not a counter: a
   retried apply cannot strand the case at one.
+- **Decisions CAS on their own premises.**  A reviewer's declaration verdict
+  compares the region *and* status *and* `updatedAt` it was made about, not a
+  timestamp alone — two changes inside one millisecond share a timestamp, and a
+  verified declaration is the real-funds region basis, so resurrecting a revoked
+  one (or verifying evidence against a region the member has left) must be
+  impossible. The SAR filing CASes on `approved` for the same reason: the loser
+  of a race gets a 409 rather than overwriting `filedByRef`.
 - **The retention writes re-check the hold themselves.**  `deleteCascade` takes
   a row lock and re-reads it inside its transaction; `anonymize` puts it in the
   `WHERE`. The sweep's `listExpired` read cannot carry that guarantee — a SAR
@@ -331,7 +361,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   predicate is `legal_hold = false`, not `IS NOT TRUE`: "not provably unheld"
   must not authorize a destructive act. A hold that wins the race is reported as
   `heldRace` (the guard working), never as an error, and leaves the run
-  un-drained so the next tick re-reads the case.
+  un-drained so the next tick re-reads the case. The right-to-erasure scrub
+  carries the same predicate into its UPDATE, and reports rows by what actually
+  moved (`returning`) rather than by what the candidate read guessed.
+- **Every path that opens a case announces it.**  `createCase` emits the
+  registered topic for its own callers; a path that composes `createCaseInTx`
+  into a larger unit (the lawful-access intake) calls `announceCaseCreated` once
+  that unit commits — after, never inside, since a chain fork can run the unit
+  twice. Without it those high-risk cases would be the only trigger invisible to
+  consumers and monitoring.
 - **Retention retries and drains.**  The sweep's cadence marker advances only
   on a *drained* run — neither a transient failure nor a >500-case backlog may
   burn the window, or expired cases would stay readable for another full

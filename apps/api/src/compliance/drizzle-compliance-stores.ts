@@ -38,7 +38,7 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
-import { and, asc, desc, eq, gt, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lte, type SQL, sql } from 'drizzle-orm';
 import type {
   CaseAuditRecord,
   CaseAuditStore,
@@ -46,6 +46,7 @@ import type {
   ComplianceCaseStore,
   ComplianceTransactor,
   ComplianceTxStores,
+  DeclarationPremises,
   DisclosureAckRecord,
   DisclosureAckStore,
   DisclosureStore,
@@ -560,19 +561,28 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
           eq(financialComplianceCases.userIdOrRoomId, userId),
         ),
       );
-    const scrubbed: string[] = [];
     const heldBack: string[] = [];
+    const eligible: string[] = [];
     for (const row of candidates) {
       const policy = row.retentionPolicy as CaseRetentionPolicy;
       if (policy.legal_hold) heldBack.push(row.caseId);
-      else scrubbed.push(row.caseId);
+      else eligible.push(row.caseId);
     }
-    if (scrubbed.length > 0) {
-      await this.#db
-        .update(financialComplianceCases)
-        .set({ userIdOrRoomId: null })
-        .where(inArray(financialComplianceCases.caseId, scrubbed));
-    }
+    if (eligible.length === 0) return { scrubbed: [], heldBack };
+    // `NOT_HELD` again, IN the update: a SAR draft or lawful-access intake can
+    // apply a hold between choosing these candidates and scrubbing them, and
+    // the carve-out this read implements would then be defeated — the held
+    // case would lose the very subject the obligation is about.  `returning`
+    // tells us which rows actually moved, so a row that lost the race is
+    // reported as held back rather than as scrubbed.
+    const updated = await this.#db
+      .update(financialComplianceCases)
+      .set({ userIdOrRoomId: null })
+      .where(and(inArray(financialComplianceCases.caseId, eligible), NOT_HELD))
+      .returning({ caseId: financialComplianceCases.caseId });
+    const scrubbed = updated.map((row) => row.caseId);
+    const moved = new Set(scrubbed);
+    for (const caseId of eligible) if (!moved.has(caseId)) heldBack.push(caseId);
     return { scrubbed, heldBack };
   }
 }
@@ -705,7 +715,10 @@ export class DrizzleRegionDeclarationStore implements RegionDeclarationStore {
     return rows[0] ? toDeclaration(rows[0]) : null;
   }
 
-  async upsert(record: RegionDeclarationRecord): Promise<RegionDeclarationRecord> {
+  async upsert(
+    record: RegionDeclarationRecord,
+    expected?: DeclarationPremises,
+  ): Promise<RegionDeclarationRecord | null> {
     const values = {
       userId: record.userId,
       declaredRegion: record.declaredRegion,
@@ -717,24 +730,44 @@ export class DrizzleRegionDeclarationStore implements RegionDeclarationStore {
       createdAt: new Date(record.createdAt),
       updatedAt: new Date(record.updatedAt),
     };
-    const rows = await this.#db
-      .insert(regionDeclarations)
-      .values(values)
-      .onConflictDoUpdate({
-        target: regionDeclarations.userId,
-        set: {
-          declaredRegion: values.declaredRegion,
-          status: values.status,
-          verificationLevel: values.verificationLevel,
-          evidenceRef: values.evidenceRef,
-          verifiedAt: values.verifiedAt,
-          verifiedBy: values.verifiedBy,
-          updatedAt: values.updatedAt,
-        },
-      })
-      .returning();
+    const set = {
+      declaredRegion: values.declaredRegion,
+      status: values.status,
+      verificationLevel: values.verificationLevel,
+      evidenceRef: values.evidenceRef,
+      verifiedAt: values.verifiedAt,
+      verifiedBy: values.verifiedBy,
+      updatedAt: values.updatedAt,
+    };
+    // The CAS: a member who changed their declaration since the caller read it
+    // makes this match zero rows rather than have their change overwritten by a
+    // decision about the old one.  The region and status are compared too — two
+    // changes inside one millisecond share a timestamp.
+    const rows = await (expected === undefined
+      ? this.#db
+          .insert(regionDeclarations)
+          .values(values)
+          .onConflictDoUpdate({ target: regionDeclarations.userId, set })
+      : this.#db
+          .insert(regionDeclarations)
+          .values(values)
+          .onConflictDoUpdate({
+            target: regionDeclarations.userId,
+            set,
+            // `and()` widens to `SQL | undefined` (it returns undefined only
+            // when given NO defined conditions — three are given here), and
+            // `exactOptionalPropertyTypes` will not take the union.  The column
+            // refs are what map the timestamp for the driver, so this must go
+            // through `eq`, not a raw template.
+            setWhere: and(
+              eq(regionDeclarations.declaredRegion, expected.declaredRegion),
+              eq(regionDeclarations.status, expected.status),
+              eq(regionDeclarations.updatedAt, new Date(expected.updatedAt)),
+            ) as SQL,
+          })
+    ).returning();
     const row = rows[0];
-    if (row === undefined) throw new Error('region declaration upsert returned no row');
+    if (row === undefined) return null; // CAS lost (or nothing written)
     return toDeclaration(row);
   }
 

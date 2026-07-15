@@ -12,6 +12,7 @@
 // incident — WS-L.3.5c — so users can see WHY an action would fail).
 
 import { zValidator } from '@hono/zod-validator';
+import { PAYMENT_INTENT_TIMED_STATES, type PaymentIntentState } from '@licio/governance';
 import {
   KILL_SWITCH_IDS,
   type KnomosisSignedActionType,
@@ -62,9 +63,70 @@ import {
   requireSteward,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
+import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/services.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
+
+/**
+ * A client-named `payment_intent_id` is a CLAIM, not a fact — and it buys the
+ * naming action a share of that intent's compliance review.  Left unverified it
+ * is a clearance to steal: a member whose high-value intent for amount X was
+ * cleared could put that id on ANY later signed transfer of X and skip manual
+ * review entirely (the review case key names the same subject and amount, so
+ * `createCase` would hand the new transfer the old cleared case).
+ *
+ * So the intent must BE this transfer: the caller's own (or their room's), for
+ * this room, this asset, this amount, and still live.  A mismatch is rejected
+ * outright rather than silently dropped — dropping it would quietly split the
+ * transfer's review in two, which is the defect the id exists to prevent.
+ *
+ * Null ⇔ verified (or none claimed).  The read crosses into WS-M, so it lives
+ * here at the composition layer, never inside the WS-L domain module.
+ */
+async function verifyClaimedIntent(input: {
+  paymentIntentId: string | undefined;
+  userId: string;
+  roomId: string;
+  typedDataMessage: Record<string, unknown>;
+}): Promise<{ code: string; message: string } | null> {
+  if (input.paymentIntentId === undefined) return null;
+  if (!treasuryServicesConfigured()) {
+    // The claim cannot be checked, so it cannot be honoured.
+    return { code: 'intent_unverifiable', message: 'The payment intent could not be verified.' };
+  }
+  const intent = await getTreasuryServices().intents.getById(input.paymentIntentId);
+  const mismatch = {
+    code: 'intent_mismatch',
+    message: 'The payment intent does not match this action.',
+  };
+  if (intent === null) return mismatch;
+  // Ownership: a member's own intent, or a room-owned payout in the room this
+  // action names (the pipeline's steward check gates the room itself).
+  if (intent.userId !== null && intent.userId !== input.userId) return mismatch;
+  if (intent.roomId !== input.roomId) return mismatch;
+  // …and the SAME movement: amount and asset come from the signed payload, so
+  // a cleared small intent cannot cover a large transfer.
+  if (intent.amount !== input.typedDataMessage['amount']) return mismatch;
+  if (intent.asset !== input.typedDataMessage['asset']) return mismatch;
+  // …and still an attempt IN FLIGHT.  `PAYMENT_INTENT_TIMED_STATES` is exactly
+  // the pre-submission window in which an action is being minted (the states
+  // the expiry sweep watches); past it the intent's action already exists, so
+  // naming it in a NEW preflight would resurrect a spent clearance.  The
+  // expiry itself is re-checked because the sweep is periodic — a lapsed intent
+  // can still be sitting in `quoted`.
+  if (!(PRE_SUBMISSION_INTENT_STATES as ReadonlySet<string>).has(intent.executionState)) {
+    return mismatch;
+  }
+  if (intent.expiresAt <= new Date(getKnomosisServices().now()).toISOString()) return mismatch;
+  return null;
+}
+
+/** The pre-submission window, from the WS-M lifecycle SSOT (never re-listed
+ *  here: a state added there must not silently become replayable). */
+const PRE_SUBMISSION_INTENT_STATES: ReadonlySet<PaymentIntentState> = new Set(
+  PAYMENT_INTENT_TIMED_STATES,
+);
 
 function preflightDeps(services: KnomosisServices): PreflightDeps | null {
   if (services.rooms === null) return null;
@@ -230,6 +292,15 @@ export function createKnomosisRoutes() {
               );
             }
           }
+          const intentClaim = await verifyClaimedIntent({
+            paymentIntentId: body.payment_intent_id,
+            userId: auth.userId,
+            roomId: body.room_id,
+            typedDataMessage: body.typed_data_message,
+          });
+          if (intentClaim !== null) {
+            return c.json(deny(intentClaim.code, intentClaim.message), 400);
+          }
           const response = await runPreflight(deps, {
             userId: auth.userId,
             actionType: body.action_type,
@@ -290,6 +361,42 @@ export function createKnomosisRoutes() {
           const subDeps = submissionDeps(services);
           if (subDeps === null) {
             return c.json(deny('unavailable', 'Governance data is unavailable.'), 503);
+          }
+          // WS-N.1.2d — the disclosure gate AGAIN, at submit.  The preflight's
+          // gate cannot stand for both: a token stays valid for its TTL, and
+          // counsel can publish or bump a disclosure inside that window — so a
+          // still-valid token would move funds against disclosures the member
+          // has never acknowledged.  This is the same reason submit re-checks
+          // sanctions, jurisdiction, and fraud rather than trusting the token;
+          // disclosures were the one gate left behind.
+          const movesFunds = (FUND_TRANSFER_ACTIONS as ReadonlySet<string>).has(body.action_type);
+          if (movesFunds && complianceServicesConfigured()) {
+            const disclosureCheck = await disclosureGate(
+              buildDisclosureDeps(getComplianceServices()),
+              auth.userId,
+            );
+            if (disclosureCheck.required) {
+              return c.json(
+                {
+                  error: {
+                    code: 'disclosure_ack_required',
+                    message:
+                      'Acknowledge the current risk disclosures before your first financial action.',
+                  },
+                  missing: disclosureCheck.missing,
+                },
+                403,
+              );
+            }
+          }
+          const claimed = await verifyClaimedIntent({
+            paymentIntentId: body.payment_intent_id,
+            userId: auth.userId,
+            roomId: body.room_id,
+            typedDataMessage: body.typed_data_message,
+          });
+          if (claimed !== null) {
+            return c.json(deny(claimed.code, claimed.message), 400);
           }
           const outcome = await submitAction(subDeps, {
             userId: auth.userId,

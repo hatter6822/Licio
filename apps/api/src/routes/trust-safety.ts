@@ -257,6 +257,14 @@ export function createTrustSafetyRoutes() {
           const request = c.req.valid('json');
           const outcome = await submitAppeal(getModerationServices(), auth.userId, request);
           if (!outcome.ok) {
+            // WS-N.2.3e: the SAME answer the report edge gives — an appeal is
+            // the other free-text lane into this queue.
+            if (outcome.code === 'key_material_blocked') {
+              return c.json(
+                { error: { code: 'key_material_blocked', message: outcome.message } },
+                422,
+              );
+            }
             if (outcome.code === 'action_not_found') {
               return c.json(deny('action_not_found', 'Action not found'), 404);
             }
