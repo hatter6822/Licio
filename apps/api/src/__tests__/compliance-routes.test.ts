@@ -1039,3 +1039,107 @@ describe('lawful access preserves the scope kind (WS-N.2.3d)', () => {
     expect(record?.userIdOrRoomId).toBe(txRef);
   });
 });
+
+describe('holds and their records are all-or-nothing (WS-N.2.1e / 2.3d)', () => {
+  it('a SAR draft that cannot be stored releases the legal hold it applied', async () => {
+    const counsel = await seedCounsel();
+    const caseId = await createCaseVia(counsel.cookie, { trigger_type: 'sanctions' });
+    compliance.sars.insert = async () => {
+      throw new Error('sar store down');
+    };
+    const res = await app().request(
+      post(
+        `/v1/compliance/admin/cases/${caseId}/sar`,
+        { jurisdiction: 'DE', narrative: 'A narrative that will not persist.' },
+        counsel.cookie,
+      ),
+    );
+    expect(res.status).toBe(503);
+    // The hold exists FOR the report; with no report it would pin the case out
+    // of retention forever and each retry would stack another hold.
+    expect((await compliance.cases.getById(caseId))?.retentionPolicy.legal_hold).toBe(false);
+    // The chain stays honest about what actually happened.
+    const actions = (await compliance.caseAudit.listChained(caseId)).map((e) => e.action);
+    expect(actions).toContain('legal_hold_applied');
+    expect(actions).toContain('legal_hold_released');
+  });
+
+  it('lawful-access intake ABORTS when the legal hold cannot be applied', async () => {
+    const counsel = await seedCounsel();
+    const subject = await seedUser({ handle: `s${randomUUID().slice(0, 8)}` });
+    // The hold's audit append fails ⇒ setLegalHold rolls back and errors.
+    let created = 0;
+    const realAppend = compliance.caseAudit.appendChained.bind(compliance.caseAudit);
+    compliance.caseAudit.appendChained = async (entry) => {
+      created += 1;
+      if (created > 1) throw new Error('audit store down'); // let 'created' land
+      return realAppend(entry);
+    };
+    const res = await app().request(
+      post(
+        '/v1/compliance/admin/lawful-access',
+        {
+          agency: 'Court',
+          jurisdiction: 'DE',
+          legal_basis: 'court_order',
+          scope: {
+            subject_kind: 'user',
+            subject_ref: subject.userId,
+            time_range_start: null,
+            time_range_end: null,
+          },
+          contact: 'court@example.test',
+        },
+        counsel.cookie,
+      ),
+    );
+    // Recording the request while its hold failed would look compliant and not
+    // be: retention could then sweep the very records it obliges us to keep.
+    expect(res.status).toBe(503);
+    expect(await compliance.lawfulAccess.list(null, 10)).toHaveLength(0);
+  });
+});
+
+describe('the declaration-verification audit records its subject (WS-N.1.1f)', () => {
+  it('puts the opaque subject in targetRef, which redactContext preserves', async () => {
+    const appended: Array<{
+      event_type: string;
+      target_ref: string | null;
+      context: { setting: string | null; reason: string | null };
+    }> = [];
+    const realAppend = identity.audit.append.bind(identity.audit);
+    identity.audit.append = async (input, createdAt) => {
+      const entry = await realAppend(input, createdAt);
+      appended.push(entry as unknown as (typeof appended)[number]);
+      return entry;
+    };
+    const reviewer = await seedReviewer();
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}` });
+    await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'DE' }, member.cookie),
+    );
+    const res = await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'verify', note: 'passport reviewed' },
+        reviewer.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    // `append` returns the PERSISTED entry — already through redactContext —
+    // so this asserts the subject actually survives redaction, not merely that
+    // the route passed it.
+    const entry = appended.find(
+      (e) => e.event_type === 'region_declaration_change' && e.target_ref !== null,
+    );
+    // Without a target the entry would say a reviewer verified *something* —
+    // useless for the one anti-circumvention control the region ladder has.
+    expect(entry).toBeDefined();
+    expect(entry?.target_ref).toBe(compliance.opaqueRef(member.userId));
+    // …and the subject is an opaque ref, never the raw user id.
+    expect(entry?.target_ref).not.toBe(member.userId);
+    // The decision + note ride the allowlisted context keys.
+    expect(entry?.context.setting).toBe('verify');
+    expect(entry?.context.reason).toBe('passport reviewed');
+  });
+});

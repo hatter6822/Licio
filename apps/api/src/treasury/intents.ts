@@ -399,6 +399,10 @@ export async function preflightIntent(
     userId: subjectUserId,
     actionType: `payment_intent:${intent.targetType}`,
     amountMinorUnits: intent.amount,
+    // This intent IS the attempt: a high-value review a compliance reviewer
+    // clears releases this deposit, never every later deposit of the same
+    // amount (each is its own intent, hence its own review).
+    reviewRef: intent.paymentIntentId,
   });
   if (fraud === 'blocked') {
     return tgErr(403, 'fraud_risk', 'This action was flagged by risk checks.');

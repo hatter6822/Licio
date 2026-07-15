@@ -52,7 +52,7 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { appendPolicyAudit, verifyPolicyAuditChain } from '../compliance/audit.js';
+import { appendCaseAudit, appendPolicyAudit, verifyPolicyAuditChain } from '../compliance/audit.js';
 import { addCaseNote, createCase, transitionCase } from '../compliance/cases.js';
 import { validateComplianceConfigValue } from '../compliance/config.js';
 import {
@@ -174,6 +174,71 @@ function availabilityToWire(
 function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): string {
   const hours = services.config().slaHoursByRisk[record.riskLevel] ?? 24;
   return new Date(Date.parse(record.createdAt) + hours * 3_600_000).toISOString();
+}
+
+/** The subject's newest OPEN fraud-class case — the review a held payment is
+ *  about.  One rule, shared by the queue's rows and the decision record. */
+async function relatedFraudCase(
+  services: ComplianceServices,
+  userId: string | null,
+): Promise<ComplianceCaseRecord | null> {
+  if (userId === null) return null;
+  const candidates = await services.cases.listBySubject(userId, 50);
+  return (
+    candidates.find(
+      (candidate) =>
+        candidate.reviewState !== 'resolved' && FRAUD_CLASS_TRIGGERS.has(candidate.triggerType),
+    ) ?? null
+  );
+}
+
+/**
+ * Durably record a fraud-queue decision on the per-case hash chain
+ * (WS-N.2.2c).  This decision directly allows or prevents fund movement, so a
+ * process log line is not enough: a later dispute or regulator needs an
+ * append-only record of WHO cleared/blocked the payment and WHY.  With no
+ * fraud-class case open, one is created keyed to the intent so the decision
+ * always lands on a chain.  Returns false when it could not be recorded — the
+ * caller then rolls its state change back rather than move funds unaudited.
+ */
+async function recordIntentReviewDecision(
+  services: ComplianceServices,
+  input: {
+    paymentIntentId: string;
+    subjectUserId: string | null;
+    decision: 'release' | 'reject';
+    reason: string;
+    actorUserId: string;
+  },
+): Promise<boolean> {
+  try {
+    let record = await relatedFraudCase(services, input.subjectUserId);
+    if (record === null) {
+      const opened = await createCase(buildCaseDeps(services), {
+        subjectKind: 'user',
+        subjectRef: input.subjectUserId ?? input.paymentIntentId,
+        triggerType: 'pattern',
+        riskLevel: 'medium',
+        note: `Payment intent ${input.paymentIntentId} held for fraud review.`,
+        idempotencyKey: `intent-review:${input.paymentIntentId}`,
+      });
+      if (!opened.ok) return false;
+      record = opened.record;
+    }
+    await appendCaseAudit(buildCaseDeps(services), {
+      caseId: record.caseId,
+      action: input.decision === 'release' ? 'fraud_queue_released' : 'fraud_queue_rejected',
+      actorRef: services.opaqueRef(input.actorUserId),
+      beforeState: record.reviewState,
+      afterState: record.reviewState,
+      note: `Payment intent ${input.paymentIntentId} ${
+        input.decision === 'release' ? 'released' : 'rejected'
+      }: ${input.reason}`,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Identity-free write budgets (§19.1: per-endpoint global budgets, never IP).
@@ -517,7 +582,15 @@ export function createComplianceRoutes() {
         await getIdentityServices().audit.append({
           actorUserId: auth.userId,
           eventType: 'region_declaration_change',
-          context: { setting: body.decision, target: services.opaqueRef(userId) },
+          // The subject rides `targetRef`, NOT the context: `redactContext`
+          // keeps a closed allowlist (device/auth_method/setting/
+          // previous_value/new_value/reason) and drops anything else, so a
+          // `target` key here would vanish and the entry would record that a
+          // reviewer verified *something*.  This verification is the only
+          // anti-circumvention control the region ladder has (§19.1 leaves no
+          // detected baseline to cross-check), so its subject must persist.
+          targetRef: services.opaqueRef(userId),
+          context: { setting: body.decision, reason: body.note },
         });
         return c.json({ declaration: declarationToWire(record) });
       },
@@ -748,20 +821,13 @@ export function createComplianceRoutes() {
         ...(await Promise.all(
           flagged.map(async (intent) => {
             // The flagged intent's queue row rides the subject's newest OPEN
-            // FRAUD-CLASS case (the review this hold is about).  An unfiltered
-            // "newest case" would happily attach an unrelated resolved or
-            // non-fraud case and show the reviewer the wrong trigger, risk,
-            // and SLA for the held payment; with no such case the synthetic
-            // row below describes the intent itself.
-            const related =
-              intent.userId === null
-                ? []
-                : (await services.cases.listBySubject(intent.userId, 50)).filter(
-                    (candidate) =>
-                      candidate.reviewState !== 'resolved' &&
-                      FRAUD_CLASS_TRIGGERS.has(candidate.triggerType),
-                  );
-            const record = related[0] ?? null;
+            // FRAUD-CLASS case (the review this hold is about) — the same rule
+            // the decision record uses.  An unfiltered "newest case" would
+            // happily attach an unrelated resolved or non-fraud case and show
+            // the reviewer the wrong trigger, risk, and SLA for the held
+            // payment; with no such case the synthetic row below describes the
+            // intent itself.
+            const record = await relatedFraudCase(services, intent.userId);
             return {
               case:
                 record !== null
@@ -818,6 +884,28 @@ export function createComplianceRoutes() {
         if (updated === null) {
           return c.json(deny('not_flagged', 'The intent is not held for review.'), 409);
         }
+        // The decision must be on the chain before the money can move: if it
+        // cannot be recorded, the hold goes back on rather than release funds
+        // with no durable account of who allowed it or why.
+        const recorded = await recordIntentReviewDecision(services, {
+          paymentIntentId: body.payment_intent_id,
+          subjectUserId: updated.userId,
+          decision: 'release',
+          reason: body.reason,
+          actorUserId: auth.userId,
+        });
+        if (!recorded) {
+          await getTreasuryServices().intents.updateComplianceState(
+            body.payment_intent_id,
+            'cleared',
+            'flagged',
+            new Date(services.now()).toISOString(),
+          );
+          return c.json(
+            deny('audit_unavailable', 'The release was not applied: it could not be recorded.'),
+            503,
+          );
+        }
         services.log('compliance.fraud_queue.released', {
           paymentIntentId: body.payment_intent_id,
           actorRef: services.opaqueRef(auth.userId),
@@ -849,6 +937,27 @@ export function createComplianceRoutes() {
         );
         if (updated === null) {
           return c.json(deny('not_flagged', 'The intent is not held for review.'), 409);
+        }
+        // A block is as consequential as a release — it stops a member's
+        // funds — so it is recorded the same way, or reverted to `flagged`.
+        const recorded = await recordIntentReviewDecision(services, {
+          paymentIntentId: body.payment_intent_id,
+          subjectUserId: updated.userId,
+          decision: 'reject',
+          reason: body.reason,
+          actorUserId: auth.userId,
+        });
+        if (!recorded) {
+          await getTreasuryServices().intents.updateComplianceState(
+            body.payment_intent_id,
+            'blocked',
+            'flagged',
+            new Date(services.now()).toISOString(),
+          );
+          return c.json(
+            deny('audit_unavailable', 'The rejection was not applied: it could not be recorded.'),
+            503,
+          );
         }
         services.log('compliance.fraud_queue.rejected', {
           paymentIntentId: body.payment_intent_id,

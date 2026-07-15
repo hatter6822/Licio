@@ -16,6 +16,8 @@ import { InMemoryVelocityStore } from '../stores.js';
 const NOW = Date.parse('2026-07-15T12:00:00.000Z');
 const USER = '6f9619ff-8b86-4d01-b42d-00cf4fc964ff';
 const REVIEWER = '7a8619ff-8b86-4d01-b42d-00cf4fc96400';
+/** A bound typed-data hash: the id of ONE attempted transfer. */
+const ATTEMPT = `0x${'a1'.repeat(32)}`;
 
 describe('InMemoryVelocityStore — exact sliding-window reserve', () => {
   it('admits up to maxCount and rejects the (n+1)th in the window', async () => {
@@ -171,7 +173,9 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     const { services, fraudRisk } = fraudFixture({
       highValueReviewThresholdMinorUnits: '1000',
     });
-    const check = () => fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000' });
+    // One ATTEMPT: preflight and submit share the bound typed-data hash.
+    const check = () =>
+      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef: ATTEMPT });
     // First attempt: held for review (the consumers reject/queue on this).
     expect(await check()).toBe('elevated');
     const [record] = await services.cases.listByStates(['open'], 10);
@@ -181,8 +185,8 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(await check()).toBe('elevated');
     expect(await services.cases.listBySubject(USER, 10)).toHaveLength(1);
 
-    // A reviewer clears THIS check → the retry proceeds (otherwise `elevated`
-    // would be a permanent block for the day's bucket).
+    // A reviewer clears THIS attempt → its retry proceeds (otherwise
+    // `elevated` would be a permanent block).
     const deps = buildCaseDeps(services);
     await transitionCase(deps, {
       caseId,
@@ -216,7 +220,8 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     const { services, fraudRisk } = fraudFixture({
       highValueReviewThresholdMinorUnits: '1000',
     });
-    const check = () => fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000' });
+    const check = () =>
+      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef: ATTEMPT });
     expect(await check()).toBe('elevated');
     const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
     const deps = buildCaseDeps(services);
@@ -273,5 +278,93 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(limitsForRegion(config, 'DE')).toEqual(config.velocityRegionOverrides['DE']);
     expect(limitsForRegion(config, 'FR')).toEqual(config.velocityLimits);
     expect(limitsForRegion(config, null)).toEqual(config.velocityLimits);
+  });
+});
+
+describe('the high-value review is scoped to ONE attempt (WS-N.2.2c)', () => {
+  it('a cleared review does NOT wave through a second transfer of the same amount', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    const first = `0x${'11'.repeat(32)}`;
+    const second = `0x${'22'.repeat(32)}`;
+    const check = (reviewRef: string) =>
+      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef });
+
+    expect(await check(first)).toBe('elevated');
+    const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
+    const deps = buildCaseDeps(services);
+    await transitionCase(deps, {
+      caseId,
+      to: 'assigned',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      assigneeUserId: REVIEWER,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'investigating',
+      actorUserId: REVIEWER,
+      isSenior: false,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'resolved',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      resolution: {
+        outcome: 'cleared',
+        notes: 'this one transfer is legitimate',
+        resolved_by: REVIEWER,
+        resolved_at: new Date(NOW).toISOString(),
+      },
+    });
+    // The cleared attempt proceeds…
+    expect(await check(first)).toBe('normal');
+    // …but a DIFFERENT transfer of the same amount, same day, same user is a
+    // new attempt and gets its own review — a day-bucket key would have let
+    // every later identical transfer ride the first clearance.
+    expect(await check(second)).toBe('elevated');
+    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(2);
+  });
+
+  it('withholds the cleared-review exit when the caller names no attempt', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    // No reviewRef: two transfers are indistinguishable, so clearing one must
+    // not release the other. The case still dedupes per day (no spam), but
+    // the action stays held — fail-closed.
+    const check = () => fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000' });
+    expect(await check()).toBe('elevated');
+    const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
+    const deps = buildCaseDeps(services);
+    await transitionCase(deps, {
+      caseId,
+      to: 'assigned',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      assigneeUserId: REVIEWER,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'investigating',
+      actorUserId: REVIEWER,
+      isSenior: false,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'resolved',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      resolution: {
+        outcome: 'cleared',
+        notes: 'cleared',
+        resolved_by: REVIEWER,
+        resolved_at: new Date(NOW).toISOString(),
+      },
+    });
+    expect(await check()).toBe('elevated');
+    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(1);
   });
 });

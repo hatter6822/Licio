@@ -601,6 +601,11 @@ export async function runPreflight(
     userId: input.userId,
     actionType,
     amountMinorUnits: message['amount'] ?? null,
+    // The bound typed-data hash identifies THIS attempted action: submit
+    // re-checks under the same ref (the token binds the hash), so one review
+    // covers the pair — while a second transfer of the same amount carries a
+    // different nonce, hence a different hash and its own review.
+    reviewRef: verified.typedDataHash,
   });
   if (fraud === 'blocked') {
     return audited(

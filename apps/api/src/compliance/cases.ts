@@ -120,21 +120,44 @@ export async function createCase(deps: CaseDeps, input: CreateCaseInput): Promis
     // A concurrent duplicate won the idempotency slot — theirs is THE case.
     return { ok: true, record: inserted };
   }
-  await appendCaseAudit(deps, {
-    caseId: inserted.caseId,
-    action: 'created',
-    actorRef: 'system',
-    beforeState: null,
-    afterState: 'open',
-    note: input.note,
+  // The genesis entry gets the same treatment as every later mutation: a case
+  // whose creation the chain never recorded is unauditable, and the
+  // idempotency key would make a retry return that very row instead of
+  // repairing it — so an unappendable audit removes the case and frees the
+  // key, leaving the retry a clean slate.
+  const audited = await appendAuditOrRollback(deps, {
+    entry: {
+      caseId: inserted.caseId,
+      action: 'created',
+      actorRef: 'system',
+      beforeState: null,
+      afterState: 'open',
+      note: input.note,
+    },
+    rollback: () => deps.cases.deleteCascade(inserted.caseId),
   });
+  if (audited !== null) return audited;
   // The registered restricted topic: opaque subject ref, never an identity.
-  await deps.emitCaseCreated({
-    caseId: inserted.caseId,
-    triggerType: inserted.triggerType,
-    subjectRef: deps.opaqueRef(input.subjectRef),
-    riskLevel: inserted.riskLevel,
-  });
+  // Best-effort BY DESIGN: the case + its chain entry are the record of
+  // truth and are already committed, so a failed notification must not
+  // destroy an audited case — nor report a false failure that sends the
+  // caller into a retry the idempotency key would short-circuit anyway.
+  // The alert is the repair signal.
+  try {
+    await deps.emitCaseCreated({
+      caseId: inserted.caseId,
+      triggerType: inserted.triggerType,
+      subjectRef: deps.opaqueRef(input.subjectRef),
+      riskLevel: inserted.riskLevel,
+    });
+  } catch (error) {
+    deps.metric('compliance.case.event_emit_failed');
+    deps.log('compliance.case.event_emit_failed', {
+      caseId: inserted.caseId,
+      triggerType: inserted.triggerType,
+      message: error instanceof Error ? error.message : 'unknown',
+    });
+  }
   deps.metric(`compliance.case.created.${inserted.triggerType}`);
   deps.log('compliance.case.created', {
     caseId: inserted.caseId,

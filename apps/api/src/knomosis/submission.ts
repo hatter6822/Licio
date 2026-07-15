@@ -22,6 +22,7 @@ import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
 import {
+  ACTION_FEATURE_CELL,
   buildEip712Domain,
   buildHumanSummary,
   CAP_CATEGORY,
@@ -421,7 +422,15 @@ export async function submitAction(
     }
   }
   const region = await deps.regionForUser(input.userId);
-  const jurisdiction = await deps.compliance.jurisdiction({ userId: input.userId, region });
+  const jurisdiction = await deps.compliance.jurisdiction({
+    userId: input.userId,
+    region,
+    // The SAME cell mapping preflight used.  A region-wide verdict here would
+    // undo the point of the re-check: a token minted before a policy change
+    // that disables `governance` while payments stay enabled would still see
+    // `allowed` and forward the prohibited signature (WS-N.1.1c).
+    featureCell: ACTION_FEATURE_CELL[actionType],
+  });
   if (jurisdiction === 'blocked') {
     return {
       ok: false,
@@ -442,6 +451,9 @@ export async function submitAction(
     userId: input.userId,
     actionType,
     amountMinorUnits: input.typedDataMessage['amount'] ?? null,
+    // Same attempt as the preflight (the token binds this hash), so the pair
+    // shares ONE high-value review instead of opening a second one here.
+    reviewRef: typedDataHash,
   });
   if (fraud === 'blocked' || (fraud === 'unavailable' && realFunds)) {
     return {
@@ -449,6 +461,18 @@ export async function submitAction(
       status: 409,
       code: 'FRAUD_RISK',
       message: 'This action was flagged by risk checks.',
+    };
+  }
+  // Mirrors preflight step 8: `elevated` = manual review required, and a
+  // signed transfer has no intent to hold, so it waits for the review.  The
+  // re-check exists precisely because this verdict can flip during the token
+  // TTL — a high-value case opened after preflight must still bite here.
+  if (fraud === 'elevated' && FUND_TRANSFER_ACTIONS.has(actionType)) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'FRAUD_RISK',
+      message: 'This action is held for compliance review before it can proceed.',
     };
   }
 

@@ -71,12 +71,17 @@ export async function intakeLawfulAccessRequest(
   });
   const caseId = linked.ok ? linked.record.caseId : null;
   if (caseId !== null) {
-    await setLegalHold(deps.caseDeps, {
+    const held = await setLegalHold(deps.caseDeps, {
       caseId,
       hold: true,
       actorUserId: input.actorUserId,
       reason: 'Legal hold applied for a lawful-access request (WS-N.2.3d).',
     });
+    // The hold is the point of linking the case: without it retention could
+    // anonymize or delete the very records the request obliges us to keep.
+    // Recording the request while the hold failed would look compliant and
+    // not be, so intake aborts and the requester retries.
+    if (!held.ok) return laErr(held.status, held.code, held.message);
   }
   const record = await deps.requests.insert({
     requestId: deps.uuid(),

@@ -30,13 +30,19 @@ modified** in their verdict semantics:
   `elevated` means **review required** and BOTH consumers honour it: a payment
   intent is held in the fraud queue (`payment_compliance_state = 'flagged'`),
   and a direct WS-L fund transfer (which has no intent to hold) is rejected
-  pending the same review. The review is a loop, not a dead end: the pattern
-  case is idempotent per (user, action, amount, day), so once a reviewer
-  resolves it `cleared` the check returns `normal` and the retry proceeds.
+  pending the same review, at preflight **and** at the submit re-check. The
+  review is a loop, not a dead end: the pattern case is idempotent per
+  **attempt** (`reviewRef` — the bound typed-data hash, or the payment-intent
+  id), so once a reviewer resolves it `cleared` that attempt's retry returns
+  `normal` and proceeds. The clearance covers only the attempt reviewed: a
+  second transfer of the same amount is a different attempt with its own
+  review, and a caller naming no attempt never gets the cleared-review exit.
 - `jurisdiction` → `'allowed' | 'blocked' | 'unknown'` — takes the
   `featureCell` the caller is about to exercise (`ACTION_FEATURE_CELL` maps
-  each signed action to its §22.2 cell). A policy is **per-cell**, so a region
-  that enables payments while disabling `governance` answers `blocked` for a
+  each signed action to its §22.2 cell), at preflight **and** at the submit
+  re-check (a policy can change during the token TTL — that is what the
+  re-check is for). A policy is **per-cell**, so a region that enables
+  payments while disabling `governance` answers `blocked` for a
   `proposal_sign` — the region-wide reading would have said `allowed` off the
   payments cells and let it through. `unknown` preserves the shipped testnet
   behaviour; `allowed` additionally requires a **verified** declaration basis
@@ -197,12 +203,23 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   audit cannot be written first and undone; instead the mutation is
   **compensated away** when its entry will not commit — a policy insert is
   deleted (which also frees the `(region, effective_at)` slot so the retry is
-  not blocked by a half-written change), and a case transition or legal hold
-  is put back exactly where it was. An unaudited state change is worse than a
-  refused action, and a retry could never recreate the missing entry.
-- **Retention retries.**  The sweep's cadence marker only advances on success,
-  so a transient outage retries on the next hourly tick instead of leaving
-  expired cases readable for another full interval.
+  not blocked by a half-written change), a case creation is removed (the
+  idempotency key would otherwise make every retry return the unauditable
+  row), and a transition, legal hold, or fraud-queue release/reject is put
+  back exactly where it was. An unaudited state change is worse than a refused
+  action, and a retry could never recreate the missing entry. The one
+  deliberate exception is the case-created *event*: the case and its chain
+  entry are already committed and are the record of truth, so a failed
+  notification alerts rather than destroying an audited case.
+- **A hold and the record it exists for are one unit.**  A SAR draft that
+  cannot be stored releases the hold it applied (otherwise the hold pins a
+  case out of retention forever for a draft that does not exist), and a
+  lawful-access intake whose hold fails aborts rather than record a request
+  whose obligations retention could then sweep away.
+- **Retention retries and drains.**  The sweep's cadence marker advances only
+  on a *drained* run — neither a transient failure nor a >500-case backlog may
+  burn the window, or expired cases would stay readable for another full
+  interval.  An un-drained run alerts and the next tick resumes.
 - **Acknowledgments are region-scoped.**  The same `(disclosure_id, version)`
   carries different counsel-authored text per region, so the ack key and the
   gate both include the region — changing regions re-prompts rather than

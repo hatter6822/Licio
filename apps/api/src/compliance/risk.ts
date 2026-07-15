@@ -23,10 +23,11 @@
 // released by a reviewer), and a direct WS-L fund transfer — which has no
 // intent to hold — is rejected pending the same review.  To keep that from
 // being a permanent block, the review is a LOOP: the pattern case is
-// idempotent per (user, action, amount, day), so once a reviewer resolves it
-// `cleared` this returns `normal` and the retry proceeds.  Any other case
-// state (open/assigned/investigating/escalated, or resolved to a non-cleared
-// outcome) keeps the action held.
+// idempotent per ATTEMPT (`reviewRef`), so once a reviewer resolves it
+// `cleared` this returns `normal` and that attempt's retry proceeds.  Any
+// other case state (open/assigned/investigating/escalated, or resolved to a
+// non-cleared outcome) keeps the action held — and the clearance covers only
+// the attempt reviewed, never every later transfer of the same amount.
 
 import type { CompliancePort, FraudVerdict } from '../knomosis/ports.js';
 import { type CaseDeps, createCase } from './cases.js';
@@ -64,7 +65,7 @@ export function limitsForRegion(
 }
 
 export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'] {
-  return async ({ userId, actionType, amountMinorUnits }): Promise<FraudVerdict> => {
+  return async ({ userId, actionType, amountMinorUnits, reviewRef }): Promise<FraudVerdict> => {
     const amount = amountMinorUnits ?? '0';
     if (!AMOUNT_RE.test(amount)) {
       // An unparseable amount can never be bounded — fail affirmatively closed.
@@ -121,14 +122,23 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
         triggerType: 'pattern',
         riskLevel: 'medium',
         note: `High-value ${actionType} at/above the manual-review threshold (WS-N.2.2c).`,
-        // Pins the review to THIS user+action+amount+day, so the post-review
-        // retry below finds the reviewer's decision instead of opening a
-        // second case (createCase returns the existing record on a hit).
-        idempotencyKey: `highvalue:${userId}:${actionType}:${amount}:${dayBucket(nowMs)}`,
+        // Scoped to the ATTEMPT (`reviewRef`: the bound typed-data hash / the
+        // payment-intent id), so one attempt's preflight and submit share a
+        // review while a DIFFERENT transfer of the same amount opens its own —
+        // a day-bucket key would let one cleared review wave through every
+        // later identical transfer that day.  With no ref the attempts are
+        // indistinguishable, so the case is still deduped per day (no spam)
+        // but the cleared-review exit below is withheld (fail-closed).
+        idempotencyKey:
+          reviewRef === undefined
+            ? `highvalue:${userId}:${actionType}:${amount}:${dayBucket(nowMs)}`
+            : `highvalue:${userId}:${actionType}:${amount}:${reviewRef}`,
       });
-      // The review loop's exit: a reviewer who CLEARED this exact high-value
-      // check lets the retry through.  Anything else stays held.
+      // The review loop's exit: a reviewer who CLEARED THIS attempt lets its
+      // retry through.  Anything else — in flight, or resolved to a
+      // non-cleared outcome — stays held.
       if (
+        reviewRef !== undefined &&
         opened.ok &&
         opened.record.reviewState === 'resolved' &&
         opened.record.resolution?.outcome === 'cleared'

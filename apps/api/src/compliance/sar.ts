@@ -48,20 +48,41 @@ export async function createSarDraft(
   });
   if (!held.ok) return sarErr(held.status, held.code, held.message);
   const nowIso = new Date(deps.now()).toISOString();
-  const record = await deps.sars.insert({
-    sarId: deps.uuid(),
-    caseId: input.caseId,
-    jurisdiction: input.jurisdiction,
-    status: 'draft',
-    narrative: input.narrative,
-    filingRef: null,
-    filedAt: null,
-    partnerFiled: false,
-    createdByRef: deps.opaqueRef(input.actorUserId),
-    approvedByRef: null,
-    createdAt: nowIso,
-    updatedAt: nowIso,
-  });
+  let record: SarRecord;
+  try {
+    record = await deps.sars.insert({
+      sarId: deps.uuid(),
+      caseId: input.caseId,
+      jurisdiction: input.jurisdiction,
+      status: 'draft',
+      narrative: input.narrative,
+      filingRef: null,
+      filedAt: null,
+      partnerFiled: false,
+      createdByRef: deps.opaqueRef(input.actorUserId),
+      approvedByRef: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+  } catch {
+    // The hold exists FOR the report.  With no report it would pin the case
+    // out of retention indefinitely for a draft that does not exist, and each
+    // retry would stack another hold + audit entry — so the hold is released
+    // (itself audited, keeping the chain honest about what happened).
+    const released = await setLegalHold(deps.caseDeps, {
+      caseId: input.caseId,
+      hold: false,
+      actorUserId: input.actorUserId,
+      reason: 'Legal hold released: the regulatory record it was applied for was not created.',
+    });
+    return sarErr(
+      503,
+      'sar_unavailable',
+      released.ok
+        ? 'The report could not be drafted; no changes were kept.'
+        : 'The report could not be drafted and its legal hold could not be released; contact the platform team.',
+    );
+  }
   return { ok: true, record };
 }
 

@@ -59,6 +59,14 @@ export async function disclosureGate(
   for (const ref of outcome.policy.disclosure_refs) {
     let acknowledged = false;
     try {
+      // An INFORMATIONAL version (requires_acknowledgment: false) is published
+      // to be read, not signed: the client renders no acknowledge button for
+      // it, so demanding an ack would strand the user behind a gate with no
+      // way to clear it.  A ref with no published version stays missing —
+      // fail-closed, since the region's policy demands a disclosure counsel
+      // has not published yet.
+      const version = await deps.disclosures.get(ref.id, resolution.region, ref.version);
+      if (version !== null && !version.requiresAcknowledgment) continue;
       // Region-scoped: this region's policy demands THIS region's text, so an
       // acknowledgment given elsewhere (same id + version, different content)
       // does not satisfy it.

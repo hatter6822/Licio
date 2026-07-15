@@ -445,3 +445,86 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     expect(await services.pins.activeForWallet(walletAccountId)).not.toBeNull();
   });
 });
+
+describe('the sweep drains its backlog before reporting done (WS-N.2.1d)', () => {
+  it('clears MORE than one page in a single run', async () => {
+    // 501 expired cases: a single 500-row page would leave one behind while
+    // reporting success, and the scheduler would then wait out the whole
+    // retention interval (a day) before looking again.
+    for (let i = 0; i < 501; i += 1) await seedCase({ triggerType: 'fraud' });
+    const summary = await runRetentionSweep(sweepDeps());
+    expect(summary.deleted).toBe(501);
+    expect(summary.drained).toBe(true);
+    expect(await services.cases.listExpired(new Date(nowMs).toISOString(), 10)).toHaveLength(0);
+  });
+
+  it('reports NOT drained when a backlog cannot progress, and the marker holds', async () => {
+    // A SAR-pinned case can never be swept: the page keeps returning it.
+    const stuck = await seedCase({ triggerType: 'sanctions' });
+    await services.sars.insert({
+      sarId: randomUUID(),
+      caseId: stuck.caseId,
+      jurisdiction: 'DE',
+      status: 'filed',
+      narrative: 'fixture',
+      filingRef: 'FIU-1',
+      filedAt: new Date(nowMs).toISOString(),
+      partnerFiled: false,
+      createdByRef: 'ref:counsel',
+      approvedByRef: 'ref:counsel',
+      createdAt: new Date(nowMs).toISOString(),
+      updatedAt: new Date(nowMs).toISOString(),
+    });
+    const summary = await runRetentionSweep(sweepDeps());
+    // It stops instead of spinning on the same un-sweepable page…
+    expect(summary.errors).toBe(1);
+    expect(summary.drained).toBe(false);
+    expect(await services.cases.getById(stuck.caseId)).not.toBeNull();
+
+    // …and an un-drained run does not burn the window: the next tick retries.
+    const fresh = await seedCase({ triggerType: 'fraud' });
+    await runComplianceTick(services, () => {});
+    await runComplianceTick(services, () => {});
+    expect(await services.cases.getById(fresh.caseId)).toBeNull();
+  });
+});
+
+describe('createCase is atomic with its genesis audit (WS-N.2.1b)', () => {
+  it('rolls the case back when the chain cannot record its creation', async () => {
+    services.caseAudit.appendChained = async () => {
+      throw new Error('audit store down');
+    };
+    const outcome = await createCase(buildCaseDeps(services), {
+      subjectKind: 'user',
+      subjectRef: randomUUID(),
+      triggerType: 'velocity',
+      riskLevel: 'high',
+      note: 'fixture',
+      idempotencyKey: 'velocity:fixture:1',
+    });
+    expect(outcome.ok).toBe(false);
+    // The row is GONE — an unauditable case would be unrepairable, since the
+    // idempotency key would make every retry return that very row.
+    expect(await services.cases.findByIdempotencyKey('velocity:fixture:1')).toBeNull();
+    expect(await services.cases.listByStates(['open'], 10)).toHaveLength(0);
+  });
+
+  it('keeps an audited case when only the event emit fails (it is best-effort)', async () => {
+    services.emitEvent = async () => {
+      throw new Error('event store down');
+    };
+    const outcome = await createCase(buildCaseDeps(services), {
+      subjectKind: 'user',
+      subjectRef: randomUUID(),
+      triggerType: 'velocity',
+      riskLevel: 'high',
+      note: 'fixture',
+    });
+    // The case + its chain entry are the record of truth and both committed;
+    // destroying them because a notification failed would be worse.
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('unreachable');
+    expect(await services.cases.getById(outcome.record.caseId)).not.toBeNull();
+    expect(await services.caseAudit.listChained(outcome.record.caseId)).toHaveLength(1);
+  });
+});

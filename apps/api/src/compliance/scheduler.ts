@@ -37,13 +37,21 @@ export async function runComplianceTick(
         log: services.log,
         now: services.now,
       });
-      // The marker advances ONLY on success: a failed sweep that burned the
-      // window would leave expired cases readable for another full interval
-      // (a day by default), so a transient outage retries on the next tick
-      // instead.  The sweep is idempotent, so an extra attempt is free.
-      lastSweepAtMs = nowMs;
+      // The marker advances ONLY on a DRAINED sweep: neither a failure nor a
+      // leftover backlog may burn the window, or expired cases would stay
+      // readable for another full interval (a day by default).  A transient
+      // outage or an un-drained page therefore retries on the next tick; the
+      // sweep is idempotent, so an extra attempt is free.
+      if (summary.drained) lastSweepAtMs = nowMs;
       services.metrics.increment('compliance.retention.deleted', summary.deleted);
       services.metrics.increment('compliance.retention.anonymized', summary.anonymized);
+      if (!summary.drained) {
+        services.metrics.increment('compliance.retention.not_drained');
+        services.alert('compliance.retention.not_drained', {
+          errors: summary.errors,
+          scheduleRef: services.config().retentionScheduleRef,
+        });
+      }
     } catch (err) {
       onError(err, 'retention_sweep');
     }

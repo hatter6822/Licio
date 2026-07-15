@@ -559,3 +559,114 @@ describe('the fail-closed compliance.* config loader', () => {
     ).toBeNull();
   });
 });
+
+describe('the disclosure gate honors requires_acknowledgment (WS-N.1.2d)', () => {
+  it('an INFORMATIONAL version never traps the user behind an unclearable gate', async () => {
+    const s = services();
+    await s.declarations.upsert({
+      userId: USER,
+      declaredRegion: 'DE',
+      status: 'verified',
+      verificationLevel: 'reviewer_verified',
+      evidenceRef: null,
+      verifiedAt: new Date(NOW).toISOString(),
+      verifiedBy: null,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    await s.policies.insert({
+      policyId: '99999999-9999-4999-8999-999999999999',
+      countryOrRegion: 'DE',
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      document: {
+        policy_id: '99999999-9999-4999-8999-999999999999',
+        country_or_region: 'DE',
+        feature_flags: {
+          wallet_connection: 'testnet',
+          testnet_transactions: 'testnet',
+          production_payments: 'disabled',
+          treasury_operations: 'disabled',
+          governance: 'disabled',
+        },
+        asset_flags: {},
+        age_gate_policy: {
+          wallet_connection: { required_band: 'adult' },
+          testnet_transactions: { required_band: 'adult' },
+          production_payments: { required_band: 'adult' },
+          treasury_operations: { required_band: 'adult' },
+          governance: { required_band: 'adult' },
+        },
+        kyc_policy: {},
+        disclosure_refs: [{ id: 'tax-info', version: 1, locales: ['en'] }],
+        legal_approval_ref: null,
+        effective_at: '2026-01-01T00:00:00.000Z',
+      },
+      createdAt: new Date(NOW).toISOString(),
+    });
+    // Published to be READ, not signed — the client renders no acknowledge
+    // button for it, so requiring an ack would be an unclearable gate.
+    await s.disclosures.publish({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      disclosureId: 'tax-info',
+      region: 'DE',
+      version: 1,
+      locale: 'en',
+      title: 'Tax information',
+      contentMd: 'You may owe tax on gains. This is informational.',
+      requiresAcknowledgment: false,
+      publishedAt: new Date(NOW).toISOString(),
+    });
+    const gate = await disclosureGate(buildDisclosureDeps(s), USER);
+    expect(gate.required).toBe(false);
+    expect(gate.missing).toHaveLength(0);
+  });
+
+  it('a ref with NO published version still blocks (fail-closed)', async () => {
+    const s = services();
+    await s.declarations.upsert({
+      userId: USER,
+      declaredRegion: 'DE',
+      status: 'verified',
+      verificationLevel: 'reviewer_verified',
+      evidenceRef: null,
+      verifiedAt: new Date(NOW).toISOString(),
+      verifiedBy: null,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    await s.policies.insert({
+      policyId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      countryOrRegion: 'DE',
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      document: {
+        policy_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        country_or_region: 'DE',
+        feature_flags: {
+          wallet_connection: 'testnet',
+          testnet_transactions: 'testnet',
+          production_payments: 'disabled',
+          treasury_operations: 'disabled',
+          governance: 'disabled',
+        },
+        asset_flags: {},
+        age_gate_policy: {
+          wallet_connection: { required_band: 'adult' },
+          testnet_transactions: { required_band: 'adult' },
+          production_payments: { required_band: 'adult' },
+          treasury_operations: { required_band: 'adult' },
+          governance: { required_band: 'adult' },
+        },
+        kyc_policy: {},
+        disclosure_refs: [{ id: 'never-published', version: 3, locales: ['en'] }],
+        legal_approval_ref: null,
+        effective_at: '2026-01-01T00:00:00.000Z',
+      },
+      createdAt: new Date(NOW).toISOString(),
+    });
+    // The region's policy demands a disclosure counsel has not published; real
+    // funds must not flow on a promise that was never made.
+    const gate = await disclosureGate(buildDisclosureDeps(s), USER);
+    expect(gate.required).toBe(true);
+    expect(gate.missing[0]?.id).toBe('never-published');
+  });
+});

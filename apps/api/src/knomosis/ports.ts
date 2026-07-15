@@ -38,11 +38,22 @@ export interface CompliancePort {
   /** Screen a recipient/actor address.  Payload is the ADDRESS ONLY — no
    *  attention or behavioral fields exist on this seam (WS-L.3.1b). */
   screenAddress(args: { addressLower: string; deploymentId: string }): Promise<SanctionsVerdict>;
-  /** Velocity/pattern fraud risk for an action. */
+  /**
+   * Velocity/pattern fraud risk for an action.
+   *
+   * `reviewRef` identifies the ONE attempted transfer being checked — the
+   * preflight and submit of the same action share it (the bound typed-data
+   * hash), while a different intent/nonce is a different attempt.  A
+   * high-value review a compliance reviewer clears applies to THAT attempt
+   * only; without the ref the engine cannot tell two transfers apart and
+   * keeps the action held (fail-closed) rather than letting a cleared review
+   * cover every later transfer of the same amount.
+   */
   fraudRisk(args: {
     userId: string;
     actionType: string;
     amountMinorUnits: string | null;
+    reviewRef?: string;
   }): Promise<FraudVerdict>;
   /**
    * Whether crypto features are available in the user's jurisdiction.
