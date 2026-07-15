@@ -279,6 +279,7 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
       title: 'Risk disclosure',
       contentMd: 'On-chain transactions are irreversible. Crypto is optional.',
       requiresAcknowledgment: true,
+      publishedByRef: 'counsel-ref',
       publishedAt: new Date(NOW).toISOString(),
     });
     return s;
@@ -381,6 +382,7 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
       title: 'Avertissement sur les risques',
       contentMd: 'Texte français distinct — les obligations diffèrent.',
       requiresAcknowledgment: true,
+      publishedByRef: 'counsel-ref',
       publishedAt: new Date(NOW).toISOString(),
     });
     await s.declarations.upsert({
@@ -427,6 +429,7 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
         title: 'Edited',
         contentMd: 'weakened wording',
         requiresAcknowledgment: true,
+        publishedByRef: 'counsel-ref',
         publishedAt: new Date(NOW).toISOString(),
       }),
     ).rejects.toThrow();
@@ -621,6 +624,7 @@ describe('the disclosure gate honors requires_acknowledgment (WS-N.1.2d)', () =>
       title: 'Tax information',
       contentMd: 'You may owe tax on gains. This is informational.',
       requiresAcknowledgment: false,
+      publishedByRef: 'counsel-ref',
       publishedAt: new Date(NOW).toISOString(),
     });
     const gate = await disclosureGate(buildDisclosureDeps(s), USER);
@@ -731,6 +735,7 @@ describe('the disclosure gate requires EVERY locale the policy names (WS-N.1.2d)
       title: `Risk (${locale})`,
       contentMd: `Localized legal text for ${locale}.`,
       requiresAcknowledgment: requiresAck,
+      publishedByRef: 'counsel-ref',
       publishedAt: new Date(NOW).toISOString(),
     });
 

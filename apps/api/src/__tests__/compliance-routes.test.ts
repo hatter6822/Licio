@@ -367,6 +367,45 @@ describe('the declaration flow (WS-N.1.1f)', () => {
   });
 });
 
+describe('a published disclosure always names its publisher (WS-N.1.2d)', () => {
+  const body = {
+    disclosure_id: 'risk-general',
+    region: 'DE',
+    version: 1,
+    locale: 'de',
+    title: 'Risikohinweise',
+    content_md: 'On-chain-Transaktionen sind unumkehrbar.',
+    requires_acknowledgment: true,
+  };
+
+  it('the attribution rides the publish, so a failing audit mirror cannot lose it', async () => {
+    const counsel = await seedUser({
+      handle: `l${randomUUID().slice(0, 8)}`,
+      platformRoles: ['counsel'],
+      mfa: true,
+    });
+    // The identity audit log (a DIFFERENT bounded context — it cannot join the
+    // publish's write) is down.
+    const original = identity.audit.append.bind(identity.audit);
+    identity.audit.append = async () => {
+      throw new Error('identity audit down');
+    };
+    try {
+      const published = await app().request(
+        post('/v1/compliance/admin/disclosures', body, counsel.cookie),
+      );
+      // A 500 here would leave an IMMUTABLE published disclosure the client
+      // believes failed — and the retry could only ever meet
+      // `already_published`, so the attribution could never be added.
+      expect(published.status).toBe(201);
+    } finally {
+      identity.audit.append = original;
+    }
+    const [stored] = await compliance.disclosures.listForRegion('DE');
+    expect(stored?.publishedByRef).toBe(compliance.opaqueRef(counsel.userId));
+  });
+});
+
 describe('disclosures (WS-N.1.2d)', () => {
   it('counsel publishes; the user lists, acknowledges, and the gate clears', async () => {
     const counsel = await seedUser({

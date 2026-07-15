@@ -622,6 +622,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       title: 'Crypto-asset risk disclosure',
       contentMd: 'You can lose everything you deposit.',
       requiresAcknowledgment: true,
+      publishedByRef: 'counsel-ref',
       publishedAt: NOW(),
     };
     await stores.disclosures.publish(version);

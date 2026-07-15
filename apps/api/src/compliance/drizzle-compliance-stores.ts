@@ -763,6 +763,7 @@ function toDisclosure(row: DisclosureRowDb): DisclosureVersionRecord {
     title: row.title,
     contentMd: row.contentMd,
     requiresAcknowledgment: row.requiresAcknowledgment,
+    publishedByRef: row.publishedByRef,
     publishedAt: iso(row.publishedAt),
   };
 }
@@ -785,6 +786,7 @@ export class DrizzleDisclosureStore implements DisclosureStore {
         title: record.title,
         contentMd: record.contentMd,
         requiresAcknowledgment: record.requiresAcknowledgment,
+        publishedByRef: record.publishedByRef,
         publishedAt: new Date(record.publishedAt),
       })
       .returning();

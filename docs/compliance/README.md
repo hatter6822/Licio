@@ -289,6 +289,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   proof deliberately keeps apart. So that one pairing stays compensated, and
   the revert is narrow: a single CAS back to `flagged` — see the note in
   `routes/compliance.ts`.
+- **An act and the record of who performed it are one write.**  A published
+  disclosure carries `published_by_ref` on the row the publish creates, because
+  a publish is IMMUTABLE: an attribution recorded in a second step and lost to a
+  failure could never be added — the retry only meets `already_published`, and a
+  live legal disclosure would keep no publisher record at all.  The identity
+  audit entry is a best-effort mirror (a different bounded context, so it cannot
+  join that write); failing it must not 500 a publish that already happened.
 - **Counsel acts are attributed on counsel-only rows.**  A SAR's filing —
   the legally consequential step, and often not the approver's doing — is
   recorded as `filed_by_ref` on the report itself, NOT as a case-chain entry:

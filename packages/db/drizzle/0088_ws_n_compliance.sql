@@ -145,6 +145,7 @@ CREATE TABLE "compliance"."disclosure_version" (
 	"title" text NOT NULL,
 	"content_md" text NOT NULL,
 	"requires_acknowledgment" boolean DEFAULT true NOT NULL,
+	"published_by_ref" text NOT NULL,
 	"published_at" timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint
 CREATE UNIQUE INDEX "dv_identity_uq" ON "compliance"."disclosure_version" ("disclosure_id", "region", "version", "locale");--> statement-breakpoint

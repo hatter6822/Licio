@@ -283,6 +283,12 @@ export const disclosureVersions = complianceSchema.table(
     title: text('title').notNull(),
     contentMd: text('content_md').notNull(),
     requiresAcknowledgment: boolean('requires_acknowledgment').notNull().default(true),
+    /** WHO published this version (non-reversible `accountRef`).  It rides the
+     *  row the publish creates, so the act and its attribution are one write:
+     *  a publish is IMMUTABLE, so an attribution recorded afterwards and lost
+     *  to a failure could never be added — the retry only meets the
+     *  already-published row. */
+    publishedByRef: text('published_by_ref').notNull(),
     publishedAt: tz('published_at').notNull().defaultNow(),
   },
   (t) => [

@@ -109,6 +109,11 @@ export interface DisclosureVersionRecord {
   title: string;
   contentMd: string;
   requiresAcknowledgment: boolean;
+  /** WHO published it (non-reversible ref).  It rides THIS row because a
+   *  publish is immutable: an attribution recorded in a second step and lost
+   *  to a failure could never be added — the retry only meets the
+   *  already-published row.  (The same reasoning as the SAR's `filedByRef`.) */
+  publishedByRef: string;
   publishedAt: string;
 }
 
