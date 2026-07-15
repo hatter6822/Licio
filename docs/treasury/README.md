@@ -236,10 +236,16 @@ a non-`ordinary` mode) plus the room header:
 
 ## Residuals (tracked)
 
-1. **WS-N compliance engine.** The jurisdiction/sanctions seams stay
-   fail-closed stubs until WS-N lands; real-fund environments reject on
-   unknown answers today (correct, but Everything-blocked is the current
-   real-funds posture pending WS-N.2.2).
+1. **WS-N compliance engine — CLOSED** (2026-07-15;
+   `docs/compliance/README.md`).  The jurisdiction/sanctions/fraud seams are
+   now the real WS-N engine: the payment-intent preflight gets real fraud
+   verdicts (velocity + high-value review → the reserved `flagged` state and
+   the compliance fraud queue), intent creation gates on acknowledged risk
+   disclosures, and a `flagged`/`blocked` intent cannot transition to
+   `quoted`/`signed`/`submitted` until released.  An UNCONFIGURED deployment
+   keeps the previous everything-blocked real-funds posture — fail-closed is
+   unchanged.  Remaining WS-N residuals (policy population, screening vendor,
+   KYC partner) are tracked in `docs/compliance/README.md`.
 2. **Delegation + grant-review web UI.** The API paths are live and tested;
    the web surface ships the transparency reads (grants list) but not yet a
    delegation management or grant-review form.  Closure: a WS-M.5 UI slice.

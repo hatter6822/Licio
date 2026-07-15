@@ -139,18 +139,19 @@ production-deployment prerequisite.
    SIWE builder are WalletConnect-agnostic, so this plugs in without reworking
    the link flow.
 
-3. **Real-funds compliance engine (WS-N).**  The WS-M half of this residual
-   **shipped** (2026-07-14; `docs/treasury/README.md`): the real treasury,
-   the 13-state payment-intent machine, and the production proposal lifecycle
-   now consume this gateway (the payment-intent kill switch gates the REAL
-   deposit path, and `pinnedDeployment` + the manifest drive the WS-M EIP-712
-   domain and real-funds arms).  The compliance port (`ports.ts`) still fails
-   closed: unknown jurisdiction / unavailable screening rejects fund transfers
-   in real-fund environments, and the WS-M preflight mirrors that posture.
-   **Closure:** WS-N.2.2.  The real-funds preflight arms
-   (`sanctions/jurisdiction/fraud === … && realFunds`) are exercised the moment
-   a capped/mature deployment is pinned (they are annotated as deliberately
-   unexercised on testnet/local).
+3. **Real-funds compliance engine (WS-N) — CLOSED** (2026-07-15;
+   `docs/compliance/README.md`).  The WS-M half shipped 2026-07-14 (the real
+   treasury, the 13-state payment-intent machine, and the production proposal
+   lifecycle consume this gateway); WS-N now fills the `CompliancePort` seam
+   with the real engine: the identity-free jurisdiction verdict (declared
+   region, verified basis required for real funds), the HTTP sanctions
+   screener behind `COMPLIANCE_SCREENING_URL`, and the velocity/high-value
+   fraud verdicts.  The port's fail-closed contract is unchanged — an
+   unconfigured deployment still answers unknown/unavailable and real-fund
+   environments still reject — but a configured deployment now gets real
+   answers.  What remains (policy population by counsel, the screening
+   vendor binding, KYC-partner verification) is tracked in
+   `docs/compliance/README.md`, not here.
 
 4. **Cross-stack fixture CI (WS-L.1.1d) + external audit (WS-L.1.3a) + bug
    bounty (WS-L.1.3b).**  The Lean/Solidity/Rust cross-stack fixture corpus

@@ -292,7 +292,8 @@ adapter.
 | WS-S — private-P2P rooms | Foundation, crypto, reducer, sync plane, blind rendezvous, live WebRTC carrier (real-browser convergence E2E included), hardened update channel, and server→private migration shipped; residuals (physical-radio field confirmation, an audited MLS build) tracked in docs |
 | WS-L — Knomosis gateway, wallets, and receipts | Complete behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags: wallet link (SIWE + ECDSA/EIP-1271), no-blind-signing EIP-712 preview, the `knomosis-gateway` v0.4 preflight→submit→reconcile pipeline, ranking-firewalled standing reads, five emergency kill switches, and K1 governance simulation; residuals tracked in `docs/knomosis/README.md` |
 | WS-M — treasury and governance | Complete behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags: the governance lifecycle (charters, law-packs, live readiness + the full mode machine), the real-asset room treasury with payment intents and three-source reconciliation, deadline-driven proposals with wallet-signed voting/challenges and kernel-routed execution, grants/delegations/action budgets, the hash-chained audit log, and the member/steward web surfaces; residuals tracked in `docs/treasury/README.md` |
-| WS-N / WS-O / WS-P | Planned or partially seeded; the WS-O adversarial suite, WS-P Core-Web-Vitals telemetry sink, and BFF-in-the-loop E2E harness exist |
+| WS-N — compliance | Complete, fail-closed by construction: the identity-free jurisdiction engine (region is **declared, never detected** — §19.1), the real sanctions/fraud/jurisdiction compliance port behind the WS-L/WS-M preflights, the guarded financial-compliance case system + fraud queue, SAR and lawful-access records (counsel-gated), versioned risk disclosures with an acknowledgment gate, hash-chained erasure-safe audit, and compliance-grade retention; every region stays blocked until counsel populates its jurisdiction policy — residuals tracked in `docs/compliance/README.md` |
+| WS-O / WS-P | Planned or partially seeded; the WS-O adversarial suite, WS-P Core-Web-Vitals telemetry sink, and BFF-in-the-loop E2E harness exist |
 
 ## Architecture
 
@@ -469,6 +470,8 @@ docs/                    Specification, planning, policy, and workstream docs
   [`docs/ai-governance/`](docs/ai-governance/README.md),
   [`docs/governance/`](docs/governance/README.md),
   [`docs/knomosis/`](docs/knomosis/README.md),
+  [`docs/treasury/`](docs/treasury/README.md),
+  [`docs/compliance/`](docs/compliance/README.md),
   [`docs/lcap/`](docs/lcap/README.md), and
   [`docs/private-p2p/`](docs/private-p2p/README.md).
 - Policy corpus: [`docs/policy/`](docs/policy/README.md).
