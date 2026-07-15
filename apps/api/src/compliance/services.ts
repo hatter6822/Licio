@@ -22,7 +22,7 @@ import {
 import type { PwattConfigStore } from '../events/stores.js';
 import type { CompliancePort } from '../knomosis/ports.js';
 import { runChainedUnit } from './audit.js';
-import { type CaseDeps, createCaseInTx } from './cases.js';
+import { announceCaseCreated, type CaseDeps, createCaseInTx } from './cases.js';
 import {
   type ComplianceRuntimeConfig,
   DEFAULT_COMPLIANCE_CONFIG,
@@ -520,22 +520,12 @@ export function buildSanctionedWalletLinkHook(
       });
       return;
     }
-    // The event is emitted OUTSIDE the unit (an external side effect must not
-    // replay when a chain fork makes the unit run twice), through the SAME
-    // builder every other case creation uses, and only for a case this call
-    // actually opened.  Best-effort: the case + its chain entry are committed
-    // and are the record of truth.
+    // Announced OUTSIDE the unit (an external side effect must not replay when
+    // a chain fork makes the unit run twice) and only for a case this call
+    // actually opened — through the ONE announcement every path that composes
+    // `createCaseInTx` owes, rather than a second copy of it here.
     if (outcome.created) {
-      await buildCaseDeps(services)
-        .emitCaseCreated({
-          caseId: outcome.record.caseId,
-          triggerType: outcome.record.triggerType,
-          subjectRef: services.opaqueRef(userId),
-          riskLevel: outcome.record.riskLevel,
-        })
-        .catch(() => {
-          services.metrics.increment('compliance.case.event_emit_failed');
-        });
+      await announceCaseCreated(buildCaseDeps(services), outcome.record, userId);
     }
   };
 }

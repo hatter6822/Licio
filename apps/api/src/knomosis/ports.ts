@@ -89,10 +89,13 @@ export interface CompliancePort {
    * subject (a personal pay-in).  Use `reviewSubjectFor` rather than deciding
    * per call site.
    *
-   * `userId` stays the ACTOR throughout: velocity is per-person (a room's
-   * payouts must not spend a steward's personal budget, and two stewards must
-   * not each get a fresh one) and so is the region resolution — a room does
-   * not declare a jurisdiction, the human authorizing the movement does.
+   * `userId` stays the ACTOR, and it is the actor's REGION that resolves from
+   * it: a room does not declare a jurisdiction, the human authorizing the
+   * movement does.  The velocity window, though, follows the `reviewSubject` —
+   * a room's payout stream is the room's, so per-steward buckets would hand
+   * each steward a fresh window over the same stream (rotate stewards, walk
+   * through the limit) and spend the steward's personal budget on the room's
+   * money besides.
    *
    * All three are REQUIRED, not optional: a caller that forgets one would
    * silently take the weaker path, so the compiler makes every consumer decide

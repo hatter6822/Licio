@@ -18,7 +18,6 @@
 import { zValidator } from '@hono/zod-validator';
 import {
   type CaseResolution,
-  type CaseReviewState,
   type CaseTriggerType,
   caseAssignRequestSchema,
   caseCreateRequestSchema,
@@ -59,14 +58,7 @@ import {
   runChainedUnit,
   verifyPolicyAuditChain,
 } from '../compliance/audit.js';
-import {
-  addCaseNote,
-  type CaseDeps,
-  createCase,
-  type TransitionInput,
-  transitionCase,
-  transitionCaseInTx,
-} from '../compliance/cases.js';
+import { addCaseNote, createCase, resolveCaseInTx, transitionCase } from '../compliance/cases.js';
 import { validateComplianceConfigValue } from '../compliance/config.js';
 import {
   acknowledgeDisclosure,
@@ -88,11 +80,7 @@ import {
   getComplianceServices,
   resolveRegionForUser,
 } from '../compliance/services.js';
-import type {
-  ComplianceCaseRecord,
-  ComplianceTxStores,
-  RegionDeclarationRecord,
-} from '../compliance/stores.js';
+import type { ComplianceCaseRecord, RegionDeclarationRecord } from '../compliance/stores.js';
 import { getEventPipelineServices } from '../events/services.js';
 import { isComplianceReviewer, isCounsel } from '../identity/rbac.js';
 import { getIdentityServices } from '../identity/services.js';
@@ -224,70 +212,14 @@ function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): s
   return new Date(Date.parse(record.createdAt) + hours * 3_600_000).toISOString();
 }
 
-/**
- * The states a fraud-queue decision can start from, and the sanctioned route
- * each takes to `resolved`.  The WS-N.2.1c table has no open→resolved edge and
- * this path does not get to invent one: a shortcut here would be a shortcut in
- * the reviewers' state machine.  Both routes are unguarded ('ok' in
- * `CASE_TRANSITIONS`) — `escalated` reaches `resolved` only via `investigating`
- * precisely so the queue never exercises the counsel-only edge.
- */
-/** The decided case could not be closed (a racing transition moved it).  Not a
- *  store fault: it aborts the unit so the decision entry cannot outlive the
- *  resolution it claims. */
+/** The decided case could not be closed (a racing transition moved it, or its
+ *  state has no sanctioned route).  Not a store fault: it aborts the unit so the
+ *  decision entry cannot outlive the resolution it claims. */
 class DecisionNotClosedError extends Error {
   constructor(caseId: string) {
     super(`case ${caseId} could not be resolved by the fraud-queue decision`);
     this.name = 'DecisionNotClosedError';
   }
-}
-
-const RESOLUTION_ROUTE: Partial<Record<CaseReviewState, readonly CaseReviewState[]>> = {
-  open: ['assigned', 'investigating', 'resolved'],
-  assigned: ['investigating', 'resolved'],
-  investigating: ['resolved'],
-  escalated: ['investigating', 'resolved'],
-};
-
-/**
- * Walk a reviewed case to `resolved` from wherever it currently sits, inside
- * the CALLER's unit.  The walk is not idempotent step-by-step (a second run
- * reads the moved state and finds no edge back), so it must be atomic: either
- * the case lands on `resolved` or it never left, and the retry re-drives the
- * whole route.  Returns false when a step is refused — the caller reports the
- * decision as unrecorded rather than move funds against a review it did not
- * close.
- */
-async function resolveReviewedCaseInTx(
-  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
-  deps: CaseDeps,
-  record: ComplianceCaseRecord,
-  input: { decision: 'release' | 'reject'; reason: string; actorUserId: string; nowIso: string },
-): Promise<boolean> {
-  if (record.reviewState === 'resolved') return true;
-  const route = RESOLUTION_ROUTE[record.reviewState];
-  if (route === undefined) return false;
-  const resolution = {
-    outcome: input.decision === 'release' ? ('cleared' as const) : ('restricted' as const),
-    notes: `Fraud-queue ${input.decision}: ${input.reason}`,
-    resolved_by: input.actorUserId,
-    resolved_at: input.nowIso,
-  };
-  for (const to of route) {
-    // Never `senior`: every edge on both routes is unguarded, so the queue
-    // claims no capability it was not granted.
-    const step: TransitionInput = {
-      caseId: record.caseId,
-      to,
-      actorUserId: input.actorUserId,
-      isSenior: false,
-      ...(to === 'assigned' ? { assigneeUserId: input.actorUserId } : {}),
-      ...(to === 'resolved' ? { resolution } : {}),
-    };
-    const moved = await transitionCaseInTx(stores, deps, step);
-    if (!moved.ok) return false;
-  }
-  return true;
 }
 
 /** A flagged intent, as much of it as the queue needs to find its review. */
@@ -412,9 +344,15 @@ async function recordIntentReviewDecision(
         // the route reverted the intent — a chain that records a release which
         // never took effect.  Throwing abandons the unit whole.
         if (
-          !(await resolveReviewedCaseInTx(stores, deps, closed, {
-            ...input,
-            nowIso: new Date(services.now()).toISOString(),
+          !(await resolveCaseInTx(stores, deps, {
+            caseId: closed.caseId,
+            actorUserId: input.actorUserId,
+            resolution: {
+              outcome: input.decision === 'release' ? 'cleared' : 'restricted',
+              notes: `Fraud-queue ${input.decision}: ${input.reason}`,
+              resolved_by: input.actorUserId,
+              resolved_at: new Date(services.now()).toISOString(),
+            },
           }))
         ) {
           throw new DecisionNotClosedError(closed.caseId);
@@ -1301,7 +1239,18 @@ export function createComplianceRoutes() {
         }
         const problem = validateComplianceConfigValue(key, value);
         if (problem !== null) return c.json(deny('invalid_config_value', problem), 400);
-        await services.configStore.set(`compliance.${key}`, { value });
+        // WHO changed it rides the SAME write as the change.  These are the
+        // counsel-approved retention schedule and the operational risk limits:
+        // once the write lands the setting is live, reloaded, and possibly
+        // already propagated to the events job, so an attribution recorded
+        // afterwards and lost to a failure leaves a live compliance control
+        // that no durable record accounts for.  The loader reads `value` and
+        // nothing else, so the envelope carries this without touching it.
+        await services.configStore.set(`compliance.${key}`, {
+          value,
+          changed_by_ref: services.opaqueRef(auth.userId),
+          changed_at: new Date(services.now()).toISOString(),
+        });
         await services.reloadConfig();
         // WS-E.1.4: retention-override changes propagate to the events job
         // immediately (shorten-only; the job clamps with min).
@@ -1310,11 +1259,21 @@ export function createComplianceRoutes() {
             services.config,
           );
         }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'compliance_config_change',
-          context: { setting: key },
-        });
+        // Best-effort MIRROR into the identity audit (a different bounded
+        // context, so it cannot join the write above): failing it must not 500
+        // a change that is already live and attributed.
+        await getIdentityServices()
+          .audit.append({
+            actorUserId: auth.userId,
+            eventType: 'compliance_config_change',
+            context: { setting: key },
+          })
+          .catch((error: unknown) => {
+            services.log('compliance.config.audit_mirror_failed', {
+              key,
+              message: error instanceof Error ? error.message : 'unknown',
+            });
+          });
         return c.json({ key, applied: true });
       },
     )

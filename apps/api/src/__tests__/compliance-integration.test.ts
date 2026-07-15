@@ -521,6 +521,57 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect(anonymized?.retentionPolicy.anonymized_at).not.toBeNull();
   });
 
+  it('applyLegalHold merges refs under a row lock — a concurrent obligation is not lost', async () => {
+    const target = track(await stores.cases.insert(caseOf(randomUUID())));
+    // Two obligations apply holds CONCURRENTLY.  Read-modify-write in the
+    // caller let each derive its next policy from the row it read and clobber
+    // the other's ref; the store's row lock serializes them instead.
+    await Promise.all([
+      stores.cases.applyLegalHold({
+        caseId: target.caseId,
+        holdRef: 'sar-hold',
+        hold: true,
+        updatedAt: NOW(),
+      }),
+      stores.cases.applyLegalHold({
+        caseId: target.caseId,
+        holdRef: 'lawful-access-hold',
+        hold: true,
+        updatedAt: NOW(),
+      }),
+    ]);
+    const both = await stores.cases.getById(target.caseId);
+    expect(both?.retentionPolicy.legal_hold_refs).toEqual(['lawful-access-hold', 'sar-hold']);
+
+    // …so the lawful-access denial cannot free a case the SAR still holds.
+    await stores.cases.applyLegalHold({
+      caseId: target.caseId,
+      holdRef: 'lawful-access-hold',
+      hold: false,
+      updatedAt: NOW(),
+    });
+    const still = await stores.cases.getById(target.caseId);
+    expect(still?.retentionPolicy.legal_hold).toBe(true);
+    expect(still?.retentionPolicy.legal_hold_refs).toEqual(['sar-hold']);
+    // A retried apply is idempotent (a SET, not a counter), so the last release
+    // still frees it.
+    await stores.cases.applyLegalHold({
+      caseId: target.caseId,
+      holdRef: 'sar-hold',
+      hold: true,
+      updatedAt: NOW(),
+    });
+    await stores.cases.applyLegalHold({
+      caseId: target.caseId,
+      holdRef: 'sar-hold',
+      hold: false,
+      updatedAt: NOW(),
+    });
+    const freed = await stores.cases.getById(target.caseId);
+    expect(freed?.retentionPolicy.legal_hold).toBe(false);
+    expect(freed?.retentionPolicy.legal_hold_refs).toEqual([]);
+  });
+
   it('the erasure scrub reports a row held at WRITE time as held back', async () => {
     const subject = randomUUID();
     const held = track(

@@ -50,6 +50,32 @@ export interface FraudRiskDeps {
 
 const AMOUNT_RE = /^\d{1,78}$/;
 
+/**
+ * Did the case this verdict CLAIMS fail to be recorded?
+ *
+ * Every verdict here that names an investigation — `blocked` on velocity,
+ * `elevated` for review — is a promise that operators and the subject have
+ * something to act on: a case, a chain entry, a queue row.  When `createCase`
+ * fails (the chain is down, the store is out), that promise is empty, and the
+ * caller must say `unavailable` instead: the real-fund paths reject on it
+ * exactly as they would on the block, but the claim is honest and the retry can
+ * still open the case.  The alert is the repair signal.
+ */
+function unrecorded(
+  deps: Pick<FraudRiskDeps, 'metric' | 'log'>,
+  opened: Awaited<ReturnType<typeof createCase>>,
+  kind: 'velocity' | 'high_value',
+): opened is Exclude<typeof opened, { ok: true }> {
+  if (opened.ok) return false;
+  deps.metric('compliance.fraud.case_unrecorded');
+  deps.log('compliance.fraud.case_unrecorded', {
+    kind,
+    code: opened.code,
+    message: opened.message,
+  });
+  return true;
+}
+
 /** UTC day bucket for idempotent case keys. */
 const dayBucket = (nowMs: number): string => new Date(nowMs).toISOString().slice(0, 10);
 
@@ -93,11 +119,18 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
       region = { region: null, basis: 'unknown' };
     }
     const nowMs = deps.now();
+    // The window belongs to the SUBJECT, not the actor.  A room-treasury payout
+    // stream is the room's: bucketing it per-steward gives each steward a fresh
+    // count and volume window for the same stream — so rotating stewards walks
+    // straight through a room-level limit — and charges the room's payouts
+    // against that steward's personal window on the way.  A personal pay-in has
+    // no subject but the payer, so it is unchanged.
+    const velocityKey = `vel:${subject.kind}:${subject.ref}`;
     for (const limit of limitsForRegion(config, region.region)) {
       let decision: 'ok' | 'exceeded';
       try {
         decision = await deps.velocity.reserve({
-          key: `vel:${userId}:${limit.periodSeconds}`,
+          key: `${velocityKey}:${limit.periodSeconds}`,
           nowMs,
           windowMs: limit.periodSeconds * 1_000,
           amountMinorUnits: amount,
@@ -113,15 +146,22 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
       if (decision === 'exceeded') {
         deps.metric('compliance.fraud.velocity_blocked');
         const periodStart = nowMs - (nowMs % (limit.periodSeconds * 1_000));
-        await createCase(deps.caseDeps, {
-          subjectKind: 'user',
-          subjectRef: userId,
+        const opened = await createCase(deps.caseDeps, {
+          // The case follows the window it is about.
+          subjectKind: subject.kind,
+          subjectRef: subject.ref,
           triggerType: 'velocity',
           riskLevel: 'high',
           note: `Velocity limit exceeded (${limit.periodSeconds}s window) on ${actionType}.`,
-          idempotencyKey: `velocity:${userId}:${limit.periodSeconds}:${periodStart}`,
+          idempotencyKey: `velocity:${subject.kind}:${subject.ref}:${limit.periodSeconds}:${periodStart}`,
         });
-        return 'blocked';
+        // A block is a claim that this was RECORDED — a high-risk case, a
+        // review trail, a case-created event.  With none of them, saying
+        // `blocked` reports an investigation that does not exist; `unavailable`
+        // is the honest answer and the real-fund paths reject on it just the
+        // same, while the retry can still open the case.
+        if (!unrecorded(deps, opened, 'velocity')) return 'blocked';
+        return 'unavailable';
       }
     }
     // High-value review (WS-N.2.2c): at/above the threshold the check is
@@ -160,12 +200,15 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
             ? `highvalue:${subject.kind}:${subject.ref}:${actionType}:${amount}:${dayBucket(nowMs)}`
             : `highvalue:${subject.kind}:${subject.ref}:${amount}:${attempt}`,
       });
+      // `elevated` means "held for manual review".  Without the case there is
+      // no queue row and no reviewer path, so it would be held for a review
+      // that cannot happen — a permanent block dressed as a pending one.
+      if (unrecorded(deps, opened, 'high_value')) return 'unavailable';
       // The review loop's exit: a reviewer who CLEARED THIS attempt lets its
       // retry through.  Anything else — in flight, or resolved to a
       // non-cleared outcome — stays held.
       if (
         attempt !== null &&
-        opened.ok &&
         opened.record.reviewState === 'resolved' &&
         opened.record.resolution?.outcome === 'cleared'
       ) {

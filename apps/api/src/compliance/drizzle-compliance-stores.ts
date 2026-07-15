@@ -64,6 +64,7 @@ import type {
   WalletRiskPinRecord,
   WalletRiskPinStore,
 } from './stores.js';
+import { nextHoldPolicy } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 /** The handle inside `db.transaction(...)`.  Every store here takes `Db | Tx`
@@ -546,6 +547,34 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
       .where(and(eq(financialComplianceCases.caseId, caseId), NOT_HELD))
       .returning({ caseId: financialComplianceCases.caseId });
     return rows.length > 0;
+  }
+
+  async applyLegalHold(input: {
+    caseId: string;
+    holdRef: string;
+    hold: boolean;
+    updatedAt: string;
+  }): Promise<ComplianceCaseRecord | null> {
+    // `#db` is the caller's transaction (every hold write runs inside a unit),
+    // so this lock is held to its commit: a concurrent SAR draft and
+    // lawful-access intake serialize here instead of both reading the same
+    // policy and clobbering one another's ref.
+    const locked = await this.#db
+      .select({ retentionPolicy: financialComplianceCases.retentionPolicy })
+      .from(financialComplianceCases)
+      .where(eq(financialComplianceCases.caseId, input.caseId))
+      .for('update');
+    const current = locked[0]?.retentionPolicy as CaseRetentionPolicy | undefined;
+    if (current === undefined) return null;
+    const rows = await this.#db
+      .update(financialComplianceCases)
+      .set({
+        retentionPolicy: nextHoldPolicy(current, input.hold, input.holdRef),
+        updatedAt: new Date(input.updatedAt),
+      })
+      .where(eq(financialComplianceCases.caseId, input.caseId))
+      .returning();
+    return rows[0] ? toCaseRecord(rows[0]) : null;
   }
 
   async scrubUserSubject(userId: string): Promise<{ scrubbed: string[]; heldBack: string[] }> {

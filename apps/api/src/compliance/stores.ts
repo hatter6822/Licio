@@ -203,6 +203,25 @@ export interface PolicyAuditStore {
   listChained(): Promise<PolicyAuditRecord[]>;
 }
 
+/**
+ * The hold-set arithmetic, shared by BOTH adapters so they cannot drift: apply
+ * or release one obligation's ref, and derive `legal_hold` from what remains.
+ *
+ * A SET, not a counter — a retried apply must not leave the case stranded at
+ * one.  Sorted, so the stored value is stable for equal sets.
+ */
+export function nextHoldPolicy(
+  policy: CaseRetentionPolicy,
+  hold: boolean,
+  holdRef: string,
+): CaseRetentionPolicy {
+  const refs = new Set(policy.legal_hold_refs);
+  if (hold) refs.add(holdRef);
+  else refs.delete(holdRef);
+  const remaining = [...refs].sort();
+  return { ...policy, legal_hold: remaining.length > 0, legal_hold_refs: remaining };
+}
+
 export interface ComplianceCaseStore {
   /** Insert honoring `idempotencyKey`: a duplicate returns the EXISTING row. */
   insert(record: ComplianceCaseRecord): Promise<ComplianceCaseRecord>;
@@ -244,6 +263,23 @@ export interface ComplianceCaseStore {
     patch: Partial<Pick<ComplianceCaseRecord, 'retentionPolicy' | 'partnerCaseRef'>>,
     updatedAt: string,
   ): Promise<ComplianceCaseRecord | null>;
+  /** Apply or release ONE obligation's legal hold, ATOMICALLY.
+   *
+   *  The set arithmetic belongs here, not in the caller: read-modify-write in
+   *  application code lets a SAR draft racing a lawful-access intake read the
+   *  same policy and clobber each other's ref — and the survivor's later
+   *  release would then free a case the lost obligation still holds, opening it
+   *  to the erasure scrub and the retention sweep.  The Drizzle adapter takes a
+   *  row lock; a caller cannot forget to.
+   *
+   *  Returns the resulting record (its `legal_hold` derived from the refs that
+   *  remain), or null when the case is gone. */
+  applyLegalHold(input: {
+    caseId: string;
+    holdRef: string;
+    hold: boolean;
+    updatedAt: string;
+  }): Promise<ComplianceCaseRecord | null>;
   /** Cases past their deletion date and NOT under legal hold. */
   listExpired(nowIso: string, limit: number): Promise<ComplianceCaseRecord[]>;
   /** Open (non-resolved) cases at ANY of the given risk levels for a subject.
@@ -759,6 +795,23 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
       updatedAt,
     });
     return true;
+  }
+
+  async applyLegalHold(input: {
+    caseId: string;
+    holdRef: string;
+    hold: boolean;
+    updatedAt: string;
+  }): Promise<ComplianceCaseRecord | null> {
+    const row = this.#rows.get(input.caseId);
+    if (!row) return null;
+    const next: ComplianceCaseRecord = {
+      ...row,
+      retentionPolicy: nextHoldPolicy(row.retentionPolicy, input.hold, input.holdRef),
+      updatedAt: input.updatedAt,
+    };
+    this.#rows.set(input.caseId, next);
+    return { ...next };
   }
 
   async scrubUserSubject(userId: string): Promise<{ scrubbed: string[]; heldBack: string[] }> {

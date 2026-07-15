@@ -64,8 +64,12 @@ modified** in their verdict semantics:
   (`ACTION_FEATURE_CELL` / `featureCellFor`): pay-in ⇒ the payer,
   `treasury_operations` ⇒ the room. One definition, so the two legs of one
   transfer cannot classify it differently and split its review in half.
-  `userId` stays the **actor** throughout — velocity is per-person, and a room
-  does not declare a jurisdiction.
+  `userId` stays the **actor**, and the actor's **region** resolves from it (a
+  room declares no jurisdiction; the human authorizing the movement does). The
+  **velocity window follows the subject**: a room's payout stream is the room's,
+  so per-steward buckets would hand each steward a fresh window over the same
+  stream — rotate stewards, walk through the limit — and spend the steward's
+  personal budget on the room's money besides.
 
   **A claimed `payment_intent_id` is a claim, not a fact.**  It buys the naming
   action a share of that intent's review, so unverified it is a clearance to
@@ -334,6 +338,28 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   **denied** request still releases its hold and closes its case explicitly: it
   obliges nothing, and leaving it would keep the subject's records pinned and
   their crypto features disabled on a request counsel rejected.
+- **A verdict never claims an investigation that does not exist.**  Every
+  answer here that names one — `blocked` on velocity, `elevated` for review,
+  `blocked` on a sanctions match — promises operators and the subject a case, a
+  chain entry, a queue row. When `createCase` fails (the chain is down), the
+  promise is empty and the port answers `unavailable` instead: the real-fund
+  paths reject on it exactly as they would on the block, but the claim is honest
+  and the retry can still open the case. A sanctions hit whose case was not
+  recorded is additionally **never cached** — the full TTL would suppress the
+  retries that could still record it.
+- **One resolution walk, read off the live state.**  `resolveCaseInTx` is the
+  single automated close (the fraud-queue decision and the lawful-access denial
+  both use it): it picks its route from where the case actually sits, never a
+  fixed one. A reviewer who has already picked the case up would otherwise make
+  an `open → assigned` first step return `INVALID_CASE_TRANSITION` and take the
+  whole unit down — counsel could not record a denial *because* someone was
+  looking at the case. Automated paths never claim `senior`; both routes are
+  unguarded, and `escalated` reaches `resolved` via `investigating` precisely so
+  the counsel-only edge stays counsel's.
+- **Cleanup inside a unit throws; it never returns.**  A returned error reads to
+  the transactor as a committed success, so a denial's failed hold-release would
+  commit the denial while the route reported failure — the partial state the
+  unit exists to prevent.
 - **A legal hold is reference-counted, not a flag.**  A SAR and a lawful-access
   request can hold the same case at once, so each names its own hold
   (`legal_hold_refs`) and releases only that one; `legal_hold` is *derived* from
@@ -346,7 +372,11 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   count is not a disclosure, since a held case already shows its hold. The chain
   says `released` only when the last obligation lets go — a release that leaves
   the case held is not a release of the case. It is a SET, not a counter: a
-  retried apply cannot strand the case at one.
+  retried apply cannot strand the case at one. The set arithmetic lives in the
+  **store**, under a row lock (`applyLegalHold`), not in the caller: a SAR draft
+  racing a lawful-access intake would otherwise each derive a next policy from
+  the row it read and clobber the other's ref — and the survivor's later release
+  would free a case the lost obligation still holds.
 - **Decisions CAS on their own premises.**  A reviewer's declaration verdict
   compares the region *and* status *and* `updatedAt` it was made about, not a
   timestamp alone — two changes inside one millisecond share a timestamp, and a

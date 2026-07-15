@@ -365,24 +365,6 @@ export async function addCaseNote(
  * unaudited change to what retention may delete.
  */
 /**
- * Apply/release ONE obligation's hold, and derive the flag from what is left.
- * The only writer of `legal_hold` / `legal_hold_refs` — so the invariant
- * ("held ⇔ some obligation holds it") cannot be broken by a caller that
- * reasons about the flag directly.
- */
-function nextHoldPolicy(
-  policy: ComplianceCaseRecord['retentionPolicy'],
-  hold: boolean,
-  holdRef: string,
-): ComplianceCaseRecord['retentionPolicy'] {
-  const current = new Set(policy.legal_hold_refs);
-  if (hold) current.add(holdRef);
-  else current.delete(holdRef);
-  const refs = [...current].sort();
-  return { ...policy, legal_hold: refs.length > 0, legal_hold_refs: refs };
-}
-
-/**
  * One obligation's hold on a case.
  *
  * `holdRef` is REQUIRED: a hold is reference-counted, because a SAR and a
@@ -390,6 +372,65 @@ function nextHoldPolicy(
  * only its own.  Pass an OPAQUE ref (`deps.opaqueRef('sar:<id>')`) — the
  * policy is reviewer-visible, and a readable ref would name the obligation.
  */
+/**
+ * The states an automated close can start from, and the sanctioned route each
+ * takes to `resolved`.  The WS-N.2.1c table has no open→resolved edge and these
+ * paths do not get to invent one — a shortcut here would be a shortcut in the
+ * reviewers' state machine.  Both routes are unguarded ('ok' in
+ * `CASE_TRANSITIONS`): `escalated` reaches `resolved` via `investigating`
+ * precisely so an automated path never exercises the counsel-only edge.
+ */
+const RESOLUTION_ROUTE: Partial<Record<CaseReviewState, readonly CaseReviewState[]>> = {
+  open: ['assigned', 'investigating', 'resolved'],
+  assigned: ['investigating', 'resolved'],
+  investigating: ['resolved'],
+  escalated: ['investigating', 'resolved'],
+};
+
+/**
+ * Walk a case to `resolved` FROM WHEREVER IT CURRENTLY SITS, inside the
+ * caller's unit.  The route is read off the live state, never fixed: a reviewer
+ * who has already picked the case up (`assigned`, `investigating`) would make a
+ * fixed open→assigned first step return `INVALID_CASE_TRANSITION` and take the
+ * whole unit down with it — so counsel could not record a denial, or the fraud
+ * queue a decision, because someone was already looking at the case.
+ *
+ * Not idempotent step-by-step (a second run reads the moved state and finds no
+ * edge back), so it must be atomic: either the case lands on `resolved` or it
+ * never left, and the retry re-drives the whole route.  False ⇔ a step was
+ * refused; the caller must abandon its unit rather than record a decision it
+ * could not apply.
+ */
+export async function resolveCaseInTx(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
+  deps: CaseDeps,
+  input: {
+    caseId: string;
+    actorUserId: string;
+    resolution: NonNullable<ComplianceCaseRecord['resolution']>;
+  },
+): Promise<boolean> {
+  const record = await stores.cases.getById(input.caseId);
+  if (record === null) return false;
+  if (record.reviewState === 'resolved') return true;
+  const route = RESOLUTION_ROUTE[record.reviewState];
+  if (route === undefined) return false;
+  for (const to of route) {
+    // Never `senior`: every edge on both routes is unguarded, so an automated
+    // path claims no capability it was not granted.
+    const moved = await transitionCaseInTx(stores, deps, {
+      caseId: input.caseId,
+      to,
+      actorUserId: input.actorUserId,
+      isSenior: false,
+      ...(to === 'assigned' ? { assigneeUserId: input.actorUserId } : {}),
+      ...(to === 'resolved' ? { resolution: input.resolution } : {}),
+    });
+    if (!moved.ok) return false;
+  }
+  return true;
+}
+
 export interface LegalHoldInput {
   caseId: string;
   hold: boolean;
@@ -419,19 +460,22 @@ export async function setLegalHoldInTx(
 ): Promise<CaseOutcome> {
   const record = await stores.cases.getById(input.caseId);
   if (record === null) return caseErr(404, 'not_found', 'Resource not found');
-  const nextPolicy = nextHoldPolicy(record.retentionPolicy, input.hold, input.holdRef);
-  const updated = await stores.cases.update(
-    input.caseId,
-    { retentionPolicy: nextPolicy },
-    new Date(deps.now()).toISOString(),
-  );
+  // The store applies the ref and derives the flag UNDER A ROW LOCK — this
+  // caller never reads-then-writes the ref set, so two obligations racing on
+  // one case cannot lose each other's hold.
+  const updated = await stores.cases.applyLegalHold({
+    caseId: input.caseId,
+    holdRef: input.holdRef,
+    hold: input.hold,
+    updatedAt: new Date(deps.now()).toISOString(),
+  });
   if (updated === null) return caseErr(404, 'not_found', 'Resource not found');
   await appendCaseAuditInTx(stores, deps, {
     caseId: input.caseId,
     // The entry describes the CASE's hold, not the obligation's: `released`
     // only when the last one lets go.  A release that leaves the case held
     // (another obligation still needs it) is not a release of the case.
-    action: nextPolicy.legal_hold ? 'legal_hold_applied' : 'legal_hold_released',
+    action: updated.retentionPolicy.legal_hold ? 'legal_hold_applied' : 'legal_hold_released',
     actorRef: deps.opaqueRef(input.actorUserId),
     beforeState: record.reviewState,
     afterState: record.reviewState,

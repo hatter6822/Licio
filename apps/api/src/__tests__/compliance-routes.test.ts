@@ -1492,6 +1492,95 @@ describe('lawful access preserves the scope kind (WS-N.2.3d)', () => {
   });
 });
 
+describe('a denial closes the intake case from wherever it sits (WS-N.2.3d)', () => {
+  async function intake(counselCookie: string): Promise<{ requestId: string; caseId: string }> {
+    const res = await app().request(
+      post(
+        '/v1/compliance/admin/lawful-access',
+        {
+          agency: 'Agency',
+          jurisdiction: 'US',
+          legal_basis: 'subpoena',
+          scope: {
+            subject_kind: 'user',
+            subject_ref: randomUUID(),
+            time_range_start: null,
+            time_range_end: null,
+          },
+          contact: 'agent@example.test',
+        },
+        counselCookie,
+      ),
+    );
+    const request = ((await res.json()) as { request: { request_id: string; case_id: string } })
+      .request;
+    return { requestId: request.request_id, caseId: request.case_id };
+  }
+
+  it('denies even when a reviewer already picked the case up', async () => {
+    const counsel = await seedCounsel();
+    const reviewer = await seedReviewer();
+    const { requestId, caseId } = await intake(counsel.cookie);
+    // A compliance reviewer takes the case while counsel deliberates.
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/compliance/admin/cases/${caseId}/assign`,
+            { assignee_user_id: reviewer.userId },
+            reviewer.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const denied = await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${requestId}/review`,
+        { decision: 'denied', note: 'overbroad' },
+        counsel.cookie,
+      ),
+    );
+    // A fixed open→assigned first step would be INVALID_CASE_TRANSITION here
+    // and take the whole unit down — counsel could not record the denial or
+    // release the hold because someone was already looking at the case.
+    expect(denied.status).toBe(200);
+    const closed = await compliance.cases.getById(caseId);
+    expect(closed?.reviewState).toBe('resolved');
+    expect(closed?.retentionPolicy.legal_hold).toBe(false);
+  });
+
+  it('a denial whose cleanup fails keeps NOTHING — not a half-denied request', async () => {
+    const counsel = await seedCounsel();
+    const { requestId, caseId } = await intake(counsel.cookie);
+    // The chain dies after the request row is CAS-written to `denied`.
+    const original = compliance.caseAudit.appendChained.bind(compliance.caseAudit);
+    compliance.caseAudit.appendChained = async () => {
+      throw new Error('chain unavailable');
+    };
+    let res: Response;
+    try {
+      res = await app().request(
+        post(
+          `/v1/compliance/admin/lawful-access/${requestId}/review`,
+          { decision: 'denied', note: 'overbroad' },
+          counsel.cookie,
+        ),
+      );
+    } finally {
+      compliance.caseAudit.appendChained = original;
+    }
+    expect(res.status).toBe(503);
+    // Returning the cleanup error instead of throwing would have COMMITTED the
+    // denial while the route reported failure: a denied request whose hold is
+    // still on and whose case is still open.
+    const stored = await compliance.lawfulAccess.getById(requestId);
+    expect(stored?.status).toBe('received');
+    const untouched = await compliance.cases.getById(caseId);
+    expect(untouched?.retentionPolicy.legal_hold).toBe(true);
+    expect(untouched?.reviewState).toBe('open');
+  });
+});
+
 describe('holds and their records are all-or-nothing (WS-N.2.1e / 2.3d)', () => {
   it('a SAR draft that cannot be stored leaves NO trace — hold, report, or entry', async () => {
     const counsel = await seedCounsel();

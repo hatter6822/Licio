@@ -18,10 +18,22 @@ import {
   announceCaseCreated,
   type CaseDeps,
   createCaseInTx,
+  resolveCaseInTx,
   setLegalHoldInTx,
-  transitionCaseInTx,
 } from './cases.js';
-import type { ComplianceTxStores, LawfulAccessRecord, LawfulAccessStore } from './stores.js';
+import type { LawfulAccessRecord, LawfulAccessStore } from './stores.js';
+
+/**
+ * A denial's cleanup (hold release / case close) failed.  Thrown, not returned:
+ * the unit must roll back, and a returned error reads to the transactor as a
+ * committed success.
+ */
+class DenialCleanupError extends Error {
+  constructor(detail: string) {
+    super(`lawful-access denial cleanup failed: ${detail}`);
+    this.name = 'DenialCleanupError';
+  }
+}
 
 /** This request's hold on its intake case — opaque, so the reviewer-visible
  *  retention policy carries no readable obligation name (WS-N.2.1e). */
@@ -205,15 +217,25 @@ export async function reviewLawfulAccessRequest(
           actorUserId: input.actorUserId,
           reason: 'Legal hold released: the lawful-access request was denied on legal review.',
         });
-        if (!released.ok) return laErr(released.status, released.code, released.message);
-        const closed = await closeDeniedIntakeCase(
-          stores,
-          deps,
-          updated.caseId,
-          input.actorUserId,
-          input.note,
-        );
-        if (closed !== null) return closed;
+        // THROW, never return: a returned error is a successful transaction
+        // result, so the denial (already CAS-written above) and any earlier
+        // cleanup would COMMIT while the route reports a failure — exactly the
+        // partial-denial state this unit exists to prevent.
+        if (!released.ok) throw new DenialCleanupError(released.message);
+        // From wherever the case now sits: a compliance reviewer may have
+        // picked it up while counsel deliberated, and a fixed open→assigned
+        // first step would fail and block the denial outright.
+        const closed = await resolveCaseInTx(stores, deps.caseDeps, {
+          caseId: updated.caseId,
+          actorUserId: input.actorUserId,
+          resolution: {
+            outcome: 'cleared',
+            notes: `Lawful-access request denied on legal review: ${input.note}`,
+            resolved_by: input.actorUserId,
+            resolved_at: new Date(deps.now()).toISOString(),
+          },
+        });
+        if (!closed) throw new DenialCleanupError('the intake case could not be closed');
       }
       return { ok: true as const, record: updated };
     },
@@ -221,42 +243,6 @@ export async function reviewLawfulAccessRequest(
   ).catch(() =>
     laErr(503, 'review_unavailable', 'The review could not be recorded; nothing was kept.'),
   );
-}
-
-/**
- * Walk a denied request's intake case to `resolved` along the sanctioned
- * transitions (the WS-N.2.1c table has no open→resolved edge, and inventing
- * one for an automated path would put a shortcut into the reviewers' machine).
- * Returns a typed error when a step fails, so the denial rolls back with it.
- */
-async function closeDeniedIntakeCase(
-  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
-  deps: LawfulAccessDeps,
-  caseId: string,
-  actorUserId: string,
-  note: string,
-): Promise<LawfulAccessError | null> {
-  const resolution = {
-    outcome: 'cleared' as const,
-    notes: `Lawful-access request denied on legal review: ${note}`,
-    resolved_by: actorUserId,
-    resolved_at: new Date(deps.now()).toISOString(),
-  };
-  const steps = [
-    { to: 'assigned' as const, assigneeUserId: actorUserId },
-    { to: 'investigating' as const },
-    { to: 'resolved' as const, resolution },
-  ];
-  for (const step of steps) {
-    const moved = await transitionCaseInTx(stores, deps.caseDeps, {
-      caseId,
-      actorUserId,
-      isSenior: true,
-      ...step,
-    });
-    if (!moved.ok) return laErr(moved.status, moved.code, moved.message);
-  }
-  return null;
 }
 
 export async function recordLawfulAccessProduction(

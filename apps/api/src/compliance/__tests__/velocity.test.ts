@@ -399,6 +399,99 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(await payoutLeg(STEWARD_B)).toBe('normal');
   });
 
+  it('a room payout’s velocity window is the ROOM’s, not each steward’s', async () => {
+    const { fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000000000',
+      velocityLimits: [{ periodSeconds: 3600, maxCount: 2, maxVolumeMinorUnits: '1000000' }],
+    });
+    const ROOM = '3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f';
+    const payout = (userId: string) =>
+      fraudRisk({
+        userId,
+        actionType: 'grant_payout',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: { kind: 'room', ref: ROOM },
+      });
+    const STEWARD_A = USER;
+    const STEWARD_B = '8b7619ff-8b86-4d01-b42d-00cf4fc96433';
+    expect(await payout(STEWARD_A)).toBe('normal');
+    expect(await payout(STEWARD_B)).toBe('normal');
+    // Bucketed per-steward, this third payout would start STEWARD_A's second
+    // window and sail through — rotate stewards, walk through a room limit.
+    expect(await payout(STEWARD_A)).toBe('blocked');
+  });
+
+  it('a personal pay-in keeps its own window (the room’s spending is not the payer’s)', async () => {
+    const { fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000000000',
+      velocityLimits: [{ periodSeconds: 3600, maxCount: 1, maxVolumeMinorUnits: '1000000' }],
+    });
+    const ROOM = '3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f';
+    // The steward's room payout must not spend their personal budget…
+    expect(
+      await fraudRisk({
+        userId: USER,
+        actionType: 'grant_payout',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: { kind: 'room', ref: ROOM },
+      }),
+    ).toBe('normal');
+    // …so their own deposit still has its first window free.
+    expect(
+      await fraudRisk({
+        userId: USER,
+        actionType: 'treasury_deposit',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
+    ).toBe('normal');
+  });
+
+  it('a verdict whose case could not be recorded is `unavailable`, never a claimed hold', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+      velocityLimits: [{ periodSeconds: 3600, maxCount: 1, maxVolumeMinorUnits: '5' }],
+    });
+    // The chain is down, so no case can be opened.
+    services.caseAudit.appendChained = async () => {
+      throw new Error('chain unavailable');
+    };
+    // `elevated` promises a review a reviewer can clear; `blocked` promises a
+    // recorded velocity case.  With neither recorded, both are claims about an
+    // investigation that does not exist — `unavailable` is honest, and the
+    // real-fund paths reject on it just the same.
+    expect(
+      await fraudRisk({
+        userId: USER,
+        actionType: 'treasury_deposit',
+        amountMinorUnits: '5000',
+        reviewRef: ATTEMPT,
+        reviewSubject: null,
+      }),
+    ).toBe('unavailable');
+    const other = '4d5619ff-8b86-4d01-b42d-00cf4fc96444';
+    await fraudRisk({
+      userId: other,
+      actionType: 'treasury_deposit',
+      amountMinorUnits: '10',
+      reviewRef: null,
+      reviewSubject: null,
+    });
+    expect(
+      await fraudRisk({
+        userId: other,
+        actionType: 'treasury_deposit',
+        amountMinorUnits: '10',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
+    ).toBe('unavailable');
+    expect(await services.cases.listByStates(['open'], 10)).toHaveLength(0);
+  });
+
   it('a DIFFERENT transfer of the same amount gets its OWN review', async () => {
     const { services, fraudRisk } = fraudFixture({
       highValueReviewThresholdMinorUnits: '1000',
