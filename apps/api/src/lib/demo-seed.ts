@@ -122,6 +122,19 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
     roles: ['user', 'expert'],
     purpose: 'Domain expert — the platform `expert` role: may post in expert-gated rooms.',
   },
+  {
+    userId: U(23),
+    handle: 'licio_compliance',
+    displayName: 'Cora Compliance',
+    email: 'compliance@licio.test',
+    // Both WS-N roles on one dev account so the whole compliance console —
+    // cases, fraud queue, declaration verification — AND the counsel-only
+    // surfaces (SAR drafting, disclosure publishing) are exercisable in dev.
+    // In production these are separate people (isCounsel ∌ compliance.review).
+    roles: ['user', 'compliance', 'counsel'],
+    purpose:
+      'Financial-compliance reviewer + counsel — the WS-N console and SAR/disclosure surfaces.',
+  },
 ] as const;
 
 /** Idempotent: re-running against existing data is a no-op. */
@@ -1982,6 +1995,24 @@ export async function seedOperationalSignals(
       context: true,
       branch: 'moderate',
       returns: 'few',
+    },
+    {
+      owner: U(23),
+      item: S(11),
+      dwell: 'long',
+      source: true,
+      context: true,
+      branch: 'shallow',
+      returns: 'none',
+    },
+    {
+      owner: U(23),
+      item: S(2),
+      dwell: 'medium',
+      source: true,
+      context: false,
+      branch: 'none',
+      returns: 'none',
     },
   ];
   const rows: NewStoredEvent[] = attention.map((a) => {
