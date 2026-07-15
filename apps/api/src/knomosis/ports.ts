@@ -17,7 +17,7 @@
 // cannot leak private attention data to a chain-analytics provider.  A unit
 // test asserts the field lists stay clean.
 
-import type { WalletRiskState } from '@licio/shared';
+import type { CryptoFeatureCell, WalletRiskState } from '@licio/shared';
 
 /** Sanctions screening verdict for an address (WS-N.2.2a seam). */
 export type SanctionsVerdict = 'clear' | 'blocked' | 'unavailable';
@@ -44,8 +44,22 @@ export interface CompliancePort {
     actionType: string;
     amountMinorUnits: string | null;
   }): Promise<FraudVerdict>;
-  /** Whether crypto features are available in the user's jurisdiction. */
-  jurisdiction(args: { userId: string; region: string | null }): Promise<JurisdictionVerdict>;
+  /**
+   * Whether crypto features are available in the user's jurisdiction.
+   *
+   * `featureCell` names the §22.2 policy cell the caller is about to exercise
+   * (derived from the action type).  A jurisdiction policy is per-cell, so a
+   * region may permit payments while disabling `governance`: WITHOUT the cell
+   * the verdict can only speak for the region as a whole and a governance
+   * signature would ride a payments-enabled `allowed`.  Every real signed
+   * action therefore passes its cell; omitting it keeps the region-wide
+   * reading (no cell claimed, so no cell-specific permission is implied).
+   */
+  jurisdiction(args: {
+    userId: string;
+    region: string | null;
+    featureCell?: CryptoFeatureCell;
+  }): Promise<JurisdictionVerdict>;
   /** Coarse wallet risk assessment (WS-L.2.5c-1); label + safe explanation
    *  only — raw sanctions/fraud internals never cross this seam. */
   walletRisk(args: {

@@ -15,6 +15,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { decCompare, type TreasuryBounds } from '@licio/governance';
 import {
+  type CryptoFeatureCell,
   formatMinorUnits,
   type GovernanceMode,
   getTypedDataStruct,
@@ -123,6 +124,23 @@ export const FUND_TRANSFER_ACTIONS: ReadonlySet<KnomosisSignedActionType> = new 
   'grant_payout',
   'bounty_contribution',
 ]);
+
+/**
+ * The §22.2 jurisdiction-policy cell each signed action exercises (WS-N.1.1c).
+ * A policy is per-cell, so the region verdict must be asked about the cell the
+ * action actually uses: a region that enables payments while disabling
+ * `governance` must reject a `proposal_sign` even though its payment cells are
+ * live.  Pay-IN actions are payments; a treasury disbursement is a treasury
+ * operation; the binding room-governance signatures are governance.
+ */
+export const ACTION_FEATURE_CELL: Readonly<Record<KnomosisSignedActionType, CryptoFeatureCell>> = {
+  treasury_deposit: 'production_payments',
+  bounty_contribution: 'production_payments',
+  grant_payout: 'treasury_operations',
+  proposal_sign: 'governance',
+  charter_update: 'governance',
+  steward_rotation: 'governance',
+};
 
 /** Law-pack cap category per amount-bearing action type. */
 export const CAP_CATEGORY: Readonly<Partial<Record<KnomosisSignedActionType, string>>> = {
@@ -544,7 +562,14 @@ export async function runPreflight(
   //     per the WS-N port contract, so a binding proposal_sign / charter_update /
   //     steward_rotation signature must be gated on region eligibility too.
   const region = await deps.regionForUser(input.userId);
-  const jurisdiction = await deps.compliance.jurisdiction({ userId: input.userId, region });
+  const jurisdiction = await deps.compliance.jurisdiction({
+    userId: input.userId,
+    region,
+    // The action's own policy cell: a region may permit payments and prohibit
+    // governance (or the reverse), and the verdict must answer for the cell
+    // this signature exercises — not for the region in aggregate.
+    featureCell: ACTION_FEATURE_CELL[actionType],
+  });
   if (jurisdiction === 'blocked') {
     return audited(
       fail(
@@ -580,6 +605,23 @@ export async function runPreflight(
   if (fraud === 'blocked') {
     return audited(
       fail('fraud_risk', 'FRAUD_RISK', 'This action was flagged by risk checks.', input, nowIso),
+    );
+  }
+  // `elevated` = manual review required (§17.10 high-value disbursements).  A
+  // payment intent expresses that by HOLDING in the fraud queue; a signed fund
+  // transfer has no intent to hold, so the equivalent is to reject until the
+  // review clears — WS-N opened the case, and once a reviewer resolves it
+  // `cleared` the same check returns `normal` and the retry proceeds.  Without
+  // this arm a high-value payout would sail past the review it triggered.
+  if (fraud === 'elevated' && FUND_TRANSFER_ACTIONS.has(actionType)) {
+    return audited(
+      fail(
+        'fraud_risk',
+        'FRAUD_RISK',
+        'This action is held for compliance review before it can proceed.',
+        input,
+        nowIso,
+      ),
     );
   }
   /* c8 ignore start -- the fraud-unavailable arm is the real-funds path (dead

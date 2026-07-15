@@ -59,7 +59,10 @@ export async function disclosureGate(
   for (const ref of outcome.policy.disclosure_refs) {
     let acknowledged = false;
     try {
-      acknowledged = await deps.acks.has(userId, ref.id, ref.version);
+      // Region-scoped: this region's policy demands THIS region's text, so an
+      // acknowledgment given elsewhere (same id + version, different content)
+      // does not satisfy it.
+      acknowledged = await deps.acks.has(userId, ref.id, ref.version, resolution.region);
     } catch {
       acknowledged = false; // fail-closed
     }
@@ -113,7 +116,12 @@ export async function listDisclosuresForUser(
   for (const version of versions) {
     let acknowledged = false;
     try {
-      acknowledged = await deps.acks.has(userId, version.disclosureId, version.version);
+      acknowledged = await deps.acks.has(
+        userId,
+        version.disclosureId,
+        version.version,
+        version.region,
+      );
     } catch {
       acknowledged = false;
     }

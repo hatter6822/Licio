@@ -302,8 +302,12 @@ export const disclosureAcknowledgments = complianceSchema.table(
     acknowledgedAt: tz('acknowledged_at').notNull().defaultNow(),
   },
   (t) => [
+    // Region is part of the key: the same (disclosure_id, version) carries
+    // DIFFERENT counsel-authored text per region, so an acknowledgment is only
+    // evidence for the region it was given in — one ack per user per version
+    // per region, and the gate asks per region (WS-N.1.2d).
     uniqueIndex('da_user_version_uq')
-      .on(t.userId, t.disclosureId, t.version)
+      .on(t.userId, t.disclosureId, t.version, t.region)
       .where(sql`${t.userId} IS NOT NULL`),
   ],
 );

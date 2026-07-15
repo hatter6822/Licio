@@ -184,6 +184,14 @@ export class DrizzleJurisdictionPolicyStore implements JurisdictionPolicyStore {
       .orderBy(asc(jurisdictionFeaturePolicies.countryOrRegion));
     return rows.map(toPolicyRow);
   }
+
+  async delete(policyId: string): Promise<boolean> {
+    const rows = await this.#db
+      .delete(jurisdictionFeaturePolicies)
+      .where(eq(jurisdictionFeaturePolicies.policyId, policyId))
+      .returning({ policyId: jurisdictionFeaturePolicies.policyId });
+    return rows.length > 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -775,7 +783,8 @@ export class DrizzleDisclosureAckStore implements DisclosureAckStore {
         acknowledgedAt: iso(row.acknowledgedAt),
       };
     } catch (error) {
-      // Idempotent: the (user, disclosure, version) unique returns the existing.
+      // Idempotent: the (user, disclosure, version, region) unique returns the
+      // existing row.
       if (isUniqueViolation(error) && ack.userId !== null) {
         const rows = await this.#db
           .select()
@@ -785,6 +794,7 @@ export class DrizzleDisclosureAckStore implements DisclosureAckStore {
               eq(disclosureAcknowledgments.userId, ack.userId),
               eq(disclosureAcknowledgments.disclosureId, ack.disclosureId),
               eq(disclosureAcknowledgments.version, ack.version),
+              eq(disclosureAcknowledgments.region, ack.region),
             ),
           )
           .limit(1);
@@ -804,7 +814,12 @@ export class DrizzleDisclosureAckStore implements DisclosureAckStore {
     }
   }
 
-  async has(userId: string, disclosureId: string, version: number): Promise<boolean> {
+  async has(
+    userId: string,
+    disclosureId: string,
+    version: number,
+    region: string,
+  ): Promise<boolean> {
     const rows = await this.#db
       .select({ id: disclosureAcknowledgments.id })
       .from(disclosureAcknowledgments)
@@ -813,6 +828,7 @@ export class DrizzleDisclosureAckStore implements DisclosureAckStore {
           eq(disclosureAcknowledgments.userId, userId),
           eq(disclosureAcknowledgments.disclosureId, disclosureId),
           eq(disclosureAcknowledgments.version, version),
+          eq(disclosureAcknowledgments.region, region),
         ),
       )
       .limit(1);

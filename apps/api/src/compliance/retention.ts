@@ -56,9 +56,12 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
         await deps.caseDeps.cases.anonymize(record.caseId, nowIso);
         summary.anonymized += 1;
       } else {
-        // Thorough deletion: the trail first, then the case (one GUC txn in
-        // the Drizzle adapter).  A SAR reference throws (FK RESTRICT).
-        await deps.caseDeps.caseAudit.deleteByCase(record.caseId);
+        // Thorough deletion through the SINGLE transactional store operation:
+        // `deleteCascade` removes the trail and the case together (one GUC
+        // transaction in the Drizzle adapter), so a failure — a SAR reference
+        // hitting the FK, say — rolls BOTH back. Deleting the trail here first
+        // would commit the trail's removal outside that transaction and could
+        // leave a live case with no review history.
         await deps.caseDeps.cases.deleteCascade(record.caseId);
         summary.deleted += 1;
       }

@@ -395,19 +395,35 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     expect(await services.declarations.get(userId)).toBeNull();
     // Consent evidence SURVIVES, unattributed (it is not deleted).
     expect(await services.acks.listByUser(userId)).toHaveLength(0);
-    expect(await services.acks.has(userId, 'risk-general', 1)).toBe(false);
+    expect(await services.acks.has(userId, 'risk-general', 1, 'DE')).toBe(false);
     expect((await services.cases.getById(scrubbed.caseId))?.userIdOrRoomId).toBeNull();
     // The legal hold defers erasure (audited), exactly as the sweep does.
     expect((await services.cases.getById(held.caseId))?.userIdOrRoomId).toBe(userId);
     expect(await services.pins.activeForWallet(walletAccountId)).toBeNull();
   });
 
-  it('the purge tolerates a wallet-lookup failure (erasure never blocks on a sibling)', async () => {
+  it('the purge FAILS on a wallet-lookup error so the job retries before the wallet purge', async () => {
     const userId = randomUUID();
-    const record = await seedCase({ userIdOrRoomId: userId });
-    await buildCompliancePurge(services, async () => {
-      throw new Error('wallet service down');
-    })(userId);
-    expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBeNull();
+    const walletAccountId = randomUUID();
+    await services.pins.pin({
+      id: randomUUID(),
+      walletAccountId,
+      reason: 'fixture',
+      pinnedByRef: 'system',
+      createdAt: new Date(nowMs).toISOString(),
+      releasedAt: null,
+      releasedByRef: null,
+    });
+    // A transient wallet-service failure must NOT read as "this user has no
+    // wallets": the WS-L purge that runs next would delete the wallet rows,
+    // and with them the only way to ever resolve these pins' ids — orphaning
+    // compliance data on a deleted account. Throwing leaves the deletion
+    // request un-tombstoned so the next tick retries the whole sequence.
+    await expect(
+      buildCompliancePurge(services, async () => {
+        throw new Error('wallet service down');
+      })(userId),
+    ).rejects.toThrow(/wallet service down/);
+    expect(await services.pins.activeForWallet(walletAccountId)).not.toBeNull();
   });
 });

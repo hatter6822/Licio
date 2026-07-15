@@ -183,6 +183,12 @@ export interface JurisdictionPolicyStore {
   hasOnlyFutureRows(region: string, nowIso: string): Promise<boolean>;
   listByRegion(region: string): Promise<JurisdictionPolicyRow[]>;
   listAll(): Promise<JurisdictionPolicyRow[]>;
+  /** Compensating removal for a policy whose audit entry could not be
+   *  committed (WS-N.1.1g): the chain must never miss a LIVE policy, so an
+   *  unauditable write is undone rather than left active.  Not an operator
+   *  affordance — no route deletes a policy (superseding it is a new version,
+   *  which the chain records). */
+  delete(policyId: string): Promise<boolean>;
 }
 
 export interface PolicyAuditStore {
@@ -260,9 +266,12 @@ export interface DisclosureStore {
 }
 
 export interface DisclosureAckStore {
-  /** Idempotent: an existing (user, disclosure, version) ack is returned. */
+  /** Idempotent: an existing (user, disclosure, version, region) ack is returned. */
   record(ack: DisclosureAckRecord): Promise<DisclosureAckRecord>;
-  has(userId: string, disclosureId: string, version: number): Promise<boolean>;
+  /** REGION-scoped: the same (disclosure, version) is different counsel-
+   *  authored text per region, so an ack in one region is not evidence for
+   *  another (WS-N.1.2d — otherwise changing regions would skip the gate). */
+  has(userId: string, disclosureId: string, version: number, region: string): Promise<boolean>;
   listByUser(userId: string): Promise<DisclosureAckRecord[]>;
   /** Right-to-erasure: NULL the user ref (consent evidence stays, anonymized). */
   anonymizeUser(userId: string): Promise<number>;
@@ -386,6 +395,13 @@ export class InMemoryJurisdictionPolicyStore implements JurisdictionPolicyStore 
   async listAll(): Promise<JurisdictionPolicyRow[]> {
     return this.#rows.map((r) => ({ ...r }));
   }
+
+  async delete(policyId: string): Promise<boolean> {
+    const index = this.#rows.findIndex((r) => r.policyId === policyId);
+    if (index === -1) return false;
+    this.#rows.splice(index, 1);
+    return true;
+  }
 }
 
 export class InMemoryPolicyAuditStore implements PolicyAuditStore {
@@ -413,6 +429,9 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore {
   readonly #rows = new Map<string, ComplianceCaseRecord>();
   /** Cross-store deletion guard (mirrors the SAR FK RESTRICT). */
   sarGuard: ((caseId: string) => Promise<boolean>) | null = null;
+  /** Cascade hook (mirrors the Drizzle adapter's single GUC transaction:
+   *  the trail and the case are removed together, or neither is). */
+  auditCascade: ((caseId: string) => Promise<void>) | null = null;
 
   async insert(record: ComplianceCaseRecord): Promise<ComplianceCaseRecord> {
     if (record.idempotencyKey !== null) {
@@ -501,9 +520,13 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore {
   }
 
   async deleteCascade(caseId: string): Promise<void> {
+    // The guard runs BEFORE anything is removed, so a SAR-referenced case
+    // leaves both the trail and the case intact — the all-or-nothing the
+    // Drizzle adapter gets from its transaction (the FK aborts it).
     if (this.sarGuard !== null && (await this.sarGuard(caseId))) {
       throw new Error('case is referenced by a SAR/STR record (legal hold)');
     }
+    await this.auditCascade?.(caseId);
     this.#rows.delete(caseId);
   }
 
@@ -631,21 +654,32 @@ export class InMemoryDisclosureAckStore implements DisclosureAckStore {
   readonly #rows: DisclosureAckRecord[] = [];
 
   async record(ack: DisclosureAckRecord): Promise<DisclosureAckRecord> {
+    // Mirrors the `da_user_version_uq` partial unique — region included.
     const existing = this.#rows.find(
       (r) =>
         r.userId !== null &&
         r.userId === ack.userId &&
         r.disclosureId === ack.disclosureId &&
-        r.version === ack.version,
+        r.version === ack.version &&
+        r.region === ack.region,
     );
     if (existing) return { ...existing };
     this.#rows.push({ ...ack });
     return { ...ack };
   }
 
-  async has(userId: string, disclosureId: string, version: number): Promise<boolean> {
+  async has(
+    userId: string,
+    disclosureId: string,
+    version: number,
+    region: string,
+  ): Promise<boolean> {
     return this.#rows.some(
-      (r) => r.userId === userId && r.disclosureId === disclosureId && r.version === version,
+      (r) =>
+        r.userId === userId &&
+        r.disclosureId === disclosureId &&
+        r.version === version &&
+        r.region === region,
     );
   }
 

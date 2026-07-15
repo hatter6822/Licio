@@ -163,3 +163,94 @@ describe('evaluateAvailability — the full object', () => {
     expect(off.assets).toEqual({});
   });
 });
+
+describe('coarseVerdict — the cell-scoped reading (WS-N.1.1c)', () => {
+  it('answers for the REQUESTED cell, not the region in aggregate', () => {
+    // The fixture region enables both real-funds cells but only SIMULATES
+    // governance, so the region-wide reading is `allowed` while a governance
+    // signature reaches no real-funds decision. Before the cell was passed,
+    // that `allowed` was what a proposal_sign rode in on.
+    expect(coarseVerdict(ELIGIBLE)).toBe('allowed');
+    expect(coarseVerdict(ELIGIBLE, 'production_payments')).toBe('allowed');
+    expect(coarseVerdict(ELIGIBLE, 'treasury_operations')).toBe('allowed');
+    expect(coarseVerdict(ELIGIBLE, 'governance')).toBe('unknown');
+  });
+
+  it.each([
+    ['blocked', 'blocked'],
+    ['disabled', 'blocked'],
+    ['pending-legal', 'blocked'],
+    ['simulated', 'unknown'],
+    ['testnet', 'unknown'],
+    ['enabled', 'allowed'],
+  ] as const)('a %s governance cell → %s', (state, expected) => {
+    const input: AvailabilityInput = {
+      ...ELIGIBLE,
+      policy: {
+        kind: 'active',
+        policy: { ...POLICY, feature_flags: { ...POLICY.feature_flags, governance: state } },
+      },
+    };
+    expect(coarseVerdict(input, 'governance')).toBe(expected);
+  });
+
+  it('a region that PROHIBITS one cell blocks it even while payments stay allowed', () => {
+    const input: AvailabilityInput = {
+      ...ELIGIBLE,
+      policy: {
+        kind: 'active',
+        policy: { ...POLICY, feature_flags: { ...POLICY.feature_flags, governance: 'disabled' } },
+      },
+    };
+    expect(coarseVerdict(input, 'production_payments')).toBe('allowed');
+    expect(coarseVerdict(input, 'governance')).toBe('blocked');
+    // …and the region-wide reading still says `allowed` — which is exactly why
+    // the caller must name its cell.
+    expect(coarseVerdict(input)).toBe('allowed');
+  });
+
+  it('the cell-scoped reading keeps every fail-closed guard', () => {
+    // A missing policy reaches NO decision (the shipped testnet behavior) —
+    // never a silent block or pass.
+    expect(coarseVerdict({ ...ELIGIBLE, policy: { kind: 'missing' } }, 'governance')).toBe(
+      'unknown',
+    );
+    expect(
+      coarseVerdict({ ...ELIGIBLE, policy: { kind: 'malformed' } }, 'production_payments'),
+    ).toBe('unknown');
+    // An enabled cell still requires the verified basis, the adult band, the
+    // recorded legal approval, and the global flags.
+    expect(coarseVerdict({ ...ELIGIBLE, basis: 'locale_subtag' }, 'production_payments')).toBe(
+      'unknown',
+    );
+    expect(coarseVerdict({ ...ELIGIBLE, cryptoEnabled: false }, 'production_payments')).toBe(
+      'unknown',
+    );
+    expect(
+      coarseVerdict(
+        {
+          ...ELIGIBLE,
+          policy: { kind: 'active', policy: { ...POLICY, legal_approval_ref: null } },
+        },
+        'production_payments',
+      ),
+    ).toBe('unknown');
+    // The governance cell additionally honors the global governance flag.
+    const enabledGovernance: AvailabilityInput = {
+      ...ELIGIBLE,
+      policy: {
+        kind: 'active',
+        policy: { ...POLICY, feature_flags: { ...POLICY.feature_flags, governance: 'enabled' } },
+      },
+    };
+    expect(coarseVerdict(enabledGovernance, 'governance')).toBe('allowed');
+    expect(coarseVerdict({ ...enabledGovernance, governanceEnabled: false }, 'governance')).toBe(
+      'unknown',
+    );
+    // Minor + hold outrank any cell.
+    expect(coarseVerdict({ ...ELIGIBLE, ageBand: 'teen_16_17' }, 'production_payments')).toBe(
+      'blocked',
+    );
+    expect(coarseVerdict({ ...ELIGIBLE, complianceHold: true }, 'governance')).toBe('blocked');
+  });
+});

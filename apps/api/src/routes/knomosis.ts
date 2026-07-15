@@ -28,6 +28,12 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { disclosureGate } from '../compliance/disclosures.js';
+import {
+  buildDisclosureDeps,
+  complianceServicesConfigured,
+  getComplianceServices,
+} from '../compliance/services.js';
 import {
   ACTION_KILL_SWITCH,
   activateKillSwitch,
@@ -38,7 +44,7 @@ import {
   requestKillSwitchDeactivation,
 } from '../knomosis/killswitch.js';
 import { KNOMOSIS_PIN, pinnedDeployment } from '../knomosis/pin.js';
-import { type PreflightDeps, runPreflight } from '../knomosis/preflight.js';
+import { FUND_TRANSFER_ACTIONS, type PreflightDeps, runPreflight } from '../knomosis/preflight.js';
 import { getKnomosisServices, type KnomosisServices } from '../knomosis/services.js';
 import {
   composeStandingEtag,
@@ -194,6 +200,36 @@ export function createKnomosisRoutes() {
             return c.json(deny('unavailable', 'Governance data is unavailable.'), 503);
           }
           const body = c.req.valid('json');
+          // WS-N.1.2d — the first-financial-action disclosure gate, the second
+          // of its two chokepoints (payment-intent creation is the other).  A
+          // fund-moving signed action can be minted here WITHOUT ever passing
+          // through an intent, so gating only the intent route would let those
+          // proceed on unacknowledged disclosures.  Fail-closed: an unreadable
+          // ack store reports them missing.
+          // `action_type` is an unvalidated wire string here (runPreflight is
+          // what rejects an unregistered one), so widen the set for the lookup:
+          // a non-fund-transfer — registered or not — simply skips this gate
+          // and meets its own rejection inside the pipeline.
+          const movesFunds = (FUND_TRANSFER_ACTIONS as ReadonlySet<string>).has(body.action_type);
+          if (movesFunds && complianceServicesConfigured()) {
+            const disclosureCheck = await disclosureGate(
+              buildDisclosureDeps(getComplianceServices()),
+              auth.userId,
+            );
+            if (disclosureCheck.required) {
+              return c.json(
+                {
+                  error: {
+                    code: 'disclosure_ack_required',
+                    message:
+                      'Acknowledge the current risk disclosures before your first financial action.',
+                  },
+                  missing: disclosureCheck.missing,
+                },
+                403,
+              );
+            }
+          }
           const response = await runPreflight(deps, {
             userId: auth.userId,
             actionType: body.action_type,

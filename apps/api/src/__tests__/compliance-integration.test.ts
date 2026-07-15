@@ -598,10 +598,21 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       acknowledgedAt: NOW(),
     };
     await stores.acks.record(ack);
-    // Idempotent on the (user, disclosure, version) partial unique.
+    // Idempotent on the (user, disclosure, version, region) partial unique.
     const replay = await stores.acks.record({ ...ack, id: randomUUID() });
     expect(replay.id).toBe(ack.id);
-    expect(await stores.acks.has(userId, disclosureId, 1)).toBe(true);
+    expect(await stores.acks.has(userId, disclosureId, 1, region)).toBe(true);
+    // Region-scoped: the SAME id+version in another region is a DIFFERENT
+    // consent record — it neither collides on the unique nor satisfies the
+    // first region's gate (WS-N.1.2d).
+    const otherRegion = `${region}-X`;
+    const foreign = await stores.acks.record({
+      ...ack,
+      id: randomUUID(),
+      region: otherRegion,
+    });
+    expect(foreign.id).not.toBe(ack.id);
+    expect(await stores.acks.has(userId, disclosureId, 1, otherRegion)).toBe(true);
 
     // The consent evidence is append-only: content edits are rejected…
     await expectTriggerRejection(
@@ -612,8 +623,8 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       /append-only/,
     );
     // …while the right-to-erasure NULLing of user_id is the ONE permitted write.
-    expect(await stores.acks.anonymizeUser(userId)).toBe(1);
-    expect(await stores.acks.has(userId, disclosureId, 1)).toBe(false);
+    expect(await stores.acks.anonymizeUser(userId)).toBe(2);
+    expect(await stores.acks.has(userId, disclosureId, 1, region)).toBe(false);
     expect(await stores.acks.listByUser(userId)).toHaveLength(0);
   });
 

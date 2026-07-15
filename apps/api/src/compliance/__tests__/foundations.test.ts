@@ -311,6 +311,96 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
     expect(gate.required).toBe(true);
   });
 
+  it('an ack is REGION-scoped: the same id+version elsewhere does not satisfy the gate', async () => {
+    const s = await withPolicy();
+    const deps = buildDisclosureDeps(s);
+    // Acknowledge DE's risk-general v2.
+    expect(
+      (
+        await acknowledgeDisclosure(deps, {
+          userId: USER,
+          disclosureId: 'risk-general',
+          version: 2,
+        })
+      ).ok,
+    ).toBe(true);
+    expect((await disclosureGate(deps, USER)).required).toBe(false);
+
+    // FR reuses the id+version for DIFFERENT counsel-authored text, and
+    // requires it too.  Moving to FR must re-prompt: the DE acknowledgment is
+    // evidence about DE's wording only.
+    await s.policies.insert({
+      policyId: '77777777-7777-4777-8777-777777777777',
+      countryOrRegion: 'FR',
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      document: {
+        policy_id: '77777777-7777-4777-8777-777777777777',
+        country_or_region: 'FR',
+        feature_flags: {
+          wallet_connection: 'testnet',
+          testnet_transactions: 'testnet',
+          production_payments: 'disabled',
+          treasury_operations: 'disabled',
+          governance: 'disabled',
+        },
+        asset_flags: {},
+        age_gate_policy: {
+          wallet_connection: { required_band: 'adult' },
+          testnet_transactions: { required_band: 'adult' },
+          production_payments: { required_band: 'adult' },
+          treasury_operations: { required_band: 'adult' },
+          governance: { required_band: 'adult' },
+        },
+        kyc_policy: {},
+        disclosure_refs: [{ id: 'risk-general', version: 2, locales: ['fr'] }],
+        legal_approval_ref: null,
+        effective_at: '2026-01-01T00:00:00.000Z',
+      },
+      createdAt: new Date(NOW).toISOString(),
+    });
+    await s.disclosures.publish({
+      id: '88888888-8888-4888-8888-888888888888',
+      disclosureId: 'risk-general',
+      region: 'FR',
+      version: 2,
+      locale: 'fr',
+      title: 'Avertissement sur les risques',
+      contentMd: 'Texte français distinct — les obligations diffèrent.',
+      requiresAcknowledgment: true,
+      publishedAt: new Date(NOW).toISOString(),
+    });
+    await s.declarations.upsert({
+      userId: USER,
+      declaredRegion: 'FR',
+      status: 'verified',
+      verificationLevel: 'reviewer_verified',
+      evidenceRef: null,
+      verifiedAt: new Date(NOW).toISOString(),
+      verifiedBy: null,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    });
+    const inFrance = await disclosureGate(deps, USER);
+    expect(inFrance.region).toBe('FR');
+    expect(inFrance.required).toBe(true);
+    expect(inFrance.missing[0]?.id).toBe('risk-general');
+    // The list shows FR's version as UNacknowledged…
+    expect((await listDisclosuresForUser(deps, USER))[0]?.acknowledged).toBe(false);
+    // …and acknowledging it clears FR without disturbing the DE evidence.
+    expect(
+      (
+        await acknowledgeDisclosure(deps, {
+          userId: USER,
+          disclosureId: 'risk-general',
+          version: 2,
+        })
+      ).ok,
+    ).toBe(true);
+    expect((await disclosureGate(deps, USER)).required).toBe(false);
+    expect(await s.acks.has(USER, 'risk-general', 2, 'DE')).toBe(true);
+    expect(await s.acks.has(USER, 'risk-general', 2, 'FR')).toBe(true);
+  });
+
   it('publish-immutability: the same version cannot be re-published', async () => {
     const s = await withPolicy();
     await expect(

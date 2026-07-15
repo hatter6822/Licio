@@ -7,6 +7,7 @@
 // the high-value `elevated` trigger, counter-outage `unavailable`).
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
+import { transitionCase } from '../cases.js';
 import { type ComplianceRuntimeConfig, DEFAULT_COMPLIANCE_CONFIG } from '../config.js';
 import { createFraudRisk, limitsForRegion } from '../risk.js';
 import { buildCaseDeps, createInMemoryComplianceServices } from '../services.js';
@@ -14,6 +15,7 @@ import { InMemoryVelocityStore } from '../stores.js';
 
 const NOW = Date.parse('2026-07-15T12:00:00.000Z');
 const USER = '6f9619ff-8b86-4d01-b42d-00cf4fc964ff';
+const REVIEWER = '7a8619ff-8b86-4d01-b42d-00cf4fc96400';
 
 describe('InMemoryVelocityStore — exact sliding-window reserve', () => {
   it('admits up to maxCount and rejects the (n+1)th in the window', async () => {
@@ -163,6 +165,87 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     const cases = await services.cases.listByStates(['open'], 10);
     expect(cases).toHaveLength(1);
     expect(cases[0]?.triggerType).toBe('pattern');
+  });
+
+  it('the high-value review is a LOOP: a cleared case lets the retry through', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    const check = () => fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000' });
+    // First attempt: held for review (the consumers reject/queue on this).
+    expect(await check()).toBe('elevated');
+    const [record] = await services.cases.listByStates(['open'], 10);
+    expect(record?.triggerType).toBe('pattern');
+    const caseId = record?.caseId as string;
+    // Still held while the review is in flight — no duplicate case either.
+    expect(await check()).toBe('elevated');
+    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(1);
+
+    // A reviewer clears THIS check → the retry proceeds (otherwise `elevated`
+    // would be a permanent block for the day's bucket).
+    const deps = buildCaseDeps(services);
+    await transitionCase(deps, {
+      caseId,
+      to: 'assigned',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      assigneeUserId: REVIEWER,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'investigating',
+      actorUserId: REVIEWER,
+      isSenior: false,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'resolved',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      resolution: {
+        outcome: 'cleared',
+        notes: 'legitimate high-value transfer',
+        resolved_by: REVIEWER,
+        resolved_at: new Date(NOW).toISOString(),
+      },
+    });
+    expect(await check()).toBe('normal');
+  });
+
+  it('a review resolved to a NON-cleared outcome keeps the action held', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    const check = () => fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000' });
+    expect(await check()).toBe('elevated');
+    const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
+    const deps = buildCaseDeps(services);
+    await transitionCase(deps, {
+      caseId,
+      to: 'assigned',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      assigneeUserId: REVIEWER,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'investigating',
+      actorUserId: REVIEWER,
+      isSenior: false,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'resolved',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      resolution: {
+        outcome: 'restricted',
+        notes: 'not cleared',
+        resolved_by: REVIEWER,
+        resolved_at: new Date(NOW).toISOString(),
+      },
+    });
+    expect(await check()).toBe('elevated');
   });
 
   it('a malformed amount is blocked (an unbounded value never passes a limiter)', async () => {

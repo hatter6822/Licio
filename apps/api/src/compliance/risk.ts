@@ -14,9 +14,20 @@
 //
 // Verdicts: `blocked` (a velocity limit would be exceeded — the shipped
 // gates reject with FRAUD_RISK and a velocity case opens), `elevated` (the
-// high-value review threshold — a pattern case routes the action's intent to
-// the fraud queue, WS-N.2.2c), `normal` otherwise.  A malformed amount is
-// `blocked`: an unparseable value must never pass a limiter.
+// high-value review threshold — §17.10 "manual review of high-value
+// disbursements"), `normal` otherwise.  A malformed amount is `blocked`: an
+// unparseable value must never pass a limiter.
+//
+// `elevated` means REVIEW REQUIRED, and both consumers honor it: a payment
+// intent is held in the fraud queue (`payment_compliance_state = 'flagged'`,
+// released by a reviewer), and a direct WS-L fund transfer — which has no
+// intent to hold — is rejected pending the same review.  To keep that from
+// being a permanent block, the review is a LOOP: the pattern case is
+// idempotent per (user, action, amount, day), so once a reviewer resolves it
+// `cleared` this returns `normal` and the retry proceeds.  Any other case
+// state (open/assigned/investigating/escalated, or resolved to a non-cleared
+// outcome) keeps the action held.
+
 import type { CompliancePort, FraudVerdict } from '../knomosis/ports.js';
 import { type CaseDeps, createCase } from './cases.js';
 import type { ComplianceRuntimeConfig, VelocityLimit } from './config.js';
@@ -100,18 +111,32 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
       }
     }
     // High-value review (WS-N.2.2c): at/above the threshold the check is
-    // `elevated` and a pattern case routes the intent to the fraud queue.
+    // `elevated` — the action is held for manual review (the intent goes to
+    // the fraud queue; a direct WS-L transfer is rejected pending review).
     // Distinct from the WS-L.2.6e signing STEP-UP threshold.
     if (BigInt(amount) >= BigInt(config.highValueReviewThresholdMinorUnits)) {
-      deps.metric('compliance.fraud.high_value_elevated');
-      await createCase(deps.caseDeps, {
+      const opened = await createCase(deps.caseDeps, {
         subjectKind: 'user',
         subjectRef: userId,
         triggerType: 'pattern',
         riskLevel: 'medium',
         note: `High-value ${actionType} at/above the manual-review threshold (WS-N.2.2c).`,
+        // Pins the review to THIS user+action+amount+day, so the post-review
+        // retry below finds the reviewer's decision instead of opening a
+        // second case (createCase returns the existing record on a hit).
         idempotencyKey: `highvalue:${userId}:${actionType}:${amount}:${dayBucket(nowMs)}`,
       });
+      // The review loop's exit: a reviewer who CLEARED this exact high-value
+      // check lets the retry through.  Anything else stays held.
+      if (
+        opened.ok &&
+        opened.record.reviewState === 'resolved' &&
+        opened.record.resolution?.outcome === 'cleared'
+      ) {
+        deps.metric('compliance.fraud.high_value_cleared');
+        return 'normal';
+      }
+      deps.metric('compliance.fraud.high_value_elevated');
       return 'elevated';
     }
     return 'normal';

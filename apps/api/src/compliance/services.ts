@@ -155,13 +155,21 @@ export function createInMemoryComplianceServices(
   // production sweep cannot, and the parity would only surface in production.
   const cases = new InMemoryComplianceCaseStore();
   const sars = new InMemorySarStore();
+  const caseAudit = new InMemoryCaseAuditStore();
   cases.sarGuard = async (caseId) => (await sars.listByCase(caseId)).length > 0;
+  // `deleteCascade` removes the trail WITH the case, mirroring the Drizzle
+  // adapter's single sanctioned-GUC transaction (the retention sweep calls the
+  // one operation; a partial delete could otherwise strand a case without its
+  // review history).
+  cases.auditCascade = async (caseId) => {
+    await caseAudit.deleteByCase(caseId);
+  };
 
   const services: ComplianceServices = {
     policies: new InMemoryJurisdictionPolicyStore(),
     policyAudit: new InMemoryPolicyAuditStore(),
     cases,
-    caseAudit: new InMemoryCaseAuditStore(),
+    caseAudit,
     declarations: new InMemoryRegionDeclarationStore(),
     disclosures: new InMemoryDisclosureStore(),
     acks: new InMemoryDisclosureAckStore(),
@@ -403,10 +411,10 @@ export function buildCompliancePort(services: ComplianceServices): CompliancePor
         return 'unavailable';
       }
     },
-    jurisdiction: async ({ userId }) => {
+    jurisdiction: async ({ userId, featureCell }) => {
       try {
         const input = await assembleAvailabilityInput(services, userId);
-        const verdict = coarseVerdict(input);
+        const verdict = coarseVerdict(input, featureCell);
         services.metrics.increment(`compliance.jurisdiction.${verdict}`);
         return verdict;
       } catch {
@@ -511,7 +519,15 @@ export function buildCompliancePurge(
       { caseDeps: buildCaseDeps(services), log: services.log },
       userId,
     );
-    const walletIds = await walletIdsForUser(userId).catch(() => [] as string[]);
+    // The wallet-id lookup must NOT be swallowed.  This purge deliberately
+    // runs BEFORE the WS-L wallet purge because the wallet rows are the only
+    // way to resolve the ids these pins are keyed by; treating a transient
+    // failure as "no wallets" would drop the pins on the floor and then let
+    // the wallet rows be deleted, leaving compliance data attached to a
+    // deleted account that no retry could ever find. Throwing instead leaves
+    // the deletion request un-tombstoned, so the next purge tick retries the
+    // whole sequence with the wallet rows still present.
+    const walletIds = await walletIdsForUser(userId);
     if (walletIds.length > 0) await services.pins.purgeForWallets(walletIds);
   };
 }

@@ -26,22 +26,33 @@ modified** in their verdict semantics:
 
 - `screenAddress` → `'clear' | 'blocked' | 'unavailable'` — WS-L submit
   preflight; `unavailable` rejects only real funds.
-- `fraudRisk` → `'normal' | 'elevated' | 'blocked' | 'unavailable'` — the
-  WS-M payment-intent preflight; `elevated` sets the intent's reserved
-  `payment_compliance_state = 'flagged'` (the fraud queue), `blocked` rejects.
-- `jurisdiction` → `'allowed' | 'blocked' | 'unknown'` — the coarse verdict
-  (truth table in `engine.ts`); `unknown` preserves the shipped testnet
-  behaviour, `allowed` additionally requires a **verified** declaration basis
-  and both `production_payments` + `treasury_operations` cells `enabled`.
+- `fraudRisk` → `'normal' | 'elevated' | 'blocked' | 'unavailable'` —
+  `elevated` means **review required** and BOTH consumers honour it: a payment
+  intent is held in the fraud queue (`payment_compliance_state = 'flagged'`),
+  and a direct WS-L fund transfer (which has no intent to hold) is rejected
+  pending the same review. The review is a loop, not a dead end: the pattern
+  case is idempotent per (user, action, amount, day), so once a reviewer
+  resolves it `cleared` the check returns `normal` and the retry proceeds.
+- `jurisdiction` → `'allowed' | 'blocked' | 'unknown'` — takes the
+  `featureCell` the caller is about to exercise (`ACTION_FEATURE_CELL` maps
+  each signed action to its §22.2 cell). A policy is **per-cell**, so a region
+  that enables payments while disabling `governance` answers `blocked` for a
+  `proposal_sign` — the region-wide reading would have said `allowed` off the
+  payments cells and let it through. `unknown` preserves the shipped testnet
+  behaviour; `allowed` additionally requires a **verified** declaration basis
+  and the relevant cell(s) `enabled`.
 - `walletRisk` — risk pins + open critical/high cases (wallet addresses are
   stored hashed; plaintext exists only at link time, which is why sanctions
   screening hooks `linkWallet` via `onSanctionedWalletLink`).
 
 Two new gates were added at the consumer edge: the **disclosure-acknowledgment
-gate** on intent creation (`403 disclosure_ack_required` until every current
-counsel-published version for the user's region is acknowledged), and the
-**compliance-hold gate** in `transitionIntent` (a `flagged`/`blocked` intent
-cannot reach `quoted`/`signed`/`submitted` until released).
+gate** (`403 disclosure_ack_required` until every current counsel-published
+version for the user's region is acknowledged) on BOTH first-financial-action
+chokepoints — payment-intent creation and the WS-L `/actions/preflight` route
+for fund-transfer actions, since a signed transfer can be minted without ever
+passing through an intent — and the **compliance-hold gate** in
+`transitionIntent` (a `flagged`/`blocked` intent cannot reach
+`quoted`/`signed`/`submitted` until released).
 
 ## Source layout
 
@@ -174,8 +185,20 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   an oversight.
 - **RBAC separation is deliberate.**  `compliance` and `counsel` are distinct
   roles with distinct capabilities; `steward` and `admin` do NOT inherit them.
-  Four-eyes: enabling any cell in a jurisdiction policy requires counsel
-  approval on top of the compliance author.
+  Enabling any cell in a jurisdiction policy takes the **counsel capability**
+  *and* a recorded `legal_approval_ref` — a compliance reviewer cannot turn
+  real funds on for a region by quoting a reference at themselves. Narrowing
+  writes (disabled/testnet/simulated/pending-legal) stay open to the
+  compliance role: they can only reduce availability.
+- **A live policy always has a chain entry.**  The audit table is append-only,
+  so the audit cannot be written first and undone; instead an insert whose
+  audit entry fails to commit is **compensated away**, which also frees the
+  `(region, effective_at)` slot so the operator's retry is not blocked by a
+  half-written change.
+- **Acknowledgments are region-scoped.**  The same `(disclosure_id, version)`
+  carries different counsel-authored text per region, so the ack key and the
+  gate both include the region — changing regions re-prompts rather than
+  silently reusing another region's consent.
 
 ## Operational contract
 

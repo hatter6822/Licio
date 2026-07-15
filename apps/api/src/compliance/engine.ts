@@ -6,23 +6,34 @@
 // top of the global fail-closed `cryptoEnabled`/`governanceEnabled` flags —
 // it can further disable, never enable.
 //
-// The coarse port verdict preserves the shipped fail-closed consumer
-// semantics exactly (preflight 7b, submit re-check, intent preflight, the
+// The port verdict preserves the shipped fail-closed consumer semantics
+// exactly (preflight 7b, submit re-check, intent preflight, the
 // `jurisdiction_supported` readiness item, kill switches):
 //
 //   `blocked`  — affirmative prohibition: a confirmed minor (§19.4), a
-//                user-level compliance hold (open high/critical case), or a
+//                user-level compliance hold (open high/critical case), a
 //                region whose EVERY crypto cell is `blocked` (the matrix
-//                "explicitly prohibited" value).  Rejects everywhere.
+//                "explicitly prohibited" value), or — when the caller names
+//                the cell it is about to exercise — a region that prohibits
+//                THAT cell.  Rejects everywhere.
 //   `allowed`  — affirmative production eligibility: adult ∧ no hold ∧ a
-//                valid policy with BOTH real-funds cells (`production_
-//                payments`, `treasury_operations`) `enabled` (which
+//                valid policy whose relevant cells are `enabled` (which
 //                validatePolicy ties to recorded legal approval) ∧ the
 //                VERIFIED declaration basis ∧ the global crypto flag on.
 //                This is what capped/mature production readiness requires.
 //   `unknown`  — everything else (fail-closed: real funds reject, testnet
 //                proceeds — the shipped behavior for regions with no policy,
 //                disabled/testnet cells, or an insufficient basis).
+//
+// CELL SCOPE (WS-N.1.1c).  A jurisdiction policy is per-cell, so the two
+// readings differ and the caller picks:
+//   • with a `featureCell` — the verdict speaks for THAT cell.  A region that
+//     enables payments but disables `governance` answers `blocked` for a
+//     `proposal_sign`, which the region-wide reading could never express: it
+//     would have said `allowed` off the payments cells and let a prohibited
+//     governance signature through.  Every real signed action names its cell.
+//   • without one — the region-wide reading (production eligibility off the
+//     two real-funds cells).  Claims no cell, so it grants no cell.
 //
 // The verified-basis requirement for the real-funds cells is DELIBERATELY
 // hard-coded, not configurable: with no geolocated baseline (§19.1), the
@@ -149,16 +160,45 @@ export function evaluateAvailability(input: AvailabilityInput): FeatureAvailabil
   };
 }
 
-/** The coarse `CompliancePort.jurisdiction` verdict (pure; see the header). */
-export function coarseVerdict(input: AvailabilityInput): JurisdictionVerdict {
+/**
+ * The `CompliancePort.jurisdiction` verdict (pure; see the header).  `cell`
+ * scopes it to the policy cell the caller is about to exercise; omitting it
+ * keeps the region-wide reading.
+ */
+export function coarseVerdict(
+  input: AvailabilityInput,
+  cell?: CryptoFeatureCell,
+): JurisdictionVerdict {
   if (input.ageBand !== null && isMinorBand(input.ageBand)) return 'blocked';
   if (input.complianceHold) return 'blocked';
   const policy = policyOf(input.policy);
-  if (
-    policy !== null &&
-    CRYPTO_FEATURE_CELLS.every((cell) => policy.feature_flags[cell] === 'blocked')
-  ) {
+  if (policy !== null && CRYPTO_FEATURE_CELLS.every((c) => policy.feature_flags[c] === 'blocked')) {
     return 'blocked';
+  }
+  if (cell !== undefined) {
+    // Cell-scoped: the region has spoken about THIS cell, so honor it.  A
+    // missing/invalid policy stays `unknown` (no decision was reached — the
+    // shipped testnet behavior), never a silent block or pass.
+    if (policy === null) return 'unknown';
+    const state = policy.feature_flags[cell];
+    if (state === 'blocked' || state === 'disabled' || state === 'pending-legal') {
+      return 'blocked';
+    }
+    // `enabled` is the only production-eligible state, and (like the
+    // region-wide reading) it still requires the verified basis + the adult
+    // band + the global flag; `simulated`/`testnet` reach no real-funds
+    // decision, so they stay `unknown` and real funds keep rejecting.
+    if (
+      state === 'enabled' &&
+      input.cryptoEnabled &&
+      input.ageBand === 'adult' &&
+      policy.legal_approval_ref !== null &&
+      input.basis === 'verified_declaration' &&
+      (cell !== 'governance' || input.governanceEnabled)
+    ) {
+      return 'allowed';
+    }
+    return 'unknown';
   }
   if (
     input.cryptoEnabled &&

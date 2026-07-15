@@ -344,6 +344,23 @@ export function createComplianceRoutes() {
         const body = c.req.valid('json');
         const { reason, approval_ref, ...policyInput } = body;
         const enablesCell = Object.values(policyInput.feature_flags).includes('enabled');
+        // Enabling a cell turns real funds on for a whole region, so it takes
+        // the COUNSEL capability — not merely a compliance reviewer quoting an
+        // approval reference at themselves.  The reference records WHICH legal
+        // approval authorizes it (validatePolicy also ties `enabled` to a
+        // recorded `legal_approval_ref`); the session proves counsel actually
+        // made the change.  Non-enabling writes (disabled/testnet/simulated/
+        // pending-legal) stay open to the compliance role — they can only
+        // narrow availability.
+        if (enablesCell && !isCounsel(auth.roles)) {
+          return c.json(
+            deny(
+              'counsel_approval_required',
+              'Enabling a feature cell requires legal counsel (the compliance role may only narrow availability).',
+            ),
+            403,
+          );
+        }
         if (enablesCell && approval_ref === undefined) {
           return c.json(
             deny(
@@ -385,19 +402,47 @@ export function createComplianceRoutes() {
             409,
           );
         }
-        await appendPolicyAudit(
-          { policyAudit: services.policyAudit, now: services.now, uuid: services.uuid },
-          {
-            policyId: inserted.policyId,
-            countryOrRegion: policyInput.country_or_region,
-            changeType: previous === null ? 'create' : 'update',
-            changedByRef: services.opaqueRef(auth.userId),
-            previousValue: previous?.document ?? null,
-            newValue: validated.policy,
-            reason,
-            approvalRef: approval_ref ?? null,
-          },
-        );
+        // The chain must never miss a live policy.  The audit table is
+        // append-only, so the audit cannot be written first and undone if the
+        // insert fails; instead the policy row is COMPENSATED away when its
+        // audit entry cannot be committed, restoring "no active policy without
+        // a chain entry" and freeing the (region, effective_at) slot so the
+        // operator's retry is not blocked by a half-written change.
+        try {
+          await appendPolicyAudit(
+            { policyAudit: services.policyAudit, now: services.now, uuid: services.uuid },
+            {
+              policyId: inserted.policyId,
+              countryOrRegion: policyInput.country_or_region,
+              changeType: previous === null ? 'create' : 'update',
+              changedByRef: services.opaqueRef(auth.userId),
+              previousValue: previous?.document ?? null,
+              newValue: validated.policy,
+              reason,
+              approvalRef: approval_ref ?? null,
+            },
+          );
+        } catch (error) {
+          const rolledBack = await services.policies
+            .delete(inserted.policyId)
+            .then(() => true)
+            .catch(() => false);
+          services.metrics.increment('compliance.policy.audit_failed');
+          services.alert('compliance.policy.audit_failed', {
+            region: policyInput.country_or_region,
+            rolledBack,
+            message: error instanceof Error ? error.message : 'unknown',
+          });
+          return c.json(
+            deny(
+              'audit_unavailable',
+              rolledBack
+                ? 'The policy change was not applied: its audit entry could not be recorded.'
+                : 'The policy change could not be audited and could not be rolled back; contact the platform team before retrying.',
+            ),
+            503,
+          );
+        }
         await getIdentityServices().audit.append({
           actorUserId: auth.userId,
           eventType: 'compliance_policy_change',

@@ -6,10 +6,14 @@
 //     all 403; compliance without per-session MFA is mfa_required);
 //   • SAR/STR surfaces demand the COUNSEL capability even to READ
 //     (anti-tipping-off — a compliance reviewer is rejected);
-//   • enabling a policy cell requires the counsel four-eyes approval_ref;
+//   • enabling a policy cell takes COUNSEL plus the four-eyes approval_ref (a
+//     reviewer cannot self-authorize); narrowing writes stay reviewer-open;
+//   • a policy write whose audit entry cannot commit is rolled back;
 //   • the declaration flow: declare (pending, never a basis) → reviewer
 //     verify → verified basis; revoke reverts;
-//   • disclosures: counsel publish → user list → acknowledge → gate clears.
+//   • disclosures: counsel publish → user list → acknowledge → gate clears;
+//   • the case console's guarded lifecycle, the fraud queue, wallet pins, and
+//     runtime config; the counsel SAR + lawful-access workflows.
 import { randomUUID } from 'node:crypto';
 import {
   ALL_DISABLED_CELLS,
@@ -228,17 +232,20 @@ describe('the authorization planes (WS-N.2.1c-2)', () => {
 });
 
 describe('policy admin (WS-N.1.1e)', () => {
-  it('enabling a cell without the counsel approval_ref is rejected (four-eyes)', async () => {
+  it('enabling a cell takes COUNSEL — a reviewer cannot self-authorize with any ref', async () => {
     const reviewer = await seedUser({
       handle: `c${randomUUID().slice(0, 8)}`,
       platformRoles: ['compliance'],
       mfa: true,
     });
+    const counsel = await seedCounsel();
     const enabling = {
       ...VALID_POLICY_BODY,
       feature_flags: { ...ALL_DISABLED_CELLS, production_payments: 'enabled' },
       legal_approval_ref: 'LEGAL-1',
     };
+    // A compliance reviewer cannot enable a cell — not even quoting a ref at
+    // themselves. Turning real funds on for a region is counsel's call.
     const denied = await app().request(
       post('/v1/compliance/admin/policies', enabling, reviewer.cookie),
     );
@@ -246,11 +253,27 @@ describe('policy admin (WS-N.1.1e)', () => {
     expect(((await denied.json()) as { error: { code: string } }).error.code).toBe(
       'counsel_approval_required',
     );
+    const invented = await app().request(
+      post(
+        '/v1/compliance/admin/policies',
+        { ...enabling, approval_ref: 'I-APPROVE-MYSELF' },
+        reviewer.cookie,
+      ),
+    );
+    expect(invented.status).toBe(403);
+    // Counsel still owes the approval reference (which legal approval applies).
+    const noRef = await app().request(
+      post('/v1/compliance/admin/policies', enabling, counsel.cookie),
+    );
+    expect(noRef.status).toBe(403);
+    expect(((await noRef.json()) as { error: { code: string } }).error.code).toBe(
+      'counsel_approval_required',
+    );
     const approved = await app().request(
       post(
         '/v1/compliance/admin/policies',
         { ...enabling, approval_ref: 'FOUR-EYES-7' },
-        reviewer.cookie,
+        counsel.cookie,
       ),
     );
     expect(approved.status).toBe(201);
@@ -259,6 +282,19 @@ describe('policy admin (WS-N.1.1e)', () => {
       get('/v1/compliance/admin/policy-audit/verify', reviewer.cookie),
     );
     expect(((await verify.json()) as { valid: boolean }).valid).toBe(true);
+  });
+
+  it('a NARROWING (non-enabling) write stays open to the compliance role', async () => {
+    const reviewer = await seedUser({
+      handle: `c${randomUUID().slice(0, 8)}`,
+      platformRoles: ['compliance'],
+      mfa: true,
+    });
+    // testnet/simulated/disabled can only reduce availability — no counsel needed.
+    const narrowing = await app().request(
+      post('/v1/compliance/admin/policies', VALID_POLICY_BODY, reviewer.cookie),
+    );
+    expect(narrowing.status).toBe(201);
   });
 
   it('a testnet-only policy needs no approval_ref and hot-applies (cache invalidated)', async () => {
@@ -854,5 +890,35 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
     ).json()) as { request: { production_summary: string } };
     expect(produced.request.production_summary).toContain('HONEST CAPABILITY BOUNDARY');
     expect(produced.request.production_summary).toContain('directory stub metadata only');
+  });
+});
+
+describe('policy write ↔ audit atomicity (WS-N.1.1g)', () => {
+  it('an unauditable policy write is ROLLED BACK, so no live policy lacks a chain entry', async () => {
+    const counsel = await seedCounsel();
+    // The audit store is down (contention exhaustion / outage).
+    compliance.policyAudit.appendChained = async () => {
+      throw new Error('audit store down');
+    };
+    const res = await app().request(
+      post('/v1/compliance/admin/policies', VALID_POLICY_BODY, counsel.cookie),
+    );
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      'audit_unavailable',
+    );
+    // The half-written policy is gone: it never became active…
+    expect(await compliance.policies.activeForRegion('DE', new Date().toISOString())).toBeNull();
+    expect(await compliance.policies.listByRegion('DE')).toHaveLength(0);
+    // …so the (region, effective_at) slot is free and the retry succeeds once
+    // the audit store recovers (a stuck duplicate would strand the operator).
+    compliance = createInMemoryComplianceServices({ configStore: compliance.configStore });
+    setComplianceServices(compliance);
+    const retry = await app().request(
+      post('/v1/compliance/admin/policies', VALID_POLICY_BODY, counsel.cookie),
+    );
+    expect(retry.status).toBe(201);
+    expect(await compliance.policies.listByRegion('DE')).toHaveLength(1);
+    expect(await compliance.policyAudit.listChained()).toHaveLength(1);
   });
 });

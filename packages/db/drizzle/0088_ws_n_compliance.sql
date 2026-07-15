@@ -164,7 +164,7 @@ CREATE TABLE "compliance"."disclosure_acknowledgment" (
 	"acknowledged_at" timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint
 ALTER TABLE "compliance"."disclosure_acknowledgment" ADD CONSTRAINT "da_user_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-CREATE UNIQUE INDEX "da_user_version_uq" ON "compliance"."disclosure_acknowledgment" ("user_id", "disclosure_id", "version") WHERE "user_id" IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "da_user_version_uq" ON "compliance"."disclosure_acknowledgment" ("user_id", "disclosure_id", "version", "region") WHERE "user_id" IS NOT NULL;--> statement-breakpoint
 CREATE OR REPLACE FUNCTION "compliance"."disclosure_acknowledgment_no_mutate"() RETURNS trigger AS $$
 BEGIN
 	IF (TG_OP = 'DELETE') THEN
