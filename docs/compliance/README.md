@@ -173,6 +173,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   verifies it; the locale subtag is a weaker basis that never unlocks
   real-funds cells.  There is no detection path to "correct" a declaration —
   that would require reading the network address.
+- **A KYC requirement is enforced, or the cell is closed.**  `kyc_policy` and
+  the age gate's `assurance` were dead letters — nothing read them, so counsel
+  could write "production_payments requires kyc_partner" and real funds would
+  flow to an unverified user. The engine now reads both, and since **no KYC
+  partner is integrated** (the tracked residual) a cell that demands one stays
+  closed with `verification_required`. `services.kycLevel` is the closure that
+  partner will fill in — one boot-time swap, no engine change.
 - **The port's args are required, not optional.**  `jurisdiction` takes
   `featureCell` and `asset`, and `fraudRisk` takes `reviewRef`, as **required
   properties with nullable values**. As optionals they were forgettable, and a
@@ -237,6 +244,12 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   alerts rather than destroying an audited case), and the **fraud-queue
   decision** stays compensated because its two halves live in different bounded
   contexts — see the note in `routes/compliance.ts`.
+- **Counsel acts are attributed on counsel-only rows.**  A SAR's filing —
+  the legally consequential step, and often not the approver's doing — is
+  recorded as `filed_by_ref` on the report itself, NOT as a case-chain entry:
+  compliance reviewers read that chain, and an entry there would announce the
+  report's existence (anti-tipping-off). A lawful-access *production* has no
+  such constraint, so it does ride the linked case's chain.
 - **A hold and the record it exists for are one unit** — literally. A SAR draft
   whose report cannot be stored leaves no hold, no report, and no chain entry;
   a lawful-access intake whose hold fails leaves no case. (The compensators

@@ -33,6 +33,7 @@ import type {
   CaseResolution,
   CaseRetentionPolicy,
   CaseReviewState,
+  CaseRiskLevel,
   LawfulAccessStatus,
 } from '@licio/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lte, sql } from 'drizzle-orm';
@@ -449,7 +450,8 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
     return rows.map(toCaseRecord);
   }
 
-  async countOpenHighRisk(subjectRef: string): Promise<number> {
+  async countOpenByRisk(subjectRef: string, risks: readonly CaseRiskLevel[]): Promise<number> {
+    if (risks.length === 0) return 0;
     const rows = await this.#db
       .select({ count: sql<number>`count(*)::int` })
       .from(financialComplianceCases)
@@ -457,7 +459,7 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
         and(
           eq(financialComplianceCases.userIdOrRoomId, subjectRef),
           sql`${financialComplianceCases.reviewState} <> 'resolved'`,
-          inArray(financialComplianceCases.riskLevel, ['high', 'critical']),
+          inArray(financialComplianceCases.riskLevel, [...risks]),
         ),
       );
     return rows[0]?.count ?? 0;
@@ -995,6 +997,7 @@ function toSar(row: SarRowDb): SarRecord {
     partnerFiled: row.partnerFiled,
     createdByRef: row.createdByRef,
     approvedByRef: row.approvedByRef,
+    filedByRef: row.filedByRef,
     createdAt: iso(row.createdAt),
     updatedAt: iso(row.updatedAt),
   };
@@ -1020,6 +1023,7 @@ export class DrizzleSarStore implements SarStore {
         partnerFiled: record.partnerFiled,
         createdByRef: record.createdByRef,
         approvedByRef: record.approvedByRef,
+        filedByRef: record.filedByRef,
         createdAt: new Date(record.createdAt),
         updatedAt: new Date(record.updatedAt),
       })
@@ -1057,7 +1061,13 @@ export class DrizzleSarStore implements SarStore {
     patch: Partial<
       Pick<
         SarRecord,
-        'status' | 'filingRef' | 'filedAt' | 'partnerFiled' | 'approvedByRef' | 'narrative'
+        | 'status'
+        | 'filingRef'
+        | 'filedAt'
+        | 'partnerFiled'
+        | 'approvedByRef'
+        | 'filedByRef'
+        | 'narrative'
       >
     >,
     updatedAt: string,
@@ -1072,6 +1082,7 @@ export class DrizzleSarStore implements SarStore {
           : {}),
         ...(patch.partnerFiled !== undefined ? { partnerFiled: patch.partnerFiled } : {}),
         ...(patch.approvedByRef !== undefined ? { approvedByRef: patch.approvedByRef } : {}),
+        ...(patch.filedByRef !== undefined ? { filedByRef: patch.filedByRef } : {}),
         ...(patch.narrative !== undefined ? { narrative: patch.narrative } : {}),
         updatedAt: new Date(updatedAt),
       })
@@ -1170,6 +1181,7 @@ export class DrizzleLawfulAccessStore implements LawfulAccessStore {
       >
     >,
     updatedAt: string,
+    expectedStatus?: readonly LawfulAccessStatus[],
   ): Promise<LawfulAccessRecord | null> {
     const rows = await this.#db
       .update(lawfulAccessRequests)
@@ -1188,7 +1200,16 @@ export class DrizzleLawfulAccessStore implements LawfulAccessStore {
         ...(patch.caseId !== undefined ? { caseId: patch.caseId } : {}),
         updatedAt: new Date(updatedAt),
       })
-      .where(eq(lawfulAccessRequests.requestId, requestId))
+      .where(
+        expectedStatus === undefined
+          ? eq(lawfulAccessRequests.requestId, requestId)
+          : and(
+              eq(lawfulAccessRequests.requestId, requestId),
+              // The CAS: a racing reviewer that already moved the status makes
+              // this match zero rows rather than overwrite their decision.
+              inArray(lawfulAccessRequests.status, [...expectedStatus]),
+            ),
+      )
       .returning();
     return rows[0] ? toLawful(rows[0]) : null;
   }
@@ -1223,6 +1244,7 @@ function complianceStoresOver(db: DbOrTx): ComplianceTxStores {
     policyAudit: new DrizzlePolicyAuditStore(db),
     sars: new DrizzleSarStore(db),
     lawfulAccess: new DrizzleLawfulAccessStore(db),
+    pins: new DrizzleWalletRiskPinStore(db),
   };
 }
 
@@ -1235,7 +1257,6 @@ export function createDrizzleComplianceStores(db: Db): ComplianceTxStores & {
   declarations: DrizzleRegionDeclarationStore;
   disclosures: DrizzleDisclosureStore;
   acks: DrizzleDisclosureAckStore;
-  pins: DrizzleWalletRiskPinStore;
   transactor: ComplianceTransactor;
 } {
   return {
@@ -1243,7 +1264,6 @@ export function createDrizzleComplianceStores(db: Db): ComplianceTxStores & {
     declarations: new DrizzleRegionDeclarationStore(db),
     disclosures: new DrizzleDisclosureStore(db),
     acks: new DrizzleDisclosureAckStore(db),
-    pins: new DrizzleWalletRiskPinStore(db),
     transactor: new DrizzleComplianceTransactor(db),
   };
 }

@@ -331,7 +331,7 @@ describe('the no-engine seam pin (removing WS-N can never fail open)', () => {
   it('an unreadable case store HOLDS (compliance_hold), never passes', async () => {
     const services = makeServices();
     await fullyEligible(services);
-    services.cases.countOpenHighRisk = async () => {
+    services.cases.countOpenByRisk = async () => {
       throw new Error('store down');
     };
     const availability = await evaluateAvailabilityForUser(services, USER);

@@ -1215,6 +1215,7 @@ export function createComplianceRoutes() {
       zValidator('param', z.object({ sarId: uuidSchema })),
       zValidator('json', sarFileRequestSchema),
       async (c) => {
+        const auth = requireAuth(c);
         const services = getComplianceServices();
         const body = c.req.valid('json');
         const result = await fileSar(
@@ -1229,6 +1230,7 @@ export function createComplianceRoutes() {
             sarId: c.req.valid('param').sarId,
             filingRef: body.filing_ref,
             partnerFiled: body.partner_filed,
+            actorUserId: auth.userId,
           },
         );
         if (!result.ok) return failJson(c, result);

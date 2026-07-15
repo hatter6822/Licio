@@ -167,6 +167,7 @@ describe('the retention sweep (WS-N.2.1d)', () => {
       partnerFiled: false,
       createdByRef: 'ref:counsel',
       approvedByRef: null,
+      filedByRef: null,
       createdAt: new Date(nowMs).toISOString(),
       updatedAt: new Date(nowMs).toISOString(),
     });
@@ -475,6 +476,7 @@ describe('the sweep drains its backlog before reporting done (WS-N.2.1d)', () =>
       partnerFiled: false,
       createdByRef: 'ref:counsel',
       approvedByRef: 'ref:counsel',
+      filedByRef: null,
       createdAt: new Date(nowMs).toISOString(),
       updatedAt: new Date(nowMs).toISOString(),
     });

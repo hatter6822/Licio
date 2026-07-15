@@ -204,6 +204,7 @@ CREATE TABLE "compliance"."sar_report" (
 	"partner_filed" boolean DEFAULT false NOT NULL,
 	"created_by_ref" text NOT NULL,
 	"approved_by_ref" text,
+	"filed_by_ref" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint

@@ -51,13 +51,18 @@ export function createWalletRisk(deps: WalletRiskDeps): CompliancePort['walletRi
         deps.metric('compliance.wallet_risk.pinned_high');
         return EXPLANATIONS.high;
       }
-      const openHighRisk = await deps.cases.countOpenHighRisk(userId);
-      if (openHighRisk > 0) {
-        const critical = (await deps.cases.listBySubject(userId, 50)).some(
-          (record) => record.reviewState !== 'resolved' && record.riskLevel === 'critical',
-        );
+      // Ask the store, do not page a list: a capped `listBySubject` would miss
+      // an older critical case beyond the page and hand a sanctioned wallet
+      // `elevated` — and only `high` stops a fund transfer.
+      const critical = await deps.cases.countOpenByRisk(userId, ['critical']);
+      if (critical > 0) {
         deps.metric('compliance.wallet_risk.case_derived');
-        return critical ? EXPLANATIONS.high : EXPLANATIONS.elevated;
+        return EXPLANATIONS.high;
+      }
+      const high = await deps.cases.countOpenByRisk(userId, ['high']);
+      if (high > 0) {
+        deps.metric('compliance.wallet_risk.case_derived');
+        return EXPLANATIONS.elevated;
       }
       deps.metric('compliance.wallet_risk.normal');
       return EXPLANATIONS.normal;

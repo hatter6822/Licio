@@ -356,6 +356,11 @@ export const sarReports = complianceSchema.table(
     partnerFiled: boolean('partner_filed').notNull().default(false),
     createdByRef: text('created_by_ref').notNull(),
     approvedByRef: text('approved_by_ref'),
+    /** WHO recorded the filing — the legally consequential submission step,
+     *  and often not the approver.  Counsel-only, like every SAR column: the
+     *  act cannot go on the case chain, which compliance reviewers read
+     *  (anti-tipping-off, WS-N.2.1e). */
+    filedByRef: text('filed_by_ref'),
     createdAt: tz('created_at').notNull().defaultNow(),
     updatedAt: tz('updated_at').notNull().defaultNow(),
   },

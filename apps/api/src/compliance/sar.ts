@@ -69,6 +69,7 @@ export async function createSarDraft(
           partnerFiled: false,
           createdByRef: deps.opaqueRef(input.actorUserId),
           approvedByRef: null,
+          filedByRef: null,
           createdAt: nowIso,
           updatedAt: nowIso,
         });
@@ -102,10 +103,11 @@ export async function approveSar(
 }
 
 /** Record the filing (approved → filed): first-party filing ref + date, or
- *  the partner's acknowledgment where a custodial partner files (§17.10). */
+ *  the partner's acknowledgment where a custodial partner files (§17.10).
+ *  The filing actor is recorded on the report itself. */
 export async function fileSar(
   deps: SarDeps,
-  input: { sarId: string; filingRef: string; partnerFiled: boolean },
+  input: { sarId: string; filingRef: string; partnerFiled: boolean; actorUserId: string },
 ): Promise<SarOutcome> {
   const record = await deps.sars.getById(input.sarId);
   if (record === null) return sarErr(404, 'not_found', 'Resource not found');
@@ -120,6 +122,11 @@ export async function fileSar(
       filingRef: input.filingRef,
       filedAt: nowIso,
       partnerFiled: input.partnerFiled,
+      // WHO filed: the legally consequential step, and often not the approver
+      // the row already names.  It rides the SAR record — counsel-only —
+      // because the case chain is reviewer-visible and an entry there would
+      // announce the report's existence (anti-tipping-off, WS-N.2.1e).
+      filedByRef: deps.opaqueRef(input.actorUserId),
     },
     nowIso,
   );

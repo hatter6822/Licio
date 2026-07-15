@@ -1271,7 +1271,7 @@ describe('a DENIED lawful-access request releases its hold (WS-N.2.3d)', () => {
     const record = await compliance.cases.getById(request.case_id);
     expect(record?.retentionPolicy.legal_hold).toBe(false);
     expect(record?.reviewState).toBe('resolved');
-    expect(await compliance.cases.countOpenHighRisk(subject.userId)).toBe(0);
+    expect(await compliance.cases.countOpenByRisk(subject.userId, ['high', 'critical'])).toBe(0);
   });
 
   it('an APPROVED request keeps its hold, and production records who disclosed', async () => {

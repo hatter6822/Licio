@@ -11,7 +11,9 @@
 // The workflow records that determination explicitly rather than an empty or
 // misleading production, and never represents a decryption capability that
 // does not exist.
-import { appendCaseAudit, runChainedUnit } from './audit.js';
+
+import type { LawfulAccessStatus } from '@licio/shared';
+import { appendCaseAuditInTx, runChainedUnit } from './audit.js';
 import {
   type CaseDeps,
   createCaseInTx,
@@ -20,6 +22,9 @@ import {
   transitionCase,
 } from './cases.js';
 import type { LawfulAccessRecord, LawfulAccessStore } from './stores.js';
+
+/** The stored column and the response schema share this cap. */
+const MAX_PRODUCTION_SUMMARY = 10_000;
 
 type Clock = () => number;
 
@@ -41,6 +46,9 @@ const laErr = (status: number, code: string, message: string): LawfulAccessError
   message,
 });
 export type LawfulAccessOutcome = LawfulAccessError | { ok: true; record: LawfulAccessRecord };
+
+/** The statuses a review may act on (also the CAS set for its write). */
+const REVIEWABLE_STATUSES: readonly LawfulAccessStatus[] = ['received', 'under_review'];
 
 /** The §8/§11.4 honest non-production determination, verbatim in the log. */
 export const PRIVATE_P2P_DETERMINATION =
@@ -134,7 +142,7 @@ export async function reviewLawfulAccessRequest(
 ): Promise<LawfulAccessOutcome> {
   const record = await deps.requests.getById(input.requestId);
   if (record === null) return laErr(404, 'not_found', 'Resource not found');
-  if (record.status !== 'received' && record.status !== 'under_review') {
+  if (!REVIEWABLE_STATUSES.includes(record.status)) {
     return laErr(409, 'invalid_transition', 'This request has already been reviewed.');
   }
   const updated = await deps.requests.update(
@@ -145,8 +153,15 @@ export async function reviewLawfulAccessRequest(
       reviewedByRef: deps.opaqueRef(input.actorUserId),
     },
     new Date(deps.now()).toISOString(),
+    // CAS on the state we read above: two counsel reviewers racing an approve
+    // and a deny would otherwise both pass the check and let the last write
+    // win — leaving the request `approved` after the denial already released
+    // its hold and closed its case.
+    REVIEWABLE_STATUSES,
   );
-  if (updated === null) return laErr(404, 'not_found', 'Resource not found');
+  if (updated === null) {
+    return laErr(409, 'concurrent_review', 'Another reviewer decided this request first.');
+  }
   // A DENIED request obliges nothing: leaving its legal hold on would keep
   // retention and the account-deletion scrub skipping the subject's records
   // indefinitely, and leaving the high-risk case open would keep the
@@ -224,32 +239,57 @@ export async function recordLawfulAccessProduction(
     const mode = await deps.roomStorageMode(record.scope.subject_ref).catch(() => null);
     if (mode === 'p2p') summary = `${PRIVATE_P2P_DETERMINATION}\n\n${summary}`;
   }
-  const nowIso = new Date(deps.now()).toISOString();
-  const updated = await deps.requests.update(
-    input.requestId,
-    {
-      status: 'produced',
-      productionSummary: summary,
-      userNotifiedAt: input.userNotified ? nowIso : null,
-    },
-    nowIso,
-  );
-  if (updated === null) return laErr(404, 'not_found', 'Resource not found');
-  // WHO disclosed the data — the record itself keeps only `reviewedByRef`, and
-  // the approver is often not the producer.  A scoped production log that
-  // cannot name the discloser is not a production log, so the act lands on the
-  // linked case's hash chain (which intake guarantees exists).
-  if (updated.caseId !== null) {
-    await appendCaseAudit(deps.caseDeps, {
-      caseId: updated.caseId,
-      action: 'lawful_access_produced',
-      actorRef: deps.opaqueRef(input.actorUserId),
-      beforeState: null,
-      afterState: null,
-      note: `Lawful-access production recorded for request ${updated.requestId}; user ${
-        input.userNotified ? 'notified' : 'not notified'
-      }.`,
-    });
+  // The prepended determination is OUR text, and the stored column and the
+  // response schema share one cap — so a summary that fits the REQUEST can
+  // still overflow once prepended.  Persisting it would poison the row: the
+  // produce call and every later listing would 500 parsing what we wrote.
+  // Reject before the write, and say how much room is left.
+  if (summary.length > MAX_PRODUCTION_SUMMARY) {
+    const room = MAX_PRODUCTION_SUMMARY - (summary.length - input.productionSummary.length);
+    return laErr(
+      400,
+      'summary_too_long',
+      `The production summary must be at most ${room} characters for this request (the private-P2P capability determination is recorded with it).`,
+    );
   }
-  return { ok: true, record: updated };
+  return runChainedUnit(
+    deps.caseDeps.transactor,
+    async (stores) => {
+      const nowIso = new Date(deps.now()).toISOString();
+      const updated = await stores.lawfulAccess.update(
+        input.requestId,
+        {
+          status: 'produced',
+          productionSummary: summary,
+          userNotifiedAt: input.userNotified ? nowIso : null,
+        },
+        nowIso,
+        // CAS: only an approved request may be produced, even under a race.
+        ['approved'],
+      );
+      if (updated === null) {
+        return laErr(409, 'legal_review_required', 'Production requires an approved legal review.');
+      }
+      // WHO disclosed the data — the record itself keeps only `reviewedByRef`,
+      // and the approver is often not the producer.  In the SAME unit as the
+      // status change: a production recorded without its scoped log entry
+      // cannot be repaired, since the retry would see `produced` and stop.
+      if (updated.caseId !== null) {
+        await appendCaseAuditInTx(stores, deps, {
+          caseId: updated.caseId,
+          action: 'lawful_access_produced',
+          actorRef: deps.opaqueRef(input.actorUserId),
+          beforeState: null,
+          afterState: null,
+          note: `Lawful-access production recorded for request ${updated.requestId}; user ${
+            input.userNotified ? 'notified' : 'not notified'
+          }.`,
+        });
+      }
+      return { ok: true as const, record: updated };
+    },
+    'lawful-access production',
+  ).catch(() =>
+    laErr(503, 'production_unavailable', 'The production could not be recorded; nothing was kept.'),
+  );
 }

@@ -53,6 +53,7 @@ import {
   isMinorBand,
   type JurisdictionCellState,
   type JurisdictionFeaturePolicy,
+  type KycVerificationLevel,
   type RegionResolutionBasis,
 } from '@licio/shared';
 import type { JurisdictionVerdict } from '../knomosis/ports.js';
@@ -68,6 +69,11 @@ export interface AvailabilityInput {
   policy: ActivePolicyOutcome;
   cryptoEnabled: boolean;
   governanceEnabled: boolean;
+  /** The user's established KYC level.  `'none'` until a KYC partner is
+   *  integrated (the tracked WS-N.1.1f residual), which is exactly why the
+   *  engine must READ it: a policy cell that demands `kyc_partner` was
+   *  otherwise satisfied by nothing at all. */
+  kycLevel: KycVerificationLevel;
 }
 
 export interface FeatureAvailabilityEntry {
@@ -98,6 +104,31 @@ function policyOf(outcome: ActivePolicyOutcome): JurisdictionFeaturePolicy | nul
 
 function policyMissingReason(outcome: ActivePolicyOutcome): FeatureDisableReason {
   return outcome.kind === 'future_dated' ? 'policy_not_yet_effective' : 'policy_missing';
+}
+
+/**
+ * Whether this cell demands a KYC level the user has not established.
+ *
+ * A policy can require partner verification two ways — `kyc_policy[cell]` and
+ * the age gate's `assurance` — and BOTH were dead letters: nothing read them,
+ * so counsel could write "production_payments requires kyc_partner" and real
+ * funds would flow to an unverified user.  A requirement we cannot yet
+ * establish (no partner is integrated) closes the cell rather than passing it.
+ *
+ * A `trigger_threshold_minor_units` narrows WHEN the requirement bites, but
+ * the cell verdict carries no amount — and a threshold cannot make an
+ * unmeetable requirement meetable, so the cell is closed either way until the
+ * partner seam exists.
+ */
+function kycUnmet(
+  policy: JurisdictionFeaturePolicy,
+  cell: CryptoFeatureCell,
+  level: KycVerificationLevel,
+): boolean {
+  const required =
+    policy.kyc_policy[cell]?.verification_level === 'kyc_partner' ||
+    policy.age_gate_policy[cell].assurance === 'kyc_partner';
+  return required && level !== 'kyc_partner';
 }
 
 /** Per-cell availability (pure; deterministic).  Reason precedence: age →
@@ -132,9 +163,11 @@ export function evaluateCell(
       if (REAL_FUNDS_CELLS.has(cell) && input.basis !== 'verified_declaration') {
         return disabled('verification_required');
       }
+      if (kycUnmet(policy, cell, input.kycLevel)) return disabled('verification_required');
       return { state, available: true, disableReason: null };
     case 'simulated':
     case 'testnet':
+      if (kycUnmet(policy, cell, input.kycLevel)) return disabled('verification_required');
       // Available at the cell's own declared level (the mode machine keeps a
       // `testnet` cell out of production — WS-M readiness requires `allowed`).
       return { state, available: true, disableReason: null };
@@ -212,6 +245,7 @@ export function coarseVerdict(
       input.ageBand === 'adult' &&
       policy.legal_approval_ref !== null &&
       input.basis === 'verified_declaration' &&
+      !kycUnmet(policy, cell, input.kycLevel) &&
       (cell !== 'governance' || input.governanceEnabled)
     ) {
       return 'allowed';
@@ -226,7 +260,9 @@ export function coarseVerdict(
     policy.legal_approval_ref !== null &&
     policy.feature_flags.production_payments === 'enabled' &&
     policy.feature_flags.treasury_operations === 'enabled' &&
-    input.basis === 'verified_declaration'
+    input.basis === 'verified_declaration' &&
+    !kycUnmet(policy, 'production_payments', input.kycLevel) &&
+    !kycUnmet(policy, 'treasury_operations', input.kycLevel)
   ) {
     return 'allowed';
   }

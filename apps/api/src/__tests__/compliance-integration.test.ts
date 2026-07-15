@@ -376,7 +376,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       ),
     );
     track(await stores.cases.insert(caseOf(subject, { riskLevel: 'low' })));
-    expect(await stores.cases.countOpenHighRisk(subject)).toBe(1);
+    expect(await stores.cases.countOpenByRisk(subject, ['high', 'critical'])).toBe(1);
     expect((await stores.cases.listBySubject(subject, 10)).length).toBe(3);
   });
 
@@ -476,6 +476,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       partnerFiled: false,
       createdByRef: 'ref:counsel-fixture',
       approvedByRef: null,
+      filedByRef: null,
       createdAt: NOW(),
       updatedAt: NOW(),
     });
@@ -674,6 +675,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       partnerFiled: false,
       createdByRef: 'ref:counsel-fixture',
       approvedByRef: null,
+      filedByRef: null,
       createdAt: NOW(),
       updatedAt: NOW(),
     });

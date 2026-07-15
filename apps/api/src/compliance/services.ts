@@ -16,11 +16,13 @@ import {
   type AgeBand,
   EVENT_SCHEMA_VERSION,
   type FeatureDisableReason,
+  type KycVerificationLevel,
   TOPIC_REGISTRY,
 } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import type { CompliancePort } from '../knomosis/ports.js';
-import { type CaseDeps, createCase } from './cases.js';
+import { runChainedUnit } from './audit.js';
+import { type CaseDeps, createCaseInTx } from './cases.js';
 import {
   type ComplianceRuntimeConfig,
   DEFAULT_COMPLIANCE_CONFIG,
@@ -116,6 +118,15 @@ export interface ComplianceServices {
   localeRegion: (userId: string) => Promise<string | null>;
   /** WS-D age band (null = unknown; fails closed to not-adult). */
   ageBand: (userId: string) => Promise<AgeBand | null>;
+  /**
+   * The user's established KYC level (WS-N.1.1f).  Always `'none'` today: no
+   * KYC partner is integrated (the tracked residual), and a level we cannot
+   * establish must not be assumed — a policy cell demanding `kyc_partner`
+   * therefore stays closed until the partner seam fills this in.  It is a
+   * closure, not a constant, so wiring that partner is one boot-time swap
+   * rather than a change to the engine.
+   */
+  kycLevel: (userId: string) => Promise<KycVerificationLevel>;
   /** The single runtime crypto/governance flags (knomosis.* config). */
   knomosisFlags: () => { cryptoEnabled: boolean; governanceEnabled: boolean };
   /** WS-S storage axis for the lawful-access honest-limits path. */
@@ -174,12 +185,13 @@ export function createInMemoryComplianceServices(
   const policies = new InMemoryJurisdictionPolicyStore();
   const policyAudit = new InMemoryPolicyAuditStore();
   const lawfulAccess = new InMemoryLawfulAccessStore();
+  const pins = new InMemoryWalletRiskPinStore();
   // The in-memory transactor gives dev/tests the SAME all-or-nothing semantics
   // Postgres gives production (the house rule: the in-memory adapters emulate
   // every DB protection, and a transaction is one).
   const transactor = new InMemoryComplianceTransactor(
-    { cases, caseAudit, policies, policyAudit, sars, lawfulAccess },
-    [cases, caseAudit, policies, policyAudit, sars, lawfulAccess],
+    { cases, caseAudit, policies, policyAudit, sars, lawfulAccess, pins },
+    [cases, caseAudit, policies, policyAudit, sars, lawfulAccess, pins],
   );
 
   const services: ComplianceServices = {
@@ -190,7 +202,7 @@ export function createInMemoryComplianceServices(
     declarations: new InMemoryRegionDeclarationStore(),
     disclosures: new InMemoryDisclosureStore(),
     acks: new InMemoryDisclosureAckStore(),
-    pins: new InMemoryWalletRiskPinStore(),
+    pins,
     sars,
     lawfulAccess,
     screeningCache: new InMemoryScreeningCacheStore(now),
@@ -202,6 +214,7 @@ export function createInMemoryComplianceServices(
 
     localeRegion: async () => null,
     ageBand: async () => null,
+    kycLevel: async () => 'none',
     knomosisFlags: () => ({ cryptoEnabled: false, governanceEnabled: false }),
     roomStorageMode: async () => null,
     // Default: an UNKEYED digest (still non-reversible for uuid-sized inputs).
@@ -311,7 +324,7 @@ async function assembleAvailabilityInput(
   }
   let complianceHold = false;
   try {
-    complianceHold = (await services.cases.countOpenHighRisk(userId)) > 0;
+    complianceHold = (await services.cases.countOpenByRisk(userId, ['high', 'critical'])) > 0;
   } catch {
     complianceHold = true; // fail-closed: an unreadable case store HOLDS
   }
@@ -320,6 +333,12 @@ async function assembleAvailabilityInput(
       ? ({ kind: 'missing' } as const)
       : await activePolicyForRegion(buildActivePolicyDeps(services), resolution.region);
   const flags = services.knomosisFlags();
+  let kycLevel: KycVerificationLevel = 'none';
+  try {
+    kycLevel = await services.kycLevel(userId);
+  } catch {
+    kycLevel = 'none'; // fail-closed: an unreadable level is no level
+  }
   return {
     ageBand,
     complianceHold,
@@ -328,6 +347,7 @@ async function assembleAvailabilityInput(
     policy,
     cryptoEnabled: flags.cryptoEnabled,
     governanceEnabled: flags.governanceEnabled,
+    kycLevel,
   };
 }
 
@@ -461,23 +481,62 @@ export function buildSanctionedWalletLinkHook(
   services: ComplianceServices,
 ): (walletAccountId: string, userId: string) => Promise<void> {
   return async (walletAccountId, userId) => {
-    await services.pins.pin({
-      id: services.uuid(),
-      walletAccountId,
-      reason: 'Sanctions screening returned a FULL match at wallet link (WS-N.2.2a).',
-      pinnedByRef: 'system',
-      createdAt: new Date(services.now()).toISOString(),
-      releasedAt: null,
-      releasedByRef: null,
-    });
-    await createCase(buildCaseDeps(services), {
-      subjectKind: 'user',
-      subjectRef: userId,
-      triggerType: 'sanctions',
-      riskLevel: 'critical',
-      note: 'A newly-linked wallet matched a sanctions list; the wallet is pinned high.',
-      idempotencyKey: `sanctions:link:${walletAccountId}`,
-    });
+    // ONE unit: the pin and the case are the two halves of the same response,
+    // and a pin with no case is a wallet frozen with nothing in the queue
+    // explaining why — no review, no event, no trail, and nobody to unfreeze
+    // it.  (Both tables live in the `compliance` schema, so the transaction
+    // spans them; before this the case's failure was silently discarded.)
+    const outcome = await runChainedUnit(
+      services.transactor,
+      async (stores) => {
+        await stores.pins.pin({
+          id: services.uuid(),
+          walletAccountId,
+          reason: 'Sanctions screening returned a FULL match at wallet link (WS-N.2.2a).',
+          pinnedByRef: 'system',
+          createdAt: new Date(services.now()).toISOString(),
+          releasedAt: null,
+          releasedByRef: null,
+        });
+        return createCaseInTx(stores, buildCaseDeps(services), {
+          subjectKind: 'user',
+          subjectRef: userId,
+          triggerType: 'sanctions',
+          riskLevel: 'critical',
+          note: 'A newly-linked wallet matched a sanctions list; the wallet is pinned high.',
+          idempotencyKey: `sanctions:link:${walletAccountId}`,
+        });
+      },
+      'sanctioned wallet link',
+    ).catch((error: unknown) => ({ ok: false as const, error }));
+    if (!outcome.ok) {
+      // Neither half landed.  The screen itself still answered `blocked`, so
+      // the action was refused — but a sanctions hit with no case is exactly
+      // the thing an operator must know about NOW.
+      services.metrics.increment('compliance.sanctioned_link.unrecorded');
+      services.alert('compliance.sanctioned_link.unrecorded', {
+        walletRef: services.opaqueRef(walletAccountId),
+        reason: 'error' in outcome ? String(outcome.error) : outcome.message,
+      });
+      return;
+    }
+    // The event is emitted OUTSIDE the unit (an external side effect must not
+    // replay when a chain fork makes the unit run twice), through the SAME
+    // builder every other case creation uses, and only for a case this call
+    // actually opened.  Best-effort: the case + its chain entry are committed
+    // and are the record of truth.
+    if (outcome.created) {
+      await buildCaseDeps(services)
+        .emitCaseCreated({
+          caseId: outcome.record.caseId,
+          triggerType: outcome.record.triggerType,
+          subjectRef: services.opaqueRef(userId),
+          riskLevel: outcome.record.riskLevel,
+        })
+        .catch(() => {
+          services.metrics.increment('compliance.case.event_emit_failed');
+        });
+    }
   };
 }
 

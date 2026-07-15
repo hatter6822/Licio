@@ -142,6 +142,7 @@ export interface SarRecord {
   partnerFiled: boolean;
   createdByRef: string;
   approvedByRef: string | null;
+  filedByRef: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -230,9 +231,13 @@ export interface ComplianceCaseStore {
   ): Promise<ComplianceCaseRecord | null>;
   /** Cases past their deletion date and NOT under legal hold. */
   listExpired(nowIso: string, limit: number): Promise<ComplianceCaseRecord[]>;
-  /** Open (non-resolved) cases at/above the given risk for a subject —
-   *  the WS-N.1.1c `compliance_hold` input. */
-  countOpenHighRisk(subjectRef: string): Promise<number>;
+  /** Open (non-resolved) cases at ANY of the given risk levels for a subject.
+   *  The caller names the levels it means — the WS-N.1.1c `compliance_hold`
+   *  asks for high+critical, the wallet-risk assessment asks for critical
+   *  alone.  A COUNT, not a page: deriving either answer from a capped list
+   *  would silently miss an older case beyond the page and downgrade the
+   *  verdict. */
+  countOpenByRisk(subjectRef: string, risks: readonly CaseRiskLevel[]): Promise<number>;
   /** The sanctioned retention delete: audit rows first, then the case (the
    *  Drizzle adapter runs both inside the `licio.compliance_retention` GUC
    *  transaction).  Throws if a SAR still references the case. */
@@ -310,7 +315,13 @@ export interface SarStore {
     patch: Partial<
       Pick<
         SarRecord,
-        'status' | 'filingRef' | 'filedAt' | 'partnerFiled' | 'approvedByRef' | 'narrative'
+        | 'status'
+        | 'filingRef'
+        | 'filedAt'
+        | 'partnerFiled'
+        | 'approvedByRef'
+        | 'filedByRef'
+        | 'narrative'
       >
     >,
     updatedAt: string,
@@ -321,6 +332,10 @@ export interface LawfulAccessStore {
   insert(record: LawfulAccessRecord): Promise<LawfulAccessRecord>;
   getById(requestId: string): Promise<LawfulAccessRecord | null>;
   list(status: LawfulAccessStatus | null, limit: number): Promise<LawfulAccessRecord[]>;
+  /** `expectedStatus` makes the write a CAS: null ⇔ the status moved under us
+   *  (two counsel reviewers racing an approve and a deny would otherwise both
+   *  pass the read-side check and let the last writer win — leaving a request
+   *  `approved` while the denial already released its hold). */
   update(
     requestId: string,
     patch: Partial<
@@ -335,6 +350,7 @@ export interface LawfulAccessStore {
       >
     >,
     updatedAt: string,
+    expectedStatus?: readonly LawfulAccessStatus[],
   ): Promise<LawfulAccessRecord | null>;
 }
 
@@ -351,6 +367,7 @@ export interface ComplianceTxStores {
   policyAudit: PolicyAuditStore;
   sars: SarStore;
   lawfulAccess: LawfulAccessStore;
+  pins: WalletRiskPinStore;
 }
 
 /**
@@ -641,12 +658,12 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
       .map((r) => ({ ...r }));
   }
 
-  async countOpenHighRisk(subjectRef: string): Promise<number> {
+  async countOpenByRisk(subjectRef: string, risks: readonly CaseRiskLevel[]): Promise<number> {
     return [...this.#rows.values()].filter(
       (r) =>
         r.userIdOrRoomId === subjectRef &&
         r.reviewState !== 'resolved' &&
-        (r.riskLevel === 'high' || r.riskLevel === 'critical'),
+        risks.includes(r.riskLevel),
     ).length;
   }
 
@@ -855,8 +872,16 @@ export class InMemoryDisclosureAckStore implements DisclosureAckStore {
   }
 }
 
-export class InMemoryWalletRiskPinStore implements WalletRiskPinStore {
+export class InMemoryWalletRiskPinStore implements WalletRiskPinStore, InMemoryRollback {
   readonly #rows: WalletRiskPinRecord[] = [];
+
+  beginRollback(): () => void {
+    const snapshot = this.#rows.map((row) => ({ ...row }));
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...snapshot);
+    };
+  }
 
   async activeForWallet(walletAccountId: string): Promise<WalletRiskPinRecord | null> {
     const row = this.#rows.find(
@@ -937,7 +962,13 @@ export class InMemorySarStore implements SarStore, InMemoryRollback {
     patch: Partial<
       Pick<
         SarRecord,
-        'status' | 'filingRef' | 'filedAt' | 'partnerFiled' | 'approvedByRef' | 'narrative'
+        | 'status'
+        | 'filingRef'
+        | 'filedAt'
+        | 'partnerFiled'
+        | 'approvedByRef'
+        | 'filedByRef'
+        | 'narrative'
       >
     >,
     updatedAt: string,
@@ -993,9 +1024,12 @@ export class InMemoryLawfulAccessStore implements LawfulAccessStore, InMemoryRol
       >
     >,
     updatedAt: string,
+    expectedStatus?: readonly LawfulAccessStatus[],
   ): Promise<LawfulAccessRecord | null> {
     const row = this.#rows.get(requestId);
     if (!row) return null;
+    // The CAS the Drizzle adapter gets from its WHERE clause.
+    if (expectedStatus !== undefined && !expectedStatus.includes(row.status)) return null;
     const next = { ...row, ...patch, updatedAt };
     this.#rows.set(requestId, next);
     return { ...next };

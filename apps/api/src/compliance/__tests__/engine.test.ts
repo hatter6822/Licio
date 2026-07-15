@@ -45,6 +45,7 @@ const ELIGIBLE: AvailabilityInput = {
   policy: { kind: 'active', policy: POLICY },
   cryptoEnabled: true,
   governanceEnabled: true,
+  kycLevel: 'none',
 };
 
 describe('coarseVerdict — the port truth table', () => {
@@ -288,5 +289,78 @@ describe('coarseVerdict — the asset gate (WS-N.1.1a asset_flags)', () => {
     expect(coarseVerdict({ ...ELIGIBLE, policy: { kind: 'missing' } }, undefined, 'USDC')).toBe(
       'unknown',
     );
+  });
+});
+
+describe('the KYC gate (WS-N.1.1a kyc_policy / age-gate assurance)', () => {
+  /** A region that demands partner verification for its payments cell. */
+  const kycRequired = (over: Partial<JurisdictionFeaturePolicy> = {}): AvailabilityInput => ({
+    ...ELIGIBLE,
+    policy: {
+      kind: 'active',
+      policy: {
+        ...POLICY,
+        kyc_policy: { production_payments: { verification_level: 'kyc_partner' } },
+        ...over,
+      },
+    },
+  });
+
+  it('closes a cell whose policy demands KYC the user has not established', () => {
+    const input = kycRequired();
+    // Before this the requirement was a dead letter: nothing read kyc_policy,
+    // so counsel could write "payments require kyc_partner" and real funds
+    // would flow to an unverified user.
+    expect(evaluateCell(input, 'production_payments')).toMatchObject({
+      available: false,
+      disableReason: 'verification_required',
+    });
+    expect(coarseVerdict(input, 'production_payments')).toBe('unknown');
+    expect(coarseVerdict(input)).toBe('unknown'); // the region-wide reading too
+    // A cell the policy does NOT gate is unaffected.
+    expect(evaluateCell(input, 'treasury_operations').available).toBe(true);
+  });
+
+  it('opens the cell once the level is established', () => {
+    const verified: AvailabilityInput = { ...kycRequired(), kycLevel: 'kyc_partner' };
+    expect(evaluateCell(verified, 'production_payments').available).toBe(true);
+    expect(coarseVerdict(verified, 'production_payments')).toBe('allowed');
+  });
+
+  it('honors the age gate’s assurance as a KYC requirement too', () => {
+    const input: AvailabilityInput = {
+      ...ELIGIBLE,
+      policy: {
+        kind: 'active',
+        policy: {
+          ...POLICY,
+          age_gate_policy: {
+            ...POLICY.age_gate_policy,
+            governance: { required_band: 'adult', assurance: 'kyc_partner' },
+          },
+          feature_flags: { ...POLICY.feature_flags, governance: 'enabled' },
+        },
+      },
+    };
+    expect(evaluateCell(input, 'governance')).toMatchObject({
+      available: false,
+      disableReason: 'verification_required',
+    });
+    expect(coarseVerdict(input, 'governance')).toBe('unknown');
+  });
+
+  it('gates a testnet/simulated cell too — the policy asked, regardless of level', () => {
+    const input = kycRequired({
+      feature_flags: { ...POLICY.feature_flags, production_payments: 'testnet' },
+    });
+    expect(evaluateCell(input, 'production_payments')).toMatchObject({
+      available: false,
+      disableReason: 'verification_required',
+    });
+  });
+
+  it('a policy with no kyc_policy entries gates nothing (the shipped default)', () => {
+    expect(evaluateCell(ELIGIBLE, 'production_payments').available).toBe(true);
+    expect(coarseVerdict(ELIGIBLE, 'production_payments')).toBe('allowed');
   });
 });
