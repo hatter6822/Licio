@@ -174,3 +174,185 @@ describe('ComplianceConsole (WS-N.2.1c / WS-N.2.2c)', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 });
+
+describe('ComplianceConsole — the case queue state machine + error paths', () => {
+  const baseCase = {
+    case_id: '11111111-1111-4111-8111-111111111111',
+    user_id_or_room_id: 'user-1',
+    subject_kind: 'user' as const,
+    trigger_type: 'velocity' as const,
+    risk_level: 'medium' as const,
+    partner_case_ref: null,
+    assigned_to: null,
+    resolution: null,
+    retention_policy: {
+      retention_period_days: 730,
+      deletion_date: '2028-07-15T00:00:00.000Z',
+      legal_hold: false,
+    },
+    created_at: '2026-07-15T00:00:00.000Z',
+    updated_at: '2026-07-15T00:00:00.000Z',
+  };
+  const caseIn = (review_state: 'open' | 'assigned' | 'investigating' | 'escalated') => ({
+    ...baseCase,
+    review_state,
+  });
+
+  it('offers ONLY the actions the server-side state machine permits, per state', async () => {
+    // One case per state; each card exposes exactly its legal transitions.
+    mocked.adminListCases.mockResolvedValue({
+      cases: [
+        { ...caseIn('open'), case_id: '11111111-1111-4111-8111-111111111111' },
+        { ...caseIn('assigned'), case_id: '22222222-2222-4222-8222-222222222222' },
+        { ...caseIn('investigating'), case_id: '33333333-3333-4333-8333-333333333333' },
+      ],
+    });
+    mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
+    render(<ComplianceConsole />);
+    // open → assign only; assigned → begin only; investigating → resolve + escalate.
+    expect(await screen.findByRole('button', { name: /^assign$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /begin investigation/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /resolve: cleared/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^escalate$/i })).toBeInTheDocument();
+  });
+
+  it('gates assign on an assignee and resolve on notes (no empty-payload calls)', async () => {
+    mocked.adminListCases.mockResolvedValue({
+      cases: [
+        caseIn('open'),
+        { ...caseIn('investigating'), case_id: '44444444-4444-4444-8444-444444444444' },
+      ],
+    });
+    mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
+    mocked.adminAssignCase.mockResolvedValue(caseIn('assigned'));
+    mocked.adminResolveCase.mockResolvedValue({
+      ...caseIn('investigating'),
+      review_state: 'resolved' as never,
+    });
+    render(<ComplianceConsole />);
+    // Gated until the operator supplies the required field. The house Button
+    // marks inactivity with aria-disabled (it stays focusable + announced) and
+    // swallows the click, so assert BOTH the state and that it cannot fire.
+    const assignButton = await screen.findByRole('button', { name: /^assign$/i });
+    expect(assignButton).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('button', { name: /resolve: cleared/i })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    await userEvent.click(assignButton);
+    expect(mocked.adminAssignCase).not.toHaveBeenCalled();
+    await userEvent.type(screen.getByLabelText(/assignee user id/i), 'reviewer-9');
+    await userEvent.type(screen.getByLabelText(/resolution notes/i), 'no pattern found');
+    await userEvent.click(screen.getByRole('button', { name: /^assign$/i }));
+    await waitFor(() =>
+      expect(mocked.adminAssignCase).toHaveBeenCalledWith(baseCase.case_id, 'reviewer-9'),
+    );
+    await userEvent.click(screen.getByRole('button', { name: /resolve: cleared/i }));
+    await waitFor(() =>
+      expect(mocked.adminResolveCase).toHaveBeenCalledWith(
+        '44444444-4444-4444-8444-444444444444',
+        'cleared',
+        'no pattern found',
+      ),
+    );
+  });
+
+  it('surfaces a rejected case action as an alert without losing the queue', async () => {
+    mocked.adminListCases.mockResolvedValue({ cases: [caseIn('assigned')] });
+    mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
+    mocked.adminCaseAction.mockRejectedValue(
+      new ApiClientError(
+        'INVALID_CASE_TRANSITION',
+        'A case cannot move assigned -> resolved.',
+        409,
+      ),
+    );
+    render(<ComplianceConsole />);
+    await userEvent.click(await screen.findByRole('button', { name: /begin investigation/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/cannot move/i);
+    // The queue is still rendered (the failure is per-action, not fatal).
+    expect(screen.getByRole('button', { name: /begin investigation/i })).toBeInTheDocument();
+  });
+
+  it('renders both empty states and a non-403 load error', async () => {
+    mocked.adminListCases.mockResolvedValue({ cases: [] });
+    mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
+    const { unmount } = render(<ComplianceConsole />);
+    expect(await screen.findByTestId('empty-cases')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('tab', { name: /fraud queue/i }));
+    expect(await screen.findByTestId('empty-fraud')).toBeInTheDocument();
+    unmount();
+
+    // A 500 is NOT an authorization problem: the console shows an error, not
+    // the access notice (which would misinform an authorized reviewer).
+    vi.resetAllMocks();
+    mocked.adminListCases.mockRejectedValue(new ApiClientError('server_error', 'boom', 500));
+    mocked.adminFetchFraudQueue.mockRejectedValue(new ApiClientError('server_error', 'boom', 500));
+    render(<ComplianceConsole />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load/i);
+    expect(screen.queryByText(/compliance access required/i)).not.toBeInTheDocument();
+  });
+
+  it('rejects a fraud-queue review failure and shows no action for a non-flagged row', async () => {
+    mocked.adminListCases.mockResolvedValue({ cases: [] });
+    mocked.adminFetchFraudQueue.mockResolvedValue({
+      items: [
+        {
+          case: caseIn('open'),
+          payment_intent_id: '55555555-5555-4555-8555-555555555555',
+          payment_compliance_state: 'flagged',
+          sla_due_at: '2026-07-15T04:00:00.000Z',
+        },
+        {
+          // A fraud-class CASE row (no intent): no release/reject affordance.
+          case: { ...caseIn('open'), case_id: '66666666-6666-4666-8666-666666666666' },
+          payment_intent_id: null,
+          payment_compliance_state: null,
+          sla_due_at: '2026-07-15T06:00:00.000Z',
+        },
+      ],
+    });
+    mocked.adminReviewIntent.mockRejectedValue(
+      new ApiClientError('not_flagged', 'The intent is not held for review.', 409),
+    );
+    render(<ComplianceConsole />);
+    await userEvent.click(await screen.findByRole('tab', { name: /fraud queue/i }));
+    // Exactly ONE row carries the action pair (the held intent).
+    expect(await screen.findAllByRole('button', { name: /^release$/i })).toHaveLength(1);
+    await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not held for review/i);
+  });
+
+  it('the declarations tab verifies and reports a rejected verification', async () => {
+    mocked.adminListCases.mockResolvedValue({ cases: [] });
+    mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
+    mocked.adminVerifyDeclaration.mockResolvedValue(undefined);
+    const { container } = render(<ComplianceConsole />);
+    await userEvent.click(await screen.findByRole('tab', { name: /declarations/i }));
+    // The anti-circumvention framing is user-visible (no geolocation exists).
+    expect(screen.getByText(/no geolocation anywhere on the platform/i)).toBeInTheDocument();
+    const verifyButton = screen.getByRole('button', { name: /^verify$/i });
+    expect(verifyButton).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(verifyButton);
+    expect(mocked.adminVerifyDeclaration).not.toHaveBeenCalled();
+    await userEvent.type(screen.getByLabelText(/user id/i), 'user-77');
+    await userEvent.type(screen.getByLabelText(/review note/i), 'passport matches');
+    await userEvent.click(screen.getByRole('button', { name: /^verify$/i }));
+    await waitFor(() =>
+      expect(mocked.adminVerifyDeclaration).toHaveBeenCalledWith(
+        'user-77',
+        'verify',
+        'passport matches',
+      ),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent(/declaration verified/i);
+    expect(await checkA11y(container)).toHaveNoViolations();
+
+    // The reject path keeps the declaration pending (never a silent verify).
+    mocked.adminVerifyDeclaration.mockRejectedValue(
+      new ApiClientError('not_found', 'Resource not found', 404),
+    );
+    await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    expect(await screen.findByRole('status')).toHaveTextContent(/resource not found/i);
+  });
+});

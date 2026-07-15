@@ -147,16 +147,26 @@ export function createInMemoryComplianceServices(
   const policyCache = new PolicyCache(() => config.policyCacheTtlMs, now);
   bindPolicyInvalidation(broadcaster, policyCache);
 
+  // The in-memory adapters emulate every DB constraint (house policy), so the
+  // case store gets the SAME cross-table deletion guard migration 0088 gives
+  // Postgres: `sar_case_fk` is ON DELETE NO ACTION, so a case with a SAR/STR
+  // record can never be deleted — the WS-N.2.1d legal hold enforced twice.
+  // Without this wiring a dev/test retention sweep would delete a case the
+  // production sweep cannot, and the parity would only surface in production.
+  const cases = new InMemoryComplianceCaseStore();
+  const sars = new InMemorySarStore();
+  cases.sarGuard = async (caseId) => (await sars.listByCase(caseId)).length > 0;
+
   const services: ComplianceServices = {
     policies: new InMemoryJurisdictionPolicyStore(),
     policyAudit: new InMemoryPolicyAuditStore(),
-    cases: new InMemoryComplianceCaseStore(),
+    cases,
     caseAudit: new InMemoryCaseAuditStore(),
     declarations: new InMemoryRegionDeclarationStore(),
     disclosures: new InMemoryDisclosureStore(),
     acks: new InMemoryDisclosureAckStore(),
     pins: new InMemoryWalletRiskPinStore(),
-    sars: new InMemorySarStore(),
+    sars,
     lawfulAccess: new InMemoryLawfulAccessStore(),
     screeningCache: new InMemoryScreeningCacheStore(now),
     velocity: new InMemoryVelocityStore(),
