@@ -96,6 +96,7 @@ import type {
 import { getEventPipelineServices } from '../events/services.js';
 import { isComplianceReviewer, isCounsel } from '../identity/rbac.js';
 import { getIdentityServices } from '../identity/services.js';
+import type { ReviewSubject } from '../knomosis/ports.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import {
   type AuthEnv,
@@ -283,9 +284,21 @@ async function resolveReviewedCaseInTx(
 interface HeldIntent {
   paymentIntentId: string;
   userId: string | null;
+  roomId: string;
   targetType: string;
   amount: string;
 }
+
+/**
+ * Who this intent's review is about — the same rule `reviewSubjectFor` applies
+ * on the seam, read off the intent's own ownership.  A room-owned payout
+ * belongs to the treasury, not to whichever steward authorized it, so the queue
+ * can find its review knowing only the intent (it never learns the steward).
+ */
+const intentReviewSubject = (intent: HeldIntent): ReviewSubject =>
+  intent.userId !== null
+    ? { kind: 'user', ref: intent.userId }
+    : { kind: 'room', ref: intent.roomId };
 
 /**
  * THIS intent's review case.  Keyed by the intent, never by its owner: a user
@@ -299,13 +312,13 @@ async function relatedFraudCase(
   services: ComplianceServices,
   intent: HeldIntent,
 ): Promise<ComplianceCaseRecord | null> {
-  if (intent.userId === null) return null;
+  const subject = intentReviewSubject(intent);
   // The high-value review `risk.ts` opens for this exact intent (its
   // `reviewRef` IS the intent id, and the key carries no action type — that is
   // what lets the intent leg and the WS-L leg share ONE review), then the case
   // this queue opened for it.
   const keys = [
-    `highvalue:${intent.userId}:${intent.amount}:${intent.paymentIntentId}`,
+    `highvalue:${subject.kind}:${subject.ref}:${intent.amount}:${intent.paymentIntentId}`,
     `intent-review:${intent.paymentIntentId}`,
   ];
   for (const key of keys) {
@@ -346,9 +359,13 @@ async function recordIntentReviewDecision(
   try {
     let record = await relatedFraudCase(services, input.intent);
     if (record === null) {
+      const subject = intentReviewSubject(input.intent);
       const opened = await createCase(buildCaseDeps(services), {
-        subjectKind: 'user',
-        subjectRef: input.intent.userId ?? input.intent.paymentIntentId,
+        // The intent's own subject — never the payment id as a stand-in "user",
+        // which would file a room's payout in the user queue and the erasure
+        // scrub under an id that is not a user's.
+        subjectKind: subject.kind,
+        subjectRef: subject.ref,
         triggerType: 'pattern',
         riskLevel: 'medium',
         note: `Payment intent ${input.intent.paymentIntentId} held for fraud review.`,
@@ -966,11 +983,16 @@ export function createComplianceRoutes() {
     // ------------------------- The fraud queue (WS-N.2.2c) ------------------
     .get('/admin/fraud-queue', authMiddleware(), requireCompliance(), async (c) => {
       const services = getComplianceServices();
-      const open = await services.cases.listByStates(
+      // Filtered IN THE QUERY, so the cap bounds fraud-class cases.  Capping
+      // first and filtering after spent the page on unrelated triggers: with
+      // >200 open cases, fraud/velocity/sanctions cases outside that page had
+      // no queue row, no SLA, and no review action until enough unrelated cases
+      // closed.
+      const fraudClass = await services.cases.listByStatesAndTriggers(
         ['open', 'assigned', 'investigating', 'escalated'],
+        [...FRAUD_CLASS_TRIGGERS],
         200,
       );
-      const fraudClass = open.filter((record) => FRAUD_CLASS_TRIGGERS.has(record.triggerType));
       const flagged = treasuryServicesConfigured()
         ? await getTreasuryServices().intents.listByComplianceState('flagged', 200)
         : [];
@@ -990,20 +1012,34 @@ export function createComplianceRoutes() {
             // the reviewer the wrong trigger, risk, and SLA for the held
             // payment; with no such case the synthetic row below describes the
             // intent itself.
-            const record = await relatedFraudCase(services, {
+            const held: HeldIntent = {
               paymentIntentId: intent.paymentIntentId,
               userId: intent.userId,
+              roomId: intent.roomId,
               targetType: intent.targetType,
               amount: intent.amount,
-            });
+            };
+            const record = await relatedFraudCase(services, held);
             return {
               case:
                 record !== null
                   ? caseToWire(record)
                   : caseToWire({
                       caseId: intent.paymentIntentId,
-                      userIdOrRoomId: intent.userId,
-                      subjectKind: 'user' as const,
+                      userIdOrRoomId: intentReviewSubject({
+                        paymentIntentId: intent.paymentIntentId,
+                        userId: intent.userId,
+                        roomId: intent.roomId,
+                        targetType: intent.targetType,
+                        amount: intent.amount,
+                      }).ref,
+                      subjectKind: intentReviewSubject({
+                        paymentIntentId: intent.paymentIntentId,
+                        userId: intent.userId,
+                        roomId: intent.roomId,
+                        targetType: intent.targetType,
+                        amount: intent.amount,
+                      }).kind,
                       triggerType: 'pattern' as const,
                       riskLevel: 'medium' as const,
                       partnerCaseRef: null,
@@ -1014,6 +1050,7 @@ export function createComplianceRoutes() {
                         retention_period_days: 730,
                         deletion_date: new Date(services.now() + 730 * 86_400_000).toISOString(),
                         legal_hold: false,
+                        legal_hold_refs: [],
                       },
                       idempotencyKey: null,
                       createdAt: intent.createdAt,
@@ -1059,6 +1096,7 @@ export function createComplianceRoutes() {
           intent: {
             paymentIntentId: updated.paymentIntentId,
             userId: updated.userId,
+            roomId: updated.roomId,
             targetType: updated.targetType,
             amount: updated.amount,
           },
@@ -1116,6 +1154,7 @@ export function createComplianceRoutes() {
           intent: {
             paymentIntentId: updated.paymentIntentId,
             userId: updated.userId,
+            roomId: updated.roomId,
             targetType: updated.targetType,
             amount: updated.amount,
           },

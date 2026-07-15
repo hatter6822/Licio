@@ -49,9 +49,23 @@ modified** in their verdict semantics:
   Keyed per leg they would not: a reviewer's release of the held intent would
   run straight into a second review at the WS-L leg that no fraud-queue action
   could clear, leaving released money stuck. Safety comes from the key's other
-  parts: `userId` is the session's and `amount` is the signed payload's, so a
-  client quoting someone else's cleared intent id lands on a different key and
-  gets its own review.
+  parts, both server-derived: the *subject* (below) and the `amount` from the
+  signed payload — so a client quoting someone else's cleared intent id lands on
+  a different key and gets its own review.
+
+  **`reviewSubject` — who the review is about, which is not always the caller.**
+  A disbursement from a room treasury belongs to the **room**, not to whichever
+  steward authorized it (the same rule the room-owned payout intent already
+  states about itself). Attributed to the actor it would open a separate review
+  per steward for ONE payout, and leave that review unfindable from the fraud
+  queue — which knows the intent and its room, and never learns the steward.
+  `reviewSubjectFor` derives it on the port both legs share, from the §22.2
+  feature cell each already computes for its jurisdiction check
+  (`ACTION_FEATURE_CELL` / `featureCellFor`): pay-in ⇒ the payer,
+  `treasury_operations` ⇒ the room. One definition, so the two legs of one
+  transfer cannot classify it differently and split its review in half.
+  `userId` stays the **actor** throughout — velocity is per-person, and a room
+  does not declare a jurisdiction.
 
   **A decision closes the review it decided.** The fraud queue's release/reject
   records the decision on the case chain **and** resolves the case (`cleared` /
@@ -290,6 +304,27 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   **denied** request still releases its hold and closes its case explicitly: it
   obliges nothing, and leaving it would keep the subject's records pinned and
   their crypto features disabled on a request counsel rejected.
+- **A legal hold is reference-counted, not a flag.**  A SAR and a lawful-access
+  request can hold the same case at once, so each names its own hold
+  (`legal_hold_refs`) and releases only that one; `legal_hold` is *derived* from
+  what remains, and `setLegalHold` is the only writer of either. As a shared
+  boolean, a denied lawful-access request cleared the hold an outstanding SAR
+  still needed — and account deletion could then scrub the subject while the
+  sweep anonymized the case. The refs are **opaque**, because the retention
+  policy is reviewer-visible and a readable `sar:<id>` would announce the
+  report's existence to the reviewers it must be kept from (anti-tipping-off); a
+  count is not a disclosure, since a held case already shows its hold. The chain
+  says `released` only when the last obligation lets go — a release that leaves
+  the case held is not a release of the case. It is a SET, not a counter: a
+  retried apply cannot strand the case at one.
+- **The retention writes re-check the hold themselves.**  `deleteCascade` takes
+  a row lock and re-reads it inside its transaction; `anonymize` puts it in the
+  `WHERE`. The sweep's `listExpired` read cannot carry that guarantee — a SAR
+  draft can land in the gap between choosing a page and acting on it. The
+  predicate is `legal_hold = false`, not `IS NOT TRUE`: "not provably unheld"
+  must not authorize a destructive act. A hold that wins the race is reported as
+  `heldRace` (the guard working), never as an error, and leaves the run
+  un-drained so the next tick re-reads the case.
 - **Retention retries and drains.**  The sweep's cadence marker advances only
   on a *drained* run — neither a transient failure nor a >500-case backlog may
   burn the window, or expired cases would stay readable for another full

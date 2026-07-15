@@ -296,6 +296,7 @@ describe('the no-engine seam pin (removing WS-N can never fail open)', () => {
         actionType: 'x',
         amountMinorUnits: '1',
         reviewRef: null,
+        reviewSubject: null,
       }),
     ).toBe('unavailable');
     expect(

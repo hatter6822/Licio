@@ -21,6 +21,18 @@ import type { ComplianceRuntimeConfig } from './config.js';
 
 type Clock = () => number;
 
+/**
+ * A legal hold landed on a case between this sweep selecting it and acting on
+ * it.  Not an error: it aborts the anonymize unit so the chain entry never
+ * claims an act that did not happen.
+ */
+class RetentionHeldError extends Error {
+  constructor(caseId: string) {
+    super(`case ${caseId} is under a legal hold`);
+    this.name = 'RetentionHeldError';
+  }
+}
+
 export interface RetentionSweepDeps {
   caseDeps: CaseDeps;
   config: () => ComplianceRuntimeConfig;
@@ -32,6 +44,11 @@ export interface RetentionSweepSummary {
   deleted: number;
   anonymized: number;
   held: number;
+  /** Cases a legal hold claimed AFTER this run selected them — the sweep left
+   *  them alone.  Reported separately from `errors`: it is the guard working,
+   *  not a fault, and separately from `held` (which counts holds visible at
+   *  selection time). */
+  heldRace: number;
   errors: number;
   /** False ⇔ expired cases remain that this run could not clear (a page cap
    *  hit with no forward progress).  The scheduler keeps its cadence marker
@@ -51,6 +68,7 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
     deleted: 0,
     anonymized: 0,
     held: 0,
+    heldRace: 0,
     errors: 0,
     drained: false,
   };
@@ -67,7 +85,7 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
       summary.drained = true;
       break;
     }
-    const before = summary.deleted + summary.anonymized;
+    const before = summary.deleted + summary.anonymized + summary.heldRace;
     for (const record of expired) {
       try {
         if (anonymizeTriggers.has(record.triggerType)) {
@@ -75,7 +93,7 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
           // anonymizing after would let a failed anonymize leave the chain
           // permanently claiming the subject data was stripped while the live
           // row still holds it — and a retry could only add a second entry.
-          await runChainedUnit(
+          const anonymized = await runChainedUnit(
             deps.caseDeps.transactor,
             async (stores) => {
               await appendCaseAuditInTx(stores, deps.caseDeps, {
@@ -86,22 +104,39 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
                 afterState: record.reviewState,
                 note: `Retention expired (${config.retentionScheduleRef}); anonymized in place.`,
               });
-              await stores.cases.anonymize(record.caseId, nowIso);
+              // The store re-checks the hold as part of the write; false ⇔ a
+              // hold landed since this page was read, so the entry above must
+              // not stand either — the unit is abandoned whole.
+              if (!(await stores.cases.anonymize(record.caseId, nowIso))) {
+                throw new RetentionHeldError(record.caseId);
+              }
+              return true;
             },
             'retention anonymize',
           );
-          summary.anonymized += 1;
+          if (anonymized) summary.anonymized += 1;
         } else {
           // Thorough deletion through the SINGLE transactional store operation:
           // `deleteCascade` removes the trail and the case together (one GUC
           // transaction in the Drizzle adapter), so a failure — a SAR reference
           // hitting the FK, say — rolls BOTH back. Deleting the trail here first
           // would commit the trail's removal outside that transaction and could
-          // leave a live case with no review history.
-          await deps.caseDeps.cases.deleteCascade(record.caseId);
-          summary.deleted += 1;
+          // leave a live case with no review history.  It also re-checks the
+          // legal hold under a row lock: false ⇔ a hold landed since this page
+          // was read, and the case is left alone.
+          if (await deps.caseDeps.cases.deleteCascade(record.caseId)) {
+            summary.deleted += 1;
+          } else {
+            summary.heldRace += 1;
+          }
         }
       } catch (error) {
+        if (error instanceof RetentionHeldError) {
+          // Not a fault: a legal hold won the race and the whole unit was
+          // abandoned, entry included.  The case simply stays.
+          summary.heldRace += 1;
+          continue;
+        }
         summary.errors += 1;
         deps.log('compliance.retention.error', {
           caseId: record.caseId,
@@ -112,10 +147,13 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
     // No forward progress ⇒ every remaining row is un-sweepable right now (an
     // anonymize-exempt SAR reference, a store fault).  Re-reading the same
     // page would spin, so stop and report the backlog as NOT drained.
-    if (summary.deleted + summary.anonymized === before) break;
+    if (summary.deleted + summary.anonymized + summary.heldRace === before) break;
     // A short page means the set is exhausted (the errors, if any, above).
     if (expired.length < SWEEP_PAGE) {
-      summary.drained = summary.errors === 0;
+      // A hold-race leaves the case in place, so the backlog is NOT drained:
+      // the next run re-reads it (by then either still held — and skipped at
+      // selection — or sweepable again).
+      summary.drained = summary.errors === 0 && summary.heldRace === 0;
       break;
     }
   }

@@ -199,6 +199,7 @@ export async function createCaseInTx(
       retention_period_days: retentionDays,
       deletion_date: new Date(nowMs + retentionDays * 86_400_000).toISOString(),
       legal_hold: false,
+      legal_hold_refs: [],
     },
     idempotencyKey,
     createdAt,
@@ -346,10 +347,41 @@ export async function addCaseNote(
  * hold and its entry are ONE unit: a hold the chain does not record is an
  * unaudited change to what retention may delete.
  */
-export async function setLegalHold(
-  deps: CaseDeps,
-  input: { caseId: string; hold: boolean; actorUserId: string; reason: string },
-): Promise<CaseOutcome> {
+/**
+ * Apply/release ONE obligation's hold, and derive the flag from what is left.
+ * The only writer of `legal_hold` / `legal_hold_refs` — so the invariant
+ * ("held ⇔ some obligation holds it") cannot be broken by a caller that
+ * reasons about the flag directly.
+ */
+function nextHoldPolicy(
+  policy: ComplianceCaseRecord['retentionPolicy'],
+  hold: boolean,
+  holdRef: string,
+): ComplianceCaseRecord['retentionPolicy'] {
+  const current = new Set(policy.legal_hold_refs);
+  if (hold) current.add(holdRef);
+  else current.delete(holdRef);
+  const refs = [...current].sort();
+  return { ...policy, legal_hold: refs.length > 0, legal_hold_refs: refs };
+}
+
+/**
+ * One obligation's hold on a case.
+ *
+ * `holdRef` is REQUIRED: a hold is reference-counted, because a SAR and a
+ * lawful-access request can hold the same case at once and each may release
+ * only its own.  Pass an OPAQUE ref (`deps.opaqueRef('sar:<id>')`) — the
+ * policy is reviewer-visible, and a readable ref would name the obligation.
+ */
+export interface LegalHoldInput {
+  caseId: string;
+  hold: boolean;
+  holdRef: string;
+  actorUserId: string;
+  reason: string;
+}
+
+export async function setLegalHold(deps: CaseDeps, input: LegalHoldInput): Promise<CaseOutcome> {
   try {
     return await runChainedUnit(
       deps.transactor,
@@ -366,19 +398,23 @@ export async function setLegalHold(
 export async function setLegalHoldInTx(
   stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
   deps: CaseDeps,
-  input: { caseId: string; hold: boolean; actorUserId: string; reason: string },
+  input: LegalHoldInput,
 ): Promise<CaseOutcome> {
   const record = await stores.cases.getById(input.caseId);
   if (record === null) return caseErr(404, 'not_found', 'Resource not found');
+  const nextPolicy = nextHoldPolicy(record.retentionPolicy, input.hold, input.holdRef);
   const updated = await stores.cases.update(
     input.caseId,
-    { retentionPolicy: { ...record.retentionPolicy, legal_hold: input.hold } },
+    { retentionPolicy: nextPolicy },
     new Date(deps.now()).toISOString(),
   );
   if (updated === null) return caseErr(404, 'not_found', 'Resource not found');
   await appendCaseAuditInTx(stores, deps, {
     caseId: input.caseId,
-    action: input.hold ? 'legal_hold_applied' : 'legal_hold_released',
+    // The entry describes the CASE's hold, not the obligation's: `released`
+    // only when the last one lets go.  A release that leaves the case held
+    // (another obligation still needs it) is not a release of the case.
+    action: nextPolicy.legal_hold ? 'legal_hold_applied' : 'legal_hold_released',
     actorRef: deps.opaqueRef(input.actorUserId),
     beforeState: record.reviewState,
     afterState: record.reviewState,

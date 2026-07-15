@@ -65,11 +65,20 @@ export function limitsForRegion(
 }
 
 export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'] {
-  return async ({ userId, actionType, amountMinorUnits, reviewRef }): Promise<FraudVerdict> => {
+  return async ({
+    userId,
+    actionType,
+    amountMinorUnits,
+    reviewRef,
+    reviewSubject,
+  }): Promise<FraudVerdict> => {
     // `null` = the caller cannot identify the attempt.  Normalized once here:
     // the port's contract is nullable, and an `undefined` check would treat
     // `null` as "an attempt was named" and hand it the cleared-review exit.
     const attempt = reviewRef ?? null;
+    // `null` = a personal action, so the actor is the subject.  A room-treasury
+    // disbursement names the ROOM (see `reviewSubjectFor`).
+    const subject = reviewSubject ?? { kind: 'user' as const, ref: userId };
     const amount = amountMinorUnits ?? '0';
     if (!AMOUNT_RE.test(amount)) {
       // An unparseable amount can never be bounded — fail affirmatively closed.
@@ -121,8 +130,12 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
     // Distinct from the WS-L.2.6e signing STEP-UP threshold.
     if (BigInt(amount) >= BigInt(config.highValueReviewThresholdMinorUnits)) {
       const opened = await createCase(deps.caseDeps, {
-        subjectKind: 'user',
-        subjectRef: userId,
+        // The SUBJECT, not the actor: a room-treasury payout is the room's
+        // review, so every steward's leg of it lands on the same case — and
+        // the fraud queue, which knows the intent's room and not its steward,
+        // can find it.
+        subjectKind: subject.kind,
+        subjectRef: subject.ref,
         triggerType: 'pattern',
         riskLevel: 'medium',
         note: `High-value ${actionType} at/above the manual-review threshold (WS-N.2.2c).`,
@@ -137,13 +150,15 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
         // so the case is still deduped per day (no spam) but the cleared-review
         // exit below is withheld (fail-closed).
         //
-        // Safety note: `userId` and `amount` are part of the key and come from
-        // the SESSION and the signed payload — a client that quotes someone
+        // Safety note: the SUBJECT and the `amount` are part of the key, and
+        // both are server-derived — the subject from the session (a pay-in) or
+        // from the room the caller is already authorized against (a payout),
+        // the amount from the signed payload.  A client that quotes someone
         // else's cleared ref lands on a different key, hence a new review.
         idempotencyKey:
           attempt === null
-            ? `highvalue:${userId}:${actionType}:${amount}:${dayBucket(nowMs)}`
-            : `highvalue:${userId}:${amount}:${attempt}`,
+            ? `highvalue:${subject.kind}:${subject.ref}:${actionType}:${amount}:${dayBucket(nowMs)}`
+            : `highvalue:${subject.kind}:${subject.ref}:${amount}:${attempt}`,
       });
       // The review loop's exit: a reviewer who CLEARED THIS attempt lets its
       // retry through.  Anything else — in flight, or resolved to a

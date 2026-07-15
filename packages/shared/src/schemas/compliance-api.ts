@@ -76,7 +76,25 @@ export const caseRetentionPolicySchema = z
   .object({
     retention_period_days: z.number().int().min(1).max(36_500),
     deletion_date: isoTimestampSchema,
+    /** Whether ANY legal obligation currently holds this case.  DERIVED from
+     *  `legal_hold_refs` — never set on its own (`setLegalHold` is the only
+     *  writer, and it computes both together).  It stays a first-class field
+     *  because every reader and the `NOT_HELD` SQL predicate ask exactly this
+     *  question. */
     legal_hold: z.boolean(),
+    /** The obligations holding this case, one OPAQUE ref each (WS-N.2.1e).
+     *
+     *  A hold is not a boolean: a SAR and a lawful-access request can hold the
+     *  same case at once, and each must release only ITS OWN — a denied
+     *  lawful-access request clearing a shared flag would drop the retention
+     *  protection an outstanding SAR still needs, letting account deletion
+     *  scrub the subject and the retention sweep anonymize the case.
+     *
+     *  The refs are opaque (`opaqueRef`) BECAUSE this policy is visible to
+     *  compliance reviewers: a readable `sar:<id>` would announce the report's
+     *  existence to the very reviewers it must be kept from (anti-tipping-off).
+     *  A count is not a disclosure — a held case already shows its hold. */
+    legal_hold_refs: z.array(z.string().min(1).max(128)).default([]),
     /** Set when the retention sweep ANONYMIZED this case in place instead of
      *  deleting it (WS-N.2.1d): the schedule's obligation is discharged and
      *  the stripped row is kept indefinitely.  It marks the case done, so the

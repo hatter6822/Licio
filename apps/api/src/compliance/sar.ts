@@ -48,9 +48,14 @@ export async function createSarDraft(
     return await runChainedUnit(
       deps.caseDeps.transactor,
       async (stores) => {
+        const sarId = deps.uuid();
         const held = await setLegalHoldInTx(stores, deps.caseDeps, {
           caseId: input.caseId,
           hold: true,
+          // THIS report's hold, released only when the report itself no longer
+          // needs it — never by a lawful-access denial that happens to share
+          // the case.  Opaque, so the reviewer-visible policy does not name it.
+          holdRef: deps.opaqueRef(`sar:${sarId}`),
           actorUserId: input.actorUserId,
           // Neutral wording: reviewers see the hold, never the report
           // (anti-tipping-off).
@@ -59,7 +64,7 @@ export async function createSarDraft(
         if (!held.ok) return sarErr(held.status, held.code, held.message);
         const nowIso = new Date(deps.now()).toISOString();
         const record = await stores.sars.insert({
-          sarId: deps.uuid(),
+          sarId,
           caseId: input.caseId,
           jurisdiction: input.jurisdiction,
           status: 'draft',
@@ -97,8 +102,13 @@ export async function approveSar(
     input.sarId,
     { status: 'approved', approvedByRef: deps.opaqueRef(input.actorUserId) },
     new Date(deps.now()).toISOString(),
+    // CAS on the state the read above checked: a racing session that already
+    // approved (or filed) this report keeps its record.
+    ['draft'],
   );
-  if (updated === null) return sarErr(404, 'not_found', 'Resource not found');
+  if (updated === null) {
+    return sarErr(409, 'invalid_transition', 'Only a draft SAR can be approved.');
+  }
   return { ok: true, record: updated };
 }
 
@@ -129,7 +139,15 @@ export async function fileSar(
       filedByRef: deps.opaqueRef(input.actorUserId),
     },
     nowIso,
+    // CAS on `approved`.  The read-side check above cannot stand alone: two
+    // counsel sessions filing the same report would both pass it, and the last
+    // writer would overwrite the other's filing ref, partner flag, and
+    // `filedByRef` — the record of who filed, which is the legally
+    // consequential one.  The loser gets the conflict, not a silent overwrite.
+    ['approved'],
   );
-  if (updated === null) return sarErr(404, 'not_found', 'Resource not found');
+  if (updated === null) {
+    return sarErr(409, 'invalid_transition', 'Filing requires counsel approval first.');
+  }
   return { ok: true, record: updated };
 }

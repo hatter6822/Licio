@@ -21,6 +21,7 @@ import type { KnomosisRuntimeConfig } from './config.js';
 import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
+import { reviewSubjectFor } from './ports.js';
 import {
   ACTION_FEATURE_CELL,
   buildEip712Domain,
@@ -461,6 +462,13 @@ export async function submitAction(
     // its intent; a direct one, the hash the token binds), so the re-check
     // lands on that review rather than opening a second.
     reviewRef: input.paymentIntentId ?? typedDataHash,
+    // The same subject the WS-M intent leg derives, from the same cell: a
+    // room-treasury payout is the ROOM's review, a pay-in is the payer's.
+    // Classifying it differently here would split one transfer's review in two.
+    reviewSubject: reviewSubjectFor(ACTION_FEATURE_CELL[actionType], {
+      userId: input.userId,
+      roomId: input.roomId,
+    }),
   });
   if (fraud === 'blocked' || (fraud === 'unavailable' && realFunds)) {
     return {

@@ -87,14 +87,45 @@ export interface ScreeningDeps {
 /** UTC day bucket for idempotent partial/full-match case keys. */
 const dayBucket = (nowMs: number): string => new Date(nowMs).toISOString().slice(0, 10);
 
+/** The idempotent key for a match's review case — ONE definition, so the
+ *  case-opening path and the cached-verdict recheck below cannot drift. */
+const matchCaseKey = (result: 'partial' | 'full', addressLower: string, nowMs: number): string =>
+  `sanctions:${result}:${addressLower}:${dayBucket(nowMs)}`;
+
+/**
+ * Has a reviewer CLEARED today's partial-match review for this address?
+ * Read-only — it never opens a case (the caller's `createCase` does that).
+ */
+async function partialReviewCleared(deps: ScreeningDeps, addressLower: string): Promise<boolean> {
+  const record = await deps.caseDeps.cases.findByIdempotencyKey(
+    matchCaseKey('partial', addressLower, deps.now()),
+  );
+  return record?.reviewState === 'resolved' && record.resolution?.outcome === 'cleared';
+}
+
 export function createScreenAddress(deps: ScreeningDeps): CompliancePort['screenAddress'] {
   return async ({ addressLower, deploymentId }): Promise<SanctionsVerdict> => {
     const key = `screen:${deploymentId}:${addressLower}`;
     try {
       const cached = await deps.cache.get(key);
-      if (cached === 'clear' || cached === 'blocked' || cached === 'unavailable') {
+      if (cached === 'clear' || cached === 'blocked') {
         deps.metric('compliance.screening.cache_hit');
         return cached;
+      }
+      if (cached === 'unavailable') {
+        // The ONLY writer of an `unavailable` entry is the partial-match path
+        // below — provider errors are never cached — so this entry means "a
+        // partial match is pending review".  It cannot be returned blind: a
+        // reviewer who has since cleared that false positive must take effect
+        // NOW, not when the short TTL happens to lapse, or the manual
+        // clearance is not a clearance.  Consult the review itself.
+        if (await partialReviewCleared(deps, addressLower)) {
+          deps.metric('compliance.screening.partial_cleared');
+          await deps.cache.set(key, 'clear', deps.config().screeningCacheTtlMs).catch(() => {});
+          return 'clear';
+        }
+        deps.metric('compliance.screening.cache_hit');
+        return 'unavailable';
       }
     } catch {
       // A cache outage is a provider round-trip, never a verdict change.
@@ -129,8 +160,23 @@ export function createScreenAddress(deps: ScreeningDeps): CompliancePort['screen
       note: partial
         ? 'Sanctions screening returned a PARTIAL match; manual review required before the action may proceed.'
         : 'Sanctions screening returned a FULL match; the action was blocked.',
-      idempotencyKey: `sanctions:${result}:${addressLower}:${dayBucket(deps.now())}`,
+      idempotencyKey: matchCaseKey(result, addressLower, deps.now()),
     });
+    if (!opened.ok) {
+      // The match is REAL and the action is denied either way — but it was not
+      // recorded: no case, no review trail, nothing for a reviewer to clear or
+      // a regulator to read.  Do NOT cache that verdict.  Caching it (at the
+      // full TTL, for a full match) would suppress every retry that could
+      // still open the case, turning a transient chain outage into a sanctions
+      // hit that is permanently invisible.  An uncached verdict re-screens.
+      deps.metric('compliance.screening.case_unrecorded');
+      deps.alert('compliance.screening.case_unrecorded', {
+        result,
+        code: opened.code,
+        message: opened.message,
+      });
+      return partial ? 'unavailable' : 'blocked';
+    }
     if (partial) {
       // A partial match is a MAYBE that a human resolves.  The idempotent key
       // means this returns that review once it exists, so honor its outcome:
@@ -138,7 +184,6 @@ export function createScreenAddress(deps: ScreeningDeps): CompliancePort['screen
       // rolls over and a reviewer literally cannot clear a false positive.
       // (A FULL match is never review-clearable here — it stays blocked.)
       if (
-        opened.ok &&
         opened.record.reviewState === 'resolved' &&
         opened.record.resolution?.outcome === 'cleared'
       ) {

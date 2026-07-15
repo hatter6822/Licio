@@ -907,6 +907,68 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
     expect(produced.request.production_summary).toContain('HONEST CAPABILITY BOUNDARY');
     expect(produced.request.production_summary).toContain('directory stub metadata only');
   });
+
+  it('an UNKNOWN room class blocks the production rather than omitting the determination', async () => {
+    const counsel = await seedCounsel();
+    // The forum store is transiently down (or the port is unwired).
+    compliance.roomStorageMode = async () => {
+      throw new Error('forum store down');
+    };
+    const intake = await app().request(
+      post(
+        '/v1/compliance/admin/lawful-access',
+        {
+          agency: 'Agency',
+          jurisdiction: 'US',
+          legal_basis: 'warrant',
+          scope: {
+            subject_kind: 'room',
+            subject_ref: randomUUID(),
+            time_range_start: null,
+            time_range_end: null,
+          },
+          contact: 'agent@example.test',
+        },
+        counsel.cookie,
+      ),
+    );
+    const request = ((await intake.json()) as { request: { request_id: string } }).request;
+    await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/review`,
+        { decision: 'approved', note: 'valid warrant' },
+        counsel.cookie,
+      ),
+    );
+    const produced = await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/produce`,
+        { production_summary: 'some records', user_notified: false },
+        counsel.cookie,
+      ),
+    );
+    // If the room IS p2p, producing here would record a summary with the
+    // no-content/no-keys boundary silently missing — the one sentence the
+    // record exists to carry.  Not-reported-as-p2p is not the same as
+    // known-to-be-server.
+    expect(produced.status).toBe(503);
+    expect(((await produced.json()) as { error: { code: string } }).error.code).toBe(
+      'room_class_unknown',
+    );
+
+    // A confirmed `server` room produces normally (no determination needed).
+    compliance.roomStorageMode = async () => 'server';
+    const retried = await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/produce`,
+        { production_summary: 'some records', user_notified: false },
+        counsel.cookie,
+      ),
+    );
+    expect(retried.status).toBe(200);
+    const body = (await retried.json()) as { request: { production_summary: string } };
+    expect(body.request.production_summary).toBe('some records');
+  });
 });
 
 describe('policy write ↔ audit atomicity (WS-N.1.1g)', () => {
@@ -961,8 +1023,9 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
         retention_period_days: 730,
         deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
         legal_hold: false,
+        legal_hold_refs: [],
       },
-      idempotencyKey: `highvalue:${subject}:5000:${intentId}`,
+      idempotencyKey: `highvalue:user:${subject}:5000:${intentId}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -982,8 +1045,9 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
         retention_period_days: 730,
         deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
         legal_hold: false,
+        legal_hold_refs: [],
       },
-      idempotencyKey: `highvalue:${subject}:9000:${otherIntentId}`,
+      idempotencyKey: `highvalue:user:${subject}:9000:${otherIntentId}`,
       createdAt: new Date(Date.now() + 1000).toISOString(),
       updatedAt: new Date(Date.now() + 1000).toISOString(),
     });
@@ -993,6 +1057,7 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
           {
             paymentIntentId: intentId,
             userId: subject,
+            roomId: randomUUID(),
             targetType: 'treasury_deposit',
             amount: '5000',
             complianceState: 'flagged',
@@ -1035,6 +1100,7 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
           {
             paymentIntentId: intentId,
             userId: subject,
+            roomId: randomUUID(),
             targetType: 'treasury_deposit',
             amount: '5000',
             complianceState: 'flagged',
@@ -1055,12 +1121,50 @@ describe('the fraud queue attaches the RIGHT case to a held intent (WS-N.2.2c)',
   });
 });
 
+describe('the fraud queue shows every fraud case, not just the first page (WS-N.2.2c)', () => {
+  it('caps fraud-class cases, not the case table', async () => {
+    const reviewer = await seedReviewer();
+    // A wall of unrelated open cases, older than the fraud case behind them.
+    for (let i = 0; i < 205; i += 1) {
+      await compliance.cases.insert({
+        caseId: randomUUID(),
+        userIdOrRoomId: randomUUID(),
+        subjectKind: 'user',
+        triggerType: 'manual', // NOT fraud-class
+        riskLevel: 'low',
+        partnerCaseRef: null,
+        reviewState: 'open',
+        assignedTo: null,
+        resolution: null,
+        retentionPolicy: {
+          retention_period_days: 730,
+          deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
+          legal_hold: false,
+          legal_hold_refs: [],
+        },
+        idempotencyKey: null,
+        createdAt: new Date(Date.now() - (300 - i) * 1000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    const fraudCaseId = await createCaseVia(reviewer.cookie, { trigger_type: 'velocity' });
+    const queue = (await (
+      await app().request(get('/v1/compliance/admin/fraud-queue', reviewer.cookie))
+    ).json()) as { items: Array<{ case: { case_id: string } }> };
+    // Capping the case read at 200 and filtering after would have spent the
+    // whole page on `manual` cases, and this velocity case would have no queue
+    // row, no SLA, and no review action until 200 unrelated cases closed.
+    expect(queue.items.map((item) => item.case.case_id)).toContain(fraudCaseId);
+  });
+});
+
 describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () => {
   /** A flagged intent whose state the fake treasury actually tracks. */
   function wireFlaggedIntent(intentId: string, subject: string) {
     const intent = {
       paymentIntentId: intentId,
       userId: subject,
+      roomId: randomUUID(),
       targetType: 'treasury_deposit',
       amount: '5000',
       complianceState: 'flagged',
@@ -1097,8 +1201,9 @@ describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () =
         retention_period_days: 730,
         deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
         legal_hold: false,
+        legal_hold_refs: [],
       },
-      idempotencyKey: `highvalue:${subject}:5000:${intentId}`,
+      idempotencyKey: `highvalue:user:${subject}:5000:${intentId}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -1153,6 +1258,76 @@ describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () =
     // NOT `cleared`: the high-value loop's exit is cleared-only, so the
     // attempt's retry keeps returning `elevated`.
     expect(closed?.resolution?.outcome).toBe('restricted');
+  });
+
+  it('finds a ROOM-owned payout’s review, which no steward’s id could locate', async () => {
+    const reviewer = await seedReviewer();
+    const roomId = randomUUID();
+    const intentId = randomUUID();
+    // A grant payout: room-owned (`userId: null`), so `risk.ts` filed its
+    // high-value review against the ROOM — the queue never learns which steward
+    // preflighted it, and a user-keyed lookup would find nothing and open a
+    // second, unrelated case while the real review stayed open.
+    const review = await compliance.cases.insert({
+      caseId: randomUUID(),
+      userIdOrRoomId: roomId,
+      subjectKind: 'room',
+      triggerType: 'pattern',
+      riskLevel: 'medium',
+      partnerCaseRef: null,
+      reviewState: 'open',
+      assignedTo: null,
+      resolution: null,
+      retentionPolicy: {
+        retention_period_days: 730,
+        deletion_date: new Date(Date.now() + 86_400_000).toISOString(),
+        legal_hold: false,
+        legal_hold_refs: [],
+      },
+      idempotencyKey: `highvalue:room:${roomId}:5000:${intentId}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const intent = {
+      paymentIntentId: intentId,
+      userId: null,
+      roomId,
+      targetType: 'grant_payout',
+      amount: '5000',
+      complianceState: 'flagged',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    setTreasuryServices({
+      intents: {
+        listByComplianceState: async (state: string) =>
+          intent.complianceState === state ? [intent] : [],
+        updateComplianceState: async (id: string, from: string, to: string) => {
+          if (id !== intentId || intent.complianceState !== from) return null;
+          intent.complianceState = to;
+          return intent;
+        },
+      },
+    } as never);
+
+    const queue = (await (
+      await app().request(get('/v1/compliance/admin/fraud-queue', reviewer.cookie))
+    ).json()) as { items: Array<{ case: { case_id: string }; payment_intent_id: string | null }> };
+    expect(queue.items.find((i) => i.payment_intent_id === intentId)?.case.case_id).toBe(
+      review.caseId,
+    );
+
+    const released = await app().request(
+      post(
+        '/v1/compliance/admin/fraud-queue/release',
+        { payment_intent_id: intentId, reason: 'board approved' },
+        reviewer.cookie,
+      ),
+    );
+    expect(released.status).toBe(200);
+    // The REAL review closed — not a second case opened beside it.
+    expect((await compliance.cases.getById(review.caseId))?.resolution?.outcome).toBe('cleared');
+    expect(await compliance.cases.findByIdempotencyKey(`intent-review:${intentId}`)).toBeNull();
   });
 
   it('the decision entry and the resolution are ONE unit: neither lands alone', async () => {

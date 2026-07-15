@@ -34,6 +34,7 @@ import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import { isContractAllowed, type PinnedDeployment, pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
+import { reviewSubjectFor } from './ports.js';
 import { type ContractTypedDataVerifier, verifyActionSignature } from './signatures.js';
 import type {
   FinancialWalletStore,
@@ -615,6 +616,13 @@ export async function runPreflight(
     // action has no intent, so its bound typed-data hash is the attempt
     // (submit re-checks under the same hash: the token binds it).
     reviewRef: input.paymentIntentId ?? verified.typedDataHash,
+    // The same subject the WS-M intent leg derives, from the same cell: a
+    // room-treasury payout is the ROOM's review, a pay-in is the payer's.
+    // Classifying it differently here would split one transfer's review in two.
+    reviewSubject: reviewSubjectFor(ACTION_FEATURE_CELL[actionType], {
+      userId: input.userId,
+      roomId: input.roomId,
+    }),
   });
   if (fraud === 'blocked') {
     return audited(

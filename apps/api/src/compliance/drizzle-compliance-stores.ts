@@ -34,7 +34,9 @@ import type {
   CaseRetentionPolicy,
   CaseReviewState,
   CaseRiskLevel,
+  CaseTriggerType,
   LawfulAccessStatus,
+  SarStatus,
 } from '@licio/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lte, sql } from 'drizzle-orm';
 import type {
@@ -279,6 +281,20 @@ export class DrizzlePolicyAuditStore implements PolicyAuditStore {
 // Financial-compliance cases (WS-N.2.1a).
 // ---------------------------------------------------------------------------
 
+/**
+ * "This case is PROVABLY not under a legal hold."  ONE definition, shared by
+ * the sweep's `listExpired` selection and by the retention WRITES themselves —
+ * the writes must re-assert it, because a hold applied in the gap between the
+ * two would otherwise anonymize or delete records a fresh SAR or lawful-access
+ * request now protects (WS-N.2.1a/d).
+ *
+ * `= false`, not `IS NOT TRUE`: an absent or null `legal_hold` reads as NULL,
+ * and `NULL = false` is NULL, so a row whose policy cannot be read is neither
+ * selected nor written.  That is the fail-closed direction for a destructive
+ * act — "not provably unheld" must not authorize a delete.
+ */
+const NOT_HELD = sql`(${financialComplianceCases.retentionPolicy}->>'legal_hold')::boolean = false`;
+
 type CaseRowDb = typeof financialComplianceCases.$inferSelect;
 
 function toCaseRecord(row: CaseRowDb): ComplianceCaseRecord {
@@ -440,7 +456,7 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
       .from(financialComplianceCases)
       .where(
         and(
-          sql`(${financialComplianceCases.retentionPolicy}->>'legal_hold')::boolean = false`,
+          NOT_HELD,
           // An already-anonymized case has discharged its retention action:
           // its deletion date stays in the past forever, so without this it
           // would be re-selected and re-anonymized on every sweep round.
@@ -448,6 +464,28 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
           sql`(${financialComplianceCases.retentionPolicy}->>'deletion_date') <= ${nowIso}`,
         ),
       )
+      .limit(limit);
+    return rows.map(toCaseRecord);
+  }
+
+  async listByStatesAndTriggers(
+    states: readonly CaseReviewState[],
+    triggers: readonly CaseTriggerType[],
+    limit: number,
+  ): Promise<ComplianceCaseRecord[]> {
+    if (triggers.length === 0) return [];
+    const rows = await this.#db
+      .select()
+      .from(financialComplianceCases)
+      .where(
+        and(
+          inArray(financialComplianceCases.reviewState, [...states]),
+          // The trigger filter is part of the QUERY, so the cap below bounds
+          // fraud-class cases — not whichever cases happen to sort first.
+          inArray(financialComplianceCases.triggerType, [...triggers]),
+        ),
+      )
+      .orderBy(asc(financialComplianceCases.createdAt))
       .limit(limit);
     return rows.map(toCaseRecord);
   }
@@ -467,18 +505,31 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
     return rows[0]?.count ?? 0;
   }
 
-  async deleteCascade(caseId: string): Promise<void> {
+  async deleteCascade(caseId: string): Promise<boolean> {
     // ONE transaction under the sanctioned retention GUC: trail, then case.
     // A SAR reference makes the case DELETE itself fail (FK RESTRICT).
-    await this.#db.transaction(async (tx) => {
+    return await this.#db.transaction(async (tx) => {
       await tx.execute(sql`SELECT set_config('licio.compliance_retention', 'on', true)`);
+      // Re-read the hold under a ROW LOCK before removing anything.  The
+      // sweep's `listExpired` read cannot carry this: a SAR draft or a
+      // lawful-access intake can apply a hold in the gap between choosing the
+      // page and deleting the row.  Locking closes the gap in both directions —
+      // a hold-setter that got here first is visible to us, and one arriving
+      // now waits for our commit and then finds the case gone.
+      const live = await tx
+        .select({ caseId: financialComplianceCases.caseId })
+        .from(financialComplianceCases)
+        .where(and(eq(financialComplianceCases.caseId, caseId), NOT_HELD))
+        .for('update');
+      if (live.length === 0) return false; // held, or already swept
       await tx.delete(complianceCaseAudits).where(eq(complianceCaseAudits.caseId, caseId));
       await tx.delete(financialComplianceCases).where(eq(financialComplianceCases.caseId, caseId));
+      return true;
     });
   }
 
-  async anonymize(caseId: string, updatedAt: string): Promise<void> {
-    await this.#db
+  async anonymize(caseId: string, updatedAt: string): Promise<boolean> {
+    const rows = await this.#db
       .update(financialComplianceCases)
       .set({
         userIdOrRoomId: null,
@@ -491,7 +542,9 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
         retentionPolicy: sql`jsonb_set(${financialComplianceCases.retentionPolicy}, '{anonymized_at}', ${JSON.stringify(updatedAt)}::jsonb)`,
         updatedAt: new Date(updatedAt),
       })
-      .where(eq(financialComplianceCases.caseId, caseId));
+      .where(and(eq(financialComplianceCases.caseId, caseId), NOT_HELD))
+      .returning({ caseId: financialComplianceCases.caseId });
+    return rows.length > 0;
   }
 
   async scrubUserSubject(userId: string): Promise<{ scrubbed: string[]; heldBack: string[] }> {
@@ -1071,6 +1124,7 @@ export class DrizzleSarStore implements SarStore {
       >
     >,
     updatedAt: string,
+    expectedStatus?: readonly SarStatus[],
   ): Promise<SarRecord | null> {
     const rows = await this.#db
       .update(sarReports)
@@ -1086,7 +1140,16 @@ export class DrizzleSarStore implements SarStore {
         ...(patch.narrative !== undefined ? { narrative: patch.narrative } : {}),
         updatedAt: new Date(updatedAt),
       })
-      .where(eq(sarReports.sarId, sarId))
+      .where(
+        expectedStatus === undefined
+          ? eq(sarReports.sarId, sarId)
+          : and(
+              eq(sarReports.sarId, sarId),
+              // The CAS: a racing counsel session that already filed makes this
+              // match zero rows rather than overwrite their filing record.
+              inArray(sarReports.status, [...expectedStatus]),
+            ),
+      )
       .returning();
     return rows[0] ? toSar(rows[0]) : null;
   }

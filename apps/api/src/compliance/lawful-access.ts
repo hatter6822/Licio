@@ -17,6 +17,11 @@ import { appendCaseAuditInTx, runChainedUnit } from './audit.js';
 import { type CaseDeps, createCaseInTx, setLegalHoldInTx, transitionCaseInTx } from './cases.js';
 import type { ComplianceTxStores, LawfulAccessRecord, LawfulAccessStore } from './stores.js';
 
+/** This request's hold on its intake case — opaque, so the reviewer-visible
+ *  retention policy carries no readable obligation name (WS-N.2.1e). */
+const requestHoldRef = (deps: LawfulAccessDeps, requestId: string): string =>
+  deps.caseDeps.opaqueRef(`lawful-access:${requestId}`);
+
 /** The stored column and the response schema share this cap. */
 const MAX_PRODUCTION_SUMMARY = 10_000;
 
@@ -76,6 +81,7 @@ export async function intakeLawfulAccessRequest(
       deps.caseDeps.transactor,
       async (stores) => {
         const nowIso = new Date(deps.now()).toISOString();
+        const requestId = deps.uuid();
         const linked = await createCaseInTx(stores, deps.caseDeps, {
           // The scope's kind carries through 1:1.  Collapsing `transaction` onto
           // `user` would file a transaction id as though it were an account, and
@@ -91,13 +97,14 @@ export async function intakeLawfulAccessRequest(
         if (!linked.ok) return laErr(linked.status, linked.code, linked.message);
         const held = await setLegalHoldInTx(stores, deps.caseDeps, {
           caseId: linked.record.caseId,
+          holdRef: requestHoldRef(deps, requestId),
           hold: true,
           actorUserId: input.actorUserId,
           reason: 'Legal hold applied for a lawful-access request (WS-N.2.3d).',
         });
         if (!held.ok) return laErr(held.status, held.code, held.message);
         const record = await stores.lawfulAccess.insert({
-          requestId: deps.uuid(),
+          requestId,
           agency: input.agency,
           jurisdiction: input.jurisdiction,
           legalBasis: input.legalBasis,
@@ -170,6 +177,11 @@ export async function reviewLawfulAccessRequest(
         const released = await setLegalHoldInTx(stores, deps.caseDeps, {
           caseId: updated.caseId,
           hold: false,
+          // Only THIS request's hold.  A SAR drafted on the same case while
+          // this request was pending still needs the retention protection, and
+          // clearing a shared flag would let account deletion scrub the subject
+          // and the sweep anonymize the case out from under it.
+          holdRef: requestHoldRef(deps, input.requestId),
           actorUserId: input.actorUserId,
           reason: 'Legal hold released: the lawful-access request was denied on legal review.',
         });
@@ -243,8 +255,24 @@ export async function recordLawfulAccessProduction(
   }
   let summary = input.productionSummary;
   if (record.scope.subject_kind === 'room') {
+    // The room's CLASS decides whether the §8/§11.4 honest-limits
+    // determination is mandatory, so it must be KNOWN — not merely
+    // not-reported-as-p2p.  A transient forum-store failure (or an unwired
+    // port) would otherwise let counsel record a production for a Private P2P
+    // room with the no-content/no-keys boundary silently omitted: the one
+    // sentence the record exists to carry.  Anything but a confirmed 'server'
+    // blocks the production until the class is known — the same reading the
+    // WS-I retrievers already take of this lookup (`!== 'server'` excludes).
     const mode = await deps.roomStorageMode(record.scope.subject_ref).catch(() => null);
-    if (mode === 'p2p') summary = `${PRIVATE_P2P_DETERMINATION}\n\n${summary}`;
+    if (mode === 'p2p') {
+      summary = `${PRIVATE_P2P_DETERMINATION}\n\n${summary}`;
+    } else if (mode !== 'server') {
+      return laErr(
+        503,
+        'room_class_unknown',
+        'The room’s storage class could not be determined; a production cannot be recorded until it is known.',
+      );
+    }
   }
   // The prepended determination is OUR text, and the stored column and the
   // response schema share one cap — so a summary that fits the REQUEST can

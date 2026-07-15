@@ -24,6 +24,7 @@ import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import { killSwitchDecision } from '../knomosis/killswitch.js';
 import { pinnedDeployment } from '../knomosis/pin.js';
 import type { CompliancePort, RegionResolverPort } from '../knomosis/ports.js';
+import { reviewSubjectFor } from '../knomosis/ports.js';
 import { REAL_FUNDS_ENVIRONMENTS } from '../knomosis/preflight.js';
 import type {
   FinancialWalletStore,
@@ -422,6 +423,15 @@ export async function preflightIntent(
     // clears releases this deposit, never every later deposit of the same
     // amount (each is its own intent, hence its own review).
     reviewRef: intent.paymentIntentId,
+    // …and the intent's OWNER is the subject.  A room-owned payout belongs to
+    // the treasury — "not to whichever steward happened to accept the
+    // milestone", as its own creation states — so two stewards preflighting it
+    // share ONE review, and the fraud queue (which knows the room, never the
+    // steward) can find that review to release it.
+    reviewSubject: reviewSubjectFor(featureCellFor(intent.targetType), {
+      userId: subjectUserId,
+      roomId: intent.roomId,
+    }),
   });
   if (fraud === 'blocked') {
     return tgErr(403, 'fraud_risk', 'This action was flagged by risk checks.');

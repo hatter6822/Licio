@@ -34,6 +34,36 @@ export interface WalletRiskAssessment {
   nextStep: string | null;
 }
 
+/** Who a compliance review is ABOUT — not necessarily who triggered it. */
+export interface ReviewSubject {
+  kind: 'user' | 'room';
+  ref: string;
+}
+
+/**
+ * The review subject for an amount-bearing action, derived from the §22.2
+ * feature cell BOTH consumers already compute for their jurisdiction check
+ * (`ACTION_FEATURE_CELL` in the WS-L preflight, `featureCellFor` in the WS-M
+ * intent).  One definition on the seam they share, so the two legs of one
+ * transfer cannot classify it differently and split its review in half:
+ *
+ *   • `production_payments` — money paid IN.  The payer is the subject; a
+ *     room-owned deposit intent cannot exist (`createPaymentIntent` rejects
+ *     one), so the actor is always the owner here.
+ *   • `treasury_operations` — money paid OUT of a room treasury.  The ROOM is
+ *     the subject.
+ *   • `governance` — moves nothing, so it never reaches the high-value branch;
+ *     the actor is the subject for want of an amount to review.
+ */
+export function reviewSubjectFor(
+  cell: CryptoFeatureCell,
+  actor: { userId: string; roomId: string },
+): ReviewSubject {
+  return cell === 'treasury_operations'
+    ? { kind: 'room', ref: actor.roomId }
+    : { kind: 'user', ref: actor.userId };
+}
+
 export interface CompliancePort {
   /** Screen a recipient/actor address.  Payload is the ADDRESS ONLY — no
    *  attention or behavioral fields exist on this seam (WS-L.3.1b). */
@@ -49,15 +79,31 @@ export interface CompliancePort {
    * withholds the cleared-review exit (fail-closed) rather than let one
    * clearance cover every later transfer of the same amount.
    *
-   * REQUIRED, not optional: a caller that forgets it would silently take the
-   * weaker path, so the compiler makes every consumer decide (see the
-   * `jurisdiction` note below).
+   * `reviewSubject` names WHO the review is about, which is not always the
+   * caller: a disbursement from a room treasury belongs to the ROOM, not to
+   * whichever steward happened to authorize it (the same rule the room-owned
+   * payout intent already states about itself).  Attributing it to the actor
+   * would open a separate review per steward for ONE payout, and leave that
+   * review unfindable from the fraud queue — which knows the intent and its
+   * room, never which steward pressed the button.  `null` = the actor is the
+   * subject (a personal pay-in).  Use `reviewSubjectFor` rather than deciding
+   * per call site.
+   *
+   * `userId` stays the ACTOR throughout: velocity is per-person (a room's
+   * payouts must not spend a steward's personal budget, and two stewards must
+   * not each get a fresh one) and so is the region resolution — a room does
+   * not declare a jurisdiction, the human authorizing the movement does.
+   *
+   * All three are REQUIRED, not optional: a caller that forgets one would
+   * silently take the weaker path, so the compiler makes every consumer decide
+   * (see the `jurisdiction` note below).
    */
   fraudRisk(args: {
     userId: string;
     actionType: string;
     amountMinorUnits: string | null;
     reviewRef: string | null;
+    reviewSubject: ReviewSubject | null;
   }): Promise<FraudVerdict>;
   /**
    * Whether crypto features are available in the user's jurisdiction.

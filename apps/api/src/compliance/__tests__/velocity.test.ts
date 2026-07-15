@@ -7,6 +7,8 @@
 // the high-value `elevated` trigger, counter-outage `unavailable`).
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
+import { reviewSubjectFor } from '../../knomosis/ports.js';
+import { ACTION_FEATURE_CELL } from '../../knomosis/preflight.js';
 import { transitionCase } from '../cases.js';
 import { type ComplianceRuntimeConfig, DEFAULT_COMPLIANCE_CONFIG } from '../config.js';
 import { createFraudRisk, limitsForRegion } from '../risk.js';
@@ -18,6 +20,35 @@ const USER = '6f9619ff-8b86-4d01-b42d-00cf4fc964ff';
 const REVIEWER = '7a8619ff-8b86-4d01-b42d-00cf4fc96400';
 /** A bound typed-data hash: the id of ONE attempted transfer. */
 const ATTEMPT = `0x${'a1'.repeat(32)}`;
+
+describe('reviewSubjectFor — one classification for both legs of a transfer', () => {
+  const actor = { userId: USER, roomId: '3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f' };
+
+  it('a pay-in is the payer’s review; a treasury disbursement is the room’s', () => {
+    expect(reviewSubjectFor('production_payments', actor)).toEqual({ kind: 'user', ref: USER });
+    expect(reviewSubjectFor('treasury_operations', actor)).toEqual({
+      kind: 'room',
+      ref: actor.roomId,
+    });
+  });
+
+  it('the WS-M intent cell and the WS-L action cell agree for the same transfer', () => {
+    // A deposit: `featureCellFor('treasury_deposit')` and
+    // `ACTION_FEATURE_CELL.treasury_deposit` are both `production_payments`, so
+    // both legs name the payer — and share one review.
+    expect(reviewSubjectFor(ACTION_FEATURE_CELL.treasury_deposit, actor)).toEqual(
+      reviewSubjectFor('production_payments', actor),
+    );
+    // A grant payout: both are `treasury_operations`, so both name the room.
+    expect(reviewSubjectFor(ACTION_FEATURE_CELL.grant_payout, actor)).toEqual(
+      reviewSubjectFor('treasury_operations', actor),
+    );
+  });
+
+  it('governance moves nothing, so the actor stands as subject', () => {
+    expect(reviewSubjectFor('governance', actor)).toEqual({ kind: 'user', ref: USER });
+  });
+});
 
 describe('InMemoryVelocityStore — exact sliding-window reserve', () => {
   it('admits up to maxCount and rejects the (n+1)th in the window', async () => {
@@ -135,13 +166,31 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
       velocityLimits: [{ periodSeconds: 3_600, maxCount: 2, maxVolumeMinorUnits: '1000000' }],
     });
     expect(
-      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+      await fraudRisk({
+        userId: USER,
+        actionType: 'a',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
     ).toBe('normal');
     expect(
-      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+      await fraudRisk({
+        userId: USER,
+        actionType: 'a',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
     ).toBe('normal');
     expect(
-      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+      await fraudRisk({
+        userId: USER,
+        actionType: 'a',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
     ).toBe('blocked');
     const cases = await services.cases.listByStates(['open'], 10);
     expect(cases).toHaveLength(1);
@@ -149,7 +198,13 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(cases[0]?.riskLevel).toBe('high');
     // Idempotent per window bucket: a second breach opens no duplicate case.
     expect(
-      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+      await fraudRisk({
+        userId: USER,
+        actionType: 'a',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
     ).toBe('blocked');
     expect(await services.cases.listByStates(['open'], 10)).toHaveLength(1);
   });
@@ -164,6 +219,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
         actionType: 'pay',
         amountMinorUnits: '999',
         reviewRef: null,
+        reviewSubject: null,
       }),
     ).toBe('normal');
     expect(
@@ -172,6 +228,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
         actionType: 'pay',
         amountMinorUnits: '1000',
         reviewRef: null,
+        reviewSubject: null,
       }),
     ).toBe('elevated');
     const cases = await services.cases.listByStates(['open'], 10);
@@ -185,7 +242,13 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     });
     // One ATTEMPT: preflight and submit share the bound typed-data hash.
     const check = () =>
-      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef: ATTEMPT });
+      fraudRisk({
+        userId: USER,
+        actionType: 'pay',
+        amountMinorUnits: '5000',
+        reviewRef: ATTEMPT,
+        reviewSubject: null,
+      });
     // First attempt: held for review (the consumers reject/queue on this).
     expect(await check()).toBe('elevated');
     const [record] = await services.cases.listByStates(['open'], 10);
@@ -240,6 +303,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
         actionType: 'payment_intent:treasury_deposit',
         amountMinorUnits: '5000',
         reviewRef: intentId,
+        reviewSubject: null,
       });
     const actionLeg = () =>
       fraudRisk({
@@ -247,6 +311,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
         actionType: 'treasury_deposit',
         amountMinorUnits: '5000',
         reviewRef: intentId,
+        reviewSubject: null,
       });
     expect(await intentLeg()).toBe('elevated');
     expect(await actionLeg()).toBe('elevated');
@@ -280,6 +345,60 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(await actionLeg()).toBe('normal');
   });
 
+  it('a room-treasury payout is the ROOM’s review, shared across stewards', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    const ROOM = '3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f';
+    const STEWARD_A = USER;
+    const STEWARD_B = '8b7619ff-8b86-4d01-b42d-00cf4fc96433';
+    const intentId = '7e6d5c4b-3a29-4180-9f7e-6d5c4b3a2918';
+    // The payout belongs to the treasury, "not to whichever steward happened to
+    // accept the milestone" — so both stewards' legs land on ONE review.
+    const payoutLeg = (userId: string) =>
+      fraudRisk({
+        userId,
+        actionType: 'grant_payout',
+        amountMinorUnits: '5000',
+        reviewRef: intentId,
+        reviewSubject: { kind: 'room', ref: ROOM },
+      });
+    expect(await payoutLeg(STEWARD_A)).toBe('elevated');
+    expect(await payoutLeg(STEWARD_B)).toBe('elevated');
+    const cases = await services.cases.listByStates(['open'], 10);
+    expect(cases).toHaveLength(1);
+    // Filed against the ROOM: a case filed under whichever steward pressed the
+    // button is unfindable from the fraud queue, which knows the intent and its
+    // room and never learns the steward.
+    expect(cases[0]?.subjectKind).toBe('room');
+    expect(cases[0]?.userIdOrRoomId).toBe(ROOM);
+
+    // One clearance releases the payout, whoever retries it.
+    const deps = buildCaseDeps(services);
+    const caseId = cases[0]?.caseId as string;
+    for (const step of ['assigned', 'investigating', 'resolved'] as const) {
+      await transitionCase(deps, {
+        caseId,
+        to: step,
+        actorUserId: REVIEWER,
+        isSenior: false,
+        ...(step === 'assigned' ? { assigneeUserId: REVIEWER } : {}),
+        ...(step === 'resolved'
+          ? {
+              resolution: {
+                outcome: 'cleared' as const,
+                notes: 'approved payout',
+                resolved_by: REVIEWER,
+                resolved_at: new Date(NOW).toISOString(),
+              },
+            }
+          : {}),
+      });
+    }
+    expect(await payoutLeg(STEWARD_A)).toBe('normal');
+    expect(await payoutLeg(STEWARD_B)).toBe('normal');
+  });
+
   it('a DIFFERENT transfer of the same amount gets its OWN review', async () => {
     const { services, fraudRisk } = fraudFixture({
       highValueReviewThresholdMinorUnits: '1000',
@@ -290,6 +409,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
         actionType: 'treasury_deposit',
         amountMinorUnits: '5000',
         reviewRef,
+        reviewSubject: null,
       });
     expect(await check('11111111-1111-4111-8111-111111111111')).toBe('elevated');
     expect(await check('22222222-2222-4222-8222-222222222222')).toBe('elevated');
@@ -303,7 +423,13 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
       highValueReviewThresholdMinorUnits: '1000',
     });
     const check = () =>
-      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef: ATTEMPT });
+      fraudRisk({
+        userId: USER,
+        actionType: 'pay',
+        amountMinorUnits: '5000',
+        reviewRef: ATTEMPT,
+        reviewSubject: null,
+      });
     expect(await check()).toBe('elevated');
     const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
     const deps = buildCaseDeps(services);
@@ -338,7 +464,13 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
   it('a malformed amount is blocked (an unbounded value never passes a limiter)', async () => {
     const { fraudRisk } = fraudFixture();
     expect(
-      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1.5', reviewRef: null }),
+      await fraudRisk({
+        userId: USER,
+        actionType: 'a',
+        amountMinorUnits: '1.5',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
     ).toBe('blocked');
   });
 
@@ -348,7 +480,13 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
       throw new Error('redis down');
     };
     expect(
-      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+      await fraudRisk({
+        userId: USER,
+        actionType: 'a',
+        amountMinorUnits: '1',
+        reviewRef: null,
+        reviewSubject: null,
+      }),
     ).toBe('unavailable');
   });
 
@@ -371,7 +509,13 @@ describe('the high-value review is scoped to ONE attempt (WS-N.2.2c)', () => {
     const first = `0x${'11'.repeat(32)}`;
     const second = `0x${'22'.repeat(32)}`;
     const check = (reviewRef: string) =>
-      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef });
+      fraudRisk({
+        userId: USER,
+        actionType: 'pay',
+        amountMinorUnits: '5000',
+        reviewRef,
+        reviewSubject: null,
+      });
 
     expect(await check(first)).toBe('elevated');
     const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
@@ -418,7 +562,13 @@ describe('the high-value review is scoped to ONE attempt (WS-N.2.2c)', () => {
     // not release the other. The case still dedupes per day (no spam), but
     // the action stays held — fail-closed.
     const check = () =>
-      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef: null });
+      fraudRisk({
+        userId: USER,
+        actionType: 'pay',
+        amountMinorUnits: '5000',
+        reviewRef: null,
+        reviewSubject: null,
+      });
     expect(await check()).toBe('elevated');
     const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
     const deps = buildCaseDeps(services);

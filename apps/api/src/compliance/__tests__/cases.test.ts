@@ -277,6 +277,7 @@ describe('legal holds (WS-N.2.1d interaction)', () => {
     const held = await setLegalHold(deps, {
       caseId: record.caseId,
       hold: true,
+      holdRef: 'test-hold',
       actorUserId: REVIEWER,
       reason: 'Legal hold applied pending regulatory review.',
     });
@@ -327,6 +328,7 @@ describe('mutation ↔ audit atomicity (WS-N.2.1c)', () => {
     const held = await setLegalHold(deps, {
       caseId: record.caseId,
       hold: true,
+      holdRef: 'test-hold',
       actorUserId: REVIEWER,
       reason: 'pending regulatory review',
     });

@@ -17,13 +17,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
 import { InMemoryJobLeaseStore } from '../../identity/job-lease.js';
 import { appendCaseAudit } from '../audit.js';
-import { createCase, transitionCase } from '../cases.js';
+import { createCase, setLegalHold, transitionCase } from '../cases.js';
 import {
   buildEventRetentionOverrides,
   runRetentionSweep,
   scrubUserSubjectForErasure,
 } from '../retention.js';
-import { createSarDraft } from '../sar.js';
+import { approveSar, createSarDraft, fileSar } from '../sar.js';
 import {
   COMPLIANCE_SCHEDULER_INTERVAL_MS,
   resetComplianceSchedulerForTests,
@@ -40,6 +40,8 @@ import {
 import type { ComplianceCaseRecord } from '../stores.js';
 
 const ACTOR = '9a8619ff-8b86-4d01-b42d-00cf4fc96422';
+const COUNSEL_A = '1b2619ff-8b86-4d01-b42d-00cf4fc96401';
+const COUNSEL_B = '2c3619ff-8b86-4d01-b42d-00cf4fc96402';
 
 let services: ComplianceServices;
 let nowMs = Date.parse('2026-07-15T00:00:00.000Z');
@@ -66,6 +68,7 @@ async function seedCase(
       retention_period_days: 730,
       deletion_date: hoursAgo(1), // expired by default
       legal_hold: false,
+      legal_hold_refs: [],
     },
     idempotencyKey: null,
     createdAt: at,
@@ -137,6 +140,7 @@ describe('the retention sweep (WS-N.2.1d)', () => {
         retention_period_days: 730,
         deletion_date: hoursAgo(1),
         legal_hold: true,
+        legal_hold_refs: [],
       },
     });
     const future = await seedCase({
@@ -144,6 +148,7 @@ describe('the retention sweep (WS-N.2.1d)', () => {
         retention_period_days: 730,
         deletion_date: hoursAhead(24),
         legal_hold: false,
+        legal_hold_refs: [],
       },
     });
     const summary = await runRetentionSweep(sweepDeps());
@@ -194,6 +199,7 @@ describe('the retention sweep (WS-N.2.1d)', () => {
         retention_period_days: 730,
         deletion_date: hoursAhead(24),
         legal_hold: true,
+        legal_hold_refs: [],
       },
     });
     const outcome = await scrubUserSubjectForErasure(
@@ -409,6 +415,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
         retention_period_days: 730,
         deletion_date: hoursAhead(24),
         legal_hold: true,
+        legal_hold_refs: [],
       },
     });
 
@@ -491,6 +498,92 @@ describe('the sweep drains its backlog before reporting done (WS-N.2.1d)', () =>
     await runComplianceTick(services, () => {});
     await runComplianceTick(services, () => {});
     expect(await services.cases.getById(fresh.caseId)).toBeNull();
+  });
+});
+
+describe('a legal hold is reference-counted, not a flag (WS-N.2.1e)', () => {
+  it('a denied lawful-access request releases ONLY its own hold', async () => {
+    const record = await seedCase({
+      retentionPolicy: {
+        retention_period_days: 730,
+        deletion_date: hoursAgo(1),
+        legal_hold: false,
+        legal_hold_refs: [],
+      },
+    });
+    const deps = buildCaseDeps(services);
+    const sarHold = {
+      caseId: record.caseId,
+      hold: true,
+      holdRef: 'sar-hold',
+      actorUserId: ACTOR,
+      reason: 'r',
+    };
+    const laHold = {
+      caseId: record.caseId,
+      hold: true,
+      holdRef: 'la-hold',
+      actorUserId: ACTOR,
+      reason: 'r',
+    };
+    await setLegalHold(deps, laHold);
+    await setLegalHold(deps, sarHold);
+    expect((await services.cases.getById(record.caseId))?.retentionPolicy.legal_hold).toBe(true);
+
+    // The lawful-access request is denied and lets its hold go.  The SAR's is
+    // untouched — clearing a shared boolean here would drop the retention
+    // protection an outstanding report still needs.
+    await setLegalHold(deps, { ...laHold, hold: false });
+    const still = await services.cases.getById(record.caseId);
+    expect(still?.retentionPolicy.legal_hold).toBe(true);
+    expect(still?.retentionPolicy.legal_hold_refs).toEqual(['sar-hold']);
+    // …so the erasure scrub and the sweep still refuse it.
+    expect(
+      (await services.cases.scrubUserSubject(record.userIdOrRoomId as string)).heldBack,
+    ).toEqual([record.caseId]);
+    expect(await services.cases.listExpired(new Date(nowMs).toISOString(), 10)).toHaveLength(0);
+
+    // Only when the LAST obligation lets go is the case free.
+    await setLegalHold(deps, { ...sarHold, hold: false });
+    const freed = await services.cases.getById(record.caseId);
+    expect(freed?.retentionPolicy.legal_hold).toBe(false);
+    expect(freed?.retentionPolicy.legal_hold_refs).toEqual([]);
+    expect(await services.cases.listExpired(new Date(nowMs).toISOString(), 10)).toHaveLength(1);
+  });
+
+  it('the chain says `released` only when the case is actually free', async () => {
+    const record = await seedCase();
+    const deps = buildCaseDeps(services);
+    const base = { caseId: record.caseId, actorUserId: ACTOR, reason: 'r' };
+    await setLegalHold(deps, { ...base, hold: true, holdRef: 'a' });
+    await setLegalHold(deps, { ...base, hold: true, holdRef: 'b' });
+    await setLegalHold(deps, { ...base, hold: false, holdRef: 'a' });
+    const trail = await services.caseAudit.listChained(record.caseId);
+    const holdEntries = trail.filter((e) => e.action.startsWith('legal_hold_'));
+    // apply, apply, and a third entry that is NOT a release: the case is still
+    // held, so recording a release would be a chain entry that lies.
+    expect(holdEntries.map((e) => e.action)).toEqual([
+      'legal_hold_applied',
+      'legal_hold_applied',
+      'legal_hold_applied',
+    ]);
+    await setLegalHold(deps, { ...base, hold: false, holdRef: 'b' });
+    const after = await services.caseAudit.listChained(record.caseId);
+    expect(after.filter((e) => e.action.startsWith('legal_hold_')).at(-1)?.action).toBe(
+      'legal_hold_released',
+    );
+  });
+
+  it('applying the same obligation twice is idempotent (no double count to strand it)', async () => {
+    const record = await seedCase();
+    const deps = buildCaseDeps(services);
+    const base = { caseId: record.caseId, actorUserId: ACTOR, reason: 'r', holdRef: 'sar-1' };
+    await setLegalHold(deps, { ...base, hold: true });
+    await setLegalHold(deps, { ...base, hold: true }); // a retry
+    await setLegalHold(deps, { ...base, hold: false });
+    const freed = await services.cases.getById(record.caseId);
+    // A counter would sit at 1 here and hold the case forever; a SET does not.
+    expect(freed?.retentionPolicy.legal_hold).toBe(false);
   });
 });
 
@@ -693,5 +786,79 @@ describe('the unit of work (WS-N.1.1g / 2.1c)', () => {
     expect(failed.ok).toBe(false);
     expect((await services.cases.getById(other.caseId))?.retentionPolicy.legal_hold).toBe(false);
     expect(await services.caseAudit.listChained(other.caseId)).toHaveLength(0);
+  });
+
+  it('a SAR is filed ONCE: the second racing counsel session gets a conflict', async () => {
+    const record = await seedCase();
+    const sarDeps = {
+      sars: services.sars,
+      caseDeps: buildCaseDeps(services),
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const drafted = await createSarDraft(sarDeps, {
+      caseId: record.caseId,
+      jurisdiction: 'DE',
+      narrative: 'A narrative.',
+      actorUserId: ACTOR,
+    });
+    if (!drafted.ok) throw new Error('draft failed');
+    const sarId = drafted.record.sarId;
+    await approveSar(sarDeps, { sarId, actorUserId: COUNSEL_A });
+
+    // Both sessions passed the read-side `status === 'approved'` check.
+    const first = await fileSar(sarDeps, {
+      sarId,
+      filingRef: 'FIU-2026-0001',
+      partnerFiled: false,
+      actorUserId: COUNSEL_A,
+    });
+    const second = await fileSar(sarDeps, {
+      sarId,
+      filingRef: 'FIU-2026-0002',
+      partnerFiled: true,
+      actorUserId: COUNSEL_B,
+    });
+    expect(first.ok).toBe(true);
+    // The CAS refuses the loser instead of letting it overwrite the filing ref,
+    // the partner flag, and `filedByRef` — the record of WHO filed, which is
+    // the legally consequential one.
+    expect(second.ok).toBe(false);
+    if (second.ok) throw new Error('unreachable');
+    expect(second.status).toBe(409);
+    const stored = await services.sars.getById(sarId);
+    expect(stored?.filingRef).toBe('FIU-2026-0001');
+    expect(stored?.partnerFiled).toBe(false);
+    expect(stored?.filedByRef).toBe(services.opaqueRef(COUNSEL_A));
+  });
+
+  it('a SAR is approved ONCE, for the same reason', async () => {
+    const record = await seedCase();
+    const sarDeps = {
+      sars: services.sars,
+      caseDeps: buildCaseDeps(services),
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const drafted = await createSarDraft(sarDeps, {
+      caseId: record.caseId,
+      jurisdiction: 'DE',
+      narrative: 'A narrative.',
+      actorUserId: ACTOR,
+    });
+    if (!drafted.ok) throw new Error('draft failed');
+    expect(
+      (await approveSar(sarDeps, { sarId: drafted.record.sarId, actorUserId: COUNSEL_A })).ok,
+    ).toBe(true);
+    const again = await approveSar(sarDeps, {
+      sarId: drafted.record.sarId,
+      actorUserId: COUNSEL_B,
+    });
+    expect(again.ok).toBe(false);
+    expect((await services.sars.getById(drafted.record.sarId))?.approvedByRef).toBe(
+      services.opaqueRef(COUNSEL_A),
+    );
   });
 });

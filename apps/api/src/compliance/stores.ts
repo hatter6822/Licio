@@ -204,6 +204,16 @@ export interface ComplianceCaseStore {
   getById(caseId: string): Promise<ComplianceCaseRecord | null>;
   findByIdempotencyKey(key: string): Promise<ComplianceCaseRecord | null>;
   listByStates(states: readonly CaseReviewState[], limit: number): Promise<ComplianceCaseRecord[]>;
+  /** Cases in any of `states` whose trigger is in `triggers`.  The fraud queue
+   *  needs this rather than filtering a `listByStates` page: the cap would
+   *  otherwise be spent on unrelated triggers, and every fraud case past the
+   *  first page would vanish from the queue — no SLA row, no review action —
+   *  until enough of them closed. */
+  listByStatesAndTriggers(
+    states: readonly CaseReviewState[],
+    triggers: readonly CaseTriggerType[],
+    limit: number,
+  ): Promise<ComplianceCaseRecord[]>;
   /** `offset` pages the DSAR export to completeness — an archive that silently
    *  stops at one page is not the user's full compliance footprint. */
   listBySubject(
@@ -241,9 +251,15 @@ export interface ComplianceCaseStore {
   /** The sanctioned retention delete: audit rows first, then the case (the
    *  Drizzle adapter runs both inside the `licio.compliance_retention` GUC
    *  transaction).  Throws if a SAR still references the case. */
-  deleteCascade(caseId: string): Promise<void>;
+  /** Thorough retention delete.  Re-checks the legal hold AS PART OF the
+   *  write: a hold applied after `listExpired` chose this page must stop the
+   *  delete, and a caller's earlier read cannot see it.  False ⇔ the case is
+   *  now held (or already gone) and nothing was removed. */
+  deleteCascade(caseId: string): Promise<boolean>;
   /** Anonymize the retained row in place (subject/partner/resolution notes). */
-  anonymize(caseId: string, updatedAt: string): Promise<void>;
+  /** Retention anonymize.  Conditional on the hold for the same reason
+   *  `deleteCascade` is.  False ⇔ the case is now held (or gone). */
+  anonymize(caseId: string, updatedAt: string): Promise<boolean>;
   /** Right-to-erasure scrub for a user subject: NULL the subject ref on every
    *  case NOT under legal hold; returns the scrubbed ids and the ids skipped
    *  because a hold applies (the audited carve-out, WS-N.2.1a). */
@@ -310,6 +326,11 @@ export interface SarStore {
   getById(sarId: string): Promise<SarRecord | null>;
   listByCase(caseId: string): Promise<SarRecord[]>;
   list(limit: number): Promise<SarRecord[]>;
+  /** `expectedStatus` makes the write a CAS — the same guarantee the
+   *  `LawfulAccessStore` update carries, for the same reason: two counsel
+   *  sessions racing a filing would otherwise both pass the read-side status
+   *  check and let the last writer overwrite the filing ref, the partner flag,
+   *  and `filedByRef` — the legally consequential record of WHO filed. */
   update(
     sarId: string,
     patch: Partial<
@@ -325,6 +346,7 @@ export interface SarStore {
       >
     >,
     updatedAt: string,
+    expectedStatus?: readonly SarStatus[],
   ): Promise<SarRecord | null>;
 }
 
@@ -658,6 +680,19 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
       .map((r) => ({ ...r }));
   }
 
+  async listByStatesAndTriggers(
+    states: readonly CaseReviewState[],
+    triggers: readonly CaseTriggerType[],
+    limit: number,
+  ): Promise<ComplianceCaseRecord[]> {
+    if (triggers.length === 0) return [];
+    return [...this.#rows.values()]
+      .filter((r) => states.includes(r.reviewState) && triggers.includes(r.triggerType))
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+
   async countOpenByRisk(subjectRef: string, risks: readonly CaseRiskLevel[]): Promise<number> {
     return [...this.#rows.values()].filter(
       (r) =>
@@ -667,7 +702,13 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
     ).length;
   }
 
-  async deleteCascade(caseId: string): Promise<void> {
+  async deleteCascade(caseId: string): Promise<boolean> {
+    const row = this.#rows.get(caseId);
+    if (!row) return false;
+    // Re-read the hold at write time (the CAS the Drizzle adapter gets from
+    // its WHERE clause): a hold applied since `listExpired` read this page must
+    // stop the delete.
+    if (row.retentionPolicy.legal_hold) return false;
     // The guard runs BEFORE anything is removed, so a SAR-referenced case
     // leaves both the trail and the case intact — the all-or-nothing the
     // Drizzle adapter gets from its transaction (the FK aborts it).
@@ -676,11 +717,13 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
     }
     await this.auditCascade?.(caseId);
     this.#rows.delete(caseId);
+    return true;
   }
 
-  async anonymize(caseId: string, updatedAt: string): Promise<void> {
+  async anonymize(caseId: string, updatedAt: string): Promise<boolean> {
     const row = this.#rows.get(caseId);
-    if (!row) return;
+    if (!row) return false;
+    if (row.retentionPolicy.legal_hold) return false; // as `deleteCascade`
     this.#rows.set(caseId, {
       ...row,
       userIdOrRoomId: null,
@@ -692,6 +735,7 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
       retentionPolicy: { ...row.retentionPolicy, anonymized_at: updatedAt },
       updatedAt,
     });
+    return true;
   }
 
   async scrubUserSubject(userId: string): Promise<{ scrubbed: string[]; heldBack: string[] }> {
@@ -972,9 +1016,12 @@ export class InMemorySarStore implements SarStore, InMemoryRollback {
       >
     >,
     updatedAt: string,
+    expectedStatus?: readonly SarStatus[],
   ): Promise<SarRecord | null> {
     const row = this.#rows.get(sarId);
     if (!row) return null;
+    // The CAS the Drizzle adapter gets from its WHERE clause.
+    if (expectedStatus !== undefined && !expectedStatus.includes(row.status)) return null;
     const next = { ...row, ...patch, updatedAt };
     this.#rows.set(sarId, next);
     return { ...next };

@@ -460,6 +460,7 @@ describe('retention + erasure (WS-N.2.1d / WS-N.2.1a)', () => {
           retention_period_days: 1,
           deletion_date: '2026-01-01T00:00:00.000Z',
           legal_hold: false,
+          legal_hold_refs: [],
         },
       },
       new Date(NOW).toISOString(),
@@ -467,6 +468,7 @@ describe('retention + erasure (WS-N.2.1d / WS-N.2.1a)', () => {
     await setLegalHold(deps, {
       caseId: held.record.caseId,
       hold: true,
+      holdRef: 'test-hold',
       actorUserId: USER,
       reason: 'regulatory',
     });
@@ -477,6 +479,7 @@ describe('retention + erasure (WS-N.2.1d / WS-N.2.1a)', () => {
           retention_period_days: 1,
           deletion_date: '2026-01-01T00:00:00.000Z',
           legal_hold: true,
+          legal_hold_refs: [],
         },
       },
       new Date(NOW).toISOString(),
@@ -524,6 +527,7 @@ describe('retention + erasure (WS-N.2.1d / WS-N.2.1a)', () => {
     await setLegalHold(deps, {
       caseId: held.record.caseId,
       hold: true,
+      holdRef: 'test-hold',
       actorUserId: USER,
       reason: 'regulatory',
     });

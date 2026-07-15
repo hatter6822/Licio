@@ -330,6 +330,42 @@ describe('a reviewed PARTIAL match can actually be cleared (WS-N.2.2a)', () => {
     expect(await screen(args)).toBe('clear');
   });
 
+  it('the clearance takes effect NOW, not when the short TTL happens to lapse', async () => {
+    const { services, screen } = reviewableFixture(['partial', 'partial']);
+    const args = { addressLower: ADDRESS, deploymentId: 'd1' };
+    expect(await screen(args)).toBe('unavailable');
+    const record = (await services.cases.listByStates(['open'], 10))[0];
+    await clearCase(services, record?.caseId as string, NOW);
+    // No clock advance: the cached `unavailable` is still live.  It must not be
+    // returned blind — the only writer of that entry is the partial path, so it
+    // means "pending review", and the reviewer has since cleared it.  Making
+    // counsel's clearance wait out a cache TTL is not a clearance.
+    expect(await screen(args)).toBe('clear');
+  });
+
+  it('a sanctions hit that could NOT be recorded is never cached', async () => {
+    const { services, screen, callCount } = fixture(['full', 'full', 'full']);
+    // The chain is down, so `createCase` cannot open the critical case.
+    const original = services.caseAudit.appendChained.bind(services.caseAudit);
+    services.caseAudit.appendChained = async () => {
+      throw new Error('chain unavailable');
+    };
+    // The action is still denied — the match is real and blocking fails closed.
+    expect(await screen({ addressLower: ADDRESS, deploymentId: 'd1' })).toBe('blocked');
+    expect(await services.cases.listByStates(['open'], 10)).toHaveLength(0);
+    // …but the verdict is NOT cached.  Caching it at the full TTL would
+    // suppress every retry that could still open the case, turning a transient
+    // chain outage into a sanctions hit with no case, no trail, and no review.
+    expect(await screen({ addressLower: ADDRESS, deploymentId: 'd1' })).toBe('blocked');
+    expect(callCount()).toBe(2); // re-screened, not served from cache
+
+    // Once the chain recovers, the retry records what the outage lost.
+    services.caseAudit.appendChained = original;
+    expect(await screen({ addressLower: ADDRESS, deploymentId: 'd1' })).toBe('blocked');
+    const cases = await services.cases.listByStates(['open'], 10);
+    expect(cases[0]?.riskLevel).toBe('critical');
+  });
+
   it('a FULL match is never review-clearable here — it stays blocked', async () => {
     const { services, screen, advance } = reviewableFixture(['full', 'full']);
     const args = { addressLower: ADDRESS, deploymentId: 'd1' };

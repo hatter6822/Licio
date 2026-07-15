@@ -137,6 +137,7 @@ function caseOf(
       retention_period_days: 1825,
       deletion_date: hoursAhead(24),
       legal_hold: false,
+      legal_hold_refs: [],
     },
     idempotencyKey: null,
     createdAt: at,
@@ -484,7 +485,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect(await stores.cases.getById(held.caseId)).not.toBeNull();
   });
 
-  it('scrubUserSubject NULLs user subjects except under legal hold; anonymize scrubs the rest', async () => {
+  it('scrubUserSubject NULLs user subjects except under legal hold; anonymize refuses the held one', async () => {
     const erasureUser = randomUUID();
     const plain = track(await stores.cases.insert(caseOf(erasureUser)));
     const held = track(
@@ -494,6 +495,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
             retention_period_days: 1825,
             deletion_date: hoursAhead(24),
             legal_hold: true,
+            legal_hold_refs: [],
           },
         }),
       ),
@@ -504,10 +506,48 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect((await stores.cases.getById(plain.caseId))?.userIdOrRoomId).toBeNull();
     expect((await stores.cases.getById(held.caseId))?.userIdOrRoomId).toBe(erasureUser);
 
-    await stores.cases.anonymize(held.caseId, NOW());
-    const anonymized = await stores.cases.getById(held.caseId);
+    // The retention anonymize re-checks the hold AS PART OF the write, so a
+    // hold that lands after a sweep chose the page still stops it.  (The
+    // sweep's own selection excludes held cases; this is the second line.)
+    expect(await stores.cases.anonymize(held.caseId, NOW())).toBe(false);
+    expect((await stores.cases.getById(held.caseId))?.userIdOrRoomId).toBe(erasureUser);
+
+    // …and it does scrub an unheld case.
+    expect(await stores.cases.anonymize(plain.caseId, NOW())).toBe(true);
+    const anonymized = await stores.cases.getById(plain.caseId);
     expect(anonymized?.userIdOrRoomId).toBeNull();
     expect(anonymized?.partnerCaseRef).toBeNull();
+    // The marker that stops `listExpired` re-selecting it every round.
+    expect(anonymized?.retentionPolicy.anonymized_at).not.toBeNull();
+  });
+
+  it('deleteCascade refuses a case a legal hold claimed after the page was read', async () => {
+    const subject = randomUUID();
+    // The sweep selects it: expired, not held.
+    const target = track(
+      await stores.cases.insert(
+        caseOf(subject, {
+          retentionPolicy: {
+            retention_period_days: 1,
+            deletion_date: hoursAgo(24),
+            legal_hold: false,
+            legal_hold_refs: [],
+          },
+        }),
+      ),
+    );
+    expect(await stores.cases.listExpired(NOW(), 50)).toContainEqual(
+      expect.objectContaining({ caseId: target.caseId }),
+    );
+    // …then a SAR draft or lawful-access intake applies a hold in the gap.
+    await stores.cases.update(
+      target.caseId,
+      { retentionPolicy: { ...target.retentionPolicy, legal_hold: true } },
+      NOW(),
+    );
+    // The write's own guard catches what the sweep's read could not.
+    expect(await stores.cases.deleteCascade(target.caseId)).toBe(false);
+    expect(await stores.cases.getById(target.caseId)).not.toBeNull();
   });
 
   it('listExpired returns past-deletion-date cases NOT under legal hold', async () => {
@@ -518,6 +558,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
             retention_period_days: 1,
             deletion_date: hoursAgo(1),
             legal_hold: false,
+            legal_hold_refs: [],
           },
         }),
       ),
@@ -529,6 +570,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
             retention_period_days: 1,
             deletion_date: hoursAgo(1),
             legal_hold: true,
+            legal_hold_refs: [],
           },
         }),
       ),
