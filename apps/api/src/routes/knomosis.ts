@@ -88,6 +88,7 @@ async function verifyClaimedIntent(input: {
   paymentIntentId: string | undefined;
   userId: string;
   roomId: string;
+  actionType: string;
   typedDataMessage: Record<string, unknown>;
 }): Promise<{ code: string; message: string } | null> {
   if (input.paymentIntentId === undefined) return null;
@@ -105,10 +106,21 @@ async function verifyClaimedIntent(input: {
   // action names (the pipeline's steward check gates the room itself).
   if (intent.userId !== null && intent.userId !== input.userId) return mismatch;
   if (intent.roomId !== input.roomId) return mismatch;
-  // …and the SAME movement: amount and asset come from the signed payload, so
-  // a cleared small intent cannot cover a large transfer.
+  // …and the SAME movement.  Amount and asset come from the signed payload, so
+  // a cleared small intent cannot cover a large transfer — but they are not
+  // enough on their own: a cleared payout intent for grant A would otherwise
+  // cover a same-room, same-asset, same-amount payout to grant B, and B would
+  // skip its own review (the later treasury attach rejects the mismatch, but
+  // only after this action has already been forwarded).  So the intent's TARGET
+  // must be the one the message names.
   if (intent.amount !== input.typedDataMessage['amount']) return mismatch;
   if (intent.asset !== input.typedDataMessage['asset']) return mismatch;
+  if (intent.targetType !== input.actionType) return mismatch;
+  const targetField = INTENT_TARGET_FIELD[input.actionType];
+  // A fund-moving action with no known target field cannot be bound to an
+  // intent at all — fail closed rather than accept an unbindable claim.
+  if (targetField === undefined) return mismatch;
+  if (intent.targetId !== input.typedDataMessage[targetField]) return mismatch;
   // …and still an attempt IN FLIGHT.  `PAYMENT_INTENT_TIMED_STATES` is exactly
   // the pre-submission window in which an action is being minted (the states
   // the expiry sweep watches); past it the intent's action already exists, so
@@ -121,6 +133,21 @@ async function verifyClaimedIntent(input: {
   if (intent.expiresAt <= new Date(getKnomosisServices().now()).toISOString()) return mismatch;
   return null;
 }
+
+/**
+ * The signed message field naming the INTENT'S TARGET, per fund-moving action.
+ * Both sides already agree on the target's identity — the intent stores it as
+ * `target_id`, the typed data commits to it under these names — so binding them
+ * is what stops one target's clearance covering another's transfer.
+ *
+ * The governance actions move nothing and never carry an intent, so they are
+ * absent; an action not listed here cannot bind an intent (fail-closed).
+ */
+const INTENT_TARGET_FIELD: Readonly<Record<string, string>> = {
+  treasury_deposit: 'treasuryId',
+  grant_payout: 'grantId',
+  bounty_contribution: 'bountyId',
+};
 
 /** The pre-submission window, from the WS-M lifecycle SSOT (never re-listed
  *  here: a state added there must not silently become replayable). */
@@ -296,6 +323,7 @@ export function createKnomosisRoutes() {
             paymentIntentId: body.payment_intent_id,
             userId: auth.userId,
             roomId: body.room_id,
+            actionType: body.action_type,
             typedDataMessage: body.typed_data_message,
           });
           if (intentClaim !== null) {
@@ -330,32 +358,48 @@ export function createKnomosisRoutes() {
             return c.json(deny('crypto_disabled', 'Crypto features are not enabled.'), 503);
           }
           const body = c.req.valid('json');
+          // Is this a RETRY of a submission that already landed?  A retry after
+          // a lost response has ALREADY submitted — its action exists and may
+          // be on chain — so the gates below answer a question that no longer
+          // applies: a disclosure published since, a kill switch engaged since,
+          // or an intent that has since advanced past the pre-submission window
+          // would each turn the retry into a fresh 403/503/400 instead of the
+          // original action id, leaving the client unable to learn what
+          // happened and the intent stranded.  Gates decide whether a NEW
+          // action may be minted, so they are skipped here — and `submitAction`
+          // still owns the replay itself (it re-reads the record AND repairs a
+          // lost actor mapping; a second replay path here would drift from it).
+          const isRetry =
+            (await services.actions.getByIdempotencyKey(auth.userId, body.idempotency_key)) !==
+            null;
           // WS-L.3.5c: submission honours the kill switch (503); preflight
           // stays available so users can see why an action would fail.
-          const region = await services.regionResolver.regionForUser(auth.userId);
-          const decision = await killSwitchDecision(services.configStore, 'action_submission', {
-            roomId: body.room_id,
-            region,
-          });
-          if (decision.engaged) {
-            return c.json(
-              deny('kill_switch_active', 'Action submission is temporarily paused.'),
-              503,
-            );
-          }
-          // Also honour the NARROWER switch for this action type (treasury /
-          // governance-voting) so a targeted pause stops the mapped submissions.
-          const specificSwitch = ACTION_KILL_SWITCH[body.action_type as KnomosisSignedActionType];
-          if (specificSwitch) {
-            const specific = await killSwitchDecision(services.configStore, specificSwitch, {
+          if (!isRetry) {
+            const region = await services.regionResolver.regionForUser(auth.userId);
+            const decision = await killSwitchDecision(services.configStore, 'action_submission', {
               roomId: body.room_id,
               region,
             });
-            if (specific.engaged) {
+            if (decision.engaged) {
               return c.json(
-                deny('kill_switch_active', 'This action type is temporarily paused.'),
+                deny('kill_switch_active', 'Action submission is temporarily paused.'),
                 503,
               );
+            }
+            // Also honour the NARROWER switch for this action type (treasury /
+            // governance-voting) so a targeted pause stops the mapped submissions.
+            const specificSwitch = ACTION_KILL_SWITCH[body.action_type as KnomosisSignedActionType];
+            if (specificSwitch) {
+              const specific = await killSwitchDecision(services.configStore, specificSwitch, {
+                roomId: body.room_id,
+                region,
+              });
+              if (specific.engaged) {
+                return c.json(
+                  deny('kill_switch_active', 'This action type is temporarily paused.'),
+                  503,
+                );
+              }
             }
           }
           const subDeps = submissionDeps(services);
@@ -370,7 +414,7 @@ export function createKnomosisRoutes() {
           // sanctions, jurisdiction, and fraud rather than trusting the token;
           // disclosures were the one gate left behind.
           const movesFunds = (FUND_TRANSFER_ACTIONS as ReadonlySet<string>).has(body.action_type);
-          if (movesFunds && complianceServicesConfigured()) {
+          if (!isRetry && movesFunds && complianceServicesConfigured()) {
             const disclosureCheck = await disclosureGate(
               buildDisclosureDeps(getComplianceServices()),
               auth.userId,
@@ -389,12 +433,15 @@ export function createKnomosisRoutes() {
               );
             }
           }
-          const claimed = await verifyClaimedIntent({
-            paymentIntentId: body.payment_intent_id,
-            userId: auth.userId,
-            roomId: body.room_id,
-            typedDataMessage: body.typed_data_message,
-          });
+          const claimed = isRetry
+            ? null
+            : await verifyClaimedIntent({
+                paymentIntentId: body.payment_intent_id,
+                userId: auth.userId,
+                roomId: body.room_id,
+                actionType: body.action_type,
+                typedDataMessage: body.typed_data_message,
+              });
           if (claimed !== null) {
             return c.json(deny(claimed.code, claimed.message), 400);
           }

@@ -537,6 +537,68 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     expect(standing.status).toBe(200);
   });
 
+  it('a retry REPLAYS even after a kill switch engages — gates are for NEW actions', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkAndMapWallet(fixture, userId);
+    const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+    const message = depositMessage(deploymentId);
+    const signature = await signedTypedData('treasury_deposit', message);
+    const idem = crypto.randomUUID();
+    const preflight = await post('/knomosis/actions/preflight', cookie, {
+      action_type: 'treasury_deposit',
+      room_id: ROOM,
+      deployment_id: deploymentId,
+      wallet_account_id: walletAccountId,
+      typed_data_message: message,
+      signature,
+    });
+    const pf = (await preflight.json()) as { preflight_token?: string };
+    const submitBody = {
+      idempotency_key: idem,
+      action_type: 'treasury_deposit',
+      room_id: ROOM,
+      deployment_id: deploymentId,
+      wallet_account_id: walletAccountId,
+      typed_data_message: message,
+      signature,
+    };
+    const first = await post('/knomosis/actions/submit', cookie, {
+      ...submitBody,
+      preflight_token: pf.preflight_token,
+    });
+    expect(first.status).toBe(202);
+    const original = ((await first.json()) as { action_record_id: string }).action_record_id;
+
+    // The response is lost; meanwhile an incident engages the kill switch.
+    await fixture.knomosis.configStore.set('knomosis.killswitch.action_submission', {
+      value: { engaged: true, scope: 'global' },
+    });
+    // The retry has ALREADY submitted — its action exists and may be on chain.
+    // Re-gating it would answer a question that no longer applies and hand the
+    // client a 503 instead of the action id, stranding the intent.
+    const retry = await post('/knomosis/actions/submit', cookie, {
+      ...submitBody,
+      preflight_token: pf.preflight_token,
+    });
+    expect(retry.status).toBe(202);
+    expect(((await retry.json()) as { action_record_id: string }).action_record_id).toBe(original);
+
+    // …while a NEW submission still meets the switch.
+    const fresh = await post('/knomosis/actions/submit', cookie, {
+      ...submitBody,
+      idempotency_key: crypto.randomUUID(),
+      preflight_token: pf.preflight_token,
+    });
+    expect(fresh.status).toBe(503);
+  });
+
   it('standing FAILS CLOSED when a gate trips between the balances and budget reads (O3)', async () => {
     const fixture = await freshKnomosisServices();
     fixture.knomosis.rooms = {
@@ -634,6 +696,10 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       paymentIntentId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
       userId: null,
       roomId: ROOM,
+      // The signed deposit message names this treasury; the intent must be for
+      // the SAME target, not merely the same room/asset/amount.
+      targetType: 'treasury_deposit',
+      targetId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       asset: 'USDC',
       amount: '1000000',
       executionState: 'quoted',
@@ -691,11 +757,15 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       );
     });
 
-    it('rejects another member’s intent, a different room, and a different asset', async () => {
+    it('rejects another member’s intent, a different room, asset, or TARGET', async () => {
       for (const overrides of [
         { userId: '11111111-1111-4111-8111-111111111111' },
         { roomId: '22222222-2222-4222-8222-222222222222' },
         { asset: 'DAI' },
+        // A cleared intent for ANOTHER target in the same room, for the same
+        // asset and amount, must not cover this transfer.
+        { targetId: '33333333-3333-4333-8333-333333333333' },
+        { targetType: 'grant_payout' },
       ]) {
         const res = await preflightClaiming(INTENT, overrides);
         expect(res.status).toBe(400);

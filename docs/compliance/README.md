@@ -78,9 +78,13 @@ modified** in their verdict semantics:
   key names the same subject and amount, so `createCase` would hand the new
   transfer the old cleared case. Both WS-L legs therefore verify the intent IS
   this transfer: the caller's own (or their room's), this room, this asset, this
-  amount, and still inside `PAYMENT_INTENT_TIMED_STATES` (the pre-submission
-  window — past it the intent's action already exists, so naming it would
-  resurrect a spent clearance) and unexpired. A mismatch is **rejected**, never
+  amount, this **target** (`target_type` + `target_id` against the field the
+  signed message commits to — `treasuryId` / `grantId` / `bountyId`; without it
+  a cleared payout intent for grant A covers a same-room, same-asset,
+  same-amount payout to grant B, and B skips its own review), and still inside
+  `PAYMENT_INTENT_TIMED_STATES` (the pre-submission window — past it the
+  intent's action already exists, so naming it would resurrect a spent
+  clearance) and unexpired. A mismatch is **rejected**, never
   silently dropped: dropping it would quietly split the transfer's review in
   two, the defect the id exists to prevent. The read crosses into WS-M, so it
   lives at the route composition layer, never inside the WS-L domain module.
@@ -347,6 +351,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   and the retry can still open the case. A sanctions hit whose case was not
   recorded is additionally **never cached** — the full TTL would suppress the
   retries that could still record it.
+- **Gates are for NEW actions; a retry replays.**  `/actions/submit` looks up
+  the `(user, idempotency_key)` record BEFORE its gates and skips them on a
+  retry. A retry has already submitted — its action exists and may be on chain —
+  so a disclosure published since, a kill switch engaged since, or an intent
+  that has advanced past the pre-submission window would each turn it into a
+  fresh 403/503/400 instead of the original action id, leaving the client unable
+  to learn what happened and the intent stranded. The replay itself stays in
+  `submitAction` (it re-reads the record *and* repairs a lost actor mapping); a
+  second replay path at the route would drift from it.
 - **One resolution walk, read off the live state.**  `resolveCaseInTx` is the
   single automated close (the fraud-queue decision and the lawful-access denial
   both use it): it picks its route from where the case actually sits, never a
@@ -355,7 +368,27 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   whole unit down — counsel could not record a denial *because* someone was
   looking at the case. Automated paths never claim `senior`; both routes are
   unguarded, and `escalated` reaches `resolved` via `investigating` precisely so
-  the counsel-only edge stays counsel's.
+  the counsel-only edge stays counsel's. An already-`resolved` case is a no-op
+  only for the **same** outcome: a case resolved `restricted` must not report
+  success for a `cleared` decision, because consumers read the case's outcome
+  and the transfer would stay held while the queue said it was released.
+  Changing a colleague's decision takes an audited reopen, not a queue click.
+- **A unique violation and a broken store are opposite answers.**  "It already
+  exists, stop" (409) versus "the store failed, retry" (503): conflating them
+  told counsel an immutable disclosure was published when nothing was written,
+  so they stop retrying and the required disclosure stays absent. The in-memory
+  adapters raise a typed `UniqueViolationError` (never a message to match) and
+  the Drizzle path's 23505 is walked out of the wrapped cause chain.
+- **The one compensator alerts when it cannot compensate.**  A fraud-queue
+  revert that throws, or matches zero rows because the state moved again, leaves
+  the intent `cleared`/`blocked` with no durable decision record while the route
+  reports the decision was not applied. Nothing else would notice, so it alerts.
+- **A committed change is never reported as a failure.**  A policy write whose
+  cache-invalidation broadcast fails is already live and hash-chained; a 503
+  would send the operator into a retry that can only collide with the row now in
+  place, and leave them believing the policy is not live when it is. It alerts
+  instead, naming the impact (other instances serve the previous policy until
+  their TTL lapses).
 - **Cleanup inside a unit throws; it never returns.**  A returned error reads to
   the transactor as a committed success, so a denial's failed hold-release would
   commit the denial while the route reported failure — the partial state the

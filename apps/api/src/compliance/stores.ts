@@ -482,6 +482,21 @@ export class ChainContentionError extends Error {
 }
 
 /**
+ * A UNIQUE constraint refused a write — the in-memory adapters' emulation of
+ * Postgres 23505.  Typed, not a message: callers must distinguish "this already
+ * exists" from "the store is broken", and the two answers are opposite (a 409
+ * that tells the caller to stop, versus a 503 that tells them to retry).  A
+ * string match would silently reclassify one as the other the day a message
+ * changes.
+ */
+export class UniqueViolationError extends Error {
+  constructor(readonly constraintLabel: string) {
+    super(`unique constraint violated: ${constraintLabel}`);
+    this.name = 'UniqueViolationError';
+  }
+}
+
+/**
  * The in-memory adapters' ROLLBACK (the house rule: they emulate every DB
  * protection, and a transaction is one).  Returning an undo CLOSURE keeps each
  * store's snapshot private — no row shape escapes through the transactor.
@@ -574,7 +589,7 @@ export class InMemoryJurisdictionPolicyStore implements JurisdictionPolicyStore,
         (r) => r.countryOrRegion === row.countryOrRegion && r.effectiveAt === row.effectiveAt,
       )
     ) {
-      throw new Error('duplicate (country_or_region, effective_at)');
+      throw new UniqueViolationError('(country_or_region, effective_at)');
     }
     this.#rows.push({ ...row });
     return row;
@@ -924,7 +939,7 @@ export class InMemoryDisclosureStore implements DisclosureStore {
           r.locale === record.locale,
       )
     ) {
-      throw new Error('disclosure version already published (publish-immutable)');
+      throw new UniqueViolationError('(disclosure_id, region, version, locale)');
     }
     this.#rows.push({ ...record });
     return { ...record };

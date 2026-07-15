@@ -81,6 +81,7 @@ import {
   resolveRegionForUser,
 } from '../compliance/services.js';
 import type { ComplianceCaseRecord, RegionDeclarationRecord } from '../compliance/stores.js';
+import { UniqueViolationError } from '../compliance/stores.js';
 import { getEventPipelineServices } from '../events/services.js';
 import { isComplianceReviewer, isCounsel } from '../identity/rbac.js';
 import { getIdentityServices } from '../identity/services.js';
@@ -122,16 +123,19 @@ const RETENTION_SCHEDULE_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether a failed policy write hit the `(country_or_region, effective_at)`
- * unique rather than a store fault.  Inside a unit of work it is the only
- * unique that can surface: the chain's own collisions are caught by
- * `appendChained` and re-raised as `ChainContentionError`, which
- * `runChainedUnit` retries instead of propagating.
+ * Did a write hit a UNIQUE constraint rather than a broken store?  The answers
+ * are opposite — "it already exists, stop" (409) versus "the store failed, try
+ * again" (503) — so the two must never be conflated: telling counsel a
+ * disclosure is already published when the store merely failed leaves the
+ * required disclosure absent and stops them retrying.
+ *
+ * Drizzle wraps the driver error, so the 23505 is walked out of the cause
+ * chain; the in-memory adapters raise `UniqueViolationError` for the same
+ * conditions.  (The chain's own collisions never reach here: `appendChained`
+ * re-raises them as `ChainContentionError`, which `runChainedUnit` retries.)
  */
-function isDuplicatePolicy(error: unknown): boolean {
-  if (error instanceof Error && error.message.includes('duplicate (country_or_region')) {
-    return true; // the in-memory adapter's emulation of the unique
-  }
+function isUniqueViolation(error: unknown): boolean {
+  if (error instanceof UniqueViolationError) return true;
   let cursor: unknown = error;
   for (let depth = 0; depth < 5 && cursor !== null && typeof cursor === 'object'; depth += 1) {
     if ((cursor as { code?: unknown }).code === '23505') return true;
@@ -220,6 +224,47 @@ class DecisionNotClosedError extends Error {
     super(`case ${caseId} could not be resolved by the fraud-queue decision`);
     this.name = 'DecisionNotClosedError';
   }
+}
+
+/**
+ * Put a fraud-queue decision's state change back when the decision could not be
+ * recorded.  The ONE compensator this module keeps (the intent's compliance
+ * column is the WS-M treasury's, a different bounded context — see
+ * `recordIntentReviewDecision`), so its failure has nowhere to hide: a revert
+ * that throws, or matches zero rows because the state moved again, leaves the
+ * intent `cleared`/`blocked` with NO durable decision record while the route
+ * reports the decision was not applied.  Nothing else will notice, so it alerts
+ * — this is the repair signal, and the discrepancy is named in it.
+ */
+async function revertIntentState(
+  services: ComplianceServices,
+  paymentIntentId: string,
+  from: 'cleared' | 'blocked',
+  to: 'flagged',
+): Promise<void> {
+  try {
+    const reverted = await getTreasuryServices().intents.updateComplianceState(
+      paymentIntentId,
+      from,
+      to,
+      new Date(services.now()).toISOString(),
+    );
+    if (reverted !== null) return;
+  } catch (error) {
+    services.alert('compliance.fraud_queue.revert_failed', {
+      paymentIntentId,
+      from,
+      message: error instanceof Error ? error.message : 'unknown',
+    });
+    services.metrics.increment('compliance.fraud_queue.revert_failed');
+    return;
+  }
+  services.alert('compliance.fraud_queue.revert_missed', {
+    paymentIntentId,
+    from,
+    reason: 'the intent was no longer in the state the decision moved it to',
+  });
+  services.metrics.increment('compliance.fraud_queue.revert_failed');
 }
 
 /** A flagged intent, as much of it as the queue needs to find its review. */
@@ -628,7 +673,7 @@ export function createComplianceRoutes() {
           // The `(region, effective_at)` unique is the only expected failure
           // here; anything else (an audit-store outage) rolled the whole unit
           // back, so nothing went live.
-          if (isDuplicatePolicy(error)) {
+          if (isUniqueViolation(error)) {
             return c.json(
               deny('duplicate_policy', 'A policy for this region and effective_at already exists.'),
               409,
@@ -650,7 +695,22 @@ export function createComplianceRoutes() {
         // authoritative chain entry just written — it must not be able to
         // strand an applied change behind an un-invalidated cache.)
         services.policyCache.invalidate(policyInput.country_or_region);
-        await services.broadcaster.publish(policyInput.country_or_region);
+        try {
+          await services.broadcaster.publish(policyInput.country_or_region);
+        } catch (error) {
+          // The policy is COMMITTED; it cannot be rolled back from here.  A
+          // pub/sub outage means other instances serve the stale cached policy
+          // until their TTL — worth an alert, not a 503: reporting failure for
+          // an applied change sends the operator into a retry that can only
+          // collide with the row now in place, and leaves them believing the
+          // policy is not live when it is.  This instance already invalidated.
+          services.metrics.increment('compliance.policy.invalidate_failed');
+          services.alert('compliance.policy.invalidate_failed', {
+            region: policyInput.country_or_region,
+            message: error instanceof Error ? error.message : 'unknown',
+            impact: 'other instances may serve the previous policy until their cache TTL lapses',
+          });
+        }
         services.metrics.increment('compliance.policy.written');
         // Best-effort: a transient identity-audit outage cannot un-apply a
         // committed, chained policy, and returning 500 would send the operator
@@ -1089,12 +1149,7 @@ export function createComplianceRoutes() {
           actorUserId: auth.userId,
         });
         if (!recorded) {
-          await getTreasuryServices().intents.updateComplianceState(
-            body.payment_intent_id,
-            'cleared',
-            'flagged',
-            new Date(services.now()).toISOString(),
-          );
+          await revertIntentState(services, body.payment_intent_id, 'cleared', 'flagged');
           return c.json(
             deny('audit_unavailable', 'The release was not applied: it could not be recorded.'),
             503,
@@ -1147,12 +1202,7 @@ export function createComplianceRoutes() {
           actorUserId: auth.userId,
         });
         if (!recorded) {
-          await getTreasuryServices().intents.updateComplianceState(
-            body.payment_intent_id,
-            'blocked',
-            'flagged',
-            new Date(services.now()).toISOString(),
-          );
+          await revertIntentState(services, body.payment_intent_id, 'blocked', 'flagged');
           return c.json(
             deny('audit_unavailable', 'The rejection was not applied: it could not be recorded.'),
             503,
@@ -1469,10 +1519,28 @@ export function createComplianceRoutes() {
             publishedByRef: services.opaqueRef(auth.userId),
             publishedAt: new Date(services.now()).toISOString(),
           });
-        } catch {
+        } catch (error) {
+          // ONLY the unique conflict is `already_published`.  Calling a store
+          // outage that too would tell counsel the immutable version exists —
+          // so they stop retrying, and the required risk disclosure stays
+          // absent while the surfaces that demand it fail closed.
+          if (isUniqueViolation(error)) {
+            return c.json(
+              deny(
+                'already_published',
+                'This disclosure version is already published (immutable).',
+              ),
+              409,
+            );
+          }
+          services.metrics.increment('compliance.disclosure.publish_failed');
+          services.alert('compliance.disclosure.publish_failed', {
+            disclosureId: body.disclosure_id,
+            message: error instanceof Error ? error.message : 'unknown',
+          });
           return c.json(
-            deny('already_published', 'This disclosure version is already published (immutable).'),
-            409,
+            deny('unavailable', 'The disclosure could not be published; nothing was kept.'),
+            503,
           );
         }
         // Best-effort NOTIFICATION, not the record of truth: the attribution

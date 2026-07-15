@@ -412,7 +412,16 @@ export async function resolveCaseInTx(
 ): Promise<boolean> {
   const record = await stores.cases.getById(input.caseId);
   if (record === null) return false;
-  if (record.reviewState === 'resolved') return true;
+  if (record.reviewState === 'resolved') {
+    // Already decided.  Only the SAME outcome is a no-op: a case a reviewer
+    // resolved `restricted` must not report success for a `cleared` decision —
+    // the consumers read the case's outcome, not the caller's intent, so the
+    // transfer would stay held while the queue said it was released.  A
+    // reviewer who means to change a decision reopens the case (an audited
+    // resolved → investigating, reason required); this path does not do it for
+    // them behind their back.
+    return record.resolution?.outcome === input.resolution.outcome;
+  }
   const route = RESOLUTION_ROUTE[record.reviewState];
   if (route === undefined) return false;
   for (const to of route) {

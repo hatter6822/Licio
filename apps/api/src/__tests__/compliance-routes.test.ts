@@ -22,7 +22,9 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { resolveCaseInTx, transitionCase } from '../compliance/cases.js';
 import {
+  buildCaseDeps,
   type ComplianceServices,
   createInMemoryComplianceServices,
   resetComplianceServicesForTests,
@@ -403,6 +405,46 @@ describe('a published disclosure always names its publisher (WS-N.1.2d)', () => 
     }
     const [stored] = await compliance.disclosures.listForRegion('DE');
     expect(stored?.publishedByRef).toBe(compliance.opaqueRef(counsel.userId));
+  });
+});
+
+describe('a store fault is never reported as `already_published` (WS-N.1.2d)', () => {
+  it('503s a broken publish, and 409s only the real duplicate', async () => {
+    const counsel = await seedCounsel();
+    const body = {
+      disclosure_id: 'risk-general',
+      region: 'DE',
+      version: 1,
+      locale: 'de',
+      title: 'Risikohinweise',
+      content_md: 'On-chain-Transaktionen sind unumkehrbar.',
+      requires_acknowledgment: true,
+    };
+    const original = compliance.disclosures.publish.bind(compliance.disclosures);
+    compliance.disclosures.publish = async () => {
+      throw new Error('disclosure store down');
+    };
+    let broken: Response;
+    try {
+      broken = await app().request(post('/v1/compliance/admin/disclosures', body, counsel.cookie));
+    } finally {
+      compliance.disclosures.publish = original;
+    }
+    // Telling counsel the immutable version already exists would stop them
+    // retrying — and the required risk disclosure would stay absent while every
+    // surface that demands it fails closed.
+    expect(broken.status).toBe(503);
+    expect(((await broken.json()) as { error: { code: string } }).error.code).toBe('unavailable');
+
+    // The real publish succeeds, and only the true duplicate is a 409.
+    expect(
+      (await app().request(post('/v1/compliance/admin/disclosures', body, counsel.cookie))).status,
+    ).toBe(201);
+    const dup = await app().request(post('/v1/compliance/admin/disclosures', body, counsel.cookie));
+    expect(dup.status).toBe(409);
+    expect(((await dup.json()) as { error: { code: string } }).error.code).toBe(
+      'already_published',
+    );
   });
 });
 
@@ -1424,6 +1466,80 @@ describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () =
     // The REAL review closed — not a second case opened beside it.
     expect((await compliance.cases.getById(review.caseId))?.resolution?.outcome).toBe('cleared');
     expect(await compliance.cases.findByIdempotencyKey(`intent-review:${intentId}`)).toBeNull();
+  });
+
+  it('a release on a case already resolved NOT-cleared is refused, never a false success', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    const intent = wireFlaggedIntent(intentId, subject);
+    const review = await seedReview(subject, intentId);
+    // A reviewer resolved this case `restricted` through the case console.
+    const deps = buildCaseDeps(compliance);
+    for (const step of ['assigned', 'investigating', 'resolved'] as const) {
+      await transitionCase(deps, {
+        caseId: review.caseId,
+        to: step,
+        actorUserId: reviewer.userId,
+        isSenior: false,
+        ...(step === 'assigned' ? { assigneeUserId: reviewer.userId } : {}),
+        ...(step === 'resolved'
+          ? {
+              resolution: {
+                outcome: 'restricted' as const,
+                notes: 'confirmed fraud',
+                resolved_by: reviewer.userId,
+                resolved_at: new Date().toISOString(),
+              },
+            }
+          : {}),
+      });
+    }
+    const released = await app().request(
+      post(
+        '/v1/compliance/admin/fraud-queue/release',
+        { payment_intent_id: intentId, reason: 'looks fine to me' },
+        reviewer.cookie,
+      ),
+    );
+    // `risk.ts` reads the case's OUTCOME, not the queue's intent, so accepting
+    // this would mark the intent cleared while the transfer stayed held — a
+    // release that reports success and releases nothing.  Changing a colleague's
+    // decision takes an audited reopen, not a queue click.
+    expect(released.status).toBe(503);
+    expect((await compliance.cases.getById(review.caseId))?.resolution?.outcome).toBe('restricted');
+    // …and the compensator put the hold back rather than leave it cleared.
+    expect(intent.complianceState).toBe('flagged');
+  });
+
+  it('the SAME decision on an already-resolved case is idempotent', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    wireFlaggedIntent(intentId, subject);
+    const review = await seedReview(subject, intentId);
+    const first = await app().request(
+      post(
+        '/v1/compliance/admin/fraud-queue/release',
+        { payment_intent_id: intentId, reason: 'verified' },
+        reviewer.cookie,
+      ),
+    );
+    expect(first.status).toBe(200);
+    // The case is `resolved`/`cleared` now; a re-run of the same decision must
+    // not fail on its own past work.
+    expect(
+      await resolveCaseInTx(compliance, buildCaseDeps(compliance), {
+        caseId: review.caseId,
+        actorUserId: reviewer.userId,
+        resolution: {
+          outcome: 'cleared',
+          notes: 'again',
+          resolved_by: reviewer.userId,
+          resolved_at: new Date().toISOString(),
+        },
+      }),
+    ).toBe(true);
   });
 
   it('the decision entry and the resolution are ONE unit: neither lands alone', async () => {
