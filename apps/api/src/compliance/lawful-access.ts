@@ -11,8 +11,14 @@
 // The workflow records that determination explicitly rather than an empty or
 // misleading production, and never represents a decryption capability that
 // does not exist.
-import { appendCaseAudit } from './audit.js';
-import { type CaseDeps, createCase, setLegalHold, transitionCase } from './cases.js';
+import { appendCaseAudit, runChainedUnit } from './audit.js';
+import {
+  type CaseDeps,
+  createCaseInTx,
+  setLegalHold,
+  setLegalHoldInTx,
+  transitionCase,
+} from './cases.js';
 import type { LawfulAccessRecord, LawfulAccessStore } from './stores.js';
 
 type Clock = () => number;
@@ -45,7 +51,13 @@ export const PRIVATE_P2P_DETERMINATION =
   'Licio’s possession or attributable by design, and no decryption or recovery ' +
   'capability exists. This is a structurally-enforced limit, not non-compliance.';
 
-/** Intake (counsel channel).  Opens the linked compliance case + legal hold. */
+/**
+ * Intake (counsel channel).  The linked case, its legal hold, and the request
+ * row are ONE unit — each is meaningless without the others: a request with no
+ * hold lets retention purge the very records it obliges us to keep, and a held
+ * case with no request is an orphan nothing will ever release (retention
+ * cannot clear a hold, and intake has no idempotency key for a retry to find).
+ */
 export async function intakeLawfulAccessRequest(
   deps: LawfulAccessDeps,
   input: {
@@ -57,77 +69,54 @@ export async function intakeLawfulAccessRequest(
     actorUserId: string;
   },
 ): Promise<LawfulAccessOutcome> {
-  const nowIso = new Date(deps.now()).toISOString();
-  const linked = await createCase(deps.caseDeps, {
-    // The scope's kind carries through 1:1.  Collapsing `transaction` onto
-    // `user` would file a transaction id as though it were an account, and
-    // the queue, legal hold, erasure scrub, export, and subject searches all
-    // key off this pairing — each would then be reasoning about the wrong
-    // kind of subject.
-    subjectKind: input.scope.subject_kind,
-    subjectRef: input.scope.subject_ref,
-    triggerType: 'manual',
-    riskLevel: 'high',
-    note: `Lawful-access request intake (${input.legalBasis}); legal review required before any production.`,
-  });
-  // A request with no case has no legal hold, so retention or an account
-  // deletion could purge the scoped records while it is outstanding —
-  // recording it anyway would look compliant and not be.  Intake aborts.
-  if (!linked.ok) return laErr(linked.status, linked.code, linked.message);
-  const caseId = linked.record.caseId;
-  const held = await setLegalHold(deps.caseDeps, {
-    caseId,
-    hold: true,
-    actorUserId: input.actorUserId,
-    reason: 'Legal hold applied for a lawful-access request (WS-N.2.3d).',
-  });
-  // Same reasoning for the hold itself: it IS the point of linking the case.
-  if (!held.ok) {
-    await discardIntakeCase(deps, caseId);
-    return laErr(held.status, held.code, held.message);
-  }
   try {
-    const record = await deps.requests.insert({
-      requestId: deps.uuid(),
-      agency: input.agency,
-      jurisdiction: input.jurisdiction,
-      legalBasis: input.legalBasis,
-      scope: input.scope,
-      contact: input.contact,
-      status: 'received',
-      reviewNote: null,
-      reviewedByRef: null,
-      productionSummary: null,
-      userNotifiedAt: null,
-      caseId,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    });
-    return { ok: true, record };
-  } catch {
-    // With no request row the case + hold are orphans: nothing will ever
-    // release them (retention cannot clear a hold), and intake has no
-    // idempotency key, so each retry would strand another held case.  The
-    // case exists only for this request, so it goes with it.
-    const discarded = await discardIntakeCase(deps, caseId);
-    return laErr(
-      503,
-      'intake_unavailable',
-      discarded
-        ? 'The request could not be recorded; no changes were kept.'
-        : 'The request could not be recorded and its linked case could not be cleaned up; contact the platform team.',
+    return await runChainedUnit(
+      deps.caseDeps.transactor,
+      async (stores) => {
+        const nowIso = new Date(deps.now()).toISOString();
+        const linked = await createCaseInTx(stores, deps.caseDeps, {
+          // The scope's kind carries through 1:1.  Collapsing `transaction` onto
+          // `user` would file a transaction id as though it were an account, and
+          // the queue, legal hold, erasure scrub, export, and subject searches
+          // all key off this pairing — each would then be reasoning about the
+          // wrong kind of subject.
+          subjectKind: input.scope.subject_kind,
+          subjectRef: input.scope.subject_ref,
+          triggerType: 'manual',
+          riskLevel: 'high',
+          note: `Lawful-access request intake (${input.legalBasis}); legal review required before any production.`,
+        });
+        if (!linked.ok) return laErr(linked.status, linked.code, linked.message);
+        const held = await setLegalHoldInTx(stores, deps.caseDeps, {
+          caseId: linked.record.caseId,
+          hold: true,
+          actorUserId: input.actorUserId,
+          reason: 'Legal hold applied for a lawful-access request (WS-N.2.3d).',
+        });
+        if (!held.ok) return laErr(held.status, held.code, held.message);
+        const record = await stores.lawfulAccess.insert({
+          requestId: deps.uuid(),
+          agency: input.agency,
+          jurisdiction: input.jurisdiction,
+          legalBasis: input.legalBasis,
+          scope: input.scope,
+          contact: input.contact,
+          status: 'received',
+          reviewNote: null,
+          reviewedByRef: null,
+          productionSummary: null,
+          userNotifiedAt: null,
+          caseId: linked.record.caseId,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+        return { ok: true, record };
+      },
+      'lawful-access intake',
     );
-  }
-}
-
-/** Remove an intake case this request created but never used (its hold would
- *  otherwise pin records forever for a request that does not exist). */
-async function discardIntakeCase(deps: LawfulAccessDeps, caseId: string): Promise<boolean> {
-  try {
-    await deps.caseDeps.cases.deleteCascade(caseId);
-    return true;
   } catch {
-    return false;
+    // The unit kept nothing: no case, no hold, no request.
+    return laErr(503, 'intake_unavailable', 'The request could not be recorded; nothing was kept.');
   }
 }
 

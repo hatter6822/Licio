@@ -47,10 +47,12 @@ import {
   type CaseAuditStore,
   type ComplianceCaseRecord,
   type ComplianceCaseStore,
+  type ComplianceTransactor,
   type DisclosureAckStore,
   type DisclosureStore,
   InMemoryCaseAuditStore,
   InMemoryComplianceCaseStore,
+  InMemoryComplianceTransactor,
   InMemoryDisclosureAckStore,
   InMemoryDisclosureStore,
   InMemoryJurisdictionPolicyStore,
@@ -102,6 +104,10 @@ export interface ComplianceServices {
   velocity: VelocityStore;
   broadcaster: PolicyInvalidationBroadcaster;
   policyCache: PolicyCache;
+  /** The unit of work: a compliance mutation and its hash-chain entry commit
+   *  together or not at all (`stores.ts`).  The production boot swaps in the
+   *  Postgres transactor alongside the Drizzle adapters. */
+  transactor: ComplianceTransactor;
   /** null ⇒ no sanctions provider configured (every screen 'unavailable'). */
   provider: SanctionsProvider | null;
 
@@ -165,10 +171,20 @@ export function createInMemoryComplianceServices(
   cases.auditCascade = async (caseId) => {
     await caseAudit.deleteByCase(caseId);
   };
+  const policies = new InMemoryJurisdictionPolicyStore();
+  const policyAudit = new InMemoryPolicyAuditStore();
+  const lawfulAccess = new InMemoryLawfulAccessStore();
+  // The in-memory transactor gives dev/tests the SAME all-or-nothing semantics
+  // Postgres gives production (the house rule: the in-memory adapters emulate
+  // every DB protection, and a transaction is one).
+  const transactor = new InMemoryComplianceTransactor(
+    { cases, caseAudit, policies, policyAudit, sars, lawfulAccess },
+    [cases, caseAudit, policies, policyAudit, sars, lawfulAccess],
+  );
 
   const services: ComplianceServices = {
-    policies: new InMemoryJurisdictionPolicyStore(),
-    policyAudit: new InMemoryPolicyAuditStore(),
+    policies,
+    policyAudit,
     cases,
     caseAudit,
     declarations: new InMemoryRegionDeclarationStore(),
@@ -176,11 +192,12 @@ export function createInMemoryComplianceServices(
     acks: new InMemoryDisclosureAckStore(),
     pins: new InMemoryWalletRiskPinStore(),
     sars,
-    lawfulAccess: new InMemoryLawfulAccessStore(),
+    lawfulAccess,
     screeningCache: new InMemoryScreeningCacheStore(now),
     velocity: new InMemoryVelocityStore(),
     broadcaster,
     policyCache,
+    transactor,
     provider: null,
 
     localeRegion: async () => null,
@@ -218,6 +235,7 @@ export function buildCaseDeps(services: ComplianceServices): CaseDeps {
   return {
     cases: services.cases,
     caseAudit: services.caseAudit,
+    transactor: services.transactor,
     config: services.config,
     opaqueRef: services.opaqueRef,
     emitCaseCreated: async (input) => {

@@ -1089,7 +1089,7 @@ describe('lawful access preserves the scope kind (WS-N.2.3d)', () => {
 });
 
 describe('holds and their records are all-or-nothing (WS-N.2.1e / 2.3d)', () => {
-  it('a SAR draft that cannot be stored releases the legal hold it applied', async () => {
+  it('a SAR draft that cannot be stored leaves NO trace — hold, report, or entry', async () => {
     const counsel = await seedCounsel();
     const caseId = await createCaseVia(counsel.cookie, { trigger_type: 'sanctions' });
     compliance.sars.insert = async () => {
@@ -1106,10 +1106,14 @@ describe('holds and their records are all-or-nothing (WS-N.2.1e / 2.3d)', () => 
     // The hold exists FOR the report; with no report it would pin the case out
     // of retention forever and each retry would stack another hold.
     expect((await compliance.cases.getById(caseId))?.retentionPolicy.legal_hold).toBe(false);
-    // The chain stays honest about what actually happened.
+    // The unit kept NOTHING — not even an applied-then-released blip. The
+    // compensator this replaced could only undo the hold after committing it,
+    // so the chain carried a pair of entries for an event that never happened;
+    // a transaction leaves no trace to explain away.
     const actions = (await compliance.caseAudit.listChained(caseId)).map((e) => e.action);
-    expect(actions).toContain('legal_hold_applied');
-    expect(actions).toContain('legal_hold_released');
+    expect(actions).not.toContain('legal_hold_applied');
+    expect(actions).not.toContain('legal_hold_released');
+    expect(await compliance.sars.listByCase(caseId)).toHaveLength(0);
   });
 
   it('lawful-access intake ABORTS when the legal hold cannot be applied', async () => {

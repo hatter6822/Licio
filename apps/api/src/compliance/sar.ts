@@ -11,8 +11,8 @@
 // underlying case, and the SAR→case FK is RESTRICT — retention can never
 // delete a case with a report, enforced twice (WS-N.2.1d interaction).
 
-import type { CaseDeps } from './cases.js';
-import { setLegalHold } from './cases.js';
+import { runChainedUnit } from './audit.js';
+import { type CaseDeps, setLegalHoldInTx } from './cases.js';
 import type { SarRecord, SarStore } from './stores.js';
 
 type Clock = () => number;
@@ -34,66 +34,52 @@ const sarErr = (status: number, code: string, message: string): SarError => ({
 });
 export type SarOutcome = SarError | { ok: true; record: SarRecord };
 
-/** Draft a SAR from a qualifying case (counsel).  Applies the legal hold. */
+/**
+ * Draft a SAR (counsel).  The legal hold and the report are ONE unit: a hold
+ * with no report would pin the case out of retention forever for a draft that
+ * does not exist, and a report with no hold would let retention reach the very
+ * records it is filed about.  Neither half can outlive the other.
+ */
 export async function createSarDraft(
   deps: SarDeps,
   input: { caseId: string; jurisdiction: string; narrative: string; actorUserId: string },
 ): Promise<SarOutcome> {
-  // The hold state BEFORE this draft touches it: the case may already be held
-  // for an EARLIER SAR or lawful-access request, and that obligation is not
-  // this draft's to undo (see the rollback below).
-  const before = await deps.caseDeps.cases.getById(input.caseId);
-  if (before === null) return sarErr(404, 'not_found', 'Resource not found');
-  const alreadyHeld = before.retentionPolicy.legal_hold;
-  const held = await setLegalHold(deps.caseDeps, {
-    caseId: input.caseId,
-    hold: true,
-    actorUserId: input.actorUserId,
-    // Neutral wording: reviewers see the hold, never the report (anti-tipping-off).
-    reason: 'Legal hold applied pending regulatory review.',
-  });
-  if (!held.ok) return sarErr(held.status, held.code, held.message);
-  const nowIso = new Date(deps.now()).toISOString();
-  let record: SarRecord;
   try {
-    record = await deps.sars.insert({
-      sarId: deps.uuid(),
-      caseId: input.caseId,
-      jurisdiction: input.jurisdiction,
-      status: 'draft',
-      narrative: input.narrative,
-      filingRef: null,
-      filedAt: null,
-      partnerFiled: false,
-      createdByRef: deps.opaqueRef(input.actorUserId),
-      approvedByRef: null,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    });
-  } catch {
-    // Undo only what THIS draft did.  The hold exists for the report, so with
-    // no report it would pin the case out of retention indefinitely and every
-    // retry would stack another hold + entry — but if an EARLIER SAR or
-    // lawful-access request already held the case, that obligation is still
-    // live and releasing it here would let retention reach records the other
-    // request still protects.  So: release only a hold this call introduced.
-    const released = alreadyHeld
-      ? { ok: true as const }
-      : await setLegalHold(deps.caseDeps, {
+    return await runChainedUnit(
+      deps.caseDeps.transactor,
+      async (stores) => {
+        const held = await setLegalHoldInTx(stores, deps.caseDeps, {
           caseId: input.caseId,
-          hold: false,
+          hold: true,
           actorUserId: input.actorUserId,
-          reason: 'Legal hold released: the regulatory record it was applied for was not created.',
+          // Neutral wording: reviewers see the hold, never the report
+          // (anti-tipping-off).
+          reason: 'Legal hold applied pending regulatory review.',
         });
-    return sarErr(
-      503,
-      'sar_unavailable',
-      released.ok
-        ? 'The report could not be drafted; no changes were kept.'
-        : 'The report could not be drafted and its legal hold could not be released; contact the platform team.',
+        if (!held.ok) return sarErr(held.status, held.code, held.message);
+        const nowIso = new Date(deps.now()).toISOString();
+        const record = await stores.sars.insert({
+          sarId: deps.uuid(),
+          caseId: input.caseId,
+          jurisdiction: input.jurisdiction,
+          status: 'draft',
+          narrative: input.narrative,
+          filingRef: null,
+          filedAt: null,
+          partnerFiled: false,
+          createdByRef: deps.opaqueRef(input.actorUserId),
+          approvedByRef: null,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+        return { ok: true, record };
+      },
+      'sar draft',
     );
+  } catch {
+    // The unit kept nothing: no hold, no report, no chain entry.
+    return sarErr(503, 'sar_unavailable', 'The report could not be drafted; nothing was kept.');
   }
-  return { ok: true, record };
 }
 
 /** Counsel approval (draft → approved). */

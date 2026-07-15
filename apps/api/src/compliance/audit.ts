@@ -9,15 +9,18 @@
 import { createHash } from 'node:crypto';
 import { canonicalize } from '@licio/governance';
 import {
-  appendChainedWithRetry,
   type ChainVerification,
+  MAX_CHAIN_RETRIES,
   verifyChainEntries,
 } from '../lib/hash-chain.js';
-import type {
-  CaseAuditRecord,
-  CaseAuditStore,
-  PolicyAuditRecord,
-  PolicyAuditStore,
+import {
+  type CaseAuditRecord,
+  type CaseAuditStore,
+  ChainContentionError,
+  type ComplianceTransactor,
+  type ComplianceTxStores,
+  type PolicyAuditRecord,
+  type PolicyAuditStore,
 } from './stores.js';
 
 type Clock = () => number;
@@ -57,34 +60,65 @@ export interface PolicyAuditInput {
   approvalRef: string | null;
 }
 
-export async function appendPolicyAudit(
-  deps: { policyAudit: PolicyAuditStore; now: Clock; uuid: () => string },
+/**
+ * Run a unit of work that appends to a chain, replaying it when a concurrent
+ * writer takes the parent slot.
+ *
+ * The retry lives OUT here, around the whole transaction, because that is the
+ * only place it can: the fork is arbitrated by a partial unique, and a unique
+ * violation poisons a Postgres transaction — nothing further can run inside
+ * it.  So the unit aborts, rolls back cleanly, and replays against the new
+ * head.  Every write in `work` therefore either commits WITH its chain entry
+ * or leaves no trace, which is the guarantee compensators could only
+ * approximate.
+ */
+export async function runChainedUnit<T>(
+  transactor: ComplianceTransactor,
+  work: (stores: ComplianceTxStores) => Promise<T>,
+  label: string,
+  maxRetries: number = MAX_CHAIN_RETRIES,
+): Promise<T> {
+  for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+    try {
+      return await transactor.run(work);
+    } catch (error) {
+      if (error instanceof ChainContentionError) continue;
+      throw error;
+    }
+  }
+  throw new Error(`${label} chain contended after ${maxRetries} attempts`);
+}
+
+/**
+ * Append a policy-change entry INSIDE a unit of work.  A fork raises, aborting
+ * the unit so `runChainedUnit` can replay the policy write with it.
+ */
+export async function appendPolicyAuditInTx(
+  stores: Pick<ComplianceTxStores, 'policyAudit'>,
+  deps: { now: Clock; uuid: () => string },
   input: PolicyAuditInput,
 ): Promise<PolicyAuditRecord> {
-  return appendChainedWithRetry<PolicyAuditRecord>(
-    {
-      chainHead: () => deps.policyAudit.chainHead(),
-      appendChained: (entry) => deps.policyAudit.appendChained(entry),
-    },
-    (prevHash) => {
-      const createdAt = new Date(deps.now()).toISOString();
-      const base = {
-        changeId: deps.uuid(),
-        policyId: input.policyId,
-        countryOrRegion: input.countryOrRegion,
-        changeType: input.changeType,
-        changedByRef: input.changedByRef,
-        previousValue: input.previousValue,
-        newValue: input.newValue,
-        reason: input.reason,
-        approvalRef: input.approvalRef,
-        prevHash,
-        createdAt,
-      };
-      return { ...base, integrityHash: computePolicyAuditHash(base) };
-    },
-    'jurisdiction policy audit',
-  );
+  const head = await stores.policyAudit.chainHead();
+  const createdAt = new Date(deps.now()).toISOString();
+  const base = {
+    changeId: deps.uuid(),
+    policyId: input.policyId,
+    countryOrRegion: input.countryOrRegion,
+    changeType: input.changeType,
+    changedByRef: input.changedByRef,
+    previousValue: input.previousValue,
+    newValue: input.newValue,
+    reason: input.reason,
+    approvalRef: input.approvalRef,
+    prevHash: head?.integrityHash ?? null,
+    createdAt,
+  };
+  const written = await stores.policyAudit.appendChained({
+    ...base,
+    integrityHash: computePolicyAuditHash(base),
+  });
+  if (written === null) throw new ChainContentionError('jurisdiction policy audit');
+  return written;
 }
 
 export async function verifyPolicyAuditChain(deps: {
@@ -125,30 +159,47 @@ export interface CaseAuditInput {
   note: string | null;
 }
 
-export async function appendCaseAudit(
-  deps: { caseAudit: CaseAuditStore; now: Clock; uuid: () => string },
+/**
+ * Append a case entry INSIDE a unit of work.  A fork raises, aborting the unit
+ * so `runChainedUnit` replays the mutation and its entry together.
+ */
+export async function appendCaseAuditInTx(
+  stores: Pick<ComplianceTxStores, 'caseAudit'>,
+  deps: { now: Clock; uuid: () => string },
   input: CaseAuditInput,
 ): Promise<CaseAuditRecord> {
-  return appendChainedWithRetry<CaseAuditRecord>(
-    {
-      chainHead: () => deps.caseAudit.chainHead(input.caseId),
-      appendChained: (entry) => deps.caseAudit.appendChained(entry),
-    },
-    (prevHash) => {
-      const createdAt = new Date(deps.now()).toISOString();
-      const base = {
-        auditId: deps.uuid(),
-        caseId: input.caseId,
-        action: input.action,
-        actorRef: input.actorRef,
-        beforeState: input.beforeState,
-        afterState: input.afterState,
-        note: input.note,
-        prevHash,
-        createdAt,
-      };
-      return { ...base, integrityHash: computeCaseAuditHash(base) };
-    },
+  const head = await stores.caseAudit.chainHead(input.caseId);
+  const createdAt = new Date(deps.now()).toISOString();
+  const base = {
+    auditId: deps.uuid(),
+    caseId: input.caseId,
+    action: input.action,
+    actorRef: input.actorRef,
+    beforeState: input.beforeState,
+    afterState: input.afterState,
+    note: input.note,
+    prevHash: head?.integrityHash ?? null,
+    createdAt,
+  };
+  const written = await stores.caseAudit.appendChained({
+    ...base,
+    integrityHash: computeCaseAuditHash(base),
+  });
+  if (written === null) throw new ChainContentionError('compliance case audit');
+  return written;
+}
+
+/**
+ * Append a case entry that stands ALONE (the retention sweep's own record of
+ * what it did).  Opens its own unit so it is still atomic + fork-safe.
+ */
+export async function appendCaseAudit(
+  deps: { transactor: ComplianceTransactor; now: Clock; uuid: () => string },
+  input: CaseAuditInput,
+): Promise<CaseAuditRecord> {
+  return runChainedUnit(
+    deps.transactor,
+    (stores) => appendCaseAuditInTx(stores, deps, input),
     'compliance case audit',
   );
 }

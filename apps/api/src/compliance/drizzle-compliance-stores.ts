@@ -41,6 +41,8 @@ import type {
   CaseAuditStore,
   ComplianceCaseRecord,
   ComplianceCaseStore,
+  ComplianceTransactor,
+  ComplianceTxStores,
   DisclosureAckRecord,
   DisclosureAckStore,
   DisclosureStore,
@@ -60,6 +62,11 @@ import type {
 } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
+/** The handle inside `db.transaction(...)`.  Every store here takes `Db | Tx`
+ *  so the SAME class serves an autocommit call and a unit of work — there is
+ *  no second, transaction-only copy of the queries to drift. */
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+type DbOrTx = Db | Tx;
 
 const iso = (value: Date): string => value.toISOString();
 const isoOrNull = (value: Date | null): string | null => (value === null ? null : iso(value));
@@ -102,8 +109,8 @@ function toPolicyRow(row: PolicyRowDb): JurisdictionPolicyRow {
 }
 
 export class DrizzleJurisdictionPolicyStore implements JurisdictionPolicyStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -184,14 +191,6 @@ export class DrizzleJurisdictionPolicyStore implements JurisdictionPolicyStore {
       .orderBy(asc(jurisdictionFeaturePolicies.countryOrRegion));
     return rows.map(toPolicyRow);
   }
-
-  async delete(policyId: string): Promise<boolean> {
-    const rows = await this.#db
-      .delete(jurisdictionFeaturePolicies)
-      .where(eq(jurisdictionFeaturePolicies.policyId, policyId))
-      .returning({ policyId: jurisdictionFeaturePolicies.policyId });
-    return rows.length > 0;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +217,8 @@ function toPolicyAudit(row: PolicyAuditRowDb): PolicyAuditRecord {
 }
 
 export class DrizzlePolicyAuditStore implements PolicyAuditStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -300,8 +299,8 @@ function toCaseRecord(row: CaseRowDb): ComplianceCaseRecord {
 }
 
 export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -543,8 +542,8 @@ function toCaseAudit(row: CaseAuditRowDb): CaseAuditRecord {
 }
 
 export class DrizzleCaseAuditStore implements CaseAuditStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -635,8 +634,8 @@ function toDeclaration(row: DeclarationRowDb): RegionDeclarationRecord {
 }
 
 export class DrizzleRegionDeclarationStore implements RegionDeclarationStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -712,8 +711,8 @@ function toDisclosure(row: DisclosureRowDb): DisclosureVersionRecord {
 }
 
 export class DrizzleDisclosureStore implements DisclosureStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -785,8 +784,8 @@ export class DrizzleDisclosureStore implements DisclosureStore {
 }
 
 export class DrizzleDisclosureAckStore implements DisclosureAckStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -910,8 +909,8 @@ function toPin(row: PinRowDb): WalletRiskPinRecord {
 }
 
 export class DrizzleWalletRiskPinStore implements WalletRiskPinStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -1002,8 +1001,8 @@ function toSar(row: SarRowDb): SarRecord {
 }
 
 export class DrizzleSarStore implements SarStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -1108,8 +1107,8 @@ function toLawful(row: LawfulRowDb): LawfulAccessRecord {
 }
 
 export class DrizzleLawfulAccessStore implements LawfulAccessStore {
-  readonly #db: Db;
-  constructor(db: Db) {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
     this.#db = db;
   }
 
@@ -1196,28 +1195,55 @@ export class DrizzleLawfulAccessStore implements LawfulAccessStore {
 }
 
 /** Convenience factory: every Drizzle compliance store over one client. */
-export function createDrizzleComplianceStores(db: Db): {
-  policies: DrizzleJurisdictionPolicyStore;
-  policyAudit: DrizzlePolicyAuditStore;
-  cases: DrizzleComplianceCaseStore;
-  caseAudit: DrizzleCaseAuditStore;
+/**
+ * The production `ComplianceTransactor`: ONE Postgres transaction over the
+ * `compliance` schema, so a mutation and its hash-chain entry commit together
+ * or not at all.  A chain fork raises inside the unit, which aborts the
+ * transaction — `runChainedUnit` then replays the work against the new head
+ * (a unique violation poisons a Postgres transaction, so the retry cannot
+ * live inside one).
+ */
+export class DrizzleComplianceTransactor implements ComplianceTransactor {
+  readonly #db: Db;
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async run<T>(work: (stores: ComplianceTxStores) => Promise<T>): Promise<T> {
+    return this.#db.transaction(async (tx) => work(complianceStoresOver(tx)));
+  }
+}
+
+/** The six unit-of-work stores bound to one handle (a db or a transaction). */
+function complianceStoresOver(db: DbOrTx): ComplianceTxStores {
+  return {
+    cases: new DrizzleComplianceCaseStore(db),
+    caseAudit: new DrizzleCaseAuditStore(db),
+    policies: new DrizzleJurisdictionPolicyStore(db),
+    policyAudit: new DrizzlePolicyAuditStore(db),
+    sars: new DrizzleSarStore(db),
+    lawfulAccess: new DrizzleLawfulAccessStore(db),
+  };
+}
+
+/**
+ * The production compliance adapters — stores AND the transactor together, so
+ * the boot's single `Object.assign` cannot wire Postgres stores while leaving
+ * the in-memory (non-transactional) unit of work behind.
+ */
+export function createDrizzleComplianceStores(db: Db): ComplianceTxStores & {
   declarations: DrizzleRegionDeclarationStore;
   disclosures: DrizzleDisclosureStore;
   acks: DrizzleDisclosureAckStore;
   pins: DrizzleWalletRiskPinStore;
-  sars: DrizzleSarStore;
-  lawfulAccess: DrizzleLawfulAccessStore;
+  transactor: ComplianceTransactor;
 } {
   return {
-    policies: new DrizzleJurisdictionPolicyStore(db),
-    policyAudit: new DrizzlePolicyAuditStore(db),
-    cases: new DrizzleComplianceCaseStore(db),
-    caseAudit: new DrizzleCaseAuditStore(db),
+    ...complianceStoresOver(db),
     declarations: new DrizzleRegionDeclarationStore(db),
     disclosures: new DrizzleDisclosureStore(db),
     acks: new DrizzleDisclosureAckStore(db),
     pins: new DrizzleWalletRiskPinStore(db),
-    sars: new DrizzleSarStore(db),
-    lawfulAccess: new DrizzleLawfulAccessStore(db),
+    transactor: new DrizzleComplianceTransactor(db),
   };
 }

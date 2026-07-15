@@ -134,23 +134,23 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     const { services, fraudRisk } = fraudFixture({
       velocityLimits: [{ periodSeconds: 3_600, maxCount: 2, maxVolumeMinorUnits: '1000000' }],
     });
-    expect(await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1' })).toBe(
-      'normal',
-    );
-    expect(await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1' })).toBe(
-      'normal',
-    );
-    expect(await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1' })).toBe(
-      'blocked',
-    );
+    expect(
+      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+    ).toBe('normal');
+    expect(
+      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+    ).toBe('normal');
+    expect(
+      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+    ).toBe('blocked');
     const cases = await services.cases.listByStates(['open'], 10);
     expect(cases).toHaveLength(1);
     expect(cases[0]?.triggerType).toBe('velocity');
     expect(cases[0]?.riskLevel).toBe('high');
     // Idempotent per window bucket: a second breach opens no duplicate case.
-    expect(await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1' })).toBe(
-      'blocked',
-    );
+    expect(
+      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+    ).toBe('blocked');
     expect(await services.cases.listByStates(['open'], 10)).toHaveLength(1);
   });
 
@@ -158,12 +158,22 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     const { services, fraudRisk } = fraudFixture({
       highValueReviewThresholdMinorUnits: '1000',
     });
-    expect(await fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '999' })).toBe(
-      'normal',
-    );
-    expect(await fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '1000' })).toBe(
-      'elevated',
-    );
+    expect(
+      await fraudRisk({
+        userId: USER,
+        actionType: 'pay',
+        amountMinorUnits: '999',
+        reviewRef: null,
+      }),
+    ).toBe('normal');
+    expect(
+      await fraudRisk({
+        userId: USER,
+        actionType: 'pay',
+        amountMinorUnits: '1000',
+        reviewRef: null,
+      }),
+    ).toBe('elevated');
     const cases = await services.cases.listByStates(['open'], 10);
     expect(cases).toHaveLength(1);
     expect(cases[0]?.triggerType).toBe('pattern');
@@ -255,9 +265,9 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
 
   it('a malformed amount is blocked (an unbounded value never passes a limiter)', async () => {
     const { fraudRisk } = fraudFixture();
-    expect(await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1.5' })).toBe(
-      'blocked',
-    );
+    expect(
+      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1.5', reviewRef: null }),
+    ).toBe('blocked');
   });
 
   it('a counter outage answers unavailable (real funds reject downstream)', async () => {
@@ -265,9 +275,9 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     services.velocity.reserve = async () => {
       throw new Error('redis down');
     };
-    expect(await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1' })).toBe(
-      'unavailable',
-    );
+    expect(
+      await fraudRisk({ userId: USER, actionType: 'a', amountMinorUnits: '1', reviewRef: null }),
+    ).toBe('unavailable');
   });
 
   it('region overrides replace the global limits (WS-N.2.2b per-jurisdiction)', () => {
@@ -335,7 +345,8 @@ describe('the high-value review is scoped to ONE attempt (WS-N.2.2c)', () => {
     // No reviewRef: two transfers are indistinguishable, so clearing one must
     // not release the other. The case still dedupes per day (no spam), but
     // the action stays held — fail-closed.
-    const check = () => fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000' });
+    const check = () =>
+      fraudRisk({ userId: USER, actionType: 'pay', amountMinorUnits: '5000', reviewRef: null });
     expect(await check()).toBe('elevated');
     const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
     const deps = buildCaseDeps(services);

@@ -73,6 +73,10 @@ apps/api/src/compliance/
 │                                   policy/case audit chains, cases, declarations,
 │                                   disclosures + acks, wallet pins, SARs, lawful-
 │                                   access, velocity counters (BigInt), screening cache)
+│                                   PLUS the ComplianceTransactor: the unit of work
+│                                   every mutation runs in, so a change and its chain
+│                                   entry commit together or not at all (the in-memory
+│                                   adapter emulates it by snapshot/restore)
 ├── drizzle-compliance-stores.ts -- gated Postgres adapters (chain tip via
 │                                   hash-NOT-IN-prev_hash, 23505-as-null idempotency,
 │                                   the GUC-sanctioned retention delete)
@@ -169,6 +173,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   verifies it; the locale subtag is a weaker basis that never unlocks
   real-funds cells.  There is no detection path to "correct" a declaration —
   that would require reading the network address.
+- **The port's args are required, not optional.**  `jurisdiction` takes
+  `featureCell` and `asset`, and `fraudRisk` takes `reviewRef`, as **required
+  properties with nullable values**. As optionals they were forgettable, and a
+  caller that forgot one silently got the broader verdict — three review rounds
+  found the cell missing from a different caller each time, and the asset gate
+  missing from every one. Required-and-nullable makes the compiler ask each call
+  site (including the next one anyone writes) what it is exercising, so `null`
+  is a decision on the record rather than an omission nobody sees.
 - **Fail-closed everywhere, in the right direction.**  Missing policy,
   malformed policy row, screening outage, velocity-counter outage, unknown
   region — each maps to the consumer verdict that DENIES real funds while
@@ -204,27 +216,36 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   real funds on for a region by quoting a reference at themselves. Narrowing
   writes (disabled/testnet/simulated/pending-legal) stay open to the
   compliance role: they can only reduce availability.
-- **No change outlives its audit entry.**  The chains are append-only, so an
-  audit cannot be written first and undone; instead the mutation is
-  **compensated away** when its entry will not commit — a policy insert is
-  deleted (which also frees the `(region, effective_at)` slot so the retry is
-  not blocked by a half-written change), a case creation is removed (the
-  idempotency key would otherwise make every retry return the unauditable
-  row), and a transition, legal hold, or fraud-queue release/reject is put
-  back exactly where it was. An unaudited state change is worse than a refused
-  action, and a retry could never recreate the missing entry. The one
-  deliberate exception is the case-created *event*: the case and its chain
-  entry are already committed and are the record of truth, so a failed
-  notification alerts rather than destroying an audited case.
-- **A hold and the record it exists for are one unit.**  A SAR draft that
-  cannot be stored releases the hold it applied — but **only** a hold that
-  draft introduced: a case already held for an earlier SAR or lawful-access
-  request keeps it, since that obligation is not this draft's to undo. A
-  lawful-access intake aborts (discarding its own case) rather than record a
-  request whose obligations retention could sweep away, and a **denied**
-  request releases its hold and closes its case: it obliges nothing, and
-  leaving it would keep the subject's records pinned and their crypto features
-  disabled on a request counsel rejected.
+- **No change outlives its audit entry — structurally.**  Every compliance
+  mutation runs inside a `ComplianceTransactor` unit of work
+  (`stores.ts`): the change and its hash-chain entry commit together or leave
+  no trace. A case creation, a transition, a legal hold, a policy write, a SAR
+  draft (hold + report), and a lawful-access intake (case + hold + request) are
+  each ONE unit. A chain fork aborts the unit and `runChainedUnit` replays it
+  against the new head — the retry lives outside the transaction because a
+  unique violation poisons a Postgres transaction.
+
+  This replaced six hand-written compensators. They could *state* the rule but
+  never guarantee it: each was a second failure point (a rollback can fail
+  too), each re-derived what "undo" meant, and one forgotten call site
+  silently reintroduced the defect — which is how three review rounds each
+  found the same class in a new place. The in-memory adapters emulate the
+  transaction (snapshot → run → restore) exactly as they emulate every other
+  DB protection, so dev and tests get production's semantics. Two deliberate
+  exceptions: the case-created **event** is best-effort (the case and its entry
+  are already committed and are the record of truth, so a failed notification
+  alerts rather than destroying an audited case), and the **fraud-queue
+  decision** stays compensated because its two halves live in different bounded
+  contexts — see the note in `routes/compliance.ts`.
+- **A hold and the record it exists for are one unit** — literally. A SAR draft
+  whose report cannot be stored leaves no hold, no report, and no chain entry;
+  a lawful-access intake whose hold fails leaves no case. (The compensators
+  these replaced could only undo a hold *after* committing it, so the chain
+  carried an applied-then-released pair for an event that never happened — and
+  had to reason about whether an *earlier* obligation already held the case.) A
+  **denied** request still releases its hold and closes its case explicitly: it
+  obliges nothing, and leaving it would keep the subject's records pinned and
+  their crypto features disabled on a request counsel rejected.
 - **Retention retries and drains.**  The sweep's cadence marker advances only
   on a *drained* run — neither a transient failure nor a >500-case backlog may
   burn the window, or expired cases would stay readable for another full

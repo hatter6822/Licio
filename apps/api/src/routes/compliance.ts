@@ -52,7 +52,12 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { appendCaseAudit, appendPolicyAudit, verifyPolicyAuditChain } from '../compliance/audit.js';
+import {
+  appendCaseAudit,
+  appendPolicyAuditInTx,
+  runChainedUnit,
+  verifyPolicyAuditChain,
+} from '../compliance/audit.js';
 import { addCaseNote, createCase, transitionCase } from '../compliance/cases.js';
 import { validateComplianceConfigValue } from '../compliance/config.js';
 import {
@@ -114,6 +119,25 @@ const RETENTION_SCHEDULE_KEYS: ReadonlySet<string> = new Set([
   'retentionScheduleRef',
   'eventRetentionOverrides',
 ]);
+
+/**
+ * Whether a failed policy write hit the `(country_or_region, effective_at)`
+ * unique rather than a store fault.  Inside a unit of work it is the only
+ * unique that can surface: the chain's own collisions are caught by
+ * `appendChained` and re-raised as `ChainContentionError`, which
+ * `runChainedUnit` retries instead of propagating.
+ */
+function isDuplicatePolicy(error: unknown): boolean {
+  if (error instanceof Error && error.message.includes('duplicate (country_or_region')) {
+    return true; // the in-memory adapter's emulation of the unique
+  }
+  let cursor: unknown = error;
+  for (let depth = 0; depth < 5 && cursor !== null && typeof cursor === 'object'; depth += 1) {
+    if ((cursor as { code?: unknown }).code === '23505') return true;
+    cursor = (cursor as { cause?: unknown }).cause ?? null;
+  }
+  return false;
+}
 
 /** Status-typed error responder (the tgError house idiom). */
 function failJson(
@@ -228,7 +252,17 @@ async function relatedFraudCase(
  * append-only record of WHO cleared/blocked the payment and WHY.  With no
  * fraud-class case open, one is created keyed to the intent so the decision
  * always lands on a chain.  Returns false when it could not be recorded — the
- * caller then rolls its state change back rather than move funds unaudited.
+ * caller then reverts its state change rather than move funds unaudited.
+ *
+ * THE ONE COMPENSATOR LEFT, and deliberately so.  Every other pairing in this
+ * module is a `ComplianceTransactor` unit, because both halves live in the
+ * `compliance` schema.  This pairing does not: the intent's compliance state
+ * belongs to the WS-M treasury (the `knomosis` schema, its own store, its own
+ * bounded context).  A transaction spanning them would have to hand the
+ * compliance transactor a treasury store — coupling two contexts the WS-D.3.2
+ * isolation proof deliberately keeps apart, to buy atomicity across a boundary
+ * that exists for a stronger reason.  So the pair stays compensated, and the
+ * revert is narrow: one CAS back to `flagged`, the state it came from.
  */
 async function recordIntentReviewDecision(
   services: ComplianceServices,
@@ -488,63 +522,57 @@ export function createComplianceRoutes() {
           );
         }
         const nowIso = new Date(services.now()).toISOString();
-        const previous = await services.policies.activeForRegion(
-          policyInput.country_or_region,
-          nowIso,
-        );
-        let inserted: Awaited<ReturnType<typeof services.policies.insert>>;
+        // The policy row and its chain entry are ONE unit: a live policy the
+        // chain never recorded is unauditable, and a chain entry for a policy
+        // that failed to insert is a lie.  The unit also frees the operator's
+        // retry — a rolled-back attempt leaves the (region, effective_at) slot
+        // open rather than colliding with a half-written change.
+        let previous: Awaited<ReturnType<typeof services.policies.activeForRegion>> = null;
         try {
-          inserted = await services.policies.insert({
-            policyId,
-            countryOrRegion: policyInput.country_or_region,
-            effectiveAt: policyInput.effective_at,
-            document: validated.policy,
-            createdAt: nowIso,
-          });
-        } catch {
-          return c.json(
-            deny('duplicate_policy', 'A policy for this region and effective_at already exists.'),
-            409,
-          );
-        }
-        // The chain must never miss a live policy.  The audit table is
-        // append-only, so the audit cannot be written first and undone if the
-        // insert fails; instead the policy row is COMPENSATED away when its
-        // audit entry cannot be committed, restoring "no active policy without
-        // a chain entry" and freeing the (region, effective_at) slot so the
-        // operator's retry is not blocked by a half-written change.
-        try {
-          await appendPolicyAudit(
-            { policyAudit: services.policyAudit, now: services.now, uuid: services.uuid },
-            {
-              policyId: inserted.policyId,
-              countryOrRegion: policyInput.country_or_region,
-              changeType: previous === null ? 'create' : 'update',
-              changedByRef: services.opaqueRef(auth.userId),
-              previousValue: previous?.document ?? null,
-              newValue: validated.policy,
-              reason,
-              approvalRef: approval_ref ?? null,
+          await runChainedUnit(
+            services.transactor,
+            async (stores) => {
+              previous = await stores.policies.activeForRegion(
+                policyInput.country_or_region,
+                nowIso,
+              );
+              const inserted = await stores.policies.insert({
+                policyId,
+                countryOrRegion: policyInput.country_or_region,
+                effectiveAt: policyInput.effective_at,
+                document: validated.policy,
+                createdAt: nowIso,
+              });
+              await appendPolicyAuditInTx(stores, services, {
+                policyId: inserted.policyId,
+                countryOrRegion: policyInput.country_or_region,
+                changeType: previous === null ? 'create' : 'update',
+                changedByRef: services.opaqueRef(auth.userId),
+                previousValue: previous === null ? null : previous.document,
+                newValue: validated.policy,
+                reason,
+                approvalRef: approval_ref ?? null,
+              });
             },
+            'jurisdiction policy write',
           );
         } catch (error) {
-          const rolledBack = await services.policies
-            .delete(inserted.policyId)
-            .then(() => true)
-            .catch(() => false);
-          services.metrics.increment('compliance.policy.audit_failed');
-          services.alert('compliance.policy.audit_failed', {
+          // The `(region, effective_at)` unique is the only expected failure
+          // here; anything else (an audit-store outage) rolled the whole unit
+          // back, so nothing went live.
+          if (isDuplicatePolicy(error)) {
+            return c.json(
+              deny('duplicate_policy', 'A policy for this region and effective_at already exists.'),
+              409,
+            );
+          }
+          services.metrics.increment('compliance.policy.write_failed');
+          services.alert('compliance.policy.write_failed', {
             region: policyInput.country_or_region,
-            rolledBack,
             message: error instanceof Error ? error.message : 'unknown',
           });
           return c.json(
-            deny(
-              'audit_unavailable',
-              rolledBack
-                ? 'The policy change was not applied: its audit entry could not be recorded.'
-                : 'The policy change could not be audited and could not be rolled back; contact the platform team before retrying.',
-            ),
+            deny('audit_unavailable', 'The policy change was not applied and nothing was kept.'),
             503,
           );
         }

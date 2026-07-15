@@ -796,7 +796,14 @@ describe('ports (WS-L.3.1b / §19.1 region)', () => {
     expect(
       await defaultCompliancePort.screenAddress({ addressLower: '0x', deploymentId: 'd' }),
     ).toBe('unavailable');
-    expect(await defaultCompliancePort.jurisdiction({ userId: 'u', region: null })).toBe('unknown');
+    expect(
+      await defaultCompliancePort.jurisdiction({
+        userId: 'u',
+        region: null,
+        featureCell: null,
+        asset: null,
+      }),
+    ).toBe('unknown');
     expect(await defaultCompliancePort.walletRisk({ walletAccountId: 'w', userId: 'u' })).toBe(
       'unavailable',
     );

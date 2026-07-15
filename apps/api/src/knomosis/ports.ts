@@ -45,15 +45,19 @@ export interface CompliancePort {
    * preflight and submit of the same action share it (the bound typed-data
    * hash), while a different intent/nonce is a different attempt.  A
    * high-value review a compliance reviewer clears applies to THAT attempt
-   * only; without the ref the engine cannot tell two transfers apart and
-   * keeps the action held (fail-closed) rather than letting a cleared review
-   * cover every later transfer of the same amount.
+   * only; `null` means the caller cannot identify the attempt, so the engine
+   * withholds the cleared-review exit (fail-closed) rather than let one
+   * clearance cover every later transfer of the same amount.
+   *
+   * REQUIRED, not optional: a caller that forgets it would silently take the
+   * weaker path, so the compiler makes every consumer decide (see the
+   * `jurisdiction` note below).
    */
   fraudRisk(args: {
     userId: string;
     actionType: string;
     amountMinorUnits: string | null;
-    reviewRef?: string;
+    reviewRef: string | null;
   }): Promise<FraudVerdict>;
   /**
    * Whether crypto features are available in the user's jurisdiction.
@@ -70,13 +74,22 @@ export interface CompliancePort {
    * `asset_flags` are a per-region prohibition list in their own right — a
    * region can permit payments while barring a specific asset — so a
    * cell-only verdict would let a barred asset through on its cell's
-   * approval.  Actions that move no asset (the governance signatures) omit it.
+   * approval.  `null` = this action moves no asset (the governance
+   * signatures).
+   *
+   * Both are REQUIRED with nullable values, deliberately.  As optionals they
+   * were forgettable, and every consumer that forgot one silently got the
+   * broader verdict: three review rounds found the cell missing from a
+   * different caller each time, and the asset gate missing from all of them.
+   * Required-and-nullable makes the compiler ask every call site — including
+   * the next one anyone writes — what it is exercising, so `null` becomes a
+   * decision on the record instead of an omission nobody sees.
    */
   jurisdiction(args: {
     userId: string;
     region: string | null;
-    featureCell?: CryptoFeatureCell;
-    asset?: string;
+    featureCell: CryptoFeatureCell | null;
+    asset: string | null;
   }): Promise<JurisdictionVerdict>;
   /** Coarse wallet risk assessment (WS-L.2.5c-1); label + safe explanation
    *  only — raw sanctions/fraud internals never cross this seam. */

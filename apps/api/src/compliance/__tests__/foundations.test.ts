@@ -7,9 +7,10 @@
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
 import {
-  appendPolicyAudit,
+  appendPolicyAuditInTx,
   computeCaseAuditHash,
   computePolicyAuditHash,
+  runChainedUnit,
   verifyPolicyAuditChain,
 } from '../audit.js';
 import { createCase, setLegalHold } from '../cases.js';
@@ -95,8 +96,10 @@ describe('the region resolution ladder (WS-N.1.1b — identity-free)', () => {
 describe('the policy audit chain (WS-N.1.1g)', () => {
   it('appends, verifies, and detects tampering + attribution rewrites', async () => {
     const s = services();
-    const deps = { policyAudit: s.policyAudit, now: s.now, uuid: s.uuid };
-    await appendPolicyAudit(deps, {
+    // Through the REAL unit of work — the policy write's own path.
+    const appendPolicyAudit = (input: Parameters<typeof appendPolicyAuditInTx>[2]) =>
+      runChainedUnit(s.transactor, (stores) => appendPolicyAuditInTx(stores, s, input), 'test');
+    await appendPolicyAudit({
       policyId: '11111111-1111-4111-8111-111111111111',
       countryOrRegion: 'DE',
       changeType: 'create',
@@ -106,7 +109,7 @@ describe('the policy audit chain (WS-N.1.1g)', () => {
       reason: 'initial',
       approvalRef: null,
     });
-    await appendPolicyAudit(deps, {
+    await appendPolicyAudit({
       policyId: '11111111-1111-4111-8111-111111111111',
       countryOrRegion: 'DE',
       changeType: 'update',

@@ -183,12 +183,11 @@ export interface JurisdictionPolicyStore {
   hasOnlyFutureRows(region: string, nowIso: string): Promise<boolean>;
   listByRegion(region: string): Promise<JurisdictionPolicyRow[]>;
   listAll(): Promise<JurisdictionPolicyRow[]>;
-  /** Compensating removal for a policy whose audit entry could not be
-   *  committed (WS-N.1.1g): the chain must never miss a LIVE policy, so an
-   *  unauditable write is undone rather than left active.  Not an operator
-   *  affordance — no route deletes a policy (superseding it is a new version,
-   *  which the chain records). */
-  delete(policyId: string): Promise<boolean>;
+  // No `delete`: a policy is superseded by a NEW version (which the chain
+  // records), never removed.  The one caller that ever needed removal was the
+  // compensator for an unauditable write — the unit of work made both the
+  // compensator and the affordance unnecessary, and an unused delete path on
+  // regulatory rows is a liability, not a convenience.
 }
 
 export interface PolicyAuditStore {
@@ -339,6 +338,93 @@ export interface LawfulAccessStore {
   ): Promise<LawfulAccessRecord | null>;
 }
 
+// ---------------------------------------------------------------------------
+// The unit of work (WS-N.1.1g / 2.1c).
+// ---------------------------------------------------------------------------
+
+/** The stores a compliance unit of work may write.  All live in the ONE
+ *  `compliance` schema, so a real database transaction spans them. */
+export interface ComplianceTxStores {
+  cases: ComplianceCaseStore;
+  caseAudit: CaseAuditStore;
+  policies: JurisdictionPolicyStore;
+  policyAudit: PolicyAuditStore;
+  sars: SarStore;
+  lawfulAccess: LawfulAccessStore;
+}
+
+/**
+ * Runs a unit of work in which EVERY write commits together or none does.
+ *
+ * This is the structural answer to the rule the module is built on: no
+ * compliance change may outlive its hash-chain entry, and no chain entry may
+ * describe a change that did not happen.  Hand-written compensators can state
+ * that rule but never guarantee it — each one is a second failure point (a
+ * rollback can itself fail), each one has to re-derive what "undo" means, and
+ * one forgotten call site silently reintroduces the defect.  A transaction
+ * makes the pairing unforgeable instead: the mutation and its entry are one
+ * write, and a fork or a fault leaves nothing behind to repair.
+ *
+ * The chain's parent slot is arbitrated by a partial unique, so a concurrent
+ * writer aborts the whole unit — `runChainedUnit` re-reads the head and
+ * replays the work.  That is why the retry lives OUTSIDE: a unique violation
+ * poisons a Postgres transaction, so retrying within one is impossible.
+ */
+export interface ComplianceTransactor {
+  run<T>(work: (stores: ComplianceTxStores) => Promise<T>): Promise<T>;
+}
+
+/** Thrown inside a unit when the chain's parent slot was taken concurrently;
+ *  aborts the transaction so `runChainedUnit` can replay against the new head. */
+export class ChainContentionError extends Error {
+  constructor(label: string) {
+    super(`${label}: the audit chain's parent slot was taken concurrently`);
+    this.name = 'ChainContentionError';
+  }
+}
+
+/**
+ * The in-memory adapters' ROLLBACK (the house rule: they emulate every DB
+ * protection, and a transaction is one).  Returning an undo CLOSURE keeps each
+ * store's snapshot private — no row shape escapes through the transactor.
+ */
+export interface InMemoryRollback {
+  /** Capture the current rows; the returned closure puts them back. */
+  beginRollback(): () => void;
+}
+
+/**
+ * The in-memory `ComplianceTransactor`: snapshot → run → restore on ANY throw,
+ * giving tests and dev the same all-or-nothing semantics Postgres gives
+ * production.  Re-entrant runs JOIN the outer unit rather than nesting a
+ * second snapshot, so a composite (a SAR draft applying a hold, say) commits
+ * once — matching the single transaction the Drizzle adapter opens.
+ */
+export class InMemoryComplianceTransactor implements ComplianceTransactor {
+  readonly #stores: ComplianceTxStores;
+  readonly #rollbacks: readonly InMemoryRollback[];
+  #depth = 0;
+
+  constructor(stores: ComplianceTxStores, rollbacks: readonly InMemoryRollback[]) {
+    this.#stores = stores;
+    this.#rollbacks = rollbacks;
+  }
+
+  async run<T>(work: (stores: ComplianceTxStores) => Promise<T>): Promise<T> {
+    if (this.#depth > 0) return work(this.#stores); // join the ambient unit
+    const undo = this.#rollbacks.map((store) => store.beginRollback());
+    this.#depth += 1;
+    try {
+      return await work(this.#stores);
+    } catch (error) {
+      for (const restore of undo) restore();
+      throw error;
+    } finally {
+      this.#depth -= 1;
+    }
+  }
+}
+
 /** Screening-verdict cache (WS-N.2.2a; Redis in production). */
 export interface ScreeningCacheStore {
   get(key: string): Promise<string | null>;
@@ -373,8 +459,16 @@ export interface PolicyInvalidationBroadcaster {
 // In-memory adapters.
 // ---------------------------------------------------------------------------
 
-export class InMemoryJurisdictionPolicyStore implements JurisdictionPolicyStore {
+export class InMemoryJurisdictionPolicyStore implements JurisdictionPolicyStore, InMemoryRollback {
   readonly #rows: JurisdictionPolicyRow[] = [];
+
+  beginRollback(): () => void {
+    const snapshot = this.#rows.map((row) => ({ ...row }));
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...snapshot);
+    };
+  }
 
   async insert(row: JurisdictionPolicyRow): Promise<JurisdictionPolicyRow> {
     if (
@@ -410,17 +504,18 @@ export class InMemoryJurisdictionPolicyStore implements JurisdictionPolicyStore 
   async listAll(): Promise<JurisdictionPolicyRow[]> {
     return this.#rows.map((r) => ({ ...r }));
   }
-
-  async delete(policyId: string): Promise<boolean> {
-    const index = this.#rows.findIndex((r) => r.policyId === policyId);
-    if (index === -1) return false;
-    this.#rows.splice(index, 1);
-    return true;
-  }
 }
 
-export class InMemoryPolicyAuditStore implements PolicyAuditStore {
+export class InMemoryPolicyAuditStore implements PolicyAuditStore, InMemoryRollback {
   readonly #rows: PolicyAuditRecord[] = [];
+
+  beginRollback(): () => void {
+    const snapshot = this.#rows.map((row) => ({ ...row }));
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...snapshot);
+    };
+  }
 
   async chainHead(): Promise<PolicyAuditRecord | null> {
     const last = this.#rows[this.#rows.length - 1];
@@ -440,8 +535,17 @@ export class InMemoryPolicyAuditStore implements PolicyAuditStore {
   }
 }
 
-export class InMemoryComplianceCaseStore implements ComplianceCaseStore {
+export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemoryRollback {
   readonly #rows = new Map<string, ComplianceCaseRecord>();
+
+  beginRollback(): () => void {
+    const snapshot = new Map([...this.#rows].map(([key, row]) => [key, { ...row }] as const));
+    return () => {
+      this.#rows.clear();
+      for (const [key, row] of snapshot) this.#rows.set(key, row);
+    };
+  }
+
   /** Cross-store deletion guard (mirrors the SAR FK RESTRICT). */
   sarGuard: ((caseId: string) => Promise<boolean>) | null = null;
   /** Cascade hook (mirrors the Drizzle adapter's single GUC transaction:
@@ -589,8 +693,16 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore {
   }
 }
 
-export class InMemoryCaseAuditStore implements CaseAuditStore {
+export class InMemoryCaseAuditStore implements CaseAuditStore, InMemoryRollback {
   readonly #rows: CaseAuditRecord[] = [];
+
+  beginRollback(): () => void {
+    const snapshot = this.#rows.map((row) => ({ ...row }));
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...snapshot);
+    };
+  }
 
   async chainHead(caseId: string): Promise<CaseAuditRecord | null> {
     for (let i = this.#rows.length - 1; i >= 0; i -= 1) {
@@ -788,8 +900,16 @@ export class InMemoryWalletRiskPinStore implements WalletRiskPinStore {
   }
 }
 
-export class InMemorySarStore implements SarStore {
+export class InMemorySarStore implements SarStore, InMemoryRollback {
   readonly #rows = new Map<string, SarRecord>();
+
+  beginRollback(): () => void {
+    const snapshot = new Map([...this.#rows].map(([key, row]) => [key, { ...row }] as const));
+    return () => {
+      this.#rows.clear();
+      for (const [key, row] of snapshot) this.#rows.set(key, row);
+    };
+  }
 
   async insert(record: SarRecord): Promise<SarRecord> {
     this.#rows.set(record.sarId, { ...record });
@@ -830,8 +950,16 @@ export class InMemorySarStore implements SarStore {
   }
 }
 
-export class InMemoryLawfulAccessStore implements LawfulAccessStore {
+export class InMemoryLawfulAccessStore implements LawfulAccessStore, InMemoryRollback {
   readonly #rows = new Map<string, LawfulAccessRecord>();
+
+  beginRollback(): () => void {
+    const snapshot = new Map([...this.#rows].map(([key, row]) => [key, { ...row }] as const));
+    return () => {
+      this.#rows.clear();
+      for (const [key, row] of snapshot) this.#rows.set(key, row);
+    };
+  }
 
   async insert(record: LawfulAccessRecord): Promise<LawfulAccessRecord> {
     this.#rows.set(record.requestId, { ...record });

@@ -168,14 +168,14 @@ export function evaluateAvailability(input: AvailabilityInput): FeatureAvailabil
 
 /**
  * The `CompliancePort.jurisdiction` verdict (pure; see the header).  `cell`
- * scopes it to the policy cell the caller is about to exercise; omitting it
- * keeps the region-wide reading.  `asset` names the asset a fund-moving action
- * would move, which the policy gates INDEPENDENTLY of the cell.
+ * scopes it to the policy cell the caller is about to exercise; `null` keeps
+ * the region-wide reading.  `asset` names the asset a fund-moving action would
+ * move (`null` = none), which the policy gates INDEPENDENTLY of the cell.
  */
 export function coarseVerdict(
   input: AvailabilityInput,
-  cell?: CryptoFeatureCell,
-  asset?: string,
+  cell: CryptoFeatureCell | null = null,
+  asset: string | null = null,
 ): JurisdictionVerdict {
   if (input.ageBand !== null && isMinorBand(input.ageBand)) return 'blocked';
   if (input.complianceHold) return 'blocked';
@@ -183,7 +183,7 @@ export function coarseVerdict(
   if (policy !== null && CRYPTO_FEATURE_CELLS.every((c) => policy.feature_flags[c] === 'blocked')) {
     return 'blocked';
   }
-  if (asset !== undefined && policy !== null) {
+  if (asset !== null && policy !== null) {
     // `asset_flags` is a prohibition list in its own right: a region can allow
     // payments while barring a specific asset, so the cell's approval alone
     // must not carry a barred one.  Explicit `false` PROHIBITS; an asset the
@@ -193,7 +193,7 @@ export function coarseVerdict(
     if (allowed === false) return 'blocked';
     if (allowed !== true) return 'unknown';
   }
-  if (cell !== undefined) {
+  if (cell !== null) {
     // Cell-scoped: the region has spoken about THIS cell, so honor it.  A
     // missing/invalid policy stays `unknown` (no decision was reached — the
     // shipped testnet behavior), never a silent block or pass.

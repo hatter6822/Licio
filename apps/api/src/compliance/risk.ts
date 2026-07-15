@@ -66,6 +66,10 @@ export function limitsForRegion(
 
 export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'] {
   return async ({ userId, actionType, amountMinorUnits, reviewRef }): Promise<FraudVerdict> => {
+    // `null` = the caller cannot identify the attempt.  Normalized once here:
+    // the port's contract is nullable, and an `undefined` check would treat
+    // `null` as "an attempt was named" and hand it the cleared-review exit.
+    const attempt = reviewRef ?? null;
     const amount = amountMinorUnits ?? '0';
     if (!AMOUNT_RE.test(amount)) {
       // An unparseable amount can never be bounded — fail affirmatively closed.
@@ -130,15 +134,15 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
         // indistinguishable, so the case is still deduped per day (no spam)
         // but the cleared-review exit below is withheld (fail-closed).
         idempotencyKey:
-          reviewRef === undefined
+          attempt === null
             ? `highvalue:${userId}:${actionType}:${amount}:${dayBucket(nowMs)}`
-            : `highvalue:${userId}:${actionType}:${amount}:${reviewRef}`,
+            : `highvalue:${userId}:${actionType}:${amount}:${attempt}`,
       });
       // The review loop's exit: a reviewer who CLEARED THIS attempt lets its
       // retry through.  Anything else — in flight, or resolved to a
       // non-cleared outcome — stays held.
       if (
-        reviewRef !== undefined &&
+        attempt !== null &&
         opened.ok &&
         opened.record.reviewState === 'resolved' &&
         opened.record.resolution?.outcome === 'cleared'

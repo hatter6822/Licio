@@ -17,12 +17,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
 import { InMemoryJobLeaseStore } from '../../identity/job-lease.js';
 import { appendCaseAudit } from '../audit.js';
-import { createCase } from '../cases.js';
+import { createCase, transitionCase } from '../cases.js';
 import {
   buildEventRetentionOverrides,
   runRetentionSweep,
   scrubUserSubjectForErasure,
 } from '../retention.js';
+import { createSarDraft } from '../sar.js';
 import {
   COMPLIANCE_SCHEDULER_INTERVAL_MS,
   resetComplianceSchedulerForTests,
@@ -37,6 +38,8 @@ import {
   createInMemoryComplianceServices,
 } from '../services.js';
 import type { ComplianceCaseRecord } from '../stores.js';
+
+const ACTOR = '9a8619ff-8b86-4d01-b42d-00cf4fc96422';
 
 let services: ComplianceServices;
 let nowMs = Date.parse('2026-07-15T00:00:00.000Z');
@@ -570,5 +573,123 @@ describe('the DSAR export is complete (WS-N.2.1a)', () => {
     const exported = await buildComplianceExport(services)(userId);
     // The archive is the user's WHOLE compliance footprint, not a list view.
     expect((exported['compliance_cases'] as unknown[]).length).toBe(205);
+  });
+});
+
+describe('the unit of work (WS-N.1.1g / 2.1c)', () => {
+  it('commits the mutation and its chain entry together', async () => {
+    const record = await seedCase({ reviewState: 'open' });
+    const outcome = await transitionCase(buildCaseDeps(services), {
+      caseId: record.caseId,
+      to: 'assigned',
+      actorUserId: ACTOR,
+      isSenior: false,
+      assigneeUserId: ACTOR,
+    });
+    expect(outcome.ok).toBe(true);
+    expect((await services.cases.getById(record.caseId))?.reviewState).toBe('assigned');
+    expect((await services.caseAudit.listChained(record.caseId)).map((e) => e.action)).toContain(
+      'transition:assigned',
+    );
+  });
+
+  it('rolls back EVERY write in the unit when any one fails', async () => {
+    const record = await seedCase({ reviewState: 'open' });
+    services.caseAudit.appendChained = async () => {
+      throw new Error('audit store down');
+    };
+    const outcome = await transitionCase(buildCaseDeps(services), {
+      caseId: record.caseId,
+      to: 'assigned',
+      actorUserId: ACTOR,
+      isSenior: false,
+      assigneeUserId: ACTOR,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error('unreachable');
+    expect(outcome.status).toBe(503);
+    expect(outcome.code).toBe('audit_unavailable');
+    // The case never moved: no compensator ran, there was simply nothing to
+    // undo — which is the difference between "we put it back" and "it never
+    // happened".
+    const after = await services.cases.getById(record.caseId);
+    expect(after?.reviewState).toBe('open');
+    expect(after?.assignedTo).toBeNull();
+  });
+
+  it('REPLAYS the whole unit when a concurrent writer takes the parent slot', async () => {
+    const record = await seedCase({ reviewState: 'open' });
+    const store = services.caseAudit;
+    const realAppend = store.appendChained.bind(store);
+    let attempts = 0;
+    store.appendChained = async (entry) => {
+      attempts += 1;
+      // The first attempt loses the parent slot, exactly as the partial unique
+      // arbitrates it in Postgres.
+      if (attempts === 1) return null;
+      return realAppend(entry);
+    };
+    const outcome = await transitionCase(buildCaseDeps(services), {
+      caseId: record.caseId,
+      to: 'assigned',
+      actorUserId: ACTOR,
+      isSenior: false,
+      assigneeUserId: ACTOR,
+    });
+    expect(outcome.ok).toBe(true);
+    expect(attempts).toBe(2);
+    // Replayed, not double-applied: ONE transition, ONE entry.
+    expect((await services.cases.getById(record.caseId))?.reviewState).toBe('assigned');
+    const trail = await services.caseAudit.listChained(record.caseId);
+    expect(trail.filter((e) => e.action === 'transition:assigned')).toHaveLength(1);
+  });
+
+  it('gives up after bounded retries rather than spinning on contention', async () => {
+    const record = await seedCase({ reviewState: 'open' });
+    services.caseAudit.appendChained = async () => null; // never wins the slot
+    const outcome = await transitionCase(buildCaseDeps(services), {
+      caseId: record.caseId,
+      to: 'assigned',
+      actorUserId: ACTOR,
+      isSenior: false,
+      assigneeUserId: ACTOR,
+    });
+    expect(outcome.ok).toBe(false);
+    expect((await services.cases.getById(record.caseId))?.reviewState).toBe('open');
+  });
+
+  it('composes: a SAR draft holds the case and files the report in ONE unit', async () => {
+    const record = await seedCase();
+    const sarDeps = {
+      sars: services.sars,
+      caseDeps: buildCaseDeps(services),
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const drafted = await createSarDraft(sarDeps, {
+      caseId: record.caseId,
+      jurisdiction: 'DE',
+      narrative: 'A narrative.',
+      actorUserId: ACTOR,
+    });
+    expect(drafted.ok).toBe(true);
+    expect((await services.cases.getById(record.caseId))?.retentionPolicy.legal_hold).toBe(true);
+    expect(await services.sars.listByCase(record.caseId)).toHaveLength(1);
+    // …and the composite is ONE unit, not two: a failing report takes the hold
+    // and its chain entry with it.
+    const other = await seedCase();
+    services.sars.insert = async () => {
+      throw new Error('sar store down');
+    };
+    const failed = await createSarDraft(sarDeps, {
+      caseId: other.caseId,
+      jurisdiction: 'DE',
+      narrative: 'Never stored.',
+      actorUserId: ACTOR,
+    });
+    expect(failed.ok).toBe(false);
+    expect((await services.cases.getById(other.caseId))?.retentionPolicy.legal_hold).toBe(false);
+    expect(await services.caseAudit.listChained(other.caseId)).toHaveLength(0);
   });
 });

@@ -47,9 +47,10 @@ import IORedis from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   appendCaseAudit,
-  appendPolicyAudit,
+  appendPolicyAuditInTx,
   computeCaseAuditHash,
   computePolicyAuditHash,
+  runChainedUnit,
   verifyCaseAuditChain,
   verifyPolicyAuditChain,
 } from '../compliance/audit.js';
@@ -258,8 +259,13 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
   });
 
   it('policy audit chain: appends link, verify passes, and a parent slot is single-writer', async () => {
-    const deps = { policyAudit: stores.policyAudit, now: clock, uuid };
-    const first = await appendPolicyAudit(deps, {
+    const appendPolicyAudit = (input: Parameters<typeof appendPolicyAuditInTx>[2]) =>
+      runChainedUnit(
+        stores.transactor,
+        (tx) => appendPolicyAuditInTx(tx, { now: clock, uuid }, input),
+        'test',
+      );
+    const first = await appendPolicyAudit({
       policyId: randomUUID(),
       countryOrRegion: region,
       changeType: 'create',
@@ -270,7 +276,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       approvalRef: null,
     });
     policyAuditIds.push(first.changeId);
-    const second = await appendPolicyAudit(deps, {
+    const second = await appendPolicyAudit({
       policyId: first.policyId,
       countryOrRegion: region,
       changeType: 'update',
@@ -376,7 +382,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
 
   it('case audit chain: per-case genesis, GUC-gated delete, and no casual DELETE path', async () => {
     const record = track(await stores.cases.insert(caseOf(userId)));
-    const deps = { caseAudit: stores.caseAudit, now: clock, uuid };
+    const deps = { transactor: stores.transactor, now: clock, uuid };
     await appendCaseAudit(deps, {
       caseId: record.caseId,
       action: 'case_created',
@@ -442,7 +448,7 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
   it('deleteCascade removes trail + case in one sanctioned transaction; a SAR blocks it', async () => {
     const doomed = await stores.cases.insert(caseOf(userId));
     await appendCaseAudit(
-      { caseAudit: stores.caseAudit, now: clock, uuid },
+      { transactor: stores.transactor, now: clock, uuid },
       {
         caseId: doomed.caseId,
         action: 'case_created',
@@ -709,6 +715,56 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect(reviewed?.status).toBe('under_review');
     const underReview = await stores.lawfulAccess.list('under_review', 100);
     expect(underReview.some((r) => r.requestId === request.requestId)).toBe(true);
+  });
+
+  it('the unit of work is a REAL Postgres transaction: all of it, or none', async () => {
+    const caseId = randomUUID();
+    const auditId = randomUUID();
+    // A unit that writes a case AND its chain entry, then fails. Both writes
+    // have already succeeded inside the transaction when it aborts.
+    await expect(
+      stores.transactor.run(async (tx) => {
+        await tx.cases.insert({ ...caseOf(userId), caseId });
+        const base = {
+          auditId,
+          caseId,
+          action: 'created',
+          actorRef: 'ref:wsn-it',
+          beforeState: null,
+          afterState: 'open',
+          note: null,
+          prevHash: null,
+          createdAt: NOW(),
+        };
+        await tx.caseAudit.appendChained({ ...base, integrityHash: computeCaseAuditHash(base) });
+        // Postgres — not any code of ours — undoes both.
+        throw new Error('the unit failed after both writes');
+      }),
+    ).rejects.toThrow('the unit failed after both writes');
+
+    expect(await stores.cases.getById(caseId)).toBeNull();
+    expect(await stores.caseAudit.listChained(caseId)).toHaveLength(0);
+
+    // …and a unit that RETURNS commits both.
+    const committedId = randomUUID();
+    await stores.transactor.run(async (tx) => {
+      await tx.cases.insert({ ...caseOf(userId), caseId: committedId });
+      const base = {
+        auditId: randomUUID(),
+        caseId: committedId,
+        action: 'created',
+        actorRef: 'ref:wsn-it',
+        beforeState: null,
+        afterState: 'open',
+        note: null,
+        prevHash: null,
+        createdAt: NOW(),
+      };
+      await tx.caseAudit.appendChained({ ...base, integrityHash: computeCaseAuditHash(base) });
+    });
+    caseIds.push(committedId);
+    expect(await stores.cases.getById(committedId)).not.toBeNull();
+    expect(await stores.caseAudit.listChained(committedId)).toHaveLength(1);
   });
 });
 

@@ -91,7 +91,12 @@ async function expectAllDisabled(services: ComplianceServices): Promise<void> {
   for (const cell of CRYPTO_FEATURE_CELLS) {
     expect(availability.features[cell].available, `${cell} must be unavailable`).toBe(false);
   }
-  const verdict = await buildCompliancePort(services).jurisdiction({ userId: USER, region: null });
+  const verdict = await buildCompliancePort(services).jurisdiction({
+    userId: USER,
+    region: null,
+    featureCell: null,
+    asset: null,
+  });
   expect(verdict).not.toBe('allowed');
 }
 
@@ -106,6 +111,8 @@ describe('WS-N.1.1d — the eight fail-closed scenarios', () => {
     const verdict = await buildCompliancePort(services).jurisdiction({
       userId: USER,
       region: 'DE',
+      featureCell: null,
+      asset: null,
     });
     expect(verdict).toBe('allowed');
   });
@@ -244,6 +251,8 @@ describe('WS-N.1.1d — the eight fail-closed scenarios', () => {
     const verdict = await buildCompliancePort(services).jurisdiction({
       userId: USER,
       region: 'DE',
+      featureCell: null,
+      asset: null,
     });
     expect(verdict).toBe('blocked'); // §19.4: minors are affirmatively excluded
   });
@@ -269,6 +278,8 @@ describe('WS-N.1.1d — the eight fail-closed scenarios', () => {
     const verdict = await buildCompliancePort(services).jurisdiction({
       userId: USER,
       region: 'DE',
+      featureCell: null,
+      asset: null,
     });
     expect(verdict).toBe('unknown'); // not affirmatively allowed
   });
@@ -284,11 +295,17 @@ describe('the no-engine seam pin (removing WS-N can never fail open)', () => {
         userId: USER,
         actionType: 'x',
         amountMinorUnits: '1',
+        reviewRef: null,
       }),
     ).toBe('unavailable');
-    expect(await defaultCompliancePort.jurisdiction({ userId: USER, region: 'DE' })).toBe(
-      'unknown',
-    );
+    expect(
+      await defaultCompliancePort.jurisdiction({
+        userId: USER,
+        region: 'DE',
+        featureCell: null,
+        asset: null,
+      }),
+    ).toBe('unknown');
     expect(await defaultCompliancePort.walletRisk({ walletAccountId: 'w', userId: USER })).toBe(
       'unavailable',
     );
@@ -305,6 +322,8 @@ describe('the no-engine seam pin (removing WS-N can never fail open)', () => {
     const verdict = await buildCompliancePort(services).jurisdiction({
       userId: USER,
       region: 'DE',
+      featureCell: null,
+      asset: null,
     });
     expect(verdict).toBe('unknown');
   });

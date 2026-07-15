@@ -432,9 +432,7 @@ export async function submitAction(
     featureCell: ACTION_FEATURE_CELL[actionType],
     // …and the same asset gate: a region can bar an asset between preflight
     // and submit, which is exactly what this re-check exists to catch.
-    ...(input.typedDataMessage['asset'] !== undefined
-      ? { asset: input.typedDataMessage['asset'] }
-      : {}),
+    asset: input.typedDataMessage['asset'] ?? null,
   });
   if (jurisdiction === 'blocked') {
     return {
