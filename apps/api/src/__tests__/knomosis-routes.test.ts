@@ -143,6 +143,36 @@ describe('wallet HTTP flow (WS-L.2)', () => {
     const unlinkBody = (await unlink.json()) as { unlink_state: string };
     expect(unlinkBody.unlink_state).toBe('pending_unlink');
   });
+
+  it('a region block bars a NEW link but never traps an existing wallet (WS-N.1.1c)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { cookie } = await seedUserWithSession(fixture.identity, { handle: 'reg1' });
+    // Linked while the region allowed it…
+    expect((await linkOverHttp(cookie)).status).toBe(201);
+    const walletId = (
+      (await (await get('/wallets', cookie)).json()) as {
+        items: Array<{ wallet_account_id: string }>;
+      }
+    ).items[0]?.wallet_account_id as string;
+    // …then the region's policy disables the `wallet_connection` cell.
+    fixture.knomosis.compliance = {
+      ...fixture.knomosis.compliance,
+      jurisdiction: async ({ featureCell }) =>
+        featureCell === 'wallet_connection' ? 'blocked' : 'allowed',
+    };
+    // A NEW connection is barred — nonce (and by the same gate, link)…
+    const nonce = await post('/wallet/nonce', cookie, {});
+    expect(nonce.status).toBe(503);
+    expect(((await nonce.json()) as { error: { code: string } }).error.code).toBe(
+      'wallet_region_blocked',
+    );
+    // …but the member can still LIST, read risk, and — the point — UNLINK the
+    // wallet they already linked (the region block never strands it).
+    expect((await get('/wallets', cookie)).status).toBe(200);
+    expect((await get(`/wallets/${walletId}/risk-state`, cookie)).status).toBe(200);
+    const unlink = await post('/wallet/unlink/request', cookie, { wallet_account_id: walletId });
+    expect(unlink.status).toBe(200);
+  });
 });
 
 describe('deployments + manifest (WS-L.1.1a-1)', () => {

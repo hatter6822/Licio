@@ -364,9 +364,48 @@ async function assembleAvailabilityInput(
   };
 }
 
-/** Per-instance dedup of the transparency event (observability volume). */
-const emittedDisableEvents = new Map<string, number>();
 const DISABLE_EVENT_DEDUP_MS = 24 * 3_600_000;
+/** Bound the per-process dedup map.  One key per (user, feature, reason) would
+ *  otherwise accumulate forever — every distinct caller of `/availability`
+ *  leaving a key that never expires — so normal traffic grows memory without
+ *  limit.  At the cap, drop keys whose dedup window has already elapsed (they
+ *  would re-emit anyway); the live working set is bounded by the distinct
+ *  subjects seen inside one 24h window, which is the dedup's whole point. */
+const DISABLE_EVENT_MAX_KEYS = 100_000;
+
+/**
+ * A bounded, TTL-dedup gate: `should(key, nowMs)` returns true at most once per
+ * `windowMs` per key.  Expired keys are pruned once the map reaches `maxKeys`,
+ * so — unlike a plain `Map` that only ever grows — memory stays bounded by the
+ * distinct keys seen inside one window.  `size()` exposes the live key count so
+ * the bound is unit-testable with small values instead of a 100k-key stress
+ * loop (the return value alone cannot distinguish a pruned key from an expired
+ * one — both re-emit).
+ */
+export function createDedupWindow(
+  windowMs: number,
+  maxKeys: number,
+): { should: (key: string, nowMs: number) => boolean; size: () => number; clear: () => void } {
+  const seen = new Map<string, number>();
+  return {
+    should: (key, nowMs) => {
+      const last = seen.get(key);
+      if (last !== undefined && nowMs - last < windowMs) return false;
+      if (seen.size >= maxKeys) {
+        for (const [k, at] of seen) {
+          if (nowMs - at >= windowMs) seen.delete(k);
+        }
+      }
+      seen.set(key, nowMs);
+      return true;
+    },
+    size: () => seen.size,
+    clear: () => seen.clear(),
+  };
+}
+
+/** Per-instance dedup of the transparency event (observability volume). */
+const disableEventDedup = createDedupWindow(DISABLE_EVENT_DEDUP_MS, DISABLE_EVENT_MAX_KEYS);
 
 async function emitDisabledEvents(
   services: ComplianceServices,
@@ -378,10 +417,8 @@ async function emitDisabledEvents(
     if (entry.available || entry.disableReason === null) continue;
     const reason: FeatureDisableReason = entry.disableReason;
     const dedupKey = `${services.opaqueRef(userId)}:${feature}:${reason}`;
-    const last = emittedDisableEvents.get(dedupKey);
     const nowMs = services.now();
-    if (last !== undefined && nowMs - last < DISABLE_EVENT_DEDUP_MS) continue;
-    emittedDisableEvents.set(dedupKey, nowMs);
+    if (!disableEventDedup.should(dedupKey, nowMs)) continue;
     const event = registryEntry.schema.parse({
       event_id: services.uuid(),
       event_type: 'jurisdiction.feature.disabled',
@@ -659,5 +696,5 @@ export function complianceServicesConfigured(): boolean {
 
 export function resetComplianceServicesForTests(): void {
   singleton = null;
-  emittedDisableEvents.clear();
+  disableEventDedup.clear();
 }

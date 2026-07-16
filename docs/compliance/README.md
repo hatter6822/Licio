@@ -304,6 +304,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   verifies it; the locale subtag is a weaker basis that never unlocks
   real-funds cells.  There is no detection path to "correct" a declaration —
   that would require reading the network address.
+- **A region block bars new connections, never traps an existing wallet.**  The
+  `wallet_connection` cell gates issuing nonces and LINKING — the acts that
+  create a new association.  Applying it to `/wallets`, risk-state reads, label
+  edits, and `/wallet/unlink/request` would strand a member who linked before
+  the policy changed: they could neither see nor SEVER their own financial-wallet
+  association until the jurisdiction re-opened.  So management and unlink pass
+  only the base gate (crypto flag + kill switch); the region verdict is checked
+  solely on nonce/link.  Severing an association is exactly what a member should
+  keep the ability to do when a region turns unavailable.
 - **A KYC requirement is enforced, or the cell is closed.**  `kyc_policy` and
   the age gate's `assurance` were dead letters — nothing read them, so counsel
   could write "production_payments requires kyc_partner" and real funds would

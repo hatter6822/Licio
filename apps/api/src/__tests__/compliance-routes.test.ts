@@ -26,6 +26,7 @@ import { resolveCaseInTx, transitionCase } from '../compliance/cases.js';
 import {
   buildCaseDeps,
   type ComplianceServices,
+  createDedupWindow,
   createInMemoryComplianceServices,
   resetComplianceServicesForTests,
   setComplianceServices,
@@ -1932,5 +1933,43 @@ describe('a DENIED lawful-access request releases its hold (WS-N.2.3d)', () => {
     expect(produced).toBeDefined();
     expect(produced?.actorRef).toBe(compliance.opaqueRef(producer.userId));
     expect(produced?.actorRef).not.toBe(compliance.opaqueRef(counsel.userId));
+  });
+});
+
+describe('the disabled-event dedup window is bounded (WS-N.1.1c memory safety)', () => {
+  it('emits once per window and re-emits after it', () => {
+    const WINDOW = 1000;
+    const dedup = createDedupWindow(WINDOW, 100);
+    expect(dedup.should('a', 0)).toBe(true); // first sight emits
+    expect(dedup.should('a', WINDOW - 1)).toBe(false); // deduped inside the window
+    expect(dedup.should('a', WINDOW)).toBe(true); // re-emits once it elapses
+  });
+
+  it('prunes expired keys at the cap so the map cannot grow unbounded', () => {
+    const WINDOW = 1000;
+    const MAX = 3;
+    const dedup = createDedupWindow(WINDOW, MAX);
+    // Fill to the cap with keys stamped in the distant past.
+    dedup.should('x', 0);
+    dedup.should('y', 0);
+    dedup.should('z', 0);
+    expect(dedup.size()).toBe(MAX);
+    // A fresh key well past their window triggers the prune: the three expired
+    // keys drop, leaving only the newcomer — a plain Map would hold all four.
+    expect(dedup.should('w', 10 * WINDOW)).toBe(true);
+    expect(dedup.size()).toBe(1);
+  });
+
+  it('retains still-live keys when it cannot free the cap', () => {
+    const WINDOW = 1000;
+    const dedup = createDedupWindow(WINDOW, 2);
+    // Two keys, both LIVE, then a third within the window: nothing is expired to
+    // prune, so the live working set is kept (dedup correctness beats the cap).
+    dedup.should('a', 0);
+    dedup.should('b', 0);
+    expect(dedup.should('c', 1)).toBe(true);
+    expect(dedup.size()).toBe(3);
+    // 'a' is still inside its window, so it stays deduped — not evicted.
+    expect(dedup.should('a', 2)).toBe(false);
   });
 });
