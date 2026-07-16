@@ -1134,6 +1134,39 @@ export function createComplianceRoutes() {
         const services = getComplianceServices();
         if (!treasuryServicesConfigured()) return c.json(notFound, 404);
         const body = c.req.valid('json');
+        // RECORD THE DECISION FIRST, then clear.  The money must not become
+        // movable (flagged → cleared) until the durable reviewer decision is on
+        // the chain: clearing first opened a window in which a client could
+        // resume the now-cleared intent and SUBMIT before the decision recorded,
+        // then the record fails and the revert cannot undo an on-chain action —
+        // funds moved with no durable account of who allowed them.  Recording
+        // first fails CLOSED: a decision-recorded-but-not-cleared intent stays
+        // held (the safe direction), never a cleared-but-unrecorded one.
+        const held = await getTreasuryServices().intents.getById(body.payment_intent_id);
+        if (held === null || held.complianceState !== 'flagged') {
+          return c.json(deny('not_flagged', 'The intent is not held for review.'), 409);
+        }
+        const recorded = await recordIntentReviewDecision(services, {
+          intent: {
+            paymentIntentId: held.paymentIntentId,
+            userId: held.userId,
+            roomId: held.roomId,
+            targetType: held.targetType,
+            amount: held.amount,
+          },
+          decision: 'release',
+          reason: body.reason,
+          actorUserId: auth.userId,
+        });
+        if (!recorded) {
+          return c.json(
+            deny('audit_unavailable', 'The release was not applied: it could not be recorded.'),
+            503,
+          );
+        }
+        // The decision is durable — NOW clear.  A CAS miss (a concurrent
+        // reviewer, or the intent left `flagged`) leaves the decision recorded
+        // and the intent unchanged; no funds moved, and a retry is idempotent.
         const updated = await getTreasuryServices().intents.updateComplianceState(
           body.payment_intent_id,
           'flagged',
@@ -1142,28 +1175,6 @@ export function createComplianceRoutes() {
         );
         if (updated === null) {
           return c.json(deny('not_flagged', 'The intent is not held for review.'), 409);
-        }
-        // The decision must be on the chain before the money can move: if it
-        // cannot be recorded, the hold goes back on rather than release funds
-        // with no durable account of who allowed it or why.
-        const recorded = await recordIntentReviewDecision(services, {
-          intent: {
-            paymentIntentId: updated.paymentIntentId,
-            userId: updated.userId,
-            roomId: updated.roomId,
-            targetType: updated.targetType,
-            amount: updated.amount,
-          },
-          decision: 'release',
-          reason: body.reason,
-          actorUserId: auth.userId,
-        });
-        if (!recorded) {
-          await revertIntentState(services, body.payment_intent_id, 'cleared', 'flagged');
-          return c.json(
-            deny('audit_unavailable', 'The release was not applied: it could not be recorded.'),
-            503,
-          );
         }
         services.log('compliance.fraud_queue.released', {
           paymentIntentId: body.payment_intent_id,

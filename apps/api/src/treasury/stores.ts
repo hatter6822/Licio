@@ -320,6 +320,14 @@ export interface PaymentIntentStore {
   /** Returns the EXISTING intent on an idempotency-key collision (WS-M.3.1c:
    *  the key row and the intent are one write — the unique index is the record). */
   insert(record: PaymentIntentRecord): Promise<PaymentIntentRecord>;
+  /** Remove a just-created intent that its OWN create call aborted atomically
+   *  (the post-insert allowance race, WS-M.3.1a): it has no audit, no action, and
+   *  no downstream reference, and abandoning it instead would leave a terminal
+   *  row holding the idempotency key — so a retry would replay a dead intent that
+   *  can never preflight/quote/submit.  Deleting frees the key so the retry mints
+   *  a fresh attempt.  NOT a general lifecycle delete: only the create's own
+   *  atomic rollback calls it. */
+  deleteById(paymentIntentId: string): Promise<boolean>;
   /** CAS state transition — the ONLY writer of executionState (WS-M.3.1b).
    *  Returns the updated record, or null when the stored state ≠ `from`. */
   transition(
@@ -763,12 +771,27 @@ export class InMemoryReservationStore implements ReservationStore {
   }
 }
 
+/** Execution states an intent can never leave — it can neither quote/submit nor
+ *  be recovered.  A row in one of these is done: it must not appear in a LIVE
+ *  view (the fraud queue) or be replayed as a usable intent. */
+export const TERMINAL_INTENT_STATES: ReadonlySet<PaymentIntentState> = new Set([
+  'finalized',
+  'abandoned',
+  'failed',
+  'reverted',
+  'reorged',
+]);
+
 export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   readonly #rows = new Map<string, PaymentIntentRecord>();
 
   async getById(paymentIntentId: string): Promise<PaymentIntentRecord | null> {
     const row = this.#rows.get(paymentIntentId);
     return row ? clone(row) : null;
+  }
+
+  async deleteById(paymentIntentId: string): Promise<boolean> {
+    return this.#rows.delete(paymentIntentId);
   }
 
   async findByIdempotencyKey(
@@ -931,8 +954,13 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
     state: PaymentIntentRecord['complianceState'],
     limit: number,
   ): Promise<PaymentIntentRecord[]> {
+    // LIVE only — a fraud-held intent that expired/clawed back to a terminal
+    // state (its `complianceState` still `flagged`) must not ride the fraud
+    // queue: the reviewer would see a row they cannot release (it can no longer
+    // quote or submit), and stale rows would consume the page ahead of live
+    // held payments.  Filtered BEFORE the slice so the cap bounds live rows.
     return [...this.#rows.values()]
-      .filter((r) => r.complianceState === state)
+      .filter((r) => r.complianceState === state && !TERMINAL_INTENT_STATES.has(r.executionState))
       .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
       .slice(0, limit)
       .map(clone);

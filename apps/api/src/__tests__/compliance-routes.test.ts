@@ -1345,6 +1345,7 @@ describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () =
     };
     setTreasuryServices({
       intents: {
+        getById: async (id: string) => (id === intentId ? intent : null),
         listByComplianceState: async (state: string) =>
           intent.complianceState === state ? [intent] : [],
         updateComplianceState: async (id: string, from: string, to: string) => {
@@ -1472,6 +1473,7 @@ describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () =
     };
     setTreasuryServices({
       intents: {
+        getById: async (id: string) => (id === intentId ? intent : null),
         listByComplianceState: async (state: string) =>
           intent.complianceState === state ? [intent] : [],
         updateComplianceState: async (id: string, from: string, to: string) => {

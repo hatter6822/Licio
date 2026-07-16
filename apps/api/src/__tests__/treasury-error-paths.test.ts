@@ -1074,6 +1074,7 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
         return typeof value === 'function' ? value.bind(target) : value;
       },
     });
+    const key = randomUUID();
     const result = await createPaymentIntent(services, {
       userId: USER,
       roomId: ROOM,
@@ -1081,15 +1082,29 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
       targetId: treasury.treasuryId,
       asset: 'USDC',
       amount: '100',
-      idempotencyKey: randomUUID(),
+      idempotencyKey: key,
     });
     expect('code' in result && result.code).toBe('deposit_limit_exceeded');
     services.intents = raw;
-    // The overshooting row abandoned ITSELF — the competitor survives.
+    // The overshooting row DELETED itself (not abandoned) — no terminal row is
+    // left holding the idempotency key.  The competitor survives.
     const epoch = new Date(0).toISOString();
     const rows = await services.intents.listDepositsInPeriod(ROOM, epoch);
-    expect(rows.find((r) => r.amount === '100')?.executionState).toBe('abandoned');
+    expect(rows.find((r) => r.amount === '100')).toBeUndefined();
     expect(rows.find((r) => r.amount === '950')?.executionState).toBe('created');
+    // A retry with the SAME key does NOT replay a dead abandoned intent as a
+    // successful create: the key is free, so the create re-runs and answers the
+    // allowance honestly (never `{ ok: true, existing: true }` for a terminal row).
+    const retry = await createPaymentIntent(services, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: key,
+    });
+    expect('code' in retry && retry.code).toBe('deposit_limit_exceeded');
   });
 
   it('self-releases a reservation that a concurrent approval pushed over the window cap', async () => {

@@ -647,13 +647,13 @@ export function createTreasuryGovernanceRoutes() {
         ),
         async (c) => {
           const auth = requireAuth(c);
-          const gate = flagGate('crypto');
-          if (gate) return c.json(deny(gate.code, gate.message), 503);
           const services = getTreasuryServices();
           const { roomId, paymentIntentId } = c.req.valid('param');
+          const body = c.req.valid('json');
           // A lifecycle step mutates SOMEONE'S financial intent: it must belong
           // to this room and to the caller (or a room steward) — an intent id
-          // alone is never authorization (mirrors the GET above).
+          // alone is never authorization (mirrors the GET above).  Authorization
+          // FIRST, before the mint gate.
           const target = await services.intents.getById(paymentIntentId);
           if (target === null || target.roomId !== roomId) return c.json(notFound, 404);
           if (
@@ -662,7 +662,18 @@ export function createTreasuryGovernanceRoutes() {
           ) {
             return c.json(notFound, 404);
           }
-          const body = c.req.valid('json');
+          // The crypto flag gates a NEW fund movement — every step EXCEPT the
+          // ATTACH (`signed` + action_record_id).  That step is BOOKKEEPING for an
+          // action `/actions/submit` already placed on chain (attachIntentSubmission
+          // carries no writability guard for exactly this reason, W15), so an
+          // operator disabling crypto between submit and attach must not reject it
+          // with 503 and strand the signed intent outside the ledger/export until
+          // background reconciliation catches it.
+          const isAttach = body.step === 'signed' && body.action_record_id !== undefined;
+          if (!isAttach) {
+            const gate = flagGate('crypto');
+            if (gate) return c.json(deny(gate.code, gate.message), 503);
+          }
           const result =
             body.step === 'preflight'
               ? await preflightIntent(services, paymentIntentId, auth.userId)

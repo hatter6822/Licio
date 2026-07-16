@@ -49,7 +49,7 @@ import type {
   TreasuryRecord,
   TreasuryStore,
 } from './stores.js';
-import { projectGrantAggregates } from './stores.js';
+import { projectGrantAggregates, TERMINAL_INTENT_STATES } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -570,6 +570,16 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     return rows[0] ? mapIntent(rows[0]) : null;
   }
 
+  async deleteById(paymentIntentId: string): Promise<boolean> {
+    // The create's own atomic rollback only (see the interface): a just-inserted
+    // row with no audit / action / downstream reference.
+    const rows = await this.db
+      .delete(paymentIntents)
+      .where(eq(paymentIntents.paymentIntentId, paymentIntentId))
+      .returning({ paymentIntentId: paymentIntents.paymentIntentId });
+    return rows.length > 0;
+  }
+
   async findByIdempotencyKey(
     userId: string | null,
     roomId: string,
@@ -798,10 +808,17 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     state: PaymentIntentRecord['complianceState'],
     limit: number,
   ): Promise<PaymentIntentRecord[]> {
+    // LIVE only (see the in-memory adapter): a fraud-held intent that expired to
+    // a terminal state must not ride the fraud queue nor consume its page.
     const rows = await this.db
       .select()
       .from(paymentIntents)
-      .where(eq(paymentIntents.complianceState, state))
+      .where(
+        and(
+          eq(paymentIntents.complianceState, state),
+          notInArray(paymentIntents.executionState, [...TERMINAL_INTENT_STATES]),
+        ),
+      )
       .orderBy(asc(paymentIntents.createdAt))
       .limit(limit);
     return rows.map(mapIntent);

@@ -377,6 +377,47 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect(fraudCalls).toBe(1);
   });
 
+  it('listByComplianceState returns LIVE flagged intents only, never terminal ones (thread-O)', async () => {
+    const store = new InMemoryPaymentIntentStore();
+    const base = {
+      userId: USER,
+      roomId: ROOM,
+      treasuryId: crypto.randomUUID(),
+      targetType: 'treasury_deposit' as const,
+      targetId: ROOM,
+      asset: 'USDC',
+      amount: '100',
+      jurisdictionState: 'allowed' as const,
+      complianceState: 'flagged' as const,
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: null,
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await store.insert({
+      ...base,
+      paymentIntentId: crypto.randomUUID(),
+      executionState: 'preflighted',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const deadId = crypto.randomUUID();
+    // A fraud-held intent that expired to a TERMINAL state (complianceState still
+    // `flagged`) must not ride the fraud queue.
+    await store.insert({
+      ...base,
+      paymentIntentId: deadId,
+      executionState: 'abandoned',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const listed = await store.listByComplianceState('flagged', 200);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.executionState).toBe('preflighted');
+    expect(listed.some((i) => i.paymentIntentId === deadId)).toBe(false);
+  });
+
   it('enforces the three deposit limits including in-flight aggregates', async () => {
     const deps = buildDeps();
     await provisionTreasury(deps);

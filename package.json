@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.8.32",
+  "version": "0.8.33",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",

@@ -22,13 +22,17 @@ const COMPLIANCE_JOB_LEASE = 'scheduler:compliance';
 /** The last sweep boundary this process observed (lease-holder local). */
 let lastSweepAtMs = 0;
 
-/** Reload the fail-closed runtime config — runs on EVERY worker, no lease. */
+/** Reload the fail-closed runtime config — runs on EVERY worker, no lease — then
+ *  re-project any config that other subsystems cache (`afterConfigReload`), so a
+ *  losing replica does not keep serving those from stale boot-time values. */
 async function reloadComplianceConfig(
   services: ComplianceServices,
   onError: (err: unknown, task: ComplianceSchedulerTask) => void,
+  afterConfigReload?: () => void | Promise<void>,
 ): Promise<void> {
   try {
     await services.reloadConfig();
+    await afterConfigReload?.();
   } catch (err) {
     onError(err, 'config_reload');
   }
@@ -75,8 +79,9 @@ async function runRetentionSweepTick(
 export async function runComplianceTick(
   services: ComplianceServices,
   onError: (err: unknown, task: ComplianceSchedulerTask) => void = () => {},
+  afterConfigReload?: () => void | Promise<void>,
 ): Promise<void> {
-  await reloadComplianceConfig(services, onError);
+  await reloadComplianceConfig(services, onError, afterConfigReload);
   await runRetentionSweepTick(services, onError);
 }
 
@@ -85,6 +90,10 @@ export function startComplianceScheduler(
   onError: (err: unknown, task: ComplianceSchedulerTask) => void = () => {},
   intervalMs: number = COMPLIANCE_SCHEDULER_INTERVAL_MS,
   runner?: { lease: JobLeaseStore; holder?: string },
+  /** Re-project config that other subsystems cache (e.g. the event-pipeline
+   *  retention overrides) — runs on EVERY worker after each reload, so a losing
+   *  replica does not keep a stale projection until it wins the lease. */
+  afterConfigReload?: () => void | Promise<void>,
 ): () => void {
   const holder = runner?.holder ?? `${hostname()}:${process.pid}`;
   const leaseTtlMs = Math.max(1, Math.floor(intervalMs * 0.9));
@@ -92,7 +101,7 @@ export function startComplianceScheduler(
     // Config reload on EVERY worker, BEFORE the lease: a replica that loses the
     // lease must still pick up a runtime config change for its request-path
     // checks, not stay on boot-time config until it wins the lease or restarts.
-    await reloadComplianceConfig(services, onError);
+    await reloadComplianceConfig(services, onError, afterConfigReload);
     if (runner) {
       try {
         if (!(await runner.lease.tryAcquire(COMPLIANCE_JOB_LEASE, leaseTtlMs, holder))) return;

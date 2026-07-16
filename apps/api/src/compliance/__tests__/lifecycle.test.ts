@@ -325,6 +325,36 @@ describe('the compliance scheduler (WS-N lease-guarded tick)', () => {
     expect(reloads).toBe(2);
   });
 
+  it('re-projects cached config on EVERY worker after reload (afterConfigReload)', async () => {
+    vi.useFakeTimers();
+    const lease = new InMemoryJobLeaseStore();
+    let reprojections = 0;
+    const reproject = () => {
+      reprojections += 1;
+    };
+    const stopA = startComplianceScheduler(
+      services,
+      () => {},
+      60_000,
+      { lease, holder: 'pod-a' },
+      reproject,
+    );
+    const stopB = startComplianceScheduler(
+      services,
+      () => {},
+      60_000,
+      { lease, holder: 'pod-b' },
+      reproject,
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    stopA();
+    stopB();
+    // BOTH the lease winner and the loser re-projected — a subsystem that caches
+    // compliance config (the WS-E.1.4 event-retention override) must refresh on
+    // every worker, not only the one that wins the sweep lease.
+    expect(reprojections).toBe(2);
+  });
+
   it('reports a lease failure and skips the SWEEP (config still reloaded first)', async () => {
     vi.useFakeTimers();
     await seedCase();

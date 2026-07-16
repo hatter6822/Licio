@@ -249,13 +249,14 @@ export async function createPaymentIntent(
       decCompare(userUsed, treasury.depositLimits.perUserPerPeriod) > 0 ||
       decCompare(roomUsed, treasury.depositLimits.perRoomPerPeriod) > 0
     ) {
-      await deps.intents.transition(
-        intent.paymentIntentId,
-        'created',
-        'abandoned',
-        {},
-        new Date(deps.now()).toISOString(),
-      );
+      // DELETE, don't abandon.  This row was inserted moments ago in THIS call,
+      // has no audit / action / downstream reference, and never reached the
+      // caller — abandoning it would leave a terminal intent still OWNING the
+      // idempotency key, so the "please retry" the client is told to do would
+      // replay a dead intent that can never preflight/quote/submit.  Deleting it
+      // frees the key: the retry mints a fresh attempt and re-checks the cap
+      // (fail-closed; the survivors fit serially).
+      await deps.intents.deleteById(intent.paymentIntentId);
       return tgErr(
         409,
         'deposit_limit_exceeded',

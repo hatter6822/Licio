@@ -1859,6 +1859,13 @@ startComplianceScheduler(
   (err, task) => logger.error({ err, task }, 'compliance scheduler task failed'),
   COMPLIANCE_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
+  // Re-project the WS-E.1.4 retention override on EVERY worker after each config
+  // reload — the config PUT only updates the worker that handled it, so a losing
+  // lease worker's event-retention sweep would otherwise keep applying the
+  // boot-time window until it wins the lease or restarts (WS-N config staleness).
+  () => {
+    eventServices.retention.overrides = buildEventRetentionOverrides(complianceServices.config);
+  },
 );
 
 // Hourly WS-R LCAP maintenance: §24.1 checkpoint issuance — issue a fresh

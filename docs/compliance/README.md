@@ -665,6 +665,28 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   live SOLELY in the counsel-gated lawful-access record.  Naming any of it on the
   case would leak a counsel-only fact to every compliance reviewer through the
   link (WS-N.2.3d).
+- **A terminal intent never appears in a live view.**  An intent can reach a
+  terminal execution state (`abandoned`/`failed`/`reverted`/…) while OTHER state
+  still points at it as if live — the idempotency key, the `flagged` compliance
+  column.  Both are filtered: `createPaymentIntent`'s own allowance-race abort
+  DELETES its just-inserted row (never abandons it) so no terminal row holds the
+  key and the "please retry" mints fresh; and `listByComplianceState` (the fraud
+  queue) excludes terminal execution states so a reviewer is never shown a held
+  intent they cannot release, and stale rows cannot consume the page ahead of
+  live ones.
+- **A fraud-queue RELEASE records the decision BEFORE it clears.**  The intent
+  becomes movable (`flagged → cleared`) only after the durable reviewer decision
+  is on the case chain: clearing first opened a window in which a client could
+  resume the cleared intent and submit before the record landed, then the record
+  fails and the compensating revert cannot undo an on-chain action.  Recording
+  first fails CLOSED — a decision-recorded-but-still-held intent never moved
+  funds without an account of who allowed them.
+- **A mint-only gate never blocks bookkeeping.**  The crypto flag gates a NEW
+  fund movement, so the WS-M intent `/advance` route applies it to every step
+  EXCEPT the ATTACH (`signed` + `action_record_id`) — that step records an action
+  `/actions/submit` already placed on chain (`attachIntentSubmission` carries no
+  writability guard for the same reason), so an operator disabling crypto between
+  submit and attach must not strand the signed intent outside the ledger/export.
 - **The retention writes re-check the hold themselves.**  `deleteCascade` takes
   a row lock and re-reads it inside its transaction; `anonymize` puts it in the
   `WHERE`. The sweep's `listExpired` read cannot carry that guarantee — a SAR
