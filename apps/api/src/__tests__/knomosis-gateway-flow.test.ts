@@ -201,7 +201,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
     walletRisk: async () => ({ state: 'normal', explanation: 'cleared', nextStep: null }),
   };
 
-  it('REFRESHES a pending wallet risk via the WS-N seam and passes once cleared (G3)', async () => {
+  it('does NOT clear a pending wallet from an absence-of-signal read-through; a genuinely cleared wallet passes (G3, thread-Y)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     fixture.knomosis.rooms = {
@@ -210,15 +210,25 @@ describe('WS-L.3.1 preflight pipeline', () => {
       isSteward: async () => false,
       contentVisibleToUser: async () => true,
     };
+    // An UNSCREENED `pending` wallet: the link-time screening was unavailable, so
+    // no clearance was ever recorded.
     const walletAccountId = await linkWalletDirectly(fixture, userId, 'pending');
-    // The WS-N engine CLEARS the wallet (and the downstream compliance gates).
+    // The WS-N engine reports `normal` — but that is derived from the ABSENCE of
+    // pins/cases, which is equally true of a wallet that was NEVER screened.  It
+    // must NOT clear `pending`, so the fund transfer stays RISK_BLOCKED.
     fixture.knomosis.compliance = clearCompliance;
     const req = await buildDeposit(userId, walletAccountId);
-    const result = await runPreflight(preflightDeps(fixture), req);
-    // The read-through refresh cleared `pending`→`normal`, so it is NOT RISK_BLOCKED.
-    expect(result.result).toBe('pass');
-    // The refreshed state is PERSISTED (the wallet UI + future actions see it).
-    expect((await fixture.knomosis.wallets.getById(walletAccountId))?.riskState).toBe('normal');
+    const blocked = await runPreflight(preflightDeps(fixture), req);
+    expect(blocked.result).toBe('fail');
+    if (blocked.result === 'fail') expect(blocked.reason_code).toBe('RISK_BLOCKED');
+    // Nothing here certified it — the wallet stays fail-closed `pending`.
+    expect((await fixture.knomosis.wallets.getById(walletAccountId))?.riskState).toBe('pending');
+
+    // A GENUINE clearance — what a link-time `clear` screening records — lifts the
+    // wallet to `normal`; the SAME deposit then passes the preflight risk gate.
+    await fixture.knomosis.wallets.updateRiskState(walletAccountId, 'normal', 'pending');
+    const passed = await runPreflight(preflightDeps(fixture), req);
+    expect(passed.result).toBe('pass');
   });
 
   it('RE-ASSESSES a NON-pending wallet risk for a fund transfer — a since-HIGH wallet blocks (M6)', async () => {

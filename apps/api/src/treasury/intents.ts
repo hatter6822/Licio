@@ -918,17 +918,23 @@ export async function expireIntents(deps: IntentDeps, limit = 200): Promise<numb
 
 /**
  * The durable action a signed intent's client minted but never attached — the
- * W13 recovery's evidence.
+ * W13 recovery's evidence.  Found by the intent↔action link the submit stamps
+ * onto the action record (`payment_intent_id`); actor-agnostic, so it recovers a
+ * room-owned payout's action under ANY steward without a room-scoped lookup.
  *
- * Found by the intent↔action link the submit stamps onto the action record:
- * `payment_intent_id`, LIVE-only (`getByPaymentIntentId`).  The partial unique
- * `knomosis_action_intent_uq` scopes that link to non-terminal attempts, so at
- * most one attachable action exists per intent — the SAME row the attach's
- * uniqueness check would collide on.  The link is actor-agnostic, so it recovers
- * a room-owned payout's action under ANY steward without a room-scoped lookup.
+ * A LIVE action is recovered at any retry count — `knomosis_action_intent_uq`
+ * scopes the live link to at most one, the SAME row the attach's uniqueness
+ * check collides on, so the sweep that ATTACHES and the reaper that must not
+ * DESTROY see exactly one.
  *
- * ONE lookup, because two readers must agree about it exactly: the sweep that
- * ATTACHES it, and the reaper that must not DESTROY it.
+ * With NO live action, a TERMINAL action is recovered ONLY on the first attempt
+ * (`retryCount === 0`): a submit that failed/reverted before the browser
+ * attached is then unambiguously THIS attempt's, and recovering it lets the
+ * intent reach `failed`/`reverted` (retryable) instead of expiring off the
+ * ledger to `abandoned`.  Past a retry there is no attempt tag to tell the
+ * current attempt's corpse from a prior one, so a terminal action is NOT
+ * recovered there — doing so would re-bind the previous attempt in a loop; a
+ * post-retry crash+fail expires to `abandoned` (the caller already spent a retry).
  *
  * Null when there is nothing to recover: the intent is not `signed`, or it has
  * already bound its action.
@@ -938,7 +944,12 @@ async function orphanActionFor(
   intent: PaymentIntentRecord,
 ): Promise<KnomosisActionRecordEntity | null> {
   if (intent.executionState !== 'signed' || intent.actionRecordId !== null) return null;
-  return await deps.actions.getByPaymentIntentId(intent.paymentIntentId);
+  const live = await deps.actions.getByPaymentIntentId(intent.paymentIntentId);
+  if (live !== null) return live;
+  if (intent.retryCount === 0) {
+    return await deps.actions.getLatestByPaymentIntentId(intent.paymentIntentId);
+  }
+  return null;
 }
 
 /** Bounded retry: `failed`/`reverted` → `created` (WS-M.3.1b, default 3). */

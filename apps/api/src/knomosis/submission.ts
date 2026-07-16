@@ -55,6 +55,7 @@ import type {
   KnomosisActionRecordEntity,
   KnomosisActionStore,
 } from './stores.js';
+import { resolveWalletRiskState } from './wallet-risk-resolve.js';
 
 // ---------------------------------------------------------------------------
 // The §23.5 state machine (WS-L.3.2b).  Invalid transitions are rejected and
@@ -322,14 +323,14 @@ export async function submitAction(
   // preflight-refreshed state (WS-L.3.2a / 2.5c-1).
   let riskState = wallet.riskState;
   if (FUND_TRANSFER_ACTIONS.has(actionType)) {
-    const assessment = await deps.compliance.walletRisk({
+    // The shared read-through (thread-Y): escalations apply, but an absence-of-
+    // signal `normal` never lifts a still-unscreened `pending` wallet, and an
+    // `unavailable` engine leaves the stored state in place.
+    ({ state: riskState } = await resolveWalletRiskState(deps, {
       walletAccountId: wallet.walletAccountId,
       userId: input.userId,
-    });
-    if (assessment !== 'unavailable' && assessment.state !== riskState) {
-      riskState = assessment.state;
-      await deps.wallets.updateRiskState(wallet.walletAccountId, riskState);
-    }
+      riskState,
+    }));
   }
   if (riskState === 'high' || (riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType))) {
     return {

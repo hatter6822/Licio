@@ -182,7 +182,18 @@ modified** in their verdict semantics:
   additionally requires a **verified** declaration basis.
 - `walletRisk` — risk pins + open critical/high cases (wallet addresses are
   stored hashed; plaintext exists only at link time, which is why sanctions
-  screening hooks `linkWallet` via `onSanctionedWalletLink`).
+  screening hooks `linkWallet` via `onSanctionedWalletLink`).  Because it reads
+  only pins and cases, `walletRisk` reports `normal` from their **absence** — a
+  verdict that is equally true of a wallet that was never screened as of one
+  screened `clear`.  So it is NOT allowed to lift a fail-closed `pending` wallet:
+  a link-time `clear` screening is the ONLY positive clearance, recorded HERE
+  (`screenLinkedWallet` CASes the stored `pending`→`normal` at the one moment the
+  plaintext address exists), and the ONE shared read-through
+  (`resolveWalletRiskState`, which the preflight gate, the submit gate, and the
+  owner-readable risk route all call) applies escalations but refuses to promote
+  `pending`→`normal` on an absence-of-signal `normal`.  An `unavailable`
+  screening records nothing, so the wallet stays `pending` — unable to move
+  funds — until it is re-linked, the honest outcome of never having certified it.
 
 Two new gates were added at the consumer edge: the **disclosure-acknowledgment
 gate** (`403 disclosure_ack_required` until every current counsel-published
@@ -519,9 +530,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   transfer that already happened.  That is a bad response, not a lost transfer —
   the **W13 auto-attach sweep** re-binds the orphan action server-side without
   the client, finding it by the `payment_intent_id` the submit stamped onto the
-  record (live-only, so the current attempt is the one it recovers).  The
-  ordering rule is about answering the client truthfully; the ledger's guarantee
-  is the sweep's, and it is stated with it below.
+  record.  It prefers the LIVE action (the current attempt), but on a FIRST
+  attempt (`retryCount === 0`) it also recovers a TERMINAL `failed`/`reverted`
+  corpse the live query skips — so a submit that reached the gateway and failed
+  before the browser attached walks the intent to `failed` (retryable) instead
+  of expiring to `abandoned`.  Past a retry only a live action re-binds:
+  `getLatestByPaymentIntentId` is consulted for the first attempt alone, so a
+  stale corpse from a prior attempt never re-attaches in a loop.  The ordering
+  rule is about answering the client truthfully; the ledger's guarantee is the
+  sweep's, and it is stated with it below.
 - **An intent whose money has moved is never abandonable.**  `signed` is a timed
   state, so a client that dies between submit and attach — the case W13's
   recovery exists for — leaves an intent that expires while its action sits on

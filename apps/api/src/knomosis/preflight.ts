@@ -44,6 +44,7 @@ import type {
   GovernanceProposalStore,
   KnomosisActionStore,
 } from './stores.js';
+import { resolveWalletRiskState } from './wallet-risk-resolve.js';
 
 /** Room facts the pipeline needs (wired to the forum service at boot). */
 export interface RoomGovernancePort {
@@ -365,16 +366,15 @@ export async function runPreflight(
   // persists the concrete state (WS-L.2.5c-1/3.1b).
   let riskState = wallet.riskState;
   if (riskState === 'pending' || FUND_TRANSFER_ACTIONS.has(actionType)) {
-    const assessment = await deps.compliance.walletRisk({
+    // The shared read-through (thread-Y): escalations apply, but an absence-of-
+    // signal `normal` never lifts a still-unscreened `pending` wallet — that is
+    // recorded only by a link-time `clear` — and an `unavailable` engine leaves
+    // the stored state in place.
+    ({ state: riskState } = await resolveWalletRiskState(deps, {
       walletAccountId: wallet.walletAccountId,
       userId: input.userId,
-    });
-    if (assessment !== 'unavailable' && assessment.state !== riskState) {
-      riskState = assessment.state;
-      // Column-scoped write — never a stale full-record snapshot that could clobber
-      // a concurrent unlink (WS-L.2.5c-1).
-      await deps.wallets.updateRiskState(wallet.walletAccountId, riskState);
-    }
+      riskState,
+    }));
   }
   if (riskState === 'high') {
     return audited(

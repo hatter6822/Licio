@@ -355,10 +355,13 @@ export interface FinancialWalletStore {
    *  A risk read-through (preflight / risk-state route) can overlap another wallet
    *  mutation (e.g. an unlink), so writing back a stale full snapshot would clobber
    *  the lifecycle fields and silently cancel the audited unlink; a column-scoped
-   *  update touches nothing else. */
+   *  update touches nothing else.  When `expected` is given the write is a CAS —
+   *  it applies only if the current `riskState` equals it (the link-time `clear`
+   *  promotes `pending`→`normal` without clobbering a racing escalation). */
   updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void>;
   /** Update ONLY the `label` column (WS-L.2.5c) — never a full-record write.  A
    *  label edit can overlap an unlink/risk mutation, so a stale full snapshot would
@@ -403,6 +406,12 @@ export interface KnomosisActionStore {
    *  released the intent for `retryIntent`, so replaying it would hand the
    *  caller a corpse instead of their replacement. */
   getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
+  /** The MOST RECENT action for this intent in ANY state (incl. terminal) — the
+   *  crash-recovery read (`orphanActionFor`): a submit that failed/reverted before
+   *  the browser attached is still recoverable so the intent can reach a
+   *  terminal/retryable state instead of expiring off the ledger.  The LIVE-only
+   *  `getByPaymentIntentId` above stays the uniqueness/replay predicate. */
+  getLatestByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
   /** COMPARE-AND-SET the submission state: apply the patch ONLY if the stored row
    *  is still in `expectedState`, returning null when a concurrent writer (e.g.
@@ -977,11 +986,14 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   async updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void> {
     // Column-scoped: re-read the CURRENT row and set only riskState, so a
     // concurrent lifecycle mutation (unlink) is never clobbered by a stale snapshot.
     const row = this.#rows.get(walletAccountId);
     if (row === undefined) return;
+    // CAS: apply only when the current state matches `expected` (when supplied).
+    if (expected !== undefined && row.riskState !== expected) return;
     this.#rows.set(walletAccountId, { ...row, riskState });
   }
 
@@ -1170,6 +1182,17 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       }
     }
     return null;
+  }
+
+  async getLatestByPaymentIntentId(
+    paymentIntentId: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    let best: KnomosisActionRecordEntity | null = null;
+    for (const row of this.#rows.values()) {
+      if (row.paymentIntentId !== paymentIntentId) continue;
+      if (best === null || row.createdAt > best.createdAt) best = row;
+    }
+    return best ? structuredClone(best) : null;
   }
 
   async update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity> {

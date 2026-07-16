@@ -295,13 +295,23 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
   async updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void> {
     // Column-scoped UPDATE: sets ONLY risk_state, so a concurrent unlink mutation
-    // is never clobbered by a stale full-record snapshot (WS-L.2.5c-1).
+    // is never clobbered by a stale full-record snapshot (WS-L.2.5c-1).  When
+    // `expected` is supplied the predicate makes it a CAS — the link-time `clear`
+    // promotes `pending`→`normal` without clobbering a racing escalation.
     await this.db
       .update(walletAccounts)
       .set({ riskState })
-      .where(eq(walletAccounts.walletAccountId, walletAccountId));
+      .where(
+        expected === undefined
+          ? eq(walletAccounts.walletAccountId, walletAccountId)
+          : and(
+              eq(walletAccounts.walletAccountId, walletAccountId),
+              eq(walletAccounts.riskState, expected),
+            ),
+      );
   }
 
   async updateLabel(walletAccountId: string, label: string | null): Promise<void> {
@@ -571,6 +581,20 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
           notInArray(knomosisActionRecords.submissionState, [...DEAD_ACTION_STATES]),
         ),
       )
+      .limit(1);
+    return rows[0] ? mapAction(rows[0]) : null;
+  }
+
+  async getLatestByPaymentIntentId(
+    paymentIntentId: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    // ANY state, newest first — the crash-recovery read (see the interface); the
+    // live-only predicate above stays the uniqueness/replay path.
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(eq(knomosisActionRecords.paymentIntentId, paymentIntentId))
+      .orderBy(desc(knomosisActionRecords.createdAt))
       .limit(1);
     return rows[0] ? mapAction(rows[0]) : null;
   }

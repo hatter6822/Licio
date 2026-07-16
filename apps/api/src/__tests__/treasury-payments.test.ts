@@ -964,6 +964,39 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect((await clean.intents.getById(cleanId))?.executionState).toBe('abandoned');
   });
 
+  it('recovers a FIRST-attempt terminal action → failed (retryable), never abandoned; a post-retry corpse is not re-bound (thread-Z)', async () => {
+    const deps = buildDeps();
+    const id = await signedIntent(deps); // retryCount 0, signed
+    // The submit reached the gateway but FAILED before the browser could attach:
+    // its payment_intent_id is stamped, yet the action never bound to the intent.
+    // The live orphan query (getByPaymentIntentId) skips it — `failed` is a dead
+    // submission state — so without the terminal-recovery branch the sweep would
+    // find nothing and eventually ABANDON a signed intent whose money moved.
+    await deps.actions.insert(actionOf({ submissionState: 'failed', paymentIntentId: id }));
+    // reconcile pass 1 recovers the terminal action (first attempt, retryCount 0)
+    // and binds it; pass 2 maps submitted→failed and walks the intent to `failed`,
+    // a RETRYABLE state — never `abandoned`.
+    await reconcileIntents(deps);
+    await reconcileIntents(deps);
+    const recovered = await deps.intents.getById(id);
+    expect(recovered?.executionState).toBe('failed');
+    expect(recovered?.actionRecordId).not.toBeNull();
+
+    // Retry (retryCount → 1) and re-sign.  The OLD failed corpse must NOT be
+    // re-bound: terminal recovery is first-attempt-only, so there is no re-bind
+    // loop past a retry — a genuinely orphaned first submit is recoverable, a
+    // stale one from a prior attempt is not.
+    const retried = await retryIntent(deps, id, USER);
+    if (!('intent' in retried)) throw new Error(JSON.stringify(retried));
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    await reconcileIntents(deps);
+    const afterRetry = await deps.intents.getById(id);
+    expect(afterRetry?.executionState).toBe('signed'); // not re-failed by the corpse
+    expect(afterRetry?.actionRecordId).toBeNull();
+  });
+
   it('rejects an action from another room, actor, type, or payload', async () => {
     const deps = buildDeps();
     const id = await signedIntent(deps);
