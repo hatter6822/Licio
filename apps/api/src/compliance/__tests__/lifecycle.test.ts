@@ -40,6 +40,7 @@ import {
   evaluateAvailabilityForUser,
 } from '../services.js';
 import type { ComplianceCaseRecord } from '../stores.js';
+import { createWalletRisk } from '../wallet-risk.js';
 
 const ACTOR = '9a8619ff-8b86-4d01-b42d-00cf4fc96422';
 const COUNSEL_A = '1b2619ff-8b86-4d01-b42d-00cf4fc96401';
@@ -483,6 +484,79 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     });
     const held = await evaluateAvailabilityForUser(services, userId);
     expect(Object.values(held.features).map((f) => f.disableReason)).toContain('compliance_hold');
+  });
+
+  it('EVERY user-visible surface suppresses an unnotified lawful-access case', async () => {
+    // The rule has been found at one surface at a time — the DSAR export, then
+    // the availability hold, then the wallet risk state.  All three read the
+    // subject's cases, all three are visible to the subject, and all three ask
+    // the SAME query.  This walks the whole set so a fourth has an obvious home
+    // rather than becoming the next round's finding.
+    const userId = randomUUID();
+    const walletAccountId = randomUUID();
+    services.knomosisFlags = () => ({ cryptoEnabled: true, governanceEnabled: true });
+    services.ageBand = async () => 'adult';
+    const intake = await intakeLawfulAccessRequest(
+      {
+        requests: services.lawfulAccess,
+        caseDeps: buildCaseDeps(services),
+        roomStorageMode: services.roomStorageMode,
+        opaqueRef: services.opaqueRef,
+        now: services.now,
+        uuid: services.uuid,
+      },
+      {
+        agency: 'Agency',
+        jurisdiction: 'US',
+        legalBasis: 'subpoena',
+        scope: {
+          subject_kind: 'user',
+          subject_ref: userId,
+          time_range_start: null,
+          time_range_end: null,
+        },
+        contact: 'agent@example.test',
+        actorUserId: ACTOR,
+      },
+    );
+    if (!intake.ok) throw new Error('intake failed');
+    const walletRisk = createWalletRisk({
+      pins: services.pins,
+      cases: services.cases,
+      suppressedCaseIds: (ref) => services.lawfulAccess.unnotifiedCaseIdsForSubject(ref),
+      metric: () => {},
+    });
+
+    // 1. The DSAR export omits the case.
+    const exported = await buildComplianceExport(services)(userId);
+    expect(exported['compliance_cases']).toEqual([]);
+    // 2. The availability hold does not count it.
+    const availability = await evaluateAvailabilityForUser(services, userId);
+    expect(Object.values(availability.features).map((f) => f.disableReason)).not.toContain(
+      'compliance_hold',
+    );
+    // 3. The wallet risk state does not derive from it — otherwise the member
+    // is told their wallet "requires additional review", and their money is
+    // restricted over a RECORDS request that says nothing about their risk.
+    expect(await walletRisk({ walletAccountId, userId })).toMatchObject({ state: 'normal' });
+
+    // …and a genuine risk case still reaches all three.
+    await createCase(buildCaseDeps(services), {
+      subjectKind: 'user',
+      subjectRef: userId,
+      triggerType: 'sanctions',
+      riskLevel: 'critical',
+      note: 'a genuine hold',
+    });
+    expect(
+      ((await buildComplianceExport(services)(userId))['compliance_cases'] as unknown[]).length,
+    ).toBe(1);
+    expect(
+      Object.values((await evaluateAvailabilityForUser(services, userId)).features).map(
+        (f) => f.disableReason,
+      ),
+    ).toContain('compliance_hold');
+    expect(await walletRisk({ walletAccountId, userId })).toMatchObject({ state: 'high' });
   });
 
   it('an erasure a legal hold deferred is discharged when the hold lapses', async () => {

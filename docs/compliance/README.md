@@ -369,18 +369,29 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   live legal disclosure would keep no publisher record at all.  The identity
   audit entry is a best-effort mirror (a different bounded context, so it cannot
   join that write); failing it must not 500 a publish that already happened.
-- **Every user-facing surface defers what counsel has not permitted.**  A
+- **Every user-visible surface defers what counsel has not permitted.**  A
   lawful-access intake case exists ONLY because a request was made, so anything
   the subject can see about it announces the request — the thing counsel decides
-  whether they may be told. Both surfaces suppress it from ONE query
-  (`unnotifiedCaseIdsForSubject`): the DSAR export omits the case, and the
-  availability hold does not count it — its `high` risk level describes the
-  REQUEST's importance, not the subject, so counting it would disable their
-  crypto features and let them read `compliance_hold` as exactly the disclosure
-  being withheld. Both return once notification is permitted: deferral, not
-  deletion. The exclusion is bounded by that subject's own requests, so it
-  cannot reintroduce the paging `countOpenByRisk` exists to avoid, and a store
-  failure holds rather than silently disclose what it could not check.
+  whether they may be told. Its `high` risk level describes the REQUEST's
+  importance, not the subject, so nothing about their risk may be derived from
+  it. **THREE** surfaces owe this and all three ask the same query
+  (`unnotifiedCaseIdsForSubject`):
+
+  1. the **DSAR export** omits the case;
+  2. the **availability hold** does not count it — otherwise the member's crypto
+     features go dark and `compliance_hold` reads as exactly the disclosure
+     being withheld;
+  3. the **wallet risk state** does not derive from it — otherwise the member is
+     told their wallet "requires additional review" and their money is
+     restricted over a RECORDS request that says nothing about their risk.
+
+  Each was found one at a time, so a single test now walks all three (and a
+  genuine risk case still reaches all three) — a fourth surface has an obvious
+  home rather than becoming the next finding. All suppression is deferral, not
+  deletion: it lifts once notification is permitted. The exclusion is bounded by
+  that subject's own requests, so it cannot reintroduce the paging
+  `countOpenByRisk` exists to avoid, and a store failure holds rather than
+  silently disclose what it could not check.
 - **A deferred erasure is a debt the case carries.**  When the account-deletion
   scrub meets a legal hold it skips the subject, audits the skip — and marks
   `erasure_pending`. Nothing else would ever come back: the account is

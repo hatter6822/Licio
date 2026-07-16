@@ -444,6 +444,8 @@ export function buildCompliancePort(services: ComplianceServices): CompliancePor
   const walletRisk = createWalletRisk({
     pins: services.pins,
     cases: services.cases,
+    suppressedCaseIds: (subjectRef) =>
+      services.lawfulAccess.unnotifiedCaseIdsForSubject(subjectRef),
     metric: (name) => services.metrics.increment(name),
   });
   return {

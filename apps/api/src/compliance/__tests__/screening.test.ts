@@ -212,6 +212,7 @@ describe('createWalletRisk (WS-N.2.2e)', () => {
     const walletRisk = createWalletRisk({
       pins: services.pins,
       cases: services.cases,
+      suppressedCaseIds: async () => [],
       metric: () => {},
     });
     const assessment = await walletRisk({ walletAccountId: WALLET, userId: USER });
@@ -232,6 +233,7 @@ describe('createWalletRisk (WS-N.2.2e)', () => {
     const walletRisk = createWalletRisk({
       pins: services.pins,
       cases: services.cases,
+      suppressedCaseIds: async () => [],
       metric: () => {},
     });
     const { createCase, transitionCase } = await import('../cases.js');
@@ -301,6 +303,7 @@ describe('createWalletRisk (WS-N.2.2e)', () => {
     const walletRisk = createWalletRisk({
       pins: services.pins,
       cases: services.cases,
+      suppressedCaseIds: async () => [],
       metric: () => {},
     });
     expect(await walletRisk({ walletAccountId: WALLET, userId: USER })).toBe('unavailable');

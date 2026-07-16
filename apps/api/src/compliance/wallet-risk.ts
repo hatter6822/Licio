@@ -21,6 +21,16 @@ import type { ComplianceCaseStore, WalletRiskPinStore } from './stores.js';
 export interface WalletRiskDeps {
   pins: WalletRiskPinStore;
   cases: ComplianceCaseStore;
+  /**
+   * The subject's cases that must not drive this assessment (WS-N.2.3d):
+   * a lawful-access intake case is `high` because that describes the REQUEST's
+   * importance, not the subject.  Counting it here would tell the member their
+   * wallet "requires additional review" — the disclosure counsel has not
+   * permitted — and restrict their money over a records request that says
+   * nothing about their risk.  The THIRD surface owing this suppression, after
+   * the DSAR export and the availability hold; all three ask the same query.
+   */
+  suppressedCaseIds: (subjectRef: string) => Promise<readonly string[]>;
   metric: (name: string) => void;
 }
 
@@ -53,13 +63,16 @@ export function createWalletRisk(deps: WalletRiskDeps): CompliancePort['walletRi
       }
       // Ask the store, do not page a list: a capped `listBySubject` would miss
       // an older critical case beyond the page and hand a sanctioned wallet
-      // `elevated` — and only `high` stops a fund transfer.
-      const critical = await deps.cases.countOpenByRisk(userId, ['critical']);
+      // `elevated` — and only `high` stops a fund transfer.  The suppression is
+      // bounded by this subject's own lawful-access requests, so it cannot
+      // reintroduce that paging.
+      const suppressed = await deps.suppressedCaseIds(userId);
+      const critical = await deps.cases.countOpenByRisk(userId, ['critical'], suppressed);
       if (critical > 0) {
         deps.metric('compliance.wallet_risk.case_derived');
         return EXPLANATIONS.high;
       }
-      const high = await deps.cases.countOpenByRisk(userId, ['high']);
+      const high = await deps.cases.countOpenByRisk(userId, ['high'], suppressed);
       if (high > 0) {
         deps.metric('compliance.wallet_risk.case_derived');
         return EXPLANATIONS.elevated;
