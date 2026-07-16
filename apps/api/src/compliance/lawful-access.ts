@@ -13,7 +13,7 @@
 // does not exist.
 
 import type { LawfulAccessStatus } from '@licio/shared';
-import { appendCaseAuditInTx, runChainedUnit } from './audit.js';
+import { appendCaseAuditInTx, mustApply, runChainedUnit } from './audit.js';
 import {
   announceCaseCreated,
   type CaseDeps,
@@ -22,18 +22,6 @@ import {
   setLegalHoldInTx,
 } from './cases.js';
 import type { LawfulAccessRecord, LawfulAccessStore } from './stores.js';
-
-/**
- * A denial's cleanup (hold release / case close) failed.  Thrown, not returned:
- * the unit must roll back, and a returned error reads to the transactor as a
- * committed success.
- */
-class DenialCleanupError extends Error {
-  constructor(detail: string) {
-    super(`lawful-access denial cleanup failed: ${detail}`);
-    this.name = 'DenialCleanupError';
-  }
-}
 
 /** This request's hold on its intake case — opaque, so the reviewer-visible
  *  retention policy carries no readable obligation name (WS-N.2.1e). */
@@ -221,7 +209,7 @@ export async function reviewLawfulAccessRequest(
         // result, so the denial (already CAS-written above) and any earlier
         // cleanup would COMMIT while the route reports a failure — exactly the
         // partial-denial state this unit exists to prevent.
-        if (!released.ok) throw new DenialCleanupError(released.message);
+        mustApply(released.ok, 'lawful-access denial: hold release');
         // From wherever the case now sits: a compliance reviewer may have
         // picked it up while counsel deliberated, and a fixed open→assigned
         // first step would fail and block the denial outright.
@@ -235,7 +223,7 @@ export async function reviewLawfulAccessRequest(
             resolved_at: new Date(deps.now()).toISOString(),
           },
         });
-        if (!closed) throw new DenialCleanupError('the intake case could not be closed');
+        mustApply(closed, 'lawful-access denial: case close');
       }
       return { ok: true as const, record: updated };
     },

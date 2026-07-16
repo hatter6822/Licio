@@ -481,6 +481,30 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     expect((await runRetentionSweep(sweepDeps())).deferredErasures).toBe(0);
   });
 
+  it('a hold re-landing mid-discharge takes the erasure entry with it', async () => {
+    const userId = randomUUID();
+    const record = await seedCase({
+      userIdOrRoomId: userId,
+      retentionPolicy: {
+        retention_period_days: 1825,
+        deletion_date: hoursAhead(24),
+        legal_hold: false,
+        legal_hold_refs: [],
+        erasure_pending: true, // the debt a held-back scrub left
+      },
+    });
+    // The store refuses the write (a fresh obligation landed since the sweep
+    // read its page).  Returning that refusal would COMMIT the
+    // `erasure_completed_hold_lapsed` entry beside it: a chain saying the
+    // subject was erased while the subject is still sitting there.
+    services.cases.completeDeferredErasure = async () => false;
+    const summary = await runRetentionSweep(sweepDeps());
+    expect(summary.deferredErasures).toBe(0);
+    expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBe(userId);
+    const actions = (await services.caseAudit.listChained(record.caseId)).map((e) => e.action);
+    expect(actions).not.toContain('erasure_completed_hold_lapsed');
+  });
+
   it('the purge deletes the declaration, anonymizes acks, scrubs subjects, purges pins', async () => {
     const userId = randomUUID();
     const walletAccountId = randomUUID();

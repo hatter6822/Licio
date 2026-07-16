@@ -17,7 +17,7 @@
 // cannot leak private attention data to a chain-analytics provider.  A unit
 // test asserts the field lists stay clean.
 
-import type { CryptoFeatureCell, WalletRiskState } from '@licio/shared';
+import type { CryptoFeatureCell, ReviewSubject, WalletRiskState } from '@licio/shared';
 
 /** Sanctions screening verdict for an address (WS-N.2.2a seam). */
 export type SanctionsVerdict = 'clear' | 'blocked' | 'unavailable';
@@ -34,34 +34,28 @@ export interface WalletRiskAssessment {
   nextStep: string | null;
 }
 
-/** Who a compliance review is ABOUT — not necessarily who triggered it. */
-export interface ReviewSubject {
-  kind: 'user' | 'room';
-  ref: string;
-}
-
 /**
- * The review subject for an amount-bearing action, derived from the §22.2
- * feature cell BOTH consumers already compute for their jurisdiction check
- * (`ACTION_FEATURE_CELL` in the WS-L preflight, `featureCellFor` in the WS-M
- * intent).  One definition on the seam they share, so the two legs of one
- * transfer cannot classify it differently and split its review in half:
+ * Screen several addresses and fold the answers into ONE verdict, worst-first:
+ * `blocked` if any party is listed, else `unavailable` if any answer was
+ * inconclusive, else `clear`.
  *
- *   • `production_payments` — money paid IN.  The payer is the subject; a
- *     room-owned deposit intent cannot exist (`createPaymentIntent` rejects
- *     one), so the actor is always the owner here.
- *   • `treasury_operations` — money paid OUT of a room treasury.  The ROOM is
- *     the subject.
- *   • `governance` — moves nothing, so it never reaches the high-value branch;
- *     the actor is the subject for want of an amount to review.
+ * Fail-closed by construction — a transfer is only as clean as its dirtiest
+ * counterparty, and an address we could not screen is not an address we
+ * cleared.  Lives here rather than at the two call sites so the preflight and
+ * its submit re-check cannot fold them differently.
  */
-export function reviewSubjectFor(
-  cell: CryptoFeatureCell,
-  actor: { userId: string; roomId: string },
-): ReviewSubject {
-  return cell === 'treasury_operations'
-    ? { kind: 'room', ref: actor.roomId }
-    : { kind: 'user', ref: actor.userId };
+export async function worstSanctionsVerdict(
+  compliance: Pick<CompliancePort, 'screenAddress'>,
+  addressesLower: readonly string[],
+  deploymentId: string,
+): Promise<SanctionsVerdict> {
+  let worst: SanctionsVerdict = 'clear';
+  for (const addressLower of addressesLower) {
+    const verdict = await compliance.screenAddress({ addressLower, deploymentId });
+    if (verdict === 'blocked') return 'blocked';
+    if (verdict === 'unavailable') worst = 'unavailable';
+  }
+  return worst;
 }
 
 export interface CompliancePort {

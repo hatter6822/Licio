@@ -40,6 +40,7 @@ import {
   lawfulAccessReviewRequestSchema,
   policyCreateRequestSchema,
   policyListResponseSchema,
+  type ReviewSubject,
   regionCodeSchema,
   regionDeclarationRequestSchema,
   regionResolutionResponseSchema,
@@ -55,6 +56,7 @@ import { z } from 'zod';
 import {
   appendCaseAuditInTx,
   appendPolicyAuditInTx,
+  mustApply,
   runChainedUnit,
   verifyPolicyAuditChain,
 } from '../compliance/audit.js';
@@ -85,7 +87,6 @@ import { UniqueViolationError } from '../compliance/stores.js';
 import { getEventPipelineServices } from '../events/services.js';
 import { isComplianceReviewer, isCounsel } from '../identity/rbac.js';
 import { getIdentityServices } from '../identity/services.js';
-import type { ReviewSubject } from '../knomosis/ports.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import {
   type AuthEnv,
@@ -214,16 +215,6 @@ function availabilityToWire(
 function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): string {
   const hours = services.config().slaHoursByRisk[record.riskLevel] ?? 24;
   return new Date(Date.parse(record.createdAt) + hours * 3_600_000).toISOString();
-}
-
-/** The decided case could not be closed (a racing transition moved it, or its
- *  state has no sanctioned route).  Not a store fault: it aborts the unit so the
- *  decision entry cannot outlive the resolution it claims. */
-class DecisionNotClosedError extends Error {
-  constructor(caseId: string) {
-    super(`case ${caseId} could not be resolved by the fraud-queue decision`);
-    this.name = 'DecisionNotClosedError';
-  }
 }
 
 /**
@@ -388,8 +379,8 @@ async function recordIntentReviewDecision(
         // a `fraud_queue_released` entry for a review that stayed open while
         // the route reverted the intent — a chain that records a release which
         // never took effect.  Throwing abandons the unit whole.
-        if (
-          !(await resolveCaseInTx(stores, deps, {
+        mustApply(
+          await resolveCaseInTx(stores, deps, {
             caseId: closed.caseId,
             actorUserId: input.actorUserId,
             resolution: {
@@ -398,10 +389,9 @@ async function recordIntentReviewDecision(
               resolved_by: input.actorUserId,
               resolved_at: new Date(services.now()).toISOString(),
             },
-          }))
-        ) {
-          throw new DecisionNotClosedError(closed.caseId);
-        }
+          }),
+          'fraud-queue decision',
+        );
         return true;
       },
       'fraud-queue decision',

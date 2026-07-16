@@ -5,10 +5,18 @@
 // atomic admit-or-reject (a rejection records nothing), malformed-amount
 // rejection, and the fraudRisk composition (region overrides, velocity case,
 // the high-value `elevated` trigger, counter-outage `unavailable`).
+
+import {
+  ACTION_TYPE_FOR_PAYMENT_TARGET,
+  featureCellForAction,
+  featureCellForPaymentTarget,
+  KNOMOSIS_ENVIRONMENTS,
+  PAYMENT_TARGET_TYPES,
+  reviewSubjectForAction,
+  TARGET_ID_FIELD_FOR_ACTION,
+} from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
-import { reviewSubjectFor } from '../../knomosis/ports.js';
-import { ACTION_FEATURE_CELL } from '../../knomosis/preflight.js';
 import { transitionCase } from '../cases.js';
 import { type ComplianceRuntimeConfig, DEFAULT_COMPLIANCE_CONFIG } from '../config.js';
 import { createFraudRisk, limitsForRegion } from '../risk.js';
@@ -21,32 +29,72 @@ const REVIEWER = '7a8619ff-8b86-4d01-b42d-00cf4fc96400';
 /** A bound typed-data hash: the id of ONE attempted transfer. */
 const ATTEMPT = `0x${'a1'.repeat(32)}`;
 
-describe('reviewSubjectFor — one classification for both legs of a transfer', () => {
+describe('the compliance mapping SSOT (WS-N.1.1c)', () => {
   const actor = { userId: USER, roomId: '3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f' };
 
-  it('a pay-in is the payer’s review; a treasury disbursement is the room’s', () => {
-    expect(reviewSubjectFor('production_payments', actor)).toEqual({ kind: 'user', ref: USER });
-    expect(reviewSubjectFor('treasury_operations', actor)).toEqual({
+  it('a pay-in is the payer’s review; a treasury payout is the room’s', () => {
+    expect(reviewSubjectForAction('treasury_deposit', actor)).toEqual({ kind: 'user', ref: USER });
+    expect(reviewSubjectForAction('bounty_contribution', actor)).toEqual({
+      kind: 'user',
+      ref: USER,
+    });
+    expect(reviewSubjectForAction('grant_payout', actor)).toEqual({
       kind: 'room',
       ref: actor.roomId,
     });
   });
 
-  it('the WS-M intent cell and the WS-L action cell agree for the same transfer', () => {
-    // A deposit: `featureCellFor('treasury_deposit')` and
-    // `ACTION_FEATURE_CELL.treasury_deposit` are both `production_payments`, so
-    // both legs name the payer — and share one review.
-    expect(reviewSubjectFor(ACTION_FEATURE_CELL.treasury_deposit, actor)).toEqual(
-      reviewSubjectFor('production_payments', actor),
-    );
-    // A grant payout: both are `treasury_operations`, so both name the room.
-    expect(reviewSubjectFor(ACTION_FEATURE_CELL.grant_payout, actor)).toEqual(
-      reviewSubjectFor('treasury_operations', actor),
+  it('governance moves nothing, so the actor stands as subject', () => {
+    expect(reviewSubjectForAction('proposal_sign', actor)).toEqual({ kind: 'user', ref: USER });
+  });
+
+  it('the intent leg and the action leg classify ONE movement identically', () => {
+    // The two legs key off different enums, which is exactly how they used to
+    // drift.  Every payment target must land on the cell its own settling
+    // action does — checked over the WHOLE target enum, so a value added to
+    // either side cannot quietly disagree.
+    for (const target of PAYMENT_TARGET_TYPES) {
+      for (const environment of KNOMOSIS_ENVIRONMENTS) {
+        expect(featureCellForPaymentTarget(target, environment)).toBe(
+          featureCellForAction(ACTION_TYPE_FOR_PAYMENT_TARGET[target], environment),
+        );
+      }
+    }
+  });
+
+  it('a payment target is NOT its action type — steward_compensation pays out as a grant', () => {
+    // The pair that made a raw `targetType === actionType` comparison reject a
+    // valid payout, and a target-keyed field table disagree with an
+    // action-keyed one.
+    expect(ACTION_TYPE_FOR_PAYMENT_TARGET.steward_compensation).toBe('grant_payout');
+    expect(TARGET_ID_FIELD_FOR_ACTION[ACTION_TYPE_FOR_PAYMENT_TARGET.steward_compensation]).toBe(
+      'grantId',
     );
   });
 
-  it('governance moves nothing, so the actor stands as subject', () => {
-    expect(reviewSubjectFor('governance', actor)).toEqual({ kind: 'user', ref: USER });
+  it('a testnet deployment exercises the TESTNET cell, never a production one', () => {
+    // A region that enables `testnet_transactions` and leaves the real-funds
+    // cells disabled — the ordinary posture before production approval — was
+    // told `blocked` for actions its own cell permits.
+    for (const environment of ['local', 'testnet'] as const) {
+      expect(featureCellForAction('treasury_deposit', environment)).toBe('testnet_transactions');
+      expect(featureCellForAction('grant_payout', environment)).toBe('testnet_transactions');
+      expect(featureCellForPaymentTarget('steward_compensation', environment)).toBe(
+        'testnet_transactions',
+      );
+    }
+    // …while a governance signature is a governance act on ANY deployment: a
+    // region can enable payments and prohibit governance.
+    expect(featureCellForAction('proposal_sign', 'testnet')).toBe('governance');
+  });
+
+  it('real-funds deployments split pay-in from treasury operations', () => {
+    for (const environment of ['capped_production', 'mature_production'] as const) {
+      expect(featureCellForAction('treasury_deposit', environment)).toBe('production_payments');
+      expect(featureCellForAction('bounty_contribution', environment)).toBe('production_payments');
+      expect(featureCellForAction('grant_payout', environment)).toBe('treasury_operations');
+      expect(featureCellForAction('charter_update', environment)).toBe('governance');
+    }
   });
 });
 

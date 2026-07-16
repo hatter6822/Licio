@@ -15,15 +15,20 @@
 
 import { decCompare } from '@licio/governance';
 import type { KnomosisReasonCode, KnomosisSignedActionType, SubmissionState } from '@licio/shared';
+import {
+  featureCellForAction,
+  REAL_FUNDS_ENVIRONMENTS,
+  reviewSubjectForAction,
+  screeningTargetsFor,
+} from '@licio/shared';
 import type { AuditStore } from '../identity/audit.js';
 import type { EphemeralStore } from '../identity/ephemeral-store.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
-import { reviewSubjectFor } from './ports.js';
+import { worstSanctionsVerdict } from './ports.js';
 import {
-  ACTION_FEATURE_CELL,
   buildEip712Domain,
   buildHumanSummary,
   CAP_CATEGORY,
@@ -33,7 +38,6 @@ import {
   MODE_ENVIRONMENTS,
   type PreflightTokenBinding,
   peekPreflightToken,
-  REAL_FUNDS_ENVIRONMENTS,
   type RoomGovernancePort,
 } from './preflight.js';
 import {
@@ -451,15 +455,13 @@ export async function submitAction(
   // fail closed on unavailable screening / unknown jurisdiction.
   const realFunds = REAL_FUNDS_ENVIRONMENTS.has(deployment.environment);
   if (FUND_TRANSFER_ACTIONS.has(actionType) && tokenPermitsThis) {
-    const screenTarget = (
-      input.typedDataMessage['recipient'] ??
-      input.typedDataMessage['actor'] ??
-      ''
-    ).toLowerCase();
-    const sanctions = await deps.compliance.screenAddress({
-      addressLower: screenTarget,
-      deploymentId: input.deploymentId,
-    });
+    // BOTH counterparties — the same rule the preflight applies, from the same
+    // helper (a payout's actor was screened nowhere but at link).
+    const sanctions = await worstSanctionsVerdict(
+      deps.compliance,
+      screeningTargetsFor(input.typedDataMessage),
+      input.deploymentId,
+    );
     if (sanctions === 'blocked') {
       return {
         ok: false,
@@ -490,7 +492,9 @@ export async function submitAction(
       // undo the point of the re-check: a token minted before a policy change
       // that disables `governance` while payments stay enabled would still see
       // `allowed` and forward the prohibited signature (WS-N.1.1c).
-      featureCell: ACTION_FEATURE_CELL[actionType],
+      // The cell this action exercises ON THIS DEPLOYMENT — the same
+      // environment-aware derivation the preflight used, from the same SSOT.
+      featureCell: featureCellForAction(actionType, deployment.environment),
       // …and the same asset gate: a region can bar an asset between preflight
       // and submit, which is exactly what this re-check exists to catch.
       asset: input.typedDataMessage['asset'] ?? null,
@@ -522,7 +526,7 @@ export async function submitAction(
       // The same subject the WS-M intent leg derives, from the same cell: a
       // room-treasury payout is the ROOM's review, a pay-in is the payer's.
       // Classifying it differently here would split one transfer's review in two.
-      reviewSubject: reviewSubjectFor(ACTION_FEATURE_CELL[actionType], {
+      reviewSubject: reviewSubjectForAction(actionType, {
         userId: input.userId,
         roomId: input.roomId,
       }),

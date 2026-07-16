@@ -697,8 +697,10 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       userId: null,
       roomId: ROOM,
       // The signed deposit message names this treasury; the intent must be for
-      // the SAME target, not merely the same room/asset/amount.
+      // the SAME target, not merely the same room/asset/amount.  (A deposit's
+      // target IS its treasury — the payout classes name their own row.)
       targetType: 'treasury_deposit',
+      treasuryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       targetId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       asset: 'USDC',
       amount: '1000000',
@@ -764,12 +766,63 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
         { asset: 'DAI' },
         // A cleared intent for ANOTHER target in the same room, for the same
         // asset and amount, must not cover this transfer.
-        { targetId: '33333333-3333-4333-8333-333333333333' },
+        { treasuryId: '33333333-3333-4333-8333-333333333333' },
         { targetType: 'grant_payout' },
       ]) {
         const res = await preflightClaiming(INTENT, overrides);
         expect(res.status).toBe(400);
       }
+    });
+
+    it('accepts a steward_compensation intent settling through a grant_payout action', async () => {
+      // The pairing is NOT the identity: a raw `targetType === actionType`
+      // comparison rejected this valid payout, so its reviewer-cleared review
+      // could never be reused and the compensation stayed held.
+      const fixture = await freshKnomosisServices();
+      fixture.knomosis.rooms = {
+        roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+        isMember: async () => true,
+        isSteward: async () => true,
+        contentVisibleToUser: async () => true,
+      };
+      const { userId, cookie } = await seedUserWithSession(fixture.identity);
+      const walletAccountId = await linkAndMapWallet(fixture, userId);
+      const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+      const message: Record<string, string> = {
+        roomId: ROOM,
+        grantId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        recipient: testAccount.address,
+        asset: 'USDC',
+        amount: '1000000',
+        actor: testAccount.address,
+        nonce: '7',
+        expiration: String(Math.floor(Date.now() / 1000) + 600),
+        deploymentId,
+      };
+      wireIntent({
+        paymentIntentId: INTENT,
+        userId,
+        roomId: ROOM,
+        targetType: 'steward_compensation',
+        targetId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        treasuryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        asset: 'USDC',
+        amount: '1000000',
+        executionState: 'quoted',
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      });
+      const res = await post('/knomosis/actions/preflight', cookie, {
+        action_type: 'grant_payout',
+        room_id: ROOM,
+        deployment_id: deploymentId,
+        wallet_account_id: walletAccountId,
+        payment_intent_id: INTENT,
+        typed_data_message: message,
+        signature: await signedTypedData('grant_payout', message),
+      });
+      // Not `intent_mismatch`: the claim is honoured (the action may still fail
+      // its own gates, but never on the intent pairing).
+      expect(res.status).not.toBe(400);
     });
 
     it('rejects an intent past the pre-submission window, or expired', async () => {

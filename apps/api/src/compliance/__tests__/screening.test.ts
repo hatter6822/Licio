@@ -6,8 +6,11 @@
 // HTTP provider contract (bearer, timeout, strict body).
 // WS-N.2.2e — wallet risk: pins dominate, case posture derives elevated/high,
 // store outage answers unavailable (the shipped read-through keeps `pending`).
+
+import { screeningTargetsFor } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
+import { worstSanctionsVerdict } from '../../knomosis/ports.js';
 import { transitionCase } from '../cases.js';
 import { DEFAULT_COMPLIANCE_CONFIG } from '../config.js';
 import { createScreenAddress, HttpSanctionsProvider } from '../screening.js';
@@ -99,6 +102,57 @@ describe('createScreenAddress (WS-N.2.2a)', () => {
       throw new Error('redis down');
     };
     expect(await screen({ addressLower: ADDRESS, deploymentId: 'd1' })).toBe('clear');
+  });
+});
+
+describe('a fund transfer screens EVERY counterparty (WS-N.2.2a)', () => {
+  const PAYER = '0x00000000000000000000000000000000000000aa';
+  const PAYEE = '0x00000000000000000000000000000000000000bb';
+
+  function port(verdicts: Record<string, 'clear' | 'blocked' | 'unavailable'>) {
+    const seen: string[] = [];
+    return {
+      seen,
+      compliance: {
+        screenAddress: async ({ addressLower }: { addressLower: string }) => {
+          seen.push(addressLower);
+          return verdicts[addressLower] ?? 'clear';
+        },
+      },
+    };
+  }
+
+  it('screens the payer AND the payee, not whichever the message happens to name', () => {
+    // A payout names both; screening `recipient ?? actor` silently skipped the
+    // payer, so a steward's wallet was address-screened only at link — and an
+    // outage there was permanent.
+    expect(screeningTargetsFor({ actor: PAYER, recipient: PAYEE })).toEqual([PAYER, PAYEE]);
+    // A deposit names no recipient: the payer alone.
+    expect(screeningTargetsFor({ actor: PAYER })).toEqual([PAYER]);
+    // A self-transfer is one address, screened once.
+    expect(screeningTargetsFor({ actor: PAYER, recipient: PAYER.toUpperCase() })).toEqual([PAYER]);
+  });
+
+  it('a listed PAYER blocks the payout even when the payee is clean', async () => {
+    const { compliance, seen } = port({ [PAYER]: 'blocked' });
+    expect(await worstSanctionsVerdict(compliance, [PAYER, PAYEE], 'd1')).toBe('blocked');
+    // Short-circuits: nothing is gained by screening the rest.
+    expect(seen).toEqual([PAYER]);
+  });
+
+  it('an address that could not be screened is not an address that cleared', async () => {
+    const { compliance } = port({ [PAYEE]: 'unavailable' });
+    // Fail-closed: the real-funds paths reject `unavailable`, so an
+    // inconclusive answer for ANY party cannot be washed out by a clear one.
+    expect(await worstSanctionsVerdict(compliance, [PAYER, PAYEE], 'd1')).toBe('unavailable');
+    // …and a blocked party still dominates an unavailable one.
+    const both = port({ [PAYER]: 'unavailable', [PAYEE]: 'blocked' });
+    expect(await worstSanctionsVerdict(both.compliance, [PAYER, PAYEE], 'd1')).toBe('blocked');
+  });
+
+  it('all-clear is clear', async () => {
+    const { compliance } = port({});
+    expect(await worstSanctionsVerdict(compliance, [PAYER, PAYEE], 'd1')).toBe('clear');
   });
 });
 

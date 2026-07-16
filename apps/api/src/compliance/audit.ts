@@ -72,6 +72,37 @@ export interface PolicyAuditInput {
  * or leaves no trace, which is the guarantee compensators could only
  * approximate.
  */
+/**
+ * A conditional store write inside a unit did NOT apply, so the unit must be
+ * abandoned whole.  See `mustApply` — the reason this is an error and not a
+ * return value.
+ */
+export class UnitNotAppliedError extends Error {
+  constructor(label: string) {
+    super(`${label}: the guarded write did not apply; the unit was abandoned`);
+    this.name = 'UnitNotAppliedError';
+  }
+}
+
+/**
+ * Assert that a guarded store write inside a unit actually applied.
+ *
+ * READ THIS BEFORE WRITING `return false` INSIDE A UNIT.  The conditional
+ * writes here (`anonymize`, `deleteCascade`, `completeDeferredErasure`,
+ * `resolveCaseInTx`, the CAS updates) report "I refused" by returning false —
+ * and a unit callback that RETURNS that is, to the transactor, a transaction
+ * that succeeded: everything written beside it commits, including the chain
+ * entry describing the act that did not happen.  Three separate paths made
+ * exactly that mistake — the fraud-queue decision, the lawful-access denial,
+ * and the deferred erasure — each recording an act the store had refused.
+ *
+ * So the refusal must THROW, and it goes through one named helper rather than
+ * three hand-written `if (!x) throw` blocks that can each be forgotten.
+ */
+export function mustApply(applied: boolean, label: string): void {
+  if (!applied) throw new UnitNotAppliedError(label);
+}
+
 export async function runChainedUnit<T>(
   transactor: ComplianceTransactor,
   work: (stores: ComplianceTxStores) => Promise<T>,

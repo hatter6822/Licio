@@ -14,6 +14,7 @@
 import { zValidator } from '@hono/zod-validator';
 import { PAYMENT_INTENT_TIMED_STATES, type PaymentIntentState } from '@licio/governance';
 import {
+  ACTION_TYPE_FOR_PAYMENT_TARGET,
   KILL_SWITCH_IDS,
   type KnomosisSignedActionType,
   killSwitchAdminRequestSchema,
@@ -25,6 +26,7 @@ import {
   knomosisPreflightResponseSchema,
   knomosisSubmitRequestSchema,
   knomosisSubmitResponseSchema,
+  TARGET_ID_FIELD_FOR_ACTION,
   uuidSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
@@ -90,6 +92,9 @@ async function verifyClaimedIntent(input: {
   roomId: string;
   actionType: string;
   typedDataMessage: Record<string, unknown>;
+  /** `submit` demands the intent already be `signed`; `preflight` accepts the
+   *  whole pre-submission window (it is what moves the intent toward signed). */
+  stage: 'preflight' | 'submit';
 }): Promise<{ code: string; message: string } | null> {
   if (input.paymentIntentId === undefined) return null;
   if (!treasuryServicesConfigured()) {
@@ -115,12 +120,19 @@ async function verifyClaimedIntent(input: {
   // must be the one the message names.
   if (intent.amount !== input.typedDataMessage['amount']) return mismatch;
   if (intent.asset !== input.typedDataMessage['asset']) return mismatch;
-  if (intent.targetType !== input.actionType) return mismatch;
-  const targetField = INTENT_TARGET_FIELD[input.actionType];
+  // The action this intent SETTLES THROUGH — not the target type itself.  They
+  // are not the same enum and not the identity mapping: `steward_compensation`
+  // pays out as a `grant_payout`, so a raw comparison rejects a valid payout
+  // and leaves its cleared review unusable.  The SSOT owns the pairing.
+  if (ACTION_TYPE_FOR_PAYMENT_TARGET[intent.targetType] !== input.actionType) return mismatch;
+  const targetField = TARGET_ID_FIELD_FOR_ACTION[input.actionType];
   // A fund-moving action with no known target field cannot be bound to an
   // intent at all — fail closed rather than accept an unbindable claim.
   if (targetField === undefined) return mismatch;
-  if (intent.targetId !== input.typedDataMessage[targetField]) return mismatch;
+  // A deposit's target IS its treasury; the payout classes name their own row.
+  const expectedTarget =
+    intent.targetType === 'treasury_deposit' ? intent.treasuryId : intent.targetId;
+  if (expectedTarget !== input.typedDataMessage[targetField]) return mismatch;
   // …and still an attempt IN FLIGHT.  `PAYMENT_INTENT_TIMED_STATES` is exactly
   // the pre-submission window in which an action is being minted (the states
   // the expiry sweep watches); past it the intent's action already exists, so
@@ -130,24 +142,22 @@ async function verifyClaimedIntent(input: {
   if (!(PRE_SUBMISSION_INTENT_STATES as ReadonlySet<string>).has(intent.executionState)) {
     return mismatch;
   }
+  // At SUBMIT the intent must already be `signed`.  The bookkeeping that
+  // records the action against the intent has one legal edge — `signed →
+  // submitted` — and the auto-attach sweep scans only `signed` intents, so
+  // forwarding from `quoted`/`preflighted` lets a client crash leave the
+  // transfer settled on chain while the intent expires OUTSIDE the ledger and
+  // the accounting export.  Preflight keeps the broad window: it is what moves
+  // the intent toward `signed` in the first place.
+  if (input.stage === 'submit' && intent.executionState !== 'signed') {
+    return {
+      code: 'intent_not_signed',
+      message: 'The payment intent must be signed before its action is submitted.',
+    };
+  }
   if (intent.expiresAt <= new Date(getKnomosisServices().now()).toISOString()) return mismatch;
   return null;
 }
-
-/**
- * The signed message field naming the INTENT'S TARGET, per fund-moving action.
- * Both sides already agree on the target's identity — the intent stores it as
- * `target_id`, the typed data commits to it under these names — so binding them
- * is what stops one target's clearance covering another's transfer.
- *
- * The governance actions move nothing and never carry an intent, so they are
- * absent; an action not listed here cannot bind an intent (fail-closed).
- */
-const INTENT_TARGET_FIELD: Readonly<Record<string, string>> = {
-  treasury_deposit: 'treasuryId',
-  grant_payout: 'grantId',
-  bounty_contribution: 'bountyId',
-};
 
 /** The pre-submission window, from the WS-M lifecycle SSOT (never re-listed
  *  here: a state added there must not silently become replayable). */
@@ -325,6 +335,7 @@ export function createKnomosisRoutes() {
             roomId: body.room_id,
             actionType: body.action_type,
             typedDataMessage: body.typed_data_message,
+            stage: 'preflight',
           });
           if (intentClaim !== null) {
             return c.json(deny(intentClaim.code, intentClaim.message), 400);
@@ -441,6 +452,7 @@ export function createKnomosisRoutes() {
                 roomId: body.room_id,
                 actionType: body.action_type,
                 typedDataMessage: body.typed_data_message,
+                stage: 'submit',
               });
           if (claimed !== null) {
             return c.json(deny(claimed.code, claimed.message), 400);

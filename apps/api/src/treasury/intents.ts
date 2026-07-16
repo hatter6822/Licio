@@ -18,14 +18,20 @@
 // computed with exact decimal math.
 
 import { decCompare, decSum, paymentIntentTransitionAllowed } from '@licio/governance';
-import type { CryptoFeatureCell, PaymentIntentState, PaymentTargetType } from '@licio/shared';
+import type { PaymentIntentState, PaymentTargetType } from '@licio/shared';
+import {
+  ACTION_TYPE_FOR_PAYMENT_TARGET,
+  featureCellForPaymentTarget,
+  REAL_FUNDS_ENVIRONMENTS,
+  reviewSubjectForAction,
+  TARGET_ID_FIELD_FOR_ACTION,
+} from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import { killSwitchDecision } from '../knomosis/killswitch.js';
 import { pinnedDeployment } from '../knomosis/pin.js';
 import type { CompliancePort, RegionResolverPort } from '../knomosis/ports.js';
-import { reviewSubjectFor } from '../knomosis/ports.js';
-import { REAL_FUNDS_ENVIRONMENTS } from '../knomosis/preflight.js';
+
 import type {
   FinancialWalletStore,
   KnomosisActionStore,
@@ -71,17 +77,6 @@ const DEPOSIT_TARGETS: ReadonlySet<PaymentTargetType> = new Set([
 
 const operationFor = (target: PaymentTargetType): 'deposits' | 'executions' =>
   DEPOSIT_TARGETS.has(target) ? 'deposits' : 'executions';
-
-/**
- * The §22.2 jurisdiction cell an intent exercises (WS-N.1.1c), derived from
- * the SAME deposit/payout split above so the two classifications cannot drift:
- * paying in is a payment, disbursing is a treasury operation.  Asking the
- * region-wide question instead would demand BOTH real-funds cells and so
- * reject a deposit in a region that enables deposits and disables treasury
- * operations — its own cell being open.
- */
-const featureCellFor = (target: PaymentTargetType): CryptoFeatureCell =>
-  DEPOSIT_TARGETS.has(target) ? 'production_payments' : 'treasury_operations';
 
 /** States that count toward the deposit-period aggregates: anything not
  *  conclusively dead (abandoned/failed) or reverted still claims allowance —
@@ -382,7 +377,19 @@ export async function preflightIntent(
     // The intent's OWN cell + asset (WS-N.1.1c): the region-wide reading would
     // demand both real-funds cells and reject a deposit whose cell is enabled,
     // and would carry an asset the region bars on the cell's approval.
-    featureCell: featureCellFor(intent.targetType),
+    // The cell this intent exercises ON ITS DEPLOYMENT — the same SSOT the
+    // WS-L action leg uses, so one movement cannot be gated against two
+    // different policies, and a testnet intent asks for the testnet cell.
+    // The cell this intent exercises ON ITS DEPLOYMENT — the same SSOT the
+    // WS-L action leg uses, so one movement cannot be gated against two
+    // different policies, and a testnet intent asks for the testnet cell.
+    // An unpinned deployment reads as non-real-funds here exactly as it does
+    // for `realFunds` above; it can never settle either way, since the WS-L
+    // submit rejects an unknown deployment outright.
+    featureCell: featureCellForPaymentTarget(
+      intent.targetType,
+      deployment?.environment ?? 'testnet',
+    ),
     asset: intent.asset,
   });
   if (jurisdiction === 'blocked') {
@@ -428,7 +435,7 @@ export async function preflightIntent(
     // milestone", as its own creation states — so two stewards preflighting it
     // share ONE review, and the fraud queue (which knows the room, never the
     // steward) can find that review to release it.
-    reviewSubject: reviewSubjectFor(featureCellFor(intent.targetType), {
+    reviewSubject: reviewSubjectForAction(ACTION_TYPE_FOR_PAYMENT_TARGET[intent.targetType], {
       userId: subjectUserId,
       roomId: intent.roomId,
     }),
@@ -516,21 +523,6 @@ export async function markIntentSigned(
 }
 
 /** The WS-L signed-action type each payment target rides (fail-closed map). */
-const ACTION_TYPE_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
-  treasury_deposit: 'treasury_deposit',
-  bounty_contribution: 'bounty_contribution',
-  grant_payout: 'grant_payout',
-  steward_compensation: 'grant_payout',
-};
-
-/** The SIGNED message field carrying each target's identity: two same-shape
- *  intents (same room/type/amount/asset) must still bind distinct actions. */
-const TARGET_FIELD_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
-  treasury_deposit: 'treasuryId',
-  bounty_contribution: 'bountyId',
-  grant_payout: 'grantId',
-  steward_compensation: 'grantId',
-};
 
 /**
  * The WS-L action idempotency key for the intent's CURRENT attempt (W14):
@@ -593,7 +585,7 @@ export async function attachIntentSubmission(
   if (
     action.roomId !== intent.roomId ||
     (intent.userId !== null && action.actorUserId !== intent.userId) ||
-    action.actionType !== ACTION_TYPE_FOR_TARGET[intent.targetType]
+    action.actionType !== ACTION_TYPE_FOR_PAYMENT_TARGET[intent.targetType]
   ) {
     return tgErr(422, 'action_mismatch', 'The action record does not belong to this intent.');
   }
@@ -608,7 +600,13 @@ export async function attachIntentSubmission(
   // The SIGNED TARGET must be this intent's target: with two same-shape
   // intents, a foreign grant/bounty/treasury action would otherwise settle
   // the wrong record (deposit intents carry the treasury id as their target).
-  const targetField = TARGET_FIELD_FOR_TARGET[intent.targetType];
+  // Every payment target settles through an action that names its target; an
+  // action with no target field cannot carry an intent at all, so an absent
+  // entry is a refusal, never a skipped check.
+  const targetField = TARGET_ID_FIELD_FOR_ACTION[ACTION_TYPE_FOR_PAYMENT_TARGET[intent.targetType]];
+  if (targetField === undefined) {
+    return tgErr(422, 'action_mismatch', 'This intent cannot be settled by a signed action.');
+  }
   const signedTarget = message[targetField];
   const expectedTarget =
     intent.targetType === 'treasury_deposit' ? intent.treasuryId : intent.targetId;

@@ -98,25 +98,46 @@ function walletDeps(services: KnomosisServices): WalletServiceDeps {
 
 /**
  * The fail-closed availability gate every wallet route passes FIRST: the
- * crypto flag (off ⇒ 503 with a clear, non-hidden reason) then the
- * wallet-connection kill switch (WS-L.3.5a: 503, immediate effect).
+ * crypto flag (off ⇒ 503 with a clear, non-hidden reason), the
+ * wallet-connection kill switch (WS-L.3.5a: 503, immediate effect), and the
+ * region's §22.2 `wallet_connection` verdict (WS-N.1.1c).
+ *
+ * The jurisdiction leg is not optional decoration: `/compliance/availability`
+ * reports `wallet_connection` per the region's policy, and without this check
+ * these routes would go on issuing nonces and linking wallets in a region whose
+ * policy disables the cell — the platform telling the member the feature is
+ * unavailable while handing it to them anyway.  `unknown` does NOT bar it:
+ * linking a wallet moves no money, and the region ladder is fail-closed for
+ * real funds, not for every affordance (the shipped testnet posture).
  */
 async function walletGate(
   services: KnomosisServices,
   userId: string,
-): Promise<{ code: 'crypto_disabled' | 'wallet_disabled' } | null> {
+): Promise<{ code: WalletGateCode } | null> {
   if (!services.config().cryptoEnabled) return { code: 'crypto_disabled' };
   const region = await services.regionResolver.regionForUser(userId);
   const decision = await killSwitchDecision(services.configStore, 'wallet_connection', {
     region,
   });
   if (decision.engaged) return { code: 'wallet_disabled' };
+  const jurisdiction = await services.compliance.jurisdiction({
+    userId,
+    region,
+    featureCell: 'wallet_connection',
+    // Linking moves no asset — the governance signatures are the other callers
+    // that name none.
+    asset: null,
+  });
+  if (jurisdiction === 'blocked') return { code: 'wallet_region_blocked' };
   return null;
 }
 
-const GATE_MESSAGES: Record<'crypto_disabled' | 'wallet_disabled', string> = {
+type WalletGateCode = 'crypto_disabled' | 'wallet_disabled' | 'wallet_region_blocked';
+
+const GATE_MESSAGES: Record<WalletGateCode, string> = {
   crypto_disabled: 'Wallet and crypto features are not enabled.',
   wallet_disabled: 'Wallet connection is temporarily disabled.',
+  wallet_region_blocked: 'Wallet connection is not available in your region.',
 };
 
 export function createWalletRoutes() {

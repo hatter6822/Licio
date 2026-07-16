@@ -15,7 +15,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { decCompare, type TreasuryBounds } from '@licio/governance';
 import {
-  type CryptoFeatureCell,
+  featureCellForAction,
   formatMinorUnits,
   type GovernanceMode,
   getTypedDataStruct,
@@ -27,6 +27,9 @@ import {
   type KnomosisReasonCode,
   type KnomosisSignedActionType,
   type PreflightStep,
+  REAL_FUNDS_ENVIRONMENTS,
+  reviewSubjectForAction,
+  screeningTargetsFor,
 } from '@licio/shared';
 import type { AuditStore } from '../identity/audit.js';
 import type { EphemeralStore } from '../identity/ephemeral-store.js';
@@ -34,7 +37,7 @@ import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import { isContractAllowed, type PinnedDeployment, pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
-import { reviewSubjectFor } from './ports.js';
+import { worstSanctionsVerdict } from './ports.js';
 import { type ContractTypedDataVerifier, verifyActionSignature } from './signatures.js';
 import type {
   FinancialWalletStore,
@@ -107,11 +110,6 @@ export interface PreflightTokenBinding {
   typedDataHash: string;
 }
 
-export const REAL_FUNDS_ENVIRONMENTS: ReadonlySet<KnomosisEnvironment> = new Set([
-  'capped_production',
-  'mature_production',
-]);
-
 /** Governance modes permitted to submit REAL signed actions, per deployment
  *  environment (simulated/ordinary rooms never reach the gateway). */
 export const MODE_ENVIRONMENTS: Readonly<
@@ -128,23 +126,6 @@ export const FUND_TRANSFER_ACTIONS: ReadonlySet<KnomosisSignedActionType> = new 
   'grant_payout',
   'bounty_contribution',
 ]);
-
-/**
- * The §22.2 jurisdiction-policy cell each signed action exercises (WS-N.1.1c).
- * A policy is per-cell, so the region verdict must be asked about the cell the
- * action actually uses: a region that enables payments while disabling
- * `governance` must reject a `proposal_sign` even though its payment cells are
- * live.  Pay-IN actions are payments; a treasury disbursement is a treasury
- * operation; the binding room-governance signatures are governance.
- */
-export const ACTION_FEATURE_CELL: Readonly<Record<KnomosisSignedActionType, CryptoFeatureCell>> = {
-  treasury_deposit: 'production_payments',
-  bounty_contribution: 'production_payments',
-  grant_payout: 'treasury_operations',
-  proposal_sign: 'governance',
-  charter_update: 'governance',
-  steward_rotation: 'governance',
-};
 
 /** Law-pack cap category per amount-bearing action type. */
 export const CAP_CATEGORY: Readonly<Partial<Record<KnomosisSignedActionType, string>>> = {
@@ -533,11 +514,15 @@ export async function runPreflight(
   //    environments fail closed on unavailable screening/unknown jurisdiction.
   const realFunds = REAL_FUNDS_ENVIRONMENTS.has(deployment.environment);
   if (FUND_TRANSFER_ACTIONS.has(actionType)) {
-    const screenTarget = (message['recipient'] ?? verified.actorLower).toLowerCase();
-    const sanctions = await deps.compliance.screenAddress({
-      addressLower: screenTarget,
-      deploymentId: input.deploymentId,
-    });
+    // BOTH counterparties: the payer who authorizes the movement and the payee
+    // who receives it.  Screening `recipient ?? actor` left a payout's actor
+    // unscreened at every action — its only screen was at link, so an outage
+    // there was permanent.
+    const sanctions = await worstSanctionsVerdict(
+      deps.compliance,
+      screeningTargetsFor({ ...message, actor: verified.actorLower }),
+      input.deploymentId,
+    );
     if (sanctions === 'blocked') {
       return audited(
         fail('sanctions', 'SANCTIONS_BLOCKED', 'This action cannot be completed.', input, nowIso),
@@ -572,7 +557,11 @@ export async function runPreflight(
     // The action's own policy cell: a region may permit payments and prohibit
     // governance (or the reverse), and the verdict must answer for the cell
     // this signature exercises — not for the region in aggregate.
-    featureCell: ACTION_FEATURE_CELL[actionType],
+    // The cell this action exercises ON THIS DEPLOYMENT.  Environment-aware:
+    // a region that enables `testnet_transactions` and leaves the real-funds
+    // cells disabled — the ordinary posture before production approval — would
+    // otherwise be told `blocked` for a testnet action its own cell permits.
+    featureCell: featureCellForAction(actionType, deployment.environment),
     // …and its asset, which `asset_flags` bars independently of the cell (a
     // region can allow payments and still prohibit one asset).  The
     // governance signatures move nothing, so they name no asset.
@@ -619,7 +608,7 @@ export async function runPreflight(
     // The same subject the WS-M intent leg derives, from the same cell: a
     // room-treasury payout is the ROOM's review, a pay-in is the payer's.
     // Classifying it differently here would split one transfer's review in two.
-    reviewSubject: reviewSubjectFor(ACTION_FEATURE_CELL[actionType], {
+    reviewSubject: reviewSubjectForAction(actionType, {
       userId: input.userId,
       roomId: input.roomId,
     }),

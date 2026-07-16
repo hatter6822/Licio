@@ -125,10 +125,19 @@ export interface LinkWalletResult {
 /**
  * WS-N.2.2a — the FIRST assessment's screening leg, at the only moment the
  * plaintext address exists server-side (WS-D stores financial addresses as
- * keyed hashes).  A `blocked` verdict fires the compliance hook (pin `high`
- * + a critical sanctions case); `clear`/`unavailable` leave the fail-closed
- * `pending` state for the read-through to resolve.  Never throws: a
- * screening outage can only under-clear, and `pending` cannot move funds.
+ * keyed hashes).  A `blocked` verdict fires the compliance hook (pin `high` +
+ * a critical sanctions case); an outage or error leaves the fail-closed
+ * `pending` state.  Never throws.
+ *
+ * A `clear` verdict is the ONLY thing that may take a wallet out of `pending`,
+ * and it must do so HERE.  This is the one moment the plaintext address exists
+ * (it is stored hashed), so it is the one moment the wallet can be screened at
+ * all — `walletRisk` later reads pins and cases and says `normal` when it finds
+ * none, which is just as true of a wallet that was never screened.  Recording
+ * the clearance here is what lets the read-throughs refuse to promote the rest
+ * (`resolvedWalletRiskState`).  An outage therefore leaves the wallet pending
+ * until it is re-linked — the honest outcome: we could not certify it, and
+ * nothing later can.
  */
 async function screenLinkedWallet(
   deps: WalletServiceDeps,
@@ -141,12 +150,22 @@ async function screenLinkedWallet(
       addressLower,
       deploymentId: 'wallet-link',
     });
-    if (verdict === 'blocked' && deps.onSanctionedWalletLink !== undefined) {
+    if (verdict !== 'blocked') return;
+    // ALERT FIRST, then record.  A hook that throws (the chain is down) used to
+    // take the alert with it, so a sanctions match at link could leave no pin,
+    // no case, and no signal — the one outcome an operator must hear about.
+    deps.alert('knomosis.wallet.link_sanctioned', { wallet_account_id: walletAccountId });
+    if (deps.onSanctionedWalletLink !== undefined) {
       await deps.onSanctionedWalletLink(walletAccountId, userId);
-      deps.alert('knomosis.wallet.link_sanctioned', { wallet_account_id: walletAccountId });
     }
-  } catch {
-    // Fail-closed by inaction: the wallet stays `pending`.
+  } catch (error) {
+    // Fail-closed by inaction: the wallet stays `pending`, which cannot move
+    // funds until an assessment resolves it — and every fund transfer
+    // re-screens this address anyway.
+    deps.alert('knomosis.wallet.link_screen_failed', {
+      wallet_account_id: walletAccountId,
+      message: error instanceof Error ? error.message : 'unknown',
+    });
   }
 }
 

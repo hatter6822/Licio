@@ -15,23 +15,17 @@
 // `scrubUserSubjectForErasure` — user subjects are NULLed EXCEPT under a
 // legal hold / counsel retention window; the skip itself is audited and the
 // data is erased when the hold lapses (this sweep re-scrubs resolved holds).
-import { appendCaseAudit, appendCaseAuditInTx, runChainedUnit } from './audit.js';
+import {
+  appendCaseAudit,
+  appendCaseAuditInTx,
+  mustApply,
+  runChainedUnit,
+  UnitNotAppliedError,
+} from './audit.js';
 import type { CaseDeps } from './cases.js';
 import type { ComplianceRuntimeConfig } from './config.js';
 
 type Clock = () => number;
-
-/**
- * A legal hold landed on a case between this sweep selecting it and acting on
- * it.  Not an error: it aborts the anonymize unit so the chain entry never
- * claims an act that did not happen.
- */
-class RetentionHeldError extends Error {
-  constructor(caseId: string) {
-    super(`case ${caseId} is under a legal hold`);
-    this.name = 'RetentionHeldError';
-  }
-}
 
 export interface RetentionSweepDeps {
   caseDeps: CaseDeps;
@@ -108,12 +102,10 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
                 afterState: record.reviewState,
                 note: `Retention expired (${config.retentionScheduleRef}); anonymized in place.`,
               });
-              // The store re-checks the hold as part of the write; false ⇔ a
-              // hold landed since this page was read, so the entry above must
-              // not stand either — the unit is abandoned whole.
-              if (!(await stores.cases.anonymize(record.caseId, nowIso))) {
-                throw new RetentionHeldError(record.caseId);
-              }
+              // The store re-checks the hold as part of the write; a refusal
+              // means a hold landed since this page was read, so the entry
+              // above must not stand either — the unit is abandoned whole.
+              mustApply(await stores.cases.anonymize(record.caseId, nowIso), 'retention anonymize');
               return true;
             },
             'retention anonymize',
@@ -135,7 +127,7 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
           }
         }
       } catch (error) {
-        if (error instanceof RetentionHeldError) {
+        if (error instanceof UnitNotAppliedError) {
           // Not a fault: a legal hold won the race and the whole unit was
           // abandoned, entry included.  The case simply stays.
           summary.heldRace += 1;
@@ -211,18 +203,25 @@ async function dischargeDeferredErasures(deps: RetentionSweepDeps): Promise<numb
             afterState: record.reviewState,
             note: 'Right-to-erasure scrub deferred by a legal hold; the hold has lapsed and the subject is erased.',
           });
-          // The store re-checks the hold as part of the write; false ⇔ a fresh
-          // obligation landed since this page was read, so the entry above must
-          // not stand either.
-          return await stores.cases.completeDeferredErasure(
-            record.caseId,
-            new Date(deps.now()).toISOString(),
+          // The store re-checks the hold as part of the write; a refusal means
+          // a fresh obligation landed since this page was read, so the entry
+          // above must not stand either.  RETURNING the refusal would commit
+          // it: the chain would say the held-back subject was erased while the
+          // subject is still there.
+          mustApply(
+            await stores.cases.completeDeferredErasure(
+              record.caseId,
+              new Date(deps.now()).toISOString(),
+            ),
+            'deferred erasure',
           );
+          return true;
         },
         'deferred erasure',
       );
       if (done) discharged += 1;
     } catch (error) {
+      if (error instanceof UnitNotAppliedError) continue; // re-held; nothing kept
       deps.log('compliance.erasure.deferred_failed', {
         caseId: record.caseId,
         message: error instanceof Error ? error.message : 'unknown',

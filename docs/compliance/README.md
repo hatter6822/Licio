@@ -53,6 +53,20 @@ modified** in their verdict semantics:
   signed payload — so a client quoting someone else's cleared intent id lands on
   a different key and gets its own review.
 
+  **One derivation, in `@licio/shared`.**  Every gate needs the same handful of
+  facts about a movement — which §22.2 cell it exercises, which signed field
+  names its target, which action settles which payment target, who its review is
+  about — and both legs used to derive them from their OWN local tables.
+  `packages/shared/src/knomosis/compliance-mapping.ts` is now the only copy, and
+  it lives in the package both contexts already import, so there is nowhere left
+  to put a second one. Every drift between those tables was a real defect: a
+  `steward_compensation` intent settles through a `grant_payout` action, so a
+  raw `targetType === actionType` comparison rejected a valid payout; a static
+  action→cell table asked for `production_payments` on a testnet deployment,
+  where only `testnet_transactions` is enabled. The cell derivation is
+  **environment-aware** for that reason, and a test walks the whole target enum
+  across every environment asserting the two legs agree.
+
   **`reviewSubject` — who the review is about, which is not always the caller.**
   A disbursement from a room treasury belongs to the **room**, not to whichever
   steward authorized it (the same rule the room-owned payout intent already
@@ -364,6 +378,16 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   **denied** request still releases its hold and closes its case explicitly: it
   obliges nothing, and leaving it would keep the subject's records pinned and
   their crypto features disabled on a request counsel rejected.
+- **A fund transfer screens EVERY counterparty.**  Both legs screened
+  `recipient ?? actor`, which quietly means a deposit (no recipient) screens its
+  actor at every action while a payout screens only its recipient and NEVER its
+  actor. A steward's wallet was therefore address-screened exactly once, at link
+  — so a link-time outage, or a match whose case could not be recorded, left an
+  unscreened wallet authorizing real payouts for good. Sanctions apply to both
+  counterparties, so `screeningTargetsFor` returns both (deduped) and
+  `worstSanctionsVerdict` folds the answers worst-first: blocked if any party is
+  listed, else unavailable if any answer was inconclusive — an address we could
+  not screen is not an address we cleared.
 - **A verdict never claims an investigation that does not exist.**  Every
   answer here that names one — `blocked` on velocity, `elevated` for review,
   `blocked` on a sanctions match — promises operators and the subject a case, a
@@ -426,7 +450,11 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 - **Cleanup inside a unit throws; it never returns.**  A returned error reads to
   the transactor as a committed success, so a denial's failed hold-release would
   commit the denial while the route reported failure — the partial state the
-  unit exists to prevent.
+  unit exists to prevent. THREE paths made exactly that mistake (the fraud-queue
+  decision, the lawful-access denial, the deferred erasure), each recording an
+  act the store had refused, so the refusal now goes through one named
+  helper — `mustApply` — rather than three hand-written throws that can each be
+  forgotten. Read its comment before writing `return false` inside a unit.
 - **A legal hold is reference-counted, not a flag.**  A SAR and a lawful-access
   request can hold the same case at once, so each names its own hold
   (`legal_hold_refs`) and releases only that one; `legal_hold` is *derived* from
