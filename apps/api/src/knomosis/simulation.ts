@@ -292,6 +292,27 @@ export async function simDeposit(
     idempotencyKey?: string;
   },
 ): Promise<{ ok: true; treasury: SimTreasuryResponse } | SimulationError> {
+  // A client-supplied idempotency key makes a retried deposit (a double-tap, or a
+  // network retry after a lost response) apply the credit AT MOST ONCE.  Namespaced
+  // with `deposit:` so a client key can never collide with a grant-execution key
+  // (a raw proposalId UUID) that shares the ledger's unique idempotency column.
+  const idempotencyKey =
+    args.idempotencyKey !== undefined
+      ? `deposit:${args.roomId}:${args.userId}:${args.idempotencyKey}`
+      : null;
+  // REPLAY before the mint-only gates below.  A retry has ALREADY applied the
+  // credit, so the comprehension gate (a quiz-version bump can newly fail it) and
+  // the `payment_intent_creation` kill switch (engaged since the original) decide
+  // whether a NEW deposit may be minted — re-running them would hand the retry a
+  // fresh 403/503 instead of the credit it cannot otherwise learn already landed.
+  if (idempotencyKey !== null) {
+    const prior = await deps.simTreasury.findEntryByIdempotencyKey(idempotencyKey);
+    if (prior !== null) {
+      // Already applied — return the current treasury without re-crediting.
+      return { ok: true, treasury: await simTreasuryView(deps, args.roomId) };
+    }
+  }
+
   const comprehension = await requireComprehension(deps, args.userId);
   if (comprehension !== null) return comprehension;
 
@@ -302,22 +323,6 @@ export async function simDeposit(
   });
   if (decision.engaged) {
     return err(503, 'kill_switch_active', 'Payment creation is temporarily paused.');
-  }
-
-  // A client-supplied idempotency key makes a retried deposit (a double-tap, or a
-  // network retry after a lost response) apply the credit AT MOST ONCE.  Namespaced
-  // with `deposit:` so a client key can never collide with a grant-execution key
-  // (a raw proposalId UUID) that shares the ledger's unique idempotency column.
-  const idempotencyKey =
-    args.idempotencyKey !== undefined
-      ? `deposit:${args.roomId}:${args.userId}:${args.idempotencyKey}`
-      : null;
-  if (idempotencyKey !== null) {
-    const prior = await deps.simTreasury.findEntryByIdempotencyKey(idempotencyKey);
-    if (prior !== null) {
-      // Already applied — return the current treasury without re-crediting.
-      return { ok: true, treasury: await simTreasuryView(deps, args.roomId) };
-    }
   }
 
   const nowIso = new Date(deps.now()).toISOString();

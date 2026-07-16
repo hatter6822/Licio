@@ -1960,16 +1960,24 @@ describe('the disabled-event dedup window is bounded (WS-N.1.1c memory safety)',
     expect(dedup.size()).toBe(1);
   });
 
-  it('retains still-live keys when it cannot free the cap', () => {
+  it('evicts oldest-first at the cap when nothing has expired (HARD bound)', () => {
     const WINDOW = 1000;
     const dedup = createDedupWindow(WINDOW, 2);
-    // Two keys, both LIVE, then a third within the window: nothing is expired to
-    // prune, so the live working set is kept (dedup correctness beats the cap).
+    // Two LIVE keys fill the cap; a third within the window has nothing expired
+    // to prune, so the OLDEST ('a') is evicted — the map never grows past 2.
     dedup.should('a', 0);
     dedup.should('b', 0);
     expect(dedup.should('c', 1)).toBe(true);
-    expect(dedup.size()).toBe(3);
-    // 'a' is still inside its window, so it stays deduped — not evicted.
-    expect(dedup.should('a', 2)).toBe(false);
+    expect(dedup.size()).toBe(2);
+    // 'a' was evicted, so it re-emits (no longer deduped); 'c' is still live.
+    expect(dedup.should('a', 2)).toBe(true);
+    expect(dedup.size()).toBe(2);
+    expect(dedup.should('c', 2)).toBe(false);
+    // Refreshing an EXISTING key past its window updates in place — no eviction.
+    const d2 = createDedupWindow(WINDOW, 2);
+    d2.should('x', 0);
+    d2.should('y', 0);
+    expect(d2.should('x', WINDOW + 1)).toBe(true); // x's window elapsed → re-emit
+    expect(d2.size()).toBe(2); // still x + y, not grown
   });
 });

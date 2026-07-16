@@ -504,6 +504,36 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     expect(first.proposalId).toBe(deterministicProposalId(ROOM, PROPOSER, key));
   });
 
+  it('replays BEFORE the freeze gate — a freeze after create cannot hide the proposal', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const key = crypto.randomUUID();
+    const first = await createProposal(deps, { idempotency_key: key });
+    // The room's governance freezes AFTER the proposal was created.
+    await deps.profiles.setProfileFreeze(
+      ROOM,
+      'frozen',
+      'incident',
+      new Date(deps.now()).toISOString(),
+    );
+    // A lost-response retry replays the stored proposal (idempotency runs before
+    // the mint-only writability gate), NOT a fresh governance_frozen.
+    const replay = await createProductionProposal(deps, {
+      roomId: ROOM,
+      userId: PROPOSER,
+      create: draft({ idempotency_key: key }),
+    });
+    expect(replay).toMatchObject({ ok: true });
+    if ('proposal' in replay) expect(replay.proposal.proposalId).toBe(first.proposalId);
+    // …but a NEW proposal IS blocked by the freeze (the gate still bites a mint).
+    const fresh = await createProductionProposal(deps, {
+      roomId: ROOM,
+      userId: PROPOSER,
+      create: draft({ idempotency_key: crypto.randomUUID() }),
+    });
+    expect(fresh).toMatchObject({ ok: false, code: 'governance_frozen' });
+  });
+
   it('requires a real-asset mode, membership, and an allowed type', async () => {
     const deps = buildHarness();
     await prepareRoom(deps);

@@ -109,6 +109,39 @@ describe('RiskDisclosures (WS-N.1.2d)', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 
+  it('withholds onAcknowledged until EVERY required disclosure is acknowledged', async () => {
+    const second = {
+      ...disclosure,
+      disclosure_id: 'risk-crypto',
+      version: 1,
+      title: 'Crypto risk',
+    };
+    mocked.fetchDisclosures
+      .mockResolvedValueOnce({ disclosures: [disclosure, second] })
+      .mockResolvedValueOnce({ disclosures: [{ ...disclosure, acknowledged: true }, second] })
+      .mockResolvedValueOnce({
+        disclosures: [
+          { ...disclosure, acknowledged: true },
+          { ...second, acknowledged: true },
+        ],
+      });
+    // The server reports one still outstanding after the first ack, none after the second.
+    mocked.acknowledgeDisclosure
+      .mockResolvedValueOnce({ acknowledged: true, remaining: [{ id: 'risk-crypto', version: 1 }] })
+      .mockResolvedValueOnce({ acknowledged: true, remaining: [] });
+    const onAcknowledged = vi.fn();
+    render(<RiskDisclosures onAcknowledged={onAcknowledged} />);
+    const buttons = await screen.findAllByRole('button', { name: /read and understood/i });
+    expect(buttons).toHaveLength(2);
+    await userEvent.click(buttons[0] as HTMLElement);
+    // One disclosure still requires ack → the flow stays open, parent NOT called.
+    await waitFor(() => expect(mocked.acknowledgeDisclosure).toHaveBeenCalledTimes(1));
+    expect(onAcknowledged).not.toHaveBeenCalled();
+    // Acknowledge the remaining one → nothing outstanding → parent IS called.
+    await userEvent.click(await screen.findByRole('button', { name: /read and understood/i }));
+    await waitFor(() => expect(onAcknowledged).toHaveBeenCalled());
+  });
+
   it('renders the empty state when no disclosures apply', async () => {
     mocked.fetchDisclosures.mockResolvedValue({ disclosures: [] });
     render(<RiskDisclosures />);

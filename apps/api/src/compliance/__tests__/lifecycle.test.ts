@@ -305,9 +305,35 @@ describe('the compliance scheduler (WS-N lease-guarded tick)', () => {
     expect(await services.cases.getById(record.caseId)).toBeNull();
   });
 
-  it('reports a lease failure and skips the tick entirely', async () => {
+  it('reloads config on EVERY worker, even the one that loses the lease', async () => {
+    vi.useFakeTimers();
+    const lease = new InMemoryJobLeaseStore();
+    let reloads = 0;
+    const realReloadA = services.reloadConfig.bind(services);
+    services.reloadConfig = async () => {
+      reloads += 1;
+      return realReloadA();
+    };
+    const stopA = startComplianceScheduler(services, () => {}, 60_000, { lease, holder: 'pod-a' });
+    const stopB = startComplianceScheduler(services, () => {}, 60_000, { lease, holder: 'pod-b' });
+    await vi.advanceTimersByTimeAsync(1);
+    stopA();
+    stopB();
+    // BOTH the lease winner and the loser reloaded config — a losing replica
+    // must not keep running request-path checks (velocity limits, screening
+    // cache TTLs) on stale boot-time config until it wins the lease or restarts.
+    expect(reloads).toBe(2);
+  });
+
+  it('reports a lease failure and skips the SWEEP (config still reloaded first)', async () => {
     vi.useFakeTimers();
     await seedCase();
+    let reloaded = false;
+    const realReload = services.reloadConfig.bind(services);
+    services.reloadConfig = async () => {
+      reloaded = true;
+      return realReload();
+    };
     const failures: string[] = [];
     const stop = startComplianceScheduler(services, (_error, task) => failures.push(task), 60_000, {
       lease: {
@@ -320,7 +346,9 @@ describe('the compliance scheduler (WS-N lease-guarded tick)', () => {
     await vi.advanceTimersByTimeAsync(1);
     stop();
     expect(failures).toEqual(['lease']);
-    // Fail-closed: no sweep ran under an unknown lease state.
+    // Config reload runs BEFORE the lease, so it happened even though the lease
+    // read failed; only the sweep is skipped (fail-closed on an unknown lease).
+    expect(reloaded).toBe(true);
     expect(services.metrics.snapshot()['compliance.retention.deleted']).toBeUndefined();
   });
 

@@ -1206,6 +1206,34 @@ describe('appeals (independence enforced)', () => {
     expect(!dup.ok && dup.code).toBe('appeal_already_exists');
   });
 
+  it('replays an existing appeal BEFORE the key-material scan (offline-idempotent, WS-N.2.3e)', async () => {
+    const actionId = await applyHide();
+    const first = await submitAppeal(services, AUTHOR, {
+      action_id: actionId,
+      user_statement: 'Please reconsider.',
+    });
+    expect(first.ok).toBe(true);
+    // A lost-response retry whose statement now trips the key-material detector
+    // (a tuning change, or an appeal accepted before the filter shipped) recovers
+    // the EXISTING appeal, not a fresh key_material_blocked — no new row either way.
+    const retry = await submitAppeal(services, AUTHOR, {
+      action_id: actionId,
+      user_statement: 'a'.repeat(64),
+    });
+    expect(retry.ok).toBe(false);
+    if (!retry.ok) expect(retry.code).toBe('appeal_already_exists');
+  });
+
+  it('still blocks key material on a NEW appeal (would create a row)', async () => {
+    const actionId = await applyHide();
+    const r = await submitAppeal(services, AUTHOR, {
+      action_id: actionId,
+      user_statement: 'a'.repeat(64),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('key_material_blocked');
+  });
+
   it('#1 rejects a modify whose action does not apply to the original target type', async () => {
     const out = await applyAction(services, safetyActor(), {
       target_type: 'account',

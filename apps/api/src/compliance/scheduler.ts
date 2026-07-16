@@ -2,10 +2,13 @@
 //
 // WS-N scheduler (the house lease-guarded pattern): the hourly tick reloads
 // the fail-closed config and runs the retention sweep on its own (daily by
-// default) cadence — the lease makes this the durable distributed runner
-// (every instance ticks, at most one executes per window), and retention is
-// ALSO enforced at read time by `listExpired`, so a missed tick never
-// extends retention.
+// default) cadence.  The config reload runs on EVERY worker (no lease): a
+// replica that loses the lease must still pick up an admin's runtime change for
+// its own request-path checks (velocity limits, screening cache TTLs), not stay
+// on boot-time config until it wins the lease or restarts.  The lease guards
+// only the retention SWEEP (at most one executor per window), and retention is
+// ALSO enforced at read time by `listExpired`, so a missed sweep never extends
+// retention.
 import { hostname } from 'node:os';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { runRetentionSweep } from './retention.js';
@@ -19,15 +22,23 @@ const COMPLIANCE_JOB_LEASE = 'scheduler:compliance';
 /** The last sweep boundary this process observed (lease-holder local). */
 let lastSweepAtMs = 0;
 
-export async function runComplianceTick(
+/** Reload the fail-closed runtime config — runs on EVERY worker, no lease. */
+async function reloadComplianceConfig(
   services: ComplianceServices,
-  onError: (err: unknown, task: ComplianceSchedulerTask) => void = () => {},
+  onError: (err: unknown, task: ComplianceSchedulerTask) => void,
 ): Promise<void> {
   try {
     await services.reloadConfig();
   } catch (err) {
     onError(err, 'config_reload');
   }
+}
+
+/** The retention sweep on its own cadence — lease-guarded (single executor). */
+async function runRetentionSweepTick(
+  services: ComplianceServices,
+  onError: (err: unknown, task: ComplianceSchedulerTask) => void,
+): Promise<void> {
   const nowMs = services.now();
   if (nowMs - lastSweepAtMs >= services.config().retentionSweepIntervalMs) {
     try {
@@ -58,6 +69,17 @@ export async function runComplianceTick(
   }
 }
 
+/** A full tick (config reload + retention sweep) for a DIRECT / no-lease caller.
+ *  The lease scheduler runs the two separately — reload on every worker, sweep
+ *  under the lease — so a losing replica never runs on stale config. */
+export async function runComplianceTick(
+  services: ComplianceServices,
+  onError: (err: unknown, task: ComplianceSchedulerTask) => void = () => {},
+): Promise<void> {
+  await reloadComplianceConfig(services, onError);
+  await runRetentionSweepTick(services, onError);
+}
+
 export function startComplianceScheduler(
   services: ComplianceServices,
   onError: (err: unknown, task: ComplianceSchedulerTask) => void = () => {},
@@ -67,6 +89,10 @@ export function startComplianceScheduler(
   const holder = runner?.holder ?? `${hostname()}:${process.pid}`;
   const leaseTtlMs = Math.max(1, Math.floor(intervalMs * 0.9));
   const tick = async (): Promise<void> => {
+    // Config reload on EVERY worker, BEFORE the lease: a replica that loses the
+    // lease must still pick up a runtime config change for its request-path
+    // checks, not stay on boot-time config until it wins the lease or restarts.
+    await reloadComplianceConfig(services, onError);
     if (runner) {
       try {
         if (!(await runner.lease.tryAcquire(COMPLIANCE_JOB_LEASE, leaseTtlMs, holder))) return;
@@ -75,7 +101,7 @@ export function startComplianceScheduler(
         return;
       }
     }
-    await runComplianceTick(services, onError);
+    await runRetentionSweepTick(services, onError);
   };
   const timer = setInterval(() => void tick(), intervalMs);
   if (typeof timer === 'object' && 'unref' in timer) timer.unref();

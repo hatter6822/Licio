@@ -374,13 +374,15 @@ const DISABLE_EVENT_DEDUP_MS = 24 * 3_600_000;
 const DISABLE_EVENT_MAX_KEYS = 100_000;
 
 /**
- * A bounded, TTL-dedup gate: `should(key, nowMs)` returns true at most once per
- * `windowMs` per key.  Expired keys are pruned once the map reaches `maxKeys`,
- * so — unlike a plain `Map` that only ever grows — memory stays bounded by the
- * distinct keys seen inside one window.  `size()` exposes the live key count so
- * the bound is unit-testable with small values instead of a 100k-key stress
- * loop (the return value alone cannot distinguish a pruned key from an expired
- * one — both re-emit).
+ * A HARD-bounded, TTL-dedup gate: `should(key, nowMs)` returns true at most once
+ * per `windowMs` per key, and the map NEVER exceeds `maxKeys`.  At the cap it
+ * first drops entries whose window has elapsed (they would re-emit anyway); if
+ * that frees nothing — a genuine >`maxKeys` live working set — it evicts
+ * oldest-first (a `Map` preserves insertion order) so a plain unbounded growth
+ * cannot happen and the per-insert scan stays bounded.  An evicted still-live
+ * key simply re-emits once (observability volume, never a correctness issue).
+ * `size()` exposes the live key count so the bound is unit-testable with small
+ * values instead of a 100k-key stress loop.
  */
 export function createDedupWindow(
   windowMs: number,
@@ -391,9 +393,16 @@ export function createDedupWindow(
     should: (key, nowMs) => {
       const last = seen.get(key);
       if (last !== undefined && nowMs - last < windowMs) return false;
-      if (seen.size >= maxKeys) {
+      if (seen.size >= maxKeys && !seen.has(key)) {
         for (const [k, at] of seen) {
           if (nowMs - at >= windowMs) seen.delete(k);
+        }
+        // Still full after dropping the expired: evict oldest-first until there
+        // is room, so the map is bounded at `maxKeys` no matter the traffic.
+        while (seen.size >= maxKeys) {
+          const oldest = seen.keys().next().value;
+          if (oldest === undefined) break;
+          seen.delete(oldest);
         }
       }
       seen.set(key, nowMs);

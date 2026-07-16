@@ -117,19 +117,28 @@ async function verifyClaimedIntent(input: {
   };
   if (intent === null) return mismatch;
   // Ownership.  A member's own intent is authorized by the owner match.  A
-  // room-owned payout (null owner: grant/compensation) is authorized by
-  // STEWARDSHIP — the same `isSteward` test `/actions/:id` uses to hide another
-  // steward's action, and the very gate `submitAction` re-runs for a
-  // `grant_payout`.  It MUST be checked here, in the identity block, because the
-  // retry replay skips `submitAction`'s gate: without it, any authenticated user
-  // who names a room-owned intent id + payload passes as its "retry" and is
-  // handed the steward's action id and submission state (WS-N.2.3d tipping-off).
+  // room-owned payout (null owner: grant/compensation) is authorized EITHER by
+  // current STEWARDSHIP (to mint a fresh action — the same `isSteward` test
+  // `/actions/:id` uses to hide another steward's action, and the gate
+  // `submitAction` re-runs for a `grant_payout`) OR by being the ORIGINAL ACTOR
+  // of the action already settling it (a lost-response retry of one's OWN
+  // submission, which a steward-role revocation landing in between must not
+  // strand — the action id they need to recover is theirs).  Both MUST be
+  // checked here, in the identity block, because the retry replay skips
+  // `submitAction`'s gate: without it any authenticated user who merely names a
+  // room-owned intent id + payload passes as its "retry" and is handed the
+  // steward's action id and submission state (WS-N.2.3d tipping-off).
   if (intent.userId !== null) {
     if (intent.userId !== input.userId) return mismatch;
   } else {
-    const rooms = getKnomosisServices().rooms;
+    const services = getKnomosisServices();
     // Fail closed: an unwired governance port cannot authorize a room payout.
-    if (rooms === null || !(await rooms.isSteward(intent.roomId, input.userId))) return mismatch;
+    if (services.rooms === null) return mismatch;
+    const settling = await services.actions.getByPaymentIntentId(intent.paymentIntentId);
+    const isOriginalActor = settling !== null && settling.actorUserId === input.userId;
+    if (!isOriginalActor && !(await services.rooms.isSteward(intent.roomId, input.userId))) {
+      return mismatch;
+    }
   }
   if (intent.roomId !== input.roomId) return mismatch;
   // …and the SAME movement.  Amount and asset come from the signed payload, so

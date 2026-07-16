@@ -932,6 +932,80 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       );
     });
 
+    it('a room-owned payout: the ORIGINAL actor may replay their submit after their role is revoked', async () => {
+      const fixture = await freshKnomosisServices();
+      fixture.knomosis.rooms = {
+        roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+        isMember: async () => true,
+        isSteward: async () => false, // role REVOKED after they submitted
+        contentVisibleToUser: async () => true,
+      };
+      const { userId, cookie } = await seedUserWithSession(fixture.identity);
+      const walletAccountId = await linkAndMapWallet(fixture, userId);
+      const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+      const message: Record<string, string> = {
+        roomId: ROOM,
+        grantId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        recipient: testAccount.address,
+        asset: 'USDC',
+        amount: '1000000',
+        actor: testAccount.address,
+        nonce: '7',
+        expiration: String(Math.floor(Date.now() / 1000) + 600),
+        deploymentId,
+      };
+      const key = crypto.randomUUID();
+      // The steward ALREADY submitted this room-owned payout — the action is theirs.
+      await fixture.knomosis.actions.insert({
+        actionRecordId: crypto.randomUUID(),
+        deploymentId,
+        actionType: 'grant_payout',
+        roomId: ROOM,
+        actorWalletAccountId: walletAccountId,
+        actorUserId: userId,
+        payloadHash: `0x${'11'.repeat(32)}`,
+        typedDataHash: `0x${'22'.repeat(32)}`,
+        signedAction: { message, signature: `0x${'a'.repeat(130)}` },
+        submissionState: 'submitted',
+        failureReason: null,
+        indexedEventRef: null,
+        reconciliationState: 'pending',
+        idempotencyKey: key,
+        paymentIntentId: INTENT,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      wireIntent({
+        paymentIntentId: INTENT,
+        userId: null, // ROOM-OWNED
+        roomId: ROOM,
+        targetType: 'grant_payout',
+        targetId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        treasuryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        asset: 'USDC',
+        amount: '1000000',
+        executionState: 'signed',
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      });
+      // The lost-response retry is authorized by IDEMPOTENCY OWNERSHIP (their own
+      // action), not current stewardship, so it REPLAYS the action id/status
+      // instead of being denied intent_mismatch by the revoked role.
+      const retry = await post('/knomosis/actions/submit', cookie, {
+        preflight_token: 'replayed-token-stand-in',
+        idempotency_key: key,
+        action_type: 'grant_payout',
+        room_id: ROOM,
+        deployment_id: deploymentId,
+        wallet_account_id: walletAccountId,
+        payment_intent_id: INTENT,
+        typed_data_message: message,
+        signature: `0x${'a'.repeat(130)}`,
+      });
+      expect(retry.status).toBe(202);
+      const body = (await retry.json()) as { submission_state?: string };
+      expect(body.submission_state).toBe('submitted');
+    });
+
     it('rejects an intent past the pre-submission window, or expired', async () => {
       // `submitted` and beyond: the intent's action already exists, so naming it
       // in a NEW preflight would resurrect a spent clearance.

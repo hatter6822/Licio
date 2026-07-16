@@ -302,6 +302,32 @@ export async function createProductionProposal(
   deps: ProposalDeps,
   input: { roomId: string; userId: string; create: ProductionProposalCreate },
 ): Promise<TreasuryGovernanceError | { ok: true; proposal: GovernanceProposalRecord }> {
+  // AUTHORIZATION first (checked on every request, retry or not) — and BEFORE the
+  // mint-only gates, so a non-member never learns a room is frozen/paused.
+  if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
+    return tgErr(403, 'not_member', 'Only room members can open proposals.');
+  }
+  const proposalType = input.create.proposal_type as ProposalType;
+  if (STEWARD_ONLY_TYPES.has(proposalType)) {
+    if (!(await deps.rooms.isSteward(input.roomId, input.userId))) {
+      return tgErr(403, 'steward_required', 'This proposal type requires a room steward.');
+    }
+  }
+
+  // REPLAY before the mint-only gates.  The deterministic id from (room, user,
+  // key) IS the idempotency record, so a lost-response retry must return the
+  // stored proposal even if a freeze/pause landed or the law-pack changed since —
+  // those gates decide whether a NEW proposal may be minted, and this one already
+  // exists.  (The sibling `createPaymentIntent` puts idempotency first, same reason.)
+  const proposalId = deterministicProposalId(
+    input.roomId,
+    input.userId,
+    input.create.idempotency_key,
+  );
+  const existing = await deps.proposals.getById(proposalId);
+  if (existing !== null) return { ok: true, proposal: existing };
+
+  // GATES — may a NEW proposal be minted?
   const guard = await assertGovernanceWritable(deps, input.roomId, 'proposals');
   if (guard !== null) return guard;
   const mode = await deps.roomMode.currentMode(input.roomId);
@@ -313,16 +339,6 @@ export async function createProductionProposal(
       'Production proposals require a real-asset governance mode (simulated rooms practice via the simulation surface).',
     );
   }
-  if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
-    return tgErr(403, 'not_member', 'Only room members can open proposals.');
-  }
-  const proposalType = input.create.proposal_type as ProposalType;
-  if (STEWARD_ONLY_TYPES.has(proposalType)) {
-    if (!(await deps.rooms.isSteward(input.roomId, input.userId))) {
-      return tgErr(403, 'steward_required', 'This proposal type requires a room steward.');
-    }
-  }
-
   // The room's ACTIVE law-pack is pinned onto the proposal (WS-M.1.3d).
   const active = await activeLawPack(deps, input.roomId);
   if (active === null) {
@@ -331,15 +347,6 @@ export async function createProductionProposal(
   if (!active.pack.allowedProposalTypes.includes(proposalType)) {
     return tgErr(409, 'type_not_allowed', `"${proposalType}" is not allowed by the law-pack.`);
   }
-
-  // Idempotency: the deterministic id from (room, user, key) IS the record.
-  const proposalId = deterministicProposalId(
-    input.roomId,
-    input.userId,
-    input.create.idempotency_key,
-  );
-  const existing = await deps.proposals.getById(proposalId);
-  if (existing !== null) return { ok: true, proposal: existing };
 
   // Draft completeness (WS-M.4.1b): spend fields all-or-none, category coherent.
   const spendCategory = SPEND_CATEGORY[proposalType] ?? null;

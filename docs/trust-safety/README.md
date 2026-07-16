@@ -126,7 +126,11 @@ apps/web/src/
   imminent-threat (lawful basis); ban after a cooldown; emergency deferred;
   shadow only after notice.  **Independence is enforced server-side at BOTH
   assignment (never the original decision-maker) and decision time** (the
-  original decision-maker can never act on the appeal).
+  original decision-maker can never act on the appeal).  Like the report edge,
+  the existing-appeal replay (`already_appealed` → the stored appeal id) resolves
+  BEFORE the WS-N.2.3e key-material scan, so a lost-response retry whose statement
+  now trips the detector recovers its appeal rather than being newly denied
+  `key_material_blocked`; the scan gates a NEW row only.
 - **Support contact (`GET /v1/support-contact`, WS-J.1.1e).** Unauthenticated,
   jurisdiction-aware emergency resources with a safe default set.
 - **Notices (WS-J.1.3d).** Every significant action emits a durable

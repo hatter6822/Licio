@@ -45,9 +45,13 @@ export function RiskDisclosures({ onAcknowledged }: RiskDisclosuresProps): React
   const acknowledge = async (disclosureId: string, version: number): Promise<void> => {
     setBusyId(disclosureId);
     try {
-      await acknowledgeDisclosure(disclosureId, version);
+      const { remaining } = await acknowledgeDisclosure(disclosureId, version);
       await refresh();
-      onAcknowledged?.();
+      // Hand control back ONLY once every required disclosure is acknowledged.
+      // A region with more than one required disclosure would otherwise send the
+      // user back to the preview after the first ack, straight into
+      // `disclosure_ack_required` again — clearing them one bounce at a time.
+      if (remaining.length === 0) onAcknowledged?.();
     } catch {
       setError(t('compliance.disclosures.ack_error', 'The acknowledgment could not be recorded.'));
     } finally {

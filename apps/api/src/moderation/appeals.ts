@@ -102,22 +102,18 @@ export async function submitAppeal(
   appellantUserId: string,
   request: CreateAppealRequest,
 ): Promise<SubmitAppealOutcome> {
-  // WS-N.2.3e — the no-private-key filter, the SAME gate the report edge runs.
-  // An appeal is the other free-text lane into this queue and into reviewer
-  // views, so a user pasting a seed phrase while appealing an action would put
-  // the secret exactly where the report filter exists to keep it out of.  The
-  // matched value is DISCARDED — never logged, stored, or echoed (§18.5).
-  const scan = scanForKeyMaterial(request.user_statement);
-  if (scan.detected) {
-    services.metrics.increment('appeals.key_material_blocked');
-    return { ok: false, code: 'key_material_blocked', message: scan.warning ?? NO_KEY_WARNING };
-  }
+  // AUTHORIZATION first: the action must exist and belong to the appellant.
   const action = await services.actions.getById(request.action_id);
   if (!action || action.subjectUserId !== appellantUserId) {
     return { ok: false, code: 'action_not_found' };
   }
   const eligibility = await checkEligibility(services, request.action_id, appellantUserId);
   if (eligibility === null) return { ok: false, code: 'action_not_found' };
+  // REPLAY before the mint-only gates: an action already appealed returns its
+  // existing appeal id.  A lost-response retry whose statement now trips the
+  // key-material detector (a tuning change, or an appeal accepted before the
+  // filter shipped) must recover its appeal, not be newly denied — no row is
+  // stored either way (WS-N.2.3e gates a NEW row).
   if (eligibility.already_appealed) {
     const existing = await services.appeals.getByActionId(request.action_id);
     return { ok: false, code: 'appeal_already_exists', appealId: existing?.appealId ?? '' };
@@ -129,6 +125,17 @@ export async function submitAppeal(
       reason: eligibility.ineligible_reason ?? 'not_appealable',
       availableAt: eligibility.available_at,
     };
+  }
+  // WS-N.2.3e — the no-private-key filter, the SAME gate the report edge runs,
+  // now that a NEW appeal row is about to be inserted.  An appeal is the other
+  // free-text lane into this queue and into reviewer views, so a user pasting a
+  // seed phrase while appealing would put the secret exactly where the report
+  // filter exists to keep it out of.  The matched value is DISCARDED — never
+  // logged, stored, or echoed (§18.5).
+  const scan = scanForKeyMaterial(request.user_statement);
+  if (scan.detected) {
+    services.metrics.increment('appeals.key_material_blocked');
+    return { ok: false, code: 'key_material_blocked', message: scan.warning ?? NO_KEY_WARNING };
   }
 
   const isBanAppeal = action.action === 'ban';
