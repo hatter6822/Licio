@@ -26,6 +26,18 @@ import type {
 
 type Clock = () => number;
 
+/**
+ * The UTC day an engine-opened case is keyed to.
+ *
+ * The idempotency keys of cases the ENGINE raises without an identifiable
+ * attempt (a sanctions match on an address, a high-value check with no
+ * `reviewRef`) fall back to a per-day key: the same condition on the same
+ * subject opens ONE case a day rather than one per request, and the reviewer's
+ * queue is not the retry counter.  Both `screening.ts` and `risk.ts` key that
+ * way, so they key it the same way.
+ */
+export const caseDayBucket = (nowMs: number): string => new Date(nowMs).toISOString().slice(0, 10);
+
 export interface CaseDeps {
   cases: ComplianceCaseStore;
   caseAudit: CaseAuditStore;

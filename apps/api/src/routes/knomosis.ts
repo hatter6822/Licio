@@ -397,9 +397,16 @@ export function createKnomosisRoutes() {
           // action may be minted, so they are skipped here — and `submitAction`
           // still owns the replay itself (it re-reads the record AND repairs a
           // lost actor mapping; a second replay path here would drift from it).
+          // BOTH replays `submitAction` performs, or this skips the gates for
+          // one and re-gates the other.  The idempotency key finds the caller's
+          // OWN earlier attempt; the intent finds whoever settled it first —
+          // for a room-owned payout that is another steward, under their own
+          // actor-scoped key, and their retry is just as much a retry.
           const isRetry =
             (await services.actions.getByIdempotencyKey(auth.userId, body.idempotency_key)) !==
-            null;
+              null ||
+            (body.payment_intent_id !== undefined &&
+              (await services.actions.getByPaymentIntentId(body.payment_intent_id)) !== null);
           // WS-L.3.5c: submission honours the kill switch (503); preflight
           // stays available so users can see why an action would fail.
           if (!isRetry) {

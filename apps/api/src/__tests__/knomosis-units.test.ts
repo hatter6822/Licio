@@ -1113,10 +1113,37 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
         idempotencyKey: INTENT,
         paymentIntentId: INTENT,
       }),
-    ).rejects.toThrow(/already settles this payment intent/);
+    ).rejects.toThrow(/unique constraint violated: knomosis_action_intent_uq/);
     // …and the loser can find the winner, which is what turns the lost race
     // into an idempotent replay rather than an error.
     expect((await store.getByPaymentIntentId(INTENT))?.actionRecordId).toBe('a1');
+
+    // A DEAD attempt releases the intent.  `retryIntent` re-arms a
+    // failed/reverted intent (`failed|reverted → created`) and the next attempt
+    // mints a REPLACEMENT under a rotated key (W14) — an index spanning every
+    // state would collide with the corpse and replay it, stranding the retry.
+    const attempt0 = await store.getById('a1');
+    if (attempt0 === null) throw new Error('attempt 0 missing');
+    await store.update({ ...attempt0, submissionState: 'failed' });
+    expect(await store.getByPaymentIntentId(INTENT)).toBeNull(); // no live action
+    await store.insert({
+      ...base,
+      actionRecordId: 'a5',
+      actorUserId: 'steward-a',
+      idempotencyKey: `${INTENT}:r1`,
+      paymentIntentId: INTENT,
+    });
+    expect((await store.getByPaymentIntentId(INTENT))?.actionRecordId).toBe('a5');
+    // …and the replacement is itself exclusive while it lives.
+    await expect(
+      store.insert({
+        ...base,
+        actionRecordId: 'a6',
+        actorUserId: 'steward-b',
+        idempotencyKey: `${INTENT}:r1`,
+        paymentIntentId: INTENT,
+      }),
+    ).rejects.toThrow(/unique constraint violated/);
 
     // A direct action (no intent) is unaffected: two actors, same key, fine.
     await store.insert({

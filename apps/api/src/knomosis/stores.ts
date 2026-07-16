@@ -24,6 +24,7 @@ import type {
   WalletAccountType,
   WalletRiskState,
 } from '@licio/shared';
+import { UniqueViolationError } from '../lib/pg-errors.js';
 
 type Clock = () => number;
 const iso = (now: Clock): string => new Date(now()).toISOString();
@@ -63,6 +64,17 @@ export interface KnomosisDeploymentRecord {
   status: 'provisioning' | 'active' | 'frozen' | 'retired';
   createdAt: string;
 }
+
+/**
+ * Action states in which the attempt is DEAD and its intent is free to be
+ * retried (`retryIntent`: `failed|reverted -> created`, WS-M.3.1b).
+ *
+ * ONE definition, matching migration 0089's partial index exactly: the index
+ * decides which reservations collide, and this decides which the in-memory
+ * adapter collides and which the replay read returns — three answers that must
+ * be the same answer.
+ */
+export const DEAD_ACTION_STATES: ReadonlySet<SubmissionState> = new Set(['failed', 'reverted']);
 
 export interface KnomosisActionRecordEntity {
   actionRecordId: string;
@@ -394,8 +406,11 @@ export interface KnomosisActionStore {
     roomId: string,
     idempotencyKey: string,
   ): Promise<KnomosisActionRecordEntity | null>;
-  /** The action settling this intent, if one already does — the read that turns
-   *  a lost `knomosis_action_intent_uq` race into a replay of the winner. */
+  /** The LIVE action settling this intent, if one already does — the read that
+   *  turns a lost `knomosis_action_intent_uq` race into a replay of the winner.
+   *  Live only, and for the same reason the index is: a dead attempt has
+   *  released the intent for `retryIntent`, so replaying it would hand the
+   *  caller a corpse instead of their replacement. */
   getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
   /** COMPARE-AND-SET the submission state: apply the patch ONLY if the stored row
@@ -1123,11 +1138,17 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       ) {
         throw new Error('idempotency key already used');
       }
-      // `knomosis_action_intent_uq` (migration 0089): ONE action per intent,
-      // whoever submits it and whatever key they chose.  Emulated here as the
-      // in-memory adapters emulate every other DB protection.
-      if (record.paymentIntentId !== null && existing.paymentIntentId === record.paymentIntentId) {
-        throw new Error('an action already settles this payment intent');
+      // `knomosis_action_intent_uq` (migration 0089): ONE LIVE action per
+      // intent, whoever submits it and whatever key they chose.  Emulated here
+      // as the in-memory adapters emulate every other DB protection — including
+      // the index's partiality: a DEAD attempt has released the intent for
+      // `retryIntent`, so it must not block the replacement.
+      if (
+        record.paymentIntentId !== null &&
+        existing.paymentIntentId === record.paymentIntentId &&
+        !DEAD_ACTION_STATES.has(existing.submissionState)
+      ) {
+        throw new UniqueViolationError('knomosis_action_intent_uq');
       }
     }
     this.#rows.set(record.actionRecordId, structuredClone(record));
@@ -1167,7 +1188,9 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
 
   async getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null> {
     for (const row of this.#rows.values()) {
-      if (row.paymentIntentId === paymentIntentId) return structuredClone(row);
+      if (row.paymentIntentId === paymentIntentId && !DEAD_ACTION_STATES.has(row.submissionState)) {
+        return structuredClone(row);
+      }
     }
     return null;
   }

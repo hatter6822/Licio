@@ -51,6 +51,7 @@ import {
   type SQL,
   sql,
 } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   CaseAuditRecord,
   CaseAuditStore,
@@ -87,16 +88,6 @@ type DbOrTx = Db | Tx;
 
 const iso = (value: Date): string => value.toISOString();
 const isoOrNull = (value: Date | null): string | null => (value === null ? null : iso(value));
-
-/** True when the error (or its cause chain) is a Postgres unique violation. */
-function isUniqueViolation(error: unknown): boolean {
-  let cursor: unknown = error;
-  for (let depth = 0; depth < 5 && cursor !== null && typeof cursor === 'object'; depth += 1) {
-    if ((cursor as { code?: unknown }).code === '23505') return true;
-    cursor = (cursor as { cause?: unknown }).cause ?? null;
-  }
-  return false;
-}
 
 // ---------------------------------------------------------------------------
 // Jurisdiction policies (WS-N.1.1a).

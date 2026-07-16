@@ -76,6 +76,10 @@ export function DepositFlow({
   // allowance-consuming one.  Editing the amount/asset starts a new attempt;
   // the key rotates only then or after a successful submit.
   const attemptRef = useRef<{ asset: string; amount: string; key: string } | null>(null);
+  /** The intent this flow has already advanced `quoted → signed`.  The machine
+   *  has no `signed → signed` edge, and a resumed attempt (a disclosure
+   *  published after the preview went up) would otherwise re-run it and 409. */
+  const signedRef = useRef<string | null>(null);
   const wallets = useWalletsQuery(true);
   const manifest = useKnomosisManifestQuery(treasury.deployment_id);
   const gate = useStepUpGate();
@@ -234,7 +238,17 @@ export function DepositFlow({
         setBusy(false);
         return;
       }
-      await advancePaymentIntent(roomId, pending.paymentIntentId, 'signed');
+      // `quoted → signed`, ONCE.  The intent state machine has no `signed →
+      // signed` edge (`signed: ['submitted','abandoned']`), so re-running this
+      // on a resumed attempt 409s `invalid_transition` before the submit can
+      // happen — and this path IS resumable: a disclosure published after the
+      // preview sends the user to the acknowledgment panel and back.  The
+      // client is the only party that knows it already advanced, so it
+      // remembers.
+      if (signedRef.current !== pending.paymentIntentId) {
+        await advancePaymentIntent(roomId, pending.paymentIntentId, 'signed');
+        signedRef.current = pending.paymentIntentId;
+      }
       // Submission needs fresh step-up; the gate opens the dialog + retries.
       const submitted = await gate.guard(() =>
         submitKnomosisAction({
@@ -260,6 +274,7 @@ export function DepositFlow({
       );
       onIntentCreated(pending.paymentIntentId);
       attemptRef.current = null; // the attempt completed — the next deposit is new
+      signedRef.current = null;
       setPending(null);
       setAmount('');
       setBusy(false);
@@ -304,6 +319,9 @@ export function DepositFlow({
           onCancel={() => {
             setPending(null);
             setError(null);
+            // The intent is abandoned with the preview; a fresh one has not
+            // been signed.
+            signedRef.current = null;
           }}
           signing={busy}
         />

@@ -61,6 +61,7 @@ import type {
   GovernanceSignatureRecord,
   GovernanceSignatureStore,
 } from '../knomosis/stores.js';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { readabilityProblems } from './charter.js';
@@ -610,26 +611,22 @@ export async function createProductionProposal(
     // Two concurrent creates with the same idempotency key both passed the
     // read above; the primary key (the deterministic id IS the idempotency
     // record) makes the loser land here — return the winner's row instead of
-    // surfacing a 500.  The SQLSTATE rides the Drizzle cause chain.
-    let current: unknown = error;
-    for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-      if ((current as { code?: string }).code === '23505') {
-        const winner = await deps.proposals.getById(proposalId);
-        if (winner !== null) {
-          // The loser charged the action budget above but published nothing —
-          // credit the charge back so a retry storm cannot drain the
-          // allowance for one accepted proposal.
-          await refundActionBudget(deps, {
-            roomId: input.roomId,
-            userId: input.userId,
-            units: budget.charged,
-            rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
-          });
-          return { ok: true, proposal: winner };
-        }
-        break;
+    // surfacing a 500.  (The SQLSTATE rides the Drizzle cause chain — see
+    // `isUniqueViolation`.)
+    if (isUniqueViolation(error)) {
+      const winner = await deps.proposals.getById(proposalId);
+      if (winner !== null) {
+        // The loser charged the action budget above but published nothing —
+        // credit the charge back so a retry storm cannot drain the allowance
+        // for one accepted proposal.
+        await refundActionBudget(deps, {
+          roomId: input.roomId,
+          userId: input.userId,
+          units: budget.charged,
+          rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
+        });
+        return { ok: true, proposal: winner };
       }
-      current = (current as { cause?: unknown }).cause;
     }
     throw error;
   }

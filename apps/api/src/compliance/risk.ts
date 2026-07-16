@@ -30,7 +30,7 @@
 // the attempt reviewed, never every later transfer of the same amount.
 
 import type { CompliancePort, FraudVerdict } from '../knomosis/ports.js';
-import { type CaseDeps, createCase } from './cases.js';
+import { type CaseDeps, caseDayBucket, createCase } from './cases.js';
 import type { ComplianceRuntimeConfig, VelocityLimit } from './config.js';
 import type { RegionResolution } from './region.js';
 import type { VelocityStore } from './stores.js';
@@ -75,9 +75,6 @@ function unrecorded(
   });
   return true;
 }
-
-/** UTC day bucket for idempotent case keys. */
-const dayBucket = (nowMs: number): string => new Date(nowMs).toISOString().slice(0, 10);
 
 export function limitsForRegion(
   config: ComplianceRuntimeConfig,
@@ -197,7 +194,7 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
         // else's cleared ref lands on a different key, hence a new review.
         idempotencyKey:
           attempt === null
-            ? `highvalue:${subject.kind}:${subject.ref}:${actionType}:${amount}:${dayBucket(nowMs)}`
+            ? `highvalue:${subject.kind}:${subject.ref}:${actionType}:${amount}:${caseDayBucket(nowMs)}`
             : `highvalue:${subject.kind}:${subject.ref}:${amount}:${attempt}`,
       });
       // `elevated` means "held for manual review".  Without the case there is

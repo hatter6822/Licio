@@ -29,6 +29,17 @@ vi.mock('../../lib/wallet-api.js', () => ({
 }));
 
 const mockSign = vi.fn();
+// The real panel fetches + renders the region's disclosures; this test is about
+// what the flow does when the user comes BACK from it, so a stand-in that just
+// exposes the acknowledgment keeps the test on its subject.
+vi.mock('../compliance/index.js', () => ({
+  RiskDisclosures: ({ onAcknowledged }: { onAcknowledged: () => void }) => (
+    <button type="button" onClick={onAcknowledged}>
+      acknowledge
+    </button>
+  ),
+}));
+
 vi.mock('../../lib/wallet-signing.js', () => ({
   discoverProviders: () => Promise.resolve([{ info: { rdns: 'io.test' }, provider: {} }]),
   requestAccount: () => Promise.resolve(`0x${'cd'.repeat(20)}`),
@@ -294,6 +305,53 @@ describe('DepositFlow (WS-M.3.1)', () => {
       expect(screen.getByText(/before your first contribution/i)).toBeInTheDocument(),
     );
     expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it('resumes after a disclosure ack WITHOUT re-signing the intent', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    // The gate lands at SUBMIT — after the flow has already advanced the intent
+    // `quoted → signed`.
+    mockPreflightAction.mockResolvedValue({ result: 'pass', preflight_token: 'tok' });
+    mockSubmitAction.mockRejectedValueOnce(
+      new ApiClientError('disclosure_ack_required', 'Acknowledge the risk disclosures.', 403),
+    );
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/before your first contribution/i)).toBeInTheDocument(),
+    );
+    const signedAdvances = () =>
+      mockAdvance.mock.calls.filter((c) => c[2] === 'signed' && c[3] === undefined).length;
+    expect(signedAdvances()).toBe(1);
+
+    // Acknowledge, land back on the preview, and re-sign.
+    mockSubmitAction.mockResolvedValue({ action_record_id: 'a1', submission_state: 'submitted' });
+    fireEvent.click(screen.getByRole('button', { name: /acknowledge/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    await waitFor(() => expect(mockSubmitAction).toHaveBeenCalledTimes(2));
+    // The intent is ALREADY `signed`, and the machine has no `signed → signed`
+    // edge — re-running the advance would 409 `invalid_transition` and the
+    // resumed deposit could never submit.
+    expect(signedAdvances()).toBe(1);
   });
 
   it('asks for a linked wallet when none matches the deployment chain', async () => {

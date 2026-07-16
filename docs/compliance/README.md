@@ -85,9 +85,16 @@ modified** in their verdict semantics:
   stream — rotate stewards, walk through the limit — and spend the steward's
   personal budget on the room's money besides.
 
-  **ONE action per intent, at the database.**  Migration 0089 puts a partial
-  unique on the action record's `payment_intent_id` — the mirror of 0087's one
-  intent per action. While an intent sits `signed`, a caller could otherwise
+  **ONE LIVE action per intent, at the database.**  Migration 0089 puts a
+  partial unique on the action record's `payment_intent_id` — the mirror of
+  0087's one intent per action.  Scoped to LIVE attempts (`submission_state NOT
+  IN ('failed','reverted')`): the invariant is one live action per intent, not
+  one ever, because `retryIntent` re-arms a failed/reverted intent and the next
+  attempt mints a replacement under a rotated key (W14) — an index spanning
+  every state would collide with the dead attempt and replay a corpse instead,
+  stranding the retry.  `DEAD_ACTION_STATES` is the one definition the index,
+  the in-memory adapter, and the replay read all use, because they must give the
+  same answer. While an intent sits `signed`, a caller could otherwise
   mint a second preflight and submit the same intent again under a different
   key; for a room-owned payout *another steward* could, because the action
   idempotency unique is `(actor_user_id, idempotency_key)` and deliberately

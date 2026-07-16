@@ -22,6 +22,7 @@ import {
 } from '@licio/db';
 import type { PauseFlags, PaymentIntentState } from '@licio/shared';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   ActionBudgetRecord,
   ActionBudgetStore,
@@ -56,19 +57,6 @@ const iso = (value: Date): string => value.toISOString();
 const isoOrNull = (value: Date | null): string | null => (value ? value.toISOString() : null);
 const dateOrNull = (value: string | null | undefined): Date | null =>
   value == null ? null : new Date(value);
-// Drizzle wraps driver errors (DrizzleQueryError → cause: PostgresError), so
-// the SQLSTATE lives on the CAUSE chain — a direct `.code` check never fires
-// and the raced insert would surface as a thrown 500 instead of the designed
-// clean-loser null (the drizzle-debate-store house pattern).
-function isUniqueViolation(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    if ((current as { code?: string }).code === '23505') return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
-
 // ---------------------------------------------------------------------------
 // Governance profiles
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@
 //   error/timeout/no provider → 'unavailable' (never cached), alert metric.
 import { z } from 'zod';
 import type { CompliancePort, SanctionsVerdict } from '../knomosis/ports.js';
-import { type CaseDeps, createCase } from './cases.js';
+import { type CaseDeps, caseDayBucket, createCase } from './cases.js';
 import type { ComplianceRuntimeConfig } from './config.js';
 import type { ScreeningCacheStore } from './stores.js';
 
@@ -84,13 +84,10 @@ export interface ScreeningDeps {
   now: Clock;
 }
 
-/** UTC day bucket for idempotent partial/full-match case keys. */
-const dayBucket = (nowMs: number): string => new Date(nowMs).toISOString().slice(0, 10);
-
 /** The idempotent key for a match's review case — ONE definition, so the
  *  case-opening path and the cached-verdict recheck below cannot drift. */
 const matchCaseKey = (result: 'partial' | 'full', addressLower: string, nowMs: number): string =>
-  `sanctions:${result}:${addressLower}:${dayBucket(nowMs)}`;
+  `sanctions:${result}:${addressLower}:${caseDayBucket(nowMs)}`;
 
 /**
  * Has a reviewer CLEARED today's partial-match review for this address?

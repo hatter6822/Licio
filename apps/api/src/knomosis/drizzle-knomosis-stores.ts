@@ -41,6 +41,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type { ActionNonceStore } from './services.js';
 import type {
   AuditLogCursor,
@@ -73,6 +74,7 @@ import type {
   WalletActorMappingStore,
 } from './stores.js';
 import {
+  DEAD_ACTION_STATES,
   READINESS_QUALIFYING_AUDIT_ACTIONS,
   selectGatewayBoundAction,
   TERMINAL_SUBMISSION_STATES,
@@ -561,7 +563,14 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     const rows = await this.db
       .select()
       .from(knomosisActionRecords)
-      .where(eq(knomosisActionRecords.paymentIntentId, paymentIntentId))
+      .where(
+        and(
+          eq(knomosisActionRecords.paymentIntentId, paymentIntentId),
+          // Live only — the same predicate `knomosis_action_intent_uq` uses, so
+          // the row this returns is exactly the row that would have collided.
+          notInArray(knomosisActionRecords.submissionState, [...DEAD_ACTION_STATES]),
+        ),
+      )
       .limit(1);
     return rows[0] ? mapAction(rows[0]) : null;
   }
@@ -1945,15 +1954,11 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
       });
       return entry;
     } catch (error) {
-      // 23505 = unique_violation on the fork-proof chain indexes (migration
-      // 0082) — the writer re-reads the head and retries; anything else rethrows.
-      // Drizzle wraps driver errors, so the SQLSTATE lives on the CAUSE chain
-      // (a direct `.code` check never fires on a DrizzleQueryError).
-      let current: unknown = error;
-      for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-        if ((current as { code?: string }).code === '23505') return null;
-        current = (current as { cause?: unknown }).cause;
-      }
+      // A unique violation on the fork-proof chain indexes (migration 0082)
+      // means the writer must re-read the head and retry; anything else
+      // rethrows.  (Drizzle buries the SQLSTATE on the cause chain — see
+      // `isUniqueViolation`.)
+      if (isUniqueViolation(error)) return null;
       throw error;
     }
   }

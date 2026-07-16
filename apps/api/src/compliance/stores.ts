@@ -25,6 +25,7 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
+import { UniqueViolationError } from '../lib/pg-errors.js';
 
 type Clock = () => number;
 
@@ -507,19 +508,12 @@ export class ChainContentionError extends Error {
 }
 
 /**
- * A UNIQUE constraint refused a write — the in-memory adapters' emulation of
- * Postgres 23505.  Typed, not a message: callers must distinguish "this already
- * exists" from "the store is broken", and the two answers are opposite (a 409
- * that tells the caller to stop, versus a 503 that tells them to retry).  A
- * string match would silently reclassify one as the other the day a message
- * changes.
+ * The in-memory adapters raise the SHARED unique-violation error, so a caller
+ * reads the same answer from them as from Postgres (`lib/pg-errors.ts` owns it,
+ * along with the cause-chain walk that finds the driver's 23505).  Re-exported
+ * because this module's adapters are the ones that raise it.
  */
-export class UniqueViolationError extends Error {
-  constructor(readonly constraintLabel: string) {
-    super(`unique constraint violated: ${constraintLabel}`);
-    this.name = 'UniqueViolationError';
-  }
-}
+export { UniqueViolationError };
 
 /**
  * The in-memory adapters' ROLLBACK (the house rule: they emulate every DB

@@ -16,9 +16,21 @@
 -- The exclusive resource is the INTENT, so the uniqueness belongs on the
 -- reference to it: a second reservation for the same intent loses this index
 -- and replays the winner, whoever submitted it and whatever key they chose.
--- Partial, so the direct (intent-free) actions keep their actor-scoped key.
+--
+-- Scoped to LIVE attempts, and both halves of that matter:
+--
+--   • `payment_intent_id IS NOT NULL` — a direct action settles no intent and
+--     keeps only its actor-scoped key.
+--   • `submission_state NOT IN ('failed','reverted')` — the invariant is ONE
+--     LIVE action per intent, not one ever.  `retryIntent` re-arms a
+--     failed/reverted intent (`failed|reverted -> created`, WS-M.3.1b) and the
+--     next attempt mints a REPLACEMENT action under a rotated key (W14); an
+--     index spanning every state would collide with the dead attempt's row and
+--     replay a corpse instead, stranding the retried transfer.  A dead attempt
+--     has released the intent, so it releases the index with it.
 ALTER TABLE "knomosis"."knomosis_action_record"
   ADD COLUMN IF NOT EXISTS "payment_intent_id" uuid;--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "knomosis_action_intent_uq"
   ON "knomosis"."knomosis_action_record" ("payment_intent_id")
-  WHERE "payment_intent_id" IS NOT NULL;
+  WHERE "payment_intent_id" IS NOT NULL
+    AND "submission_state" NOT IN ('failed', 'reverted');

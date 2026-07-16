@@ -83,10 +83,10 @@ import {
   resolveRegionForUser,
 } from '../compliance/services.js';
 import type { ComplianceCaseRecord, RegionDeclarationRecord } from '../compliance/stores.js';
-import { UniqueViolationError } from '../compliance/stores.js';
 import { getEventPipelineServices } from '../events/services.js';
 import { isComplianceReviewer, isCounsel } from '../identity/rbac.js';
 import { getIdentityServices } from '../identity/services.js';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import {
   type AuthEnv,
@@ -123,27 +123,13 @@ const RETENTION_SCHEDULE_KEYS: ReadonlySet<string> = new Set([
   'eventRetentionOverrides',
 ]);
 
-/**
- * Did a write hit a UNIQUE constraint rather than a broken store?  The answers
- * are opposite — "it already exists, stop" (409) versus "the store failed, try
- * again" (503) — so the two must never be conflated: telling counsel a
- * disclosure is already published when the store merely failed leaves the
- * required disclosure absent and stops them retrying.
- *
- * Drizzle wraps the driver error, so the 23505 is walked out of the cause
- * chain; the in-memory adapters raise `UniqueViolationError` for the same
- * conditions.  (The chain's own collisions never reach here: `appendChained`
- * re-raises them as `ChainContentionError`, which `runChainedUnit` retries.)
- */
-function isUniqueViolation(error: unknown): boolean {
-  if (error instanceof UniqueViolationError) return true;
-  let cursor: unknown = error;
-  for (let depth = 0; depth < 5 && cursor !== null && typeof cursor === 'object'; depth += 1) {
-    if ((cursor as { code?: unknown }).code === '23505') return true;
-    cursor = (cursor as { cause?: unknown }).cause ?? null;
-  }
-  return false;
-}
+// `isUniqueViolation` (`lib/pg-errors.ts`) answers the question these writes
+// must never get wrong: "it already exists, stop" (409) versus "the store
+// failed, try again" (503) are opposite instructions, and telling counsel a
+// disclosure is already published when the store merely failed leaves the
+// required disclosure absent and stops them retrying.  (The chain's own
+// collisions never reach it: `appendChained` re-raises them as
+// `ChainContentionError`, which `runChainedUnit` retries.)
 
 /** Status-typed error responder (the tgError house idiom). */
 function failJson(

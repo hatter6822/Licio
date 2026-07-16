@@ -43,6 +43,7 @@ import { and, asc, count, desc, eq, inArray, isNull, type SQL, sql } from 'drizz
 import { sha256Hex } from '../identity/crypto.js';
 import type { S3ObjectStoreConfig } from '../identity/object-store-s3.js';
 import { type SigV4Credentials, signRequest, uriEncode } from '../identity/sigv4.js';
+import { isUniqueViolation, uniqueViolationConstraint } from '../lib/pg-errors.js';
 import type {
   ContributionEditRecord,
   ContributionInsertOutcome,
@@ -73,29 +74,6 @@ function iso(value: Date): string {
 
 function isoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  // Drizzle wraps the driver error (DrizzleQueryError → cause: PostgresError),
-  // so the unique-violation code must be checked down the cause chain (the
-  // WS-F adapter precedent; proven by the gated integration tests).
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    if ((current as { code?: string }).code === '23505') return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
-
-/** The violated constraint's name, from anywhere in the cause chain. */
-function uniqueViolationConstraint(error: unknown): string {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    const name = (current as { constraint_name?: unknown }).constraint_name;
-    if (typeof name === 'string') return name;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return '';
 }
 
 // WS-T: the section sink key (`incorrect` = 1, else 0).  `incorrect` comments
