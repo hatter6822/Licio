@@ -828,6 +828,21 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       expect(res.status).not.toBe(400);
     });
 
+    it('does not hand another member’s action to whoever quotes their intent id', async () => {
+      // The retry lookup keys on the intent, so the claim must be AUTHORIZED
+      // before it is trusted as evidence of a retry.  Otherwise a caller who
+      // merely knows someone else's intent id is treated as its retry, skips
+      // the ownership check that would have stopped them, collides on the
+      // intent unique, and is handed that member's action id and state.
+      const res = await preflightClaiming(INTENT, {
+        userId: '11111111-1111-4111-8111-111111111111', // NOT the caller
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'intent_mismatch',
+      );
+    });
+
     it('rejects an intent past the pre-submission window, or expired', async () => {
       // `submitted` and beyond: the intent's action already exists, so naming it
       // in a NEW preflight would resurrect a spent clearance.

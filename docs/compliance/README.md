@@ -114,6 +114,14 @@ modified** in their verdict semantics:
   `payment_intent_id`), it was added to the flow and forgotten by both, letting
   submit drop or swap the intent and re-run fraud against a different review.
 
+  **Authorization is not a gate.**  A claimed intent's IDENTITY — is it the
+  caller's, and is it this transfer — is checked on every request that names
+  one, retry or not.  Its STATE (in-flight, `signed`, the attempt key) is a gate
+  on minting a NEW action, so a retry skips it.  Conflating the two let a caller
+  who merely knew another member's intent id be treated as its retry: the check
+  that would have stopped them was skipped, the reservation collided on the
+  intent unique, and they were handed that member's action id and status.
+
   **A claimed `payment_intent_id` is a claim, not a fact.**  It buys the naming
   action a share of that intent's review, so unverified it is a clearance to
   steal: a member whose high-value intent for amount X was cleared could put
@@ -455,7 +463,18 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   the `(user, idempotency_key)` record BEFORE its gates and skips them on a
   retry — and `POST …/payment-intents` does the same with its idempotency key,
   since `createPaymentIntent` already answers a replay before its own gates and
-  a route-level disclosure gate in front of it undid that. A retry has already submitted — its action exists and may be on chain —
+  a route-level disclosure gate in front of it undid that.  That includes the
+  **crypto flag**: ahead of the replay it stranded work already done — an action
+  forwarded, the response lost, an operator disabling crypto during the incident
+  — and the retry got `crypto_disabled` instead of its own id, with no other way
+  to learn the fate of a transfer that may be on chain.  Returning an existing
+  id mints nothing and moves nothing.
+- **The fraud queue shows each case ONCE.**  A high-value review is opened
+  keyed to its intent, so the same case arrives on both of the queue's passes —
+  and only the intent-linked row carries Release/Reject.  Rendering both let a
+  reviewer resolve the case-only row, believe the review cleared, and leave the
+  intent `flagged` with the transfer still held.  The intent row wins, because
+  it is the one that can act. A retry has already submitted — its action exists and may be on chain —
   so a disclosure published since, a kill switch engaged since, or an intent
   that has advanced past the pre-submission window would each turn it into a
   fresh 403/503/400 instead of the original action id, leaving the client unable

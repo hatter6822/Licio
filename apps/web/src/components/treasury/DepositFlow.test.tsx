@@ -16,9 +16,11 @@ vi.mock('../../lib/queries.js', () => ({
 
 const mockCreateIntent = vi.fn();
 const mockAdvance = vi.fn();
+const mockFetchIntent = vi.fn();
 vi.mock('../../lib/treasury-api.js', () => ({
   createPaymentIntent: (...args: unknown[]) => mockCreateIntent(...args),
   advancePaymentIntent: (...args: unknown[]) => mockAdvance(...args),
+  fetchPaymentIntent: (...args: unknown[]) => mockFetchIntent(...args),
 }));
 
 const mockPreflightAction = vi.fn();
@@ -352,6 +354,30 @@ describe('DepositFlow (WS-M.3.1)', () => {
     // edge — re-running the advance would 409 `invalid_transition` and the
     // resumed deposit could never submit.
     expect(signedAdvances()).toBe(1);
+  });
+
+  it('resumes a RELEASED high-value intent instead of replaying its preflight', async () => {
+    // The review flags the intent at preflight and the compliance hold bars
+    // `quoted`, so the user returns to a `preflighted` intent once a reviewer
+    // releases it.  The lifecycle has no `preflighted → preflighted` edge, so
+    // replaying the step 409s and the reviewed deposit could never resume.
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: true,
+    });
+    mockFetchIntent.mockResolvedValue({ execution_state: 'preflighted' });
+    mockAdvance.mockResolvedValue({ execution_state: 'quoted', quote: null });
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    const steps = mockAdvance.mock.calls.map((c) => c[2]);
+    expect(steps).not.toContain('preflight'); // already done — replaying it 409s
+    expect(steps).toContain('quote'); // …and this is what the release unblocked
   });
 
   it('asks for a linked wallet when none matches the deployment chain', async () => {

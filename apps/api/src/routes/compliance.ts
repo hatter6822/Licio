@@ -1025,75 +1025,85 @@ export function createComplianceRoutes() {
       const flagged = treasuryServicesConfigured()
         ? await getTreasuryServices().intents.listByComplianceState('flagged', 200)
         : [];
+      const intentRows = await Promise.all(
+        flagged.map(async (intent) => {
+          // The flagged intent's queue row rides the subject's newest OPEN
+          // FRAUD-CLASS case (the review this hold is about) — the same rule
+          // the decision record uses.  An unfiltered "newest case" would
+          // happily attach an unrelated resolved or non-fraud case and show
+          // the reviewer the wrong trigger, risk, and SLA for the held
+          // payment; with no such case the synthetic row below describes the
+          // intent itself.
+          const held: HeldIntent = {
+            paymentIntentId: intent.paymentIntentId,
+            userId: intent.userId,
+            roomId: intent.roomId,
+            targetType: intent.targetType,
+            amount: intent.amount,
+          };
+          const record = await relatedFraudCase(services, held);
+          return {
+            case:
+              record !== null
+                ? caseToWire(record)
+                : caseToWire({
+                    caseId: intent.paymentIntentId,
+                    userIdOrRoomId: intentReviewSubject({
+                      paymentIntentId: intent.paymentIntentId,
+                      userId: intent.userId,
+                      roomId: intent.roomId,
+                      targetType: intent.targetType,
+                      amount: intent.amount,
+                    }).ref,
+                    subjectKind: intentReviewSubject({
+                      paymentIntentId: intent.paymentIntentId,
+                      userId: intent.userId,
+                      roomId: intent.roomId,
+                      targetType: intent.targetType,
+                      amount: intent.amount,
+                    }).kind,
+                    triggerType: 'pattern' as const,
+                    riskLevel: 'medium' as const,
+                    partnerCaseRef: null,
+                    reviewState: 'open' as const,
+                    assignedTo: null,
+                    resolution: null,
+                    retentionPolicy: {
+                      retention_period_days: 730,
+                      deletion_date: new Date(services.now() + 730 * 86_400_000).toISOString(),
+                      legal_hold: false,
+                      legal_hold_refs: [],
+                    },
+                    idempotencyKey: null,
+                    createdAt: intent.createdAt,
+                    updatedAt: intent.updatedAt,
+                  }),
+            payment_intent_id: intent.paymentIntentId,
+            payment_compliance_state: intent.complianceState,
+            sla_due_at: new Date(
+              Date.parse(intent.createdAt) +
+                (services.config().slaHoursByRisk['medium'] ?? 4) * 3_600_000,
+            ).toISOString(),
+          };
+        }),
+      );
+      // ONE row per case.  A high-value review is opened by `preflightIntent`
+      // keyed to the intent, so the same case arrives on both passes — and only
+      // the intent row carries Release/Reject.  Rendering both let a reviewer
+      // resolve the case-only row, believe the review cleared, and leave the
+      // intent `flagged` with the transfer still held.  The intent row wins,
+      // because it is the one that can act.
+      const representedByIntent = new Set(intentRows.map((row) => row.case.case_id));
       const items = [
-        ...fraudClass.map((record) => ({
-          case: caseToWire(record),
-          payment_intent_id: null,
-          payment_compliance_state: null,
-          sla_due_at: slaDueAt(services, record),
-        })),
-        ...(await Promise.all(
-          flagged.map(async (intent) => {
-            // The flagged intent's queue row rides the subject's newest OPEN
-            // FRAUD-CLASS case (the review this hold is about) — the same rule
-            // the decision record uses.  An unfiltered "newest case" would
-            // happily attach an unrelated resolved or non-fraud case and show
-            // the reviewer the wrong trigger, risk, and SLA for the held
-            // payment; with no such case the synthetic row below describes the
-            // intent itself.
-            const held: HeldIntent = {
-              paymentIntentId: intent.paymentIntentId,
-              userId: intent.userId,
-              roomId: intent.roomId,
-              targetType: intent.targetType,
-              amount: intent.amount,
-            };
-            const record = await relatedFraudCase(services, held);
-            return {
-              case:
-                record !== null
-                  ? caseToWire(record)
-                  : caseToWire({
-                      caseId: intent.paymentIntentId,
-                      userIdOrRoomId: intentReviewSubject({
-                        paymentIntentId: intent.paymentIntentId,
-                        userId: intent.userId,
-                        roomId: intent.roomId,
-                        targetType: intent.targetType,
-                        amount: intent.amount,
-                      }).ref,
-                      subjectKind: intentReviewSubject({
-                        paymentIntentId: intent.paymentIntentId,
-                        userId: intent.userId,
-                        roomId: intent.roomId,
-                        targetType: intent.targetType,
-                        amount: intent.amount,
-                      }).kind,
-                      triggerType: 'pattern' as const,
-                      riskLevel: 'medium' as const,
-                      partnerCaseRef: null,
-                      reviewState: 'open' as const,
-                      assignedTo: null,
-                      resolution: null,
-                      retentionPolicy: {
-                        retention_period_days: 730,
-                        deletion_date: new Date(services.now() + 730 * 86_400_000).toISOString(),
-                        legal_hold: false,
-                        legal_hold_refs: [],
-                      },
-                      idempotencyKey: null,
-                      createdAt: intent.createdAt,
-                      updatedAt: intent.updatedAt,
-                    }),
-              payment_intent_id: intent.paymentIntentId,
-              payment_compliance_state: intent.complianceState,
-              sla_due_at: new Date(
-                Date.parse(intent.createdAt) +
-                  (services.config().slaHoursByRisk['medium'] ?? 4) * 3_600_000,
-              ).toISOString(),
-            };
-          }),
-        )),
+        ...fraudClass
+          .filter((record) => !representedByIntent.has(record.caseId))
+          .map((record) => ({
+            case: caseToWire(record),
+            payment_intent_id: null,
+            payment_compliance_state: null,
+            sla_due_at: slaDueAt(services, record),
+          })),
+        ...intentRows,
       ];
       return c.json(fraudQueueResponseSchema.parse({ items }));
     })

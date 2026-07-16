@@ -99,6 +99,15 @@ async function verifyClaimedIntent(input: {
   /** The submit's client idempotency key — checked against the intent's own
    *  attempt key (submit only; a preflight mints no action). */
   idempotencyKey?: string;
+  /** IDENTITY ONLY: is the intent the caller's, and is it this transfer?
+   *
+   *  The split matters.  Identity is AUTHORIZATION and is checked on every
+   *  request that names an intent, retry or not.  The state checks below —
+   *  in-flight, `signed`, the attempt key — are a GATE on minting a NEW action,
+   *  and a retry has already minted: re-applying them would reject the retry of
+   *  a submission that succeeded.  Conflating the two is how a client that
+   *  merely QUOTED someone else's intent id could be treated as its retry. */
+  identityOnly?: boolean;
 }): Promise<{ code: string; message: string } | null> {
   if (input.paymentIntentId === undefined) return null;
   if (!treasuryServicesConfigured()) {
@@ -137,6 +146,10 @@ async function verifyClaimedIntent(input: {
   const expectedTarget =
     intent.targetType === 'treasury_deposit' ? intent.treasuryId : intent.targetId;
   if (expectedTarget !== input.typedDataMessage[targetField]) return mismatch;
+  // Everything above is IDENTITY — whose intent this is and what it settles.
+  // A retry stops here: it minted its action already, and the gate below is
+  // about minting.
+  if (input.identityOnly === true) return null;
   // …and still an attempt IN FLIGHT.  `PAYMENT_INTENT_TIMED_STATES` is exactly
   // the pre-submission window in which an action is being minted (the states
   // the expiry sweep watches); past it the intent's action already exists, so
@@ -382,9 +395,6 @@ export function createKnomosisRoutes() {
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
-          if (!services.config().cryptoEnabled) {
-            return c.json(deny('crypto_disabled', 'Crypto features are not enabled.'), 503);
-          }
           const body = c.req.valid('json');
           // Is this a RETRY of a submission that already landed?  A retry after
           // a lost response has ALREADY submitted — its action exists and may
@@ -397,11 +407,29 @@ export function createKnomosisRoutes() {
           // action may be minted, so they are skipped here — and `submitAction`
           // still owns the replay itself (it re-reads the record AND repairs a
           // lost actor mapping; a second replay path here would drift from it).
+          // A claimed intent is AUTHORIZED FIRST, before it is trusted for
+          // anything — including as evidence that this is a retry.  Otherwise a
+          // caller who merely knows another member's intent id is treated as
+          // its retry, skips this very check, collides on the intent unique,
+          // and is handed that member's action id and submission state.
+          const claimIdentity = await verifyClaimedIntent({
+            paymentIntentId: body.payment_intent_id,
+            userId: auth.userId,
+            roomId: body.room_id,
+            actionType: body.action_type,
+            typedDataMessage: body.typed_data_message,
+            stage: 'submit',
+            identityOnly: true,
+          });
+          if (claimIdentity !== null) {
+            return c.json(deny(claimIdentity.code, claimIdentity.message), 400);
+          }
           // BOTH replays `submitAction` performs, or this skips the gates for
           // one and re-gates the other.  The idempotency key finds the caller's
-          // OWN earlier attempt; the intent finds whoever settled it first —
-          // for a room-owned payout that is another steward, under their own
-          // actor-scoped key, and their retry is just as much a retry.
+          // OWN earlier attempt; the intent — now known to be theirs — finds
+          // whoever settled it first, which for a room-owned payout is another
+          // steward under their own actor-scoped key, and their retry is just
+          // as much a retry.
           const isRetry =
             (await services.actions.getByIdempotencyKey(auth.userId, body.idempotency_key)) !==
               null ||
@@ -410,6 +438,16 @@ export function createKnomosisRoutes() {
           // WS-L.3.5c: submission honours the kill switch (503); preflight
           // stays available so users can see why an action would fail.
           if (!isRetry) {
+            // The crypto flag gates MINTING too, so it sits with the other
+            // gates.  Ahead of the replay it stranded work already done: an
+            // action inserted and forwarded, the response lost, an operator
+            // disabling crypto during the incident — and the retry got
+            // `crypto_disabled` instead of its own action id, with no other way
+            // to learn the fate of a transfer that may be on chain.  Returning
+            // that id mints nothing and moves nothing.
+            if (!services.config().cryptoEnabled) {
+              return c.json(deny('crypto_disabled', 'Crypto features are not enabled.'), 503);
+            }
             const region = await services.regionResolver.regionForUser(auth.userId);
             const decision = await killSwitchDecision(services.configStore, 'action_submission', {
               roomId: body.room_id,

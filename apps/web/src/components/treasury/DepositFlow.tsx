@@ -23,7 +23,11 @@ import { useRef, useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import { useKnomosisManifestQuery, useWalletsQuery } from '../../lib/queries.js';
-import { advancePaymentIntent, createPaymentIntent } from '../../lib/treasury-api.js';
+import {
+  advancePaymentIntent,
+  createPaymentIntent,
+  fetchPaymentIntent,
+} from '../../lib/treasury-api.js';
 import { preflightKnomosisAction, submitKnomosisAction } from '../../lib/wallet-api.js';
 import {
   discoverProviders,
@@ -126,8 +130,27 @@ export function DepositFlow({
         amount: minorUnits,
         idempotency_key: attemptRef.current?.key ?? crypto.randomUUID(),
       });
-      await advancePaymentIntent(roomId, created.payment_intent_id, 'preflight');
-      const quoted = await advancePaymentIntent(roomId, created.payment_intent_id, 'quote');
+      // RESUME from where this intent actually is, rather than replaying steps
+      // it has already taken.  A high-value deposit is held at preflight (the
+      // review flags it, and the compliance hold bars `quoted`), so the user
+      // comes back to a `preflighted` intent once a reviewer releases it — and
+      // the lifecycle has no `preflighted → preflighted` edge, so replaying the
+      // step 409s and a reviewed deposit could never resume.
+      const state = created.existing
+        ? (await fetchPaymentIntent(roomId, created.payment_intent_id)).execution_state
+        : 'created';
+      if (state === 'created') {
+        await advancePaymentIntent(roomId, created.payment_intent_id, 'preflight');
+      }
+      // Only advance what is not already done — every step is a one-way edge,
+      // so replaying one 409s.  An already-`quoted` intent keeps its stored
+      // quote; the preview falls back to the market-rate line rather than
+      // inventing a figure, because the fee rides the quote RESPONSE and this
+      // path has no call to return it.
+      const quoted =
+        state === 'created' || state === 'preflighted'
+          ? await advancePaymentIntent(roomId, created.payment_intent_id, 'quote')
+          : null;
       const providers = await discoverProviders();
       const provider = providers[0];
       const address = provider ? await requestAccount(provider.provider) : null;
@@ -152,7 +175,7 @@ export function DepositFlow({
         expiration: signatureExpiration(),
         deploymentId: treasury.deployment_id,
       };
-      const quote = quoted.quote as { estimated_fee?: unknown } | null | undefined;
+      const quote = quoted?.quote as { estimated_fee?: unknown } | null | undefined;
       const estimatedFee =
         typeof quote?.estimated_fee === 'string'
           ? `${decimals === undefined ? quote.estimated_fee : formatMinorUnits(quote.estimated_fee, decimals)} ${asset}`

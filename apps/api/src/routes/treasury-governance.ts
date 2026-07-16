@@ -506,8 +506,6 @@ export function createTreasuryGovernanceRoutes() {
         zValidator('json', paymentIntentCreateRequestSchema),
         async (c) => {
           const auth = requireAuth(c);
-          const gate = flagGate('crypto');
-          if (gate) return c.json(deny(gate.code, gate.message), 503);
           const services = getTreasuryServices();
           const roomId = c.req.valid('param').roomId;
           if (!(await services.rooms.isMember(roomId, auth.userId))) {
@@ -542,6 +540,16 @@ export function createTreasuryGovernanceRoutes() {
             roomId,
             body.idempotency_key,
           );
+          // The crypto flag gates CREATING an intent, so it sits with the
+          // gates rather than ahead of the replay.  Ahead of it, a retry after
+          // a lost response — with crypto disabled in between — got a 503
+          // instead of the existing `payment_intent_id`, and there is no way to
+          // recover that id afterwards: the intent sat orphaned until it
+          // expired.  Returning it creates nothing.
+          if (replay === null) {
+            const gate = flagGate('crypto');
+            if (gate) return c.json(deny(gate.code, gate.message), 503);
+          }
           // WS-N.1.2d — the first-financial-action disclosure gate: where the
           // user's region policy lists risk disclosures, the CURRENT version
           // of each must be acknowledged before any intent is created here
