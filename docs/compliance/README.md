@@ -366,7 +366,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   member whose verified declaration names a BLOCKED region must not have a
   transient outage resolve them to a more-permissive locale and unlock the very
   wallet links / testnet actions the stored declaration denies (fail toward the
-  restrictive answer, never a laterally more-permissive one).
+  restrictive answer, never a laterally more-permissive one).  The SAME reasoning
+  bars a SELF-INFLICTED downgrade: a redeclaration over a `verified` row is
+  refused (409 `declaration_verified`), never a silent overwrite to `pending`.
+  Erasing the verified basis would drop `resolveRegion` to the weaker locale rung
+  — a verified-BLOCKED member could self-declare a new region and reach the routes
+  that reject only an explicit `blocked` (wallet-connect / testnet).  Changing a
+  verified region is an EXPLICIT, audited act (revoke, which the record shows,
+  then redeclare), never a side effect of a new POST.
 - **Velocity counting reserves, never reconciles down.**  Each `fraudRisk`
   call reserves a check (preflight + submit ≈ 2 per action, and the limits
   carry that factor); a rejected action's reservation is deliberately kept.
@@ -581,6 +588,22 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 
   Together: the transfer cannot settle outside the ledger and the accounting
   export because its intent expired.
+- **A `reserving` action settles nothing — it never forwarded.**  The submit
+  reserves the idempotency key by inserting the action `reserving` BEFORE the
+  single-use gates, and only advances it to `submitted` once they all pass; a
+  crash in between leaves it `reserving`, and the retry sweep is submitted-only,
+  so it never reaches the gateway.  Such a row must never bind to an intent — it
+  would settle the intent against a transfer that never happened.  Both paths
+  refuse it: `attachIntentSubmission` rejects `reserving` (409
+  `action_not_forwarded`) REGARDLESS of `allowTerminal` — that exemption is for a
+  real failed/reverted corpse, not a never-started reservation — so neither the
+  client submit-replay NOR the reconcile orphan sweep can bind it; and
+  `/actions/submit` returns a RETRYABLE error (not an ok replay) when the
+  idempotency-key lookup finds a `reserving` row, so the deposit flow retries
+  rather than attaching a dead reservation.  The stale-reservation sweep
+  (`failStaleReservations`, keyed off the preflight-token TTL so a live submission
+  is never swept) reclaims the crashed row to `failed`, after which the orphan
+  sweep recovers the intent.
 - **Gates are for NEW actions; a retry replays.**  `/actions/submit` looks up
   the `(user, idempotency_key)` record BEFORE its gates and skips them on a
   retry — and `POST …/payment-intents` does the same with its idempotency key,
@@ -798,15 +821,17 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 - **Runtime config** (`compliance.*`, fail-closed loader): cache TTLs,
   screening timeout, velocity limits + per-region overrides, the high-value
   review threshold, retention days by trigger + anonymize triggers, SLA hours
-  by risk, event-tier retention overrides.  Every map KEY that is later used for
-  an EXACT lookup is validated against its canonical vocabulary, not accepted as
-  a free string: `velocityRegionOverrides` keys are `regionCodeSchema`, and
-  `retentionDaysByTrigger` / `retentionAnonymizeTriggers` keys are
-  `caseTriggerTypeSchema` (`partialRecord`, since the map is partial — absent
-  triggers take the 730-day fallback).  A typo (`sanction` for `sanctions`) would
-  otherwise validate, store, and then silently miss the lookup — a
-  jurisdiction-specific limit or a case-retention/anonymization rule that looks
-  configured but never fires.
+  by risk, event-tier retention overrides.  EVERY map key/element that a consumer
+  later uses for an EXACT lookup is validated against its canonical vocabulary,
+  not accepted as a free string — a whole class of "looks configured but never
+  fires" bugs: `velocityRegionOverrides` keys are `regionCodeSchema`;
+  `retentionDaysByTrigger` / `retentionAnonymizeTriggers` are `caseTriggerTypeSchema`
+  (`createCaseInTx` / the anonymize sweep); `slaHoursByRisk` is
+  `caseRiskLevelSchema` (`slaDueAt`); and `eventRetentionOverrides` is
+  `retentionTierSchema` (`effectiveMaxDays`).  All use `partialRecord` — the maps
+  are partial by design (absent keys take the fallback / base) — so a canonical
+  partial map is accepted but a typo (`sanction`, `critcal`, `sensitive`) is
+  rejected outright rather than stored to silently miss the lookup.
 - **Dev**: the seeded `compliance@licio.test` account carries both roles
   (see `docs/DEVELOPMENT.md`); policies are unpopulated by default so every
   cell reads `disabled` (`no_policy`) until one is created through the

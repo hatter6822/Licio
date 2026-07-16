@@ -198,6 +198,31 @@ function replayOf(record: KnomosisActionRecordEntity): SubmitActionOutcome {
 }
 
 /**
+ * Replay an existing action — UNLESS it is still `reserving`.  A `reserving` row
+ * never forwarded: it is inserted before the post-reservation gates and only
+ * advances to `submitted` once they all pass, and the retry sweep is
+ * submitted-only, so it will never reach the gateway (a crashed prior attempt),
+ * or it is a concurrent in-flight attempt that has not advanced yet.  Presenting
+ * it as an ok replay lets the deposit flow bind a never-forwarded reservation to
+ * the intent (`attachIntentSubmission` rejects only failed/reverted), settling it
+ * against a transfer that never happened and stranding it on the stale-reservation
+ * sweep.  Return a RETRYABLE error instead: a fresh attempt (or the sweep
+ * reclaiming this row to `failed`) makes progress, and attach also refuses a
+ * `reserving` action (defense in depth).
+ */
+function replayOrRetry(record: KnomosisActionRecordEntity): SubmitActionOutcome {
+  if (record.submissionState === 'reserving') {
+    return {
+      ok: false,
+      status: 503,
+      code: 'GATEWAY_UNAVAILABLE',
+      message: 'A previous submission is still in progress; please retry.',
+    };
+  }
+  return replayOf(record);
+}
+
+/**
  * Has this submission ALREADY been made?  Both scopes the reservation's uniques
  * enforce, asked in one place so they cannot drift apart:
  *
@@ -234,7 +259,7 @@ export async function submitAction(
   // caller no way to learn the id their intent must attach to.  It used to be
   // caught only by the insert conflict, which is past all of them.
   const existing = await alreadySubmitted(deps, input);
-  if (existing !== null) return replayOf(existing);
+  if (existing !== null) return replayOrRetry(existing);
 
   // The gateway must be configured BEFORE any state is consumed (fail closed,
   // nothing burned on an unconfigured deployment).
@@ -627,7 +652,11 @@ export async function submitAction(
   } catch (error) {
     // Whichever unique refused us, the answer is the same: replay the action
     // that won.  Same lookup as the early one above — a racing writer that
-    // landed between them is exactly what this catch is for.
+    // landed between them is exactly what this catch is for.  This is the
+    // CONCURRENT path: the winner was created in THIS same window and is
+    // forwarding now (it may be momentarily `reserving`), so the loser REPLAYS it
+    // — `replayOf`, not `replayOrRetry`, keeps the "exactly one replay" invariant
+    // (attach still refuses a `reserving` action, so nothing binds a dead one).
     const winner = await alreadySubmitted(deps, input);
     if (winner !== null) return replayOf(winner);
     throw error; // a different failure — propagate

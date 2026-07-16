@@ -14,7 +14,12 @@
 // typically costs ~2 checks.  Over-counting is the deliberate fail-safe
 // direction (a retry can only tighten the window, never widen it); defaults
 // carry the 2x factor.
-import { caseTriggerTypeSchema, regionCodeSchema } from '@licio/shared';
+import {
+  caseRiskLevelSchema,
+  caseTriggerTypeSchema,
+  regionCodeSchema,
+  retentionTierSchema,
+} from '@licio/shared';
 import { z } from 'zod';
 import type { PwattConfigStore } from '../events/stores.js';
 
@@ -140,8 +145,14 @@ const VALIDATORS: Readonly<Record<keyof ComplianceRuntimeConfig, z.ZodType>> = {
     .int()
     .min(3_600_000)
     .max(7 * 86_400_000),
-  slaHoursByRisk: z.record(z.string().min(1).max(16), z.number().int().min(1).max(720)),
-  eventRetentionOverrides: z.record(z.string().min(1).max(64), z.number().int().min(1).max(3_650)),
+  // Same class as the retention triggers above: the consumers do EXACT lookups —
+  // `slaDueAt` by `CaseRiskLevel` (with a 24h fallback) and `effectiveMaxDays` by
+  // `RetentionTier` (base if absent) — so a typo (`critcal`, `sensitive`) would
+  // validate, store, and then silently keep the default while reporting success.
+  // Keys are constrained to their canonical vocabulary; `partialRecord` keeps the
+  // maps partial (an override need not cover every level/tier).
+  slaHoursByRisk: z.partialRecord(caseRiskLevelSchema, z.number().int().min(1).max(720)),
+  eventRetentionOverrides: z.partialRecord(retentionTierSchema, z.number().int().min(1).max(3_650)),
 };
 
 export const COMPLIANCE_CONFIG_KEYS = Object.keys(VALIDATORS) as Array<

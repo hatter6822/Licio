@@ -402,6 +402,28 @@ export function createComplianceRoutes() {
         const body = c.req.valid('json');
         const nowIso = new Date(services.now()).toISOString();
         const existing = await services.declarations.get(auth.userId);
+        // A VERIFIED declaration is the real-funds region basis AND the only
+        // anti-circumvention control the §19.1 ladder has.  A redeclaration must
+        // NOT silently erase it: overwriting the verified row with a fresh
+        // `pending` one drops `resolveRegion` to the weaker locale rung, so a
+        // member whose verified region is BLOCKED could self-declare a new region
+        // and reach the routes that reject only an explicit `blocked` verdict
+        // (wallet-connect / testnet).  Changing a verified region is an EXPLICIT,
+        // audited act — revoke first (DELETE, which reverts to locale on the
+        // record), then declare — never a silent side effect of a new POST.
+        if (
+          existing !== null &&
+          existing.status === 'verified' &&
+          existing.verificationLevel === 'reviewer_verified'
+        ) {
+          return c.json(
+            deny(
+              'declaration_verified',
+              'Your region is verified. Revoke the current declaration first, then declare the new region.',
+            ),
+            409,
+          );
+        }
         const record = await services.declarations.upsert({
           userId: auth.userId,
           declaredRegion: body.declared_region,

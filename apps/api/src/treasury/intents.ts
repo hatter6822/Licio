@@ -575,6 +575,17 @@ export async function attachIntentSubmission(
   // create/preflight/quote/signing/retry, all upstream of the submit.
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
+  // A `reserving` action NEVER forwarded: it is inserted before the post-
+  // reservation gates and only advances to `submitted` once they all pass, and
+  // the retry sweep is submitted-only — so it never reaches the gateway.  Binding
+  // it would settle the intent against a transfer that did not happen (and leave
+  // it waiting for the stale-reservation sweep).  Rejected on BOTH callers — the
+  // client submit-replay AND the reconcile orphan sweep (which is `allowTerminal`,
+  // for a real failed/reverted attempt, NOT this never-started one) — so a dead
+  // reservation can never become an intent's submission.
+  if (action.submissionState === 'reserving') {
+    return tgErr(409, 'action_not_forwarded', 'This action was never submitted to the gateway.');
+  }
   // A DEAD action can settle nothing: manually binding a failed/reverted
   // record (a pre-retry attempt's corpse still matches every belongs-to
   // check) would drive a freshly retried intent straight back to its

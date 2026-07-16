@@ -564,6 +564,76 @@ describe('DepositFlow (WS-M.3.1)', () => {
     expect(submits[1]?.preflight_token).toBe('tok-abc');
   });
 
+  it('recovers a quoted→signed advance whose response was lost, instead of stranding on invalid_transition (thread DepositFlow:331)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    const onIntentCreated = vi.fn();
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    mockPreflightAction.mockResolvedValue({ result: 'pass', preflight_token: 'tok-xyz' });
+    mockSubmitAction.mockResolvedValue({
+      action_record_id: '66666666-6666-4666-8666-666666666666',
+      submission_state: 'submitted',
+      reason_code: null,
+      human_message: null,
+    });
+    // The FIRST quoted→signed advance reaches the server but its response is LOST
+    // (so `signedRef` never gets set); the SECOND (retry) re-runs it and the
+    // server 409s `invalid_transition` — there is no signed→signed edge.
+    let signedAdvances = 0;
+    mockAdvance.mockImplementation(
+      (_room: string, _id: string, state: string, actionRecordId?: string) => {
+        if (state === 'preflight') return Promise.resolve({ execution_state: 'preflighted' });
+        if (state === 'quote')
+          return Promise.resolve({
+            execution_state: 'quoted',
+            quote: { estimated_fee: '1000', quoted_at: '2026-07-01T00:00:00.000Z' },
+          });
+        if (state === 'signed' && actionRecordId === undefined) {
+          signedAdvances += 1;
+          if (signedAdvances === 1)
+            return Promise.reject(new ApiClientError('network', 'Connection lost.', 503));
+          return Promise.reject(
+            new ApiClientError('invalid_transition', 'The intent cannot be signed.', 409),
+          );
+        }
+        return Promise.resolve({ execution_state: 'ok' }); // the attach (signed + arid)
+      },
+    );
+    // The recovery fetch confirms the intent is ALREADY `signed` (the lost advance
+    // landed), so the flow continues to submit rather than stranding.
+    mockFetchIntent.mockResolvedValue({ execution_state: 'signed' });
+    render(
+      <DepositFlow
+        roomId={TREASURY.room_id}
+        treasury={TREASURY}
+        onIntentCreated={onIntentCreated}
+      />,
+    );
+    enterAmount('3');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    // Attempt 1: the signed advance loses its response.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 3 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    // Retry: the re-advance 409s invalid_transition; a fetch shows `signed`, so
+    // the flow submits instead of stranding until cancel/expiry.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 3 USDC to the treasury/i }));
+    await waitFor(() =>
+      expect(onIntentCreated).toHaveBeenCalledWith('55555555-5555-4555-8555-555555555555'),
+    );
+    expect(mockFetchIntent).toHaveBeenCalled(); // the recovery fetch ran
+    expect(mockSubmitAction).toHaveBeenCalledTimes(1);
+  });
+
   it('blocks the flow when deposits are paused', () => {
     render(
       <DepositFlow

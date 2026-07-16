@@ -997,6 +997,31 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect(afterRetry?.actionRecordId).toBeNull();
   });
 
+  it('refuses to bind a `reserving` action — a reservation that never forwarded settles nothing (thread submission.ts:237)', async () => {
+    const deps = buildDeps();
+    const id = await signedIntent(deps);
+    // A `reserving` row is a crashed prior attempt: inserted before the post-
+    // reservation gates, never advanced to `submitted`, and the retry sweep is
+    // submitted-only — it never forwarded.  Binding it would settle the intent
+    // against a transfer that never happened.
+    const action = actionOf({ submissionState: 'reserving' });
+    await deps.actions.insert(action);
+    const outcome = await attachIntentSubmission(deps, id, action.actionRecordId, USER);
+    if (!('code' in outcome)) throw new Error('reserving action unexpectedly attached');
+    expect(outcome.code).toBe('action_not_forwarded');
+    // Even the reconcile sweep's `allowTerminal` path refuses it — that exemption
+    // is for a real failed/reverted corpse, not a never-started reservation.
+    const viaReconcile = await attachIntentSubmission(deps, id, action.actionRecordId, USER, {
+      allowTerminal: true,
+    });
+    if (!('code' in viaReconcile)) throw new Error('reserving action attached via allowTerminal');
+    expect(viaReconcile.code).toBe('action_not_forwarded');
+    // The intent is untouched — still `signed`, unbound (the stale-reservation
+    // sweep reclaims the row to `failed`, then the orphan sweep recovers it).
+    expect((await deps.intents.getById(id))?.executionState).toBe('signed');
+    expect((await deps.intents.getById(id))?.actionRecordId).toBeNull();
+  });
+
   it('rejects an action from another room, actor, type, or payload', async () => {
     const deps = buildDeps();
     const id = await signedIntent(deps);

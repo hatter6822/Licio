@@ -276,12 +276,20 @@ describe('the retention sweep (WS-N.2.1d)', () => {
   it('buildEventRetentionOverrides projects the configured per-tier maxima', async () => {
     expect(buildEventRetentionOverrides(services.config)).toEqual({ maxDays: {} });
     await services.configStore.set('compliance.eventRetentionOverrides', {
-      value: { sensitive: 30, restricted: 90 },
+      value: { attention_aggregated: 30, ranking_log: 90 },
     });
     await services.reloadConfig();
     expect(buildEventRetentionOverrides(services.config)).toEqual({
-      maxDays: { sensitive: 30, restricted: 90 },
+      maxDays: { attention_aggregated: 30, ranking_log: 90 },
     });
+    // A typo'd tier (`effectiveMaxDays` does an EXACT RetentionTier lookup) is
+    // rejected by the fail-closed loader — the DEFAULT (empty) holds rather than
+    // storing a key the sweep never matches (config thread).
+    await services.configStore.set('compliance.eventRetentionOverrides', {
+      value: { sensitive: 30 },
+    });
+    await services.reloadConfig();
+    expect(buildEventRetentionOverrides(services.config)).toEqual({ maxDays: {} });
   });
 });
 

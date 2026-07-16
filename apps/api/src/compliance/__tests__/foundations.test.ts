@@ -623,6 +623,21 @@ describe('the fail-closed compliance.* config loader', () => {
       validateComplianceConfigValue('retentionAnonymizeTriggers', ['sanctions', 'fraud']),
     ).toBeNull();
   });
+
+  it('SLA-by-risk and event-retention override KEYS are constrained to their vocabularies (config thread)', () => {
+    // `slaDueAt` looks up `slaHoursByRisk[riskLevel]` by the CaseRiskLevel enum
+    // (24h fallback); a typo silently keeps the default while reporting success.
+    expect(validateComplianceConfigValue('slaHoursByRisk', { critcal: 2 })).not.toBeNull();
+    expect(validateComplianceConfigValue('slaHoursByRisk', { high: 2, critical: 1 })).toBeNull();
+    // `effectiveMaxDays` looks up `eventRetentionOverrides[tier]` by the
+    // RetentionTier enum (base if absent); a typo never shortens what it names.
+    expect(
+      validateComplianceConfigValue('eventRetentionOverrides', { sensitive: 30 }),
+    ).not.toBeNull();
+    expect(
+      validateComplianceConfigValue('eventRetentionOverrides', { attention_aggregated: 30 }),
+    ).toBeNull();
+  });
 });
 
 describe('the disclosure gate honors requires_acknowledgment (WS-N.1.2d)', () => {

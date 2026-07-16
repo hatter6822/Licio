@@ -962,6 +962,56 @@ describe('WS-L.3.2 submission + state machine', () => {
     expect(await fixture.knomosis.actions.listByRoom(ROOM, 100)).toHaveLength(1);
   });
 
+  it('a `reserving` idempotency-key replay returns a RETRYABLE error, never an attachable dead reservation (thread submission.ts:237)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const { pre, req } = await preflightPass(fixture, userId, walletAccountId);
+    const idem = crypto.randomUUID();
+    // A prior submit crashed AFTER reserving the idempotency key but BEFORE the
+    // reserving→submitted promotion — the row is stuck `reserving`, and the retry
+    // sweep is submitted-only, so it never forwarded and never will.
+    await fixture.knomosis.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      actorWalletAccountId: walletAccountId,
+      actorUserId: userId,
+      payloadHash: `0x${'11'.repeat(32)}`,
+      typedDataHash: `0x${'22'.repeat(32)}`,
+      signedAction: { message: req.typedDataMessage, signature: req.signature },
+      submissionState: 'reserving',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: idem,
+      paymentIntentId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // The retry with the SAME key must NOT return an ok replay (which the deposit
+    // flow treats as attachable and binds to the intent) — it is a retryable error.
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: idem,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: req.typedDataMessage,
+      signature: req.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe(503);
+    // The dead reservation was left untouched for the stale-reservation sweep —
+    // never advanced, never replayed as complete.
+    const rows = await fixture.knomosis.actions.listByRoom(ROOM, 100);
+    expect(rows.filter((r) => r.idempotencyKey === idem)).toHaveLength(1);
+    expect(rows.find((r) => r.idempotencyKey === idem)?.submissionState).toBe('reserving');
+  });
+
   it('a production proposal_sign submit records the ACTION but no ledger row (W14)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);

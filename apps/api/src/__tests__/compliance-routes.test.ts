@@ -743,6 +743,49 @@ describe('the case console (WS-N.2.1b/c)', () => {
       );
     }
   });
+
+  it('a redeclaration over a VERIFIED declaration is refused — the verified basis is not silently erased (P1)', async () => {
+    const reviewer = await seedReviewer();
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}`, locale: 'en-GB' });
+    await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'DE' }, member.cookie),
+    );
+    await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'verify', note: 'passport checked' },
+        reviewer.cookie,
+      ),
+    );
+    // A member with a VERIFIED DE region self-declares a NEW region.  If this
+    // overwrote the verified row with a fresh `pending` one, `resolveRegion`
+    // would drop to the locale rung (GB) — a verified-BLOCKED member could reach
+    // wallet-connect/testnet, which reject only an explicit `blocked`.  It must
+    // fail closed, preserving the verified basis.
+    const redeclared = await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'US' }, member.cookie),
+    );
+    expect(redeclared.status).toBe(409);
+    expect(((await redeclared.json()) as { error: { code: string } }).error.code).toBe(
+      'declaration_verified',
+    );
+    // The verified DE basis is intact — resolution did not fall to locale.
+    const region = (await (
+      await app().request(get('/v1/compliance/region', member.cookie))
+    ).json()) as { region: string | null; basis: string };
+    expect(region).toMatchObject({ region: 'DE', basis: 'verified_declaration' });
+    // The escape hatch remains explicit + audited: revoke first, THEN redeclare.
+    await app().request(
+      new Request('http://localhost/v1/compliance/region/declaration', {
+        method: 'DELETE',
+        headers: json(member.cookie),
+      }),
+    );
+    const afterRevoke = await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'US' }, member.cookie),
+    );
+    expect(afterRevoke.status).toBe(201);
+  });
 });
 
 describe('the fraud queue + wallet pins + runtime config', () => {
@@ -820,7 +863,7 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     const byReviewer = await app().request(
       put(
         '/v1/compliance/admin/config/eventRetentionOverrides',
-        { value: { sensitive: 30 } },
+        { value: { attention_aggregated: 30 } },
         reviewer.cookie,
       ),
     );
@@ -828,15 +871,31 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     expect(((await byReviewer.json()) as { error: { code: string } }).error.code).toBe(
       'counsel_approval_required',
     );
-    const overrides = await app().request(
+    // A TYPO'd tier is rejected outright: `effectiveMaxDays` does an EXACT
+    // RetentionTier lookup, so a `sensitive` key would store, report success, and
+    // then never shorten what it names (config thread).
+    const typo = await app().request(
       put(
         '/v1/compliance/admin/config/eventRetentionOverrides',
         { value: { sensitive: 30 } },
         counsel.cookie,
       ),
     );
+    expect(typo.status).toBe(400);
+    expect(((await typo.json()) as { error: { code: string } }).error.code).toBe(
+      'invalid_config_value',
+    );
+    const overrides = await app().request(
+      put(
+        '/v1/compliance/admin/config/eventRetentionOverrides',
+        { value: { attention_aggregated: 30 } },
+        counsel.cookie,
+      ),
+    );
     expect(overrides.status).toBe(200);
-    expect(getEventPipelineServices().retention.overrides).toEqual({ maxDays: { sensitive: 30 } });
+    expect(getEventPipelineServices().retention.overrides).toEqual({
+      maxDays: { attention_aggregated: 30 },
+    });
   });
 });
 

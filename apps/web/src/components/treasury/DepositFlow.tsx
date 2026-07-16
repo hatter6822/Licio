@@ -327,7 +327,19 @@ export function DepositFlow({
       // client is the only party that knows it already advanced, so it
       // remembers.
       if (signedRef.current !== pending.paymentIntentId) {
-        await advancePaymentIntent(roomId, pending.paymentIntentId, 'signed');
+        try {
+          await advancePaymentIntent(roomId, pending.paymentIntentId, 'signed');
+        } catch (e) {
+          // The advance may have LANDED on a prior attempt whose response was
+          // lost, so `signedRef` never got set; re-running it here 409s
+          // `invalid_transition` (no signed→signed edge) and would strand a
+          // deposit that is actually ready to submit until cancel/expiry.  If a
+          // fetch confirms the intent is ALREADY `signed`, the prior advance took
+          // — continue to the submit.  Any other cause (or state) rethrows.
+          if (!(e instanceof ApiClientError && e.code === 'invalid_transition')) throw e;
+          const current = await fetchPaymentIntent(roomId, pending.paymentIntentId);
+          if (current.execution_state !== 'signed') throw e;
+        }
         signedRef.current = pending.paymentIntentId;
       }
       // Submission needs fresh step-up; the gate opens the dialog + retries.
