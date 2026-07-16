@@ -499,6 +499,21 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   act the store had refused, so the refusal now goes through one named
   helper — `mustApply` — rather than three hand-written throws that can each be
   forgotten. Read its comment before writing `return false` inside a unit.
+- **A store makes its OWN atomicity.**  The Drizzle stores are built over
+  `DbOrTx = Db | Tx`, and that type hides the only difference that matters:
+  handed a transaction, a method's statements are atomic; handed the POOL, each
+  statement is its own transaction — so identical code races, and a
+  `SELECT … FOR UPDATE` releases its lock the instant its statement ends.
+  `applyLegalHold` shipped with a row lock that was correct for every production
+  caller (all inside a unit) and worthless for a direct one; it passed review
+  and every local run, and lost a concurrent hold exactly once, in CI.
+  **A method whose write is computed from an earlier statement must open its own
+  transaction** — a SAVEPOINT when nested, a real transaction on the pool,
+  correct either way. `drizzle-store-atomicity.test.ts` enforces that
+  statically, because the hazard is invisible at the call site AND at the
+  definition; it flags nothing for several reads (a torn read fails closed, and
+  READ COMMITTED gives per-statement snapshots inside a transaction anyway) or
+  for a write-then-read (`record`'s conflict-quiet insert).
 - **A legal hold is reference-counted, not a flag.**  A SAR and a lawful-access
   request can hold the same case at once, so each names its own hold
   (`legal_hold_refs`) and releases only that one; `legal_hold` is *derived* from

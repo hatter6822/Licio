@@ -84,6 +84,26 @@ type Db = ReturnType<typeof createDbClient>;
  *  so the SAME class serves an autocommit call and a unit of work — there is
  *  no second, transaction-only copy of the queries to drift. */
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+/**
+ * A store may be built over the POOL or over a caller's TRANSACTION — and this
+ * type cannot tell you which you got.  That is the whole hazard:
+ *
+ *   • handed a `Tx`, a method's statements are atomic (the caller's unit);
+ *   • handed the pool, EACH STATEMENT IS ITS OWN TRANSACTION, so the same code
+ *     silently races and a `SELECT … FOR UPDATE` releases its lock the instant
+ *     its statement ends.
+ *
+ * So the rule, and it is not optional: **a method that issues more than one
+ * statement must open its own transaction** (`this.#db.transaction(...)` — a
+ * SAVEPOINT when nested, a real transaction on the pool, correct either way).
+ * Atomicity is the method's promise to make; it cannot be delegated to whoever
+ * happened to construct the store.
+ *
+ * `applyLegalHold` learned this the expensive way: its row lock was correct for
+ * every production caller (all inside a unit) and worthless for a direct one,
+ * and only CI's gated Postgres run ever saw the lost update.
+ * `drizzle-store-atomicity.test.ts` now enforces the rule statically.
+ */
 type DbOrTx = Db | Tx;
 
 const iso = (value: Date): string => value.toISOString();
@@ -595,30 +615,56 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
     hold: boolean;
     updatedAt: string;
   }): Promise<ComplianceCaseRecord | null> {
-    // `#db` is the caller's transaction (every hold write runs inside a unit),
-    // so this lock is held to its commit: a concurrent SAR draft and
-    // lawful-access intake serialize here instead of both reading the same
-    // policy and clobbering one another's ref.
-    const locked = await this.#db
-      .select({ retentionPolicy: financialComplianceCases.retentionPolicy })
-      .from(financialComplianceCases)
-      .where(eq(financialComplianceCases.caseId, input.caseId))
-      .for('update');
-    const current = locked[0]?.retentionPolicy as CaseRetentionPolicy | undefined;
-    if (current === undefined) return null;
-    const rows = await this.#db
-      .update(financialComplianceCases)
-      .set({
-        retentionPolicy: nextHoldPolicy(current, input.hold, input.holdRef),
-        updatedAt: new Date(input.updatedAt),
-      })
-      .where(eq(financialComplianceCases.caseId, input.caseId))
-      .returning();
-    return rows[0] ? toCaseRecord(rows[0]) : null;
+    // The read-modify-write runs in a transaction OF ITS OWN, so the row lock
+    // below is held across both statements no matter who called us.
+    //
+    // It used to rely on `#db` already BEING the caller's transaction — true of
+    // every production hold write, and false for anyone calling the store
+    // directly.  On the pool a `SELECT … FOR UPDATE` releases the moment its
+    // implicit single-statement transaction ends, so two concurrent holders
+    // both read the pre-image and the second clobbers the first's ref: the
+    // exact loss this lock exists to prevent, reintroduced by an assumption the
+    // type could not enforce.  (CI's gated Postgres run caught it — the race is
+    // timing-dependent and had passed locally.)
+    //
+    // Nested inside an existing unit this is a SAVEPOINT, so the outer
+    // transaction's atomicity is unchanged and its locks still run to ITS
+    // commit.
+    return await this.#db.transaction(async (tx) => {
+      const locked = await tx
+        .select({ retentionPolicy: financialComplianceCases.retentionPolicy })
+        .from(financialComplianceCases)
+        .where(eq(financialComplianceCases.caseId, input.caseId))
+        .for('update');
+      const current = locked[0]?.retentionPolicy as CaseRetentionPolicy | undefined;
+      if (current === undefined) return null;
+      const rows = await tx
+        .update(financialComplianceCases)
+        .set({
+          retentionPolicy: nextHoldPolicy(current, input.hold, input.holdRef),
+          updatedAt: new Date(input.updatedAt),
+        })
+        .where(eq(financialComplianceCases.caseId, input.caseId))
+        .returning();
+      return rows[0] ? toCaseRecord(rows[0]) : null;
+    });
   }
 
   async scrubUserSubject(userId: string): Promise<{ scrubbed: string[]; heldBack: string[] }> {
-    const candidates = await this.#db
+    // THREE statements — select the candidates, scrub the eligible, mark the
+    // held-back with their deferred-erasure debt — and they are one act: a
+    // crash between the scrub and the marking would drop the debt for a case
+    // whose erasure was deferred, and nothing would ever come back for it (the
+    // account is tombstoned by then).  Its own transaction, per the `DbOrTx`
+    // rule above.
+    return await this.#db.transaction(async (tx) => this.#scrubUserSubjectInTx(tx, userId));
+  }
+
+  async #scrubUserSubjectInTx(
+    tx: Tx,
+    userId: string,
+  ): Promise<{ scrubbed: string[]; heldBack: string[] }> {
+    const candidates = await tx
       .select({
         caseId: financialComplianceCases.caseId,
         retentionPolicy: financialComplianceCases.retentionPolicy,
@@ -646,7 +692,7 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
     const updated =
       eligible.length === 0
         ? []
-        : await this.#db
+        : await tx
             .update(financialComplianceCases)
             .set({ userIdOrRoomId: null })
             .where(and(inArray(financialComplianceCases.caseId, eligible), NOT_HELD))
@@ -660,7 +706,7 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
       // will — the account is tombstoned and no later WS-D sweep names this
       // user again.  `jsonb_set` writes the key in ONE statement, so it cannot
       // clobber a concurrent hold write the way a read-modify-write would.
-      await this.#db
+      await tx
         .update(financialComplianceCases)
         .set({
           retentionPolicy: sql`jsonb_set(${financialComplianceCases.retentionPolicy}, '{erasure_pending}', 'true'::jsonb)`,
@@ -966,58 +1012,53 @@ export class DrizzleDisclosureAckStore implements DisclosureAckStore {
   }
 
   async record(ack: DisclosureAckRecord): Promise<DisclosureAckRecord> {
-    try {
-      const rows = await this.#db
-        .insert(disclosureAcknowledgments)
-        .values({
-          id: ack.id,
-          userId: ack.userId,
-          disclosureId: ack.disclosureId,
-          version: ack.version,
-          region: ack.region,
-          acknowledgedAt: new Date(ack.acknowledgedAt),
-        })
-        .returning();
-      const row = rows[0];
-      if (row === undefined) throw new Error('disclosure ack insert returned no row');
-      return {
-        id: row.id,
-        userId: row.userId,
-        disclosureId: row.disclosureId,
-        version: row.version,
-        region: row.region,
-        acknowledgedAt: iso(row.acknowledgedAt),
-      };
-    } catch (error) {
-      // Idempotent: the (user, disclosure, version, region) unique returns the
-      // existing row.
-      if (isUniqueViolation(error) && ack.userId !== null) {
-        const rows = await this.#db
-          .select()
-          .from(disclosureAcknowledgments)
-          .where(
-            and(
-              eq(disclosureAcknowledgments.userId, ack.userId),
-              eq(disclosureAcknowledgments.disclosureId, ack.disclosureId),
-              eq(disclosureAcknowledgments.version, ack.version),
-              eq(disclosureAcknowledgments.region, ack.region),
-            ),
-          )
-          .limit(1);
-        const row = rows[0];
-        if (row !== undefined) {
-          return {
-            id: row.id,
-            userId: row.userId,
-            disclosureId: row.disclosureId,
-            version: row.version,
-            region: row.region,
-            acknowledgedAt: iso(row.acknowledgedAt),
-          };
-        }
-      }
-      throw error;
-    }
+    const toRecord = (row: typeof disclosureAcknowledgments.$inferSelect): DisclosureAckRecord => ({
+      id: row.id,
+      userId: row.userId,
+      disclosureId: row.disclosureId,
+      version: row.version,
+      region: row.region,
+      acknowledgedAt: iso(row.acknowledgedAt),
+    });
+    // Idempotent by CONFLICTING QUIETLY, never by catching the 23505 and
+    // re-reading: inside a transaction that catch is unrecoverable — the
+    // violation has already aborted the unit, so the recovery SELECT fails too
+    // and the caller sees a store error where an existing row was the answer.
+    // This store is built over `DbOrTx` and only today's call graph keeps it off
+    // the transactional path; the shape must be safe on either.
+    const inserted = await this.#db
+      .insert(disclosureAcknowledgments)
+      .values({
+        id: ack.id,
+        userId: ack.userId,
+        disclosureId: ack.disclosureId,
+        version: ack.version,
+        region: ack.region,
+        acknowledgedAt: new Date(ack.acknowledgedAt),
+      })
+      .onConflictDoNothing()
+      .returning();
+    const row = inserted[0];
+    if (row !== undefined) return toRecord(row);
+    // Lost the unique — the acknowledgment already stands.  (An anonymized ack
+    // carries a null owner and cannot be found again; it is also never
+    // re-recorded, since the user it belonged to is gone.)
+    if (ack.userId === null) throw new Error('disclosure ack insert returned no row');
+    const existing = await this.#db
+      .select()
+      .from(disclosureAcknowledgments)
+      .where(
+        and(
+          eq(disclosureAcknowledgments.userId, ack.userId),
+          eq(disclosureAcknowledgments.disclosureId, ack.disclosureId),
+          eq(disclosureAcknowledgments.version, ack.version),
+          eq(disclosureAcknowledgments.region, ack.region),
+        ),
+      )
+      .limit(1);
+    const found = existing[0];
+    if (found === undefined) throw new Error('disclosure ack insert returned no row');
+    return toRecord(found);
   }
 
   async has(

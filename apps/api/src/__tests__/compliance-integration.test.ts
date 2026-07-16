@@ -523,9 +523,17 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
 
   it('applyLegalHold merges refs under a row lock — a concurrent obligation is not lost', async () => {
     const target = track(await stores.cases.insert(caseOf(randomUUID())));
-    // Two obligations apply holds CONCURRENTLY.  Read-modify-write in the
-    // caller let each derive its next policy from the row it read and clobber
-    // the other's ref; the store's row lock serializes them instead.
+    // Two obligations apply holds CONCURRENTLY — a SAR draft racing a
+    // lawful-access intake on one case.  Read-modify-write let each derive its
+    // next policy from the row it read and clobber the other's ref; the store
+    // now runs the pair in a transaction of its own, so the row lock is held
+    // across both statements whoever called it.
+    //
+    // TIMING-DEPENDENT, and worth saying so: whether the two calls actually
+    // overlap is up to the driver's connection scheduling.  This assertion is
+    // exact and cheap, and it is what caught the pool-level lock in CI when it
+    // never once bit locally — so it stays, and it is not evidence of absence
+    // on a green local run.
     await Promise.all([
       stores.cases.applyLegalHold({
         caseId: target.caseId,
