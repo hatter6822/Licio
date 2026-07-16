@@ -108,7 +108,13 @@ apps/web/src/
   (`isEmergencyReasonCode` = {critical} ∪ {imminent-risk}); reports aggregate
   into one open **case** per target.  Rate limits (per-user/hour, per-target/day)
   are derived from the durable store (correct across restarts).  Emergency
-  reports page on-call with minimum context (never reporter identity).
+  reports page on-call with minimum context (never reporter identity).  The
+  idempotency replays (`local_operation_id`, then reporter+target+reason)
+  resolve BEFORE the mint-only gates — the WS-N.2.3e no-private-key scan and the
+  rate limits — so a lost-response retry of a stored report returns its response
+  rather than being newly denied `key_material_blocked` (a report accepted
+  before the filter shipped, or before a detector tuning, whose stored text the
+  scan now trips); the scan gates a NEW row only, and a replay stores no secret.
 - **Blocks (`/v1/blocks`, WS-J.1.2a).** Bilateral and API-enforced: the
   `RelationshipReader.interactionBlocked` seam is what forum interaction
   rejection + thread/feed viewing filters consult.  Lists are private; the

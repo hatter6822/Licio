@@ -29,8 +29,10 @@ export interface RegionResolutionDeps {
   localeRegion: (userId: string) => Promise<string | null>;
 }
 
-/** Resolve the strongest available basis; every failure degrades DOWN the
- *  ladder, never up (a store outage can only under-resolve). */
+/** Resolve the strongest available basis.  A failure degrades toward `unknown`
+ *  (fail-closed), never toward a MORE permissive region: a declaration-read
+ *  failure jumps straight to `unknown`, and a locale-read failure to `unknown`
+ *  too. */
 export async function resolveRegion(
   deps: RegionResolutionDeps,
   userId: string,
@@ -45,7 +47,15 @@ export async function resolveRegion(
       return { region: declaration.declaredRegion, basis: 'verified_declaration' };
     }
   } catch {
-    // Fall through to the weaker rung (fail-closed direction).
+    // FAIL CLOSED, not down the ladder.  A store outage cannot be read as "no
+    // verified declaration": a member whose verified declaration names a BLOCKED
+    // region would otherwise fall to the weaker locale rung and resolve to a MORE
+    // PERMISSIVE region — a transient outage allowing the very wallet links and
+    // testnet actions the stored declaration denies (the wallet/testnet callers
+    // reject only an explicit `blocked` verdict).  `unknown` disables real-funds
+    // cells; a successful read that finds no verified declaration still falls to
+    // locale below, because then we KNOW there is nothing stronger to lose.
+    return { region: null, basis: 'unknown' };
   }
   try {
     const subtag = await deps.localeRegion(userId);

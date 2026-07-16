@@ -333,6 +333,12 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   region — each maps to the consumer verdict that DENIES real funds while
   leaving simulated/testnet behaviour intact.  A fraud `unavailable` verdict
   never *improves* an intent's compliance state; verdicts only flag or reject.
+  This holds for the region ladder's OWN failures too: a declaration-store
+  outage fails straight to `unknown`, never down to the weaker locale rung — a
+  member whose verified declaration names a BLOCKED region must not have a
+  transient outage resolve them to a more-permissive locale and unlock the very
+  wallet links / testnet actions the stored declaration denies (fail toward the
+  restrictive answer, never a laterally more-permissive one).
 - **Velocity counting reserves, never reconciles down.**  Each `fraudRisk`
   call reserves a check (preflight + submit ≈ 2 per action, and the limits
   carry that factor); a rejected action's reservation is deliberately kept.

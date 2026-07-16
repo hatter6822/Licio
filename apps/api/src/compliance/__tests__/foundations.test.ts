@@ -64,7 +64,7 @@ describe('the region resolution ladder (WS-N.1.1b — identity-free)', () => {
     ).toEqual({ region: null, basis: 'unknown' });
   });
 
-  it('pending/revoked declarations are never a basis; store outages degrade DOWN', async () => {
+  it('pending declarations fall to locale; a declaration-read OUTAGE fails CLOSED to unknown', async () => {
     const declarations = new InMemoryRegionDeclarationStore();
     await declarations.upsert({
       userId: USER,
@@ -77,10 +77,17 @@ describe('the region resolution ladder (WS-N.1.1b — identity-free)', () => {
       createdAt: new Date(NOW).toISOString(),
       updatedAt: new Date(NOW).toISOString(),
     });
+    // A SUCCESSFUL read that finds no verified declaration falls to the weaker
+    // locale rung — we KNOW there is nothing stronger to lose.
     expect(await resolveRegion({ declarations, localeRegion: async () => 'FR' }, USER)).toEqual({
       region: 'FR',
       basis: 'locale_subtag',
     });
+    // But a declaration-store OUTAGE must NOT be read as "no verified
+    // declaration": a member whose verified declaration names a BLOCKED region
+    // would otherwise resolve to the more-permissive locale 'FR' and be allowed
+    // the wallet links / testnet actions the stored declaration denies.  Fail
+    // CLOSED to `unknown` — never down to a weaker, more permissive rung.
     const broken = {
       declarations: {
         get: async () => {
@@ -89,7 +96,16 @@ describe('the region resolution ladder (WS-N.1.1b — identity-free)', () => {
       } as never,
       localeRegion: async () => 'FR',
     };
-    expect(await resolveRegion(broken, USER)).toEqual({ region: 'FR', basis: 'locale_subtag' });
+    expect(await resolveRegion(broken, USER)).toEqual({ region: null, basis: 'unknown' });
+    // A LOCALE outage (declaration read fine, no verified decl) still fails to
+    // unknown, not up — the locale rung is already the weakest permissive one.
+    const localeDown = {
+      declarations,
+      localeRegion: async () => {
+        throw new Error('locale down');
+      },
+    };
+    expect(await resolveRegion(localeDown, USER)).toEqual({ region: null, basis: 'unknown' });
   });
 });
 

@@ -114,20 +114,14 @@ export async function submitReport(
   const nowMs = services.now();
   const nowIso = new Date(nowMs).toISOString();
 
-  // 0. WS-N.2.3e — the no-private-key filter on the support channel: a report
-  // whose free text carries key-like material (a bare 64-hex key, a BIP-39
-  // seed phrase) is BLOCKED with the standing warning, and the matched value
-  // is DISCARDED — never logged, stored, or echoed (§18.5: real support never
-  // asks; users pasting keys are the phishing target this trains against).
-  if (request.context !== undefined && request.context !== null) {
-    const scan = scanForKeyMaterial(request.context);
-    if (scan.detected) {
-      services.metrics.increment('reports.key_material_blocked');
-      return { ok: false, code: 'key_material_blocked', message: scan.warning ?? NO_KEY_WARNING };
-    }
-  }
-
-  // 1. Idempotency by client operation id (offline-replay safe).
+  // 1. Idempotency by client operation id (offline-replay safe).  BEFORE the
+  //    mint-only gates below: a lost-response retry of a report already stored
+  //    under this operation id has minted its row, so re-answering it is the
+  //    idempotent contract — running the key-material scan (or any gate) first
+  //    would hand a retry `key_material_blocked` (a report accepted before the
+  //    filter shipped, or before a detector tuning, whose stored text the scan
+  //    now trips) instead of its stored response, storing no new secret either
+  //    way (WS-N.2.3e is about a NEW row).
   const byOp = await services.reports.findByOperationId(reporterUserId, request.local_operation_id);
   if (byOp) {
     services.metrics.increment('reports.idempotent_op');
@@ -148,7 +142,22 @@ export async function submitReport(
     return { ok: true, response: toResponse(dup, true) };
   }
 
-  // 3. Rate limits (derived from the durable store; correct across restarts).
+  // 3. WS-N.2.3e — the no-private-key filter on the support channel: a report
+  // whose free text carries key-like material (a bare 64-hex key, a BIP-39
+  // seed phrase) is BLOCKED with the standing warning, and the matched value
+  // is DISCARDED — never logged, stored, or echoed (§18.5: real support never
+  // asks; users pasting keys are the phishing target this trains against).
+  // It gates a NEW row only — the idempotent replays above already returned,
+  // so a retry is never denied for text its own accepted report already stored.
+  if (request.context !== undefined && request.context !== null) {
+    const scan = scanForKeyMaterial(request.context);
+    if (scan.detected) {
+      services.metrics.increment('reports.key_material_blocked');
+      return { ok: false, code: 'key_material_blocked', message: scan.warning ?? NO_KEY_WARNING };
+    }
+  }
+
+  // 4. Rate limits (derived from the durable store; correct across restarts).
   const hourAgoIso = new Date(nowMs - 3_600_000).toISOString();
   const perHour = await services.reports.countByReporterSince(reporterUserId, hourAgoIso);
   if (perHour >= config.reportsPerHour) {
@@ -167,7 +176,7 @@ export async function submitReport(
     return { ok: false, code: 'rate_limited', retryAfter: 86_400 };
   }
 
-  // 4. Find or open the case for this target.
+  // 5. Find or open the case for this target.
   let theCase = await services.cases.findOpenByTarget(request.target_type, request.target_id);
   let newCase = false;
   if (theCase === null) {
@@ -199,7 +208,7 @@ export async function submitReport(
     }
   }
 
-  // 5. Insert the report.  Idempotent under concurrency: two same-op submissions
+  // 6. Insert the report.  Idempotent under concurrency: two same-op submissions
   //    can both pass findByOperationId, but the `moderation_reports_op_uq` index
   //    rejects the loser — re-read and return the original (offline-replay safe),
   //    never a 500.
@@ -234,7 +243,7 @@ export async function submitReport(
     idempotent = true;
   }
 
-  // 6. RECOMPUTE the case aggregate from its committed reports (race-safe): every
+  // 7. RECOMPUTE the case aggregate from its committed reports (race-safe): every
   //    writer derives the same final severity/routing/count/SLA from the actual
   //    rows, so a concurrent lower-priority report can never drop an increment or
   //    overwrite a higher-priority escalation (a stale-snapshot lost update).
@@ -263,7 +272,7 @@ export async function submitReport(
   services.metrics.increment('reports.created');
   services.metrics.increment(`reports.created.${routedTo}`);
 
-  // 7. Emit the moderation.case.created event for a NEW case (the queue intake),
+  // 8. Emit the moderation.case.created event for a NEW case (the queue intake),
   //    and route it to the least-loaded available reviewer (WS-J.2.1d).
   if (newCase) {
     // AWAITED (not background): `moderation.case.created` is the durable intake
@@ -293,7 +302,7 @@ export async function submitReport(
     services.trackBackground(autoAssignNewCase(services, theCase));
   }
 
-  // 8. Emergency routing pages on-call (minimum context, never reporter identity).
+  // 9. Emergency routing pages on-call (minimum context, never reporter identity).
   if (emergency) {
     services.metrics.increment('reports.emergency_routed');
     services.alerts.pageOnCall({
@@ -305,7 +314,7 @@ export async function submitReport(
     });
   }
 
-  // 9. Coordinated-report detection (base-rate conditioned; MFCI-1/2).  AWAITED
+  // 10. Coordinated-report detection (base-rate conditioned; MFCI-1/2).  AWAITED
   //    (not backgrounded) so the enforcement delay is committed BEFORE the report
   //    is acknowledged — otherwise submitReport could return with
   //    enforcementDelayed=false (and a crash could drop the background task),
