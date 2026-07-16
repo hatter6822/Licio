@@ -328,6 +328,7 @@ describe('additional fail-closed route branches', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -365,6 +366,7 @@ describe('additional fail-closed route branches', () => {
         indexedEventRef: null,
         reconciliationState: 'pending',
         idempotencyKey: crypto.randomUUID(),
+        paymentIntentId: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -661,6 +663,7 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: idem,
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });

@@ -324,7 +324,20 @@ async function assembleAvailabilityInput(
   }
   let complianceHold = false;
   try {
-    complianceHold = (await services.cases.countOpenByRisk(userId, ['high', 'critical'])) > 0;
+    // ANTI-TIPPING-OFF (WS-N.2.3d), the same suppression the DSAR export
+    // applies and from the same query.  A lawful-access intake case is `high`
+    // — its risk level describes the REQUEST's importance, not the subject —
+    // so counting it here disables the member's crypto features and tells them,
+    // by the absence, that something exists.  They would learn from a
+    // `compliance_hold` exactly what counsel has not permitted them to be told.
+    // The hold returns once notification is permitted.
+    //
+    // The exclusion is bounded by this subject's own requests, so it cannot
+    // reintroduce the paging this count exists to avoid.  A failure to READ it
+    // holds, as everything else here does.
+    const suppressed = await services.lawfulAccess.unnotifiedCaseIdsForSubject(userId);
+    complianceHold =
+      (await services.cases.countOpenByRisk(userId, ['high', 'critical'], suppressed)) > 0;
   } catch {
     complianceHold = true; // fail-closed: an unreadable case store HOLDS
   }
@@ -561,9 +574,7 @@ export function buildComplianceExport(
     // deletion.  Bounded by the user's own page — never a scan of every
     // request.  A store failure suppresses NOTHING silently: it throws, and the
     // export retries, rather than quietly disclosing what it could not check.
-    const suppressed = new Set(
-      await services.lawfulAccess.unnotifiedCaseIds(cases.map((record) => record.caseId)),
-    );
+    const suppressed = new Set(await services.lawfulAccess.unnotifiedCaseIdsForSubject(userId));
     return {
       region_declaration:
         declaration === null

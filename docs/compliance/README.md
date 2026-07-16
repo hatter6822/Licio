@@ -85,6 +85,28 @@ modified** in their verdict semantics:
   stream — rotate stewards, walk through the limit — and spend the steward's
   personal budget on the room's money besides.
 
+  **ONE action per intent, at the database.**  Migration 0089 puts a partial
+  unique on the action record's `payment_intent_id` — the mirror of 0087's one
+  intent per action. While an intent sits `signed`, a caller could otherwise
+  mint a second preflight and submit the same intent again under a different
+  key; for a room-owned payout *another steward* could, because the action
+  idempotency unique is `(actor_user_id, idempotency_key)` and deliberately
+  actor-scoped (a room-wide key would let one member squat another's). Each
+  reservation forwarded with its own gateway key and MOVED FUNDS, and only one
+  could ever attach to the ledger. The exclusive resource is the intent, so the
+  uniqueness lives on the reference to it, and the loser replays the winner
+  whoever they are. Submit additionally demands the intent's own attempt key
+  (`intentActionIdempotencyKey`, the SSOT the auto-attach already looks up by)
+  and that the intent be `signed`.
+
+  **The preflight token binds every fact it was cleared under.**  The binding is
+  built by ONE constructor and compared by a TOTAL walk over its keys, so a
+  field added to it is bound and checked by construction. It used to be two
+  hand-written lists — a literal at mint, an `if` chain at submit — and the
+  moment a new input arrived that decides a verdict (the claimed
+  `payment_intent_id`), it was added to the flow and forgotten by both, letting
+  submit drop or swap the intent and re-run fraud against a different review.
+
   **A claimed `payment_intent_id` is a claim, not a fact.**  It buys the naming
   action a share of that intent's review, so unverified it is a clearance to
   steal: a member whose high-value intent for amount X was cleared could put
@@ -347,14 +369,18 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   live legal disclosure would keep no publisher record at all.  The identity
   audit entry is a best-effort mirror (a different bounded context, so it cannot
   join that write); failing it must not 500 a publish that already happened.
-- **The export defers what counsel has not permitted.**  A lawful-access intake
-  case exists ONLY because a request was made, so exporting its trigger/state/
-  dates announces the request — the thing counsel decides whether the subject
-  may be told, and the thing the export's own note claims to withhold. Cases
-  linked to a request with no `user_notified_at` are suppressed from the DSAR
-  projection and become exportable once notification is permitted: deferral, not
-  deletion. The lookup is bounded by the user's own page, and a store failure
-  throws rather than silently disclose what it could not check.
+- **Every user-facing surface defers what counsel has not permitted.**  A
+  lawful-access intake case exists ONLY because a request was made, so anything
+  the subject can see about it announces the request — the thing counsel decides
+  whether they may be told. Both surfaces suppress it from ONE query
+  (`unnotifiedCaseIdsForSubject`): the DSAR export omits the case, and the
+  availability hold does not count it — its `high` risk level describes the
+  REQUEST's importance, not the subject, so counting it would disable their
+  crypto features and let them read `compliance_hold` as exactly the disclosure
+  being withheld. Both return once notification is permitted: deferral, not
+  deletion. The exclusion is bounded by that subject's own requests, so it
+  cannot reintroduce the paging `countOpenByRisk` exists to avoid, and a store
+  failure holds rather than silently disclose what it could not check.
 - **A deferred erasure is a debt the case carries.**  When the account-deletion
   scrub meets a legal hold it skips the subject, audits the skip — and marks
   `erasure_pending`. Nothing else would ever come back: the account is

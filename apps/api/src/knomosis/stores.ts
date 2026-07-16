@@ -87,6 +87,12 @@ export interface KnomosisActionRecordEntity {
   indexedEventRef: string | null;
   reconciliationState: ReconciliationState;
   idempotencyKey: string;
+  /** The WS-M payment intent this action settles, when it settles one.  ONE
+   *  action per intent is a DB partial unique (migration 0089): the intent is
+   *  the exclusive resource, so a second reservation for it loses the insert
+   *  and replays the winner — whoever submitted it, under whatever key.  Null
+   *  for a direct action, which carries only its actor-scoped key. */
+  paymentIntentId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -388,6 +394,9 @@ export interface KnomosisActionStore {
     roomId: string,
     idempotencyKey: string,
   ): Promise<KnomosisActionRecordEntity | null>;
+  /** The action settling this intent, if one already does — the read that turns
+   *  a lost `knomosis_action_intent_uq` race into a replay of the winner. */
+  getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
   /** COMPARE-AND-SET the submission state: apply the patch ONLY if the stored row
    *  is still in `expectedState`, returning null when a concurrent writer (e.g.
@@ -1114,6 +1123,12 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       ) {
         throw new Error('idempotency key already used');
       }
+      // `knomosis_action_intent_uq` (migration 0089): ONE action per intent,
+      // whoever submits it and whatever key they chose.  Emulated here as the
+      // in-memory adapters emulate every other DB protection.
+      if (record.paymentIntentId !== null && existing.paymentIntentId === record.paymentIntentId) {
+        throw new Error('an action already settles this payment intent');
+      }
     }
     this.#rows.set(record.actionRecordId, structuredClone(record));
     return structuredClone(record);
@@ -1146,6 +1161,13 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       if (row.roomId === roomId && row.idempotencyKey === idempotencyKey) {
         return structuredClone(row);
       }
+    }
+    return null;
+  }
+
+  async getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null> {
+    for (const row of this.#rows.values()) {
+      if (row.paymentIntentId === paymentIntentId) return structuredClone(row);
     }
     return null;
   }

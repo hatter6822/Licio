@@ -463,6 +463,7 @@ describe('WS-L.2.5b unlink lifecycle + WS-L.2.5c list/label', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });

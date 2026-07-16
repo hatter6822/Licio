@@ -100,7 +100,18 @@ export interface PreflightRequestInput {
 
 const PREFLIGHT_TOKEN_PREFIX = 'knomosis:preflight:';
 
-/** The submission-side binding a pass token carries (WS-L.3.1c/3.2a). */
+/**
+ * What a pass token PROMISES about the submission it permits (WS-L.3.1c/3.2a).
+ *
+ * Every field here is minted by `buildPreflightBinding` and compared by
+ * `preflightBindingMismatch`, which walks EVERY key — so a field added to this
+ * type is bound and checked by construction.  It used to be two hand-written
+ * lists (a literal at mint, an `if` chain at submit), and the moment a new input
+ * arrived that decided a compliance verdict — the claimed `payment_intent_id` —
+ * it was added to the flow and forgotten by both.  Submit could then swap or
+ * drop the intent the preflight was cleared under, and re-run the fraud check
+ * against a different review.
+ */
 export interface PreflightTokenBinding {
   userId: string;
   actionType: KnomosisSignedActionType;
@@ -108,6 +119,48 @@ export interface PreflightTokenBinding {
   deploymentId: string;
   walletAccountId: string;
   typedDataHash: string;
+  /** The intent this action settles; null ⇔ none claimed.  It decides the
+   *  fraud review ref, so submit must name the SAME one. */
+  paymentIntentId: string | null;
+}
+
+/** The ONE constructor: mint and normalization both go through it. */
+export function buildPreflightBinding(input: {
+  userId: string;
+  actionType: KnomosisSignedActionType;
+  roomId: string;
+  deploymentId: string;
+  walletAccountId: string;
+  typedDataHash: string;
+  paymentIntentId?: string | null | undefined;
+}): PreflightTokenBinding {
+  return {
+    userId: input.userId,
+    actionType: input.actionType,
+    roomId: input.roomId,
+    deploymentId: input.deploymentId,
+    walletAccountId: input.walletAccountId,
+    typedDataHash: input.typedDataHash,
+    paymentIntentId: input.paymentIntentId ?? null,
+  };
+}
+
+/**
+ * Does this binding describe that submission?  TOTAL over the binding's keys —
+ * there is no list to keep in step, so a field cannot be bound and left
+ * unchecked.  Returns the human message for the first disagreement, or null.
+ */
+export function preflightBindingMismatch(
+  bound: PreflightTokenBinding,
+  actual: PreflightTokenBinding,
+): string | null {
+  for (const key of Object.keys(bound) as (keyof PreflightTokenBinding)[]) {
+    if (bound[key] === actual[key]) continue;
+    return key === 'typedDataHash'
+      ? 'The submitted payload differs from the preflighted action.'
+      : 'The submission does not match the preflighted action.';
+  }
+  return null;
 }
 
 /** Governance modes permitted to submit REAL signed actions, per deployment
@@ -665,14 +718,18 @@ export async function runPreflight(
 
   // PASS — mint the single-use token binding the exact typed-data hash.
   const token = randomBytes(24).toString('hex');
-  const binding: PreflightTokenBinding = {
+  const binding = buildPreflightBinding({
     userId: input.userId,
     actionType,
     roomId: input.roomId,
     deploymentId: input.deploymentId,
     walletAccountId: input.walletAccountId,
     typedDataHash: verified.typedDataHash,
-  };
+    // The intent this preflight was cleared UNDER — the fraud check above used
+    // it as the review ref, so the token may not permit a submit that names a
+    // different one (or none).
+    paymentIntentId: input.paymentIntentId,
+  });
   await deps.ephemeral.set(
     `${PREFLIGHT_TOKEN_PREFIX}${token}`,
     JSON.stringify(binding),
@@ -725,7 +782,9 @@ export async function peekPreflightToken(
 function parseBinding(raw: string | null): PreflightTokenBinding | null {
   if (raw === null) return null;
   try {
-    return JSON.parse(raw) as PreflightTokenBinding;
+    // Through the constructor, so a token minted before a field existed reads
+    // back with that field's normalized default rather than `undefined`.
+    return buildPreflightBinding(JSON.parse(raw) as PreflightTokenBinding);
   } catch {
     return null;
   }

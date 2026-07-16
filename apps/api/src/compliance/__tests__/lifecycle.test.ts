@@ -37,6 +37,7 @@ import {
   buildCompliancePurge,
   type ComplianceServices,
   createInMemoryComplianceServices,
+  evaluateAvailabilityForUser,
 } from '../services.js';
 import type { ComplianceCaseRecord } from '../stores.js';
 
@@ -430,6 +431,58 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     expect(
       (after['compliance_cases'] as Array<{ trigger_type: string }>).map((c) => c.trigger_type),
     ).toContain('manual');
+  });
+
+  it('an unnotified lawful-access case does not disable the subject’s crypto features', async () => {
+    const userId = randomUUID();
+    // `compliance_hold` is only REACHABLE once the global flags and the age
+    // gate pass — they dominate and report no reason at all, so without this
+    // the assertions below would hold whatever the hold logic did.
+    services.knomosisFlags = () => ({ cryptoEnabled: true, governanceEnabled: true });
+    services.ageBand = async () => 'adult';
+    const deps = {
+      requests: services.lawfulAccess,
+      caseDeps: buildCaseDeps(services),
+      roomStorageMode: services.roomStorageMode,
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const intake = await intakeLawfulAccessRequest(deps, {
+      agency: 'Agency',
+      jurisdiction: 'US',
+      legalBasis: 'subpoena',
+      scope: {
+        subject_kind: 'user',
+        subject_ref: userId,
+        time_range_start: null,
+        time_range_end: null,
+      },
+      contact: 'agent@example.test',
+      actorUserId: ACTOR,
+    });
+    if (!intake.ok) throw new Error('intake failed');
+
+    // The intake case is `high` — its risk level describes the REQUEST, not the
+    // subject.  Counting it would disable their crypto features and tell them,
+    // by the absence, exactly what counsel has not permitted them to be told.
+    // Assert the USER-VISIBLE outcome: no feature may read `compliance_hold`,
+    // because that reason is precisely the disclosure.
+    const availability = await evaluateAvailabilityForUser(services, userId);
+    const reasons = Object.values(availability.features).map((f) => f.disableReason);
+    expect(reasons).not.toContain('compliance_hold');
+
+    // A REAL risk case for the same user still holds — the suppression is
+    // surgical, not a hole.
+    await createCase(buildCaseDeps(services), {
+      subjectKind: 'user',
+      subjectRef: userId,
+      triggerType: 'sanctions',
+      riskLevel: 'critical',
+      note: 'a genuine hold',
+    });
+    const held = await evaluateAvailabilityForUser(services, userId);
+    expect(Object.values(held.features).map((f) => f.disableReason)).toContain('compliance_hold');
   });
 
   it('an erasure a legal hold deferred is discharged when the hold lapses', async () => {

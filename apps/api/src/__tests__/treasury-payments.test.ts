@@ -422,6 +422,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -483,6 +484,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
         indexedEventRef: null,
         reconciliationState: 'pending',
         idempotencyKey: crypto.randomUUID(),
+        paymentIntentId: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -569,6 +571,7 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
       indexedEventRef: opts.withEvent ? crypto.randomUUID() : null,
       reconciliationState: 'matched',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -691,6 +694,7 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
         indexedEventRef: null, // the event linkage NEVER landed
         reconciliationState: 'pending',
         idempotencyKey: crypto.randomUUID(),
+        paymentIntentId: null,
         createdAt: staleIso,
         updatedAt: staleIso,
       });
@@ -775,6 +779,7 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
       indexedEventRef: 'evt-1',
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -835,6 +840,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     indexedEventRef: null,
     reconciliationState: 'pending',
     idempotencyKey: crypto.randomUUID(),
+    paymentIntentId: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...over,
@@ -955,6 +961,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -1048,6 +1055,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -1150,6 +1158,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: id,
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1181,6 +1190,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -1342,6 +1352,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: id,
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1393,6 +1404,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: id,
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1515,6 +1527,7 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
       indexedEventRef: null,
       reconciliationState: 'matched',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };

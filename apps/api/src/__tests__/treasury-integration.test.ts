@@ -569,6 +569,7 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
       indexedEventRef: null,
       reconciliationState: 'pending' as const,
       idempotencyKey: sharedKey,
+      paymentIntentId: null,
       createdAt,
       updatedAt: createdAt,
     });

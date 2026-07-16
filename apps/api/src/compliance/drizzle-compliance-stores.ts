@@ -38,7 +38,19 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
-import { and, asc, desc, eq, gt, inArray, isNull, lte, type SQL, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lte,
+  notInArray,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import type {
   CaseAuditRecord,
   CaseAuditStore,
@@ -492,7 +504,11 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
     return rows.map(toCaseRecord);
   }
 
-  async countOpenByRisk(subjectRef: string, risks: readonly CaseRiskLevel[]): Promise<number> {
+  async countOpenByRisk(
+    subjectRef: string,
+    risks: readonly CaseRiskLevel[],
+    excludeCaseIds: readonly string[] = [],
+  ): Promise<number> {
     if (risks.length === 0) return 0;
     const rows = await this.#db
       .select({ count: sql<number>`count(*)::int` })
@@ -502,6 +518,9 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
           eq(financialComplianceCases.userIdOrRoomId, subjectRef),
           sql`${financialComplianceCases.reviewState} <> 'resolved'`,
           inArray(financialComplianceCases.riskLevel, [...risks]),
+          ...(excludeCaseIds.length > 0
+            ? [notInArray(financialComplianceCases.caseId, [...excludeCaseIds])]
+            : []),
         ),
       );
     return rows[0]?.count ?? 0;
@@ -1339,14 +1358,13 @@ export class DrizzleLawfulAccessStore implements LawfulAccessStore {
     return rows.map(toLawful);
   }
 
-  async unnotifiedCaseIds(caseIds: readonly string[]): Promise<string[]> {
-    if (caseIds.length === 0) return [];
+  async unnotifiedCaseIdsForSubject(subjectRef: string): Promise<string[]> {
     const rows = await this.#db
       .select({ caseId: lawfulAccessRequests.caseId })
       .from(lawfulAccessRequests)
       .where(
         and(
-          inArray(lawfulAccessRequests.caseId, [...caseIds]),
+          sql`${lawfulAccessRequests.scope}->>'subject_ref' = ${subjectRef}`,
           isNull(lawfulAccessRequests.userNotifiedAt),
         ),
       );

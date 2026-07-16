@@ -31,6 +31,7 @@ import { worstSanctionsVerdict } from './ports.js';
 import {
   buildEip712Domain,
   buildHumanSummary,
+  buildPreflightBinding,
   CAP_CATEGORY,
   consumePreflightToken,
   FUND_TRANSFER_ACTIONS,
@@ -38,6 +39,7 @@ import {
   MODE_ENVIRONMENTS,
   type PreflightTokenBinding,
   peekPreflightToken,
+  preflightBindingMismatch,
   type RoomGovernancePort,
 } from './preflight.js';
 import {
@@ -159,31 +161,27 @@ export type SubmitActionOutcome =
 
 /** WS-L.3.2a — submit a preflighted, signed action to the gateway. */
 /**
- * Does this preflight binding describe THIS submission?  Returns the human
- * message for the first field that disagrees, or null when it matches.
- *
- * One definition, used twice: once as the advisory gate that keeps a bogus
- * token away from the mutable compliance re-checks, and once against the
- * consumed binding, which is the authoritative one.
+ * Does the token permit THIS submission?  Delegates to the shared total
+ * comparison — the token's promise is defined in one place, so a field added to
+ * the binding is checked here without touching this file.
  */
 function bindingMismatch(
   binding: PreflightTokenBinding,
   input: SubmitActionInput,
   typedDataHash: string,
 ): string | null {
-  if (
-    binding.userId !== input.userId ||
-    binding.roomId !== input.roomId ||
-    binding.deploymentId !== input.deploymentId ||
-    binding.walletAccountId !== input.walletAccountId ||
-    binding.actionType !== input.actionType
-  ) {
-    return 'The submission does not match the preflighted action.';
-  }
-  if (typedDataHash !== binding.typedDataHash) {
-    return 'The submitted payload differs from the preflighted action.';
-  }
-  return null;
+  return preflightBindingMismatch(
+    binding,
+    buildPreflightBinding({
+      userId: input.userId,
+      actionType: input.actionType as KnomosisSignedActionType,
+      roomId: input.roomId,
+      deploymentId: input.deploymentId,
+      walletAccountId: input.walletAccountId,
+      typedDataHash,
+      paymentIntentId: input.paymentIntentId,
+    }),
+  );
 }
 
 export async function submitAction(
@@ -582,13 +580,27 @@ export async function submitAction(
     indexedEventRef: null,
     reconciliationState: 'pending',
     idempotencyKey: input.idempotencyKey,
+    // The intent this action settles.  It carries the `knomosis_action_intent_uq`
+    // partial unique (migration 0089): ONE action per intent, so a second
+    // reservation for the same intent loses the insert below and replays the
+    // winner instead of forwarding a second fund movement the intent's ledger
+    // could never account for.
+    paymentIntentId: input.paymentIntentId ?? null,
     createdAt: nowIso,
     updatedAt: nowIso,
   };
   try {
     await deps.actions.insert(record);
   } catch (error) {
-    const winner = await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey);
+    // Which unique refused us?  Either way the answer is the SAME: replay the
+    // action that won.  The idempotency key finds our own earlier attempt; the
+    // intent finds whoever settled this intent first — another steward, under
+    // their own actor-scoped key, for a room-owned payout.
+    const winner =
+      (await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey)) ??
+      (input.paymentIntentId !== undefined
+        ? await deps.actions.getByPaymentIntentId(input.paymentIntentId)
+        : null);
     if (winner !== null) {
       return {
         ok: true,

@@ -65,6 +65,7 @@ import {
   requireSteward,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
+import { intentActionIdempotencyKey } from '../treasury/intents.js';
 import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/services.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
@@ -95,6 +96,9 @@ async function verifyClaimedIntent(input: {
   /** `submit` demands the intent already be `signed`; `preflight` accepts the
    *  whole pre-submission window (it is what moves the intent toward signed). */
   stage: 'preflight' | 'submit';
+  /** The submit's client idempotency key — checked against the intent's own
+   *  attempt key (submit only; a preflight mints no action). */
+  idempotencyKey?: string;
 }): Promise<{ code: string; message: string } | null> {
   if (input.paymentIntentId === undefined) return null;
   if (!treasuryServicesConfigured()) {
@@ -153,6 +157,19 @@ async function verifyClaimedIntent(input: {
     return {
       code: 'intent_not_signed',
       message: 'The payment intent must be signed before its action is submitted.',
+    };
+  }
+  // …under the intent's OWN attempt key.  WS-M already derives it
+  // (`intentActionIdempotencyKey`: the intent id, rotated per retry) and the
+  // auto-attach looks the action up by it — so a submit that names some other
+  // key mints an action the intent's own bookkeeping cannot find.  The DB's
+  // `knomosis_action_intent_uq` stops the SECOND action either way; this makes
+  // the FIRST one findable, and says so plainly instead of letting the client
+  // discover it through a lost race.
+  if (input.stage === 'submit' && input.idempotencyKey !== intentActionIdempotencyKey(intent)) {
+    return {
+      code: 'intent_key_mismatch',
+      message: 'A submission settling a payment intent must use that intent’s attempt key.',
     };
   }
   if (intent.expiresAt <= new Date(getKnomosisServices().now()).toISOString()) return mismatch;
@@ -453,6 +470,7 @@ export function createKnomosisRoutes() {
                 actionType: body.action_type,
                 typedDataMessage: body.typed_data_message,
                 stage: 'submit',
+                idempotencyKey: body.idempotency_key,
               });
           if (claimed !== null) {
             return c.json(deny(claimed.code, claimed.message), 400);

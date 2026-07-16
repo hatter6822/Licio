@@ -295,7 +295,17 @@ export interface ComplianceCaseStore {
    *  alone.  A COUNT, not a page: deriving either answer from a capped list
    *  would silently miss an older case beyond the page and downgrade the
    *  verdict. */
-  countOpenByRisk(subjectRef: string, risks: readonly CaseRiskLevel[]): Promise<number>;
+  /** Open cases for `subjectRef` at any of `risks`.
+   *
+   *  A COUNT, never a page: a capped list would miss an older critical case
+   *  beyond it and hand a sanctioned wallet `elevated`.  `excludeCaseIds` drops
+   *  named cases from the tally — the anti-tipping-off suppression, which is
+   *  bounded by the subject's own requests and so cannot reintroduce paging. */
+  countOpenByRisk(
+    subjectRef: string,
+    risks: readonly CaseRiskLevel[],
+    excludeCaseIds?: readonly string[],
+  ): Promise<number>;
   /** The sanctioned retention delete: audit rows first, then the case (the
    *  Drizzle adapter runs both inside the `licio.compliance_retention` GUC
    *  transaction).  Throws if a SAR still references the case. */
@@ -420,10 +430,14 @@ export interface LawfulAccessStore {
   insert(record: LawfulAccessRecord): Promise<LawfulAccessRecord>;
   getById(requestId: string): Promise<LawfulAccessRecord | null>;
   list(status: LawfulAccessStatus | null, limit: number): Promise<LawfulAccessRecord[]>;
-  /** Which of `caseIds` belong to a request the subject may NOT yet be told
-   *  about (`user_notified_at` still null)?  Bounded by the caller's own page —
-   *  never a scan of every request. */
-  unnotifiedCaseIds(caseIds: readonly string[]): Promise<string[]>;
+  /** The cases of requests about THIS subject that they may not yet be told
+   *  about (`user_notified_at` still null).
+   *
+   *  Every user-facing surface owes this the same suppression — the DSAR export
+   *  and the availability hold both — so it is one query, keyed by the subject
+   *  they both already have.  Bounded by that subject's own requests, never a
+   *  scan. */
+  unnotifiedCaseIdsForSubject(subjectRef: string): Promise<string[]>;
   /** `expectedStatus` makes the write a CAS: null ⇔ the status moved under us
    *  (two counsel reviewers racing an approve and a deny would otherwise both
    *  pass the read-side check and let the last writer win — leaving a request
@@ -778,12 +792,18 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
       .map((r) => ({ ...r }));
   }
 
-  async countOpenByRisk(subjectRef: string, risks: readonly CaseRiskLevel[]): Promise<number> {
+  async countOpenByRisk(
+    subjectRef: string,
+    risks: readonly CaseRiskLevel[],
+    excludeCaseIds: readonly string[] = [],
+  ): Promise<number> {
+    const excluded = new Set(excludeCaseIds);
     return [...this.#rows.values()].filter(
       (r) =>
         r.userIdOrRoomId === subjectRef &&
         r.reviewState !== 'resolved' &&
-        risks.includes(r.riskLevel),
+        risks.includes(r.riskLevel) &&
+        !excluded.has(r.caseId),
     ).length;
   }
 
@@ -1213,11 +1233,11 @@ export class InMemoryLawfulAccessStore implements LawfulAccessStore, InMemoryRol
       .map((r) => ({ ...r }));
   }
 
-  async unnotifiedCaseIds(caseIds: readonly string[]): Promise<string[]> {
-    if (caseIds.length === 0) return [];
-    const wanted = new Set(caseIds);
+  async unnotifiedCaseIdsForSubject(subjectRef: string): Promise<string[]> {
     return [...this.#rows.values()]
-      .filter((r) => r.caseId !== null && wanted.has(r.caseId) && r.userNotifiedAt === null)
+      .filter(
+        (r) => r.caseId !== null && r.scope.subject_ref === subjectRef && r.userNotifiedAt === null,
+      )
       .map((r) => r.caseId as string);
   }
 

@@ -1350,6 +1350,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'matched',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -1385,6 +1386,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
         indexedEventRef: null,
         reconciliationState: 'matched',
         idempotencyKey: `idem-${i}`,
+        paymentIntentId: null,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
@@ -1581,6 +1583,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1655,6 +1658,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1726,6 +1730,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1783,6 +1788,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1882,6 +1888,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1962,6 +1969,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     indexedEventRef: null,
     reconciliationState: 'pending',
     idempotencyKey: crypto.randomUUID(),
+    paymentIntentId: null,
     createdAt,
     updatedAt: createdAt,
   });

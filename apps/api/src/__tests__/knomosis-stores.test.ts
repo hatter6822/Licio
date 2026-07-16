@@ -62,6 +62,7 @@ function action(over: Partial<KnomosisActionRecordEntity> = {}): KnomosisActionR
     indexedEventRef: null,
     reconciliationState: 'pending',
     idempotencyKey: crypto.randomUUID(),
+    paymentIntentId: null,
     createdAt: now(),
     updatedAt: now(),
     ...over,
@@ -599,6 +600,7 @@ describe('InMemorySimTreasuryStore + receipts + comprehension + deployments + ma
       actorUserId: null,
       proposalId: 'p1',
       idempotencyKey: key,
+      paymentIntentId: null,
       createdAt: now(),
     };
     // First write: balance changes AND the entry lands, together.

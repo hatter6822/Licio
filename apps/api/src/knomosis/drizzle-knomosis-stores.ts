@@ -498,6 +498,7 @@ function mapAction(row: typeof knomosisActionRecords.$inferSelect): KnomosisActi
     indexedEventRef: row.indexedEventRef,
     reconciliationState: row.reconciliationState,
     idempotencyKey: row.idempotencyKey,
+    paymentIntentId: row.paymentIntentId,
     createdAt: iso(row.createdAt),
     updatedAt: iso(row.updatedAt),
   };
@@ -523,6 +524,7 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       indexedEventRef: record.indexedEventRef,
       reconciliationState: record.reconciliationState,
       idempotencyKey: record.idempotencyKey,
+      paymentIntentId: record.paymentIntentId,
       createdAt: new Date(record.createdAt),
       updatedAt: new Date(record.updatedAt),
     });
@@ -551,6 +553,15 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
           eq(knomosisActionRecords.idempotencyKey, idempotencyKey),
         ),
       )
+      .limit(1);
+    return rows[0] ? mapAction(rows[0]) : null;
+  }
+
+  async getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(eq(knomosisActionRecords.paymentIntentId, paymentIntentId))
       .limit(1);
     return rows[0] ? mapAction(rows[0]) : null;
   }
