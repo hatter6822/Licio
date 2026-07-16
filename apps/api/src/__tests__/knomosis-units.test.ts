@@ -1163,6 +1163,55 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     expect((await store.getById('a4'))?.actorUserId).toBe('u2');
   });
 
+  it('an intent’s action replays BEFORE the mint-only gates, so a recovery cannot be locked out', async () => {
+    const fixture = await freshKnomosisServices();
+    const INTENT = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    // Steward A already submitted and forwarded this room-owned payout.
+    await fixture.knomosis.actions.insert({
+      actionRecordId: 'winner',
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      actionType: 'grant_payout',
+      roomId: '33333333-3333-4333-8333-333333333333',
+      actorWalletAccountId: 'wallet-a',
+      actorUserId: 'steward-a',
+      payloadHash: '0xaa',
+      typedDataHash: '0xbb',
+      signedAction: { message: {}, signature: '0x' },
+      submissionState: 'submitted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: INTENT,
+      paymentIntentId: INTENT,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // Steward B recovers, under their OWN actor scope — and would fail every
+    // mint-only gate: no wallet, no room port, a junk token, an empty payload.
+    // None of that applies to an action that already exists and may be on
+    // chain; B needs its id to attach the intent, and the insert conflict that
+    // used to be the only replay is far past all those gates.
+    const { submitAction } = await import('../knomosis/submission.js');
+    const result = await submitAction(s(fixture), {
+      userId: 'steward-b',
+      preflightToken: 'nonexistent-token',
+      idempotencyKey: `${INTENT}:r1`,
+      actionType: 'grant_payout',
+      roomId: '33333333-3333-4333-8333-333333333333',
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      walletAccountId: 'wallet-b',
+      paymentIntentId: INTENT,
+      typedDataMessage: {},
+      signature: '0x',
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.actionRecordId).toBe('winner');
+      expect(result.submissionState).toBe('submitted');
+      expect(result.replayed).toBe(true);
+    }
+  });
+
   it('the preflight token BINDS the intent it was cleared under', async () => {
     const { buildPreflightBinding, preflightBindingMismatch } = await import(
       '../knomosis/preflight.js'

@@ -184,24 +184,56 @@ function bindingMismatch(
   );
 }
 
+/** The replay answer for an action that already exists. */
+function replayOf(record: KnomosisActionRecordEntity): SubmitActionOutcome {
+  return {
+    ok: true,
+    actionRecordId: record.actionRecordId,
+    submissionState: record.submissionState,
+    reasonCode: null,
+    humanMessage: null,
+    replayed: true,
+  };
+}
+
+/**
+ * Has this submission ALREADY been made?  Both scopes the reservation's uniques
+ * enforce, asked in one place so they cannot drift apart:
+ *
+ *   • `(actor, idempotency_key)` — the caller's own earlier attempt;
+ *   • the payment intent — whoever settled it first, which for a room-owned
+ *     payout is another steward under their own actor scope.
+ *
+ * The intent lookup trusts `input.paymentIntentId` because the ROUTE authorizes
+ * the claim before calling us (owner, room, asset, amount, target) — the same
+ * trust this function's caller already places in it when it writes the column
+ * and names the fraud review ref.  Nothing here is authorization.
+ */
+async function alreadySubmitted(
+  deps: SubmissionDeps,
+  input: SubmitActionInput,
+): Promise<KnomosisActionRecordEntity | null> {
+  const own = await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey);
+  if (own !== null) return own;
+  if (input.paymentIntentId === undefined) return null;
+  return await deps.actions.getByPaymentIntentId(input.paymentIntentId);
+}
+
 export async function submitAction(
   deps: SubmissionDeps,
   input: SubmitActionInput,
 ): Promise<SubmitActionOutcome> {
   const nowIso = new Date(deps.now()).toISOString();
 
-  // Duplicate idempotency keys return the ORIGINAL result, no re-processing.
-  const existing = await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey);
-  if (existing !== null) {
-    return {
-      ok: true,
-      actionRecordId: existing.actionRecordId,
-      submissionState: existing.submissionState,
-      reasonCode: null,
-      humanMessage: null,
-      replayed: true,
-    };
-  }
+  // An ALREADY-MADE submission replays here, BEFORE any gate below.  Those
+  // gates decide whether a NEW action may be minted, and this one exists: its
+  // signature may have expired since, its wallet gone inactive, its cap been
+  // lowered, its compliance verdict flipped — and every one of those would
+  // reject the recovery of an action that is already on chain, leaving the
+  // caller no way to learn the id their intent must attach to.  It used to be
+  // caught only by the insert conflict, which is past all of them.
+  const existing = await alreadySubmitted(deps, input);
+  if (existing !== null) return replayOf(existing);
 
   // The gateway must be configured BEFORE any state is consumed (fail closed,
   // nothing burned on an unconfigured deployment).
@@ -592,25 +624,11 @@ export async function submitAction(
   try {
     await deps.actions.insert(record);
   } catch (error) {
-    // Which unique refused us?  Either way the answer is the SAME: replay the
-    // action that won.  The idempotency key finds our own earlier attempt; the
-    // intent finds whoever settled this intent first — another steward, under
-    // their own actor-scoped key, for a room-owned payout.
-    const winner =
-      (await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey)) ??
-      (input.paymentIntentId !== undefined
-        ? await deps.actions.getByPaymentIntentId(input.paymentIntentId)
-        : null);
-    if (winner !== null) {
-      return {
-        ok: true,
-        actionRecordId: winner.actionRecordId,
-        submissionState: winner.submissionState,
-        reasonCode: null,
-        humanMessage: null,
-        replayed: true,
-      };
-    }
+    // Whichever unique refused us, the answer is the same: replay the action
+    // that won.  Same lookup as the early one above — a racing writer that
+    // landed between them is exactly what this catch is for.
+    const winner = await alreadySubmitted(deps, input);
+    if (winner !== null) return replayOf(winner);
     throw error; // a different failure — propagate
   }
 

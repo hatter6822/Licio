@@ -459,6 +459,27 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   gate, which fails the reserved record so the failure is audited and a retry
   replays it. Skipping is safe in one direction only — `take` reads what `get`
   read, so a peek that says no guarantees the gate says no.
+- **Authorization, then replay, then gates — in that order, on every idempotent
+  path.**  This ordering has produced a finding in four separate review rounds
+  (the submit route, the intent-create route, the crypto flag, and
+  `submitAction`'s own gates), always as "one more place", so it is written down
+  as the rule it always was:
+
+  1. **Authorization and validation first** — is the caller who they say, is the
+     room theirs, does the claimed intent belong to them.  This applies to
+     EVERY request, retry or not; a retry is not exempt from proving whose work
+     it is replaying.  (Conflating this with a gate is how a caller who merely
+     knew another member's intent id got handed that member's action.)
+  2. **Then the replay** — has this work already been done?
+  3. **Then the gates** — may NEW work be minted?  A disclosure published since,
+     a kill switch engaged since, the crypto flag, an expired signature, a
+     lowered cap, a flipped compliance verdict: every one of them is a question
+     about minting, and every one of them answers *wrongly* for work that
+     already exists and may be on chain.
+
+  The failure is always the same shape: the client cannot learn the id of a
+  transfer that already happened, so the intent it must attach to strands
+  outside the ledger and the accounting export.
 - **Gates are for NEW actions; a retry replays.**  `/actions/submit` looks up
   the `(user, idempotency_key)` record BEFORE its gates and skips them on a
   retry — and `POST …/payment-intents` does the same with its idempotency key,
