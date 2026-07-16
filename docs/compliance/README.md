@@ -493,9 +493,12 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   every idempotent path in the codebase and written down as the rule it always
   was.  The paths that now follow it: `submitAction` and the `/actions/submit`
   route, `createPaymentIntent` and the intent-create route, `createProductionProposal`
-  (idempotency before the freeze/pause/law-pack gates), the WS-L.4 `simDeposit`
-  (before the comprehension + kill-switch gates), the report edge (before the
-  key-material scan + rate limits), and the appeal edge (before the same scan):
+  (idempotency before the freeze/pause/law-pack gates), `preflightIntent` (the
+  intent's `created`-state guard before jurisdiction/sanctions/`fraudRisk` — a
+  retried or duplicate `/advance` on an already-preflighted intent replays or
+  refuses WITHOUT reserving the velocity window), the WS-L.4 `simDeposit` (before
+  the comprehension + kill-switch gates), the report edge (before the key-material
+  scan + rate limits), and the appeal edge (before the same scan):
 
   1. **Authorization and validation first** — is the caller who they say, is the
      room theirs, does the claimed intent belong to them (a room-owned payout is
@@ -645,9 +648,23 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   deletion purge removes declarations before it tombstones the user), an
   `INSERT … ON CONFLICT DO UPDATE` finds no conflict and RECREATES region data
   for a deleting/deleted account — the conditional UPDATE matches zero rows and
-  returns null, exactly as the in-memory adapter does. The SAR filing CASes on
+  returns null, exactly as the in-memory adapter does. And the decision applies
+  ONLY to a `pending` declaration: a stale reviewer form or a duplicate queue
+  action on an already-`verified` row is refused with `declaration_not_pending`
+  (409) BEFORE any write, so it can never set the verified declaration back to
+  pending and silently disable real-fund resolution — changing a verified
+  declaration is a separate audited workflow. The SAR filing CASes on
   `approved` for the same reason: the loser of a race gets a 409 rather than
   overwriting `filedByRef`.
+- **A lawful-access request is COUNSEL-only, including through its linked case.**
+  Intake opens a `manual`, legal-held case so retention cannot purge the records
+  the request obliges us to keep — but that case is readable on the
+  compliance-gated `/admin/cases/:caseId` surface, audit `note`s included.  So
+  the case's note and its legal-hold reason are GENERIC ("Legal hold in force
+  pending counsel review"); the request's existence, agency, and legal basis
+  live SOLELY in the counsel-gated lawful-access record.  Naming any of it on the
+  case would leak a counsel-only fact to every compliance reviewer through the
+  link (WS-N.2.3d).
 - **The retention writes re-check the hold themselves.**  `deleteCascade` takes
   a row lock and re-reads it inside its transaction; `anonymize` puts it in the
   `WHERE`. The sweep's `listExpired` read cannot carry that guarantee — a SAR

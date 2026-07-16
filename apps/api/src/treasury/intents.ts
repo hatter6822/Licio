@@ -366,6 +366,20 @@ export async function preflightIntent(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  // STATE GUARD before the mutable compliance checks below — jurisdiction,
+  // sanctions, and especially `fraudRisk` RESERVE velocity budget and can open a
+  // review.  A retry (or a duplicate `/advance`) on an intent already past
+  // `created` cannot transition again, so running those checks would burn the
+  // member/room velocity window — later blocking legitimate financial actions —
+  // for a transition the CAS below rejects anyway.  An already-`preflighted`
+  // intent REPLAYS (a lost-response retry of a valid preflight); any other
+  // non-`created` state is an invalid transition, refused without touching
+  // velocity.  (The transition CAS still guards a concurrent racer at the end.)
+  if (intent.executionState !== 'created') {
+    return intent.executionState === 'preflighted'
+      ? { ok: true, intent }
+      : tgErr(409, 'invalid_transition', 'The intent is not in a preflightable state.');
+  }
   const guard = await assertGovernanceWritable(
     deps,
     intent.roomId,

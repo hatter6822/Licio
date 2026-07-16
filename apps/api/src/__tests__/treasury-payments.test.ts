@@ -348,6 +348,35 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect(replay.existing).toBe(true);
   });
 
+  it('a preflight retry on an already-preflighted intent replays without re-reserving velocity (thread-K)', async () => {
+    const deps = buildDeps();
+    let fraudCalls = 0;
+    deps.compliance = {
+      ...defaultCompliancePort,
+      fraudRisk: async (input) => {
+        fraudCalls += 1;
+        return defaultCompliancePort.fraudRisk(input);
+      },
+    };
+    await provisionTreasury(deps);
+    const created = await create(deps);
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    const first = await preflightIntent(deps, id, USER);
+    expect('intent' in first && first.intent.executionState).toBe('preflighted');
+    expect(fraudCalls).toBe(1);
+    // A lost-response retry REPLAYS the preflighted intent — no second reserve.
+    const retry = await preflightIntent(deps, id, USER);
+    expect('intent' in retry && retry.intent.executionState).toBe('preflighted');
+    expect(fraudCalls).toBe(1);
+    // A preflight on an intent already ADVANCED past preflighted is refused with
+    // NO velocity burn (the state guard runs before the mutable checks).
+    await quoteIntent(deps, id, USER);
+    const stale = await preflightIntent(deps, id, USER);
+    expect('code' in stale && stale.code).toBe('invalid_transition');
+    expect(fraudCalls).toBe(1);
+  });
+
   it('enforces the three deposit limits including in-flight aggregates', async () => {
     const deps = buildDeps();
     await provisionTreasury(deps);

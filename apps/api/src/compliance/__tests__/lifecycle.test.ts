@@ -462,6 +462,48 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     ).toContain('manual');
   });
 
+  it('the intake case audit reveals NO lawful-access detail to a compliance reviewer (thread-M)', async () => {
+    const userId = randomUUID();
+    const deps = {
+      requests: services.lawfulAccess,
+      caseDeps: buildCaseDeps(services),
+      roomStorageMode: services.roomStorageMode,
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const intake = await intakeLawfulAccessRequest(deps, {
+      agency: 'Secret Agency',
+      jurisdiction: 'US',
+      legalBasis: 'subpoena',
+      scope: {
+        subject_kind: 'user',
+        subject_ref: userId,
+        time_range_start: null,
+        time_range_end: null,
+      },
+      contact: 'agent@example.test',
+      actorUserId: ACTOR,
+    });
+    if (!intake.ok) throw new Error('intake failed');
+    const caseId = intake.record.caseId;
+    if (caseId === null) throw new Error('intake did not link a case');
+    // The linked case is readable on the COMPLIANCE-gated `/admin/cases/:caseId`
+    // surface (its audit `note`s included).  Those notes must not name the
+    // lawful-access request, its legal basis, or the agency — all COUNSEL-only.
+    const trail = await services.caseAudit.listChained(caseId);
+    const notes = trail
+      .map((e) => e.note ?? '')
+      .join(' ')
+      .toLowerCase();
+    expect(notes).not.toContain('lawful-access');
+    expect(notes).not.toContain('subpoena');
+    expect(notes).not.toContain('secret agency');
+    // …but the counsel-only record still carries the full detail.
+    expect(intake.record.legalBasis).toBe('subpoena');
+    expect(intake.record.agency).toBe('Secret Agency');
+  });
+
   it('an unnotified lawful-access case does not disable the subject’s crypto features', async () => {
     const userId = randomUUID();
     // `compliance_hold` is only REACHABLE once the global flags and the age

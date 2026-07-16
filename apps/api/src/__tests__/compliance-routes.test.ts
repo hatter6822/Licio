@@ -710,6 +710,39 @@ describe('the case console (WS-N.2.1b/c)', () => {
     expect(body.declaration.status).toBe('pending');
     expect(body.declaration.verification_level).toBe('unverified');
   });
+
+  it('a decision on an already-verified declaration is refused — no silent un-verify (thread-L)', async () => {
+    const reviewer = await seedReviewer();
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}` });
+    await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'DE' }, member.cookie),
+    );
+    const verified = await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'verify', note: 'passport checked' },
+        reviewer.cookie,
+      ),
+    );
+    expect(verified.status).toBe(200);
+    // A stale reviewer form or a duplicate queue action on the now-verified row —
+    // verify OR reject — is refused with 409, BEFORE any write, so it can never
+    // set the verified declaration back to pending and disable real-fund region
+    // resolution behind the member's back.
+    for (const decision of ['reject', 'verify'] as const) {
+      const stale = await app().request(
+        post(
+          `/v1/compliance/admin/declarations/${member.userId}/verify`,
+          { decision, note: 'stale form' },
+          reviewer.cookie,
+        ),
+      );
+      expect(stale.status).toBe(409);
+      expect(((await stale.json()) as { error: { code: string } }).error.code).toBe(
+        'declaration_not_pending',
+      );
+    }
+  });
 });
 
 describe('the fraud queue + wallet pins + runtime config', () => {

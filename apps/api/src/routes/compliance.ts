@@ -753,6 +753,21 @@ export function createComplianceRoutes() {
         const body = c.req.valid('json');
         const existing = await services.declarations.get(userId);
         if (existing === null || existing.status === 'revoked') return c.json(notFound, 404);
+        // A decision applies ONLY to a PENDING declaration.  A stale reviewer
+        // form or a duplicate queue action opened after another reviewer already
+        // verified would otherwise CAS against the current `verified` row and set
+        // it back to `pending`/`unverified` — silently disabling real-fund region
+        // resolution with no user redeclaration and no revocation.  Changing a
+        // verified declaration is a separate audited workflow, never this one.
+        if (existing.status !== 'pending') {
+          return c.json(
+            deny(
+              'declaration_not_pending',
+              'This declaration is no longer pending; only a pending declaration can be reviewed here.',
+            ),
+            409,
+          );
+        }
         const nowIso = new Date(services.now()).toISOString();
         const record = await services.declarations.upsert(
           {

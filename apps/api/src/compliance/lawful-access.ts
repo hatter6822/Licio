@@ -98,7 +98,14 @@ export async function intakeLawfulAccessRequest(
           subjectRef: input.scope.subject_ref,
           triggerType: 'manual',
           riskLevel: 'high',
-          note: `Lawful-access request intake (${input.legalBasis}); legal review required before any production.`,
+          // GENERIC on purpose (WS-N.2.3d).  The linked case is readable on the
+          // COMPLIANCE-gated `/admin/cases/:caseId` surface (its audit `note`s
+          // included), but the lawful-access request — that one exists at all, its
+          // legal basis, its agency — is COUNSEL-only.  Naming any of it here would
+          // leak counsel-only facts to every compliance reviewer through the linked
+          // case, so the details live SOLELY in the counsel-gated lawful-access
+          // record below; the case note says only that a hold is in force.
+          note: 'Legal hold in force pending counsel review (WS-N.2.3d).',
         });
         if (!linked.ok) return laErr(linked.status, linked.code, linked.message);
         const held = await setLegalHoldInTx(stores, deps.caseDeps, {
@@ -106,7 +113,9 @@ export async function intakeLawfulAccessRequest(
           holdRef: requestHoldRef(deps, requestId),
           hold: true,
           actorUserId: input.actorUserId,
-          reason: 'Legal hold applied for a lawful-access request (WS-N.2.3d).',
+          // Generic for the same reason — the hold reason is on the same
+          // compliance-readable case audit.
+          reason: 'Legal hold in force pending counsel review (WS-N.2.3d).',
         });
         if (!held.ok) return laErr(held.status, held.code, held.message);
         const record = await stores.lawfulAccess.insert({
