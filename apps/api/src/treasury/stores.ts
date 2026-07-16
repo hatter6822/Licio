@@ -973,7 +973,15 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
     updatedAt: string,
   ): Promise<PaymentIntentRecord | null> {
     const row = this.#rows.get(paymentIntentId);
-    if (!row || row.complianceState !== from) return null;
+    // CAS on the compliance column AND a LIVE execution state: a review decision
+    // (release/reject) must not flip the column of an intent the expiry/clawback
+    // path terminal-ized between the reviewer's read and this write — a
+    // `flagged → cleared` on an `abandoned`/`failed` row would report the transfer
+    // released while it can never quote or submit.  A terminal row fails the CAS
+    // (→ null → 409), the same as a compliance-state mismatch.
+    if (!row || row.complianceState !== from || TERMINAL_INTENT_STATES.has(row.executionState)) {
+      return null;
+    }
     row.complianceState = to;
     row.updatedAt = updatedAt;
     return clone(row);

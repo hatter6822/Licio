@@ -448,6 +448,47 @@ describe('DepositFlow (WS-M.3.1)', () => {
     expect(bodies[1]?.idempotency_key).not.toBe(bodies[0]?.idempotency_key);
   });
 
+  it('canceling a SIGNED intent rotates the attempt key so a restart mints a fresh one (thread-X)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' }); // preflight/quote/signed all succeed
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    mockPreflightAction.mockResolvedValue({
+      result: 'pass',
+      preflight_token: 'token-1234567890abcdef',
+    });
+    // The `signed` advance succeeds (the server intent is now `signed`); the
+    // SUBMIT then fails.
+    mockSubmitAction.mockRejectedValue(new ApiClientError('network', 'Connection lost.', 503));
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('2');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 2 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument()); // submit failed
+    // Cancel, then restart the SAME deposit.  A restart under the old key would
+    // reuse the `signed` intent and 409 on the re-advance, so cancel must rotate
+    // the key: the restart mints a FRESH intent.
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    enterAmount('2');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() => expect(mockCreateIntent).toHaveBeenCalledTimes(2));
+    const bodies = mockCreateIntent.mock.calls.map(
+      (call) => call[1] as { idempotency_key: string },
+    );
+    expect(bodies[1]?.idempotency_key).not.toBe(bodies[0]?.idempotency_key);
+  });
+
   it('blocks the flow when deposits are paused', () => {
     render(
       <DepositFlow

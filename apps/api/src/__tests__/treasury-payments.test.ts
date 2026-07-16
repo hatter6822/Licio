@@ -397,9 +397,10 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    const liveId = crypto.randomUUID();
     await store.insert({
       ...base,
-      paymentIntentId: crypto.randomUUID(),
+      paymentIntentId: liveId,
       executionState: 'preflighted',
       idempotencyKey: crypto.randomUUID(),
     });
@@ -416,6 +417,12 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]?.executionState).toBe('preflighted');
     expect(listed.some((i) => i.paymentIntentId === deadId)).toBe(false);
+    // updateComplianceState CASes on a LIVE execution state too (thread-U): a
+    // release/reject cannot flip a terminal intent's compliance column, closing
+    // the TOCTOU between the release endpoint's pre-check and this write.
+    const now = new Date().toISOString();
+    expect(await store.updateComplianceState(liveId, 'flagged', 'cleared', now)).not.toBeNull();
+    expect(await store.updateComplianceState(deadId, 'flagged', 'cleared', now)).toBeNull();
   });
 
   it('enforces the three deposit limits including in-flight aggregates', async () => {

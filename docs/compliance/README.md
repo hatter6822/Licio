@@ -664,13 +664,22 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   pending counsel review"); the request's existence, agency, and legal basis
   live SOLELY in the counsel-gated lawful-access record.  Naming any of it on the
   case would leak a counsel-only fact to every compliance reviewer through the
-  link (WS-N.2.3d).  The anti-tipping-off suppression (`unnotifiedCaseIdsForSubject`,
-  which hides the linked case from exports/availability/wallet-risk while
-  `userNotifiedAt` is null) lasts only as long as the legal restriction: a
-  production recorded with `user_notified: false` (a gag order) leaves the
-  timestamp null, and the counsel-only `notifyLawfulAccessSubject` transition is
-  the one that later sets it — so the case is un-suppressed once counsel may
-  notify, never forever.
+  link (WS-N.2.3d).  This holds for EVERY case-chain write the workflow makes:
+  the denial resolution note, the production, and the notification entries are
+  all generic legal-hold wording (`legal_hold_action`, "Counsel action recorded
+  under legal hold") — the denial reason, the production, and the notification
+  status live only on the counsel-gated request record.  The anti-tipping-off
+  suppression (`unnotifiedCaseIdsForSubject`, which hides the linked case from
+  exports/availability/wallet-risk while `userNotifiedAt` is null) lasts only as
+  long as the legal restriction: a production recorded with `user_notified: false`
+  (a gag order) leaves the timestamp null, and the counsel-only
+  `notifyLawfulAccessSubject` transition is the one that later sets it — so the
+  case is un-suppressed once counsel may notify, never forever.
+- **A user surface counts only USER cases.**  `countOpenByRisk` / `listBySubject`
+  (the compliance hold, wallet risk, DSAR export) match a KIND as well as the
+  polymorphic `user_id_or_room_id` ref — a manual or lawful-access case is not
+  FK-constrained, so a room/transaction case whose soft ref collides with a user
+  id would otherwise count as that user's hold or leak into their export.
 - **A terminal intent never appears in a live view.**  An intent can reach a
   terminal execution state (`abandoned`/`failed`/`reverted`/…) while OTHER state
   still points at it as if live — the idempotency key, the `flagged` compliance
@@ -681,7 +690,9 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   intent they cannot release, and stale rows cannot consume the page; and the
   RELEASE endpoint re-checks the execution state (the queue was read earlier, so
   the id can be stale), refusing a terminal intent rather than reporting it
-  `cleared`.
+  `cleared` — and `updateComplianceState`'s CAS itself excludes terminal
+  execution states, so the flip is atomic against a state change racing between
+  that re-check and the write.
 - **A jurisdiction-keyed control validates its keys as regions.**  A regional
   velocity override's KEY is a canonical region code (`regionCodeSchema`), not
   any string: `limitsForRegion` does an EXACT lookup with the resolved code, so a

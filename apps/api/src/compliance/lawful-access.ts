@@ -227,7 +227,11 @@ export async function reviewLawfulAccessRequest(
           actorUserId: input.actorUserId,
           resolution: {
             outcome: 'cleared',
-            notes: `Lawful-access request denied on legal review: ${input.note}`,
+            // GENERIC (WS-N.2.3d): the case resolution is readable on the
+            // COMPLIANCE-gated case surface, so it must not name the lawful-access
+            // request or carry counsel's denial reason — that reason lives on the
+            // counsel-only request record (`reviewNote`, written above).
+            notes: 'Legal hold released on counsel review (WS-N.2.3d).',
             resolved_by: input.actorUserId,
             resolved_at: new Date(deps.now()).toISOString(),
           },
@@ -308,20 +312,23 @@ export async function recordLawfulAccessProduction(
       if (updated === null) {
         return laErr(409, 'legal_review_required', 'Production requires an approved legal review.');
       }
-      // WHO disclosed the data — the record itself keeps only `reviewedByRef`,
-      // and the approver is often not the producer.  In the SAME unit as the
-      // status change: a production recorded without its scoped log entry
-      // cannot be repaired, since the retry would see `produced` and stop.
+      // WHO acted under the hold — the counsel-only record keeps only
+      // `reviewedByRef`, and the approver is often not the producer, so the
+      // producer's opaque ref is recorded here.  In the SAME unit as the status
+      // change: an action recorded without its scoped log entry cannot be
+      // repaired, since the retry would see `produced` and stop.  The entry's
+      // action + note are GENERIC (WS-N.2.3d): this case chain is
+      // compliance-readable, so it must not reveal a lawful-access PRODUCTION or
+      // the notification status — those live on the counsel-only request record
+      // (`status`, `productionSummary`, `userNotifiedAt`).
       if (updated.caseId !== null) {
         await appendCaseAuditInTx(stores, deps, {
           caseId: updated.caseId,
-          action: 'lawful_access_produced',
+          action: 'legal_hold_action',
           actorRef: deps.opaqueRef(input.actorUserId),
           beforeState: null,
           afterState: null,
-          note: `Lawful-access production recorded for request ${updated.requestId}; user ${
-            input.userNotified ? 'notified' : 'not notified'
-          }.`,
+          note: 'Counsel action recorded under legal hold (WS-N.2.3d).',
         });
       }
       return { ok: true as const, record: updated };
@@ -375,13 +382,16 @@ export async function notifyLawfulAccessSubject(
       // notification recorded without its scoped entry cannot be repaired
       // (the retry would see a non-null `userNotifiedAt` and stop).
       if (updated.caseId !== null) {
+        // GENERIC on the compliance-readable case chain (WS-N.2.3d): the fact of
+        // a lawful-access notification, like the production, stays on the
+        // counsel-only record (`userNotifiedAt`).
         await appendCaseAuditInTx(stores, deps, {
           caseId: updated.caseId,
-          action: 'lawful_access_notified',
+          action: 'legal_hold_action',
           actorRef: deps.opaqueRef(input.actorUserId),
           beforeState: null,
           afterState: null,
-          note: `Subject notification recorded for request ${updated.requestId}.`,
+          note: 'Counsel action recorded under legal hold (WS-N.2.3d).',
         });
       }
       return { ok: true as const, record: updated };

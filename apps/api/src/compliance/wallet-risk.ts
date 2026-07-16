@@ -67,12 +67,12 @@ export function createWalletRisk(deps: WalletRiskDeps): CompliancePort['walletRi
       // bounded by this subject's own lawful-access requests, so it cannot
       // reintroduce that paging.
       const suppressed = await deps.suppressedCaseIds(userId);
-      const critical = await deps.cases.countOpenByRisk(userId, ['critical'], suppressed);
+      const critical = await deps.cases.countOpenByRisk(userId, 'user', ['critical'], suppressed);
       if (critical > 0) {
         deps.metric('compliance.wallet_risk.case_derived');
         return EXPLANATIONS.high;
       }
-      const high = await deps.cases.countOpenByRisk(userId, ['high'], suppressed);
+      const high = await deps.cases.countOpenByRisk(userId, 'user', ['high'], suppressed);
       if (high > 0) {
         deps.metric('compliance.wallet_risk.case_derived');
         return EXPLANATIONS.elevated;

@@ -34,6 +34,7 @@ import type {
   CaseRetentionPolicy,
   CaseReviewState,
   CaseRiskLevel,
+  CaseSubjectKind,
   CaseTriggerType,
   LawfulAccessStatus,
   SarStatus,
@@ -402,13 +403,21 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
 
   async listBySubject(
     subjectRef: string,
+    subjectKind: CaseSubjectKind,
     limit: number,
     offset = 0,
   ): Promise<ComplianceCaseRecord[]> {
     const rows = await this.#db
       .select()
       .from(financialComplianceCases)
-      .where(eq(financialComplianceCases.userIdOrRoomId, subjectRef))
+      .where(
+        and(
+          eq(financialComplianceCases.userIdOrRoomId, subjectRef),
+          // KIND-matched: the ref is polymorphic and manual/lawful-access cases
+          // are not FK-constrained (see the in-memory adapter).
+          eq(financialComplianceCases.subjectKind, subjectKind),
+        ),
+      )
       .orderBy(desc(financialComplianceCases.createdAt))
       .limit(limit)
       .offset(offset);
@@ -505,6 +514,7 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
 
   async countOpenByRisk(
     subjectRef: string,
+    subjectKind: CaseSubjectKind,
     risks: readonly CaseRiskLevel[],
     excludeCaseIds: readonly string[] = [],
   ): Promise<number> {
@@ -515,6 +525,9 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
       .where(
         and(
           eq(financialComplianceCases.userIdOrRoomId, subjectRef),
+          // KIND-matched (see `listBySubject`): the user's hold must not count a
+          // room/transaction case whose soft ref equals their id.
+          eq(financialComplianceCases.subjectKind, subjectKind),
           sql`${financialComplianceCases.reviewState} <> 'resolved'`,
           inArray(financialComplianceCases.riskLevel, [...risks]),
           ...(excludeCaseIds.length > 0

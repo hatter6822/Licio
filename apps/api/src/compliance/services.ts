@@ -337,7 +337,7 @@ async function assembleAvailabilityInput(
     // holds, as everything else here does.
     const suppressed = await services.lawfulAccess.unnotifiedCaseIdsForSubject(userId);
     complianceHold =
-      (await services.cases.countOpenByRisk(userId, ['high', 'critical'], suppressed)) > 0;
+      (await services.cases.countOpenByRisk(userId, 'user', ['high', 'critical'], suppressed)) > 0;
   } catch {
     complianceHold = true; // fail-closed: an unreadable case store HOLDS
   }
@@ -609,7 +609,7 @@ export function buildComplianceExport(
     const cases: ComplianceCaseRecord[] = [];
     const pageSize = 200;
     for (let offset = 0; ; offset += pageSize) {
-      const page = await services.cases.listBySubject(userId, pageSize, offset);
+      const page = await services.cases.listBySubject(userId, 'user', pageSize, offset);
       cases.push(...page);
       if (page.length < pageSize) break;
     }

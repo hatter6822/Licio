@@ -257,6 +257,22 @@ describe('the retention sweep (WS-N.2.1d)', () => {
     expect(heldPolicy?.erasure_pending ?? false).toBe(false);
   });
 
+  it('user-scoped case counts/lists exclude a colliding room case (thread-V)', async () => {
+    // The polymorphic ref is shared: the SAME id names a user AND a room's soft
+    // ref (manual/lawful-access cases are not FK-constrained).
+    const ref = randomUUID();
+    await seedCase({ userIdOrRoomId: ref, subjectKind: 'user', riskLevel: 'high' });
+    await seedCase({ userIdOrRoomId: ref, subjectKind: 'room', riskLevel: 'critical' });
+    // Kind-matched: only the USER case is the user's compliance hold / DSAR row —
+    // the room case (which happens to share the ref) must not leak in.
+    expect(await services.cases.countOpenByRisk(ref, 'user', ['high', 'critical'])).toBe(1);
+    const listed = await services.cases.listBySubject(ref, 'user', 10);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.subjectKind).toBe('user');
+    // …and the room-scoped view sees only the room case.
+    expect(await services.cases.countOpenByRisk(ref, 'room', ['high', 'critical'])).toBe(1);
+  });
+
   it('buildEventRetentionOverrides projects the configured per-tier maxima', async () => {
     expect(buildEventRetentionOverrides(services.config)).toEqual({ maxDays: {} });
     await services.configStore.set('compliance.eventRetentionOverrides', {

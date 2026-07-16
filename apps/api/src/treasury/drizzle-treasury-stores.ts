@@ -837,6 +837,9 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
         and(
           eq(paymentIntents.paymentIntentId, paymentIntentId),
           eq(paymentIntents.complianceState, from),
+          // …AND a LIVE execution state (see the in-memory adapter): a review
+          // decision must not flip a terminal intent's compliance column.
+          notInArray(paymentIntents.executionState, [...TERMINAL_INTENT_STATES]),
         ),
       )
       .returning();

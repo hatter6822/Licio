@@ -1952,7 +1952,9 @@ describe('a DENIED lawful-access request releases its hold (WS-N.2.3d)', () => {
     const record = await compliance.cases.getById(request.case_id);
     expect(record?.retentionPolicy.legal_hold).toBe(false);
     expect(record?.reviewState).toBe('resolved');
-    expect(await compliance.cases.countOpenByRisk(subject.userId, ['high', 'critical'])).toBe(0);
+    expect(
+      await compliance.cases.countOpenByRisk(subject.userId, 'user', ['high', 'critical']),
+    ).toBe(0);
   });
 
   it('an APPROVED request keeps its hold, and production records who disclosed', async () => {
@@ -2000,10 +2002,22 @@ describe('a DENIED lawful-access request releases its hold (WS-N.2.3d)', () => {
       ),
     );
     const trail = await compliance.caseAudit.listChained(request.case_id);
-    const produced = trail.find((entry) => entry.action === 'lawful_access_produced');
+    // The producer's action is recorded under GENERIC wording (the case chain is
+    // COMPLIANCE-readable; the production detail is counsel-only), so it is found
+    // by the producer's opaque ref, not a lawful-access action string.
+    const produced = trail.find(
+      (entry) => entry.actorRef === compliance.opaqueRef(producer.userId),
+    );
     expect(produced).toBeDefined();
-    expect(produced?.actorRef).toBe(compliance.opaqueRef(producer.userId));
     expect(produced?.actorRef).not.toBe(compliance.opaqueRef(counsel.userId));
+    // …and the compliance-readable chain reveals NO lawful-access detail (W).
+    const chain = trail
+      .map((e) => `${e.action} ${e.note ?? ''}`)
+      .join(' ')
+      .toLowerCase();
+    expect(chain).not.toContain('lawful-access');
+    expect(chain).not.toContain('produced');
+    expect(chain).not.toContain('notified');
   });
 });
 

@@ -377,8 +377,8 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
       ),
     );
     track(await stores.cases.insert(caseOf(subject, { riskLevel: 'low' })));
-    expect(await stores.cases.countOpenByRisk(subject, ['high', 'critical'])).toBe(1);
-    expect((await stores.cases.listBySubject(subject, 10)).length).toBe(3);
+    expect(await stores.cases.countOpenByRisk(subject, 'user', ['high', 'critical'])).toBe(1);
+    expect((await stores.cases.listBySubject(subject, 'user', 10)).length).toBe(3);
   });
 
   it('case audit chain: per-case genesis, GUC-gated delete, and no casual DELETE path', async () => {

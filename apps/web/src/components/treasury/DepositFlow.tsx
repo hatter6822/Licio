@@ -350,8 +350,15 @@ export function DepositFlow({
           onCancel={() => {
             setPending(null);
             setError(null);
-            // The intent is abandoned with the preview; a fresh one has not
-            // been signed.
+            // Canceling ABANDONS this attempt.  The intent may already be
+            // `signed` on the server (the `quoted → signed` advance succeeded but
+            // submit/attach did not), and the lifecycle has no `signed → signed`
+            // edge — so restarting under the SAME idempotency key would reuse that
+            // signed intent and 409 (`invalid_transition`) when `signAndSubmit`
+            // re-advances it, stranding the user until expiry.  Rotate the attempt
+            // key (clear `attemptRef`) so the next deposit mints a FRESH intent;
+            // the abandoned one lapses on its signed TTL.
+            attemptRef.current = null;
             signedRef.current = null;
           }}
           signing={busy}

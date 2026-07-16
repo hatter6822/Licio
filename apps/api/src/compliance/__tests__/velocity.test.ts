@@ -304,7 +304,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     const caseId = record?.caseId as string;
     // Still held while the review is in flight — no duplicate case either.
     expect(await check()).toBe('elevated');
-    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(1);
+    expect(await services.cases.listBySubject(USER, 'user', 10)).toHaveLength(1);
 
     // A reviewer clears THIS attempt → its retry proceeds (otherwise
     // `elevated` would be a permanent block).
@@ -365,7 +365,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(await actionLeg()).toBe('elevated');
     // Keying on the action type would have opened a SECOND case here — one the
     // fraud queue's release could never clear, stranding the released deposit.
-    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(1);
+    expect(await services.cases.listBySubject(USER, 'user', 10)).toHaveLength(1);
 
     const caseId = (await services.cases.listByStates(['open'], 10))[0]?.caseId as string;
     const deps = buildCaseDeps(services);
@@ -556,7 +556,7 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(await check('22222222-2222-4222-8222-222222222222')).toBe('elevated');
     // Dropping the action type from the key must not collapse two transfers
     // into one review: the ATTEMPT still separates them.
-    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(2);
+    expect(await services.cases.listBySubject(USER, 'user', 10)).toHaveLength(2);
   });
 
   it('a review resolved to a NON-cleared outcome keeps the action held', async () => {
@@ -692,7 +692,7 @@ describe('the high-value review is scoped to ONE attempt (WS-N.2.2c)', () => {
     // new attempt and gets its own review — a day-bucket key would have let
     // every later identical transfer ride the first clearance.
     expect(await check(second)).toBe('elevated');
-    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(2);
+    expect(await services.cases.listBySubject(USER, 'user', 10)).toHaveLength(2);
   });
 
   it('withholds the cleared-review exit when the caller names no attempt', async () => {
@@ -739,6 +739,6 @@ describe('the high-value review is scoped to ONE attempt (WS-N.2.2c)', () => {
       },
     });
     expect(await check()).toBe('elevated');
-    expect(await services.cases.listBySubject(USER, 10)).toHaveLength(1);
+    expect(await services.cases.listBySubject(USER, 'user', 10)).toHaveLength(1);
   });
 });

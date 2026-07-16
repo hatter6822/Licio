@@ -243,6 +243,7 @@ export interface ComplianceCaseStore {
    *  stops at one page is not the user's full compliance footprint. */
   listBySubject(
     subjectRef: string,
+    subjectKind: CaseSubjectKind,
     limit: number,
     offset?: number,
   ): Promise<ComplianceCaseRecord[]>;
@@ -304,6 +305,7 @@ export interface ComplianceCaseStore {
    *  bounded by the subject's own requests and so cannot reintroduce paging. */
   countOpenByRisk(
     subjectRef: string,
+    subjectKind: CaseSubjectKind,
     risks: readonly CaseRiskLevel[],
     excludeCaseIds?: readonly string[],
   ): Promise<number>;
@@ -718,11 +720,16 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
 
   async listBySubject(
     subjectRef: string,
+    subjectKind: CaseSubjectKind,
     limit: number,
     offset = 0,
   ): Promise<ComplianceCaseRecord[]> {
+    // The ref is POLYMORPHIC (`userIdOrRoomId` holds a user OR room OR
+    // transaction ref), and manual/lawful-access cases are not FK-constrained,
+    // so the kind must be matched too — else a room/transaction case whose soft
+    // ref collides with a user id leaks into that user's surface (DSAR here).
     return [...this.#rows.values()]
-      .filter((r) => r.userIdOrRoomId === subjectRef)
+      .filter((r) => r.userIdOrRoomId === subjectRef && r.subjectKind === subjectKind)
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
       .slice(offset, offset + limit)
       .map((r) => ({ ...r }));
@@ -788,13 +795,17 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
 
   async countOpenByRisk(
     subjectRef: string,
+    subjectKind: CaseSubjectKind,
     risks: readonly CaseRiskLevel[],
     excludeCaseIds: readonly string[] = [],
   ): Promise<number> {
     const excluded = new Set(excludeCaseIds);
+    // Kind-matched (see `listBySubject`): a user's compliance hold / wallet risk
+    // must not count a room/transaction case whose soft ref equals their id.
     return [...this.#rows.values()].filter(
       (r) =>
         r.userIdOrRoomId === subjectRef &&
+        r.subjectKind === subjectKind &&
         r.reviewState !== 'resolved' &&
         risks.includes(r.riskLevel) &&
         !excluded.has(r.caseId),
