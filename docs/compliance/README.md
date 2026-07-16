@@ -664,7 +664,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   pending counsel review"); the request's existence, agency, and legal basis
   live SOLELY in the counsel-gated lawful-access record.  Naming any of it on the
   case would leak a counsel-only fact to every compliance reviewer through the
-  link (WS-N.2.3d).
+  link (WS-N.2.3d).  The anti-tipping-off suppression (`unnotifiedCaseIdsForSubject`,
+  which hides the linked case from exports/availability/wallet-risk while
+  `userNotifiedAt` is null) lasts only as long as the legal restriction: a
+  production recorded with `user_notified: false` (a gag order) leaves the
+  timestamp null, and the counsel-only `notifyLawfulAccessSubject` transition is
+  the one that later sets it — so the case is un-suppressed once counsel may
+  notify, never forever.
 - **A terminal intent never appears in a live view.**  An intent can reach a
   terminal execution state (`abandoned`/`failed`/`reverted`/…) while OTHER state
   still points at it as if live — the idempotency key, the `flagged` compliance

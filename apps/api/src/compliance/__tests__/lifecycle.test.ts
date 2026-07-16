@@ -18,7 +18,12 @@ import { InMemoryPwattConfigStore } from '../../events/stores.js';
 import { InMemoryJobLeaseStore } from '../../identity/job-lease.js';
 import { appendCaseAudit } from '../audit.js';
 import { createCase, setLegalHold, transitionCase } from '../cases.js';
-import { intakeLawfulAccessRequest } from '../lawful-access.js';
+import {
+  intakeLawfulAccessRequest,
+  notifyLawfulAccessSubject,
+  recordLawfulAccessProduction,
+  reviewLawfulAccessRequest,
+} from '../lawful-access.js';
 import {
   buildEventRetentionOverrides,
   runRetentionSweep,
@@ -532,6 +537,74 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     // …but the counsel-only record still carries the full detail.
     expect(intake.record.legalBasis).toBe('subpoena');
     expect(intake.record.agency).toBe('Secret Agency');
+  });
+
+  it('a produced-but-unnotified request stays notifyable — the suppression is not forever (thread-Q)', async () => {
+    const userId = randomUUID();
+    const deps = {
+      requests: services.lawfulAccess,
+      caseDeps: buildCaseDeps(services),
+      roomStorageMode: services.roomStorageMode,
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const intake = await intakeLawfulAccessRequest(deps, {
+      agency: 'Agency',
+      jurisdiction: 'US',
+      legalBasis: 'subpoena',
+      scope: {
+        subject_kind: 'user',
+        subject_ref: userId,
+        time_range_start: null,
+        time_range_end: null,
+      },
+      contact: 'agent@example.test',
+      actorUserId: ACTOR,
+    });
+    if (!intake.ok) throw new Error('intake failed');
+    const caseId = intake.record.caseId;
+    if (caseId === null) throw new Error('no case');
+    // Approve, then PRODUCE without notifying (a gag order still in force).
+    expect(
+      (
+        await reviewLawfulAccessRequest(deps, {
+          requestId: intake.record.requestId,
+          decision: 'approved',
+          note: 'ok',
+          actorUserId: ACTOR,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await recordLawfulAccessProduction(deps, {
+          requestId: intake.record.requestId,
+          productionSummary: 'produced',
+          userNotified: false,
+          actorUserId: ACTOR,
+        })
+      ).ok,
+    ).toBe(true);
+    // The linked case is SUPPRESSED while unnotified.
+    expect(await services.lawfulAccess.unnotifiedCaseIdsForSubject(userId)).toContain(caseId);
+    // Counsel records the subject may now be notified → the suppression LIFTS
+    // (it lasted only as long as the legal restriction, not forever).
+    const notified = await notifyLawfulAccessSubject(deps, {
+      requestId: intake.record.requestId,
+      actorUserId: ACTOR,
+    });
+    expect(notified.ok).toBe(true);
+    expect(await services.lawfulAccess.unnotifiedCaseIdsForSubject(userId)).not.toContain(caseId);
+    // A second notify is refused (already notified).
+    expect(
+      (
+        await notifyLawfulAccessSubject(deps, {
+          requestId: intake.record.requestId,
+          actorUserId: ACTOR,
+        })
+      ).ok,
+    ).toBe(false);
   });
 
   it('an unnotified lawful-access case does not disable the subject’s crypto features', async () => {

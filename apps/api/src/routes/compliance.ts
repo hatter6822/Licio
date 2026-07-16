@@ -69,6 +69,7 @@ import {
 } from '../compliance/disclosures.js';
 import {
   intakeLawfulAccessRequest,
+  notifyLawfulAccessSubject,
   recordLawfulAccessProduction,
   reviewLawfulAccessRequest,
 } from '../compliance/lawful-access.js';
@@ -1504,6 +1505,27 @@ export function createComplianceRoutes() {
           requestId: c.req.valid('param').requestId,
           productionSummary: body.production_summary,
           userNotified: body.user_notified,
+          actorUserId: auth.userId,
+        });
+        if (!result.ok) return failJson(c, result);
+        return c.json({ request: lawfulToWire(result.record) });
+      },
+    )
+
+    // WS-N.2.3d — counsel records that the subject MAY now be notified (a gag
+    // order lifted).  This is the ONLY transition that clears a produced-but-
+    // unnotified request's `userNotifiedAt`, so the anti-tipping-off suppression
+    // lasts only as long as the legal restriction — never forever.
+    .post(
+      '/admin/lawful-access/:requestId/notify',
+      authMiddleware(),
+      requireCounsel(),
+      zValidator('param', z.object({ requestId: uuidSchema })),
+      async (c) => {
+        const auth = requireAuth(c);
+        const services = getComplianceServices();
+        const result = await notifyLawfulAccessSubject(buildLawfulDeps(services), {
+          requestId: c.req.valid('param').requestId,
           actorUserId: auth.userId,
         });
         if (!result.ok) return failJson(c, result);

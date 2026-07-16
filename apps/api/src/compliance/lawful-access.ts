@@ -331,3 +331,67 @@ export async function recordLawfulAccessProduction(
     laErr(503, 'production_unavailable', 'The production could not be recorded; nothing was kept.'),
   );
 }
+
+/**
+ * Counsel records that the subject MAY now be notified (a gag order lifted).
+ *
+ * The anti-tipping-off suppression (`unnotifiedCaseIdsForSubject`) hides the
+ * linked case from exports / availability / wallet-risk while `userNotifiedAt`
+ * is null — which is correct while the user may not be told, but a production
+ * recorded with `user_notified: false` (a gag order still in force) would
+ * otherwise leave it null FOREVER, suppressing the case long past the point
+ * counsel may notify.  This is the one transition that sets it, so the
+ * suppression lasts only as long as the legal restriction, not forever.
+ */
+export async function notifyLawfulAccessSubject(
+  deps: LawfulAccessDeps,
+  input: { requestId: string; actorUserId: string },
+): Promise<LawfulAccessOutcome> {
+  const record = await deps.requests.getById(input.requestId);
+  if (record === null) return laErr(404, 'not_found', 'Resource not found');
+  // Only a PRODUCED, not-yet-notified request has a suppression to lift.
+  if (record.status !== 'produced' || record.userNotifiedAt !== null) {
+    return laErr(
+      409,
+      'invalid_transition',
+      'Only a produced, not-yet-notified request can be marked notified.',
+    );
+  }
+  return runChainedUnit(
+    deps.caseDeps.transactor,
+    async (stores) => {
+      const nowIso = new Date(deps.now()).toISOString();
+      const updated = await stores.lawfulAccess.update(
+        input.requestId,
+        { userNotifiedAt: nowIso },
+        nowIso,
+        // CAS: still `produced` (a racing review/produce cannot have moved it).
+        ['produced'],
+      );
+      if (updated === null) {
+        return laErr(409, 'invalid_transition', 'Only a produced request can be marked notified.');
+      }
+      // The lift is auditable in the SAME unit as the timestamp write — a
+      // notification recorded without its scoped entry cannot be repaired
+      // (the retry would see a non-null `userNotifiedAt` and stop).
+      if (updated.caseId !== null) {
+        await appendCaseAuditInTx(stores, deps, {
+          caseId: updated.caseId,
+          action: 'lawful_access_notified',
+          actorRef: deps.opaqueRef(input.actorUserId),
+          beforeState: null,
+          afterState: null,
+          note: `Subject notification recorded for request ${updated.requestId}.`,
+        });
+      }
+      return { ok: true as const, record: updated };
+    },
+    'lawful-access notification',
+  ).catch(() =>
+    laErr(
+      503,
+      'notification_unavailable',
+      'The notification could not be recorded; nothing was kept.',
+    ),
+  );
+}
