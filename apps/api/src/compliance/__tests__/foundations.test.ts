@@ -584,6 +584,21 @@ describe('the fail-closed compliance.* config loader', () => {
       ]),
     ).toBeNull();
   });
+
+  it('a regional velocity override KEY must be a canonical region code (thread-S)', () => {
+    const limits = [{ periodSeconds: 60, maxCount: 1, maxVolumeMinorUnits: '10' }];
+    // A non-canonical key (`limitsForRegion` does an EXACT lookup with the
+    // canonical code, so it would silently fall back to the global limits).
+    expect(validateComplianceConfigValue('velocityRegionOverrides', { us: limits })).not.toBeNull();
+    expect(
+      validateComplianceConfigValue('velocityRegionOverrides', { 'us-ca': limits }),
+    ).not.toBeNull();
+    // Canonical region codes are accepted.
+    expect(validateComplianceConfigValue('velocityRegionOverrides', { US: limits })).toBeNull();
+    expect(
+      validateComplianceConfigValue('velocityRegionOverrides', { 'US-CA': limits, EU: limits }),
+    ).toBeNull();
+  });
 });
 
 describe('the disclosure gate honors requires_acknowledgment (WS-N.1.2d)', () => {

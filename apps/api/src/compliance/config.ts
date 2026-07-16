@@ -14,6 +14,7 @@
 // typically costs ~2 checks.  Over-counting is the deliberate fail-safe
 // direction (a retry can only tighten the window, never widen it); defaults
 // carry the 2x factor.
+import { regionCodeSchema } from '@licio/shared';
 import { z } from 'zod';
 import type { PwattConfigStore } from '../events/stores.js';
 
@@ -109,10 +110,12 @@ const VALIDATORS: Readonly<Record<keyof ComplianceRuntimeConfig, z.ZodType>> = {
   screeningPartialCacheTtlMs: z.number().int().min(10_000).max(86_400_000),
   screeningTimeoutMs: z.number().int().min(500).max(60_000),
   velocityLimits: z.array(velocityLimitSchema).min(1).max(10),
-  velocityRegionOverrides: z.record(
-    z.string().min(2).max(64),
-    z.array(velocityLimitSchema).min(1).max(10),
-  ),
+  // The KEY must be a canonical region code (`regionCodeSchema`, e.g. `US`,
+  // `US-CA`, `EU`), NOT any 2–64 char string: `limitsForRegion` does an EXACT
+  // lookup with the resolved region code, so a non-canonical key (`us`, a typo)
+  // would validate, store, and then silently fall back to the global limits —
+  // a jurisdiction-specific fraud control that looks configured but never fires.
+  velocityRegionOverrides: z.record(regionCodeSchema, z.array(velocityLimitSchema).min(1).max(10)),
   highValueReviewThresholdMinorUnits: minorUnits,
   retentionScheduleRef: z.string().min(1).max(256),
   retentionDaysByTrigger: z.record(z.string().min(1).max(32), z.number().int().min(1).max(36_500)),

@@ -674,12 +674,26 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 - **A terminal intent never appears in a live view.**  An intent can reach a
   terminal execution state (`abandoned`/`failed`/`reverted`/…) while OTHER state
   still points at it as if live — the idempotency key, the `flagged` compliance
-  column.  Both are filtered: `createPaymentIntent`'s own allowance-race abort
+  column.  All are filtered: `createPaymentIntent`'s own allowance-race abort
   DELETES its just-inserted row (never abandons it) so no terminal row holds the
-  key and the "please retry" mints fresh; and `listByComplianceState` (the fraud
+  key and the "please retry" mints fresh; `listByComplianceState` (the fraud
   queue) excludes terminal execution states so a reviewer is never shown a held
-  intent they cannot release, and stale rows cannot consume the page ahead of
-  live ones.
+  intent they cannot release, and stale rows cannot consume the page; and the
+  RELEASE endpoint re-checks the execution state (the queue was read earlier, so
+  the id can be stale), refusing a terminal intent rather than reporting it
+  `cleared`.
+- **A jurisdiction-keyed control validates its keys as regions.**  A regional
+  velocity override's KEY is a canonical region code (`regionCodeSchema`), not
+  any string: `limitsForRegion` does an EXACT lookup with the resolved code, so a
+  non-canonical key (`us`, a typo) would validate, store, and then silently fall
+  back to the global limits — a jurisdiction control that looks configured but
+  never fires (a fail-SILENT, the opposite of fail-closed).
+- **A right-to-erasure deferral and its audit are ONE unit.**  When a legal hold
+  defers a subject scrub, the `erasure_pending` debt and its
+  `erasure_skipped_legal_hold` chain entry commit together (`runChainedUnit`) —
+  the marker used to commit first and the entry after, so a failed append left an
+  UNAUDITED carve-out on a tombstoned account that nothing guarantees to repair.
+  Same rule the anonymize and deferred-discharge paths follow.
 - **A fraud-queue RELEASE records the decision BEFORE it clears.**  The intent
   becomes movable (`flagged → cleared`) only after the durable reviewer decision
   is on the case chain: clearing first opened a window in which a client could

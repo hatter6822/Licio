@@ -98,6 +98,7 @@ import {
   requireVerifiedAccount,
 } from '../middleware/auth.js';
 import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/services.js';
+import { TERMINAL_INTENT_STATES } from '../treasury/stores.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
@@ -1144,7 +1145,17 @@ export function createComplianceRoutes() {
         // first fails CLOSED: a decision-recorded-but-not-cleared intent stays
         // held (the safe direction), never a cleared-but-unrecorded one.
         const held = await getTreasuryServices().intents.getById(body.payment_intent_id);
-        if (held === null || held.complianceState !== 'flagged') {
+        // Not flagged, or already TERMINAL: a reviewer who loaded the queue while
+        // the intent was live may click Release after the expiry/clawback path
+        // moved it to `abandoned`/`failed` — the compliance CAS would still flip
+        // the column and report `cleared` for an intent that can never quote or
+        // submit.  Re-check the execution state here (the queue query already
+        // filters it, but this endpoint is reached with a stale id).
+        if (
+          held === null ||
+          held.complianceState !== 'flagged' ||
+          TERMINAL_INTENT_STATES.has(held.executionState)
+        ) {
           return c.json(deny('not_flagged', 'The intent is not held for review.'), 409);
         }
         const recorded = await recordIntentReviewDecision(services, {

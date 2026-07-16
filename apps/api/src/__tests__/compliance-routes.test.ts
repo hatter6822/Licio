@@ -1382,6 +1382,42 @@ describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () =
     });
   }
 
+  it('a release on a TERMINAL (abandoned) flagged intent is refused — no false cleared (thread-R)', async () => {
+    const reviewer = await seedReviewer();
+    const intentId = randomUUID();
+    // The reviewer's queue was stale: the intent went `abandoned` (expiry /
+    // clawback) after they loaded it, while its `complianceState` stayed
+    // `flagged`.  Releasing it would flip the column and report `cleared` for an
+    // intent that can never quote or submit.
+    const intent = {
+      paymentIntentId: intentId,
+      userId: randomUUID(),
+      roomId: randomUUID(),
+      targetType: 'treasury_deposit',
+      amount: '5000',
+      complianceState: 'flagged',
+      executionState: 'abandoned',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    setTreasuryServices({
+      intents: {
+        getById: async (id: string) => (id === intentId ? intent : null),
+        listByComplianceState: async () => [],
+        updateComplianceState: async () => intent,
+      },
+    } as never);
+    const released = await app().request(
+      post(
+        '/v1/compliance/admin/fraud-queue/release',
+        { payment_intent_id: intentId, reason: 'looks fine' },
+        reviewer.cookie,
+      ),
+    );
+    expect(released.status).toBe(409);
+    expect(((await released.json()) as { error: { code: string } }).error.code).toBe('not_flagged');
+  });
+
   it('a release resolves the case `cleared` and the queue drains', async () => {
     const reviewer = await seedReviewer();
     const subject = randomUUID();

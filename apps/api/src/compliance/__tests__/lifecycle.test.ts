@@ -221,6 +221,42 @@ describe('the retention sweep (WS-N.2.1d)', () => {
     expect(trail.map((entry) => entry.action)).toContain('erasure_skipped_legal_hold');
   });
 
+  it('the scrub + its skip audit are ONE unit: a failed audit rolls BOTH back (thread-T)', async () => {
+    const userId = randomUUID();
+    const plain = await seedCase({ userIdOrRoomId: userId });
+    const heldC = await seedCase({
+      userIdOrRoomId: userId,
+      retentionPolicy: {
+        retention_period_days: 730,
+        deletion_date: hoursAhead(24),
+        legal_hold: true,
+        legal_hold_refs: [],
+      },
+    });
+    // The chain append fails mid-unit (a store fault at the worst moment).
+    const original = services.caseAudit.appendChained.bind(services.caseAudit);
+    services.caseAudit.appendChained = async () => {
+      throw new Error('chain unavailable');
+    };
+    try {
+      await expect(
+        scrubUserSubjectForErasure(
+          { caseDeps: buildCaseDeps(services), log: services.log },
+          userId,
+        ),
+      ).rejects.toThrow();
+    } finally {
+      services.caseAudit.appendChained = original;
+    }
+    // NOTHING committed: the plain case keeps its subject (not scrubbed), and the
+    // held case carries NO `erasure_pending` debt — never an unaudited carve-out.
+    expect((await services.cases.getById(plain.caseId))?.userIdOrRoomId).toBe(userId);
+    const heldPolicy = (await services.cases.getById(heldC.caseId))?.retentionPolicy as
+      | { erasure_pending?: boolean }
+      | undefined;
+    expect(heldPolicy?.erasure_pending ?? false).toBe(false);
+  });
+
   it('buildEventRetentionOverrides projects the configured per-tier maxima', async () => {
     expect(buildEventRetentionOverrides(services.config)).toEqual({ maxDays: {} });
     await services.configStore.set('compliance.eventRetentionOverrides', {

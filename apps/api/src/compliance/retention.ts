@@ -15,13 +15,7 @@
 // `scrubUserSubjectForErasure` — user subjects are NULLed EXCEPT under a
 // legal hold / counsel retention window; the skip itself is audited and the
 // data is erased when the hold lapses (this sweep re-scrubs resolved holds).
-import {
-  appendCaseAudit,
-  appendCaseAuditInTx,
-  mustApply,
-  runChainedUnit,
-  UnitNotAppliedError,
-} from './audit.js';
+import { appendCaseAuditInTx, mustApply, runChainedUnit, UnitNotAppliedError } from './audit.js';
 import type { CaseDeps } from './cases.js';
 import type { ComplianceRuntimeConfig } from './config.js';
 
@@ -244,17 +238,32 @@ export async function scrubUserSubjectForErasure(
   deps: Pick<RetentionSweepDeps, 'caseDeps' | 'log'>,
   userId: string,
 ): Promise<{ scrubbed: number; heldBack: number }> {
-  const result = await deps.caseDeps.cases.scrubUserSubject(userId);
-  for (const caseId of result.heldBack) {
-    await appendCaseAudit(deps.caseDeps, {
-      caseId,
-      action: 'erasure_skipped_legal_hold',
-      actorRef: 'system',
-      beforeState: null,
-      afterState: null,
-      note: 'Right-to-erasure scrub deferred: a legal hold applies (erased when it lapses).',
-    });
-  }
+  // ONE chained unit: the deferred-erasure debt (`erasure_pending`, set by
+  // `scrubUserSubject`) and its audited skip (`erasure_skipped_legal_hold`) must
+  // land TOGETHER.  Committing the marker first and appending the entry after
+  // left the case carrying an UNAUDITED retention carve-out whenever the append
+  // failed or exhausted its chain-contention retries — a carve-out nothing
+  // guarantees to repair for a tombstoned account.  Scrub + mark + entry now
+  // commit or roll back as a whole (the same rule the deferred-discharge
+  // pathway above already follows).
+  const result = await runChainedUnit(
+    deps.caseDeps.transactor,
+    async (stores) => {
+      const scrub = await stores.cases.scrubUserSubject(userId);
+      for (const caseId of scrub.heldBack) {
+        await appendCaseAuditInTx(stores, deps.caseDeps, {
+          caseId,
+          action: 'erasure_skipped_legal_hold',
+          actorRef: 'system',
+          beforeState: null,
+          afterState: null,
+          note: 'Right-to-erasure scrub deferred: a legal hold applies (erased when it lapses).',
+        });
+      }
+      return scrub;
+    },
+    'erasure scrub',
+  );
   deps.log('compliance.erasure.scrub', {
     scrubbed: result.scrubbed.length,
     heldBack: result.heldBack.length,
