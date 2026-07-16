@@ -26,15 +26,21 @@ export async function runWsmTick(
   services: TreasuryServices,
   onError: (error: unknown, task: WsmSchedulerTask) => void = () => {},
 ): Promise<void> {
-  try {
-    await expireIntents(services);
-  } catch (error) {
-    onError(error, 'wsm_intent_expiry');
-  }
+  // RECOVER, then reap.  Reconcile attaches the durable action a died-mid-flow
+  // client left behind (W13), taking the intent out of the timed states; expiry
+  // then abandons only what is genuinely dead.  The other order let one tick
+  // reap the very intent the next line would have rescued — the reaper is
+  // guarded independently (`expireIntents` will not abandon an intent whose
+  // action exists), but the order should not need the guard to be right.
   try {
     await reconcileIntents(services);
   } catch (error) {
     onError(error, 'wsm_intent_reconcile');
+  }
+  try {
+    await expireIntents(services);
+  } catch (error) {
+    onError(error, 'wsm_intent_expiry');
   }
   try {
     // Every room with a governance profile is a candidate (production proposals

@@ -1169,6 +1169,78 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect(recovered?.actionRecordId).toBe(action.actionRecordId);
   });
 
+  it('the expiry sweep NEVER abandons a signed intent whose action already exists (W13)', async () => {
+    // The W13 recovery is what makes a lost attach survivable: the client dies
+    // between submit and attach, and the sweep re-binds the durable action.
+    // But `signed` is a TIMED state, so the intent has a TTL — and the tick
+    // runs expiry BEFORE reconcile.  An intent whose TTL lapsed in the gap is
+    // therefore abandoned by the same tick that would have attached it, and no
+    // later sweep looks at it: the transfer is on chain and its intent is
+    // `abandoned`, so the money settles outside the ledger and the accounting
+    // export.  Nothing else notices — there is no error anywhere.
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const created = await createPaymentIntent(deps, {
+      userId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    // The submit landed under the intent's attempt key; the browser died.
+    await deps.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: {
+        message: { amount: '100', asset: 'USDC', treasuryId: treasury.treasuryId },
+        signature: '0xsig',
+      },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: id,
+      paymentIntentId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // …and the signed TTL lapses before the next tick.
+    const signed = await deps.intents.getById(id);
+    if (signed === null) throw new Error('intent missing');
+    await deps.intents.transition(
+      id,
+      'signed',
+      'signed',
+      { expiresAt: new Date(deps.now() - 1).toISOString() },
+      new Date(deps.now()).toISOString(),
+    );
+
+    // The tick: expiry, then reconcile.
+    await expireIntents(deps);
+    await reconcileIntents(deps);
+
+    const after = await deps.intents.getById(id);
+    // An intent whose money HAS MOVED is not abandonable — the action is the
+    // evidence, and reaping it destroys the only link back to the ledger.
+    expect(after?.executionState).not.toBe('abandoned');
+    expect(after?.actionRecordId).not.toBeNull();
+  });
+
   it('a revert landing before the first sweep still reaches terminal state (W13)', async () => {
     const deps = buildDeps();
     await provisionTreasury(deps);

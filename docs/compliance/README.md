@@ -477,9 +477,33 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
      about minting, and every one of them answers *wrongly* for work that
      already exists and may be on chain.
 
-  The failure is always the same shape: the client cannot learn the id of a
-  transfer that already happened, so the intent it must attach to strands
-  outside the ledger and the accounting export.
+  The symptom is always the same shape: the client cannot learn the id of a
+  transfer that already happened.  That is a bad response, not a lost transfer —
+  the **W13 auto-attach sweep** re-binds the orphan action server-side without
+  the client, and the `intent_key_mismatch` check exists precisely so it can
+  always find it.  The ordering rule is about answering the client truthfully;
+  the ledger's guarantee is the sweep's, and it is stated with it below.
+- **An intent whose money has moved is never abandonable.**  `signed` is a timed
+  state, so a client that dies between submit and attach — the case W13's
+  recovery exists for — leaves an intent that expires while its action sits on
+  chain.  Three things had to be true for the sweep to actually save it, and
+  only one was:
+  1. the tick must **recover before it reaps** (it ran expiry first, so one tick
+     reaped the very intent the next line would have rescued);
+  2. the reaper must not abandon an intent whose action exists (`expireIntents`
+     asks for the orphan by the same lookup the sweep uses — `orphanActionFor`,
+     one definition, because the two must agree about it exactly);
+  3. the attach must be allowed to land on an expired intent.  It was not: the
+     expiry guard refused every transition but `abandoned`, so the money could
+     be reaped and never re-bound.  `submitted` is now exempt, because it is
+     reached one way only — `attachIntentSubmission`, recording an action the
+     WS-L submit ALREADY placed on chain.  That is BOOKKEEPING, not
+     authorization (the same reason the attach carries no writability guard,
+     W15): refusing it does not stop a transfer that has happened, it only
+     severs the intent from it.
+
+  Together: the transfer cannot settle outside the ledger and the accounting
+  export because its intent expired.
 - **Gates are for NEW actions; a retry replays.**  `/actions/submit` looks up
   the `(user, idempotency_key)` record BEFORE its gates and skips them on a
   retry — and `POST …/payment-intents` does the same with its idempotency key,

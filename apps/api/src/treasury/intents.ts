@@ -34,6 +34,7 @@ import type { CompliancePort, RegionResolverPort } from '../knomosis/ports.js';
 
 import type {
   FinancialWalletStore,
+  KnomosisActionRecordEntity,
   KnomosisActionStore,
   KnomosisReceiptStore,
 } from '../knomosis/stores.js';
@@ -313,10 +314,22 @@ async function transitionIntent(
   ) {
     return null;
   }
-  // An expired timed state may only move to `abandoned`: a delayed expiry
-  // sweep must never let stale compliance/quote/signing state keep advancing.
+  // An expired timed state may only move to `abandoned` — or to `submitted`.
+  //
+  // A delayed expiry sweep must never let stale compliance/quote/signing state
+  // AUTHORIZE a movement, which is what this guard is for.  But `submitted` is
+  // reached one way only: `attachIntentSubmission`, recording an action the
+  // WS-L submit ALREADY placed on chain.  That is bookkeeping, not
+  // authorization — the same reason the attach carries no writability guard
+  // (W15) — and refusing it does not stop the transfer, which has happened; it
+  // only severs the intent from it.  A client that died between submit and
+  // attach (the case W13's recovery exists for) leaves the intent `signed`
+  // until its TTL lapses, and this guard then made the recovery impossible:
+  // the money sat on chain while its intent could only be abandoned, settling
+  // outside the ledger and the accounting export with no error anywhere.
   if (
     to !== 'abandoned' &&
+    to !== 'submitted' &&
     TIMED_STATES.has(intent.executionState) &&
     intent.expiresAt <= new Date(deps.now()).toISOString()
   ) {
@@ -763,12 +776,7 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
       // grant/compensation) recover through the room-scoped lookup — ANY
       // steward's signed action under the attempt key qualifies (W14).
       if (intent.executionState === 'signed') {
-        if (intent.actionRecordId !== null) continue;
-        const attemptKey = intentActionIdempotencyKey(intent);
-        const orphan =
-          intent.userId !== null
-            ? await deps.actions.getByIdempotencyKey(intent.userId, attemptKey)
-            : await deps.actions.getByRoomIdempotencyKey(intent.roomId, attemptKey);
+        const orphan = await orphanActionFor(deps, intent);
         if (orphan !== null) {
           const attached = await attachIntentSubmission(
             deps,
@@ -883,10 +891,49 @@ export async function expireIntents(deps: IntentDeps, limit = 200): Promise<numb
   const expired = await deps.intents.listExpired(new Date(deps.now()).toISOString(), limit);
   let abandoned = 0;
   for (const intent of expired) {
+    // AN INTENT WHOSE MONEY HAS MOVED IS NOT ABANDONABLE.  `signed` is a timed
+    // state, so a client that died between submit and attach — the exact case
+    // W13's recovery exists for — leaves an intent that expires while its
+    // action sits on chain.  Reaping it destroys the only link back: the sweep
+    // that would have attached it only looks at `signed` intents, so it never
+    // sees an `abandoned` one again, and the transfer settles OUTSIDE the
+    // ledger and the accounting export with no error anywhere.
+    //
+    // The action is the evidence, so the reaper asks for it — by the same
+    // lookup the sweep uses, because the two must agree.  A skipped intent is
+    // not stuck: the next reconcile attaches it, and if the attach can never
+    // succeed (a binding mismatch) it stays visible as `signed` for an operator
+    // rather than disappearing into `abandoned`.
+    if ((await orphanActionFor(deps, intent)) !== null) continue;
     const updated = await transitionIntent(deps, intent, 'abandoned', {}, null);
     if (updated !== null) abandoned += 1;
   }
   return abandoned;
+}
+
+/**
+ * The durable action a signed intent's client minted but never attached — the
+ * W13 recovery's evidence.
+ *
+ * ONE lookup, because two readers must agree about it exactly: the sweep that
+ * ATTACHES it, and the reaper that must not DESTROY it.  (`intentActionIdempotencyKey`
+ * is why it is findable at all — a submit under any other key mints an action
+ * this cannot see, which is what `intent_key_mismatch` refuses at the edge.)
+ *
+ * Null when there is nothing to recover: the intent is not `signed`, or it has
+ * already bound its action.
+ */
+async function orphanActionFor(
+  deps: IntentDeps,
+  intent: PaymentIntentRecord,
+): Promise<KnomosisActionRecordEntity | null> {
+  if (intent.executionState !== 'signed' || intent.actionRecordId !== null) return null;
+  const attemptKey = intentActionIdempotencyKey(intent);
+  // Room-owned payout intents (null owner) recover through the room-scoped
+  // lookup — ANY steward's signed action under the attempt key qualifies (W14).
+  return intent.userId !== null
+    ? await deps.actions.getByIdempotencyKey(intent.userId, attemptKey)
+    : await deps.actions.getByRoomIdempotencyKey(intent.roomId, attemptKey);
 }
 
 /** Bounded retry: `failed`/`reverted` → `created` (WS-M.3.1b, default 3). */
