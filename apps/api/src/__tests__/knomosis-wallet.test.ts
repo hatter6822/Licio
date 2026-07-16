@@ -617,6 +617,30 @@ describe('WS-L.2.5b unlink lifecycle + WS-L.2.5c list/label', () => {
     expect(alerts).toContain('knomosis.wallet.link_sanctioned');
   });
 
+  it('an active pending re-link re-screens so a recovered provider can clear it (thread wallet.ts:308)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // First link: the default port screens `unavailable`, so the wallet stays
+    // fail-closed `pending` (and the read-through refuses to promote it — thread-Y).
+    const first = await linkTestWallet(fixture, userId, 's1');
+    if (!first.ok) throw new Error('first link failed');
+    expect(first.wallet.riskState).toBe('pending');
+    // The provider recovers; a re-link of the SAME active address now screens
+    // `clear`.  Without re-screening on the already-linked branch this wallet
+    // would be fund-blocked forever (no unlink→finalize→relink), so the re-link
+    // must re-run link-time screening.
+    fixture.knomosis.compliance = {
+      ...fixture.knomosis.compliance,
+      screenAddress: async () => 'clear',
+    };
+    const second = await linkTestWallet(fixture, userId, 's2');
+    if (!second.ok) throw new Error('relink failed');
+    expect(second.alreadyLinked).toBe(true); // the idempotent active re-link branch
+    expect(second.wallet.riskState).toBe('normal'); // …but it re-screened and cleared
+    const stored = await fixture.knomosis.wallets.getById(second.wallet.walletAccountId);
+    expect(stored?.riskState).toBe('normal');
+  });
+
   it('link attempts are rate-limited and fire an integrity alert (WS-L.2.5d)', async () => {
     const fixture = await freshKnomosisServices();
     const alerts: string[] = [];

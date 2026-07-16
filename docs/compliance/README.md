@@ -161,10 +161,20 @@ modified** in their verdict semantics:
   close it for two reasons: `risk.ts` reads the **case**, not the intent's
   compliance column, so a still-open review would block the released deposit
   again at the WS-L leg; and a decided-but-open case would sit in the queue
-  forever. Atomic in both directions — a chain fault leaves the case unmoved
-  and the compensator puts the hold back rather than move funds unaudited, and
-  a closure the state machine refuses aborts the unit rather than commit an
-  entry recording a release that never took effect.
+  forever.
+
+  **The decision is recorded BEFORE the intent state moves — for release AND
+  reject alike.** The case-chain decision lands first, then the intent's
+  compliance column changes (`flagged → cleared` on release, `flagged → blocked`
+  on reject). There is no compensator: a chain fault leaves the intent `flagged`
+  (held) — the safe direction — rather than moving it and racing to put it back.
+  Blocking first was the same shape of bug as clearing first: the case-chain
+  write could fail AFTER the CAS while the expiry/clawback sweep terminalized the
+  timed intent before a best-effort revert landed, leaving it blocked/abandoned
+  with NO durable reviewer decision. A CAS miss after a recorded decision leaves
+  the decision durable and the intent unchanged; a retry is idempotent. And a
+  closure the state machine refuses aborts the unit rather than commit an entry
+  recording a decision that never took effect.
 - `jurisdiction` → `'allowed' | 'blocked' | 'unknown'` — takes the
   `featureCell` the caller is about to exercise and the `asset` it would move.
   Every fund/action path passes both: the WS-L preflight, its submit re-check
@@ -194,6 +204,13 @@ modified** in their verdict semantics:
   `pending`→`normal` on an absence-of-signal `normal`.  An `unavailable`
   screening records nothing, so the wallet stays `pending` — unable to move
   funds — until it is re-linked, the honest outcome of never having certified it.
+  Because that recovery IS the re-link, `linkWallet` re-runs `screenLinkedWallet`
+  on the already-linked branch too whenever the row is still `pending` (not only
+  on a finalized reactivation): a wallet stuck `pending` from a screening outage
+  clears the moment the provider recovers and the member re-links the same active
+  address, rather than being fund-blocked until an unlink→finalize→cooldown→relink.
+  The re-screen is idempotent — a `clear` CASes `pending`→`normal`, and the
+  `blocked` hook dedups per wallet (idempotent pin + `sanctions:link:<wallet>` case).
 
 Two new gates were added at the consumer edge: the **disclosure-acknowledgment
 gate** (`403 disclosure_ack_required` until every current counsel-published
@@ -781,7 +798,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 - **Runtime config** (`compliance.*`, fail-closed loader): cache TTLs,
   screening timeout, velocity limits + per-region overrides, the high-value
   review threshold, retention days by trigger + anonymize triggers, SLA hours
-  by risk, event-tier retention overrides.
+  by risk, event-tier retention overrides.  Every map KEY that is later used for
+  an EXACT lookup is validated against its canonical vocabulary, not accepted as
+  a free string: `velocityRegionOverrides` keys are `regionCodeSchema`, and
+  `retentionDaysByTrigger` / `retentionAnonymizeTriggers` keys are
+  `caseTriggerTypeSchema` (`partialRecord`, since the map is partial — absent
+  triggers take the 730-day fallback).  A typo (`sanction` for `sanctions`) would
+  otherwise validate, store, and then silently miss the lookup — a
+  jurisdiction-specific limit or a case-retention/anonymization rule that looks
+  configured but never fires.
 - **Dev**: the seeded `compliance@licio.test` account carries both roles
   (see `docs/DEVELOPMENT.md`); policies are unpopulated by default so every
   cell reads `disabled` (`no_policy`) until one is created through the

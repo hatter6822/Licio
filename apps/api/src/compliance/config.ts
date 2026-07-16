@@ -14,7 +14,7 @@
 // typically costs ~2 checks.  Over-counting is the deliberate fail-safe
 // direction (a retry can only tighten the window, never widen it); defaults
 // carry the 2x factor.
-import { regionCodeSchema } from '@licio/shared';
+import { caseTriggerTypeSchema, regionCodeSchema } from '@licio/shared';
 import { z } from 'zod';
 import type { PwattConfigStore } from '../events/stores.js';
 
@@ -118,8 +118,23 @@ const VALIDATORS: Readonly<Record<keyof ComplianceRuntimeConfig, z.ZodType>> = {
   velocityRegionOverrides: z.record(regionCodeSchema, z.array(velocityLimitSchema).min(1).max(10)),
   highValueReviewThresholdMinorUnits: minorUnits,
   retentionScheduleRef: z.string().min(1).max(256),
-  retentionDaysByTrigger: z.record(z.string().min(1).max(32), z.number().int().min(1).max(36_500)),
-  retentionAnonymizeTriggers: z.array(z.string().min(1).max(32)).max(16),
+  // The KEY / element must be a canonical `CaseTriggerType`, NOT any ≤32-char
+  // string.  `createCaseInTx` indexes `retentionDaysByTrigger[triggerType]`
+  // (falling back to 730 days) and the anonymize sweep matches
+  // `retentionAnonymizeTriggers` against `triggerType` by EXACT string — so a
+  // typo (`sanction` for `sanctions`) would validate, store, and then silently
+  // give `sanctions`/`fraud` cases the wrong retention + no anonymization, a
+  // schedule that looks applied but never fires (same class as
+  // `velocityRegionOverrides` above).
+  // `partialRecord`, not `record`: an enum-keyed `z.record` is EXHAUSTIVE in
+  // Zod v4 (it would demand every trigger), but the map is partial by design —
+  // absent triggers take the 730-day fallback.  We only need every PRESENT key
+  // to be a real `CaseTriggerType`.
+  retentionDaysByTrigger: z.partialRecord(
+    caseTriggerTypeSchema,
+    z.number().int().min(1).max(36_500),
+  ),
+  retentionAnonymizeTriggers: z.array(caseTriggerTypeSchema).max(16),
   retentionSweepIntervalMs: z
     .number()
     .int()

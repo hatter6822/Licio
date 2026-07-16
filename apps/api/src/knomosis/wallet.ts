@@ -325,6 +325,24 @@ export async function linkWallet(
             unlinkFinalizeAfter: null,
           })
         : existing;
+    // A wallet still `pending` from a link-time screening OUTAGE has NO other
+    // recovery route: the read-through now refuses to promote it from an
+    // absence-of-signal `normal` (thread-Y), so without re-screening here it is
+    // fund-blocked until an unlink→finalize→cooldown→relink.  Re-screen on the
+    // re-link so a recovered provider can clear it.  Idempotent: a `clear` CASes
+    // `pending`→`normal`, `unavailable` leaves it pending, and the blocked hook
+    // dedups per wallet (idempotent pin + `sanctions:link:<wallet>` case).
+    if (record.riskState === 'pending') {
+      const rescreened = await screenLinkedWallet(
+        deps,
+        verified.addressLower,
+        record.walletAccountId,
+        args.userId,
+      );
+      if (rescreened !== null) {
+        return { ok: true, wallet: { ...record, riskState: rescreened }, alreadyLinked: true };
+      }
+    }
     return { ok: true, wallet: record, alreadyLinked: true };
   }
 

@@ -57,6 +57,19 @@ interface PendingSignature {
   preview: TransactionPreview;
   walletAccountId: string;
   address: string;
+  /** Set once a WS-L preflight has succeeded for this attempt (WS-L.3.2a).  A
+   *  retry after a lost submit/attach response REPLAYS the submit with this
+   *  token + the stored signed payload + the stable `submitKey`, rather than
+   *  re-signing and re-preflighting: the message nonce is single-use and a submit
+   *  consumes it, so re-preflighting the same signed message would 409
+   *  `NONCE_REUSED` before the idempotent submit-replay could recover the
+   *  already-created action, stranding the intent in `signed`. */
+  preflightToken?: string;
+  /** The exact signed typed-data message + signature the preflight was minted
+   *  over — resent verbatim on the submit replay (the server's idempotent
+   *  replay returns the original result without re-validating the body). */
+  signedMessage?: Record<string, string>;
+  signedSignature?: string;
 }
 
 export interface DepositFlowProps {
@@ -231,43 +244,80 @@ export function DepositFlow({
     setError(null);
     setBusy(true);
     try {
-      const providers = await discoverProviders();
-      const provider = providers[0];
-      if (provider === undefined) {
-        setError(t('room.deposit.noProvider', 'No browser wallet is available.'));
-        setBusy(false);
-        return;
-      }
-      const signed = await signTypedData({
-        provider: provider.provider,
-        address: pending.address,
-        actionType: 'treasury_deposit',
-        domain: pending.domain,
-        message: pending.message,
-      });
-      if (signed === null) {
-        setError(t('room.deposit.rejected', 'The wallet did not sign the deposit.'));
-        setBusy(false);
-        return;
-      }
-      const preflight = await preflightKnomosisAction({
-        action_type: 'treasury_deposit',
-        room_id: roomId,
-        deployment_id: treasury.deployment_id,
-        wallet_account_id: pending.walletAccountId,
-        // This action SETTLES that intent — naming it makes both compliance
-        // legs one attempt, so a high-value deposit is reviewed once and a
-        // reviewer's release of the intent actually lets the deposit through
-        // (WS-N.2.2c).  Unnamed, the WS-L leg would open a second review no
-        // fraud-queue action could clear.
-        payment_intent_id: pending.paymentIntentId,
-        typed_data_message: signed.message,
-        signature: signed.signature,
-      });
-      if (preflight.result === 'fail') {
-        setError(preflight.human_message);
-        setBusy(false);
-        return;
+      // A RETRY after a submit that may already have reached the server must NOT
+      // re-sign + re-preflight: the message nonce is single-use, a submit consumes
+      // it, and re-preflighting the same signed message 409s `NONCE_REUSED` BEFORE
+      // the idempotent submit-replay (keyed by `submitKey`) could recover the
+      // already-created action — stranding the intent in `signed` until background
+      // recovery/expiry.  So once a preflight has succeeded we STORE its token +
+      // the signed payload and, on re-entry, replay the submit directly.
+      let creds: { token: string; message: Record<string, string>; signature: string } | null =
+        pending.preflightToken !== undefined &&
+        pending.signedMessage !== undefined &&
+        pending.signedSignature !== undefined
+          ? {
+              token: pending.preflightToken,
+              message: pending.signedMessage,
+              signature: pending.signedSignature,
+            }
+          : null;
+      if (creds === null) {
+        const providers = await discoverProviders();
+        const provider = providers[0];
+        if (provider === undefined) {
+          setError(t('room.deposit.noProvider', 'No browser wallet is available.'));
+          setBusy(false);
+          return;
+        }
+        const signed = await signTypedData({
+          provider: provider.provider,
+          address: pending.address,
+          actionType: 'treasury_deposit',
+          domain: pending.domain,
+          message: pending.message,
+        });
+        if (signed === null) {
+          setError(t('room.deposit.rejected', 'The wallet did not sign the deposit.'));
+          setBusy(false);
+          return;
+        }
+        const preflight = await preflightKnomosisAction({
+          action_type: 'treasury_deposit',
+          room_id: roomId,
+          deployment_id: treasury.deployment_id,
+          wallet_account_id: pending.walletAccountId,
+          // This action SETTLES that intent — naming it makes both compliance
+          // legs one attempt, so a high-value deposit is reviewed once and a
+          // reviewer's release of the intent actually lets the deposit through
+          // (WS-N.2.2c).  Unnamed, the WS-L leg would open a second review no
+          // fraud-queue action could clear.
+          payment_intent_id: pending.paymentIntentId,
+          typed_data_message: signed.message,
+          signature: signed.signature,
+        });
+        if (preflight.result === 'fail') {
+          setError(preflight.human_message);
+          setBusy(false);
+          return;
+        }
+        creds = {
+          token: preflight.preflight_token,
+          message: signed.message,
+          signature: signed.signature,
+        };
+        // Persist for the retry path: a lost submit/attach response now replays
+        // the submit instead of re-preflighting a spent nonce.
+        const stored = creds;
+        setPending((p) =>
+          p === null
+            ? p
+            : {
+                ...p,
+                preflightToken: stored.token,
+                signedMessage: stored.message,
+                signedSignature: stored.signature,
+              },
+        );
       }
       // `quoted → signed`, ONCE.  The intent state machine has no `signed →
       // signed` edge (`signed: ['submitted','abandoned']`), so re-running this
@@ -281,9 +331,11 @@ export function DepositFlow({
         signedRef.current = pending.paymentIntentId;
       }
       // Submission needs fresh step-up; the gate opens the dialog + retries.
+      // Capture into a const so the closure sees the narrowed non-null value.
+      const submitCreds = creds;
       const submitted = await gate.guard(() =>
         submitKnomosisAction({
-          preflight_token: preflight.preflight_token,
+          preflight_token: submitCreds.token,
           // The attempt's own key (see `submitKey`): a lost attach response
           // replays THIS submission and recovers the existing action_record_id
           // instead of stranding the intent in `signed`.
@@ -293,8 +345,8 @@ export function DepositFlow({
           deployment_id: treasury.deployment_id,
           wallet_account_id: pending.walletAccountId,
           payment_intent_id: pending.paymentIntentId,
-          typed_data_message: signed.message,
-          signature: signed.signature,
+          typed_data_message: submitCreds.message,
+          signature: submitCreds.signature,
         }),
       );
       await advancePaymentIntent(

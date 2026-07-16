@@ -599,6 +599,30 @@ describe('the fail-closed compliance.* config loader', () => {
       validateComplianceConfigValue('velocityRegionOverrides', { 'US-CA': limits, EU: limits }),
     ).toBeNull();
   });
+
+  it('retention trigger KEYS must be canonical CaseTriggerType values (config thread)', () => {
+    // A typo'd key validates as any string today, then `createCaseInTx` indexes
+    // `retentionDaysByTrigger[triggerType]` by the CLOSED enum (730-day fallback)
+    // and the anonymize sweep matches `retentionAnonymizeTriggers` by EXACT
+    // string — so a typo is a schedule that looks applied but never fires.
+    expect(
+      validateComplianceConfigValue('retentionDaysByTrigger', { sanction: 1_825 }),
+    ).not.toBeNull();
+    expect(
+      validateComplianceConfigValue('retentionDaysByTrigger', { nonsense: 100 }),
+    ).not.toBeNull();
+    // A canonical (partial) map is accepted — the fallback covers the rest.
+    expect(
+      validateComplianceConfigValue('retentionDaysByTrigger', { sanctions: 1_825, fraud: 1_825 }),
+    ).toBeNull();
+    // Anonymize triggers are likewise constrained to the enum.
+    expect(
+      validateComplianceConfigValue('retentionAnonymizeTriggers', ['sanction']),
+    ).not.toBeNull();
+    expect(
+      validateComplianceConfigValue('retentionAnonymizeTriggers', ['sanctions', 'fraud']),
+    ).toBeNull();
+  });
 });
 
 describe('the disclosure gate honors requires_acknowledgment (WS-N.1.2d)', () => {

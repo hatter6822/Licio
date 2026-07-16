@@ -205,47 +205,6 @@ function slaDueAt(services: ComplianceServices, record: ComplianceCaseRecord): s
   return new Date(Date.parse(record.createdAt) + hours * 3_600_000).toISOString();
 }
 
-/**
- * Put a fraud-queue decision's state change back when the decision could not be
- * recorded.  The ONE compensator this module keeps (the intent's compliance
- * column is the WS-M treasury's, a different bounded context — see
- * `recordIntentReviewDecision`), so its failure has nowhere to hide: a revert
- * that throws, or matches zero rows because the state moved again, leaves the
- * intent `cleared`/`blocked` with NO durable decision record while the route
- * reports the decision was not applied.  Nothing else will notice, so it alerts
- * — this is the repair signal, and the discrepancy is named in it.
- */
-async function revertIntentState(
-  services: ComplianceServices,
-  paymentIntentId: string,
-  from: 'cleared' | 'blocked',
-  to: 'flagged',
-): Promise<void> {
-  try {
-    const reverted = await getTreasuryServices().intents.updateComplianceState(
-      paymentIntentId,
-      from,
-      to,
-      new Date(services.now()).toISOString(),
-    );
-    if (reverted !== null) return;
-  } catch (error) {
-    services.alert('compliance.fraud_queue.revert_failed', {
-      paymentIntentId,
-      from,
-      message: error instanceof Error ? error.message : 'unknown',
-    });
-    services.metrics.increment('compliance.fraud_queue.revert_failed');
-    return;
-  }
-  services.alert('compliance.fraud_queue.revert_missed', {
-    paymentIntentId,
-    from,
-    reason: 'the intent was no longer in the state the decision moved it to',
-  });
-  services.metrics.increment('compliance.fraud_queue.revert_failed');
-}
-
 /** A flagged intent, as much of it as the queue needs to find its review. */
 interface HeldIntent {
   paymentIntentId: string;
@@ -1211,6 +1170,44 @@ export function createComplianceRoutes() {
         const services = getComplianceServices();
         if (!treasuryServicesConfigured()) return c.json(notFound, 404);
         const body = c.req.valid('json');
+        // RECORD THE DECISION FIRST, then block — symmetric with Release, and for
+        // the same reason.  A block is as consequential as a release: it stops a
+        // member's funds.  Blocking first opened a window in which the case-chain
+        // write could fail AFTER the `flagged → blocked` CAS while the
+        // expiry/clawback sweep terminalized the timed intent before the
+        // best-effort revert landed — leaving it blocked/abandoned with NO durable
+        // reviewer decision.  Recording first fails CLOSED: a
+        // decision-recorded-but-not-blocked intent stays `flagged` (held), never a
+        // blocked/terminal one with no account of who rejected it.
+        const held = await getTreasuryServices().intents.getById(body.payment_intent_id);
+        if (
+          held === null ||
+          held.complianceState !== 'flagged' ||
+          TERMINAL_INTENT_STATES.has(held.executionState)
+        ) {
+          return c.json(deny('not_flagged', 'The intent is not held for review.'), 409);
+        }
+        const recorded = await recordIntentReviewDecision(services, {
+          intent: {
+            paymentIntentId: held.paymentIntentId,
+            userId: held.userId,
+            roomId: held.roomId,
+            targetType: held.targetType,
+            amount: held.amount,
+          },
+          decision: 'reject',
+          reason: body.reason,
+          actorUserId: auth.userId,
+        });
+        if (!recorded) {
+          return c.json(
+            deny('audit_unavailable', 'The rejection was not applied: it could not be recorded.'),
+            503,
+          );
+        }
+        // The decision is durable — NOW block.  A CAS miss (a concurrent reviewer,
+        // or the intent left `flagged`) leaves the decision recorded and the intent
+        // unchanged; no funds moved, and a retry is idempotent.
         const updated = await getTreasuryServices().intents.updateComplianceState(
           body.payment_intent_id,
           'flagged',
@@ -1219,27 +1216,6 @@ export function createComplianceRoutes() {
         );
         if (updated === null) {
           return c.json(deny('not_flagged', 'The intent is not held for review.'), 409);
-        }
-        // A block is as consequential as a release — it stops a member's
-        // funds — so it is recorded the same way, or reverted to `flagged`.
-        const recorded = await recordIntentReviewDecision(services, {
-          intent: {
-            paymentIntentId: updated.paymentIntentId,
-            userId: updated.userId,
-            roomId: updated.roomId,
-            targetType: updated.targetType,
-            amount: updated.amount,
-          },
-          decision: 'reject',
-          reason: body.reason,
-          actorUserId: auth.userId,
-        });
-        if (!recorded) {
-          await revertIntentState(services, body.payment_intent_id, 'blocked', 'flagged');
-          return c.json(
-            deny('audit_unavailable', 'The rejection was not applied: it could not be recorded.'),
-            503,
-          );
         }
         services.log('compliance.fraud_queue.rejected', {
           paymentIntentId: body.payment_intent_id,

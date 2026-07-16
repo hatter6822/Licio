@@ -489,6 +489,81 @@ describe('DepositFlow (WS-M.3.1)', () => {
     expect(bodies[1]?.idempotency_key).not.toBe(bodies[0]?.idempotency_key);
   });
 
+  it('a retry after a lost attach REPLAYS the submit without re-preflighting a spent nonce (thread DepositFlow:266)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    const onIntentCreated = vi.fn();
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    mockPreflightAction.mockResolvedValue({ result: 'pass', preflight_token: 'tok-abc' });
+    mockSubmitAction.mockResolvedValue({
+      action_record_id: '66666666-6666-4666-8666-666666666666',
+      submission_state: 'submitted',
+      reason_code: null,
+      human_message: null,
+    });
+    // The submit REACHES the server (an action row exists), but the following
+    // attach advance (the `signed` call CARRYING an action_record_id) loses its
+    // response the first time — the exact lost-response window the finding names.
+    let attachAttempts = 0;
+    mockAdvance.mockImplementation(
+      (_room: string, _id: string, state: string, actionRecordId?: string) => {
+        if (state === 'preflight') return Promise.resolve({ execution_state: 'preflighted' });
+        if (state === 'quote')
+          return Promise.resolve({
+            execution_state: 'quoted',
+            quote: { estimated_fee: '1000', quoted_at: '2026-07-01T00:00:00.000Z' },
+          });
+        if (state === 'signed' && actionRecordId !== undefined) {
+          attachAttempts += 1;
+          if (attachAttempts === 1)
+            return Promise.reject(new ApiClientError('network', 'Connection lost.', 503));
+          return Promise.resolve({ execution_state: 'ok' });
+        }
+        return Promise.resolve({ execution_state: 'ok' }); // quoted → signed
+      },
+    );
+    render(
+      <DepositFlow
+        roomId={TREASURY.room_id}
+        treasury={TREASURY}
+        onIntentCreated={onIntentCreated}
+      />,
+    );
+    enterAmount('2');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    // First attempt: the attach fails after the submit landed.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 2 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(mockSubmitAction).toHaveBeenCalledTimes(1);
+
+    // The retry must NOT re-sign + re-preflight (the message nonce is spent, so a
+    // re-preflight 409s NONCE_REUSED before the idempotent submit-replay could
+    // recover the action).  It replays the submit with the SAME token + key.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 2 USDC to the treasury/i }));
+    await waitFor(() =>
+      expect(onIntentCreated).toHaveBeenCalledWith('55555555-5555-4555-8555-555555555555'),
+    );
+    expect(mockSign).toHaveBeenCalledTimes(1); // NOT re-signed
+    expect(mockPreflightAction).toHaveBeenCalledTimes(1); // NOT re-preflighted
+    expect(mockSubmitAction).toHaveBeenCalledTimes(2);
+    const submits = mockSubmitAction.mock.calls.map(
+      (call) => call[0] as { idempotency_key: string; preflight_token: string },
+    );
+    // Same idempotency key AND the stored preflight token across both submits.
+    expect(submits[1]?.idempotency_key).toBe(submits[0]?.idempotency_key);
+    expect(submits[0]?.preflight_token).toBe('tok-abc');
+    expect(submits[1]?.preflight_token).toBe('tok-abc');
+  });
+
   it('blocks the flow when deposits are paused', () => {
     render(
       <DepositFlow

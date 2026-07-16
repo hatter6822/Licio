@@ -1645,6 +1645,40 @@ describe('a fraud-queue decision CLOSES the review it decided (WS-N.2.2c)', () =
     expect(untouched?.resolution).toBeNull();
     expect(intent.complianceState).toBe('flagged');
   });
+
+  it('a REJECT records the decision BEFORE blocking: a chain fault leaves the intent flagged, never blocked (thread compliance.ts:1218)', async () => {
+    const reviewer = await seedReviewer();
+    const subject = randomUUID();
+    const intentId = randomUUID();
+    const intent = wireFlaggedIntent(intentId, subject);
+    const review = await seedReview(subject, intentId);
+
+    // The chain append fails mid-unit (a store fault at the worst moment).
+    const original = compliance.caseAudit.appendChained.bind(compliance.caseAudit);
+    compliance.caseAudit.appendChained = async () => {
+      throw new Error('chain unavailable');
+    };
+    try {
+      const rejected = await app().request(
+        post(
+          '/v1/compliance/admin/fraud-queue/reject',
+          { payment_intent_id: intentId, reason: 'unexplained source of funds' },
+          reviewer.cookie,
+        ),
+      );
+      expect(rejected.status).toBe(503);
+    } finally {
+      compliance.caseAudit.appendChained = original;
+    }
+    // Recording FIRST (symmetric with Release) means the `flagged → blocked` CAS
+    // never ran: the intent stays `flagged` (held), never `blocked` with no
+    // durable reviewer decision — which the expiry/clawback sweep could then
+    // terminalize before a best-effort revert landed.  No compensator needed.
+    expect(intent.complianceState).toBe('flagged');
+    const untouched = await compliance.cases.getById(review.caseId);
+    expect(untouched?.reviewState).toBe('open');
+    expect(untouched?.resolution).toBeNull();
+  });
 });
 
 describe('lawful access preserves the scope kind (WS-N.2.3d)', () => {
