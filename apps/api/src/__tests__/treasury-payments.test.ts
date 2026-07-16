@@ -22,12 +22,12 @@ import {
 import { buildAccountingExport } from '../treasury/export.js';
 import { updateGrantMilestone } from '../treasury/grants.js';
 import {
+  abandonOpenIntent,
   attachIntentSubmission,
   createPaymentIntent,
   depositAllowance,
   expireIntents,
   type IntentDeps,
-  intentActionIdempotencyKey,
   markIntentSigned,
   preflightIntent,
   quoteIntent,
@@ -866,6 +866,27 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     return id;
   }
 
+  it('the clawback/cancel path refuses to abandon an intent whose money has moved (thread-4)', async () => {
+    const deps = buildDeps();
+    const id = await signedIntent(deps);
+    // A LIVE action settles the intent (the submit stamped its payment_intent_id
+    // and the browser died before the attach).  abandonOpenIntent — the choke
+    // point a grant clawback (markGrantClawedBack) and a user cancel both ride —
+    // must refuse to reap it, or the settled transfer vanishes from the ledger
+    // and the accounting export while `reconcileIntents` no longer scans it.
+    await deps.actions.insert(actionOf({ paymentIntentId: id }));
+    expect(await abandonOpenIntent(deps, id)).toBe(false);
+    expect((await deps.intents.getById(id))?.executionState).toBe('signed');
+    // …and the reconcile sweep attaches it instead of it lingering unlinked.
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(id))?.executionState).toBe('submitted');
+    // A control: with no money in motion a signed intent IS abandonable.
+    const clean = buildDeps();
+    const cleanId = await signedIntent(clean);
+    expect(await abandonOpenIntent(clean, cleanId)).toBe(true);
+    expect((await clean.intents.getById(cleanId))?.executionState).toBe('abandoned');
+  });
+
   it('rejects an action from another room, actor, type, or payload', async () => {
     const deps = buildDeps();
     const id = await signedIntent(deps);
@@ -1138,8 +1159,8 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
-    // The WS-L submit landed (idempotency key = the INTENT id, the client
-    // convention) but the browser died before the attach request.
+    // The WS-L submit landed (stamping its payment_intent_id onto the action)
+    // but the browser died before the attach request.
     const action: KnomosisActionRecordEntity = {
       actionRecordId: crypto.randomUUID(),
       deploymentId: DEPLOYMENT,
@@ -1157,8 +1178,8 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       failureReason: null,
       indexedEventRef: null,
       reconciliationState: 'pending',
-      idempotencyKey: id,
-      paymentIntentId: null,
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1196,7 +1217,9 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
-    // The submit landed under the intent's attempt key; the browser died.
+    // The submit stamped the action with this `payment_intent_id`; the browser
+    // died before it could attach.  The client's own idempotency key is a free
+    // UUID — the intent↔action link is the payment_intent_id, not the key.
     await deps.actions.insert({
       actionRecordId: crypto.randomUUID(),
       deploymentId: DEPLOYMENT,
@@ -1214,8 +1237,8 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       failureReason: null,
       indexedEventRef: null,
       reconciliationState: 'pending',
-      idempotencyKey: id,
-      paymentIntentId: null,
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -1398,9 +1421,9 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
-    // The steward's WS-L submit landed (idempotency key = the intent id) but
-    // the browser died before the attach — a NULL-owner intent has no
-    // user-scoped key, so recovery rides the room-scoped lookup.
+    // The steward's WS-L submit landed (stamping its payment_intent_id) but the
+    // browser died before the attach — a NULL-owner intent recovers through the
+    // SAME actor-agnostic payment_intent_id link, whichever steward signed it.
     const action: KnomosisActionRecordEntity = {
       actionRecordId: crypto.randomUUID(),
       deploymentId: DEPLOYMENT,
@@ -1423,8 +1446,8 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       failureReason: null,
       indexedEventRef: null,
       reconciliationState: 'pending',
-      idempotencyKey: id,
-      paymentIntentId: null,
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1440,9 +1463,6 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     await provisionTreasury(deps);
     const treasury = await deps.treasuries.getByRoom(ROOM);
     if (treasury === null) throw new Error('fixture treasury missing');
-    // Attempt keys rotate per retry: same id at 0, `:r<n>`-suffixed after.
-    expect(intentActionIdempotencyKey({ paymentIntentId: 'pi', retryCount: 0 })).toBe('pi');
-    expect(intentActionIdempotencyKey({ paymentIntentId: 'pi', retryCount: 2 })).toBe('pi:r2');
     const created = await createPaymentIntent(deps, {
       userId: USER,
       roomId: ROOM,
@@ -1457,8 +1477,11 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
-    // Attempt 0's action FAILED at the gateway (durable, key = intent id).
-    const dead: KnomosisActionRecordEntity = {
+    // Attempt 0's action forwards LIVE — the ORDINARY way an intent reaches
+    // `failed` and becomes retryable: the auto-attach binds the live action by
+    // its payment_intent_id, then the gateway failure reconciles onto the intent
+    // (the client's idempotency key is its own free UUID, not a derived key).
+    const attempt0: KnomosisActionRecordEntity = {
       actionRecordId: crypto.randomUUID(),
       deploymentId: DEPLOYMENT,
       actionType: 'treasury_deposit' as KnomosisSignedActionType,
@@ -1471,20 +1494,23 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
         message: { amount: '100', asset: 'USDC', treasuryId: treasury.treasuryId },
         signature: '0xsig',
       },
-      submissionState: 'failed' as SubmissionState,
-      failureReason: 'gateway_rejected',
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
       indexedEventRef: null,
       reconciliationState: 'pending',
-      idempotencyKey: id,
-      paymentIntentId: null,
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    await deps.actions.insert(dead);
-    // Same-attempt recovery binds the terminal action (accurate bookkeeping:
-    // the failure reconciles onto the intent, opening the retry path).
-    await reconcileIntents(deps);
-    await reconcileIntents(deps);
+    await deps.actions.insert(attempt0);
+    await reconcileIntents(deps); // signed → submitted (auto-attach binds the live action)
+    await deps.actions.update({
+      ...attempt0,
+      submissionState: 'failed' as SubmissionState,
+      failureReason: 'gateway_rejected',
+    });
+    await reconcileIntents(deps); // submitted → failed
     expect((await deps.intents.getById(id))?.executionState).toBe('failed');
     // The bounded retry re-arms the intent for a NEW attempt…
     const retried = await retryIntent(deps, id, USER);
@@ -1493,24 +1519,25 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     await preflightIntent(deps, id, USER);
     await quoteIntent(deps, id, USER);
     await markIntentSigned(deps, id, USER);
-    // …whose MANUAL attach refuses the dead attempt-0 action outright…
-    const replay = await attachIntentSubmission(deps, id, dead.actionRecordId, USER);
+    // …whose MANUAL attach refuses the now-terminal attempt-0 action outright…
+    const replay = await attachIntentSubmission(deps, id, attempt0.actionRecordId, USER);
     if (!('code' in replay)) throw new Error('unexpectedly attached');
     expect(replay.code).toBe('action_terminal');
-    // …and whose auto-attach looks up the ROTATED key, so the dead action
-    // (still stored under the attempt-0 key) is invisible to recovery.
+    // …and whose auto-attach, keyed on the LIVE payment_intent_id link, never
+    // rebinds the dead attempt-0 action (a corpse moved no money).
     await reconcileIntents(deps);
     const after = await deps.intents.getById(id);
     expect(after?.executionState).toBe('signed');
     expect(after?.actionRecordId).toBeNull();
-    // A fresh attempt-1 action under the rotated key DOES recover.
+    // A fresh LIVE attempt-1 action for the same intent DOES recover — the link
+    // finds it, the dead attempt-0 stays invisible.
     const fresh: KnomosisActionRecordEntity = {
-      ...dead,
+      ...attempt0,
       actionRecordId: crypto.randomUUID(),
       typedDataHash: `0x${'3'.repeat(64)}`,
       submissionState: 'submitted' as SubmissionState,
       failureReason: null,
-      idempotencyKey: `${id}:r1`,
+      idempotencyKey: crypto.randomUUID(),
     };
     await deps.actions.insert(fresh);
     await reconcileIntents(deps);

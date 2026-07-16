@@ -90,21 +90,28 @@ modified** in their verdict semantics:
   0087's one intent per action.  Scoped to LIVE attempts (`submission_state NOT
   IN ('failed','reverted')`): the invariant is one live action per intent, not
   one ever, because `retryIntent` re-arms a failed/reverted intent and the next
-  attempt mints a replacement under a rotated key (W14) — an index spanning
-  every state would collide with the dead attempt and replay a corpse instead,
-  stranding the retry.  `DEAD_ACTION_STATES` is the one definition the index,
-  the in-memory adapter, and the replay read all use, because they must give the
-  same answer. While an intent sits `signed`, a caller could otherwise
-  mint a second preflight and submit the same intent again under a different
-  key; for a room-owned payout *another steward* could, because the action
-  idempotency unique is `(actor_user_id, idempotency_key)` and deliberately
-  actor-scoped (a room-wide key would let one member squat another's). Each
-  reservation forwarded with its own gateway key and MOVED FUNDS, and only one
-  could ever attach to the ledger. The exclusive resource is the intent, so the
-  uniqueness lives on the reference to it, and the loser replays the winner
-  whoever they are. Submit additionally demands the intent's own attempt key
-  (`intentActionIdempotencyKey`, the SSOT the auto-attach already looks up by)
-  and that the intent be `signed`.
+  attempt mints a replacement under its own fresh client key (W14) — an index
+  spanning every state would collide with the dead attempt and replay a corpse
+  instead, stranding the retry.  `DEAD_ACTION_STATES` is the one definition the
+  index, the in-memory adapter, the replay read, and the auto-attach lookup
+  (`getByPaymentIntentId`, live-only) all use, because they must give the same
+  answer. While an intent sits `signed`, a caller could otherwise mint a second
+  preflight and submit the same intent again under a different key; for a
+  room-owned payout *another steward* could, because the action idempotency
+  unique is `(actor_user_id, idempotency_key)` and deliberately actor-scoped (a
+  room-wide key would let one member squat another's). Each reservation forwarded
+  with its own gateway key and MOVED FUNDS, and only one could ever attach to the
+  ledger. The exclusive resource is the intent, so the uniqueness lives on the
+  reference to it, and the loser replays the winner whoever they are.
+
+  **The idempotency key is the client's; the link is `payment_intent_id`.**  The
+  submit's `idempotency_key` is a free client UUID (WS-L.3.2a) that dedups the
+  client's own HTTP retries — nothing derives it or demands it match a
+  server-computed value, so a UUID column and wire schema hold it and a retried
+  intent can actually submit.  The intent↔action linkage is the
+  `payment_intent_id` the submit stamps onto the record, read back live-only, so
+  the auto-attach recovers the orphan regardless of which key the client chose —
+  no key convention to enforce, and no `intent_key_mismatch` edge to get wrong.
 
   **The preflight token binds every fact it was cleared under.**  The binding is
   built by ONE constructor and compared by a TOTAL walk over its keys, so a
@@ -115,12 +122,18 @@ modified** in their verdict semantics:
   submit drop or swap the intent and re-run fraud against a different review.
 
   **Authorization is not a gate.**  A claimed intent's IDENTITY — is it the
-  caller's, and is it this transfer — is checked on every request that names
-  one, retry or not.  Its STATE (in-flight, `signed`, the attempt key) is a gate
-  on minting a NEW action, so a retry skips it.  Conflating the two let a caller
-  who merely knew another member's intent id be treated as its retry: the check
-  that would have stopped them was skipped, the reservation collided on the
-  intent unique, and they were handed that member's action id and status.
+  caller's (or, for a room-owned payout with a null owner, is the caller a
+  STEWARD of the room), and is it this transfer — is checked on every request
+  that names one, retry or not.  Its STATE (in-flight, `signed`) is a gate on
+  minting a NEW action, so a retry skips it.  Conflating the two let a caller who
+  merely knew another member's intent id be treated as its retry: the check that
+  would have stopped them was skipped, the reservation collided on the intent
+  unique, and they were handed that member's action id and status.  The
+  stewardship leg is the same one `/actions/:id` and `submitAction` apply — a
+  room-owned payout has no owner to match, so without it any authenticated user
+  who named the intent id and payload replayed the steward's action id/status
+  (WS-N.2.3d tipping-off), because the retry replay runs before `submitAction`
+  re-checks the `role_permission` gate.
 
   **A claimed `payment_intent_id` is a claim, not a fact.**  It buys the naming
   action a share of that intent's review, so unverified it is a clearance to
@@ -480,9 +493,10 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   The symptom is always the same shape: the client cannot learn the id of a
   transfer that already happened.  That is a bad response, not a lost transfer —
   the **W13 auto-attach sweep** re-binds the orphan action server-side without
-  the client, and the `intent_key_mismatch` check exists precisely so it can
-  always find it.  The ordering rule is about answering the client truthfully;
-  the ledger's guarantee is the sweep's, and it is stated with it below.
+  the client, finding it by the `payment_intent_id` the submit stamped onto the
+  record (live-only, so the current attempt is the one it recovers).  The
+  ordering rule is about answering the client truthfully; the ledger's guarantee
+  is the sweep's, and it is stated with it below.
 - **An intent whose money has moved is never abandonable.**  `signed` is a timed
   state, so a client that dies between submit and attach — the case W13's
   recovery exists for — leaves an intent that expires while its action sits on
@@ -490,9 +504,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   only one was:
   1. the tick must **recover before it reaps** (it ran expiry first, so one tick
      reaped the very intent the next line would have rescued);
-  2. the reaper must not abandon an intent whose action exists (`expireIntents`
-     asks for the orphan by the same lookup the sweep uses — `orphanActionFor`,
-     one definition, because the two must agree about it exactly);
+  2. no reaper may abandon an intent whose action exists.  The guard lives in
+     `orphanActionFor` (one definition — the sweep that ATTACHES and the reapers
+     that must not DESTROY have to agree about it exactly), and BOTH reapers ask
+     it: the expiry sweep AND `abandonOpenIntent`, the choke point a grant
+     clawback (`markGrantClawedBack`) and a user cancel both ride — a clawback
+     landing after a payout submitted but before it bound would otherwise reap
+     the intent `reconcileIntents` no longer scans;
   3. the attach must be allowed to land on an expired intent.  It was not: the
      expiry guard refused every transition but `abandoned`, so the money could
      be reaped and never re-bound.  `submitted` is now exempt, because it is
@@ -600,8 +618,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   timestamp alone — two changes inside one millisecond share a timestamp, and a
   verified declaration is the real-funds region basis, so resurrecting a revoked
   one (or verifying evidence against a region the member has left) must be
-  impossible. The SAR filing CASes on `approved` for the same reason: the loser
-  of a race gets a 409 rather than overwriting `filedByRef`.
+  impossible. A premised CAS is an `UPDATE … WHERE`, never an upsert: if the
+  declaration was DELETED between the reviewer's read and their decision (the
+  deletion purge removes declarations before it tombstones the user), an
+  `INSERT … ON CONFLICT DO UPDATE` finds no conflict and RECREATES region data
+  for a deleting/deleted account — the conditional UPDATE matches zero rows and
+  returns null, exactly as the in-memory adapter does. The SAR filing CASes on
+  `approved` for the same reason: the loser of a race gets a 409 rather than
+  overwriting `filedByRef`.
 - **The retention writes re-check the hold themselves.**  `deleteCascade` takes
   a row lock and re-reads it inside its transaction; `anonymize` puts it in the
   `WHERE`. The sweep's `listExpired` read cannot carry that guarantee — a SAR

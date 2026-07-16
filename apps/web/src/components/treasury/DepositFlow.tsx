@@ -45,6 +45,13 @@ import { TransactionPreviewCard } from '../wallet/TransactionPreview.js';
 
 interface PendingSignature {
   paymentIntentId: string;
+  /** The submit's client idempotency key (WS-L.3.2a): a fresh UUID per attempt,
+   *  STABLE across lost-response retries of this same signed submission (so they
+   *  replay the one action) and NEW when a fresh attempt assembles a new preview
+   *  (so a retried intent never dedups onto a prior attempt's terminal action).
+   *  It is the client's own key — the intent↔action link is `payment_intent_id`,
+   *  not this, so no server-derived key convention constrains it. */
+  submitKey: string;
   domain: KnomosisEip712Domain;
   message: Record<string, string>;
   preview: TransactionPreview;
@@ -197,6 +204,7 @@ export function DepositFlow({
       });
       setPending({
         paymentIntentId: created.payment_intent_id,
+        submitKey: crypto.randomUUID(),
         domain,
         message,
         preview,
@@ -276,10 +284,10 @@ export function DepositFlow({
       const submitted = await gate.guard(() =>
         submitKnomosisAction({
           preflight_token: preflight.preflight_token,
-          // STABLE per intent: a retry after a lost attach response replays
-          // the SAME submission and recovers the existing action_record_id
+          // The attempt's own key (see `submitKey`): a lost attach response
+          // replays THIS submission and recovers the existing action_record_id
           // instead of stranding the intent in `signed`.
-          idempotency_key: pending.paymentIntentId,
+          idempotency_key: pending.submitKey,
           action_type: 'treasury_deposit',
           room_id: roomId,
           deployment_id: treasury.deployment_id,

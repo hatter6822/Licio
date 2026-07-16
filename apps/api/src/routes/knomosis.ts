@@ -65,7 +65,6 @@ import {
   requireSteward,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
-import { intentActionIdempotencyKey } from '../treasury/intents.js';
 import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/services.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
@@ -96,17 +95,14 @@ async function verifyClaimedIntent(input: {
   /** `submit` demands the intent already be `signed`; `preflight` accepts the
    *  whole pre-submission window (it is what moves the intent toward signed). */
   stage: 'preflight' | 'submit';
-  /** The submit's client idempotency key — checked against the intent's own
-   *  attempt key (submit only; a preflight mints no action). */
-  idempotencyKey?: string;
   /** IDENTITY ONLY: is the intent the caller's, and is it this transfer?
    *
    *  The split matters.  Identity is AUTHORIZATION and is checked on every
    *  request that names an intent, retry or not.  The state checks below —
-   *  in-flight, `signed`, the attempt key — are a GATE on minting a NEW action,
-   *  and a retry has already minted: re-applying them would reject the retry of
-   *  a submission that succeeded.  Conflating the two is how a client that
-   *  merely QUOTED someone else's intent id could be treated as its retry. */
+   *  in-flight and `signed` — are a GATE on minting a NEW action, and a retry
+   *  has already minted: re-applying them would reject the retry of a submission
+   *  that succeeded.  Conflating the two is how a client that merely QUOTED
+   *  someone else's intent id could be treated as its retry. */
   identityOnly?: boolean;
 }): Promise<{ code: string; message: string } | null> {
   if (input.paymentIntentId === undefined) return null;
@@ -120,9 +116,21 @@ async function verifyClaimedIntent(input: {
     message: 'The payment intent does not match this action.',
   };
   if (intent === null) return mismatch;
-  // Ownership: a member's own intent, or a room-owned payout in the room this
-  // action names (the pipeline's steward check gates the room itself).
-  if (intent.userId !== null && intent.userId !== input.userId) return mismatch;
+  // Ownership.  A member's own intent is authorized by the owner match.  A
+  // room-owned payout (null owner: grant/compensation) is authorized by
+  // STEWARDSHIP — the same `isSteward` test `/actions/:id` uses to hide another
+  // steward's action, and the very gate `submitAction` re-runs for a
+  // `grant_payout`.  It MUST be checked here, in the identity block, because the
+  // retry replay skips `submitAction`'s gate: without it, any authenticated user
+  // who names a room-owned intent id + payload passes as its "retry" and is
+  // handed the steward's action id and submission state (WS-N.2.3d tipping-off).
+  if (intent.userId !== null) {
+    if (intent.userId !== input.userId) return mismatch;
+  } else {
+    const rooms = getKnomosisServices().rooms;
+    // Fail closed: an unwired governance port cannot authorize a room payout.
+    if (rooms === null || !(await rooms.isSteward(intent.roomId, input.userId))) return mismatch;
+  }
   if (intent.roomId !== input.roomId) return mismatch;
   // …and the SAME movement.  Amount and asset come from the signed payload, so
   // a cleared small intent cannot cover a large transfer — but they are not
@@ -172,19 +180,10 @@ async function verifyClaimedIntent(input: {
       message: 'The payment intent must be signed before its action is submitted.',
     };
   }
-  // …under the intent's OWN attempt key.  WS-M already derives it
-  // (`intentActionIdempotencyKey`: the intent id, rotated per retry) and the
-  // auto-attach looks the action up by it — so a submit that names some other
-  // key mints an action the intent's own bookkeeping cannot find.  The DB's
-  // `knomosis_action_intent_uq` stops the SECOND action either way; this makes
-  // the FIRST one findable, and says so plainly instead of letting the client
-  // discover it through a lost race.
-  if (input.stage === 'submit' && input.idempotencyKey !== intentActionIdempotencyKey(intent)) {
-    return {
-      code: 'intent_key_mismatch',
-      message: 'A submission settling a payment intent must use that intent’s attempt key.',
-    };
-  }
+  // The client's idempotency key is its own (WS-L.3.2a): a free UUID that dedups
+  // its HTTP retries.  The intent↔action link is `payment_intent_id`, stamped
+  // onto the action record and read back LIVE-only, so the auto-attach finds the
+  // orphan regardless of the key the client chose — no key convention to enforce.
   if (intent.expiresAt <= new Date(getKnomosisServices().now()).toISOString()) return mismatch;
   return null;
 }
@@ -515,7 +514,6 @@ export function createKnomosisRoutes() {
                 actionType: body.action_type,
                 typedDataMessage: body.typed_data_message,
                 stage: 'submit',
-                idempotencyKey: body.idempotency_key,
               });
           if (claimed !== null) {
             return c.json(deny(claimed.code, claimed.message), 400);

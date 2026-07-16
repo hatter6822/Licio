@@ -535,24 +535,6 @@ export async function markIntentSigned(
   return { ok: true, intent: updated };
 }
 
-/** The WS-L signed-action type each payment target rides (fail-closed map). */
-
-/**
- * The WS-L action idempotency key for the intent's CURRENT attempt (W14):
- * the first attempt uses the payment-intent id (the W13 client convention);
- * every retry rotates the key to `<intentId>:r<retryCount>` so a fresh
- * attempt never dedups onto — nor auto-recovers — a previous attempt's
- * terminal action.  The client derives the same key from the wire
- * `retry_count` when submitting the retried action.
- */
-export function intentActionIdempotencyKey(
-  intent: Pick<PaymentIntentRecord, 'paymentIntentId' | 'retryCount'>,
-): string {
-  return intent.retryCount > 0
-    ? `${intent.paymentIntentId}:r${intent.retryCount}`
-    : intent.paymentIntentId;
-}
-
 /**
  * `signed → submitted`: bind the WS-L action record minted by the submit path.
  * The action must BELONG to this intent — same room, same actor, the target's
@@ -583,8 +565,9 @@ export async function attachIntentSubmission(
   // check) would drive a freshly retried intent straight back to its
   // terminal state, burning the retry budget without a transfer (W14).
   // The reconcile sweep is exempt: recovering the CURRENT attempt's action
-  // — whatever its state — is accurate bookkeeping (the attempt key keeps
-  // older attempts out of its reach).
+  // — whatever its state — is accurate bookkeeping (the payment-intent link
+  // is LIVE-only, so `knomosis_action_intent_uq` keeps at most this one
+  // attachable action; older attempts are dead and out of reach).
   if (
     opts?.allowTerminal !== true &&
     (action.submissionState === 'failed' || action.submissionState === 'reverted')
@@ -766,15 +749,14 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
     if (candidates.length === 0) break;
     afterId = candidates[candidates.length - 1]?.paymentIntentId ?? null;
     for (const intent of candidates) {
-      // AUTO-ATTACH recovery (W13): the client submits the WS-L action with
-      // idempotency key = the intent's ATTEMPT key (`intentActionIdempotencyKey`
-      // — the intent id, `:r<n>`-suffixed after a retry, W14), so a browser
-      // that died between submit and attach leaves a durable action the server
-      // can re-bind — the full attach validation (bindings, freeze, uniqueness)
-      // still applies, and the intent would otherwise expire while the
-      // transfer finalized off-ledger.  Room-owned payout intents (null owner:
-      // grant/compensation) recover through the room-scoped lookup — ANY
-      // steward's signed action under the attempt key qualifies (W14).
+      // AUTO-ATTACH recovery (W13): the client submits the WS-L action naming
+      // its `payment_intent_id`, so a browser that died between submit and
+      // attach leaves a durable action the server can re-bind by that link
+      // (`getByPaymentIntentId`, LIVE-only) — the full attach validation
+      // (bindings, freeze, uniqueness) still applies, and the intent would
+      // otherwise expire while the transfer finalized off-ledger.  The link is
+      // actor-agnostic, so a room-owned payout intent (null owner:
+      // grant/compensation) recovers ANY steward's signed action for it (W14).
       if (intent.executionState === 'signed') {
         const orphan = await orphanActionFor(deps, intent);
         if (orphan !== null) {
@@ -876,6 +858,13 @@ async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord):
  * cancellation path, W9): same table-checked + audited transition the expiry
  * sweep uses.  Post-submission states are untouched — an on-chain movement in
  * flight cannot be cancelled here; the attach/retry guards handle the rest.
+ *
+ * AND an intent whose money has moved is not abandonable — the same guard the
+ * expiry sweep applies (`orphanActionFor`).  `signed` is a timed state, so a
+ * clawback (or a user cancel) landing after the payout action was submitted but
+ * before the client/auto-attach bound it would otherwise reap the intent that
+ * `reconcileIntents` no longer scans, stranding the settled transfer outside
+ * the ledger and the accounting export.
  */
 export async function abandonOpenIntent(
   deps: IntentDeps,
@@ -883,6 +872,7 @@ export async function abandonOpenIntent(
 ): Promise<boolean> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null || !TIMED_STATES.has(intent.executionState)) return false;
+  if ((await orphanActionFor(deps, intent)) !== null) return false;
   return (await transitionIntent(deps, intent, 'abandoned', {}, null)) !== null;
 }
 
@@ -915,10 +905,15 @@ export async function expireIntents(deps: IntentDeps, limit = 200): Promise<numb
  * The durable action a signed intent's client minted but never attached — the
  * W13 recovery's evidence.
  *
+ * Found by the intent↔action link the submit stamps onto the action record:
+ * `payment_intent_id`, LIVE-only (`getByPaymentIntentId`).  The partial unique
+ * `knomosis_action_intent_uq` scopes that link to non-terminal attempts, so at
+ * most one attachable action exists per intent — the SAME row the attach's
+ * uniqueness check would collide on.  The link is actor-agnostic, so it recovers
+ * a room-owned payout's action under ANY steward without a room-scoped lookup.
+ *
  * ONE lookup, because two readers must agree about it exactly: the sweep that
- * ATTACHES it, and the reaper that must not DESTROY it.  (`intentActionIdempotencyKey`
- * is why it is findable at all — a submit under any other key mints an action
- * this cannot see, which is what `intent_key_mismatch` refuses at the edge.)
+ * ATTACHES it, and the reaper that must not DESTROY it.
  *
  * Null when there is nothing to recover: the intent is not `signed`, or it has
  * already bound its action.
@@ -928,12 +923,7 @@ async function orphanActionFor(
   intent: PaymentIntentRecord,
 ): Promise<KnomosisActionRecordEntity | null> {
   if (intent.executionState !== 'signed' || intent.actionRecordId !== null) return null;
-  const attemptKey = intentActionIdempotencyKey(intent);
-  // Room-owned payout intents (null owner) recover through the room-scoped
-  // lookup — ANY steward's signed action under the attempt key qualifies (W14).
-  return intent.userId !== null
-    ? await deps.actions.getByIdempotencyKey(intent.userId, attemptKey)
-    : await deps.actions.getByRoomIdempotencyKey(intent.roomId, attemptKey);
+  return await deps.actions.getByPaymentIntentId(intent.paymentIntentId);
 }
 
 /** Bounded retry: `failed`/`reverted` → `created` (WS-M.3.1b, default 3). */

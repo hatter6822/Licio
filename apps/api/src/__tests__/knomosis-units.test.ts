@@ -1120,7 +1120,7 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
 
     // A DEAD attempt releases the intent.  `retryIntent` re-arms a
     // failed/reverted intent (`failed|reverted → created`) and the next attempt
-    // mints a REPLACEMENT under a rotated key (W14) — an index spanning every
+    // mints a REPLACEMENT under its OWN fresh key (W14) — an index spanning every
     // state would collide with the corpse and replay it, stranding the retry.
     const attempt0 = await store.getById('a1');
     if (attempt0 === null) throw new Error('attempt 0 missing');
@@ -1130,17 +1130,18 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
       ...base,
       actionRecordId: 'a5',
       actorUserId: 'steward-a',
-      idempotencyKey: `${INTENT}:r1`,
+      idempotencyKey: '11111111-1111-4111-8111-111111111111',
       paymentIntentId: INTENT,
     });
     expect((await store.getByPaymentIntentId(INTENT))?.actionRecordId).toBe('a5');
-    // …and the replacement is itself exclusive while it lives.
+    // …and the replacement is itself exclusive while it lives — the collision is
+    // on the intent link, whatever key the second submitter chose.
     await expect(
       store.insert({
         ...base,
         actionRecordId: 'a6',
         actorUserId: 'steward-b',
-        idempotencyKey: `${INTENT}:r1`,
+        idempotencyKey: '22222222-2222-4222-8222-222222222222',
         paymentIntentId: INTENT,
       }),
     ).rejects.toThrow(/unique constraint violated/);
@@ -1195,7 +1196,9 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     const result = await submitAction(s(fixture), {
       userId: 'steward-b',
       preflightToken: 'nonexistent-token',
-      idempotencyKey: `${INTENT}:r1`,
+      // Steward B's OWN free idempotency key — the replay is found by the
+      // payment_intent_id link, not by any shared/derived key.
+      idempotencyKey: '44444444-4444-4444-8444-444444444444',
       actionType: 'grant_payout',
       roomId: '33333333-3333-4333-8333-333333333333',
       deploymentId: LOCAL_DEPLOYMENT.deployment_id,

@@ -843,6 +843,65 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       );
     });
 
+    it('a room-owned payout: a STEWARD may claim it, a non-steward may NOT (WS-N.2.3d)', async () => {
+      // A null-owner payout is authorized by STEWARDSHIP, not ownership — the
+      // check lives in the identity block so the submit retry replay (which skips
+      // the pipeline's steward gate) cannot hand a non-steward the steward's
+      // action id/state by merely naming the intent.
+      async function payoutClaim(isSteward: boolean): Promise<Response> {
+        const fixture = await freshKnomosisServices();
+        fixture.knomosis.rooms = {
+          roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+          isMember: async () => true,
+          isSteward: async () => isSteward,
+          contentVisibleToUser: async () => true,
+        };
+        const { userId, cookie } = await seedUserWithSession(fixture.identity);
+        const walletAccountId = await linkAndMapWallet(fixture, userId);
+        const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+        const message: Record<string, string> = {
+          roomId: ROOM,
+          grantId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          recipient: testAccount.address,
+          asset: 'USDC',
+          amount: '1000000',
+          actor: testAccount.address,
+          nonce: '7',
+          expiration: String(Math.floor(Date.now() / 1000) + 600),
+          deploymentId,
+        };
+        wireIntent({
+          paymentIntentId: INTENT,
+          userId: null, // ROOM-OWNED: authorized by stewardship alone
+          roomId: ROOM,
+          targetType: 'grant_payout',
+          targetId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          treasuryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          asset: 'USDC',
+          amount: '1000000',
+          executionState: 'quoted',
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        });
+        return await post('/knomosis/actions/preflight', cookie, {
+          action_type: 'grant_payout',
+          room_id: ROOM,
+          deployment_id: deploymentId,
+          wallet_account_id: walletAccountId,
+          payment_intent_id: INTENT,
+          typed_data_message: message,
+          signature: await signedTypedData('grant_payout', message),
+        });
+      }
+      // A steward's claim is honoured (it may still fail a later gate, never on
+      // the intent pairing); a non-steward is rejected on the pairing itself.
+      expect((await payoutClaim(true)).status).not.toBe(400);
+      const denied = await payoutClaim(false);
+      expect(denied.status).toBe(400);
+      expect(((await denied.json()) as { error: { code: string } }).error.code).toBe(
+        'intent_mismatch',
+      );
+    });
+
     it('rejects an intent past the pre-submission window, or expired', async () => {
       // `submitted` and beyond: the intent's action already exists, so naming it
       // in a NEW preflight would resurrect a spent clearance.

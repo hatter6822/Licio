@@ -575,26 +575,6 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     return rows[0] ? mapAction(rows[0]) : null;
   }
 
-  async getByRoomIdempotencyKey(
-    roomId: string,
-    idempotencyKey: string,
-  ): Promise<KnomosisActionRecordEntity | null> {
-    // Idempotency is actor-scoped, so racing stewards can share a key within
-    // the room — the EARLIEST row wins deterministically (W14).
-    const rows = await this.db
-      .select()
-      .from(knomosisActionRecords)
-      .where(
-        and(
-          eq(knomosisActionRecords.roomId, roomId),
-          eq(knomosisActionRecords.idempotencyKey, idempotencyKey),
-        ),
-      )
-      .orderBy(asc(knomosisActionRecords.createdAt))
-      .limit(1);
-    return rows[0] ? mapAction(rows[0]) : null;
-  }
-
   async getByTypedDataHash(
     deploymentId: string,
     typedDataHash: string,

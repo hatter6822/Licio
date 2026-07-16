@@ -758,6 +758,28 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect((await stores.declarations.get(userId))?.verificationLevel).toBe('reviewer_verified');
     expect(await stores.declarations.delete(userId)).toBe(true);
     expect(await stores.declarations.get(userId)).toBeNull();
+    // A CAS against a MISSING row inserts NOTHING.  If the deletion purge
+    // removed the declaration between the reviewer's read and their decision,
+    // an `INSERT … ON CONFLICT DO UPDATE` would find no conflict and recreate
+    // region data for the deleting/deleted account — the `UPDATE … WHERE`
+    // matches zero rows and returns null instead, and the row stays gone.
+    expect(
+      await stores.declarations.upsert(
+        {
+          userId,
+          declaredRegion: region,
+          status: 'revoked',
+          verificationLevel: 'reviewer_verified',
+          evidenceRef: null,
+          verifiedAt: null,
+          verifiedBy: null,
+          createdAt: at,
+          updatedAt: NOW(),
+        },
+        { declaredRegion: region, status: 'revoked', updatedAt: NOW() },
+      ),
+    ).toBeNull();
+    expect(await stores.declarations.get(userId)).toBeNull();
   });
 
   it('disclosures are publish-immutable; acks are idempotent and erased by NULLing only', async () => {

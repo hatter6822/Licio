@@ -534,60 +534,57 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
     await db.delete(users).where(eq(users.userId, owner));
   });
 
-  it('getByRoomIdempotencyKey finds the EARLIEST steward action (W14 auto-attach)', async () => {
+  it('getByPaymentIntentId recovers a room-owned steward action, LIVE-only (W14 auto-attach)', async () => {
     const actions = new DrizzleKnomosisActionStore(db);
-    const stewardA = await makeUser(db, 'wsm_stew_a');
-    const stewardB = await makeUser(db, 'wsm_stew_b');
-    const walletOf = async (owner: string) => {
-      const inserted = await db
-        .insert(walletAccounts)
-        .values({
-          userId: owner,
-          addressHash: Buffer.from(randomUUID().replaceAll('-', ''), 'hex'),
-          addressTruncated: '0xabcd…ef01',
-          chainId: 1337,
-          walletType: 'eoa' as const,
-          unlinkState: 'active' as const,
-          riskState: 'normal' as const,
-        })
-        .returning();
-      return (inserted[0] as { walletAccountId: string }).walletAccountId;
-    };
-    const sharedKey = randomUUID();
-    const actionOf = (owner: string, wallet: string, createdAt: string) => ({
+    const steward = await makeUser(db, 'wsm_stew_a');
+    const inserted = await db
+      .insert(walletAccounts)
+      .values({
+        userId: steward,
+        addressHash: Buffer.from(randomUUID().replaceAll('-', ''), 'hex'),
+        addressTruncated: '0xabcd…ef01',
+        chainId: 1337,
+        walletType: 'eoa' as const,
+        unlinkState: 'active' as const,
+        riskState: 'normal' as const,
+      })
+      .returning();
+    const wallet = (inserted[0] as { walletAccountId: string }).walletAccountId;
+    const intentId = randomUUID();
+    const actionOf = (state: 'submitted' | 'failed') => ({
       actionRecordId: randomUUID(),
       deploymentId,
       actionType: 'grant_payout' as const,
       roomId,
       actorWalletAccountId: wallet,
-      actorUserId: owner,
+      actorUserId: steward,
       payloadHash: HEX32('1'),
       typedDataHash: `0x${randomUUID().replaceAll('-', '')}${'0'.repeat(32)}`,
       signedAction: { message: { amount: '10', asset: 'USDC' }, signature: '0xsig' },
-      submissionState: 'submitted' as const,
+      submissionState: state,
       failureReason: null,
       indexedEventRef: null,
       reconciliationState: 'pending' as const,
-      idempotencyKey: sharedKey,
-      paymentIntentId: null,
-      createdAt,
-      updatedAt: createdAt,
+      // A room-owned payout carries the steward's OWN client idempotency key —
+      // the intent↔action link is `payment_intent_id`, not the key (W14).
+      idempotencyKey: randomUUID(),
+      paymentIntentId: intentId,
+      createdAt: NOW(),
+      updatedAt: NOW(),
     });
-    // Two stewards raced the SAME attempt key (idempotency is actor-scoped):
-    // the room-scoped lookup returns the EARLIEST row deterministically.
-    const walletA = await walletOf(stewardA);
-    const walletB = await walletOf(stewardB);
-    const early = actionOf(stewardA, walletA, new Date(Date.now() - 60_000).toISOString());
-    const late = actionOf(stewardB, walletB, NOW());
-    await actions.insert(late);
-    await actions.insert(early);
-    const found = await actions.getByRoomIdempotencyKey(roomId, sharedKey);
-    expect(found?.actionRecordId).toBe(early.actionRecordId);
-    // Scoped to THE room — another room sees nothing under the key.
-    expect(await actions.getByRoomIdempotencyKey(randomUUID(), sharedKey)).toBeNull();
+    // A dead prior attempt for the SAME intent stays invisible; the live action
+    // is recovered regardless of which steward's key it carries.
+    const dead = actionOf('failed');
+    await actions.insert(dead);
+    expect(await actions.getByPaymentIntentId(intentId)).toBeNull();
+    const live = actionOf('submitted');
+    await actions.insert(live);
+    expect((await actions.getByPaymentIntentId(intentId))?.actionRecordId).toBe(
+      live.actionRecordId,
+    );
     await db.delete(knomosisActionRecords).where(eq(knomosisActionRecords.roomId, roomId));
-    await db.delete(walletAccounts).where(inArray(walletAccounts.userId, [stewardA, stewardB]));
-    await db.delete(users).where(inArray(users.userId, [stewardA, stewardB]));
+    await db.delete(walletAccounts).where(eq(walletAccounts.userId, steward));
+    await db.delete(users).where(eq(users.userId, steward));
   });
 
   // --- Grants ----------------------------------------------------------------------

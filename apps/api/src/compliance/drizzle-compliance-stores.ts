@@ -38,19 +38,7 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  gt,
-  inArray,
-  isNull,
-  lte,
-  notInArray,
-  type SQL,
-  sql,
-} from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   CaseAuditRecord,
@@ -873,31 +861,38 @@ export class DrizzleRegionDeclarationStore implements RegionDeclarationStore {
     // makes this match zero rows rather than have their change overwritten by a
     // decision about the old one.  The region and status are compared too — two
     // changes inside one millisecond share a timestamp.
+    //
+    // With `expected`, the CAS requires an EXISTING row — an UPDATE, NEVER an
+    // upsert.  If the declaration was deleted between the caller's read and here
+    // (the deletion purge removes declarations before it tombstones the user),
+    // an `ON CONFLICT DO UPDATE` finds no conflict and INSERTs a fresh row,
+    // recreating region data for a deleting/deleted account and making a stale
+    // reviewer decision live.  `UPDATE … WHERE (premises)` matches zero rows
+    // there and returns null, exactly as the in-memory store does.
+    // Each branch is a SINGLE atomic statement (the insert-or-CAS one way, the
+    // conditional UPDATE the other) — `this.#db` sits inside the parens so the
+    // read-modify-write atomicity scan does not read the two mutually exclusive
+    // writes as a sequence.
     const rows = await (expected === undefined
       ? this.#db
           .insert(regionDeclarations)
           .values(values)
           .onConflictDoUpdate({ target: regionDeclarations.userId, set })
+          .returning()
       : this.#db
-          .insert(regionDeclarations)
-          .values(values)
-          .onConflictDoUpdate({
-            target: regionDeclarations.userId,
-            set,
-            // `and()` widens to `SQL | undefined` (it returns undefined only
-            // when given NO defined conditions — three are given here), and
-            // `exactOptionalPropertyTypes` will not take the union.  The column
-            // refs are what map the timestamp for the driver, so this must go
-            // through `eq`, not a raw template.
-            setWhere: and(
+          .update(regionDeclarations)
+          .set(set)
+          .where(
+            and(
+              eq(regionDeclarations.userId, record.userId),
               eq(regionDeclarations.declaredRegion, expected.declaredRegion),
               eq(regionDeclarations.status, expected.status),
               eq(regionDeclarations.updatedAt, new Date(expected.updatedAt)),
-            ) as SQL,
-          })
-    ).returning();
+            ),
+          )
+          .returning());
     const row = rows[0];
-    if (row === undefined) return null; // CAS lost (or nothing written)
+    if (row === undefined) return null; // CAS lost, row missing, or nothing written
     return toDeclaration(row);
   }
 
