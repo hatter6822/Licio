@@ -101,6 +101,13 @@ export const caseRetentionPolicySchema = z
      *  sweep stops re-selecting a row whose `deletion_date` is forever in the
      *  past — which would re-anonymize it and re-audit it every round. */
     anonymized_at: isoTimestampSchema.nullish(),
+    /** Set when the right-to-erasure scrub reached this case and a legal hold
+     *  held it back (WS-N.2.1a).  The obligation does not evaporate with the
+     *  sweep that found it: the subject asked to be erased and only the hold
+     *  defers that, so the case carries the debt until the retention sweep can
+     *  discharge it — the account is tombstoned by then and no later WS-D sweep
+     *  will ever come back for it. */
+    erasure_pending: z.boolean().optional(),
   })
   .strict();
 export type CaseRetentionPolicy = z.infer<typeof caseRetentionPolicySchema>;

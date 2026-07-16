@@ -412,6 +412,15 @@ async function recordIntentReviewDecision(
 }
 
 // Identity-free write budgets (§19.1: per-endpoint global budgets, never IP).
+//
+// Mounted AFTER the auth/role gate, deliberately.  These budgets are GLOBAL —
+// §19.1 leaves nothing to key them by — so whoever spends them spends them for
+// everyone.  Ahead of the gate, an unauthenticated caller could exhaust the
+// 30/min policy budget and 429 an emergency jurisdiction-policy change, or hold
+// every member's region declaration at 60/min, without ever holding a session.
+// A budget bounds the WORK an endpoint does, and a request that 401s does none.
+// Connection-level flood fairness is the edge's concern (§19.1), not a
+// consumable an anonymous caller gets to burn on counsel's behalf.
 const declarationBudget = rateLimit({ windowMs: 60_000, limit: 60 });
 const policyWriteBudget = rateLimit({ windowMs: 60_000, limit: 30 });
 
@@ -446,9 +455,9 @@ export function createComplianceRoutes() {
     // compliance reviewer verifies the referenced evidence — fail-closed).
     .post(
       '/region/declaration',
-      declarationBudget,
       authMiddleware(),
       requireVerifiedAccount(),
+      declarationBudget,
       zValidator('json', regionDeclarationRequestSchema),
       async (c) => {
         const auth = requireAuth(c);
@@ -586,9 +595,9 @@ export function createComplianceRoutes() {
     // legal_approval_ref invariant (enabling is the dangerous direction).
     .post(
       '/admin/policies',
-      policyWriteBudget,
       authMiddleware(),
       requireCompliance(),
+      policyWriteBudget,
       zValidator('json', policyCreateRequestSchema),
       async (c) => {
         const auth = requireAuth(c);

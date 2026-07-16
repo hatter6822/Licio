@@ -711,6 +711,29 @@ export async function consumePreflightToken(
   token: string,
 ): Promise<PreflightTokenBinding | null> {
   const raw = await ephemeral.take(`${PREFLIGHT_TOKEN_PREFIX}${token}`);
+  return parseBinding(raw);
+}
+
+/**
+ * Read a preflight token WITHOUT consuming it (`get`, not `take`).
+ *
+ * The single-use consumption stays where it belongs — after the reservation, so
+ * a token is never burned by a submission that left no record.  But that is
+ * late: everything before it runs for a request that may be about to fail the
+ * token gate, and some of it MUTATES compliance state.  This is the cheap
+ * advisory check that stops those side effects; it is not the security
+ * boundary, because a token can lapse or be used between the peek and the take
+ * — `consumePreflightToken` remains the one that decides.
+ */
+export async function peekPreflightToken(
+  ephemeral: EphemeralStore,
+  token: string,
+): Promise<PreflightTokenBinding | null> {
+  const raw = await ephemeral.get(`${PREFLIGHT_TOKEN_PREFIX}${token}`);
+  return parseBinding(raw);
+}
+
+function parseBinding(raw: string | null): PreflightTokenBinding | null {
   if (raw === null) return null;
   try {
     return JSON.parse(raw) as PreflightTokenBinding;

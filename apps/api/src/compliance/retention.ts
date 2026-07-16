@@ -49,6 +49,9 @@ export interface RetentionSweepSummary {
    *  not a fault, and separately from `held` (which counts holds visible at
    *  selection time). */
   heldRace: number;
+  /** Right-to-erasure scrubs a legal hold deferred, discharged now that the
+   *  hold has lapsed (WS-N.2.1a). */
+  deferredErasures: number;
   errors: number;
   /** False ⇔ expired cases remain that this run could not clear (a page cap
    *  hit with no forward progress).  The scheduler keeps its cadence marker
@@ -69,6 +72,7 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
     anonymized: 0,
     held: 0,
     heldRace: 0,
+    deferredErasures: 0,
     errors: 0,
     drained: false,
   };
@@ -157,6 +161,14 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
       break;
     }
   }
+  // Discharge the erasures a legal hold DEFERRED (WS-N.2.1a).  This is the
+  // re-scrub this module has always promised: the WS-D deletion sweep skipped
+  // these cases and audited the skip, then tombstoned the account — so no later
+  // WS-D sweep will ever name that user again, and without this pass the
+  // subject would sit on the case until normal retention expiry, years after
+  // the person asked to be erased and long after the obligation lapsed.
+  summary.deferredErasures = await dischargeDeferredErasures(deps);
+
   // Held cases are visible in the report (never deleted).
   const held = await deps.caseDeps.cases.listByStates(
     ['open', 'assigned', 'investigating', 'resolved', 'escalated'],
@@ -172,10 +184,62 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
   return summary;
 }
 
+/** One page of deferred erasures per sweep — the backlog is bounded by how
+ *  many holds lapsed since the last run, so one page is generous. */
+const DEFERRED_ERASURE_PAGE = 500;
+
+/**
+ * Scrub the user subjects of cases whose erasure a legal hold deferred and
+ * whose holds have since lapsed.  Each is audited on its own chain, so the
+ * erasure is as accountable as the skip that preceded it.
+ */
+async function dischargeDeferredErasures(deps: RetentionSweepDeps): Promise<number> {
+  let discharged = 0;
+  const pending = await deps.caseDeps.cases.listDeferredErasures(DEFERRED_ERASURE_PAGE);
+  for (const record of pending) {
+    try {
+      // ONE unit: an entry claiming the subject was erased must not outlive a
+      // failed erasure, and a scrub with no entry is unaccountable.
+      const done = await runChainedUnit(
+        deps.caseDeps.transactor,
+        async (stores) => {
+          await appendCaseAuditInTx(stores, deps.caseDeps, {
+            caseId: record.caseId,
+            action: 'erasure_completed_hold_lapsed',
+            actorRef: 'system',
+            beforeState: record.reviewState,
+            afterState: record.reviewState,
+            note: 'Right-to-erasure scrub deferred by a legal hold; the hold has lapsed and the subject is erased.',
+          });
+          // The store re-checks the hold as part of the write; false ⇔ a fresh
+          // obligation landed since this page was read, so the entry above must
+          // not stand either.
+          return await stores.cases.completeDeferredErasure(
+            record.caseId,
+            new Date(deps.now()).toISOString(),
+          );
+        },
+        'deferred erasure',
+      );
+      if (done) discharged += 1;
+    } catch (error) {
+      deps.log('compliance.erasure.deferred_failed', {
+        caseId: record.caseId,
+        message: error instanceof Error ? error.message : 'unknown',
+      });
+    }
+  }
+  if (discharged > 0) deps.log('compliance.erasure.deferred_discharged', { discharged });
+  return discharged;
+}
+
 /**
  * Right-to-erasure scrub for one user's case subjects (called by the WS-D
- * deletion sweep).  Legal holds are SKIPPED — and the skip is itself audited
- * on the case trail (the legal-obligation carve-out, WS-N.2.1a).
+ * deletion sweep).  Legal holds are SKIPPED — the skip is audited on the case
+ * trail AND the case keeps the debt (`erasure_pending`), which the retention
+ * sweep discharges once the hold lapses (the legal-obligation carve-out,
+ * WS-N.2.1a).  The deferral is not a quiet drop: nothing else would ever come
+ * back for a tombstoned account.
  */
 export async function scrubUserSubjectForErasure(
   deps: Pick<RetentionSweepDeps, 'caseDeps' | 'log'>,

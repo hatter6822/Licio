@@ -1072,6 +1072,85 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     log: fixture.knomosis.log,
   });
 
+  it('a bogus token reaches NO mutable compliance check (WS-N.2.2a/b)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => true,
+      contentVisibleToUser: async () => true,
+    };
+    await fixture.knomosis.wallets.insert({
+      walletAccountId: 'w1',
+      userId: 'u1',
+      addressHashHex: 'deadbeef',
+      addressTruncated: '0x00…00',
+      chainId: LOCAL_DEPLOYMENT.chain_id,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    // Count every MUTATING compliance call: `screenAddress` opens a sanctions
+    // case and caches a verdict; `fraudRisk` reserves a velocity check (which a
+    // room payout spends from the ROOM's window) and opens a high-value review.
+    let screened = 0;
+    let fraudChecked = 0;
+    fixture.knomosis.compliance = {
+      screenAddress: async () => {
+        screened += 1;
+        return 'clear' as const;
+      },
+      fraudRisk: async () => {
+        fraudChecked += 1;
+        return 'normal' as const;
+      },
+      jurisdiction: async () => 'allowed' as const,
+      walletRisk: async () => ({ state: 'normal' as const, explanation: 'ok', nextStep: null }),
+    };
+    const { submitAction } = await import('../knomosis/submission.js');
+    const result = await submitAction(s(fixture), {
+      userId: 'u1',
+      preflightToken: 'nonexistent-token',
+      idempotencyKey: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: '33333333-3333-4333-8333-333333333333',
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      walletAccountId: 'w1',
+      typedDataMessage: {
+        roomId: '33333333-3333-4333-8333-333333333333',
+        treasuryId: '44444444-4444-4444-8444-444444444444',
+        asset: 'USDC',
+        amount: '1000000',
+        actor: '0x0000000000000000000000000000000000000001',
+        nonce: '1',
+        expiration: String(Math.floor(Date.now() / 1000) + 600),
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      },
+      signature: '0x',
+    });
+    // The submission fails at the token gate, as it always would have…
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('PREFLIGHT_EXPIRED');
+    // …but it never touched compliance on the way.  An authorized member could
+    // otherwise sign arbitrary payloads, submit them with junk tokens, and
+    // pollute the review queue / burn velocity budget on requests that were
+    // always going to be rejected.
+    expect(screened).toBe(0);
+    expect(fraudChecked).toBe(0);
+    // The failure is still AUDITED: the reservation exists and is `failed`, so
+    // a retry replays it rather than re-processing.
+    const reserved = (await fixture.knomosis.actions.listByActor('u1', 10)).find(
+      (r) => r.actorWalletAccountId === 'w1',
+    );
+    expect(reserved?.submissionState).toBe('failed');
+  });
+
   it('a missing preflight token is rejected (PREFLIGHT_EXPIRED)', async () => {
     const fixture = await freshKnomosisServices();
     // The pre-reservation gates (deployment/wallet/room) now run BEFORE the

@@ -549,6 +549,36 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
     return rows.length > 0;
   }
 
+  async listDeferredErasures(limit: number): Promise<ComplianceCaseRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(financialComplianceCases)
+      .where(
+        and(
+          sql`(${financialComplianceCases.retentionPolicy}->>'erasure_pending')::boolean = true`,
+          NOT_HELD,
+          sql`${financialComplianceCases.userIdOrRoomId} IS NOT NULL`,
+        ),
+      )
+      .limit(limit);
+    return rows.map(toCaseRecord);
+  }
+
+  async completeDeferredErasure(caseId: string, updatedAt: string): Promise<boolean> {
+    // `NOT_HELD` in the WHERE: a fresh obligation can land between the sweep
+    // choosing this case and this write, and it must win.
+    const rows = await this.#db
+      .update(financialComplianceCases)
+      .set({
+        userIdOrRoomId: null,
+        retentionPolicy: sql`jsonb_set(${financialComplianceCases.retentionPolicy}, '{erasure_pending}', 'false'::jsonb)`,
+        updatedAt: new Date(updatedAt),
+      })
+      .where(and(eq(financialComplianceCases.caseId, caseId), NOT_HELD))
+      .returning({ caseId: financialComplianceCases.caseId });
+    return rows.length > 0;
+  }
+
   async applyLegalHold(input: {
     caseId: string;
     holdRef: string;
@@ -597,21 +627,36 @@ export class DrizzleComplianceCaseStore implements ComplianceCaseStore {
       if (policy.legal_hold) heldBack.push(row.caseId);
       else eligible.push(row.caseId);
     }
-    if (eligible.length === 0) return { scrubbed: [], heldBack };
     // `NOT_HELD` again, IN the update: a SAR draft or lawful-access intake can
     // apply a hold between choosing these candidates and scrubbing them, and
     // the carve-out this read implements would then be defeated — the held
     // case would lose the very subject the obligation is about.  `returning`
     // tells us which rows actually moved, so a row that lost the race is
     // reported as held back rather than as scrubbed.
-    const updated = await this.#db
-      .update(financialComplianceCases)
-      .set({ userIdOrRoomId: null })
-      .where(and(inArray(financialComplianceCases.caseId, eligible), NOT_HELD))
-      .returning({ caseId: financialComplianceCases.caseId });
+    const updated =
+      eligible.length === 0
+        ? []
+        : await this.#db
+            .update(financialComplianceCases)
+            .set({ userIdOrRoomId: null })
+            .where(and(inArray(financialComplianceCases.caseId, eligible), NOT_HELD))
+            .returning({ caseId: financialComplianceCases.caseId });
     const scrubbed = updated.map((row) => row.caseId);
     const moved = new Set(scrubbed);
     for (const caseId of eligible) if (!moved.has(caseId)) heldBack.push(caseId);
+    if (heldBack.length > 0) {
+      // The erasure is DEFERRED, not dropped: the case carries the debt so the
+      // retention sweep can discharge it once the hold lapses.  Nothing else
+      // will — the account is tombstoned and no later WS-D sweep names this
+      // user again.  `jsonb_set` writes the key in ONE statement, so it cannot
+      // clobber a concurrent hold write the way a read-modify-write would.
+      await this.#db
+        .update(financialComplianceCases)
+        .set({
+          retentionPolicy: sql`jsonb_set(${financialComplianceCases.retentionPolicy}, '{erasure_pending}', 'true'::jsonb)`,
+        })
+        .where(inArray(financialComplianceCases.caseId, heldBack));
+    }
     return { scrubbed, heldBack };
   }
 }
@@ -1292,6 +1337,20 @@ export class DrizzleLawfulAccessStore implements LawfulAccessStore {
       .orderBy(desc(lawfulAccessRequests.createdAt))
       .limit(limit);
     return rows.map(toLawful);
+  }
+
+  async unnotifiedCaseIds(caseIds: readonly string[]): Promise<string[]> {
+    if (caseIds.length === 0) return [];
+    const rows = await this.#db
+      .select({ caseId: lawfulAccessRequests.caseId })
+      .from(lawfulAccessRequests)
+      .where(
+        and(
+          inArray(lawfulAccessRequests.caseId, [...caseIds]),
+          isNull(lawfulAccessRequests.userNotifiedAt),
+        ),
+      );
+    return rows.flatMap((row) => (row.caseId === null ? [] : [row.caseId]));
   }
 
   async update(

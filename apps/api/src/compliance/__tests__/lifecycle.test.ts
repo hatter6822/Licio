@@ -18,6 +18,7 @@ import { InMemoryPwattConfigStore } from '../../events/stores.js';
 import { InMemoryJobLeaseStore } from '../../identity/job-lease.js';
 import { appendCaseAudit } from '../audit.js';
 import { createCase, setLegalHold, transitionCase } from '../cases.js';
+import { intakeLawfulAccessRequest } from '../lawful-access.js';
 import {
   buildEventRetentionOverrides,
   runRetentionSweep,
@@ -375,6 +376,109 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     const empty = await buildComplianceExport(services)(randomUUID());
     expect(empty['region_declaration']).toBeNull();
     expect(empty['compliance_cases']).toEqual([]);
+  });
+
+  it('the export SUPPRESSES a case for a lawful-access request the subject may not know about', async () => {
+    const userId = randomUUID();
+    const deps = {
+      requests: services.lawfulAccess,
+      caseDeps: buildCaseDeps(services),
+      roomStorageMode: services.roomStorageMode,
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const intake = await intakeLawfulAccessRequest(deps, {
+      agency: 'Agency',
+      jurisdiction: 'US',
+      legalBasis: 'subpoena',
+      scope: {
+        subject_kind: 'user',
+        subject_ref: userId,
+        time_range_start: null,
+        time_range_end: null,
+      },
+      contact: 'agent@example.test',
+      actorUserId: ACTOR,
+    });
+    if (!intake.ok) throw new Error('intake failed');
+    // An ordinary case the subject IS entitled to see, for contrast.
+    await createCase(buildCaseDeps(services), {
+      subjectKind: 'user',
+      subjectRef: userId,
+      triggerType: 'velocity',
+      riskLevel: 'low',
+      note: 'ordinary',
+    });
+
+    // The intake case exists ONLY because the request does, so exporting its
+    // trigger/state/dates announces the request — the very thing counsel has
+    // not yet permitted the subject to be told.
+    const exported = await buildComplianceExport(services)(userId);
+    const triggers = (exported['compliance_cases'] as Array<{ trigger_type: string }>).map(
+      (c) => c.trigger_type,
+    );
+    expect(triggers).toEqual(['velocity']);
+
+    // Once counsel permits notification, the deferral lapses and it exports.
+    await services.lawfulAccess.update(
+      intake.record.requestId,
+      { userNotifiedAt: new Date(nowMs).toISOString() },
+      new Date(nowMs).toISOString(),
+    );
+    const after = await buildComplianceExport(services)(userId);
+    expect(
+      (after['compliance_cases'] as Array<{ trigger_type: string }>).map((c) => c.trigger_type),
+    ).toContain('manual');
+  });
+
+  it('an erasure a legal hold deferred is discharged when the hold lapses', async () => {
+    const userId = randomUUID();
+    const record = await seedCase({
+      userIdOrRoomId: userId,
+      retentionPolicy: {
+        retention_period_days: 1825,
+        deletion_date: hoursAhead(24), // NOT expired: only the erasure debt applies
+        legal_hold: false,
+        legal_hold_refs: [],
+      },
+    });
+    const deps = buildCaseDeps(services);
+    await setLegalHold(deps, {
+      caseId: record.caseId,
+      hold: true,
+      holdRef: 'sar-hold',
+      actorUserId: ACTOR,
+      reason: 'r',
+    });
+
+    // The account deletion runs while the hold stands: the subject survives,
+    // the skip is audited, and the case takes on the erasure debt.
+    const outcome = await scrubUserSubjectForErasure({ caseDeps: deps, log: services.log }, userId);
+    expect(outcome.heldBack).toBe(1);
+    expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBe(userId);
+    // A sweep now must NOT erase it — the hold still stands.
+    await runRetentionSweep(sweepDeps());
+    expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBe(userId);
+
+    // The obligation lapses.  Nothing else will ever come back for this user —
+    // the account is tombstoned — so the sweep discharges the debt.
+    await setLegalHold(deps, {
+      caseId: record.caseId,
+      hold: false,
+      holdRef: 'sar-hold',
+      actorUserId: ACTOR,
+      reason: 'r',
+    });
+    const summary = await runRetentionSweep(sweepDeps());
+    expect(summary.deferredErasures).toBe(1);
+    expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBeNull();
+    // The erasure is as accountable as the skip that preceded it.
+    const actions = (await services.caseAudit.listChained(record.caseId)).map((e) => e.action);
+    expect(actions).toContain('erasure_skipped_legal_hold');
+    expect(actions).toContain('erasure_completed_hold_lapsed');
+    // Idempotent: the debt is cleared, so a later sweep does nothing.
+    expect((await runRetentionSweep(sweepDeps())).deferredErasures).toBe(0);
   });
 
   it('the purge deletes the declaration, anonymizes acks, scrubs subjects, purges pins', async () => {

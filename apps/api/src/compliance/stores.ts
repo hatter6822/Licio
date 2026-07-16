@@ -263,6 +263,13 @@ export interface ComplianceCaseStore {
     patch: Partial<Pick<ComplianceCaseRecord, 'retentionPolicy' | 'partnerCaseRef'>>,
     updatedAt: string,
   ): Promise<ComplianceCaseRecord | null>;
+  /** Cases whose erasure a legal hold deferred and that are now free of it
+   *  (`erasure_pending` and no hold) — the retention sweep's re-scrub list. */
+  listDeferredErasures(limit: number): Promise<ComplianceCaseRecord[]>;
+  /** Discharge one deferred erasure: NULL the user subject and clear the debt.
+   *  Conditional on the hold being gone at WRITE time (a fresh obligation can
+   *  land between the sweep's read and this call).  False ⇔ held again. */
+  completeDeferredErasure(caseId: string, updatedAt: string): Promise<boolean>;
   /** Apply or release ONE obligation's legal hold, ATOMICALLY.
    *
    *  The set arithmetic belongs here, not in the caller: read-modify-write in
@@ -413,6 +420,10 @@ export interface LawfulAccessStore {
   insert(record: LawfulAccessRecord): Promise<LawfulAccessRecord>;
   getById(requestId: string): Promise<LawfulAccessRecord | null>;
   list(status: LawfulAccessStatus | null, limit: number): Promise<LawfulAccessRecord[]>;
+  /** Which of `caseIds` belong to a request the subject may NOT yet be told
+   *  about (`user_notified_at` still null)?  Bounded by the caller's own page —
+   *  never a scan of every request. */
+  unnotifiedCaseIds(caseIds: readonly string[]): Promise<string[]>;
   /** `expectedStatus` makes the write a CAS: null ⇔ the status moved under us
    *  (two counsel reviewers racing an approve and a deny would otherwise both
    *  pass the read-side check and let the last writer win — leaving a request
@@ -812,6 +823,31 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
     return true;
   }
 
+  async listDeferredErasures(limit: number): Promise<ComplianceCaseRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.retentionPolicy.erasure_pending === true &&
+          !r.retentionPolicy.legal_hold &&
+          r.userIdOrRoomId !== null,
+      )
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+
+  async completeDeferredErasure(caseId: string, updatedAt: string): Promise<boolean> {
+    const row = this.#rows.get(caseId);
+    if (!row) return false;
+    if (row.retentionPolicy.legal_hold) return false; // a fresh obligation won
+    this.#rows.set(caseId, {
+      ...row,
+      userIdOrRoomId: null,
+      retentionPolicy: { ...row.retentionPolicy, erasure_pending: false },
+      updatedAt,
+    });
+    return true;
+  }
+
   async applyLegalHold(input: {
     caseId: string;
     holdRef: string;
@@ -839,6 +875,16 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
       // or the held case loses the subject the obligation is about.
       const live = this.#rows.get(row.caseId);
       if (live === undefined || live.retentionPolicy.legal_hold) {
+        // The erasure is DEFERRED, not dropped: the case carries the debt so
+        // the retention sweep can discharge it once the hold lapses.  Nothing
+        // else will — the account is tombstoned and no later WS-D sweep names
+        // this user again.
+        if (live !== undefined) {
+          this.#rows.set(row.caseId, {
+            ...live,
+            retentionPolicy: { ...live.retentionPolicy, erasure_pending: true },
+          });
+        }
         heldBack.push(row.caseId);
         continue;
       }
@@ -1165,6 +1211,14 @@ export class InMemoryLawfulAccessStore implements LawfulAccessStore, InMemoryRol
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
       .slice(0, limit)
       .map((r) => ({ ...r }));
+  }
+
+  async unnotifiedCaseIds(caseIds: readonly string[]): Promise<string[]> {
+    if (caseIds.length === 0) return [];
+    const wanted = new Set(caseIds);
+    return [...this.#rows.values()]
+      .filter((r) => r.caseId !== null && wanted.has(r.caseId) && r.userNotifiedAt === null)
+      .map((r) => r.caseId as string);
   }
 
   async update(

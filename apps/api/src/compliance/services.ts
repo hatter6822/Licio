@@ -552,6 +552,18 @@ export function buildComplianceExport(
       cases.push(...page);
       if (page.length < pageSize) break;
     }
+    // ANTI-TIPPING-OFF (WS-N.2.3d): a lawful-access intake case exists ONLY
+    // because a request was made, so exporting its trigger/state/dates tells
+    // the subject the request exists — the very thing counsel decides whether
+    // they may be told, and the export's own note claims to withhold.  A case
+    // suppressed here becomes exportable once counsel permits notification (the
+    // production records `user_notified_at`); the withholding is deferral, not
+    // deletion.  Bounded by the user's own page — never a scan of every
+    // request.  A store failure suppresses NOTHING silently: it throws, and the
+    // export retries, rather than quietly disclosing what it could not check.
+    const suppressed = new Set(
+      await services.lawfulAccess.unnotifiedCaseIds(cases.map((record) => record.caseId)),
+    );
     return {
       region_declaration:
         declaration === null
@@ -568,12 +580,14 @@ export function buildComplianceExport(
         region: ack.region,
         acknowledged_at: ack.acknowledgedAt,
       })),
-      compliance_cases: cases.map((record) => ({
-        trigger_type: record.triggerType,
-        review_state: record.reviewState,
-        created_at: record.createdAt,
-        updated_at: record.updatedAt,
-      })),
+      compliance_cases: cases
+        .filter((record) => !suppressed.has(record.caseId))
+        .map((record) => ({
+          trigger_type: record.triggerType,
+          review_state: record.reviewState,
+          created_at: record.createdAt,
+          updated_at: record.updatedAt,
+        })),
       note: 'Investigation notes and any regulatory-report detail are excluded under the legal-obligation and anti-tipping-off carve-outs (SPEC §17.10; GDPR Art. 23-equivalent).',
     };
   };

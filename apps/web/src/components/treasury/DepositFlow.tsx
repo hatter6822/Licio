@@ -264,8 +264,35 @@ export function DepositFlow({
       setAmount('');
       setBusy(false);
     } catch (e) {
+      // WS-N.1.2d again — the gate is re-checked at the WS-L preflight AND at
+      // submit (a token outlives a disclosure bump), so it can land HERE, after
+      // the preview is up.  `pending` is kept: acknowledging returns to this
+      // preview and the signature is retried, rather than stranding a signed
+      // intent behind an error message with no way forward.
+      if (e instanceof ApiClientError && e.code === 'disclosure_ack_required') {
+        setNeedsDisclosures(true);
+        setBusy(false);
+        return;
+      }
       fail(e, t('room.deposit.submitError', 'The deposit could not be submitted.'));
     }
+  }
+
+  if (needsDisclosures) {
+    // WS-N.1.2d: read + acknowledge the region's current risk disclosures, then
+    // return to whatever was in flight (the next attempt passes the server
+    // gate).  This is checked BEFORE the pending preview: a disclosure
+    // published after the preview went up gates the signing path too, and a
+    // panel rendered only in the no-pending branch would be unreachable exactly
+    // when it is needed.
+    return (
+      <div className="flex flex-col gap-3">
+        <h3 className="text-sm font-medium">
+          {t('room.deposit.disclosures', 'Before your first contribution')}
+        </h3>
+        <RiskDisclosures onAcknowledged={() => setNeedsDisclosures(false)} />
+      </div>
+    );
   }
 
   if (pending !== null) {
@@ -286,19 +313,6 @@ export function DepositFlow({
           </p>
         ) : null}
         <StepUpDialog {...gate.dialog} />
-      </div>
-    );
-  }
-
-  if (needsDisclosures) {
-    // WS-N.1.2d: read + acknowledge the region's current risk disclosures,
-    // then return to the form (the next attempt passes the server gate).
-    return (
-      <div className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">
-          {t('room.deposit.disclosures', 'Before your first contribution')}
-        </h3>
-        <RiskDisclosures onAcknowledged={() => setNeedsDisclosures(false)} />
       </div>
     );
   }

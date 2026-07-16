@@ -572,6 +572,48 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect(freed?.retentionPolicy.legal_hold_refs).toEqual([]);
   });
 
+  it('a held-back scrub leaves the erasure DEBT, and the discharge is hold-conditional', async () => {
+    const subject = randomUUID();
+    const held = track(
+      await stores.cases.insert(
+        caseOf(subject, {
+          retentionPolicy: {
+            retention_period_days: 1825,
+            deletion_date: hoursAhead(24),
+            legal_hold: true,
+            legal_hold_refs: ['sar-hold'],
+          },
+        }),
+      ),
+    );
+    await stores.cases.scrubUserSubject(subject);
+    // The subject survives the hold — and the case carries the debt, because
+    // the account is tombstoned by now and no later WS-D sweep names this user.
+    const marked = await stores.cases.getById(held.caseId);
+    expect(marked?.userIdOrRoomId).toBe(subject);
+    expect(marked?.retentionPolicy.erasure_pending).toBe(true);
+    // Still held ⇒ not yet due, and the write refuses it anyway.
+    expect(await stores.cases.listDeferredErasures(50)).toEqual([]);
+    expect(await stores.cases.completeDeferredErasure(held.caseId, NOW())).toBe(false);
+
+    // The hold lapses through the same store op the release path uses.
+    await stores.cases.applyLegalHold({
+      caseId: held.caseId,
+      holdRef: 'sar-hold',
+      hold: false,
+      updatedAt: NOW(),
+    });
+    expect((await stores.cases.listDeferredErasures(50)).map((r) => r.caseId)).toContain(
+      held.caseId,
+    );
+    expect(await stores.cases.completeDeferredErasure(held.caseId, NOW())).toBe(true);
+    const erased = await stores.cases.getById(held.caseId);
+    expect(erased?.userIdOrRoomId).toBeNull();
+    // The debt is discharged, so the next sweep does not re-select it.
+    expect(erased?.retentionPolicy.erasure_pending).toBe(false);
+    expect(await stores.cases.listDeferredErasures(50)).toEqual([]);
+  });
+
   it('the erasure scrub reports a row held at WRITE time as held back', async () => {
     const subject = randomUUID();
     const held = track(

@@ -528,11 +528,25 @@ export function createTreasuryGovernanceRoutes() {
               403,
             );
           }
+          // Is this a RETRY of an intent that already exists?  `createPaymentIntent`
+          // answers a replay from the idempotency key before its own gates —
+          // "a replay of an ALREADY-CREATED intent has no new side effects" —
+          // but the disclosure gate below sits in front of it, which undoes
+          // that: a disclosure published after the original create would hand
+          // the retry `disclosure_ack_required` instead of the existing
+          // `payment_intent_id`, so the client never learns its intent id and
+          // the in-flight intent strands behind an unrelated new gate.  Gates
+          // decide whether a NEW intent may be created.
+          const replay = await services.intents.findByIdempotencyKey(
+            auth.userId,
+            roomId,
+            body.idempotency_key,
+          );
           // WS-N.1.2d — the first-financial-action disclosure gate: where the
           // user's region policy lists risk disclosures, the CURRENT version
           // of each must be acknowledged before any intent is created here
           // (fail-closed: an unreadable ack store reports them missing).
-          if (complianceServicesConfigured()) {
+          if (replay === null && complianceServicesConfigured()) {
             const disclosureCheck = await disclosureGate(
               buildDisclosureDeps(getComplianceServices()),
               auth.userId,

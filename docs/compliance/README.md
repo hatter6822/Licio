@@ -287,6 +287,12 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   seed phrase while appealing an action reaches the same queue and the same
   reviewer views.  (`new_evidence` is URL-schema'd, not free text, so it is not
   scanned.)
+- **Write budgets sit behind the auth gate.**  They are GLOBAL — §19.1 leaves
+  nothing to key them by — so whoever spends one spends it for everyone. Ahead
+  of the gate, an unauthenticated caller could exhaust the 30/min policy budget
+  and 429 an emergency jurisdiction-policy change without ever holding a
+  session. A budget bounds the WORK an endpoint does, and a request that 401s
+  does none; connection-level flood fairness is the edge's concern (§19.1).
 - **RBAC separation is deliberate.**  `compliance` and `counsel` are distinct
   roles with distinct capabilities; `steward` and `admin` do NOT inherit them.
   Enabling any cell in a jurisdiction policy takes the **counsel capability**
@@ -327,6 +333,22 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   live legal disclosure would keep no publisher record at all.  The identity
   audit entry is a best-effort mirror (a different bounded context, so it cannot
   join that write); failing it must not 500 a publish that already happened.
+- **The export defers what counsel has not permitted.**  A lawful-access intake
+  case exists ONLY because a request was made, so exporting its trigger/state/
+  dates announces the request — the thing counsel decides whether the subject
+  may be told, and the thing the export's own note claims to withhold. Cases
+  linked to a request with no `user_notified_at` are suppressed from the DSAR
+  projection and become exportable once notification is permitted: deferral, not
+  deletion. The lookup is bounded by the user's own page, and a store failure
+  throws rather than silently disclose what it could not check.
+- **A deferred erasure is a debt the case carries.**  When the account-deletion
+  scrub meets a legal hold it skips the subject, audits the skip — and marks
+  `erasure_pending`. Nothing else would ever come back: the account is
+  tombstoned, so no later WS-D sweep names that user again, and without the debt
+  the subject would sit on the case until normal retention expiry, years after
+  the person asked to be erased. The retention sweep discharges it once the hold
+  lapses (hold-conditional at write time, and audited on the case's own chain —
+  the erasure is as accountable as the skip).
 - **Counsel acts are attributed on counsel-only rows.**  A SAR's filing —
   the legally consequential step, and often not the approver's doing — is
   recorded as `filed_by_ref` on the report itself, NOT as a case-chain entry:
@@ -351,9 +373,21 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   and the retry can still open the case. A sanctions hit whose case was not
   recorded is additionally **never cached** — the full TTL would suppress the
   retries that could still record it.
+- **A bogus token reaches no mutable compliance check.**  The submit re-checks
+  MUTATE state (`screenAddress` opens a sanctions case, `fraudRisk` reserves
+  velocity and can open a review), but the single-use token proving the action
+  was preflighted is not consumed until after the reservation — far too late to
+  stand between a junk token and those side effects. So the token is **peeked**
+  (a read; nothing consumed) and a token that cannot permit the submission skips
+  the re-checks. It does not reject there: the flow still reaches the token
+  gate, which fails the reserved record so the failure is audited and a retry
+  replays it. Skipping is safe in one direction only — `take` reads what `get`
+  read, so a peek that says no guarantees the gate says no.
 - **Gates are for NEW actions; a retry replays.**  `/actions/submit` looks up
   the `(user, idempotency_key)` record BEFORE its gates and skips them on a
-  retry. A retry has already submitted — its action exists and may be on chain —
+  retry — and `POST …/payment-intents` does the same with its idempotency key,
+  since `createPaymentIntent` already answers a replay before its own gates and
+  a route-level disclosure gate in front of it undid that. A retry has already submitted — its action exists and may be on chain —
   so a disclosure published since, a kill switch engaged since, or an intent
   that has advanced past the pre-submission window would each turn it into a
   fresh 403/503/400 instead of the original action id, leaving the client unable

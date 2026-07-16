@@ -262,6 +262,40 @@ describe('DepositFlow (WS-M.3.1)', () => {
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
+  it('a disclosure published AFTER the preview is acknowledgeable, and the deposit resumes', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    // The WS-L preflight now runs the disclosure gate too (a token outlives a
+    // disclosure bump), so the gate can land AFTER the preview is up.
+    mockPreflightAction.mockRejectedValueOnce(
+      new ApiClientError('disclosure_ack_required', 'Acknowledge the risk disclosures.', 403),
+    );
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    // The panel must be REACHABLE from here — rendered only in the no-pending
+    // branch it would be invisible exactly when it is needed, leaving the user
+    // on the preview with an error and no way forward.
+    await waitFor(() =>
+      expect(screen.getByText(/before your first contribution/i)).toBeInTheDocument(),
+    );
+    expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
   it('asks for a linked wallet when none matches the deployment chain', async () => {
     mockWallets.mockReturnValue({ data: { items: [], nextCursor: null } });
     render(<DepositFlow roomId="r1" treasury={TREASURY} onIntentCreated={() => {}} />);
