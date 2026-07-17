@@ -355,14 +355,34 @@ describe('the declaration flow (WS-N.1.1f)', () => {
       await app().request(get('/v1/compliance/region', member.cookie))
     ).json()) as never;
     expect(region).toMatchObject({ region: 'DE', basis: 'verified_declaration' });
-    // Revocation reverts to the locale subtag.
-    const revoked = await app().request(
+    // A member CANNOT self-revoke a VERIFIED region — that is the same
+    // self-service downgrade the POST guard blocks (a verified-BLOCKED member
+    // dropping to a more-permissive locale).  The DELETE fails closed.
+    const selfRevoke = await app().request(
       new Request('http://localhost/v1/compliance/region/declaration', {
         method: 'DELETE',
         headers: json(member.cookie),
       }),
     );
-    expect(revoked.status).toBe(200);
+    expect(selfRevoke.status).toBe(409);
+    expect(((await selfRevoke.json()) as { error: { code: string } }).error.code).toBe(
+      'declaration_verified',
+    );
+    // …and the verified basis is intact until a REVIEWER acts.
+    region = (await (
+      await app().request(get('/v1/compliance/region', member.cookie))
+    ).json()) as never;
+    expect(region).toMatchObject({ region: 'DE', basis: 'verified_declaration' });
+    // The reviewer `revoke` decision IS the audited path to remove a verified
+    // region; resolution then reverts to the locale subtag.
+    const adminRevoke = await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'revoke', note: 'member moved; evidence withdrawn' },
+        reviewer.cookie,
+      ),
+    );
+    expect(adminRevoke.status).toBe(200);
     region = (await (
       await app().request(get('/v1/compliance/region', member.cookie))
     ).json()) as never;
@@ -774,13 +794,16 @@ describe('the case console (WS-N.2.1b/c)', () => {
       await app().request(get('/v1/compliance/region', member.cookie))
     ).json()) as { region: string | null; basis: string };
     expect(region).toMatchObject({ region: 'DE', basis: 'verified_declaration' });
-    // The escape hatch remains explicit + audited: revoke first, THEN redeclare.
-    await app().request(
-      new Request('http://localhost/v1/compliance/region/declaration', {
-        method: 'DELETE',
-        headers: json(member.cookie),
-      }),
+    // The escape hatch is REVIEWER action (a member cannot self-revoke a verified
+    // region): the reviewer revokes, then the member may redeclare.
+    const adminRevoke = await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'revoke', note: 'evidence withdrawn' },
+        reviewer.cookie,
+      ),
     );
+    expect(adminRevoke.status).toBe(200);
     const afterRevoke = await app().request(
       post('/v1/compliance/region/declaration', { declared_region: 'US' }, member.cookie),
     );

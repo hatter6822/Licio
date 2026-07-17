@@ -222,7 +222,10 @@ export type RegionResolutionResponse = z.infer<typeof regionResolutionResponseSc
  *  declaration after reviewing the referenced evidence. */
 export const declarationVerifyRequestSchema = z
   .object({
-    decision: z.enum(['verify', 'reject']),
+    // `verify` / `reject` act on a PENDING declaration; `revoke` is the reviewer
+    // action that removes a VERIFIED region (a member cannot self-revoke one, so
+    // this is the only path to change it) — see the route.
+    decision: z.enum(['verify', 'reject', 'revoke']),
     note: z.string().min(1).max(2000),
   })
   .strict();

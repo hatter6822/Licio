@@ -450,12 +450,27 @@ export function createComplianceRoutes() {
       },
     )
 
-    // Revocation reverts resolution to the locale subtag or unknown.
+    // Revocation of a NON-verified declaration reverts resolution to the locale
+    // subtag or unknown.  A VERIFIED declaration cannot be self-revoked (see the
+    // guard): that would be the SAME self-service downgrade the POST guard blocks
+    // — a verified-BLOCKED member dropping to a more-permissive locale to reach
+    // the routes that reject only an explicit `blocked` (wallet-connect/testnet).
+    // Removing a verified region is reviewer action (`POST …/verify` with
+    // `decision: 'revoke'`), never a member DELETE.
     .delete('/region/declaration', authMiddleware(), async (c) => {
       const auth = requireAuth(c);
       const services = getComplianceServices();
       const existing = await services.declarations.get(auth.userId);
       if (existing === null) return c.json(notFound, 404);
+      if (existing.status === 'verified' && existing.verificationLevel === 'reviewer_verified') {
+        return c.json(
+          deny(
+            'declaration_verified',
+            'Your region is verified and cannot be self-revoked; contact compliance to change it.',
+          ),
+          409,
+        );
+      }
       await services.declarations.upsert({
         ...existing,
         status: 'revoked',
@@ -736,13 +751,16 @@ export function createComplianceRoutes() {
         const body = c.req.valid('json');
         const existing = await services.declarations.get(userId);
         if (existing === null || existing.status === 'revoked') return c.json(notFound, 404);
-        // A decision applies ONLY to a PENDING declaration.  A stale reviewer
-        // form or a duplicate queue action opened after another reviewer already
-        // verified would otherwise CAS against the current `verified` row and set
-        // it back to `pending`/`unverified` — silently disabling real-fund region
-        // resolution with no user redeclaration and no revocation.  Changing a
-        // verified declaration is a separate audited workflow, never this one.
-        if (existing.status !== 'pending') {
+        const isVerify = body.decision === 'verify';
+        const isRevoke = body.decision === 'revoke';
+        // `verify`/`reject` apply ONLY to a PENDING declaration: a stale reviewer
+        // form or a duplicate queue action on an already-`verified` row would
+        // otherwise CAS it back to `pending`/`unverified`, silently disabling
+        // real-fund region resolution behind the member's back.  `revoke` is the
+        // exception — it is the DELIBERATE reviewer path to remove a VERIFIED
+        // region (a member cannot self-revoke one, so this is the only way to
+        // change it), and it may also clear a still-pending declaration.
+        if (!isRevoke && existing.status !== 'pending') {
           return c.json(
             deny(
               'declaration_not_pending',
@@ -755,10 +773,10 @@ export function createComplianceRoutes() {
         const record = await services.declarations.upsert(
           {
             ...existing,
-            status: body.decision === 'verify' ? 'verified' : 'pending',
-            verificationLevel: body.decision === 'verify' ? 'reviewer_verified' : 'unverified',
-            verifiedAt: body.decision === 'verify' ? nowIso : null,
-            verifiedBy: body.decision === 'verify' ? auth.userId : null,
+            status: isVerify ? 'verified' : isRevoke ? 'revoked' : 'pending',
+            verificationLevel: isVerify ? 'reviewer_verified' : 'unverified',
+            verifiedAt: isVerify ? nowIso : null,
+            verifiedBy: isVerify ? auth.userId : null,
             updatedAt: nowIso,
           },
           // CAS on the PREMISES this decision was made about.  A member who

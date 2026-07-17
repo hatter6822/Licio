@@ -575,6 +575,16 @@ export async function attachIntentSubmission(
   // create/preflight/quote/signing/retry, all upstream of the submit.
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
+  // IDEMPOTENT re-attach: this action is ALREADY bound to this intent — a prior
+  // attach committed and only its response was lost, so the client (or the sweep)
+  // retries.  Return the already-linked intent as success: re-running the
+  // transition below would be `submitted → submitted`, which has no edge, and the
+  // spurious `invalid_transition` leaves the UI blind to a settlement that already
+  // happened.  Checked BEFORE the state/ownership guards — a bound action stays
+  // bound regardless of what state it has since reconciled to.
+  if (intent.actionRecordId === actionRecordId) {
+    return { ok: true, intent };
+  }
   // A `reserving` action NEVER forwarded: it is inserted before the post-
   // reservation gates and only advances to `submitted` once they all pass, and
   // the retry sweep is submitted-only — so it never reaches the gateway.  Binding

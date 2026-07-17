@@ -367,13 +367,16 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   transient outage resolve them to a more-permissive locale and unlock the very
   wallet links / testnet actions the stored declaration denies (fail toward the
   restrictive answer, never a laterally more-permissive one).  The SAME reasoning
-  bars a SELF-INFLICTED downgrade: a redeclaration over a `verified` row is
-  refused (409 `declaration_verified`), never a silent overwrite to `pending`.
-  Erasing the verified basis would drop `resolveRegion` to the weaker locale rung
-  — a verified-BLOCKED member could self-declare a new region and reach the routes
-  that reject only an explicit `blocked` (wallet-connect / testnet).  Changing a
-  verified region is an EXPLICIT, audited act (revoke, which the record shows,
-  then redeclare), never a side effect of a new POST.
+  bars a SELF-INFLICTED downgrade — via BOTH member paths, since either erases the
+  verified basis and drops `resolveRegion` to the weaker locale rung, letting a
+  verified-BLOCKED member reach the routes that reject only an explicit `blocked`
+  (wallet-connect / testnet): a redeclaration over a `verified` row is refused
+  (409 `declaration_verified`, never a silent overwrite to `pending`), AND a member
+  cannot self-revoke a `verified` row (the DELETE fails closed the same way).
+  Changing a verified region is REVIEWER action, not a member one: the compliance
+  role's `POST …/verify` takes a `revoke` decision (the ONLY path that removes a
+  verified region), after which the member may redeclare.  A member DELETE still
+  freely revokes a NON-verified (pending) declaration.
 - **Velocity counting reserves, never reconciles down.**  Each `fraudRisk`
   call reserves a check (preflight + submit ≈ 2 per action, and the limits
   carry that factor); a rejected action's reservation is deliberately kept.
@@ -539,10 +542,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
      room theirs, does the claimed intent belong to them (a room-owned payout is
      authorized by current stewardship OR by being the original actor of the
      action already settling it — a retry of one's OWN submission survives a role
-     revocation).  This applies to EVERY request, retry or not; a retry is not
-     exempt from proving whose work it is replaying.  (Conflating this with a gate
-     is how a caller who merely knew another member's intent id got handed that
-     member's action.)
+     revocation).  That original-actor check reads the action in ANY state (the
+     caller's own idempotency-scoped row, else the newest for the intent) — a
+     LIVE-only lookup would miss a `failed`/`reverted` action, so a lost-response
+     retry of a payout that reached the gateway and failed, by a steward whose
+     role was since revoked, would be denied `intent_mismatch` before it could
+     replay its own status.  This applies to EVERY request, retry or not; a retry
+     is not exempt from proving whose work it is replaying.  (Conflating this with
+     a gate is how a caller who merely knew another member's intent id got handed
+     that member's action.)
   2. **Then the replay** — has this work already been done?
   3. **Then the gates** — may NEW work be minted?  A disclosure published since,
      a kill switch engaged since, the crypto flag, an expired signature, a
@@ -604,6 +612,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   (`failStaleReservations`, keyed off the preflight-token TTL so a live submission
   is never swept) reclaims the crashed row to `failed`, after which the orphan
   sweep recovers the intent.
+- **Attaching the SAME action twice is idempotent.**  If the first attach
+  committed (the intent bound + advanced to `submitted`) but its response was
+  lost, the client replays the submit — recovering the same `action_record_id` —
+  and attaches AGAIN.  `attachIntentSubmission` short-circuits to success when the
+  intent is already bound to that exact action (checked before the state guards, a
+  bound action stays bound whatever state it has since reconciled to): re-running
+  the transition would be `submitted → submitted`, which has no edge, and the
+  spurious `invalid_transition` would leave the UI blind to a settlement that
+  already happened.
 - **Gates are for NEW actions; a retry replays.**  `/actions/submit` looks up
   the `(user, idempotency_key)` record BEFORE its gates and skips them on a
   retry — and `POST …/payment-intents` does the same with its idempotency key,

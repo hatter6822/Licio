@@ -1022,6 +1022,25 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect((await deps.intents.getById(id))?.actionRecordId).toBeNull();
   });
 
+  it('a re-attach of the SAME already-bound action returns success, not invalid_transition (thread DepositFlow:354)', async () => {
+    const deps = buildDeps();
+    const id = await signedIntent(deps);
+    const action = actionOf();
+    await deps.actions.insert(action);
+    // First attach binds it and moves the intent to `submitted`.
+    const first = await attachIntentSubmission(deps, id, action.actionRecordId, USER);
+    if (!('ok' in first) || !first.ok) throw new Error('first attach should succeed');
+    expect((await deps.intents.getById(id))?.executionState).toBe('submitted');
+    // A lost-response retry re-attaches the SAME action.  The `submitted →
+    // submitted` transition has no edge, so without idempotency it would 409
+    // `invalid_transition` and the UI would never see a settlement that already
+    // happened.  It returns the already-linked intent as success instead.
+    const again = await attachIntentSubmission(deps, id, action.actionRecordId, USER);
+    if (!('ok' in again) || !again.ok) throw new Error('re-attach should be idempotent success');
+    expect(again.intent.executionState).toBe('submitted');
+    expect(again.intent.actionRecordId).toBe(action.actionRecordId);
+  });
+
   it('rejects an action from another room, actor, type, or payload', async () => {
     const deps = buildDeps();
     const id = await signedIntent(deps);

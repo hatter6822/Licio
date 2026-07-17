@@ -92,6 +92,10 @@ async function verifyClaimedIntent(input: {
   roomId: string;
   actionType: string;
   typedDataMessage: Record<string, unknown>;
+  /** The submit's client key, when present: lets the ORIGINAL-actor check for a
+   *  room-owned payout recognize the caller's OWN action in ANY state (a dead
+   *  `failed`/`reverted` row the live lookup skips) precisely, by owner + key. */
+  idempotencyKey?: string;
   /** `submit` demands the intent already be `signed`; `preflight` accepts the
    *  whole pre-submission window (it is what moves the intent toward signed). */
   stage: 'preflight' | 'submit';
@@ -134,7 +138,19 @@ async function verifyClaimedIntent(input: {
     const services = getKnomosisServices();
     // Fail closed: an unwired governance port cannot authorize a room payout.
     if (services.rooms === null) return mismatch;
-    const settling = await services.actions.getByPaymentIntentId(intent.paymentIntentId);
+    // The action already settling this intent, read in ANY state — a lost-response
+    // retry of one's OWN payout must be recognized even after that action reached
+    // `failed`/`reverted` (which the LIVE lookup skips) and even after the steward
+    // role was revoked, or the retry gets `intent_mismatch` before it can reach the
+    // idempotency replay that returns their own action id/status.  Prefer the
+    // caller's OWN idempotency-scoped action (precise: owner + key); else the newest
+    // action for the intent (`getLatestByPaymentIntentId`, all-state).
+    const ownAction =
+      input.idempotencyKey !== undefined
+        ? await services.actions.getByIdempotencyKey(input.userId, input.idempotencyKey)
+        : null;
+    const settling =
+      ownAction ?? (await services.actions.getLatestByPaymentIntentId(intent.paymentIntentId));
     const isOriginalActor = settling !== null && settling.actorUserId === input.userId;
     if (!isOriginalActor && !(await services.rooms.isSteward(intent.roomId, input.userId))) {
       return mismatch;
@@ -426,6 +442,7 @@ export function createKnomosisRoutes() {
             roomId: body.room_id,
             actionType: body.action_type,
             typedDataMessage: body.typed_data_message,
+            idempotencyKey: body.idempotency_key,
             stage: 'submit',
             identityOnly: true,
           });
