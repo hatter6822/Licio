@@ -39,7 +39,7 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
-import { and, asc, desc, eq, gt, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, sql } from 'drizzle-orm';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   CaseAuditRecord,
@@ -1406,6 +1406,10 @@ export class DrizzleLawfulAccessStore implements LawfulAccessStore {
         and(
           sql`${lawfulAccessRequests.scope}->>'subject_ref' = ${subjectRef}`,
           isNull(lawfulAccessRequests.userNotifiedAt),
+          // Suppress only STILL-HIDDEN requests: a denied one (never notified,
+          // so `userNotifiedAt` stays null) is released + closed, so keeping it
+          // suppressed would hide the subject's own generic closed case forever.
+          ne(lawfulAccessRequests.status, 'denied'),
         ),
       );
     return rows.flatMap((row) => (row.caseId === null ? [] : [row.caseId]));

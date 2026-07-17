@@ -243,41 +243,17 @@ export async function reviewLawfulAccessRequest(
       // high/critical case IS the compliance hold) — both on the strength of a
       // request counsel rejected.  Reporting "denied" while that cleanup
       // silently failed would be the worst of both, so it commits together.
+      // The SAME release+close the production/notification paths use — one
+      // helper, so the case-chain note stays GENERIC (WS-N.2.3d): a compliance
+      // reviewer reading the linked case must NOT learn a lawful-access request
+      // existed and was denied; counsel's reason lives only on the counsel-only
+      // request record (`reviewNote`, written above).
       if (input.decision === 'denied' && updated.caseId !== null) {
-        const released = await setLegalHoldInTx(stores, deps.caseDeps, {
+        await releaseAndCloseLinkedCase(stores, deps, {
           caseId: updated.caseId,
-          hold: false,
-          // Only THIS request's hold.  A SAR drafted on the same case while
-          // this request was pending still needs the retention protection, and
-          // clearing a shared flag would let account deletion scrub the subject
-          // and the sweep anonymize the case out from under it.
-          holdRef: requestHoldRef(deps, input.requestId),
+          requestId: input.requestId,
           actorUserId: input.actorUserId,
-          reason: 'Legal hold released: the lawful-access request was denied on legal review.',
         });
-        // THROW, never return: a returned error is a successful transaction
-        // result, so the denial (already CAS-written above) and any earlier
-        // cleanup would COMMIT while the route reports a failure — exactly the
-        // partial-denial state this unit exists to prevent.
-        mustApply(released.ok, 'lawful-access denial: hold release');
-        // From wherever the case now sits: a compliance reviewer may have
-        // picked it up while counsel deliberated, and a fixed open→assigned
-        // first step would fail and block the denial outright.
-        const closed = await resolveCaseInTx(stores, deps.caseDeps, {
-          caseId: updated.caseId,
-          actorUserId: input.actorUserId,
-          resolution: {
-            outcome: 'cleared',
-            // GENERIC (WS-N.2.3d): the case resolution is readable on the
-            // COMPLIANCE-gated case surface, so it must not name the lawful-access
-            // request or carry counsel's denial reason — that reason lives on the
-            // counsel-only request record (`reviewNote`, written above).
-            notes: 'Legal hold released on counsel review (WS-N.2.3d).',
-            resolved_by: input.actorUserId,
-            resolved_at: new Date(deps.now()).toISOString(),
-          },
-        });
-        mustApply(closed, 'lawful-access denial: case close');
       }
       return { ok: true as const, record: updated };
     },

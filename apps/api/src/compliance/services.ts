@@ -131,6 +131,11 @@ export interface ComplianceServices {
   knomosisFlags: () => { cryptoEnabled: boolean; governanceEnabled: boolean };
   /** WS-S storage axis for the lawful-access honest-limits path. */
   roomStorageMode: (roomId: string) => Promise<string | null>;
+  /** The OWNER of a financial wallet (WS-L), by walletAccountId — used so a
+   *  manual wallet pin opens its investigation case for the ACTUAL owner rather
+   *  than a caller-supplied ref that could name an unrelated user.  Fail-closed
+   *  default `null` (an unknown wallet cannot be pinned with a case). */
+  walletOwner: (walletAccountId: string) => Promise<string | null>;
   /** Non-reversible refs for chained audits + restricted events. */
   opaqueRef: (id: string) => string;
   /** Durable persist + router publish for registered compliance topics. */
@@ -217,6 +222,7 @@ export function createInMemoryComplianceServices(
     kycLevel: async () => 'none',
     knomosisFlags: () => ({ cryptoEnabled: false, governanceEnabled: false }),
     roomStorageMode: async () => null,
+    walletOwner: async () => null,
     // Default: an UNKEYED digest (still non-reversible for uuid-sized inputs).
     // The boot swaps in the identity `accountRef` (keyed HMAC).
     opaqueRef: (id) => createHash('sha256').update(`compliance-ref:${id}`).digest('hex'),

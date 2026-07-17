@@ -376,7 +376,12 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   Changing a verified region is REVIEWER action, not a member one: the compliance
   role's `POST …/verify` takes a `revoke` decision (the ONLY path that removes a
   verified region), after which the member may redeclare.  A member DELETE still
-  freely revokes a NON-verified (pending) declaration.
+  freely revokes a NON-verified (pending) declaration.  The read-guard alone is a
+  TOCTOU, so the redeclaration WRITE is a CAS on the read premises
+  (`declaredRegion`/`status`/`updatedAt`): a reviewer verifying the pending row
+  between the guard's read and the upsert would otherwise be clobbered back to
+  `pending`/`unverified` by an unconditional write — a CAS miss re-reads (now
+  sees the verify) and 409s rather than silently downgrading `reviewer_verified`.
 - **Velocity counting reserves, never reconciles down.**  Each `fraudRisk`
   call reserves a check (preflight + submit ≈ 2 per action, and the limits
   carry that factor); a rejected action's reservation is deliberately kept.
@@ -473,14 +478,20 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   that subject's own requests, so it cannot reintroduce the paging
   `countOpenByRisk` exists to avoid, and a store failure holds rather than
   silently disclose what it could not check.  **The lift RELEASES the case, it
-  does not merely un-hide it.**  The moment `userNotifiedAt` is set — a production
-  with `user_notified: true`, or the notify endpoint — the linked intake case is
-  RELEASED (this request's hold cleared) and RESOLVED, in the same unit.  Left
-  open + held once suppression lifts, an OPEN high-risk case would flip straight
-  from invisible to driving a `compliance_hold` + elevated wallet risk
-  INDEFINITELY, for a records request that is no longer hidden.  (The denial path
-  already released + closed for the same reason; production/notification now
-  share the one helper.)
+  does not merely un-hide it.**  When a request reaches a state that lifts the
+  suppression — a production with `user_notified: true`, the notify endpoint, OR a
+  DENIAL — the linked intake case is RELEASED (this request's hold cleared) and
+  RESOLVED, in the same unit, through the ONE `releaseAndCloseLinkedCase` helper.
+  Left open + held once suppression lifts, an OPEN high-risk case would flip
+  straight from invisible to driving a `compliance_hold` + elevated wallet risk
+  INDEFINITELY, for a records request no longer hidden.  Because that helper is
+  shared, the release note stays GENERIC on every path (WS-N.2.3d) — a
+  compliance reviewer reading the linked case must not learn a lawful-access
+  request existed or was denied; counsel's reason lives only on the counsel-only
+  record.  And the suppression QUERY matches the lift: it keys on
+  `userNotifiedAt IS NULL` AND `status != 'denied'`, so a denied request — which
+  never notifies — does not stay filtered out of the subject's own (now generic,
+  closed) DSAR export forever.
 - **A deferred erasure is a debt the case carries.**  When the account-deletion
   scrub meets a legal hold it skips the subject, audits the skip — and marks
   `erasure_pending`. Nothing else would ever come back: the account is
@@ -514,11 +525,16 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 - **A wallet pin and its case are one unit** — the manual pin route as much as
   the link-time sanctions response.  A reviewer pin immediately drives
   `walletRisk` to `high` and blocks the OWNER's fund transfers, so — like
-  `buildSanctionedWalletLinkHook` — it opens an investigation CASE for the
-  wallet's owner (`subject_ref`) in the SAME `runChainedUnit`, `manual`-triggered
-  and idempotent per wallet (`manual-pin:<wallet>`).  A pin with no case is a
-  wallet frozen with nothing in the reviewer queue, case history, or DSAR/export
-  explaining the restriction — no investigation record, nobody to release it.
+  `buildSanctionedWalletLinkHook` — it opens an investigation CASE in the SAME
+  `runChainedUnit`, `manual`-triggered and idempotent per wallet
+  (`manual-pin:<wallet>`).  A pin with no case is a wallet frozen with nothing in
+  the reviewer queue, case history, or DSAR/export explaining the restriction —
+  no investigation record, nobody to release it.  The case subject is DERIVED
+  from the wallet's owner (`walletOwner`, the WS-L wallet record), NEVER a
+  caller-supplied ref: a mistyped subject would otherwise pin one member's wallet
+  (blocked by `walletAccountId`) while opening the high-risk case on an unrelated
+  member — the actual owner fund-blocked with no case, the wrong member accused.
+  An unknown wallet fails closed (no real subject ⇒ no case ⇒ no pin).
 - **A fund transfer screens EVERY counterparty.**  Both legs screened
   `recipient ?? actor`, which quietly means a deposit (no recipient) screens its
   actor at every action while a payout screens only its recipient and NEVER its

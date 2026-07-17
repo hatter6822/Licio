@@ -809,6 +809,53 @@ describe('the case console (WS-N.2.1b/c)', () => {
     );
     expect(afterRevoke.status).toBe(201);
   });
+
+  it('a redeclaration CASes on the read premises — a verify that lands mid-write is not clobbered (thread 434)', async () => {
+    const reviewer = await seedReviewer();
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}`, locale: 'en-GB' });
+    await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'DE' }, member.cookie),
+    );
+    await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'verify', note: 'passport checked' },
+        reviewer.cookie,
+      ),
+    );
+    const verifiedRow = await compliance.declarations.get(member.userId);
+    if (verifiedRow === null) throw new Error('verified row missing');
+
+    // Simulate the TOCTOU: the redeclaration's guard READS a stale `pending`
+    // snapshot (as if a reviewer verified the row JUST after), so the
+    // verified-guard passes — but the real store is `verified`, so the write's CAS
+    // on the stale premises must MISS.  The route then re-reads (real state) and
+    // 409s rather than overwriting `reviewer_verified` with `pending`.
+    const realGet = compliance.declarations.get.bind(compliance.declarations);
+    let servedStale = false;
+    compliance.declarations.get = async (id: string) => {
+      if (!servedStale && id === member.userId) {
+        servedStale = true;
+        return { ...verifiedRow, status: 'pending', verificationLevel: 'unverified' };
+      }
+      return realGet(id);
+    };
+    try {
+      const redeclared = await app().request(
+        post('/v1/compliance/region/declaration', { declared_region: 'US' }, member.cookie),
+      );
+      expect(redeclared.status).toBe(409);
+      expect(((await redeclared.json()) as { error: { code: string } }).error.code).toBe(
+        'declaration_verified',
+      );
+    } finally {
+      compliance.declarations.get = realGet;
+    }
+    // The verified DE basis is intact — the CAS refused to clobber it.
+    const after = await compliance.declarations.get(member.userId);
+    expect(after?.status).toBe('verified');
+    expect(after?.declaredRegion).toBe('DE');
+  });
 });
 
 describe('the fraud queue + wallet pins + runtime config', () => {
@@ -841,14 +888,18 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     expect(reject.status).toBe(404);
   });
 
-  it('pins a wallet (201) AND opens an investigation case, releases once, 404s a double release', async () => {
+  it('pins a wallet (201) AND opens a case for the DERIVED owner, releases once, 404s a double release', async () => {
     const reviewer = await seedReviewer();
     const walletId = randomUUID();
     const subject = randomUUID();
+    // The case subject is DERIVED from the wallet owner (thread 1318), never a
+    // caller-supplied ref — so a mistyped subject can't pin one user's wallet
+    // while opening a case on another.
+    compliance.walletOwner = async (id) => (id === walletId ? subject : null);
     const pinned = await app().request(
       post(
         `/v1/compliance/admin/wallets/${walletId}/pin`,
-        { reason: 'suspected compromise', subject_ref: subject },
+        { reason: 'suspected compromise' },
         reviewer.cookie,
       ),
     );
@@ -864,7 +915,7 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     const rePinned = await app().request(
       post(
         `/v1/compliance/admin/wallets/${walletId}/pin`,
-        { reason: 'suspected compromise', subject_ref: subject },
+        { reason: 'suspected compromise' },
         reviewer.cookie,
       ),
     );
@@ -879,6 +930,23 @@ describe('the fraud queue + wallet pins + runtime config', () => {
       del(`/v1/compliance/admin/wallets/${walletId}/pin`, reviewer.cookie),
     );
     expect(again.status).toBe(404);
+  });
+
+  it('a manual pin on an UNKNOWN wallet fails closed — no case for a phantom subject (thread 1318)', async () => {
+    const reviewer = await seedReviewer();
+    const walletId = randomUUID();
+    compliance.walletOwner = async () => null; // wallet cannot be resolved to an owner
+    const pinned = await app().request(
+      post(
+        `/v1/compliance/admin/wallets/${walletId}/pin`,
+        { reason: 'suspected compromise' },
+        reviewer.cookie,
+      ),
+    );
+    expect(pinned.status).toBe(404);
+    expect(((await pinned.json()) as { error: { code: string } }).error.code).toBe(
+      'wallet_unknown',
+    );
   });
 
   it('config PUT validates, applies, and pushes retention overrides to the events job', async () => {

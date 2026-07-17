@@ -408,52 +408,71 @@ export function createComplianceRoutes() {
         const services = getComplianceServices();
         const body = c.req.valid('json');
         const nowIso = new Date(services.now()).toISOString();
-        const existing = await services.declarations.get(auth.userId);
-        // A VERIFIED declaration is the real-funds region basis AND the only
-        // anti-circumvention control the §19.1 ladder has.  A redeclaration must
-        // NOT silently erase it: overwriting the verified row with a fresh
-        // `pending` one drops `resolveRegion` to the weaker locale rung, so a
-        // member whose verified region is BLOCKED could self-declare a new region
-        // and reach the routes that reject only an explicit `blocked` verdict
-        // (wallet-connect / testnet).  Changing a verified region is an EXPLICIT,
-        // audited act — revoke first (DELETE, which reverts to locale on the
-        // record), then declare — never a silent side effect of a new POST.
-        if (
-          existing !== null &&
-          existing.status === 'verified' &&
-          existing.verificationLevel === 'reviewer_verified'
-        ) {
-          return c.json(
-            deny(
-              'declaration_verified',
-              'Your region is verified. Revoke the current declaration first, then declare the new region.',
-            ),
-            409,
+        // READ → GUARD → CAS, retried.  A VERIFIED declaration is the real-funds
+        // region basis AND the only anti-circumvention control the §19.1 ladder
+        // has, so a redeclaration must NOT silently erase it (overwriting the
+        // verified row with a fresh `pending` one drops `resolveRegion` to the
+        // weaker locale rung — a verified-BLOCKED member could then reach the
+        // routes that reject only an explicit `blocked`).  The guard alone is a
+        // TOCTOU: a reviewer can verify the pending row BETWEEN our read and our
+        // write, and an unconditional upsert would clobber `reviewer_verified`.
+        // So the write CASes on the read premises; a miss RE-READS and re-checks
+        // (the re-read now sees the verify and 409s) rather than clobbering it.
+        // Changing a verified region stays an explicit, audited act — revoke
+        // first (DELETE), then declare — never a silent side effect of a POST.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const existing = await services.declarations.get(auth.userId);
+          if (
+            existing !== null &&
+            existing.status === 'verified' &&
+            existing.verificationLevel === 'reviewer_verified'
+          ) {
+            return c.json(
+              deny(
+                'declaration_verified',
+                'Your region is verified. Revoke the current declaration first, then declare the new region.',
+              ),
+              409,
+            );
+          }
+          const record = await services.declarations.upsert(
+            {
+              userId: auth.userId,
+              declaredRegion: body.declared_region,
+              status: 'pending',
+              verificationLevel: 'unverified',
+              evidenceRef: body.evidence_ref ?? null,
+              verifiedAt: null,
+              verifiedBy: null,
+              createdAt: existing?.createdAt ?? nowIso,
+              updatedAt: nowIso,
+            },
+            // CAS only when a prior row exists — a concurrent verify is the write
+            // to preserve; a first declaration has no premises to lose.
+            existing === null
+              ? undefined
+              : {
+                  declaredRegion: existing.declaredRegion,
+                  status: existing.status,
+                  updatedAt: existing.updatedAt,
+                },
           );
+          if (record !== null) {
+            await getIdentityServices().audit.append({
+              actorUserId: auth.userId,
+              eventType: 'region_declaration_change',
+              context: { setting: 'declare', new_value: body.declared_region },
+            });
+            services.metrics.increment('compliance.declaration.created');
+            return c.json({ declaration: declarationToWire(record) }, 201);
+          }
+          // record === null ⇒ a CAS miss (only reachable when `existing` was
+          // non-null): the row changed under us, so loop and re-read/re-check.
         }
-        const record = await services.declarations.upsert({
-          userId: auth.userId,
-          declaredRegion: body.declared_region,
-          status: 'pending',
-          verificationLevel: 'unverified',
-          evidenceRef: body.evidence_ref ?? null,
-          verifiedAt: null,
-          verifiedBy: null,
-          createdAt: existing?.createdAt ?? nowIso,
-          updatedAt: nowIso,
-        });
-        // Unconditional (the member is declaring their OWN region — there is no
-        // decision-about-a-prior-row to lose), so a null is a store fault.
-        if (record === null) {
-          return c.json(deny('unavailable', 'The declaration could not be stored.'), 503);
-        }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'region_declaration_change',
-          context: { setting: 'declare', new_value: body.declared_region },
-        });
-        services.metrics.increment('compliance.declaration.created');
-        return c.json({ declaration: declarationToWire(record) }, 201);
+        return c.json(
+          deny('declaration_changed', 'The declaration changed while being updated; try again.'),
+          409,
+        );
       },
     )
 
@@ -1281,21 +1300,25 @@ export function createComplianceRoutes() {
       authMiddleware(),
       requireCompliance(),
       zValidator('param', z.object({ walletAccountId: uuidSchema })),
-      // `subject_ref` is the wallet OWNER: a manual pin blocks the owner's fund
-      // transfers, so — like the link-time sanctions response — it opens an
-      // investigation CASE for that subject in the SAME unit, or the restriction
-      // would have no reviewer-queue entry, case history, or DSAR/export record
-      // explaining it.
-      zValidator(
-        'json',
-        z.object({ reason: z.string().min(1).max(2000), subject_ref: uuidSchema }).strict(),
-      ),
+      zValidator('json', z.object({ reason: z.string().min(1).max(2000) }).strict()),
       async (c) => {
         const auth = requireAuth(c);
         const services = getComplianceServices();
         const { walletAccountId } = c.req.valid('param');
-        const { reason, subject_ref } = c.req.valid('json');
+        const { reason } = c.req.valid('json');
         const nowIso = new Date(services.now()).toISOString();
+        // DERIVE the case subject from the wallet's OWNER, never a caller-supplied
+        // ref: the pin blocks the wallet by `walletAccountId`, so a wrong subject
+        // would leave the ACTUAL owner fund-blocked with no case explaining it
+        // while an unrelated user got a spurious high-risk case.  Fail closed on an
+        // unknown wallet — a pin with no real subject cannot carry its case.
+        const subjectRef = await services.walletOwner(walletAccountId);
+        if (subjectRef === null) {
+          return c.json(
+            deny('wallet_unknown', 'The wallet could not be resolved to an owner.'),
+            404,
+          );
+        }
         // ONE unit: the pin and its case are the two halves of the same response
         // (the same invariant `buildSanctionedWalletLinkHook` keeps at link) — a
         // pin with no case is a wallet frozen with nothing in the queue explaining
@@ -1315,7 +1338,7 @@ export function createComplianceRoutes() {
             });
             return createCaseInTx(stores, buildCaseDeps(services), {
               subjectKind: 'user',
-              subjectRef: subject_ref,
+              subjectRef,
               triggerType: 'manual',
               riskLevel: 'high',
               note: `Wallet manually pinned by a compliance reviewer: ${reason}`,
@@ -1331,7 +1354,7 @@ export function createComplianceRoutes() {
         // Announced OUTSIDE the unit (an external side effect must not replay if a
         // chain fork runs the unit twice) and only for a case this call opened.
         if (outcome.created) {
-          await announceCaseCreated(buildCaseDeps(services), outcome.record, subject_ref);
+          await announceCaseCreated(buildCaseDeps(services), outcome.record, subjectRef);
         }
         services.metrics.increment('compliance.wallet_pin.created');
         return c.json({ pinned: true, created_at: nowIso }, 201);

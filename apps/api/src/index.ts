@@ -1358,6 +1358,8 @@ complianceServices.knomosisFlags = () => ({
 });
 complianceServices.roomStorageMode = async (roomId) =>
   (await forumServices.rooms.getById(roomId))?.storageMode ?? null;
+complianceServices.walletOwner = async (walletAccountId) =>
+  (await knomosisServices.wallets.getById(walletAccountId))?.userId ?? null;
 complianceServices.opaqueRef = (id) => accountRef(identityServices.config.masterSecret, id);
 complianceServices.emitEvent = async (event) => {
   const envelope = event as {

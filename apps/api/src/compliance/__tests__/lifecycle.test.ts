@@ -667,6 +667,61 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     ).toBe(false);
   });
 
+  it('a DENIED request lifts its suppression and closes the case with a GENERIC note (threads 1408, lawful-access:256)', async () => {
+    const userId = randomUUID();
+    const deps = {
+      requests: services.lawfulAccess,
+      caseDeps: buildCaseDeps(services),
+      roomStorageMode: services.roomStorageMode,
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const intake = await intakeLawfulAccessRequest(deps, {
+      agency: 'Agency',
+      jurisdiction: 'US',
+      legalBasis: 'subpoena',
+      scope: {
+        subject_kind: 'user',
+        subject_ref: userId,
+        time_range_start: null,
+        time_range_end: null,
+      },
+      contact: 'agent@example.test',
+      actorUserId: ACTOR,
+    });
+    if (!intake.ok) throw new Error('intake failed');
+    const caseId = intake.record.caseId;
+    if (caseId === null) throw new Error('no case');
+    // While the request is live, its case is suppressed.
+    expect(await services.lawfulAccess.unnotifiedCaseIdsForSubject(userId)).toContain(caseId);
+
+    const denied = await reviewLawfulAccessRequest(deps, {
+      requestId: intake.record.requestId,
+      decision: 'denied',
+      note: 'invalid order',
+      actorUserId: ACTOR,
+    });
+    expect(denied.ok).toBe(true);
+    // Finding B: a DENIED request never notifies (`userNotifiedAt` stays null),
+    // but counsel rejected it and the case is released + closed — so it must NOT
+    // stay suppressed forever; the subject's own generic closed case belongs in
+    // their DSAR.
+    expect(await services.lawfulAccess.unnotifiedCaseIdsForSubject(userId)).not.toContain(caseId);
+    const closed = await services.cases.getById(caseId);
+    expect(closed?.reviewState).toBe('resolved');
+    expect(closed?.retentionPolicy.legal_hold).toBe(false);
+    // Finding D: the case-chain notes are GENERIC — a compliance reviewer reading
+    // the linked case must NOT learn a lawful-access request existed or was denied
+    // (that lives only on the counsel-only request record).
+    const notes = (await services.caseAudit.listChained(caseId))
+      .map((e) => (e.note ?? '').toLowerCase())
+      .join(' | ');
+    expect(notes).not.toContain('lawful');
+    expect(notes).not.toContain('denied');
+    expect(notes).not.toContain('invalid order');
+  });
+
   it('an unnotified lawful-access case does not disable the subject’s crypto features', async () => {
     const userId = randomUUID();
     // `compliance_hold` is only REACHABLE once the global flags and the age

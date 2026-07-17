@@ -1239,9 +1239,17 @@ export class InMemoryLawfulAccessStore implements LawfulAccessStore, InMemoryRol
   }
 
   async unnotifiedCaseIdsForSubject(subjectRef: string): Promise<string[]> {
+    // Suppress ONLY while the request is still hidden: not yet notified AND not
+    // DENIED.  A denied request never sets `userNotifiedAt`, but counsel rejected
+    // it and its case is released + closed — keeping it suppressed would filter
+    // the subject's own (now generic, closed) case out of their DSAR forever.
     return [...this.#rows.values()]
       .filter(
-        (r) => r.caseId !== null && r.scope.subject_ref === subjectRef && r.userNotifiedAt === null,
+        (r) =>
+          r.caseId !== null &&
+          r.scope.subject_ref === subjectRef &&
+          r.userNotifiedAt === null &&
+          r.status !== 'denied',
       )
       .map((r) => r.caseId as string);
   }
