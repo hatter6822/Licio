@@ -337,6 +337,58 @@ describe('createFraudRisk (WS-N.2.2b/c)', () => {
     expect(await check()).toBe('normal');
   });
 
+  it('a NULL-ref (direct) high-value review is NEVER cleared-and-reused — it fails closed to elevated (codex: keep direct reviews per transfer)', async () => {
+    const { services, fraudRisk } = fraudFixture({
+      highValueReviewThresholdMinorUnits: '1000',
+    });
+    // A DIRECT transfer names NO attempt (reviewRef null): the case is day-bucketed
+    // and the cleared-review exit is withheld, so a direct high-value transfer must
+    // go through a payment intent to be reviewable.
+    const direct = () =>
+      fraudRisk({
+        userId: USER,
+        actionType: 'treasury_deposit',
+        amountMinorUnits: '5000',
+        reviewRef: null,
+        reviewSubject: null,
+      });
+    expect(await direct()).toBe('elevated');
+    const [record] = await services.cases.listByStates(['open'], 10);
+    const caseId = record?.caseId as string;
+    // Clear the case; a stable movement key would now let this ONE clearance cover
+    // an UNLIMITED stream of identical direct transfers.  The null ref must not:
+    // the direct transfer stays `elevated`, never `normal`.
+    const deps = buildCaseDeps(services);
+    await transitionCase(deps, {
+      caseId,
+      to: 'assigned',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      assigneeUserId: REVIEWER,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'investigating',
+      actorUserId: REVIEWER,
+      isSenior: false,
+    });
+    await transitionCase(deps, {
+      caseId,
+      to: 'resolved',
+      actorUserId: REVIEWER,
+      isSenior: false,
+      resolution: {
+        outcome: 'cleared',
+        notes: 'reviewed',
+        resolved_by: REVIEWER,
+        resolved_at: new Date(NOW).toISOString(),
+      },
+    });
+    expect(await direct()).toBe('elevated'); // NOT normal — the clearance is not reusable
+    // …and it does not spam cases: the day-bucketed key dedups (still one case).
+    expect(await services.cases.listBySubject(USER, 'user', 10)).toHaveLength(1);
+  });
+
   it('an intent-backed transfer is reviewed ONCE across both legs, and the clearance releases it', async () => {
     const { services, fraudRisk } = fraudFixture({
       highValueReviewThresholdMinorUnits: '1000',

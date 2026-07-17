@@ -16,7 +16,6 @@
 import { decCompare } from '@licio/governance';
 import type { KnomosisReasonCode, KnomosisSignedActionType, SubmissionState } from '@licio/shared';
 import {
-  directTransferReviewRef,
   featureCellForAction,
   REAL_FUNDS_ENVIRONMENTS,
   reviewSubjectForAction,
@@ -576,19 +575,12 @@ export async function submitAction(
       userId: input.userId,
       actionType,
       amountMinorUnits: input.typedDataMessage['amount'] ?? null,
-      // The same review the preflight named — an intent-backed transfer by its
-      // intent id, a direct one by the STABLE MOVEMENT key (the ONE shared
-      // definition, so preflight and this re-check never key the same movement
-      // two different ways).  Keying a direct review by `typedDataHash` would open
-      // a fresh case on every retry, since the hash binds the per-attempt nonce.
-      reviewRef:
-        input.paymentIntentId ??
-        directTransferReviewRef(
-          actionType,
-          input.deploymentId,
-          input.roomId,
-          input.typedDataMessage,
-        ),
+      // ONLY an intent-backed transfer names a review attempt (its intent id).  A
+      // direct one passes NO ref (the same choice the preflight makes), so its
+      // high-value case is day-bucketed and NEVER honors a clearance — a direct
+      // high-value transfer cannot be cleared-and-reused for an unlimited stream;
+      // it must go through a payment intent to be reviewable.
+      reviewRef: input.paymentIntentId ?? null,
       // The same subject the WS-M intent leg derives, from the same cell: a
       // room-treasury payout is the ROOM's review, a pay-in is the payer's.
       // Classifying it differently here would split one transfer's review in two.
@@ -605,16 +597,20 @@ export async function submitAction(
         message: 'This action was flagged by risk checks.',
       };
     }
-    // Mirrors preflight step 8: `elevated` = manual review required, and a
-    // signed transfer has no intent to hold, so it waits for the review.  The
-    // re-check exists precisely because this verdict can flip during the token
-    // TTL — a high-value case opened after preflight must still bite here.
+    // Mirrors preflight step 8: `elevated` = manual review required.  An
+    // intent-backed transfer waits for its intent's review; a DIRECT one has no
+    // clearable per-attempt review, so it is refused with guidance to use a
+    // payment intent.  The re-check exists precisely because this verdict can flip
+    // during the token TTL — a high-value case opened after preflight must bite.
     if (fraud === 'elevated' && FUND_TRANSFER_ACTIONS.has(actionType)) {
       return {
         ok: false,
         status: 409,
         code: 'FRAUD_RISK',
-        message: 'This action is held for compliance review before it can proceed.',
+        message:
+          input.paymentIntentId === undefined
+            ? 'High-value transfers must go through a payment intent so the amount can be reviewed.'
+            : 'This action is held for compliance review before it can proceed.',
       };
     }
   }

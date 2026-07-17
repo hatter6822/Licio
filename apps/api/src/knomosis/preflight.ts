@@ -15,7 +15,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { decCompare, type TreasuryBounds } from '@licio/governance';
 import {
-  directTransferReviewRef,
   featureCellForAction,
   formatMinorUnits,
   type GovernanceMode,
@@ -652,14 +651,16 @@ export async function runPreflight(
     userId: input.userId,
     actionType,
     amountMinorUnits: message['amount'] ?? null,
-    // A DIRECT transfer (no intent) keys its high-value review on the STABLE
-    // MOVEMENT, never `verified.typedDataHash` (which binds the per-attempt nonce/
-    // expiration) — the ONE shared definition the submit re-check uses too, so a
-    // retry after a reviewer clears lands on the same case rather than opening a
-    // fresh `elevated` one.  An intent-backed transfer keeps naming its INTENT.
-    reviewRef:
-      input.paymentIntentId ??
-      directTransferReviewRef(actionType, input.deploymentId, input.roomId, message),
+    // ONLY an intent-backed transfer names a review attempt (its intent id — a
+    // genuine per-attempt id, single-use and reviewable).  A DIRECT transfer
+    // passes NO ref: `fraudRisk` day-buckets a null-ref high-value case and
+    // withholds the cleared-review exit (fail-closed), so a direct high-value
+    // transfer stays held and can never be cleared-and-reused for an unlimited
+    // stream of identical transfers.  A stable movement key would have let ONE
+    // clearance cover every later identical transfer; the per-attempt hash would
+    // have re-opened a case on each retry.  High-value transfers that need review
+    // must go through a PAYMENT INTENT (whose id IS the durable per-attempt ref).
+    reviewRef: input.paymentIntentId ?? null,
     // The same subject the WS-M intent leg derives, from the same cell: a
     // room-treasury payout is the ROOM's review, a pay-in is the payer's.
     // Classifying it differently here would split one transfer's review in two.
@@ -673,18 +674,20 @@ export async function runPreflight(
       fail('fraud_risk', 'FRAUD_RISK', 'This action was flagged by risk checks.', input, nowIso),
     );
   }
-  // `elevated` = manual review required (§17.10 high-value disbursements).  A
-  // payment intent expresses that by HOLDING in the fraud queue; a signed fund
-  // transfer has no intent to hold, so the equivalent is to reject until the
-  // review clears — WS-N opened the case, and once a reviewer resolves it
-  // `cleared` the same check returns `normal` and the retry proceeds.  Without
-  // this arm a high-value payout would sail past the review it triggered.
+  // `elevated` = manual review required (§17.10 high-value disbursements).  An
+  // intent-backed transfer expresses that by HOLDING in the fraud queue, and a
+  // reviewer clearing THAT intent's review lets the retry through.  A DIRECT
+  // transfer has no clearable per-attempt review (its null ref is never cleared),
+  // so it is refused with guidance to use a payment intent — never held on a
+  // review it can never satisfy.
   if (fraud === 'elevated' && FUND_TRANSFER_ACTIONS.has(actionType)) {
     return audited(
       fail(
         'fraud_risk',
         'FRAUD_RISK',
-        'This action is held for compliance review before it can proceed.',
+        input.paymentIntentId === undefined
+          ? 'High-value transfers must go through a payment intent so the amount can be reviewed.'
+          : 'This action is held for compliance review before it can proceed.',
         input,
         nowIso,
       ),

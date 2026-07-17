@@ -60,41 +60,6 @@ export const TARGET_ID_FIELD_FOR_ACTION: Readonly<
   grant_payout: 'grantId',
 };
 
-/**
- * The stable review key for a DIRECT (intent-less) fund transfer's high-value
- * (`elevated`) review.
- *
- * It identifies the MOVEMENT, not the attempt: `verified.typedDataHash` binds the
- * per-attempt nonce + expiration, and an action's expiration is capped to minutes
- * while a manual review runs to hours — so the retry a reviewer's clearance
- * REQUIRES (necessarily a fresh nonce, hence a fresh hash) would open a NEW review
- * case and re-block, never honoring the clearance.  Keying on the stable movement
- * fields makes the retry land on the same, already-cleared case.  Velocity still
- * bounds repetition (each attempt reserves budget).
- *
- * The preflight and the submit re-check MUST derive the identical key, so this is
- * ONE definition over the token-bound message both see.  An intent-backed transfer
- * keys by its intent id instead (each intent is its own single review).
- */
-export function directTransferReviewRef(
-  actionType: KnomosisSignedActionType,
-  deploymentId: string,
-  roomId: string,
-  message: Record<string, unknown>,
-): string {
-  const targetField = TARGET_ID_FIELD_FOR_ACTION[actionType];
-  return `direct:${[
-    actionType,
-    deploymentId,
-    roomId,
-    String(message['actor'] ?? '').toLowerCase(),
-    String(message['amount'] ?? ''),
-    String(message['asset'] ?? ''),
-    String((targetField !== undefined ? message[targetField] : '') ?? ''),
-    String(message['recipient'] ?? '').toLowerCase(),
-  ].join('\x00')}`;
-}
-
 /** Environments whose actions move REAL funds (everything else is play money). */
 export const REAL_FUNDS_ENVIRONMENTS: ReadonlySet<KnomosisEnvironment> = new Set([
   'capped_production',

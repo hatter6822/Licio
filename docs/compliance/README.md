@@ -641,18 +641,21 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   way.  A shared address-only key would have let a reviewer's clearance on one
   deployment silently clear the same address's pending review on another, so a
   chain-specific match could bypass review.
-- **A DIRECT high-value review keys on the MOVEMENT, not the attempt.**  A signed
-  fund transfer that carries no payment intent and trips the `elevated` threshold
-  needs a review ref for its fraud case.  Keying it by the bound `typedDataHash`
-  re-blocked every retry: the hash commits to the per-attempt nonce + expiration,
-  and an action's expiration is minutes while a manual review runs to hours — so
-  the retry a clearance REQUIRES (a fresh nonce, hence a fresh hash) opened a NEW
-  `elevated` case and re-blocked, never honoring the clearance.  The shared
-  `directTransferReviewRef` (ONE definition the preflight and the submit re-check
-  both call) keys on the stable movement — action / deployment / room / actor /
-  amount / asset / target / recipient — so the retry lands on the same, cleared
-  case; velocity still bounds repetition.  An intent-backed transfer keeps keying
-  by its intent id (each intent is its own single review).
+- **A high-value review needs a genuine per-ATTEMPT id — so only a PAYMENT INTENT
+  is reviewable.**  `fraudRisk`'s `elevated` verdict is honored per its `reviewRef`:
+  a reviewer who clears THAT ref lets its retry through.  For a direct (intent-less)
+  signed transfer there is no such id: the per-attempt `typedDataHash` re-opens a
+  new case on every retry (the hash binds the nonce/expiration a retry must
+  change), while a stable movement key (action / room / actor / amount / asset /
+  target / recipient) would let ONE clearance cover an UNLIMITED stream of
+  identical transfers — a movement key cannot tell a retry from a fresh transfer.
+  So a direct transfer passes NO ref: `fraudRisk` day-buckets a null-ref case (no
+  spam) and structurally WITHHOLDS the cleared-review exit, so a direct high-value
+  transfer can never be cleared-and-reused — it stays `elevated`, and both legs
+  refuse it with guidance to use a payment intent.  The intent id IS the durable
+  per-attempt review ref (single-use, its own case), so high-value transfers that
+  need review go through the intent flow; a direct transfer below the threshold is
+  unaffected.
 - **A bogus token reaches no mutable compliance check.**  The submit re-checks
   MUTATE state (`screenAddress` opens a sanctions case, `fraudRisk` reserves
   velocity and can open a review), but the single-use token proving the action
