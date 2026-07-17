@@ -86,6 +86,23 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   `/profile/signal-ledger`, `/profile/settings`, `/profile/privacy`,
   `/profile/wallet`), and flag-gated routes (`/rooms/$roomId/governance`). Flat
   URLs for nested detail routes use the `_`-suffixed (non-nesting) route-id form.
+  The operator consoles (`/moderation` WS-J.2, `/compliance-console` WS-N) are
+  linked from the profile page's role-gated **Operations** group: the auth-status
+  context carries the user's OWN `roles` + `steward_roles`
+  (`userContextSchema`, both defaulted for pre-roles persisted state) and the
+  shared `canAccessModerationConsole` / `canAccessComplianceConsole` hints decide
+  which links render.  The moderation hint mirrors the console's REAL gate
+  (`isStewardActor`: any WS-J doctrine grant, or platform admin — the platform
+  `steward` role alone gets no link because the console would 403 it); an
+  api-side test pins the mirror.  The hints are navigation only — every console
+  endpoint re-authorizes server-side (role capability + step-up MFA) and the
+  console pages render an access notice on a 403.  The roles ride
+  `/v1/auth/status` (a tolerant non-strict schema), NOT the `.strict()` login
+  echo — growing that would break stale cached bundles — so the login flows
+  re-read the status to unhide the links immediately after sign-in.  Sign-out
+  (both the local and the cross-tab path) purges the SW's `licio-api` runtime
+  cache: cached `/v1` GETs — the status response with its roles included —
+  must not survive the session on a shared browser.
 - **Conversation surface (WS-T.7/8):** story pages embed their own comment
   section using the served `thread_id`, so the feed → story → discussion path
   stays inline. That inline section shows exactly **one nested reply layer** to

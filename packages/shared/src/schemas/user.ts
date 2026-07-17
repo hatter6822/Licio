@@ -46,6 +46,53 @@ export const AGE_BANDS = ['adult', 'teen_16_17', 'teen_13_15'] as const;
 export type AgeBand = (typeof AGE_BANDS)[number];
 export const ageBandSchema = z.enum(AGE_BANDS);
 
+/**
+ * The closed platform-RBAC role vocabulary (WS-D.1.6b, §25.4).  This tuple is
+ * the SSOT: the server policy table (`apps/api/src/identity/rbac.ts` ROLES /
+ * POLICY) derives its `Role` type from it, so the wire vocabulary and the
+ * authorization table can never drift.  Distinct from the WS-J doctrine
+ * steward roles (`steward-roles.ts`) — those are per-console duty grants, not
+ * platform capabilities.  A user's OWN roles appear on the auth-status
+ * context (`userContextSchema.roles`) as a navigation hint; they are NEVER a
+ * client-side authorization decision (every console endpoint re-authorizes
+ * with the capability + step-up MFA) and never appear on `userPublicSchema`
+ * (which compliance officers hold is not other-users' information).
+ */
+export const PLATFORM_ROLES = [
+  'user',
+  'expert',
+  'moderator',
+  'steward',
+  'admin',
+  'compliance',
+  'counsel',
+] as const;
+export type PlatformRole = (typeof PLATFORM_ROLES)[number];
+export const platformRoleSchema = z.enum(PLATFORM_ROLES);
+
+/**
+ * Navigation HINTS for the role-gated operator consoles — they mirror the
+ * server's authorization derivations and an api-side test asserts the mirror
+ * never drifts.  A wrong hint can reveal a LINK, never data: every console
+ * endpoint re-authorizes (+ per-session MFA) on every request.
+ *
+ * The moderation console's real gate is `isStewardActor` (WS-J doctrine): ANY
+ * doctrine steward-role grant, or the platform `admin` role (which holds all
+ * five doctrine roles implicitly).  The platform `steward` role alone carries
+ * NO console access — a doctrine-granted plain `user` does.  The compliance
+ * console's gate is the `compliance.review` capability (`compliance` or
+ * `counsel`).
+ */
+export function canAccessModerationConsole(
+  roles: readonly PlatformRole[],
+  stewardRoles: readonly string[],
+): boolean {
+  return roles.includes('admin') || stewardRoles.length > 0;
+}
+export function canAccessComplianceConsole(roles: readonly PlatformRole[]): boolean {
+  return roles.includes('compliance') || roles.includes('counsel');
+}
+
 /** Handle policy: ASCII alphanumeric + underscore, 3–30 chars (matches the DB CHECK). */
 export const HANDLE_PATTERN = /^[A-Za-z0-9_]{3,30}$/;
 export const handleSchema = z

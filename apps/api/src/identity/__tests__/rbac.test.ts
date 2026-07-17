@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import {
+  canAccessComplianceConsole,
+  canAccessModerationConsole,
+  PLATFORM_ROLES,
+  STEWARD_ROLE_IDS,
+} from '@licio/shared';
 import { describe, expect, it } from 'vitest';
+import { isStewardActor } from '../../moderation/authz.js';
 import {
   ACTIONS,
   type Action,
@@ -53,6 +60,42 @@ describe('RBAC policy matrix', () => {
 
   it('denies an empty role set everything', () => {
     for (const action of ACTIONS) expect(authorize([], action)).toBe(false);
+  });
+
+  it('ROLES is the shared PLATFORM_ROLES SSOT (wire vocabulary ≡ policy table)', () => {
+    expect(ROLES).toBe(PLATFORM_ROLES);
+  });
+
+  it('the shared console-nav hints mirror the server authorization exactly (no drift)', () => {
+    // `canAccess*Console` gates only which LINK renders; these equivalences
+    // guarantee the hint can never disagree with the gate that actually
+    // authorizes.  The moderation console's gate is the WS-J doctrine
+    // `isStewardActor` (ANY doctrine grant, or platform admin) — NOT the
+    // platform `steward` role: a doctrine-granted plain `user` must see the
+    // link, and a grant-less platform `steward` must not.  Checked over
+    // every platform role × {no grants, one grant, all grants}.
+    const grantSets: readonly (readonly (typeof STEWARD_ROLE_IDS)[number][])[] = [
+      [],
+      [STEWARD_ROLE_IDS[0]],
+      STEWARD_ROLE_IDS,
+    ];
+    for (const role of ROLES) {
+      for (const grants of grantSets) {
+        expect(
+          canAccessModerationConsole([role], grants),
+          `${role} + ${grants.length} grants`,
+        ).toBe(
+          isStewardActor({
+            userId: '6f9619ff-8b86-4d01-b42d-00cf4fc964ff',
+            platformRoles: [role],
+            stewardRoles: grants,
+            mfaActive: true,
+            mfaVerified: true,
+          }),
+        );
+      }
+      expect(canAccessComplianceConsole([role]), role).toBe(isComplianceReviewer([role]));
+    }
   });
 });
 

@@ -50,6 +50,19 @@ function postLogout(): void {
 }
 
 /**
+ * Purge the SW's `licio-api` runtime cache on sign-out.  Cached /v1 GETs (the
+ * NetworkFirst offline fallback) hold the signed-out user's data for up to
+ * 24h — /v1/auth/status now includes their operator roles — and on a shared
+ * browser the next user (or any same-origin script) could read them from
+ * Cache Storage.  Best-effort: Cache Storage may be absent (older WebViews,
+ * some test environments), and a failed purge must never block sign-out.
+ */
+function purgeApiCache(): void {
+  if (typeof caches === 'undefined') return;
+  void caches.delete('licio-api').catch(() => undefined);
+}
+
+/**
  * Wire cross-tab auth sync. Call once at app startup. Returns a teardown so the
  * channel can be closed (tests, hot reload). A no-op where BroadcastChannel is
  * unavailable — single-tab behaviour is unaffected.
@@ -96,11 +109,13 @@ export const useAuthStore = create<AuthState>((set) => ({
   expireSession: () => set({ status: 'session-expired' }),
   logout: () => {
     clearPersisted(PERSIST.key);
+    purgeApiCache();
     set({ status: 'unauthenticated', user: null });
     postLogout();
   },
   applyRemoteLogout: () => {
     clearPersisted(PERSIST.key);
+    purgeApiCache();
     set({ status: 'unauthenticated', user: null });
   },
 }));

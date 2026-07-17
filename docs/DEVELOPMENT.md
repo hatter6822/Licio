@@ -684,6 +684,17 @@ pre-seeded, so these development accounts use the email one-time-code path.
 | **expert** | Dr. Erin Expert | `expert@licio.test` | Least-privilege `expert` role: can post top-level content in expert-gated rooms such as *Open Science*, without moderation/admin power. |
 | **compliance + counsel** | Cora Compliance | `compliance@licio.test` | The WS-N financial-compliance console at `/compliance-console` (cases, fraud queue, declaration verification) **and** the counsel-only surfaces (SAR drafting/approval, disclosure publishing, lawful-access review). Both roles sit on one dev account for convenience; in production they are separate people. Console actions require step-up MFA — enrol TOTP from **Profile → Security** first. |
 
+Signed in with a role-holding account, the consoles are linked from
+**Profile → Operations** — the moderation console (`/moderation`) for
+DOCTRINE-granted stewards and admins (the console's real gate is the WS-J
+doctrine grants — `steward@licio.test` holds three; the platform `steward`
+role alone carries no console access) and the compliance console
+(`/compliance-console`) for compliance/counsel sessions.  The link visibility
+comes from the roles + doctrine grants on the auth-status context (a
+navigation hint); every console endpoint still authorizes server-side (role
+capability + verified step-up MFA), so an account without MFA sees the
+console's "access required" card until TOTP is enrolled and verified.
+
 There is also a plain demo author, `licio_demo`, that owns most of the seeded
 content. Use the three email accounts above when you need to test role-gated
 behavior. The `.test` top-level domain is reserved by RFC 6761, so these

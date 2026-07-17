@@ -8,16 +8,12 @@
 //   • Object-level ownership: a user may only touch their own resources.  A
 //     cross-user reference to a PRIVATE object resolves to `not_found`, never
 //     `forbidden`, so existence is not confirmed (no enumeration oracle).
+import { PLATFORM_ROLES } from '@licio/shared';
 
-export const ROLES = [
-  'user',
-  'expert',
-  'moderator',
-  'steward',
-  'admin',
-  'compliance',
-  'counsel',
-] as const;
+/** The closed role vocabulary — re-exported from the shared SSOT
+ *  (`PLATFORM_ROLES`), so the wire contexts and this policy table can never
+ *  drift.  The policy GRANTS below remain server-only on purpose. */
+export const ROLES = PLATFORM_ROLES;
 export type Role = (typeof ROLES)[number];
 
 export const ACTIONS = [
