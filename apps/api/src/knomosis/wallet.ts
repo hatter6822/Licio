@@ -315,15 +315,16 @@ export async function linkWallet(
       };
     }
     // active or pending_unlink: idempotent re-link; a pending unlink is
-    // CANCELLED by re-linking during the cooling-off window (WS-L.2.5b).
+    // CANCELLED by re-linking during the cooling-off window (WS-L.2.5b).  The
+    // cancel is COLUMN-SCOPED — a full-record `update({...existing})` would write
+    // the stale `existing` snapshot back over any `riskState` a compliance
+    // escalation persisted between the read above and this write, silently
+    // restoring a prior `normal` and losing the fail-closed fund restriction.  The
+    // method returns the FRESH row, so the `pending` re-screen below (and the
+    // response) reflect a concurrent escalation rather than the stale read.
     const record =
       existing.unlinkState === 'pending_unlink'
-        ? await deps.wallets.update({
-            ...existing,
-            unlinkState: 'active',
-            unlinkRequestedAt: null,
-            unlinkFinalizeAfter: null,
-          })
+        ? ((await deps.wallets.cancelPendingUnlink(existing.walletAccountId)) ?? existing)
         : existing;
     // A wallet still `pending` from a link-time screening OUTAGE has NO other
     // recovery route: the read-through now refuses to promote it from an
@@ -331,7 +332,8 @@ export async function linkWallet(
     // fund-blocked until an unlink→finalize→cooldown→relink.  Re-screen on the
     // re-link so a recovered provider can clear it.  Idempotent: a `clear` CASes
     // `pending`→`normal`, `unavailable` leaves it pending, and the blocked hook
-    // dedups per wallet (idempotent pin + `sanctions:link:<wallet>` case).
+    // dedups per ACTIVE PIN (idempotent pin + `sanctions:link:<pin.id>` case), so a
+    // re-freeze after the prior incident resolved opens a fresh reviewable case.
     if (record.riskState === 'pending') {
       const rescreened = await screenLinkedWallet(
         deps,

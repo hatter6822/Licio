@@ -389,5 +389,19 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
     );
     await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
     expect(await screen.findByRole('status')).toHaveTextContent(/resource not found/i);
+
+    // REVOKE is the reviewer's only path to remove a VERIFIED region (a member
+    // DELETE is refused server-side); the console must expose it, or a wrong
+    // verified region is stuck.  It routes the 'revoke' decision to the API.
+    mocked.adminVerifyDeclaration.mockResolvedValue(undefined);
+    await userEvent.click(screen.getByRole('button', { name: /revoke verified/i }));
+    await waitFor(() =>
+      expect(mocked.adminVerifyDeclaration).toHaveBeenCalledWith(
+        'user-77',
+        'revoke',
+        'passport matches',
+      ),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent(/verified region revoked/i);
   });
 });

@@ -97,6 +97,10 @@ async function verifyClaimedIntent(input: {
    *  room-owned payout recognize the caller's OWN action in ANY state (a dead
    *  `failed`/`reverted` row the live lookup skips) precisely, by owner + key. */
   idempotencyKey?: string;
+  /** The deployment the action would move funds ON (`body.deployment_id`): the
+   *  intent is bound to its treasury's deployment, so a claim naming a DIFFERENT
+   *  deployment is not this movement (see the binding in the identity block). */
+  deploymentId: string;
   /** `submit` demands the intent already be `signed`; `preflight` accepts the
    *  whole pre-submission window (it is what moves the intent toward signed). */
   stage: 'preflight' | 'submit';
@@ -180,6 +184,19 @@ async function verifyClaimedIntent(input: {
   const expectedTarget =
     intent.targetType === 'treasury_deposit' ? intent.treasuryId : intent.targetId;
   if (expectedTarget !== input.typedDataMessage[targetField]) return mismatch;
+  // …and the SAME DEPLOYMENT.  The intent draws on its treasury, which is pinned
+  // to one deployment; the action moves funds on `body.deployment_id`.  In a room
+  // with a rotated or additional active deployment, a cleared same-room / asset /
+  // amount / target / recipient intent would otherwise cover a submit on ANOTHER
+  // deployment — the treasury attach rejects `action.deploymentId !==
+  // intentTreasury.deploymentId`, but only AFTER `submitAction` has already
+  // forwarded the WS-L action, settling the transfer OUTSIDE the intent ledger and
+  // the accounting export.  Bind it here, BEFORE the mint, as IDENTITY (a retry
+  // names the same deployment, so it stays bound).  A missing treasury fails closed.
+  const intentTreasury = await getTreasuryServices().treasuries.getById(intent.treasuryId);
+  if (intentTreasury === null || intentTreasury.deploymentId !== input.deploymentId) {
+    return mismatch;
+  }
   // Everything above is IDENTITY — whose intent this is and what it settles.
   // A retry stops here: it minted its action already, and the gate below is
   // about minting.  (A payout's RECIPIENT binding is a MINT gate, not identity —
@@ -409,6 +426,7 @@ export function createKnomosisRoutes() {
             roomId: body.room_id,
             actionType: body.action_type,
             typedDataMessage: body.typed_data_message,
+            deploymentId: body.deployment_id,
             stage: 'preflight',
           });
           if (intentClaim !== null) {
@@ -462,6 +480,7 @@ export function createKnomosisRoutes() {
             roomId: body.room_id,
             actionType: body.action_type,
             typedDataMessage: body.typed_data_message,
+            deploymentId: body.deployment_id,
             idempotencyKey: body.idempotency_key,
             stage: 'submit',
             identityOnly: true,
@@ -559,6 +578,7 @@ export function createKnomosisRoutes() {
                 roomId: body.room_id,
                 actionType: body.action_type,
                 typedDataMessage: body.typed_data_message,
+                deploymentId: body.deployment_id,
                 stage: 'submit',
               });
           if (claimed !== null) {

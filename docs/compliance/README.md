@@ -402,7 +402,11 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   cannot self-revoke a `verified` row (the DELETE fails closed the same way).
   Changing a verified region is REVIEWER action, not a member one: the compliance
   role's `POST …/verify` takes a `revoke` decision (the ONLY path that removes a
-  verified region), after which the member may redeclare.  A member DELETE still
+  verified region), after which the member may redeclare — and the shipped
+  ComplianceConsole surfaces that decision as a "Revoke verified" action next to
+  verify/reject, so a reviewer can actually make the change the member is told to
+  ask for (a console offering only verify/reject would leave a wrong verified
+  region stuck behind a manual API call).  A member DELETE still
   freely revokes a NON-verified (pending) declaration.  The read-guard alone is a
   TOCTOU, so the redeclaration WRITE is a CAS on the read premises
   (`declaredRegion`/`status`/`updatedAt`): a reviewer verifying the pending row
@@ -677,6 +681,18 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   it: the recipient is a MINT gate, not identity, and the action already
   forwarded under a vetted recipient — re-checking would let a grant clawed back
   SINCE strand the recovery.
+- **A claimed intent binds its DEPLOYMENT before the action forwards, too.**  The
+  intent draws on its treasury, and every treasury is pinned to ONE deployment;
+  the signed action moves funds on `body.deployment_id`.  Matching the intent's
+  room / asset / amount / target / recipient does not prove the SAME deployment —
+  in a room with a rotated or additional active deployment, a cleared intent for
+  the treasury on deployment D1 would otherwise cover a submit on D2.  The
+  treasury attach rejects `action.deploymentId !== intentTreasury.deploymentId`,
+  but (exactly like the recipient) only AFTER `submitAction` forwarded — settling
+  outside the intent ledger/export.  So `verifyClaimedIntent` reads the intent's
+  treasury and binds its deployment as IDENTITY (a retry names the same
+  deployment, so it stays bound), BEFORE the mint; a treasury it cannot read fails
+  closed (`intent_mismatch`).
 - **An intent whose money has moved is never abandonable.**  `signed` is a timed
   state, so a client that dies between submit and attach — the case W13's
   recovery exists for — leaves an intent that expires while its action sits on

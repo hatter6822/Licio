@@ -307,6 +307,38 @@ describe('InMemoryFinancialWalletStore', () => {
     await expect(store.updateLabel('nope', 'x')).resolves.toBeUndefined();
   });
 
+  it('cancelPendingUnlink is column-scoped — a risk escalation landing first is NOT clobbered (codex: preserve risk on relink)', async () => {
+    const store = new InMemoryFinancialWalletStore();
+    const finalizeAfter = new Date(Date.now() + 60_000).toISOString();
+    const w = wallet({
+      unlinkState: 'pending_unlink',
+      unlinkRequestedAt: new Date().toISOString(),
+      unlinkFinalizeAfter: finalizeAfter,
+      riskState: 'normal',
+      label: 'my-wallet',
+    });
+    await store.insert(w);
+    // A caller reads the row (riskState 'normal') — the stale snapshot a full-record
+    // relink-cancel would write back.  A compliance escalation then persists `high`.
+    const stale = await store.getById(w.walletAccountId);
+    expect(stale?.riskState).toBe('normal');
+    await store.updateRiskState(w.walletAccountId, 'high');
+    // Cancelling the unlink flips ONLY the lifecycle fields; the `high` survives and
+    // the label is untouched (a full `update({...stale})` would restore `normal`).
+    const cancelled = await store.cancelPendingUnlink(w.walletAccountId);
+    expect(cancelled?.unlinkState).toBe('active');
+    expect(cancelled?.riskState).toBe('high');
+    expect(cancelled?.label).toBe('my-wallet');
+    const after = await store.getById(w.walletAccountId);
+    expect(after?.unlinkState).toBe('active');
+    expect(after?.unlinkRequestedAt).toBeNull();
+    expect(after?.unlinkFinalizeAfter).toBeNull();
+    expect(after?.riskState).toBe('high');
+    // Idempotent on an already-active row, and null for a missing one.
+    expect((await store.cancelPendingUnlink(w.walletAccountId))?.unlinkState).toBe('active');
+    expect(await store.cancelPendingUnlink('nope')).toBeNull();
+  });
+
   it('comprehension record keeps a pass monotonic — a later fail never downgrades it (M2)', async () => {
     const store = new InMemoryComprehensionStore();
     const now = () => new Date().toISOString();

@@ -308,13 +308,18 @@ function DeclarationVerification(): React.JSX.Element {
   const [userId, setUserId] = useState('');
   const [note, setNote] = useState('');
   const [outcome, setOutcome] = useState<string | null>(null);
-  const submit = async (decision: 'verify' | 'reject'): Promise<void> => {
+  const submit = async (decision: 'verify' | 'reject' | 'revoke'): Promise<void> => {
     try {
       await adminVerifyDeclaration(userId.trim(), decision, note.trim() || 'console review');
       setOutcome(
         decision === 'verify'
           ? t('compliance.console.verified', 'Declaration verified.')
-          : t('compliance.console.rejected', 'Declaration rejected (stays pending).'),
+          : decision === 'revoke'
+            ? t(
+                'compliance.console.revoked',
+                'Verified region revoked; the member may now redeclare.',
+              )
+            : t('compliance.console.rejected', 'Declaration rejected (stays pending).'),
       );
     } catch (e) {
       setOutcome(e instanceof ApiClientError ? e.message : 'Verification failed');
@@ -351,6 +356,13 @@ function DeclarationVerification(): React.JSX.Element {
           onClick={() => void submit('reject')}
         >
           {t('compliance.console.rejectDecl', 'Reject')}
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={userId.trim() === ''}
+          onClick={() => void submit('revoke')}
+        >
+          {t('compliance.console.revokeDecl', 'Revoke verified')}
         </Button>
       </div>
       {outcome !== null ? (

@@ -164,10 +164,14 @@ export async function adminReviewIntent(
   return parseResponse(res, intentReviewEnvelopeSchema);
 }
 
-/** Verify/reject a pending region declaration after evidence review (WS-N.1.1f). */
+/** Verify/reject a pending region declaration, or REVOKE a verified one, after
+ *  evidence review (WS-N.1.1f).  `revoke` is the reviewer's ONLY path to remove a
+ *  verified region — a member DELETE is refused (409) so a self-downgrade cannot
+ *  drop the verified basis to a more-permissive locale rung; after a revoke the
+ *  member may redeclare. */
 export async function adminVerifyDeclaration(
   userId: string,
-  decision: 'verify' | 'reject',
+  decision: 'verify' | 'reject' | 'revoke',
   note: string,
 ): Promise<void> {
   const res = await client.v1.compliance.admin.declarations[':userId'].verify.$post({

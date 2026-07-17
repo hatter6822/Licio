@@ -56,7 +56,14 @@ social product is unaffected and every WS-L endpoint withholds (`503`).
 - **Fail-closed wallet risk.**  Preflight rejects a fund-transfer action from a
   wallet whose risk is `high` OR `pending` (the pre-assessment state), so an
   unassessed wallet can never move funds before its first compliance
-  assessment.
+  assessment.  Every wallet-lifecycle write that is NOT itself the risk write is
+  COLUMN-SCOPED for this reason: `updateRiskState` (CAS), `updateLabel`,
+  `finalizeIfStillPending`, and `cancelPendingUnlink` (the relink-in-cooldown
+  cancel, WS-L.2.5b) each touch only their own columns, so a `high` a compliance
+  escalation persists between a caller's read and its write survives.  A
+  full-record `update({...existing})` on the relink-cancel would have written the
+  stale snapshot's `riskState` back over that escalation, silently restoring a
+  prior `normal` and losing the fail-closed fund restriction.
 - **Idempotent + replay-resistant.**  Every write binds a per-(user,
   deployment) anti-replay nonce, a chain id, an expiration, and a
   `deploymentId` into the EIP-712 domain/message; submissions require a

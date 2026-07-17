@@ -722,9 +722,23 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     function wireIntent(
       intent: Record<string, unknown> | null,
       grant: Record<string, unknown> | null = null,
+      // The intent's TREASURY deployment: the claim binds it so a cleared intent
+      // cannot cover a submit on a rotated/additional deployment (WS-N.2.2c).
+      // Defaults to the request's deployment (match); `null` models a missing
+      // treasury (fail closed).
+      treasuryDeploymentId: string | null = LOCAL_DEPLOYMENT.deployment_id,
     ) {
       setTreasuryServices({
         intents: { getById: async () => intent },
+        treasuries: {
+          getById: async () =>
+            intent === null || treasuryDeploymentId === null
+              ? null
+              : {
+                  treasuryId: (intent as { treasuryId: string }).treasuryId,
+                  deploymentId: treasuryDeploymentId,
+                },
+        },
         // The payout recipient binding (WS-M) resolves the grant to check the
         // signed recipient BEFORE the action forwards; deposit intents never
         // reach it (bindPayoutRecipient returns early for non-payouts).
@@ -758,6 +772,7 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     async function preflightClaiming(
       intentId: string,
       overrides: Record<string, unknown> = {},
+      treasuryDeploymentId: string | null = LOCAL_DEPLOYMENT.deployment_id,
     ): Promise<Response> {
       const fixture = await freshKnomosisServices();
       fixture.knomosis.rooms = {
@@ -770,7 +785,7 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       const walletAccountId = await linkAndMapWallet(fixture, userId);
       const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
       const message = depositMessage(deploymentId);
-      wireIntent(liveIntent({ userId, ...overrides }));
+      wireIntent(liveIntent({ userId, ...overrides }), null, treasuryDeploymentId);
       return await post('/knomosis/actions/preflight', cookie, {
         action_type: 'treasury_deposit',
         room_id: ROOM,
@@ -814,6 +829,29 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
         const res = await preflightClaiming(INTENT, overrides);
         expect(res.status).toBe(400);
       }
+    });
+
+    it('rejects an intent whose TREASURY is on a DIFFERENT deployment (codex: bind deployment)', async () => {
+      // Same room / asset / amount / target, but the intent's treasury is pinned
+      // to another (rotated or additional) active deployment.  The later treasury
+      // attach would reject the deployment mismatch, but only AFTER submitAction
+      // forwarded the WS-L action — settling the transfer outside the intent
+      // ledger — so the claim must fail closed HERE, before the mint.
+      const res = await preflightClaiming(INTENT, {}, '99999999-9999-4999-8999-999999999999');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'intent_mismatch',
+      );
+    });
+
+    it('fails closed when the intent’s treasury cannot be read (bind deployment)', async () => {
+      // No treasury ⇒ the deployment cannot be verified ⇒ the claim is refused,
+      // never honoured on an unverifiable premise.
+      const res = await preflightClaiming(INTENT, {}, null);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'intent_mismatch',
+      );
     });
 
     it('accepts a steward_compensation intent settling through a grant_payout action', async () => {

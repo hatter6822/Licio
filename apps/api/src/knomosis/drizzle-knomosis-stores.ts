@@ -407,6 +407,27 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
     return rows.length > 0;
   }
 
+  async cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null> {
+    // Column-scoped UPDATE predicated on `pending_unlink`: flip it back to active +
+    // clear the cooling-off fields, touching NOTHING else — a full snapshot would
+    // clobber a `high` risk a compliance escalation persisted between the caller's
+    // read and this write (the same clobber updateRiskState/updateLabel avoid).  The
+    // `.returning()` gives the FRESH row, so the caller sees a concurrent escalation.
+    const rows = await this.db
+      .update(walletAccounts)
+      .set({ unlinkState: 'active', unlinkRequestedAt: null, unlinkFinalizeAfter: null })
+      .where(
+        and(
+          eq(walletAccounts.walletAccountId, walletAccountId),
+          eq(walletAccounts.unlinkState, 'pending_unlink'),
+        ),
+      )
+      .returning();
+    // Matched: the fresh, just-reactivated row.  No match ⇒ the row was already
+    // active (idempotent) or finalized by a racing sweep — return its current state.
+    return rows[0] !== undefined ? mapWallet(rows[0]) : this.getById(walletAccountId);
+  }
+
   async purgeByUser(userId: string): Promise<number> {
     const rows = await this.db
       .delete(walletAccounts)

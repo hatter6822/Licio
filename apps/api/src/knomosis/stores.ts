@@ -379,6 +379,15 @@ export interface FinancialWalletStore {
     expectedFinalizeAfter: string | null,
     unlinkedAtIso: string,
   ): Promise<boolean>;
+  /** Column-scoped CANCEL of a pending unlink (WS-L.2.5b relink-in-cooldown): flip
+   *  `unlinkState`→`active` + clear the cooling-off fields ONLY, leaving riskState/
+   *  label untouched.  A full-record write would clobber a `high` risk a compliance
+   *  escalation persisted between the caller's read and this write, silently
+   *  restoring the prior `normal` and losing the fail-closed restriction — the same
+   *  clobber `updateRiskState`/`updateLabel` are column-scoped to avoid.  Returns
+   *  the FRESH row (so the caller sees a concurrent escalation), the current row
+   *  unchanged when it is no longer pending_unlink, or null if it vanished. */
+  cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null>;
   /** WS-L data-rights: hard-delete every wallet row for a user on account
    *  deletion; returns the rows removed. */
   purgeByUser(userId: string): Promise<number>;
@@ -1034,6 +1043,24 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
       unlinkedAt: unlinkedAtIso,
     });
     return true;
+  }
+
+  async cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null> {
+    // Column-scoped: re-read the CURRENT row and touch ONLY the unlink lifecycle
+    // fields, so a concurrent risk escalation (a `high` persisted since the caller
+    // read `existing`) survives.  Idempotent — a row already active is returned
+    // unchanged.
+    const row = this.#rows.get(walletAccountId);
+    if (row === undefined) return null;
+    if (row.unlinkState !== 'pending_unlink') return { ...row };
+    const updated: FinancialWalletRecord = {
+      ...row,
+      unlinkState: 'active',
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+    };
+    this.#rows.set(walletAccountId, updated);
+    return { ...updated };
   }
 
   async purgeByUser(userId: string): Promise<number> {
