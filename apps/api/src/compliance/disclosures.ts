@@ -38,8 +38,10 @@ export interface DisclosureGateResult {
   region: string | null;
   /** The refs still missing an acknowledgment of the CURRENT version. */
   missing: DisclosureRef[];
-  /** The POLICY STORE was unavailable, so the disclosure requirement could not be
-   *  read — the route fails closed (503), never a silent pass. */
+  /** The requirement could not be READ — either the region resolution failed
+   *  (a declaration-store outage, `RegionResolution.unavailable`) or the policy
+   *  store was unavailable — so the route fails closed (503), never a silent
+   *  pass. */
   unavailable?: boolean;
 }
 
@@ -53,6 +55,15 @@ export async function disclosureGate(
   userId: string,
 ): Promise<DisclosureGateResult> {
   const resolution = await deps.resolveRegion(userId);
+  if (resolution.unavailable === true) {
+    // Declaration-store OUTAGE (`resolveRegion` fail-closed marker): this is NOT
+    // an ordinary no-region user — a member whose VERIFIED region requires risk
+    // disclosures must not clear the gate while the store that names that region
+    // is down.  Same fail-closed arm as the policy-store outage below: the
+    // treasury/Knomosis chokepoints reject the financial action (503) on
+    // `unavailable`, never a silent pass.
+    return { required: true, unavailable: true, region: null, missing: [] };
+  }
   if (resolution.region === null) return { required: false, region: null, missing: [] };
   const outcome = await deps.activePolicy(deps.policy, resolution.region);
   if (outcome.kind === 'store_unavailable') {
@@ -115,6 +126,18 @@ export async function acknowledgeDisclosure(
   input: { userId: string; disclosureId: string; version: number },
 ): Promise<DisclosureError | { ok: true; record: DisclosureAckRecord }> {
   const resolution = await deps.resolveRegion(input.userId);
+  if (resolution.unavailable === true) {
+    // A declaration-store outage is NOT "no region declared": telling the user
+    // to declare a region they may well have verified sends them into a dead
+    // end, and recording the ack against an unresolved region would misfile the
+    // consent evidence.  Transient ⇒ 503, retry.
+    return {
+      ok: false,
+      status: 503,
+      code: 'region_unavailable',
+      message: 'Your region could not be resolved right now — try again shortly.',
+    };
+  }
   if (resolution.region === null) {
     return {
       ok: false,
@@ -138,13 +161,20 @@ export async function acknowledgeDisclosure(
   return { ok: true, record };
 }
 
-/** The user-facing list: the region's published disclosures + ack status. */
+/** The user-facing list: the region's published disclosures + ack status.
+ *  `unavailable: true` marks a region-resolution outage — the caller must
+ *  surface it (503) rather than present the empty list as "nothing to read"
+ *  while the gate on the financial chokepoints is failing closed. */
 export async function listDisclosuresForUser(
   deps: DisclosureDeps,
   userId: string,
-): Promise<Array<DisclosureVersionRecord & { acknowledged: boolean }>> {
+): Promise<{
+  unavailable: boolean;
+  disclosures: Array<DisclosureVersionRecord & { acknowledged: boolean }>;
+}> {
   const resolution = await deps.resolveRegion(userId);
-  if (resolution.region === null) return [];
+  if (resolution.unavailable === true) return { unavailable: true, disclosures: [] };
+  if (resolution.region === null) return { unavailable: false, disclosures: [] };
   const versions = await deps.disclosures.listForRegion(resolution.region);
   const out: Array<DisclosureVersionRecord & { acknowledged: boolean }> = [];
   for (const version of versions) {
@@ -161,5 +191,5 @@ export async function listDisclosuresForUser(
     }
     out.push({ ...version, acknowledged });
   }
-  return out;
+  return { unavailable: false, disclosures: out };
 }

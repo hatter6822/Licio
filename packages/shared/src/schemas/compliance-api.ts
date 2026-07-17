@@ -279,8 +279,11 @@ export const policyCreateRequestSchema = jurisdictionFeaturePolicySchema
   .extend({
     /** Required reason for the audit chain (WS-N.1.1g). */
     reason: z.string().min(1).max(1000),
-    /** Counsel four-eyes approval ref — REQUIRED when any cell is `enabled`
-     *  (relative to nothing: enabling is the dangerous direction). */
+    /** Counsel four-eyes approval ref — REQUIRED when the write EXPANDS
+     *  availability relative to the policy in force at its `effective_at`
+     *  (`policyChangeRequiresCounsel`): a newly enabled cell, or a governed
+     *  field changed while a cell remains enabled.  A pure narrowing or an
+     *  unchanged carry-forward needs none. */
     approval_ref: z.string().min(1).max(256).optional(),
   })
   .strict();

@@ -167,26 +167,48 @@ export function validateComplianceConfigValue(key: string, value: unknown): stri
   return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid value');
 }
 
-/** Fail-closed loader: invalid stored values are reported and defaults kept. */
+/**
+ * Fail-closed loader: invalid stored values are reported and defaults kept.
+ *
+ * `base` is the LAST-GOOD config an UNREADABLE key falls back to.  On the
+ * initial load it is the defaults (there is nothing better); on a runtime
+ * reload the caller passes the LIVE config, so a transient per-key store
+ * outage keeps the previously loaded value for that key — never a silent
+ * reset to a default that may be LOOSER than the operator's stored override
+ * (velocity limits, the high-value threshold, cache TTLs).  A SUCCESSFUL
+ * read that finds no stored row still resets the key to its default: that is
+ * the operator deliberately removing an override, not an outage.
+ */
 export async function loadComplianceConfig(
   configStore: PwattConfigStore,
   onInvalid: (key: string, problem: string) => void = () => {},
+  base: ComplianceRuntimeConfig = DEFAULT_COMPLIANCE_CONFIG,
 ): Promise<ComplianceRuntimeConfig> {
-  const config: ComplianceRuntimeConfig = structuredClone(DEFAULT_COMPLIANCE_CONFIG);
+  const config: ComplianceRuntimeConfig = structuredClone(base);
   for (const key of COMPLIANCE_CONFIG_KEYS) {
     let stored: Record<string, unknown> | null;
     try {
       stored = await configStore.get(`${CONFIG_PREFIX}${key}`);
     } catch {
-      // A store outage never loosens a compliance control: the default holds.
+      // A store outage never loosens a compliance control: the LAST-GOOD value
+      // (the live one on reload, the default on first load) holds.
       onInvalid(key, 'config store unreadable');
       continue;
     }
-    if (stored === null || !Object.hasOwn(stored, 'value')) continue;
+    const fallback = () => {
+      (config as unknown as Record<string, unknown>)[key] = structuredClone(
+        DEFAULT_COMPLIANCE_CONFIG[key],
+      );
+    };
+    if (stored === null || !Object.hasOwn(stored, 'value')) {
+      fallback(); // an override the operator REMOVED resets, even on reload
+      continue;
+    }
     const value = stored['value'];
     const problem = validateComplianceConfigValue(key, value);
     if (problem !== null) {
       onInvalid(key, problem);
+      fallback(); // the documented invalid-value contract: report + default
       continue;
     }
     (config as unknown as Record<string, unknown>)[key] = value;

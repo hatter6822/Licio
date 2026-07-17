@@ -289,6 +289,213 @@ describe('policy admin (WS-N.1.1e)', () => {
     expect(((await verify.json()) as { valid: boolean }).valid).toBe(true);
   });
 
+  it('carrying an approved enabled cell forward while NARROWING another needs no counsel; widening sideways still does (codex: compare policy deltas before requiring counsel)', async () => {
+    const reviewer = await seedReviewer();
+    const counsel = await seedCounsel();
+    const approvedDoc = {
+      ...VALID_POLICY_BODY,
+      feature_flags: {
+        ...ALL_DISABLED_CELLS,
+        production_payments: 'enabled',
+        testnet_transactions: 'testnet',
+      },
+      legal_approval_ref: 'LEGAL-1',
+    };
+    // Counsel turns DE on (four-eyes).
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/compliance/admin/policies',
+            { ...approvedDoc, approval_ref: 'FOUR-EYES-1' },
+            counsel.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    // An incident: the reviewer must narrow the testnet cell NOW, counsel
+    // offline.  The replacement document is whole, so the still-approved
+    // production cell rides along UNCHANGED — that carry-forward is not an
+    // enablement and must not strand the narrowing behind counsel.
+    const narrowed = {
+      ...approvedDoc,
+      feature_flags: {
+        ...ALL_DISABLED_CELLS,
+        production_payments: 'enabled',
+        testnet_transactions: 'disabled',
+      },
+      effective_at: '2026-02-01T00:00:00.000Z',
+    };
+    const res = await app().request(
+      post('/v1/compliance/admin/policies', narrowed, reviewer.cookie),
+    );
+    expect(res.status).toBe(201);
+
+    // But under a carried-forward enabled cell the reviewer can NOT widen
+    // sideways: a new asset flag is counsel's call…
+    const widened = {
+      ...narrowed,
+      asset_flags: { USDC: true },
+      effective_at: '2026-03-01T00:00:00.000Z',
+    };
+    const deniedAssets = await app().request(
+      post('/v1/compliance/admin/policies', widened, reviewer.cookie),
+    );
+    expect(deniedAssets.status).toBe(403);
+    expect(((await deniedAssets.json()) as { error: { code: string } }).error.code).toBe(
+      'counsel_approval_required',
+    );
+    // …and so is slipping an ADDITIONAL cell to enabled.
+    const extraCell = {
+      ...narrowed,
+      feature_flags: { ...narrowed.feature_flags, treasury_operations: 'enabled' },
+      effective_at: '2026-04-01T00:00:00.000Z',
+    };
+    const deniedCell = await app().request(
+      post('/v1/compliance/admin/policies', extraCell, reviewer.cookie),
+    );
+    expect(deniedCell.status).toBe(403);
+    // The denied attempts rolled back whole (no row, no chain entry): the
+    // chain still verifies.
+    const verify = await app().request(
+      get('/v1/compliance/admin/policy-audit/verify', reviewer.cookie),
+    );
+    expect(((await verify.json()) as { valid: boolean }).valid).toBe(true);
+  });
+
+  it('a NON-counsel write cannot SCHEDULE: a future or behind-active effective_at is a counsel act (review: future-dated carry-forward bypass)', async () => {
+    const reviewer = await seedReviewer();
+    const counsel = await seedCounsel();
+    const approvedDoc = {
+      ...VALID_POLICY_BODY,
+      feature_flags: {
+        ...ALL_DISABLED_CELLS,
+        production_payments: 'enabled',
+        testnet_transactions: 'testnet',
+      },
+      legal_approval_ref: 'LEGAL-1',
+    };
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/compliance/admin/policies',
+            { ...approvedDoc, approval_ref: 'FOUR-EYES-1' },
+            counsel.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    // Counsel schedules a shutdown for next year (scheduling is counsel-only;
+    // a pure narrowing needs no fresh approval_ref).
+    const futureNarrow = {
+      ...approvedDoc,
+      feature_flags: { ...approvedDoc.feature_flags, production_payments: 'disabled' },
+      legal_approval_ref: null,
+      effective_at: '2027-08-01T00:00:00.000Z',
+    };
+    expect(
+      (await app().request(post('/v1/compliance/admin/policies', futureNarrow, counsel.cookie)))
+        .status,
+    ).toBe(201);
+    // The bypass this arm closes: a reviewer plants a byte-identical
+    // carry-forward of TODAY's approved document dated AFTER the scheduled
+    // narrowing — a "no-op against today" whose arrival would silently
+    // re-enable payments.  Scheduling itself is refused.
+    const planted = { ...approvedDoc, effective_at: '2027-09-01T00:00:00.000Z' };
+    const denied = await app().request(
+      post('/v1/compliance/admin/policies', planted, reviewer.cookie),
+    );
+    expect(denied.status).toBe(403);
+    expect(((await denied.json()) as { error: { code: string } }).error.code).toBe(
+      'counsel_approval_required',
+    );
+    // A back-date BEHIND the active row is the same timeline-reorder class.
+    const backdated = { ...approvedDoc, effective_at: '2025-12-01T00:00:00.000Z' };
+    expect(
+      (await app().request(post('/v1/compliance/admin/policies', backdated, reviewer.cookie)))
+        .status,
+    ).toBe(403);
+  });
+
+  it('a counsel-scheduled RE-ENABLE after a scheduled narrowing expands ITS timeline slot: the delta baselines on the predecessor at effective_at', async () => {
+    const counsel = await seedCounsel();
+    const approvedDoc = {
+      ...VALID_POLICY_BODY,
+      feature_flags: { ...ALL_DISABLED_CELLS, production_payments: 'enabled' },
+      legal_approval_ref: 'LEGAL-1',
+    };
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/compliance/admin/policies',
+            { ...approvedDoc, approval_ref: 'FOUR-EYES-1' },
+            counsel.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    const futureNarrow = {
+      ...approvedDoc,
+      feature_flags: { ...ALL_DISABLED_CELLS },
+      legal_approval_ref: null,
+      effective_at: '2027-08-01T00:00:00.000Z',
+    };
+    expect(
+      (await app().request(post('/v1/compliance/admin/policies', futureNarrow, counsel.cookie)))
+        .status,
+    ).toBe(201);
+    // Re-enabling AFTER the scheduled narrowing compares against the NARROWED
+    // predecessor — not today's enabled policy — so the four-eyes ref is
+    // demanded even though the document equals the currently-active one.
+    const reEnable = { ...approvedDoc, effective_at: '2027-09-01T00:00:00.000Z' };
+    const noRef = await app().request(
+      post('/v1/compliance/admin/policies', reEnable, counsel.cookie),
+    );
+    expect(noRef.status).toBe(403);
+    expect(((await noRef.json()) as { error: { code: string } }).error.code).toBe(
+      'counsel_approval_required',
+    );
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/compliance/admin/policies',
+            { ...reEnable, approval_ref: 'FOUR-EYES-2' },
+            counsel.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+  });
+
+  it('a nonconforming ACTIVE row cannot be "carried forward" — the prior is ABSENT, every enabled cell is an expansion (review: malformed-prior arm)', async () => {
+    const reviewer = await seedReviewer();
+    // A corrupted/legacy row planted straight into the store (the admin write
+    // path validates, so only corruption produces this).
+    await compliance.policies.insert({
+      policyId: randomUUID(),
+      countryOrRegion: 'DE',
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      document: { feature_flags: { production_payments: 'enabled' }, garbage: true },
+      createdAt: new Date().toISOString(),
+    });
+    const carry = {
+      ...VALID_POLICY_BODY,
+      feature_flags: { ...ALL_DISABLED_CELLS, production_payments: 'enabled' },
+      legal_approval_ref: 'LEGAL-1',
+      effective_at: '2026-02-01T00:00:00.000Z',
+    };
+    const denied = await app().request(
+      post('/v1/compliance/admin/policies', carry, reviewer.cookie),
+    );
+    expect(denied.status).toBe(403);
+    expect(((await denied.json()) as { error: { code: string } }).error.code).toBe(
+      'counsel_approval_required',
+    );
+  });
+
   it('a NARROWING (non-enabling) write stays open to the compliance role', async () => {
     const reviewer = await seedUser({
       handle: `c${randomUUID().slice(0, 8)}`,
@@ -534,6 +741,77 @@ describe('disclosures (WS-N.1.2d)', () => {
       await app().request(get('/v1/compliance/disclosures', member.cookie))
     ).json()) as { disclosures: Array<{ acknowledged: boolean }> };
     expect(after.disclosures[0]?.acknowledged).toBe(true);
+  });
+
+  it('a declaration-store outage 503s the list AND the acknowledge — never an empty "nothing to read" (codex: fail closed on declaration-store disclosure outages)', async () => {
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}`, locale: 'de-DE' });
+    compliance.declarations.get = async () => {
+      throw new Error('declaration store down');
+    };
+    const listed = await app().request(get('/v1/compliance/disclosures', member.cookie));
+    expect(listed.status).toBe(503);
+    expect(((await listed.json()) as { error: { code: string } }).error.code).toBe(
+      'region_unavailable',
+    );
+    const acked = await app().request(
+      post(
+        '/v1/compliance/disclosures/acknowledge',
+        { disclosure_id: 'risk-general', version: 1 },
+        member.cookie,
+      ),
+    );
+    expect(acked.status).toBe(503);
+    expect(((await acked.json()) as { error: { code: string } }).error.code).toBe(
+      'region_unavailable',
+    );
+  });
+
+  it('an ack landing during a policy-store outage reports the outage — remaining:[] must not read as all-clear (review: ack unavailable arm)', async () => {
+    const counsel = await seedUser({
+      handle: `l${randomUUID().slice(0, 8)}`,
+      platformRoles: ['counsel'],
+      mfa: true,
+    });
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}`, locale: 'de-DE' });
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/compliance/admin/disclosures',
+            {
+              disclosure_id: 'risk-general',
+              region: 'DE',
+              version: 1,
+              locale: 'de',
+              title: 'Risikohinweise',
+              content_md: 'On-chain-Transaktionen sind unumkehrbar.',
+              requires_acknowledgment: true,
+            },
+            counsel.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    // The post-ack requirement probe hits a policy-store outage: the ack
+    // itself records, but the response must surface the outage rather than
+    // serve `remaining: []` as gate-cleared while the intent create 503s.
+    compliance.policyCache.invalidate(null);
+    compliance.policies.activeForRegion = async () => {
+      throw new Error('policy store down');
+    };
+    const acked = await app().request(
+      post(
+        '/v1/compliance/disclosures/acknowledge',
+        { disclosure_id: 'risk-general', version: 1 },
+        member.cookie,
+      ),
+    );
+    expect(acked.status).toBe(503);
+    expect(((await acked.json()) as { error: { code: string } }).error.code).toBe(
+      'region_unavailable',
+    );
+    // The consent evidence DID record — the retry is an idempotent re-ack.
+    expect(await compliance.acks.has(member.userId, 'risk-general', 1, 'DE')).toBe(true);
   });
 });
 

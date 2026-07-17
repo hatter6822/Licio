@@ -214,6 +214,102 @@ export function validatePolicy(input: unknown): ValidatePolicyResult {
 }
 
 // ---------------------------------------------------------------------------
+// The WS-N.1.1e counsel-gate delta (the four-eyes boundary on policy WRITES).
+// ---------------------------------------------------------------------------
+
+/** Deterministic key-sorted serialization for policy-field comparison.  The
+ *  inputs are zod-parsed policy sub-shapes, so every value is JSON-safe. */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`);
+  return `{${entries.join(',')}}`;
+}
+
+/** The document fields, beyond the cells themselves, that govern WHAT an
+ *  `enabled` cell legally means: which assets it covers, who may use it (age/
+ *  KYC), what must be disclosed first, and which legal approval authorizes it.
+ *  While any cell REMAINS enabled these stay under the counsel gate — without
+ *  this, a delta rule keyed on cell transitions alone would let a compliance
+ *  reviewer widen an approved region sideways (turn a new asset on, drop a KYC
+ *  trigger or a disclosure, or rewrite the recorded approval reference). */
+const COUNSEL_GOVERNED_FIELDS = [
+  'asset_flags',
+  'age_gate_policy',
+  'kyc_policy',
+  'disclosure_refs',
+  'legal_approval_ref',
+] as const;
+export type CounselGovernedField = (typeof COUNSEL_GOVERNED_FIELDS)[number];
+
+export interface PolicyCounselDelta {
+  /** Whether the write takes the counsel capability + a fresh approval ref. */
+  required: boolean;
+  /** Cells transitioning non-enabled → enabled relative to the prior policy
+   *  (with no prior — absent, future-dated only, or nonconforming — every
+   *  enabled cell in the new document counts: nothing counsel-approved is
+   *  active to inherit from). */
+  newlyEnabledCells: CryptoFeatureCell[];
+  /** Governed fields changed while at least one cell remains enabled. */
+  changedGoverningFields: CounselGovernedField[];
+}
+
+/**
+ * The WS-N.1.1e write-gate delta: counsel is required to EXPAND availability,
+ * never to narrow it.  A policy write is a whole replacement document, so a
+ * compliance reviewer narrowing one cell must carry the region's other,
+ * already-approved `enabled` cells forward — that carry-forward is NOT an
+ * enablement and must not strand a narrowing behind counsel availability.
+ * Counsel is required exactly when:
+ *
+ *   • any cell transitions non-enabled → enabled relative to `prior` (prior
+ *     `null` — missing at that instant, or nonconforming — fails closed:
+ *     every enabled cell counts), OR
+ *   • at least one cell REMAINS enabled and any counsel-governed field
+ *     (`asset_flags`, `age_gate_policy`, `kyc_policy`, `disclosure_refs`,
+ *     `legal_approval_ref`) differs from the prior policy — the enabled
+ *     surface's legal terms stay counsel-controlled.
+ *
+ * `prior` must be the policy in force AT THE NEW DOCUMENT'S OWN
+ * `effective_at` (its timeline predecessor over ALL rows, pending included),
+ * not merely the policy active at write time: policies are insert-only and
+ * served greatest-`effective_at`-first, so a "no-op against today" document
+ * dated after a scheduled narrowing is an EXPANSION of the timeline it
+ * actually lands in.  The write route additionally restricts non-counsel
+ * writers to an immediate `effective_at` (between the active row and now) so
+ * scheduling itself stays a counsel act.
+ *
+ * Comparison is order-sensitive for `disclosure_refs` (a reordering takes the
+ * counsel path — strictness in the safe direction) and key-order-insensitive
+ * for the record shapes.
+ */
+export function policyChangeRequiresCounsel(
+  prior: JurisdictionFeaturePolicy | null,
+  next: JurisdictionFeaturePolicy,
+): PolicyCounselDelta {
+  const newlyEnabledCells = CRYPTO_FEATURE_CELLS.filter(
+    (cell) => next.feature_flags[cell] === 'enabled' && prior?.feature_flags[cell] !== 'enabled',
+  );
+  const retainsEnabledCell =
+    prior !== null &&
+    CRYPTO_FEATURE_CELLS.some(
+      (cell) => next.feature_flags[cell] === 'enabled' && prior.feature_flags[cell] === 'enabled',
+    );
+  const changedGoverningFields = retainsEnabledCell
+    ? COUNSEL_GOVERNED_FIELDS.filter(
+        (field) => prior !== null && stableStringify(next[field]) !== stableStringify(prior[field]),
+      )
+    : [];
+  return {
+    required: newlyEnabledCells.length > 0 || changedGoverningFields.length > 0,
+    newlyEnabledCells,
+    changedGoverningFields,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Engine vocabulary (WS-N.1.1b/c): resolution bases and disable reasons.
 // ---------------------------------------------------------------------------
 
