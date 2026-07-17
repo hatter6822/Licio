@@ -1259,7 +1259,9 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
       userId: OTHER,
       addressHashHex: hashFinancialWalletAddress('test-master-secret', recipientAddress),
       addressTruncated: `${recipientAddress.slice(0, 6)}…${recipientAddress.slice(-4)}`,
-      chainId: 1337,
+      // The recipient wallet must be on the PAYOUT CHAIN (the pinned deployment's
+      // chain), or the chain-scoped recipient bind rejects it (codex fix).
+      chainId: KNOMOSIS_PIN.deployments[0]?.chain_id ?? 0,
       walletType: 'eoa',
       unlinkState: 'active',
       riskState: 'normal',

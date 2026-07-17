@@ -727,6 +727,9 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       // Defaults to the request's deployment (match); `null` models a missing
       // treasury (fail closed).
       treasuryDeploymentId: string | null = LOCAL_DEPLOYMENT.deployment_id,
+      // The recipient's linked wallets, for a `user:<id>` grant recipient — the
+      // payout binds to one ON THE PAYOUT CHAIN (defaults to none).
+      recipientWallets: Array<Record<string, unknown>> = [],
     ) {
       setTreasuryServices({
         intents: { getById: async () => intent },
@@ -743,7 +746,7 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
         // signed recipient BEFORE the action forwards; deposit intents never
         // reach it (bindPayoutRecipient returns early for non-payouts).
         grants: { getById: async () => grant },
-        wallets: { listByUser: async () => [] },
+        wallets: { listByUser: async () => recipientWallets },
         masterSecret: 'test-secret',
       } as never);
     }
@@ -907,6 +910,93 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
       // Not `intent_mismatch`: the claim is honoured (the action may still fail
       // its own gates, but never on the intent pairing).
       expect(res.status).not.toBe(400);
+    });
+
+    it('binds a user:<id> recipient to a wallet ON THE PAYOUT CHAIN, rejecting the same address on another chain (codex: chain-scoped recipient)', async () => {
+      const fixture = await freshKnomosisServices();
+      fixture.knomosis.rooms = {
+        roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+        isMember: async () => true,
+        isSteward: async () => true,
+        contentVisibleToUser: async () => true,
+      };
+      const { userId, cookie } = await seedUserWithSession(fixture.identity);
+      const walletAccountId = await linkAndMapWallet(fixture, userId);
+      const deploymentId = LOCAL_DEPLOYMENT.deployment_id;
+      const recipientUserId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+      const grantId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+      const message: Record<string, string> = {
+        roomId: ROOM,
+        grantId,
+        recipient: testAccount.address,
+        asset: 'USDC',
+        amount: '1000000',
+        actor: testAccount.address,
+        nonce: '7',
+        expiration: String(Math.floor(Date.now() / 1000) + 600),
+        deploymentId,
+      };
+      const signature = await signedTypedData('grant_payout', message);
+      // The recipient wallet's address, hashed under the wireIntent masterSecret.
+      const addressHashHex = hashFinancialWalletAddress(
+        'test-secret',
+        testAccount.address.toLowerCase(),
+      );
+      const recipientWallet = (chainId: number) => ({
+        walletAccountId: 'a0000000-0000-4000-8000-0000000000c1',
+        userId: recipientUserId,
+        addressHashHex,
+        addressTruncated: '0x1234…5678',
+        chainId,
+        walletType: 'eoa',
+        unlinkState: 'active',
+        riskState: 'normal',
+        label: null,
+        linkedAt: new Date().toISOString(),
+        lastUsedAt: null,
+        unlinkRequestedAt: null,
+        unlinkFinalizeAfter: null,
+        unlinkedAt: null,
+      });
+      const intentRecord = {
+        paymentIntentId: INTENT,
+        userId: null,
+        roomId: ROOM,
+        targetType: 'steward_compensation',
+        targetId: grantId,
+        treasuryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        asset: 'USDC',
+        amount: '1000000',
+        executionState: 'quoted',
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      };
+      const grant = { recipientRef: `user:${recipientUserId}`, payoutState: 'active' };
+      const preflight = () =>
+        post('/knomosis/actions/preflight', cookie, {
+          action_type: 'grant_payout',
+          room_id: ROOM,
+          deployment_id: deploymentId,
+          wallet_account_id: walletAccountId,
+          payment_intent_id: INTENT,
+          typed_data_message: message,
+          signature,
+        });
+
+      // The recipient's wallet is on a DIFFERENT chain than the payout deployment:
+      // the same address may be an uncontrolled contract there, so the bind fails.
+      wireIntent(intentRecord, grant, deploymentId, [
+        recipientWallet(LOCAL_DEPLOYMENT.chain_id + 424_242),
+      ]);
+      const wrong = await preflight();
+      expect(wrong.status).toBe(400);
+      expect(((await wrong.json()) as { error: { code: string } }).error.code).toBe(
+        'recipient_not_bound',
+      );
+
+      // The SAME address linked on the payout chain → the recipient bind passes.
+      wireIntent(intentRecord, grant, deploymentId, [recipientWallet(LOCAL_DEPLOYMENT.chain_id)]);
+      const right = await preflight();
+      expect(right.status).not.toBe(400);
     });
 
     it('rejects a payout claim whose signed recipient is NOT the approved grant recipient — before it forwards (thread knomosis.ts:181)', async () => {

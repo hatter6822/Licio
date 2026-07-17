@@ -598,6 +598,13 @@ export async function bindPayoutRecipient(
   deps: PayoutRecipientDeps,
   intent: Pick<PaymentIntentRecord, 'targetType' | 'targetId'>,
   message: Record<string, unknown>,
+  // The CHAIN the payout settles on (the intent treasury's deployment chain).
+  // A `user:<id>` recipient binds to a wallet ON THIS CHAIN — wallets are
+  // chain-scoped and the actor path enforces `wallet.chainId === deployment
+  // .chain_id`, so binding chain-agnostically would let a payout on chain B
+  // settle to an address the recipient only controls on chain A.  `undefined`
+  // (an unresolvable/unpinned deployment) fails a user-recipient bind CLOSED.
+  deploymentChainId: number | undefined,
 ): Promise<TreasuryGovernanceError | null> {
   if (intent.targetType !== 'grant_payout' && intent.targetType !== 'steward_compensation') {
     return null;
@@ -631,16 +638,26 @@ export async function bindPayoutRecipient(
     if (!/^0x[0-9a-f]{40}$/.test(signedRecipient)) {
       return tgErr(422, 'action_mismatch', 'The signed recipient is not a valid address.');
     }
+    // The wallet must be linked ON THE PAYOUT'S CHAIN.  An unresolvable chain
+    // (unpinned deployment) leaves nothing to bind against, so it fails closed —
+    // never bind a user recipient chain-agnostically (the chain-crossing hole).
+    if (deploymentChainId === undefined) {
+      return tgErr(
+        422,
+        'recipient_not_bound',
+        'The payout deployment chain could not be resolved to bind the recipient wallet.',
+      );
+    }
     const recipientUserId = grant.recipientRef.slice('user:'.length);
     const linked = (await deps.wallets.listByUser(recipientUserId, false)).filter(
-      (w) => w.unlinkState === 'active',
+      (w) => w.unlinkState === 'active' && w.chainId === deploymentChainId,
     );
     const signedHash = hashFinancialWalletAddress(deps.masterSecret, signedRecipient);
     if (!linked.some((w) => w.addressHashHex === signedHash)) {
       return tgErr(
         422,
         'recipient_not_bound',
-        'The signed address is not a linked wallet of the approved recipient.',
+        'The signed address is not a linked wallet of the approved recipient on the payout chain.',
       );
     }
     return null;
@@ -767,8 +784,15 @@ export async function attachIntentSubmission(
   }
   // The signed payout must pay the grant's APPROVED recipient — the SAME binding
   // the pre-forward intent-claim gate runs, from the one definition, so the two
-  // can never disagree about who a payout may pay.
-  const recipientError = await bindPayoutRecipient(deps, intent, message);
+  // can never disagree about who a payout may pay.  A `user:<id>` recipient is
+  // bound to a wallet on the intent treasury's DEPLOYMENT CHAIN (the same chain
+  // the action rode, validated just above), never chain-agnostically.
+  const recipientError = await bindPayoutRecipient(
+    deps,
+    intent,
+    message,
+    pinnedDeployment(intentTreasury.deploymentId)?.chain_id,
+  );
   if (recipientError !== null) return recipientError;
   // One WS-L action settles exactly ONE intent — a record already bound to
   // another intent would double-count a single transfer in the ledger/export.

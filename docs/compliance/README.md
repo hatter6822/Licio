@@ -699,7 +699,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   (recipient included), so it cannot swap the recipient after.  A REPLAY skips
   it: the recipient is a MINT gate, not identity, and the action already
   forwarded under a vetted recipient — re-checking would let a grant clawed back
-  SINCE strand the recovery.
+  SINCE strand the recovery.  A `user:<id>` grant recipient binds to one of that
+  member's linked wallets **on the payout's CHAIN** (the intent treasury's
+  deployment chain), never chain-agnostically: wallets are chain-scoped and the
+  actor path already enforces `wallet.chainId === deployment.chain_id`, so binding
+  across chains would let a payout on chain B settle to an address the recipient
+  only controls on chain A — where the same address may be a different or
+  uncontrolled contract.  An unresolvable deployment chain fails the bind CLOSED.
 - **A claimed intent binds its DEPLOYMENT before the action forwards, too.**  The
   intent draws on its treasury, and every treasury is pinned to ONE deployment;
   the signed action moves funds on `body.deployment_id`.  Matching the intent's

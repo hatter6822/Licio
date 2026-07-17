@@ -216,6 +216,10 @@ async function verifyClaimedIntent(input: {
     getTreasuryServices(),
     intent,
     input.typedDataMessage,
+    // A `user:<id>` recipient binds to a wallet on the payout's CHAIN — the intent
+    // treasury's deployment chain (the deployment the identity check above already
+    // pinned to `input.deployment_id`).
+    pinnedDeployment(intentTreasury.deploymentId)?.chain_id,
   );
   if (recipientError !== null) {
     return { code: recipientError.code, message: recipientError.message };
