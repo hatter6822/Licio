@@ -8,7 +8,11 @@
 // notice, never data.  Everything shown is transaction-derived only
 // (WS-N.2.2d) — this surface structurally cannot render attention data
 // because no API it calls carries any.
-import type { FinancialComplianceCase, FraudQueueResponse } from '@licio/shared';
+import type {
+  CaseResolutionOutcome,
+  FinancialComplianceCase,
+  FraudQueueResponse,
+} from '@licio/shared';
 import { useEffect, useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
@@ -24,7 +28,28 @@ import {
 import { Button } from '../ui/Button/index.js';
 import { Card } from '../ui/Card/index.js';
 import { Input } from '../ui/Input/index.js';
+import { Select } from '../ui/Select/index.js';
 import { Tabs } from '../ui/Tabs/index.js';
+
+/** The outcomes a reviewer records when RESOLVING an investigating case (WS-N.2.1
+ *  §22.6).  `escalated` is a state transition, not a resolution — it has its own
+ *  control — so it is excluded here.  A hard-coded `cleared` would force a reviewer
+ *  to falsely clear a scam/sanctions hold they mean to keep restricted. */
+const RESOLVE_OUTCOMES: readonly CaseResolutionOutcome[] = [
+  'cleared',
+  'restricted',
+  'account_suspended',
+  'referred_to_law_enforcement',
+];
+
+/** Default English labels for the resolution outcomes (localizable). */
+const OUTCOME_LABEL: Record<CaseResolutionOutcome, string> = {
+  cleared: 'Cleared',
+  restricted: 'Restricted',
+  account_suspended: 'Account suspended',
+  referred_to_law_enforcement: 'Referred to law enforcement',
+  escalated: 'Escalated',
+};
 
 type Tab = 'cases' | 'fraud' | 'declarations';
 
@@ -118,6 +143,7 @@ function CaseQueue({
   const t = useT();
   const [assignee, setAssignee] = useState('');
   const [notes, setNotes] = useState('');
+  const [resolveOutcome, setResolveOutcome] = useState<CaseResolutionOutcome>('cleared');
   const [error, setError] = useState<string | null>(null);
   if (cases === null) {
     return <p className="text-sm text-ink-muted">{t('compliance.console.loading', 'Loading…')}</p>;
@@ -155,6 +181,15 @@ function CaseQueue({
           label={t('compliance.console.notes', 'Resolution notes')}
           value={notes}
           onChange={(event) => setNotes(event.target.value)}
+        />
+        <Select
+          label={t('compliance.console.outcome', 'Resolution outcome')}
+          value={resolveOutcome}
+          onValueChange={(value) => setResolveOutcome(value as CaseResolutionOutcome)}
+          options={RESOLVE_OUTCOMES.map((outcome) => ({
+            value: outcome,
+            label: t(`compliance.console.outcome.${outcome}`, OUTCOME_LABEL[outcome]),
+          }))}
         />
       </div>
       <ul className="flex flex-col gap-2">
@@ -195,10 +230,17 @@ function CaseQueue({
                       <Button
                         disabled={notes.trim() === ''}
                         onClick={() =>
-                          void act(() => adminResolveCase(record.case_id, 'cleared', notes.trim()))
+                          void act(() =>
+                            adminResolveCase(record.case_id, resolveOutcome, notes.trim()),
+                          )
                         }
                       >
-                        {t('compliance.console.clear', 'Resolve: cleared')}
+                        {t('compliance.console.resolve', 'Resolve: {outcome}', {
+                          outcome: t(
+                            `compliance.console.outcome.${resolveOutcome}`,
+                            OUTCOME_LABEL[resolveOutcome],
+                          ),
+                        })}
                       </Button>
                       <Button
                         variant="secondary"

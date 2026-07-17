@@ -63,6 +63,30 @@ describe('RegionDeclarationCard (WS-N.1.1f)', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 
+  it('hides self-revoke for a VERIFIED region and points to the reviewer path (codex: forbidden verified revocation)', async () => {
+    // A verified declaration: the server DELETE rejects member revocation with
+    // `declaration_verified`, so the self-service button can only 409.
+    mocked.fetchRegionResolution.mockResolvedValue({
+      region: 'DE',
+      basis: 'verified_declaration',
+      declaration: {
+        declared_region: 'DE',
+        status: 'verified',
+        verification_level: 'reviewer_verified',
+        verified_at: '2026-07-16T00:00:00.000Z',
+        created_at: '2026-07-15T00:00:00.000Z',
+      },
+    });
+    const { container } = render(<RegionDeclarationCard />);
+    await waitFor(() => expect(screen.getByTestId('declaration-status')).toBeInTheDocument());
+    // No revoke button; the actionable "contact compliance" guidance instead.
+    expect(screen.queryByRole('button', { name: /revoke declaration/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId('verified-change-hint')).toBeInTheDocument();
+    // …and no re-declare form either (the region is not revoked/absent).
+    expect(screen.queryByRole('button', { name: /declare region/i })).not.toBeInTheDocument();
+    expect(await checkA11y(container)).toHaveNoViolations();
+  });
+
   it('rejects a malformed region code client-side (server still validates)', async () => {
     mocked.fetchRegionResolution.mockResolvedValue({
       region: null,
@@ -288,6 +312,33 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
         '44444444-4444-4444-8444-444444444444',
         'cleared',
         'no pattern found',
+      ),
+    );
+  });
+
+  it('records a RESTRICTIVE outcome, not only cleared (codex: restrictive case outcomes)', async () => {
+    mocked.adminListCases.mockResolvedValue({
+      cases: [{ ...caseIn('investigating'), case_id: '55555555-5555-4555-8555-555555555555' }],
+    });
+    mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
+    mocked.adminResolveCase.mockResolvedValue({
+      ...caseIn('investigating'),
+      review_state: 'resolved' as never,
+    });
+    render(<ComplianceConsole />);
+    await userEvent.type(
+      await screen.findByLabelText(/resolution notes/i),
+      'confirmed sanctioned party',
+    );
+    // Pick the restrictive outcome from the Select instead of the default cleared.
+    await userEvent.click(screen.getByRole('combobox', { name: /resolution outcome/i }));
+    await userEvent.click(screen.getByRole('option', { name: /^restricted$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /resolve: restricted/i }));
+    await waitFor(() =>
+      expect(mocked.adminResolveCase).toHaveBeenCalledWith(
+        '55555555-5555-4555-8555-555555555555',
+        'restricted',
+        'confirmed sanctioned party',
       ),
     );
   });

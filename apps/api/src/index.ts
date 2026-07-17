@@ -57,6 +57,7 @@ import {
   buildCompliancePort,
   buildCompliancePurge,
   createInMemoryComplianceServices,
+  resolveRegionForUser,
   setComplianceServices,
 } from './compliance/services.js';
 import { registerDefaultConsumers } from './events/consumers.js';
@@ -1214,7 +1215,12 @@ identityServices.purgeFinancialWallets = async (userId) => {
 const governanceStores = db ? createDrizzleGovernanceStores(db) : createInMemoryGovernanceStores();
 knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
 knomosisServices.roomMode = buildRoomModePort(forumServices);
-knomosisServices.regionResolver = buildRegionResolver(identityServices);
+// The pure LOCALE resolver (identity locale subtag).  It stays the compliance
+// ladder's locale rung below; `knomosisServices.regionResolver` is REPLACED with
+// the authoritative ladder once compliance is wired (see below), so the closure
+// must capture this const, not `regionResolver`, or the ladder would recurse.
+const localeRegionResolver = buildRegionResolver(identityServices);
+knomosisServices.regionResolver = localeRegionResolver;
 // EIP-1271/6492 contract-wallet verification shares the CHAIN_RPC_URLS map
 // the identity SIWE flow uses; without endpoints only EOA signatures verify.
 const knomosisRpcUrls = identityServices.config.siwe.chainRpcUrls ?? {};
@@ -1349,7 +1355,7 @@ if (
 // locale-subtag region resolver, the WS-D age band, the single runtime
 // crypto/governance flags, the WS-S room storage axis, keyed opaque refs,
 // and durable persist + router publish for the registered compliance topics.
-complianceServices.localeRegion = (userId) => knomosisServices.regionResolver.regionForUser(userId);
+complianceServices.localeRegion = (userId) => localeRegionResolver.regionForUser(userId);
 complianceServices.ageBand = async (userId) =>
   (await identityServices.store.getUser(userId))?.ageBand ?? null;
 complianceServices.knomosisFlags = () => ({
@@ -1392,6 +1398,18 @@ setComplianceServices(complianceServices);
 // every shipped consumer — gateway preflight/submit, intent preflight, the
 // jurisdiction readiness item, wallet risk — lights up through this seam.
 knomosisServices.compliance = buildCompliancePort(complianceServices);
+// The kill-switch and (ignored) jurisdiction region seam resolves the
+// AUTHORITATIVE region — the WS-N.1.1b ladder (verified declaration → locale) —
+// not locale alone.  A regional incident kill switch must cover a member VERIFIED
+// in the paused region even when their account locale resolves elsewhere, exactly
+// as the jurisdiction gate already does (it re-resolves the ladder and ignores any
+// passed region).  Every kill-switch consumer (submit/preflight/standing/
+// simulation/scheduler/governance) reads this ONE seam, so binding the ladder here
+// fixes them all.  `localeRegion` above uses the pure `localeRegionResolver`, so
+// this ladder is not self-referential.
+knomosisServices.regionResolver = {
+  regionForUser: async (userId) => (await resolveRegionForUser(complianceServices, userId)).region,
+};
 // WS-E.1.4: the jurisdictional retention overrides (shorten-only; re-pushed
 // by the compliance admin config surface on change).
 eventServices.retention.overrides = buildEventRetentionOverrides(complianceServices.config);

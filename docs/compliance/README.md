@@ -163,6 +163,15 @@ modified** in their verdict semantics:
   again at the WS-L leg; and a decided-but-open case would sit in the queue
   forever.
 
+  **The console records the reviewer's chosen outcome, not a hard-coded
+  `cleared`.** The `investigating → resolved` control on the ComplianceConsole
+  case queue is backed by an outcome selector over the full
+  `CASE_RESOLUTION_OUTCOMES` set (`cleared` / `restricted` / `account_suspended` /
+  `referred_to_law_enforcement`; `escalated` is a separate transition), so a
+  scam / manual / sanctions case that must stay restricted can be resolved as such
+  — a hard-coded `cleared` would have forced a reviewer to falsely clear the hold
+  or leave the case open.
+
   **The decision is recorded BEFORE the intent state moves — for release AND
   reject alike.** The case-chain decision lands first, then the intent's
   compliance column changes (`flagged → cleared` on release, `flagged → blocked`
@@ -406,7 +415,11 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   ComplianceConsole surfaces that decision as a "Revoke verified" action next to
   verify/reject, so a reviewer can actually make the change the member is told to
   ask for (a console offering only verify/reject would leave a wrong verified
-  region stuck behind a manual API call).  A member DELETE still
+  region stuck behind a manual API call).  The member-facing RegionDeclarationCard
+  is the OTHER half: for a `verified` declaration it hides the self-service revoke
+  button entirely and shows the "contact compliance" guidance, since the member
+  DELETE can only 409 there — offering the button would bury that actionable
+  guidance behind a generic failure.  A member DELETE still
   freely revokes a NON-verified (pending) declaration.  The read-guard alone is a
   TOCTOU, so the redeclaration WRITE is a CAS on the read premises
   (`declaredRegion`/`status`/`updatedAt`): a reviewer verifying the pending row
@@ -415,7 +428,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   sees the verify) and 409s rather than silently downgrading `reviewer_verified`.
   BOTH member writes CAS: the redeclaration POST and the member DELETE (revoke)
   run the same read→guard→CAS loop, since a mid-write verify would clobber
-  `reviewer_verified` on either path.
+  `reviewer_verified` on either path.  Because the verified declaration is the
+  AUTHORITATIVE crypto-feature region, the knomosis `regionResolver` seam that
+  scopes every regional kill switch (submit / preflight / standing / simulation /
+  scheduler / governance) is boot-wired to the SAME `resolveRegionForUser` ladder
+  the jurisdiction gate uses, not the locale subtag alone — so a regional incident
+  pause covers a member VERIFIED in the paused region even when their account
+  locale resolves elsewhere (a locale-only scope would have let them act).
 - **Velocity counting reserves, never reconciles down.**  Each `fraudRisk`
   call reserves a check (preflight + submit ≈ 2 per action, and the limits
   carry that factor); a rejected action's reservation is deliberately kept.

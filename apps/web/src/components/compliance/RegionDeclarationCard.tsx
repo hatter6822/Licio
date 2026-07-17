@@ -119,11 +119,24 @@ export function RegionDeclarationCard(): React.JSX.Element {
               STATUS_COPY[declaration.status] ?? declaration.status,
             )}
           </span>
-          <div className="mt-2">
-            <Button variant="secondary" disabled={busy} onClick={() => void revoke()}>
-              {t('compliance.region.revoke', 'Revoke declaration')}
-            </Button>
-          </div>
+          {declaration.status === 'verified' ? (
+            // A VERIFIED region cannot be self-revoked — the server DELETE returns
+            // 409 `declaration_verified` — so offering the button would only fail
+            // and bury the actionable guidance behind a generic error.  Direct the
+            // member to the reviewer path (compliance revokes, then they redeclare).
+            <p className="mt-2 text-ink-muted" data-testid="verified-change-hint">
+              {t(
+                'compliance.region.verified_change',
+                'This region is verified. To change it, contact compliance — a reviewer must revoke a verified region before you can declare a new one.',
+              )}
+            </p>
+          ) : (
+            <div className="mt-2">
+              <Button variant="secondary" disabled={busy} onClick={() => void revoke()}>
+                {t('compliance.region.revoke', 'Revoke declaration')}
+              </Button>
+            </div>
+          )}
         </div>
       ) : (
         <form

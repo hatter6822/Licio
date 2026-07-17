@@ -26,6 +26,7 @@ import {
   buildCompliancePort,
   buildCompliancePurge,
   createInMemoryComplianceServices,
+  resolveRegionForUser,
   setComplianceServices,
 } from './compliance/services.js';
 import { registerDefaultConsumers } from './events/consumers.js';
@@ -236,7 +237,11 @@ const knomosisServices = createInMemoryKnomosisServices({
 });
 knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
 knomosisServices.roomMode = buildRoomModePort(forumServices);
-knomosisServices.regionResolver = buildRegionResolver(identityServices);
+// Pure LOCALE resolver; `regionResolver` is replaced with the authoritative
+// ladder once compliance is wired (see below).  The compliance `localeRegion`
+// captures THIS const so the ladder is not self-referential.
+const localeRegionResolver = buildRegionResolver(identityServices);
+knomosisServices.regionResolver = localeRegionResolver;
 identityServices.exportFinancialWallets = (userId) =>
   exportFinancialWalletData(knomosisServices, userId);
 identityServices.purgeFinancialWallets = (userId) =>
@@ -256,7 +261,7 @@ const complianceServices = createInMemoryComplianceServices({
   configStore: eventServices.configStore,
   log: (event, meta) => logger.info(meta, event),
 });
-complianceServices.localeRegion = (userId) => knomosisServices.regionResolver.regionForUser(userId);
+complianceServices.localeRegion = (userId) => localeRegionResolver.regionForUser(userId);
 complianceServices.ageBand = async (userId) =>
   (await identityServices.store.getUser(userId))?.ageBand ?? null;
 complianceServices.knomosisFlags = () => ({
@@ -271,6 +276,13 @@ complianceServices.opaqueRef = (id) => accountRef(identityServices.config.master
 await complianceServices.reloadConfig();
 setComplianceServices(complianceServices);
 knomosisServices.compliance = buildCompliancePort(complianceServices);
+// The kill-switch region seam resolves the AUTHORITATIVE ladder region (verified
+// declaration → locale), matching production — a verified-region member is caught
+// by that region's pause regardless of locale.  `localeRegion` above uses the pure
+// `localeRegionResolver`, so this is not self-referential.
+knomosisServices.regionResolver = {
+  regionForUser: async (userId) => (await resolveRegionForUser(complianceServices, userId)).region,
+};
 identityServices.exportComplianceData = buildComplianceExport(complianceServices);
 identityServices.purgeCompliance = buildCompliancePurge(complianceServices, async (userId) =>
   (await knomosisServices.wallets.listByUser(userId, true)).map((w) => w.walletAccountId),
