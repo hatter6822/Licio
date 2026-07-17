@@ -96,9 +96,19 @@ describe('the region resolution ladder (WS-N.1.1b — identity-free)', () => {
       } as never,
       localeRegion: async () => 'FR',
     };
-    expect(await resolveRegion(broken, USER)).toEqual({ region: null, basis: 'unknown' });
+    // …and it is marked `unavailable`: the DECLARATION read failed, so even the
+    // affordances that pass an ordinary `unknown` (wallet connection, testnet)
+    // must fail closed while the store is down (thread wallet.ts:152).
+    expect(await resolveRegion(broken, USER)).toEqual({
+      region: null,
+      basis: 'unknown',
+      unavailable: true,
+    });
     // A LOCALE outage (declaration read fine, no verified decl) still fails to
     // unknown, not up — the locale rung is already the weakest permissive one.
+    // It is NOT `unavailable`: the declaration read SUCCEEDED and found no
+    // verified declaration, so there is no blocked-verified region to lose — the
+    // ordinary testnet-permissive `unknown` posture is correct.
     const localeDown = {
       declarations,
       localeRegion: async () => {

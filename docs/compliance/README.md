@@ -366,7 +366,16 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   member whose verified declaration names a BLOCKED region must not have a
   transient outage resolve them to a more-permissive locale and unlock the very
   wallet links / testnet actions the stored declaration denies (fail toward the
-  restrictive answer, never a laterally more-permissive one).  The SAME reasoning
+  restrictive answer, never a laterally more-permissive one).  But `unknown`
+  alone was not enough: the wallet-connection / testnet gates deliberately PASS an
+  ordinary `unknown` (no region ⇒ testnet posture, linking moves no money), so
+  the outage's `unknown` slipped straight through.  `resolveRegion` now marks the
+  outage `unavailable` — distinct from a resolved-but-unknown region — and
+  `coarseVerdict` fails an `unavailable` resolution CLOSED (`blocked`) for EVERY
+  cell, including `wallet_connection`.  So the verified-BLOCKED member cannot link
+  a new wallet while the store is down, while a genuine no-region member keeps the
+  testnet posture.  (`/compliance/availability` already showed the cell
+  unavailable for any region-null; this makes the GATE agree for the outage.)  The SAME reasoning
   bars a SELF-INFLICTED downgrade — via BOTH member paths, since either erases the
   verified basis and drops `resolveRegion` to the weaker locale rung, letting a
   verified-BLOCKED member reach the routes that reject only an explicit `blocked`
@@ -487,7 +496,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   RESOLVED, in the same unit, through the ONE `releaseAndCloseLinkedCase` helper.
   Left open + held once suppression lifts, an OPEN high-risk case would flip
   straight from invisible to driving a `compliance_hold` + elevated wallet risk
-  INDEFINITELY, for a records request no longer hidden.  Because that helper is
+  INDEFINITELY, for a records request no longer hidden.  The HOLD RELEASE is the
+  essential half and runs regardless of the case's outcome: a compliance reviewer
+  may have resolved the linked case `restricted` through the console before
+  counsel acted, and forcing a `cleared` close onto an already-resolved case is a
+  refusal — which, un-guarded, would abort the whole counsel transition and leave
+  the hold ON.  So the close is SKIPPED for an already-resolved case (it is
+  already closed, and not open ⇒ not driving anything); only a still-open case is
+  closed.  Because that helper is
   shared, the release note stays GENERIC on every path (WS-N.2.3d) — a
   compliance reviewer reading the linked case must not learn a lawful-access
   request existed or was denied; counsel's reason lives only on the counsel-only
@@ -534,8 +550,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   the link-time sanctions response.  A reviewer pin immediately drives
   `walletRisk` to `high` and blocks the OWNER's fund transfers, so — like
   `buildSanctionedWalletLinkHook` — it opens an investigation CASE in the SAME
-  `runChainedUnit`, `manual`-triggered and idempotent per wallet
-  (`manual-pin:<wallet>`).  A pin with no case is a wallet frozen with nothing in
+  `runChainedUnit`, `manual`-triggered and idempotent per ACTIVE PIN
+  (`manual-pin:<pin-id>`, the id `pins.pin` returns — stable while the pin is
+  active, new after a release).  Keying on the WALLET would be permanent: a
+  re-pin after the first case was released + resolved would dedup onto that OLD
+  closed case, leaving the fresh restriction with no open reviewer-queue / DSAR
+  record — so the key follows the pin, and a re-pin after release opens a fresh
+  case while a re-pin of a still-active pin dedups onto its own.  A pin with no
+  case is a wallet frozen with nothing in
   the reviewer queue, case history, or DSAR/export explaining the restriction —
   no investigation record, nobody to release it.  The case subject is DERIVED
   from the wallet's owner (`walletOwner`, the WS-L wallet record), NEVER a

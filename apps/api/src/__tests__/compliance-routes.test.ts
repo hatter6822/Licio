@@ -953,11 +953,16 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     // The pin is paired with a case (WS-N.2.2e/2.3b) — the reviewer queue, case
     // history, and DSAR export now have an investigation record explaining the
     // restriction, the same pin+case unit the link-time sanctions path keeps.
-    const opened = await compliance.cases.findByIdempotencyKey(`manual-pin:${walletId}`);
-    expect(opened).not.toBeNull();
-    expect(opened?.userIdOrRoomId).toBe(subject);
-    expect(opened?.subjectKind).toBe('user');
-    // Re-pinning the same wallet does not open a duplicate case (idempotent key).
+    // The case key is scoped to the ACTIVE pin (thread 1368), not the wallet.
+    const manualCases = () =>
+      compliance.cases
+        .listBySubject(subject, 'user', 50)
+        .then((ks) => ks.filter((k) => (k.idempotencyKey ?? '').startsWith('manual-pin:')));
+    const opened = await manualCases();
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.userIdOrRoomId).toBe(subject);
+    expect(opened[0]?.subjectKind).toBe('user');
+    // Re-pinning the SAME still-active wallet dedups onto its pin's case.
     const rePinned = await app().request(
       post(
         `/v1/compliance/admin/wallets/${walletId}/pin`,
@@ -966,8 +971,7 @@ describe('the fraud queue + wallet pins + runtime config', () => {
       ),
     );
     expect(rePinned.status).toBe(201);
-    const cases = await compliance.cases.listBySubject(subject, 'user', 50);
-    expect(cases.filter((k) => k.idempotencyKey === `manual-pin:${walletId}`)).toHaveLength(1);
+    expect(await manualCases()).toHaveLength(1);
     const released = await app().request(
       del(`/v1/compliance/admin/wallets/${walletId}/pin`, reviewer.cookie),
     );
@@ -976,6 +980,56 @@ describe('the fraud queue + wallet pins + runtime config', () => {
       del(`/v1/compliance/admin/wallets/${walletId}/pin`, reviewer.cookie),
     );
     expect(again.status).toBe(404);
+  });
+
+  it('re-pinning a wallet AFTER release opens a FRESH investigation case (thread 1368)', async () => {
+    const reviewer = await seedReviewer();
+    const walletId = randomUUID();
+    const subject = randomUUID();
+    compliance.walletOwner = async (id) => (id === walletId ? subject : null);
+    const pin = () =>
+      app().request(
+        post(
+          `/v1/compliance/admin/wallets/${walletId}/pin`,
+          { reason: 'reported scam' },
+          reviewer.cookie,
+        ),
+      );
+    const manualCases = () =>
+      compliance.cases
+        .listBySubject(subject, 'user', 50)
+        .then((ks) => ks.filter((k) => (k.idempotencyKey ?? '').startsWith('manual-pin:')));
+
+    expect((await pin()).status).toBe(201);
+    const first = await manualCases();
+    expect(first).toHaveLength(1);
+    // Reviewer resolves the case, then the pin is released.
+    await resolveCaseInTx(
+      { cases: compliance.cases, caseAudit: compliance.caseAudit },
+      buildCaseDeps(compliance),
+      {
+        caseId: first[0]?.caseId as string,
+        actorUserId: reviewer.userId,
+        resolution: {
+          outcome: 'restricted',
+          notes: 'confirmed',
+          resolved_by: reviewer.userId,
+          resolved_at: new Date().toISOString(),
+        },
+      },
+    );
+    expect(
+      (await app().request(del(`/v1/compliance/admin/wallets/${walletId}/pin`, reviewer.cookie)))
+        .status,
+    ).toBe(200);
+
+    // A NEW report re-pins the same wallet — a permanent `manual-pin:<wallet>`
+    // key would have handed back the OLD resolved case, leaving the fresh
+    // restriction with no open record.  A pin-scoped key opens a SECOND case.
+    expect((await pin()).status).toBe(201);
+    const afterRepin = await manualCases();
+    expect(afterRepin).toHaveLength(2);
+    expect(new Set(afterRepin.map((k) => k.idempotencyKey)).size).toBe(2);
   });
 
   it('a manual pin on an UNKNOWN wallet fails closed — no case for a phantom subject (thread 1318)', async () => {

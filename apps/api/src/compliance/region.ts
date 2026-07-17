@@ -21,6 +21,14 @@ import type { RegionDeclarationStore } from './stores.js';
 export interface RegionResolution {
   region: string | null;
   basis: RegionResolutionBasis;
+  /** True when the region could not be RESOLVED because the declaration store
+   *  read FAILED (a transient outage), as distinct from a resolved-but-unknown
+   *  region (no verified declaration, no locale — the testnet-permissive case).
+   *  The two are both `basis: 'unknown'`, but only the outage must fail CLOSED:
+   *  a member whose verified declaration names a BLOCKED region must not slip
+   *  through the wallet/real-funds gates while the store is down (thread
+   *  wallet.ts:152).  The wire basis stays `unknown`; this is engine-internal. */
+  unavailable?: boolean;
 }
 
 export interface RegionResolutionDeps {
@@ -51,11 +59,13 @@ export async function resolveRegion(
     // verified declaration": a member whose verified declaration names a BLOCKED
     // region would otherwise fall to the weaker locale rung and resolve to a MORE
     // PERMISSIVE region — a transient outage allowing the very wallet links and
-    // testnet actions the stored declaration denies (the wallet/testnet callers
-    // reject only an explicit `blocked` verdict).  `unknown` disables real-funds
-    // cells; a successful read that finds no verified declaration still falls to
-    // locale below, because then we KNOW there is nothing stronger to lose.
-    return { region: null, basis: 'unknown' };
+    // testnet actions the stored declaration denies.  `unknown` alone disables
+    // real-funds cells, but the wallet/testnet gates pass an ordinary `unknown`
+    // (no region ⇒ testnet posture) — so this path ALSO marks `unavailable`, and
+    // the engine fails those affordances closed while the store is down.  A
+    // successful read that finds no verified declaration still falls to locale
+    // below, because then we KNOW there is nothing stronger to lose.
+    return { region: null, basis: 'unknown', unavailable: true };
   }
   try {
     const subtag = await deps.localeRegion(userId);

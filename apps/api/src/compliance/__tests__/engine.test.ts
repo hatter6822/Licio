@@ -60,6 +60,13 @@ describe('coarseVerdict — the port truth table', () => {
     ['unknown age', { ageBand: null }, 'unknown'],
     ['locale basis only', { basis: 'locale_subtag' as const }, 'unknown'],
     ['unknown basis', { basis: 'unknown' as const, region: null }, 'unknown'],
+    // A resolution that FAILED (declaration-store outage) fails CLOSED — distinct
+    // from an ordinary resolved-but-unknown region (thread wallet.ts:152).
+    [
+      'region unavailable (outage)',
+      { unavailable: true, basis: 'unknown' as const, region: null },
+      'blocked',
+    ],
     ['crypto flag off', { cryptoEnabled: false }, 'unknown'],
     ['policy missing', { policy: { kind: 'missing' as const } }, 'unknown'],
     ['policy future-dated', { policy: { kind: 'future_dated' as const } }, 'unknown'],
@@ -67,6 +74,21 @@ describe('coarseVerdict — the port truth table', () => {
     ['policy store down', { policy: { kind: 'store_unavailable' as const } }, 'unknown'],
   ])('%s → %s', (_label, patch, expected) => {
     expect(coarseVerdict({ ...ELIGIBLE, ...patch })).toBe(expected);
+  });
+
+  it('wallet_connection: an ordinary unknown ALLOWS (testnet posture) but a store OUTAGE BLOCKS (thread wallet.ts:152)', () => {
+    // No region resolved (no verified declaration, no locale) — the ordinary
+    // `unknown` the wallet gate passes, since linking moves no money.
+    const noRegion = {
+      ...ELIGIBLE,
+      region: null,
+      basis: 'unknown' as const,
+      policy: { kind: 'missing' as const },
+    };
+    expect(coarseVerdict(noRegion, 'wallet_connection')).toBe('unknown');
+    // The SAME shape but the declaration read FAILED: a verified-BLOCKED member
+    // must not slip through while the store is down, so it fails closed.
+    expect(coarseVerdict({ ...noRegion, unavailable: true }, 'wallet_connection')).toBe('blocked');
   });
 
   it('blocked only when EVERY cell is blocked; a testnet-only region is unknown', () => {

@@ -363,6 +363,9 @@ async function assembleAvailabilityInput(
     complianceHold,
     region: resolution.region,
     basis: resolution.basis,
+    // Thread the store-outage signal so the engine fails those affordances that
+    // pass an ordinary `unknown` (wallet connection, testnet) CLOSED while down.
+    ...(resolution.unavailable === true ? { unavailable: true } : {}),
     policy,
     cryptoEnabled: flags.cryptoEnabled,
     governanceEnabled: flags.governanceEnabled,

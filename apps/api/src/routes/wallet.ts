@@ -123,9 +123,14 @@ async function walletBaseGate(
  * reports `wallet_connection` per the region's policy, and without this check
  * these routes would go on issuing nonces and linking wallets in a region whose
  * policy disables the cell — the platform telling the member the feature is
- * unavailable while handing it to them anyway.  `unknown` does NOT bar it:
- * linking a wallet moves no money, and the region ladder is fail-closed for
- * real funds, not for every affordance (the shipped testnet posture).
+ * unavailable while handing it to them anyway.  An ordinary `unknown` (no
+ * verified declaration, no locale) does NOT bar it: linking a wallet moves no
+ * money, and the region ladder is fail-closed for real funds, not for every
+ * affordance (the shipped testnet posture).  But a region resolution that FAILED
+ * — a declaration-store outage — is NOT an ordinary `unknown`: `resolveRegion`
+ * marks it `unavailable` and the engine returns `blocked`, so a member whose
+ * verified declaration names a BLOCKED region cannot link a new wallet while the
+ * store is down (the escape closed with the outage's fail-closed path).
  *
  * It applies ONLY to new connections.  A region that bars new links must NOT
  * trap the wallet a member linked before the policy changed: they must still be

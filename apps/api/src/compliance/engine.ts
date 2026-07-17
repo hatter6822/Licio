@@ -66,6 +66,10 @@ export interface AvailabilityInput {
   complianceHold: boolean;
   region: string | null;
   basis: RegionResolutionBasis;
+  /** The region resolution FAILED (a declaration-store outage), as distinct from
+   *  a resolved-but-unknown region — the outage must fail CLOSED even for the
+   *  affordances that pass an ordinary `unknown` (thread wallet.ts:152). */
+  unavailable?: boolean;
   policy: ActivePolicyOutcome;
   cryptoEnabled: boolean;
   governanceEnabled: boolean;
@@ -231,6 +235,14 @@ export function coarseVerdict(
 ): JurisdictionVerdict {
   if (input.ageBand !== null && isMinorBand(input.ageBand)) return 'blocked';
   if (input.complianceHold) return 'blocked';
+  // A FAILED region resolution (declaration-store outage) fails CLOSED for every
+  // cell — including `wallet_connection`, which otherwise passes an ordinary
+  // `unknown`.  Without this a member whose verified declaration names a BLOCKED
+  // region could link a wallet / act on testnet while the store is down, because
+  // `resolveRegion` degrades to `unknown` and only an explicit `blocked` bars
+  // those gates (thread wallet.ts:152).  A resolved-but-unknown region (no
+  // verified declaration, no locale) is NOT unavailable and keeps its posture.
+  if (input.unavailable === true) return 'blocked';
   const policy = policyOf(input.policy);
   if (policy !== null && CRYPTO_FEATURE_CELLS.every((c) => policy.feature_flags[c] === 'blocked')) {
     return 'blocked';

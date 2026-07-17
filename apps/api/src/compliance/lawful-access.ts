@@ -52,21 +52,32 @@ async function releaseAndCloseLinkedCase(
     reason: 'Legal hold released: the restriction has lapsed (WS-N.2.3d).',
   });
   // THROW, never return: a returned error is a successful transaction result, so
-  // the surrounding write would COMMIT while the route reports failure.
+  // the surrounding write would COMMIT while the route reports failure.  The hold
+  // release is the ESSENTIAL cleanup — it must happen regardless of the case's
+  // outcome (leaving it on keeps the erasure scrub skipping the subject).
   mustApply(released.ok, 'lawful-access: hold release');
-  // From wherever the case now sits (a reviewer may have picked it up while
-  // counsel deliberated).
-  const closed = await resolveCaseInTx(stores, deps.caseDeps, {
-    caseId: input.caseId,
-    actorUserId: input.actorUserId,
-    resolution: {
-      outcome: 'cleared',
-      notes: 'Legal hold released; the restriction has lapsed (WS-N.2.3d).',
-      resolved_by: input.actorUserId,
-      resolved_at: new Date(deps.now()).toISOString(),
-    },
-  });
-  mustApply(closed, 'lawful-access: case close');
+  // Close the case too — but ONLY if it is still OPEN.  A compliance reviewer may
+  // have resolved it `restricted` through the case console before counsel acted;
+  // forcing a `cleared` outcome onto an already-resolved case is a refusal
+  // (`resolveCaseInTx` rejects a resolved case with a DIFFERENT outcome), and
+  // `mustApply` would abort the whole counsel transition and roll the hold
+  // release back — the exact opposite of releasing it.  An already-resolved case
+  // is already closed, so it needs no re-resolution; the hold is released either
+  // way.  From wherever a still-open case sits (a reviewer may have picked it up).
+  const current = await stores.cases.getById(input.caseId);
+  if (current !== null && current.reviewState !== 'resolved') {
+    const closed = await resolveCaseInTx(stores, deps.caseDeps, {
+      caseId: input.caseId,
+      actorUserId: input.actorUserId,
+      resolution: {
+        outcome: 'cleared',
+        notes: 'Legal hold released; the restriction has lapsed (WS-N.2.3d).',
+        resolved_by: input.actorUserId,
+        resolved_at: new Date(deps.now()).toISOString(),
+      },
+    });
+    mustApply(closed, 'lawful-access: case close');
+  }
 }
 
 /** The stored column and the response schema share this cap. */

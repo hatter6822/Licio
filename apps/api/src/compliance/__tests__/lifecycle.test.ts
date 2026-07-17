@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryPwattConfigStore } from '../../events/stores.js';
 import { InMemoryJobLeaseStore } from '../../identity/job-lease.js';
 import { appendCaseAudit } from '../audit.js';
-import { createCase, setLegalHold, transitionCase } from '../cases.js';
+import { createCase, resolveCaseInTx, setLegalHold, transitionCase } from '../cases.js';
 import {
   intakeLawfulAccessRequest,
   notifyLawfulAccessSubject,
@@ -720,6 +720,68 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     expect(notes).not.toContain('lawful');
     expect(notes).not.toContain('denied');
     expect(notes).not.toContain('invalid order');
+  });
+
+  it('a DENIED request RELEASES its hold even when a reviewer already resolved the case restricted (thread lawful-access:64)', async () => {
+    const userId = randomUUID();
+    const deps = {
+      requests: services.lawfulAccess,
+      caseDeps: buildCaseDeps(services),
+      roomStorageMode: services.roomStorageMode,
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const intake = await intakeLawfulAccessRequest(deps, {
+      agency: 'Agency',
+      jurisdiction: 'US',
+      legalBasis: 'subpoena',
+      scope: {
+        subject_kind: 'user',
+        subject_ref: userId,
+        time_range_start: null,
+        time_range_end: null,
+      },
+      contact: 'agent@example.test',
+      actorUserId: ACTOR,
+    });
+    if (!intake.ok) throw new Error('intake failed');
+    const caseId = intake.record.caseId;
+    if (caseId === null) throw new Error('no case');
+    // A compliance reviewer resolves the linked case `restricted` through the
+    // case console BEFORE counsel acts (the hold is still on — request is live).
+    const resolved = await resolveCaseInTx(
+      { cases: services.cases, caseAudit: services.caseAudit },
+      buildCaseDeps(services),
+      {
+        caseId,
+        actorUserId: ACTOR,
+        resolution: {
+          outcome: 'restricted',
+          notes: 'confirmed',
+          resolved_by: ACTOR,
+          resolved_at: new Date().toISOString(),
+        },
+      },
+    );
+    expect(resolved).toBe(true);
+    expect((await services.cases.getById(caseId))?.retentionPolicy.legal_hold).toBe(true);
+
+    // Counsel DENIES.  The cleanup would force a `cleared` close onto the case,
+    // which a resolved-`restricted` case REFUSES — without the fix that refusal
+    // aborts the whole denial and leaves the hold ON.  It must succeed and
+    // release the hold regardless of the existing case outcome.
+    const denied = await reviewLawfulAccessRequest(deps, {
+      requestId: intake.record.requestId,
+      decision: 'denied',
+      note: 'invalid order',
+      actorUserId: ACTOR,
+    });
+    expect(denied.ok).toBe(true);
+    const after = await services.cases.getById(caseId);
+    expect(after?.retentionPolicy.legal_hold).toBe(false); // hold RELEASED
+    expect(after?.reviewState).toBe('resolved');
+    expect(after?.resolution?.outcome).toBe('restricted'); // outcome NOT forced to cleared
   });
 
   it('an unnotified lawful-access case does not disable the subject’s crypto features', async () => {

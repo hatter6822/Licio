@@ -1350,7 +1350,14 @@ export function createComplianceRoutes() {
         const outcome = await runChainedUnit(
           services.transactor,
           async (stores) => {
-            await stores.pins.pin({
+            // `pin` is idempotent: it returns the ACTIVE pin unchanged, or a new
+            // row after a release.  Key the case on THAT pin's id, not the wallet:
+            // a permanent `manual-pin:<wallet>` key would hand a re-pin (after the
+            // first case was released + resolved) the OLD closed case, leaving the
+            // fresh restriction with no open reviewer-queue / DSAR record.  Per
+            // active pin ⇒ a re-pin after release opens a fresh case, while a
+            // re-pin of a still-active pin dedups onto its own.
+            const pin = await stores.pins.pin({
               id: services.uuid(),
               walletAccountId,
               reason,
@@ -1365,7 +1372,7 @@ export function createComplianceRoutes() {
               triggerType: 'manual',
               riskLevel: 'high',
               note: `Wallet manually pinned by a compliance reviewer: ${reason}`,
-              idempotencyKey: `manual-pin:${walletAccountId}`,
+              idempotencyKey: `manual-pin:${pin.id}`,
             });
           },
           'manual wallet pin',
