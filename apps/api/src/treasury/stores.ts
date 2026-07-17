@@ -366,8 +366,14 @@ export interface PaymentIntentStore {
   /** Data-rights scrub (W12): null the OWNER on every intent of a deleted
    *  user — the tombstoned users row never fires the FK's SET NULL. */
   anonymizeUser(userId: string): Promise<number>;
-  /** Timed-out pre-submission intents for the expiry sweep (WS-M.3.1b). */
-  listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]>;
+  /** Timed-out pre-submission intents for the expiry sweep (WS-M.3.1b) —
+   *  keyset-paged (paymentIntentId ascending) so a page of un-abandonable signed
+   *  orphans can never starve later expirable rows sitting BEHIND them. */
+  listExpired(
+    nowIso: string,
+    limit: number,
+    afterId?: string | null,
+  ): Promise<PaymentIntentRecord[]>;
   /** Post-submission intents to reconcile against their action records —
    *  keyset-paged (paymentIntentId ascending) so a stuck first slice can
    *  never starve later reconcilable rows. */
@@ -929,10 +935,16 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
     return scrubbed;
   }
 
-  async listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]> {
+  async listExpired(
+    nowIso: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<PaymentIntentRecord[]> {
     const timed: PaymentIntentState[] = ['created', 'preflighted', 'quoted', 'signed'];
     return [...this.#rows.values()]
       .filter((r) => timed.includes(r.executionState) && r.expiresAt <= nowIso)
+      .sort((a, b) => (a.paymentIntentId < b.paymentIntentId ? -1 : 1))
+      .filter((r) => afterId === null || r.paymentIntentId > afterId)
       .slice(0, limit)
       .map(clone);
   }

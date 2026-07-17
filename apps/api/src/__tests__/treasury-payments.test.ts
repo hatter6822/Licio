@@ -693,10 +693,78 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       updatedAt: new Date().toISOString(),
     });
     deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmIntentSignedTtlMs + 1_000);
-    // A page (size 1) entirely of un-abandonable rows makes no forward progress:
-    // the loop breaks rather than re-reading the same head forever.
+    // The lone un-abandonable row is skipped (the cursor pages past it); with no
+    // rows behind it the next page is empty and the sweep ends — nothing reaped.
     expect(await expireIntents(deps, 1)).toBe(0);
     expect((await deps.intents.getById(id))?.executionState).toBe('signed');
+  });
+
+  it('the expiry drain PAGES PAST an un-abandonable signed orphan to reap rows behind it (codex: continue expiring)', async () => {
+    const deps = buildDeps();
+    const treasury = await provisionTreasury(deps);
+    const past = '2020-01-01T00:00:00.000Z';
+    const baseRow = {
+      userId: USER,
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      targetType: 'treasury_deposit' as const,
+      targetId: ROOM,
+      asset: 'USDC',
+      amount: '100',
+      jurisdictionState: 'allowed' as const,
+      complianceState: 'pending' as const,
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: null,
+      expiresAt: past,
+      createdAt: past,
+      updatedAt: past,
+    };
+    // A SIGNED orphan that sorts FIRST by id — an action on chain makes it
+    // un-abandonable (the next reconcile attaches it).
+    const signedId = '00000000-0000-4000-8000-000000000001';
+    await deps.intents.insert({
+      ...baseRow,
+      paymentIntentId: signedId,
+      executionState: 'signed',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    await deps.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: {
+        message: { amount: '100', asset: 'USDC', treasuryId: treasury.treasuryId },
+        signature: '0xsig',
+      },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: signedId,
+      createdAt: past,
+      updatedAt: past,
+    });
+    // A CREATED intent that sorts AFTER it — abandonable, but BEHIND the orphan.
+    const createdId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    await deps.intents.insert({
+      ...baseRow,
+      paymentIntentId: createdId,
+      executionState: 'created',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    // With page size 1, a no-progress break would STOP at the signed orphan and
+    // never reach the created row behind it; the keyset cursor pages past it.
+    expect(await expireIntents(deps, 1)).toBe(1);
+    expect((await deps.intents.getById(createdId))?.executionState).toBe('abandoned');
+    expect((await deps.intents.getById(signedId))?.executionState).toBe('signed'); // untouched
   });
 });
 

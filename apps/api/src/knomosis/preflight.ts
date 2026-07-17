@@ -15,6 +15,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { decCompare, type TreasuryBounds } from '@licio/governance';
 import {
+  directTransferReviewRef,
   featureCellForAction,
   formatMinorUnits,
   type GovernanceMode,
@@ -651,13 +652,14 @@ export async function runPreflight(
     userId: input.userId,
     actionType,
     amountMinorUnits: message['amount'] ?? null,
-    // The attempt this action belongs to.  An intent-backed transfer names
-    // its INTENT, so the WS-M preflight's review and this one are one review
-    // — otherwise a reviewer's release of the held intent would run straight
-    // into a second review here that no queue action could clear.  A direct
-    // action has no intent, so its bound typed-data hash is the attempt
-    // (submit re-checks under the same hash: the token binds it).
-    reviewRef: input.paymentIntentId ?? verified.typedDataHash,
+    // A DIRECT transfer (no intent) keys its high-value review on the STABLE
+    // MOVEMENT, never `verified.typedDataHash` (which binds the per-attempt nonce/
+    // expiration) — the ONE shared definition the submit re-check uses too, so a
+    // retry after a reviewer clears lands on the same case rather than opening a
+    // fresh `elevated` one.  An intent-backed transfer keeps naming its INTENT.
+    reviewRef:
+      input.paymentIntentId ??
+      directTransferReviewRef(actionType, input.deploymentId, input.roomId, message),
     // The same subject the WS-M intent leg derives, from the same cell: a
     // room-treasury payout is the ROOM's review, a pay-in is the payer's.
     // Classifying it differently here would split one transfer's review in two.

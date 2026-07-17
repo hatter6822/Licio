@@ -1399,8 +1399,31 @@ export function createComplianceRoutes() {
       async (c) => {
         const auth = requireAuth(c);
         const services = getComplianceServices();
+        const { walletAccountId } = c.req.valid('param');
+        const pin = await services.pins.activeForWallet(walletAccountId);
+        if (pin === null) return c.json(notFound, 404);
+        // A pin's INCIDENT CASE keeps the wallet `high` on its own —
+        // `createWalletRisk` derives `high` from any open critical case for the
+        // owner as well as from the pin — so releasing the pin while that case is
+        // still open would report `{ released: true }` on a wallet the risk engine
+        // STILL blocks.  Require the linked case to be resolved FIRST, through the
+        // case console with a deliberate outcome + notes; never auto-clear a
+        // sanctions/manual incident case as a side effect of a pin deletion.  The
+        // case is keyed on THIS pin's id by both pin-opening paths.
+        for (const key of [`sanctions:link:${pin.id}`, `manual-pin:${pin.id}`]) {
+          const linked = await services.cases.findByIdempotencyKey(key);
+          if (linked !== null && linked.reviewState !== 'resolved') {
+            return c.json(
+              deny(
+                'case_open',
+                'Resolve the linked compliance case before releasing the pin; the wallet stays restricted while its incident case is open.',
+              ),
+              409,
+            );
+          }
+        }
         const released = await services.pins.release(
-          c.req.valid('param').walletAccountId,
+          walletAccountId,
           services.opaqueRef(auth.userId),
           new Date(services.now()).toISOString(),
         );

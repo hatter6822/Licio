@@ -16,6 +16,7 @@
 import { decCompare } from '@licio/governance';
 import type { KnomosisReasonCode, KnomosisSignedActionType, SubmissionState } from '@licio/shared';
 import {
+  directTransferReviewRef,
   featureCellForAction,
   REAL_FUNDS_ENVIRONMENTS,
   reviewSubjectForAction,
@@ -575,10 +576,19 @@ export async function submitAction(
       userId: input.userId,
       actionType,
       amountMinorUnits: input.typedDataMessage['amount'] ?? null,
-      // The same attempt the preflight named (an intent-backed transfer names
-      // its intent; a direct one, the hash the token binds), so the re-check
-      // lands on that review rather than opening a second.
-      reviewRef: input.paymentIntentId ?? typedDataHash,
+      // The same review the preflight named — an intent-backed transfer by its
+      // intent id, a direct one by the STABLE MOVEMENT key (the ONE shared
+      // definition, so preflight and this re-check never key the same movement
+      // two different ways).  Keying a direct review by `typedDataHash` would open
+      // a fresh case on every retry, since the hash binds the per-attempt nonce.
+      reviewRef:
+        input.paymentIntentId ??
+        directTransferReviewRef(
+          actionType,
+          input.deploymentId,
+          input.roomId,
+          input.typedDataMessage,
+        ),
       // The same subject the WS-M intent leg derives, from the same cell: a
       // room-treasury payout is the ROOM's review, a pay-in is the payer's.
       // Classifying it differently here would split one transfer's review in two.

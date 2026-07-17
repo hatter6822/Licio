@@ -771,7 +771,11 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     return rows.length;
   }
 
-  async listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]> {
+  async listExpired(
+    nowIso: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<PaymentIntentRecord[]> {
     const rows = await this.db
       .select()
       .from(paymentIntents)
@@ -779,8 +783,10 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
         and(
           inArray(paymentIntents.executionState, ['created', 'preflighted', 'quoted', 'signed']),
           lte(paymentIntents.expiresAt, new Date(nowIso)),
+          afterId === null ? undefined : gt(paymentIntents.paymentIntentId, afterId),
         ),
       )
+      .orderBy(asc(paymentIntents.paymentIntentId))
       .limit(limit);
     return rows.map(mapIntent);
   }

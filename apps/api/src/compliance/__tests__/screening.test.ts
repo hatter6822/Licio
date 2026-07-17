@@ -401,6 +401,24 @@ describe('a reviewed PARTIAL match can actually be cleared (WS-N.2.2a)', () => {
     expect(await screen(args)).toBe('clear');
   });
 
+  it('a partial clearance is scoped to its screening context — clearing one deployment does NOT clear another (codex: scope review keys)', async () => {
+    const { services, screen } = reviewableFixture(['partial']);
+    // The SAME address returns `partial` on two deployments; each opens its OWN
+    // review case (deployment-scoped key), and both hold pending review.
+    expect(await screen({ addressLower: ADDRESS, deploymentId: 'd1' })).toBe('unavailable');
+    const caseD1 = (await services.cases.listByStates(['open'], 10))[0];
+    expect(caseD1?.triggerType).toBe('sanctions');
+    // Clear ONLY d1's review.
+    await clearCase(services, caseD1?.caseId as string, NOW);
+    // d2's partial opens a SEPARATE case and stays pending.
+    expect(await screen({ addressLower: ADDRESS, deploymentId: 'd2' })).toBe('unavailable');
+    // d1 now honors its clearance…
+    expect(await screen({ addressLower: ADDRESS, deploymentId: 'd1' })).toBe('clear');
+    // …but d2's chain-specific match must NOT ride d1's clearance (a shared key
+    // would have bypassed d2's review here and returned `clear`).
+    expect(await screen({ addressLower: ADDRESS, deploymentId: 'd2' })).toBe('unavailable');
+  });
+
   it('a sanctions hit that could NOT be recorded is never cached', async () => {
     const { services, screen, callCount } = fixture(['full', 'full', 'full']);
     // The chain is down, so `createCase` cannot open the critical case.

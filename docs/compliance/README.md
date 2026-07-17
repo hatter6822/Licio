@@ -605,7 +605,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   caller-supplied ref: a mistyped subject would otherwise pin one member's wallet
   (blocked by `walletAccountId`) while opening the high-risk case on an unrelated
   member — the actual owner fund-blocked with no case, the wrong member accused.
-  An unknown wallet fails closed (no real subject ⇒ no case ⇒ no pin).
+  An unknown wallet fails closed (no real subject ⇒ no case ⇒ no pin).  And
+  because a pin and its case are one unit, RELEASING the pin is not enough on its
+  own: `walletRisk` derives `high` from the open critical/high case as well as
+  from the pin, so a bare pin-release would report `{ released: true }` on a wallet
+  the risk engine still blocks.  The pin-DELETE therefore REFUSES (409 `case_open`)
+  while the linked incident case (`sanctions:link:<pin.id>` / `manual-pin:<pin.id>`)
+  is still open — the reviewer resolves the case first, through the console with a
+  deliberate outcome + notes (never an implicit `cleared` as a side effect of a pin
+  deletion), and only then does the release fully unfreeze.
 - **A fund transfer screens EVERY counterparty.**  Both legs screened
   `recipient ?? actor`, which quietly means a deposit (no recipient) screens its
   actor at every action while a payout screens only its recipient and NEVER its
@@ -625,6 +633,26 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   and the retry can still open the case. A sanctions hit whose case was not
   recorded is additionally **never cached** — the full TTL would suppress the
   retries that could still record it.
+- **A sanctions clearance is scoped to its screening context.**  The provider
+  request and the screening cache are deployment-scoped (`screen:<deployment>:
+  <address>`), and a provider can return a different `partial` verdict per chain,
+  so the review CASE key carries the deployment too (`sanctions:<result>:
+  <address>:<deployment>:<day>`) — and `partialReviewCleared` looks it up the same
+  way.  A shared address-only key would have let a reviewer's clearance on one
+  deployment silently clear the same address's pending review on another, so a
+  chain-specific match could bypass review.
+- **A DIRECT high-value review keys on the MOVEMENT, not the attempt.**  A signed
+  fund transfer that carries no payment intent and trips the `elevated` threshold
+  needs a review ref for its fraud case.  Keying it by the bound `typedDataHash`
+  re-blocked every retry: the hash commits to the per-attempt nonce + expiration,
+  and an action's expiration is minutes while a manual review runs to hours — so
+  the retry a clearance REQUIRES (a fresh nonce, hence a fresh hash) opened a NEW
+  `elevated` case and re-blocked, never honoring the clearance.  The shared
+  `directTransferReviewRef` (ONE definition the preflight and the submit re-check
+  both call) keys on the stable movement — action / deployment / room / actor /
+  amount / asset / target / recipient — so the retry lands on the same, cleared
+  case; velocity still bounds repetition.  An intent-backed transfer keeps keying
+  by its intent id (each intent is its own single review).
 - **A bogus token reaches no mutable compliance check.**  The submit re-checks
   MUTATE state (`screenAddress` opens a sanctions case, `fraudRisk` reserves
   velocity and can open a review), but the single-use token proving the action
@@ -750,11 +778,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   ALLOWANCE_STATES, so every expired-but-unreaped intent keeps counting toward the
   per-user / per-room deposit caps until a LATER tick finally abandoned it — a
   burst of >`page` timed intents (a freeze, a wave of abandoned checkouts) could
-  wrongly block a member's fresh deposit for several ticks.  Each round re-reads
-  the head of the expired set (rows abandoned this round drop out of it); a round
-  that abandons NOTHING means the page is all un-abandonable `signed`-with-action
-  rows the next reconcile attaches, so the loop STOPS rather than spinning on the
-  same head, under a `MAX_EXPIRE_ROUNDS` backstop.
+  wrongly block a member's fresh deposit for several ticks.  It KEYSET-pages by
+  `paymentIntentId` (the same cursor `reconcileIntents` uses), not a re-read-head
+  loop with a no-progress break: a `signed` intent whose action is on chain cannot
+  be abandoned this round (the next reconcile attaches it), and a break would STOP
+  the whole sweep at a page full of such orphans — stranding every expirable
+  `created`/`preflighted`/`quoted` row sitting BEHIND them in the allowance-
+  counting states.  The cursor PAGES PAST a skipped orphan (its id is below the
+  advancing cursor) and reaches the rows after it; abandoned rows simply leave the
+  filter.  A short page ends the sweep, under a `MAX_EXPIRE_ROUNDS` backstop.
 - **A `reserving` action settles nothing — it never forwarded.**  The submit
   reserves the idempotency key by inserting the action `reserving` BEFORE the
   single-use gates, and only advances it to `submitted` once they all pass; a

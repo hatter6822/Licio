@@ -972,6 +972,28 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     );
     expect(rePinned.status).toBe(201);
     expect(await manualCases()).toHaveLength(1);
+    // The pin cannot be released while its incident case is still OPEN (thread
+    // 1406): createWalletRisk derives `high` from the open case too, so a bare
+    // release would report an unfreeze the risk engine still blocks.
+    const blocked = await app().request(
+      del(`/v1/compliance/admin/wallets/${walletId}/pin`, reviewer.cookie),
+    );
+    expect(blocked.status).toBe(409);
+    // Resolve the linked case first; then the release succeeds and fully unfreezes.
+    await resolveCaseInTx(
+      { cases: compliance.cases, caseAudit: compliance.caseAudit },
+      buildCaseDeps(compliance),
+      {
+        caseId: opened[0]?.caseId as string,
+        actorUserId: reviewer.userId,
+        resolution: {
+          outcome: 'cleared',
+          notes: 'false alarm',
+          resolved_by: reviewer.userId,
+          resolved_at: new Date().toISOString(),
+        },
+      },
+    );
     const released = await app().request(
       del(`/v1/compliance/admin/wallets/${walletId}/pin`, reviewer.cookie),
     );

@@ -998,24 +998,26 @@ export async function abandonOpenIntent(
 const MAX_EXPIRE_ROUNDS = 500;
 
 /** The expiry sweep: timed pre-submission states past their TTL → abandoned.
- *  Drains the backlog across bounded rounds, exactly like the sibling
- *  `reconcileIntents`/`runRetentionSweep`.  A single fixed page would abandon at
- *  most `limit` rows per tick, and every un-reaped timed row (created/preflighted/
+ *  KEYSET-paged (paymentIntentId ascending) across bounded rounds, exactly like
+ *  the sibling `reconcileIntents`.  A single fixed page would abandon at most
+ *  `limit` rows per tick, and every un-reaped timed row (created/preflighted/
  *  quoted/signed are all ALLOWANCE_STATES) keeps counting toward per-user/per-room
  *  deposit caps until a LATER tick finally reaped it — so a burst of >`limit`
  *  expired intents could wrongly block a member's fresh deposit for several ticks.
- *  Each round re-reads the head of the expired set (rows this round abandoned drop
- *  out of it); a round that abandons NOTHING means every remaining row is
- *  un-abandonable right now (a `signed` intent whose action is on chain, which the
- *  next reconcile attaches — see below), so the loop stops rather than spinning on
- *  the same page. */
+ *  The cursor is essential, not decorative: a plain re-read-head loop that broke on
+ *  "no row abandoned this round" would STOP at a page filled with un-abandonable
+ *  `signed` orphans (an action on chain the next reconcile attaches), stranding
+ *  every expirable created/preflighted/quoted row sitting BEHIND them.  Keyset
+ *  paging PAGES PAST a skipped orphan (its id is below the advancing cursor) and
+ *  reaches the rows after it; abandoned rows simply leave the filter. */
 export async function expireIntents(deps: IntentDeps, limit = 200): Promise<number> {
   const nowIso = new Date(deps.now()).toISOString();
   let abandoned = 0;
+  let afterId: string | null = null;
   for (let round = 0; round < MAX_EXPIRE_ROUNDS; round += 1) {
-    const expired = await deps.intents.listExpired(nowIso, limit);
+    const expired = await deps.intents.listExpired(nowIso, limit, afterId);
     if (expired.length === 0) break;
-    const before = abandoned;
+    afterId = expired[expired.length - 1]?.paymentIntentId ?? null;
     for (const intent of expired) {
       // AN INTENT WHOSE MONEY HAS MOVED IS NOT ABANDONABLE.  `signed` is a timed
       // state, so a client that died between submit and attach — the exact case
@@ -1027,17 +1029,15 @@ export async function expireIntents(deps: IntentDeps, limit = 200): Promise<numb
       //
       // The action is the evidence, so the reaper asks for it — by the same
       // lookup the sweep uses, because the two must agree.  A skipped intent is
-      // not stuck: the next reconcile attaches it, and if the attach can never
-      // succeed (a binding mismatch) it stays visible as `signed` for an operator
-      // rather than disappearing into `abandoned`.
+      // not stuck: the cursor has already moved past it (so this sweep reaches the
+      // rows behind it), the next reconcile attaches it, and if the attach can
+      // never succeed (a binding mismatch) it stays visible as `signed` for an
+      // operator rather than disappearing into `abandoned`.
       if ((await orphanActionFor(deps, intent)) !== null) continue;
       const updated = await transitionIntent(deps, intent, 'abandoned', {}, null);
       if (updated !== null) abandoned += 1;
     }
-    // No forward progress ⇒ every row this page is un-abandonable right now
-    // (signed-with-orphan rows the next reconcile attaches); re-reading the same
-    // head would spin, so stop.  A short page means the expired set is drained.
-    if (abandoned === before || expired.length < limit) break;
+    if (expired.length < limit) break; // a short page ⇒ the expired set is drained
   }
   return abandoned;
 }

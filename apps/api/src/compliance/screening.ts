@@ -85,17 +85,30 @@ export interface ScreeningDeps {
 }
 
 /** The idempotent key for a match's review case — ONE definition, so the
- *  case-opening path and the cached-verdict recheck below cannot drift. */
-const matchCaseKey = (result: 'partial' | 'full', addressLower: string, nowMs: number): string =>
-  `sanctions:${result}:${addressLower}:${caseDayBucket(nowMs)}`;
+ *  case-opening path and the cached-verdict recheck below cannot drift.  It is
+ *  scoped to the SCREENING CONTEXT (deployment): the provider request and the
+ *  cache are deployment-scoped, and a `partial` verdict can differ per chain, so a
+ *  clearance for one deployment must NOT dedup-clear the same address on another
+ *  (that would let a chain-specific match bypass review). */
+const matchCaseKey = (
+  result: 'partial' | 'full',
+  addressLower: string,
+  deploymentId: string,
+  nowMs: number,
+): string => `sanctions:${result}:${addressLower}:${deploymentId}:${caseDayBucket(nowMs)}`;
 
 /**
- * Has a reviewer CLEARED today's partial-match review for this address?
- * Read-only — it never opens a case (the caller's `createCase` does that).
+ * Has a reviewer CLEARED today's partial-match review for this address IN THIS
+ * screening context?  Read-only — it never opens a case (the caller's
+ * `createCase` does that).
  */
-async function partialReviewCleared(deps: ScreeningDeps, addressLower: string): Promise<boolean> {
+async function partialReviewCleared(
+  deps: ScreeningDeps,
+  addressLower: string,
+  deploymentId: string,
+): Promise<boolean> {
   const record = await deps.caseDeps.cases.findByIdempotencyKey(
-    matchCaseKey('partial', addressLower, deps.now()),
+    matchCaseKey('partial', addressLower, deploymentId, deps.now()),
   );
   return record?.reviewState === 'resolved' && record.resolution?.outcome === 'cleared';
 }
@@ -116,7 +129,7 @@ export function createScreenAddress(deps: ScreeningDeps): CompliancePort['screen
         // reviewer who has since cleared that false positive must take effect
         // NOW, not when the short TTL happens to lapse, or the manual
         // clearance is not a clearance.  Consult the review itself.
-        if (await partialReviewCleared(deps, addressLower)) {
+        if (await partialReviewCleared(deps, addressLower, deploymentId)) {
           deps.metric('compliance.screening.partial_cleared');
           await deps.cache.set(key, 'clear', deps.config().screeningCacheTtlMs).catch(() => {});
           return 'clear';
@@ -157,7 +170,7 @@ export function createScreenAddress(deps: ScreeningDeps): CompliancePort['screen
       note: partial
         ? 'Sanctions screening returned a PARTIAL match; manual review required before the action may proceed.'
         : 'Sanctions screening returned a FULL match; the action was blocked.',
-      idempotencyKey: matchCaseKey(result, addressLower, deps.now()),
+      idempotencyKey: matchCaseKey(result, addressLower, deploymentId, deps.now()),
     });
     if (!opened.ok) {
       // The match is REAL and the action is denied either way — but it was not
