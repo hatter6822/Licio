@@ -434,7 +434,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   scheduler / governance) is boot-wired to the SAME `resolveRegionForUser` ladder
   the jurisdiction gate uses, not the locale subtag alone — so a regional incident
   pause covers a member VERIFIED in the paused region even when their account
-  locale resolves elsewhere (a locale-only scope would have let them act).
+  locale resolves elsewhere (a locale-only scope would have let them act).  And a
+  regional pause must resolve a region from the ACTOR, never `null`: a room-owned
+  payout intent has a null OWNER, so `createPaymentIntent` scopes its
+  `payment_intent_creation` kill switch by `userId ?? actorUserId` (the acting
+  steward).  Passing the null owner's region read as `null`, which
+  `killSwitchDecision` treats as inside EVERY regional scope — so one region's
+  incident would have halted ALL room-owned payout creation globally while
+  member deposits stayed correctly region-scoped.
 - **Velocity counting reserves, never reconciles down.**  Each `fraudRisk`
   call reserves a check (preflight + submit ≈ 2 per action, and the limits
   carry that factor); a rejected action's reservation is deliberately kept.

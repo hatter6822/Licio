@@ -97,6 +97,12 @@ export interface CreateIntentInput {
   /** null = ROOM-owned (grant/compensation payouts): idempotency scopes to
    *  (room, key) and any room steward may drive the lifecycle. */
   userId: string | null;
+  /** The user ACTING (the acting steward for a room-owned payout, the member for
+   *  a deposit) — always present.  Used to scope the regional kill switch: a
+   *  room-owned intent (`userId` null) must resolve the ACTOR's region, or a
+   *  null region reads as inside EVERY regional pause and one region's incident
+   *  halts all room-owned payout creation globally. */
+  actorUserId: string;
   roomId: string;
   targetType: PaymentTargetType;
   targetId: string;
@@ -161,8 +167,12 @@ export async function createPaymentIntent(
   const guard = await assertGovernanceWritable(deps, input.roomId, operation);
   if (guard !== null) return guard;
 
-  const region =
-    input.userId === null ? null : await deps.regionResolver.regionForUser(input.userId);
+  // Scope the regional kill switch to the ACTOR's region — the member for a
+  // deposit, the acting steward for a room-owned payout (`userId` null).  Reading
+  // a room-owned intent's region as null let one region's `payment_intent_creation`
+  // pause halt ALL room-owned payout creation globally (a null region matches every
+  // regional scope), while member deposits stayed correctly region-scoped.
+  const region = await deps.regionResolver.regionForUser(input.userId ?? input.actorUserId);
   const killSwitch = await killSwitchDecision(deps.configStore, 'payment_intent_creation', {
     roomId: input.roomId,
     region,

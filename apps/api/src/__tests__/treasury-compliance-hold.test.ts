@@ -87,6 +87,7 @@ async function provision(deps: TestDeps): Promise<string> {
   if (!('treasury' in created)) throw new Error('treasury should provision');
   const intent = await createPaymentIntent(deps, {
     userId: USER,
+    actorUserId: USER,
     roomId: ROOM,
     targetType: 'treasury_deposit',
     targetId: created.treasury.treasuryId,

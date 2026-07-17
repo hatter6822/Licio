@@ -575,6 +575,7 @@ export function createTreasuryGovernanceRoutes() {
           }
           const result = await createPaymentIntent(services, {
             userId: auth.userId,
+            actorUserId: auth.userId,
             roomId,
             targetType: body.target_type,
             targetId: body.target_id,

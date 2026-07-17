@@ -9,6 +9,7 @@ import type { KnomosisSignedActionType, SubmissionState } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
 import { DEFAULT_KNOMOSIS_CONFIG } from '../knomosis/config.js';
+import { activateKillSwitch } from '../knomosis/killswitch.js';
 import { KNOMOSIS_PIN } from '../knomosis/pin.js';
 import { defaultCompliancePort, defaultRegionResolverPort } from '../knomosis/ports.js';
 import {
@@ -328,6 +329,7 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
   ) =>
     createPaymentIntent(deps, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: ROOM,
@@ -766,6 +768,56 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect((await deps.intents.getById(createdId))?.executionState).toBe('abandoned');
     expect((await deps.intents.getById(signedId))?.executionState).toBe('signed'); // untouched
   });
+
+  it('a room-owned payout intent scopes the regional kill switch to the ACTING STEWARD, not null (codex: resolve room-owned pauses from the actor)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const STEWARD_FR = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const STEWARD_DE = 'dddddddd-dddd-4ddd-8ddd-ddddddddddd0';
+    // A DE incident pause on room-owned payout INTENT CREATION.
+    const activated = await activateKillSwitch(
+      {
+        configStore: deps.configStore,
+        audit: { append: async () => {} } as never,
+        now: deps.now,
+        log: () => {},
+      },
+      {
+        switchId: 'payment_intent_creation',
+        scopes: { global: false, regions: ['DE'], room_ids: [] },
+        releaseCard: {
+          owner: 'sec',
+          trigger_condition: 'incident',
+          rollback_path: 'runbook',
+          review_date: '2026-07-13T00:00:00.000Z',
+        },
+        actorUserId: STEWARD_DE,
+        reason: 'jurisdiction',
+      },
+    );
+    expect(activated.ok).toBe(true);
+    const payout = (actor: string) =>
+      createPaymentIntent(deps, {
+        userId: null, // room-owned: the region must come from the ACTOR, not null
+        actorUserId: actor,
+        roomId: ROOM,
+        targetType: 'grant_payout',
+        targetId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        asset: 'USDC',
+        amount: '100',
+        idempotencyKey: crypto.randomUUID(),
+      });
+
+    // A steward in FR: before the fix the null owner resolved region=null, which
+    // matches EVERY regional scope, so the DE pause wrongly blocked this payout.
+    deps.regionResolver = { regionForUser: async (uid) => (uid === STEWARD_FR ? 'FR' : null) };
+    expect('intent' in (await payout(STEWARD_FR))).toBe(true);
+
+    // Control: a steward whose region IS the paused DE is still blocked.
+    deps.regionResolver = { regionForUser: async (uid) => (uid === STEWARD_DE ? 'DE' : null) };
+    const blocked = await payout(STEWARD_DE);
+    expect('code' in blocked && blocked.code).toBe('kill_switch_active');
+  });
 });
 
 describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
@@ -776,6 +828,7 @@ describe('treasury reconciliation (WS-M.5.2a) + export (WS-M.5.2b)', () => {
   ): Promise<PaymentIntentRecord> {
     const created = await createPaymentIntent(deps, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: ROOM,
@@ -1087,6 +1140,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     await provisionTreasury(deps);
     const created = await createPaymentIntent(deps, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: ROOM,
@@ -1266,6 +1320,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     if (grant === null) throw new Error('fixture grant collision');
     const created = await createPaymentIntent(deps, {
       userId: null,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'grant_payout',
       targetId: grant.grantId,
@@ -1360,6 +1415,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     const mkIntent = async () => {
       const created = await createPaymentIntent(deps, {
         userId: null,
+        actorUserId: USER,
         roomId: ROOM,
         targetType: 'grant_payout',
         targetId: grant.grantId,
@@ -1444,6 +1500,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     // deposit (0086 scopes the null-owner uniqueness to the payout classes).
     const created = await createPaymentIntent(deps, {
       userId: null,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'grant_payout',
       targetId: crypto.randomUUID(),
@@ -1463,6 +1520,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     if (treasury === null) throw new Error('fixture treasury missing');
     const created = await createPaymentIntent(deps, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1521,6 +1579,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     if (treasury === null) throw new Error('fixture treasury missing');
     const created = await createPaymentIntent(deps, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1639,6 +1698,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     const first = await signedIntent(deps);
     const second = await createPaymentIntent(deps, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: ROOM,
@@ -1690,6 +1750,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     expect(
       await createPaymentIntent(deps, {
         userId: USER,
+        actorUserId: USER,
         roomId: ROOM,
         targetType: 'treasury_deposit',
         targetId: ROOM,
@@ -1725,6 +1786,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     if (grant === null) throw new Error('fixture grant collision');
     const created = await createPaymentIntent(deps, {
       userId: null,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'grant_payout',
       targetId: grant.grantId,
@@ -1781,6 +1843,7 @@ describe('intent–action binding (PR #144 review: attach validation)', () => {
     if (treasury === null) throw new Error('fixture treasury missing');
     const created = await createPaymentIntent(deps, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,

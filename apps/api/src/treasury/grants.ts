@@ -295,6 +295,10 @@ export async function updateGrantMilestone(
       // accepting race to ONE intent) and lets a different steward attach
       // the signed payout action later (no per-user actor binding).
       userId: null,
+      // The acting steward — the payout is room-owned (null owner), but the
+      // regional kill switch must still resolve a region (the actor's), or a
+      // one-region pause would block this room-owned payout globally.
+      actorUserId: input.actorUserId,
       roomId: input.roomId,
       targetType: 'grant_payout',
       targetId: grant.grantId,
