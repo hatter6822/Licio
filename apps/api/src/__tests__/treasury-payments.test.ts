@@ -479,8 +479,88 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       code: 'deposit_limit_exceeded',
     });
     expect(await create(deps, { userId: OTHER, amount: '500' })).toMatchObject({ ok: true });
-    const allowance = await depositAllowance(deps, ROOM, USER);
+    const allowance = await depositAllowance(deps, ROOM, USER, 'USDC');
     expect(allowance).toMatchObject({ userRemaining: '0', roomRemaining: '0' });
+  });
+
+  it('deposit limits are PER-ASSET — a full USDC window does not exhaust the DAI allowance (codex: separate deposit limits by asset)', async () => {
+    const deps = buildDeps();
+    const created = await createTreasury(deps, {
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      treasuryAddress: ADDRESS,
+      acceptedAssets: ['USDC', 'SIM-USDC'],
+      depositLimits: LIMITS,
+      actorUserId: USER,
+    });
+    if (!('treasury' in created)) throw new Error('treasury should provision');
+    // Fill the USER's USDC window (perUserPerPeriod 1000, perDepositMax 600).
+    expect(await create(deps, { asset: 'USDC', amount: '600' })).toMatchObject({ ok: true });
+    expect(await create(deps, { asset: 'USDC', amount: '400' })).toMatchObject({ ok: true });
+    expect(await create(deps, { asset: 'USDC', amount: '1' })).toMatchObject({
+      ok: false,
+      code: 'deposit_limit_exceeded',
+    });
+    // SIM-USDC has its OWN window: summing minor units across assets is
+    // meaningless, so it is NOT blocked by the (full) USDC window…
+    expect(await create(deps, { asset: 'SIM-USDC', amount: '600' })).toMatchObject({ ok: true });
+    // …and it enforces its own cap independently (600 + 500 > 1000).
+    expect(await create(deps, { asset: 'SIM-USDC', amount: '500' })).toMatchObject({
+      ok: false,
+      code: 'deposit_limit_exceeded',
+    });
+  });
+
+  it('a retry that loses the post-transition allowance re-check is abandoned via the AUDITED transition (codex: audit abandoned retry transitions)', async () => {
+    const deps = buildDeps();
+    const treasury = await provisionTreasury(deps);
+    // Recent timestamps so the rows fall inside the deposit period window.
+    const nowIso = new Date(deps.now()).toISOString();
+    const row = (over: Partial<PaymentIntentRecord>): PaymentIntentRecord => ({
+      paymentIntentId: crypto.randomUUID(),
+      userId: USER,
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      targetType: 'treasury_deposit',
+      targetId: ROOM,
+      asset: 'USDC',
+      amount: '500',
+      executionState: 'created',
+      jurisdictionState: 'allowed',
+      complianceState: 'cleared',
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: null,
+      expiresAt: nowIso,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      idempotencyKey: crypto.randomUUID(),
+      ...over,
+    });
+    // A FAILED deposit (amount 500) eligible to retry.  The pre-check passes
+    // (nothing else in flight), but a CONCURRENT 1000 deposit lands between the
+    // pre- and post-check (injected on the 2nd period read), so the re-included
+    // retry overshoots and is abandoned.
+    const failedId = crypto.randomUUID();
+    await deps.intents.insert(row({ paymentIntentId: failedId, executionState: 'failed' }));
+    const realList = deps.intents.listDepositsInPeriod.bind(deps.intents);
+    let calls = 0;
+    const concurrent = row({ executionState: 'created', amount: '1000' });
+    deps.intents.listDepositsInPeriod = async (roomId, sinceIso) => {
+      calls += 1;
+      const rows = await realList(roomId, sinceIso);
+      return calls >= 2 ? [...rows, concurrent] : rows;
+    };
+    const retried = await retryIntent(deps, failedId, USER);
+    expect(retried).toMatchObject({ ok: false, code: 'deposit_limit_exceeded' });
+    expect((await deps.intents.getById(failedId))?.executionState).toBe('abandoned');
+    // The abandonment is AUDITED, not a silent direct write: the retry records
+    // TWO chained transitions — failed→created AND created→abandoned.  A raw
+    // `intents.transition` for the abandonment (the bug) would have recorded only
+    // the first, leaving the retry visibly created then silently abandoned.
+    const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
+    expect(chain.filter((e) => e.actionType === 'payment_intent_transition')).toHaveLength(2);
   });
 
   it('the pause guard blocks creation before any side effect', async () => {

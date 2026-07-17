@@ -797,6 +797,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   counting states.  The cursor PAGES PAST a skipped orphan (its id is below the
   advancing cursor) and reaches the rows after it; abandoned rows simply leave the
   filter.  A short page ends the sweep, under a `MAX_EXPIRE_ROUNDS` backstop.
+- **Deposit limits are PER ASSET, and every abandonment is audited.**  A treasury
+  may accept more than one asset, and minor units are not comparable across them
+  (1 ETH is `1e18`, 1 USDC is `1e6`), so all three deposit-allowance aggregates —
+  the create pre-check, the post-insert re-verify, and the retry re-verify — filter
+  the in-period set by `intent.asset`; summing across assets would let a deposit in
+  one asset exhaust or distort another's window.  And when the retry re-verify
+  overshoots, the row is walked to `abandoned` through the AUDITED `transitionIntent`
+  (chained `payment_intent_transition`), never a raw `intents.transition` that would
+  leave the retry visibly `created` then silently abandoned with no trail.
 - **A `reserving` action settles nothing — it never forwarded.**  The submit
   reserves the idempotency key by inserting the action `reserving` BEFORE the
   single-use gates, and only advances it to `submitted` once they all pass; a

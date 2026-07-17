@@ -116,16 +116,20 @@ export async function depositAllowance(
   deps: IntentDeps,
   roomId: string,
   userId: string,
+  asset: string,
 ): Promise<{ userRemaining: string; roomRemaining: string; perDepositMax: string } | null> {
   const treasury = await deps.treasuries.getByRoom(roomId);
   if (treasury === null) return null;
   const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
   // The COMPLETE in-period deposit set (bounded by the period, never a fixed
   // newest-N slice that would let a busy room's older in-period deposits slip
-  // out of the cap math).
+  // out of the cap math), scoped to THIS ASSET: minor units are not comparable
+  // across assets (1 ETH is 1e18, 1 USDC is 1e6), so summing them would let a
+  // deposit in one asset exhaust or distort the allowance for another — the
+  // limits apply per accepted asset.
   const recent = (
     await deps.intents.listDepositsInPeriod(roomId, new Date(periodStart).toISOString())
-  ).filter((intent) => ALLOWANCE_STATES.has(intent.executionState));
+  ).filter((intent) => ALLOWANCE_STATES.has(intent.executionState) && intent.asset === asset);
   const roomUsed = decSum(recent.map((intent) => intent.amount));
   const userUsed = decSum(
     recent.filter((intent) => intent.userId === userId).map((intent) => intent.amount),
@@ -200,7 +204,7 @@ export async function createPaymentIntent(
         `The deposit exceeds the per-deposit maximum ${treasury.depositLimits.perDepositMax}.`,
       );
     }
-    const allowance = await depositAllowance(deps, input.roomId, input.userId);
+    const allowance = await depositAllowance(deps, input.roomId, input.userId, input.asset);
     if (allowance === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
     if (decCompare(input.amount, allowance.userRemaining) > 0) {
       return tgErr(
@@ -248,9 +252,11 @@ export async function createPaymentIntent(
     // included — an overshoot abandons ITSELF (fail-closed; the client
     // retries and the survivors fit the cap serially).
     const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
+    // Per-asset (see `depositAllowance`): raw minor units are not comparable
+    // across assets, so the re-verify aggregates only THIS asset's deposits.
     const inPeriod = (
       await deps.intents.listDepositsInPeriod(input.roomId, new Date(periodStart).toISOString())
-    ).filter((row) => ALLOWANCE_STATES.has(row.executionState));
+    ).filter((row) => ALLOWANCE_STATES.has(row.executionState) && row.asset === input.asset);
     const roomUsed = decSum(inPeriod.map((row) => row.amount));
     const userUsed = decSum(
       inPeriod.filter((row) => row.userId === input.userId).map((row) => row.amount),
@@ -1117,7 +1123,7 @@ export async function retryIntent(
   if (DEPOSIT_TARGETS.has(intent.targetType) && intent.userId !== null) {
     const treasury = await deps.treasuries.getById(intent.treasuryId);
     if (treasury === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
-    const allowance = await depositAllowance(deps, intent.roomId, intent.userId);
+    const allowance = await depositAllowance(deps, intent.roomId, intent.userId, intent.asset);
     if (allowance === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
     if (
       decCompare(intent.amount, allowance.userRemaining) > 0 ||
@@ -1149,9 +1155,11 @@ export async function retryIntent(
     const treasury = await deps.treasuries.getById(updated.treasuryId);
     if (treasury !== null) {
       const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
+      // Per-asset (see `depositAllowance`): raw minor units are not comparable
+      // across assets, so the re-verify aggregates only THIS asset's deposits.
       const inPeriod = (
         await deps.intents.listDepositsInPeriod(updated.roomId, new Date(periodStart).toISOString())
-      ).filter((row) => ALLOWANCE_STATES.has(row.executionState));
+      ).filter((row) => ALLOWANCE_STATES.has(row.executionState) && row.asset === updated.asset);
       const roomUsed = decSum(inPeriod.map((row) => row.amount));
       const userUsed = decSum(
         inPeriod.filter((row) => row.userId === updated.userId).map((row) => row.amount),
@@ -1160,13 +1168,12 @@ export async function retryIntent(
         decCompare(userUsed, treasury.depositLimits.perUserPerPeriod) > 0 ||
         decCompare(roomUsed, treasury.depositLimits.perRoomPerPeriod) > 0
       ) {
-        await deps.intents.transition(
-          updated.paymentIntentId,
-          'created',
-          'abandoned',
-          {},
-          new Date(deps.now()).toISOString(),
-        );
+        // Through the AUDITED helper — a raw `intents.transition` here would skip
+        // the chained `payment_intent_transition` entry every other lifecycle move
+        // records, so the retry would be visibly `created` then silently
+        // `abandoned`.  A CAS miss (a concurrent move raced this row) still fails
+        // closed: the retry does not proceed.
+        await transitionIntent(deps, updated, 'abandoned', {}, actorUserId);
         return tgErr(
           409,
           'deposit_limit_exceeded',
