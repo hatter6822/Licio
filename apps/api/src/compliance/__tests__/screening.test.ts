@@ -16,6 +16,7 @@ import { DEFAULT_COMPLIANCE_CONFIG } from '../config.js';
 import { createScreenAddress, HttpSanctionsProvider } from '../screening.js';
 import {
   buildCaseDeps,
+  buildSanctionedWalletLinkHook,
   type ComplianceServices,
   createInMemoryComplianceServices,
 } from '../services.js';
@@ -434,5 +435,53 @@ describe('a reviewed PARTIAL match can actually be cleared (WS-N.2.2a)', () => {
     );
     advance(DEFAULT_COMPLIANCE_CONFIG.screeningCacheTtlMs + 1);
     expect(await screen(args)).toBe('blocked');
+  });
+});
+
+describe('buildSanctionedWalletLinkHook — per-active-pin case key (audit: idempotency-scope)', () => {
+  function services() {
+    return createInMemoryComplianceServices({
+      configStore: new InMemoryPwattConfigStore(),
+      now: () => NOW,
+    });
+  }
+
+  it('a re-link that re-matches sanctions opens a FRESH case, never dedups onto a resolved one', async () => {
+    const svc = services();
+    const hook = buildSanctionedWalletLinkHook(svc);
+
+    // First sanctioned link: pin the wallet + open a critical sanctions case.
+    await hook(WALLET, USER);
+    const first = await svc.cases.listByStates(['open'], 10);
+    expect(first).toHaveLength(1);
+    expect(first[0]?.triggerType).toBe('sanctions');
+    expect(first[0]?.riskLevel).toBe('critical');
+    expect(await svc.pins.activeForWallet(WALLET)).not.toBeNull();
+    const firstCaseId = first[0]?.caseId as string;
+
+    // A reviewer resolves the case; the pin is released (unlink/finalize).
+    await clearCase(svc, firstCaseId, NOW);
+    expect(await svc.pins.release(WALLET, REVIEWER, new Date(NOW).toISOString())).toBe(true);
+    expect(await svc.cases.listByStates(['open'], 10)).toHaveLength(0);
+
+    // The SAME wallet is re-linked (reactivateIfUnderCap preserves the id) and
+    // re-matches sanctions.  A permanent per-wallet key would dedup onto the
+    // resolved case (created:false → no new case, no reviewer-queue record) —
+    // the wallet re-frozen with NOTHING in the open queue.  The per-active-pin
+    // key opens a FRESH incident, with the wallet re-pinned.
+    await hook(WALLET, USER);
+    const second = await svc.cases.listByStates(['open'], 10);
+    expect(second).toHaveLength(1);
+    expect(second[0]?.caseId).not.toBe(firstCaseId);
+    expect(await svc.pins.activeForWallet(WALLET)).not.toBeNull();
+  });
+
+  it('a genuine same-pin retry (lost response) still dedups onto its own open case', async () => {
+    const svc = services();
+    const hook = buildSanctionedWalletLinkHook(svc);
+    await hook(WALLET, USER);
+    // The pin is still active, so the key is stable and the retry dedups.
+    await hook(WALLET, USER);
+    expect(await svc.cases.listByStates(['open'], 10)).toHaveLength(1);
   });
 });

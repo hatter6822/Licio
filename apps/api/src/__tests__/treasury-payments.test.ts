@@ -377,6 +377,39 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect(fraudCalls).toBe(1);
   });
 
+  it('quote and sign are idempotent on a lost-response retry; out-of-order steps still 409 (audit: lifecycle-idempotency)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const created = await create(deps);
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    await preflightIntent(deps, id, USER);
+
+    // A sign BEFORE quote (skipping the quoted state) is a genuine invalid
+    // transition, not a replay — refused.
+    const early = await markIntentSigned(deps, id, USER);
+    expect('code' in early && early.code).toBe('invalid_transition');
+
+    const quoted = await quoteIntent(deps, id, USER);
+    if (!('intent' in quoted)) throw new Error('expected quote');
+    const firstQuoteRef = quoted.intent.quoteRef;
+    // A lost-response retry of quote REPLAYS the quoted intent, returning the
+    // recorded quoteRef UNCHANGED — a re-quote must not overwrite the fee/time.
+    const requote = await quoteIntent(deps, id, USER);
+    expect('intent' in requote && requote.intent.executionState).toBe('quoted');
+    expect('intent' in requote && requote.intent.quoteRef).toEqual(firstQuoteRef);
+
+    const signed = await markIntentSigned(deps, id, USER);
+    expect('intent' in signed && signed.intent.executionState).toBe('signed');
+    // A lost-response retry of sign REPLAYS the signed intent (no wasted
+    // signature, no forced re-quote/re-sign).
+    const resign = await markIntentSigned(deps, id, USER);
+    expect('intent' in resign && resign.intent.executionState).toBe('signed');
+    // …and a quote on an already-signed intent (out of order) still 409s.
+    const staleQuote = await quoteIntent(deps, id, USER);
+    expect('code' in staleQuote && staleQuote.code).toBe('invalid_transition');
+  });
+
   it('listByComplianceState returns LIVE flagged intents only, never terminal ones (thread-O)', async () => {
     const store = new InMemoryPaymentIntentStore();
     const base = {
@@ -605,6 +638,65 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect((await deps.intents.getById(created.intent.paymentIntentId))?.executionState).toBe(
       'abandoned',
     );
+  });
+
+  it('the expiry sweep DRAINS the backlog across pages, not just the first (audit: paged-sweep-not-fully-drained)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const ids: string[] = [];
+    // Five timed intents (5 × 100 = 500, under the 1000 user / 1500 room caps).
+    for (let i = 0; i < 5; i += 1) {
+      const c = await create(deps, { amount: '100' });
+      if (!('intent' in c)) throw new Error('expected intent');
+      ids.push(c.intent.paymentIntentId);
+    }
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmIntentCreatedTtlMs + 1_000);
+    // A page size of 2 would abandon only 2 with a single-page sweep; the drain
+    // loop clears all 5 in one call (each round re-reads the head after the
+    // prior round's rows dropped out of the expired set).
+    expect(await expireIntents(deps, 2)).toBe(5);
+    for (const id of ids) {
+      expect((await deps.intents.getById(id))?.executionState).toBe('abandoned');
+    }
+  });
+
+  it('the expiry drain loop STOPS on a page of un-abandonable signed rows (no infinite spin)', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const created = await create(deps, { amount: '100' });
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    const treasuryId = created.intent.treasuryId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    // Bind a LIVE action (money in motion) so orphanActionFor makes the signed
+    // intent un-abandonable — the reconcile sweep will attach it, the reaper
+    // must not touch it.
+    await deps.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: { message: { amount: '100', asset: 'USDC', treasuryId }, signature: '0xsig' },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmIntentSignedTtlMs + 1_000);
+    // A page (size 1) entirely of un-abandonable rows makes no forward progress:
+    // the loop breaks rather than re-reading the same head forever.
+    expect(await expireIntents(deps, 1)).toBe(0);
+    expect((await deps.intents.getById(id))?.executionState).toBe('signed');
   });
 });
 

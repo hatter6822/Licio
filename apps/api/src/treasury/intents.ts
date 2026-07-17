@@ -501,6 +501,20 @@ export async function quoteIntent(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  // Lost-response replay (mirrors preflightIntent's already-`preflighted`
+  // branch): an already-`quoted` intent re-reports its recorded quote UNCHANGED
+  // so a dropped HTTP response cannot strand the client at 409 mid-chain — the
+  // `quoted → quoted` self-edge is absent from the transition table, so without
+  // this the retry 409s, the intent TTL-expires to `abandoned`, and the deposit
+  // must restart.  Returning the existing row preserves the recorded fee/
+  // timestamp (a re-quote must not overwrite them).  Only the immediate
+  // predecessor (`preflighted`) proceeds; any other state is a genuine invalid
+  // transition.
+  if (intent.executionState !== 'preflighted') {
+    return intent.executionState === 'quoted'
+      ? { ok: true, intent }
+      : tgErr(409, 'invalid_transition', 'The intent cannot be quoted.');
+  }
   // A freeze/pause landed AFTER preflight must stop the lifecycle here too.
   const guard = await assertGovernanceWritable(
     deps,
@@ -533,6 +547,17 @@ export async function markIntentSigned(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  // Lost-response replay (same class as quoteIntent above): an already-`signed`
+  // intent re-reports itself UNCHANGED so a dropped response cannot strand the
+  // client at 409 — there is no `signed → signed` self-edge, so without this the
+  // retry 409s, the obtained wallet signature is wasted, and the flow must
+  // re-quote and re-sign.  Only the immediate predecessor (`quoted`) proceeds;
+  // any other state is a genuine invalid transition.
+  if (intent.executionState !== 'quoted') {
+    return intent.executionState === 'signed'
+      ? { ok: true, intent }
+      : tgErr(409, 'invalid_transition', 'The intent cannot be signed.');
+  }
   const guard = await assertGovernanceWritable(
     deps,
     intent.roomId,
@@ -945,27 +970,50 @@ export async function abandonOpenIntent(
   return (await transitionIntent(deps, intent, 'abandoned', {}, null)) !== null;
 }
 
-/** The expiry sweep: timed pre-submission states past their TTL → abandoned. */
+/** Backstop on the expiry page loop (100k intents/run) — never an infinite sweep. */
+const MAX_EXPIRE_ROUNDS = 500;
+
+/** The expiry sweep: timed pre-submission states past their TTL → abandoned.
+ *  Drains the backlog across bounded rounds, exactly like the sibling
+ *  `reconcileIntents`/`runRetentionSweep`.  A single fixed page would abandon at
+ *  most `limit` rows per tick, and every un-reaped timed row (created/preflighted/
+ *  quoted/signed are all ALLOWANCE_STATES) keeps counting toward per-user/per-room
+ *  deposit caps until a LATER tick finally reaped it — so a burst of >`limit`
+ *  expired intents could wrongly block a member's fresh deposit for several ticks.
+ *  Each round re-reads the head of the expired set (rows this round abandoned drop
+ *  out of it); a round that abandons NOTHING means every remaining row is
+ *  un-abandonable right now (a `signed` intent whose action is on chain, which the
+ *  next reconcile attaches — see below), so the loop stops rather than spinning on
+ *  the same page. */
 export async function expireIntents(deps: IntentDeps, limit = 200): Promise<number> {
-  const expired = await deps.intents.listExpired(new Date(deps.now()).toISOString(), limit);
+  const nowIso = new Date(deps.now()).toISOString();
   let abandoned = 0;
-  for (const intent of expired) {
-    // AN INTENT WHOSE MONEY HAS MOVED IS NOT ABANDONABLE.  `signed` is a timed
-    // state, so a client that died between submit and attach — the exact case
-    // W13's recovery exists for — leaves an intent that expires while its
-    // action sits on chain.  Reaping it destroys the only link back: the sweep
-    // that would have attached it only looks at `signed` intents, so it never
-    // sees an `abandoned` one again, and the transfer settles OUTSIDE the
-    // ledger and the accounting export with no error anywhere.
-    //
-    // The action is the evidence, so the reaper asks for it — by the same
-    // lookup the sweep uses, because the two must agree.  A skipped intent is
-    // not stuck: the next reconcile attaches it, and if the attach can never
-    // succeed (a binding mismatch) it stays visible as `signed` for an operator
-    // rather than disappearing into `abandoned`.
-    if ((await orphanActionFor(deps, intent)) !== null) continue;
-    const updated = await transitionIntent(deps, intent, 'abandoned', {}, null);
-    if (updated !== null) abandoned += 1;
+  for (let round = 0; round < MAX_EXPIRE_ROUNDS; round += 1) {
+    const expired = await deps.intents.listExpired(nowIso, limit);
+    if (expired.length === 0) break;
+    const before = abandoned;
+    for (const intent of expired) {
+      // AN INTENT WHOSE MONEY HAS MOVED IS NOT ABANDONABLE.  `signed` is a timed
+      // state, so a client that died between submit and attach — the exact case
+      // W13's recovery exists for — leaves an intent that expires while its
+      // action sits on chain.  Reaping it destroys the only link back: the sweep
+      // that would have attached it only looks at `signed` intents, so it never
+      // sees an `abandoned` one again, and the transfer settles OUTSIDE the
+      // ledger and the accounting export with no error anywhere.
+      //
+      // The action is the evidence, so the reaper asks for it — by the same
+      // lookup the sweep uses, because the two must agree.  A skipped intent is
+      // not stuck: the next reconcile attaches it, and if the attach can never
+      // succeed (a binding mismatch) it stays visible as `signed` for an operator
+      // rather than disappearing into `abandoned`.
+      if ((await orphanActionFor(deps, intent)) !== null) continue;
+      const updated = await transitionIntent(deps, intent, 'abandoned', {}, null);
+      if (updated !== null) abandoned += 1;
+    }
+    // No forward progress ⇒ every row this page is un-abandonable right now
+    // (signed-with-orphan rows the next reconcile attaches); re-reading the same
+    // head would spin, so stop.  A short page means the expired set is drained.
+    if (abandoned === before || expired.length < limit) break;
   }
   return abandoned;
 }

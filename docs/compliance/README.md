@@ -210,7 +210,13 @@ modified** in their verdict semantics:
   clears the moment the provider recovers and the member re-links the same active
   address, rather than being fund-blocked until an unlink→finalize→cooldown→relink.
   The re-screen is idempotent — a `clear` CASes `pending`→`normal`, and the
-  `blocked` hook dedups per wallet (idempotent pin + `sanctions:link:<wallet>` case).
+  `blocked` hook dedups per ACTIVE PIN (idempotent pin + `sanctions:link:<pin.id>`
+  case), the same per-active-pin scope the manual-pin path keeps: a genuine
+  same-pin retry dedups onto its own open case, but a re-link that re-matches
+  sanctions AFTER the prior case resolved and the pin released opens a FRESH
+  incident case — a permanent `sanctions:link:<wallet>` key would instead dedup
+  the re-freeze onto the resolved case, re-pinning the wallet with nothing in the
+  open reviewer queue explaining why.
 
 Two new gates were added at the consumer edge: the **disclosure-acknowledgment
 gate** (`403 disclosure_ack_required` until every current counsel-published
@@ -375,7 +381,19 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   cell, including `wallet_connection`.  So the verified-BLOCKED member cannot link
   a new wallet while the store is down, while a genuine no-region member keeps the
   testnet posture.  (`/compliance/availability` already showed the cell
-  unavailable for any region-null; this makes the GATE agree for the outage.)  The SAME reasoning
+  unavailable for any region-null; this makes the GATE agree for the outage.)  The
+  jurisdiction-POLICY-store outage is the exact SIBLING and now fails closed the
+  same way: `activePolicyForRegion` returns a dedicated `store_unavailable`
+  outcome — distinct from a truly `missing` policy (no policy authored yet) whose
+  fail direction is the OPPOSITE permissive `unknown` — and `coarseVerdict` blocks
+  a `store_unavailable` policy on a resolved region for EVERY cell (cell-scoped and
+  region-wide), because we cannot read the policy that might name the cell
+  `blocked`.  Without it a verified-DE member whose policy sets
+  `wallet_connection='blocked'` could link a wallet / run testnet the moment the
+  `jurisdiction_policies` read transiently threw, since `policyOf` collapses
+  `store_unavailable`→null and the cell reading degraded to the permissive
+  `unknown`.  (`evaluateCell` already renders any null policy `available:false`, so
+  the availability CARD was never the leak — only the verdict GATE was.)  The SAME reasoning
   bars a SELF-INFLICTED downgrade — via BOTH member paths, since either erases the
   verified basis and drops `resolveRegion` to the weaker locale rung, letting a
   verified-BLOCKED member reach the routes that reject only an explicit `blocked`
@@ -603,7 +621,11 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   (idempotency before the freeze/pause/law-pack gates), `preflightIntent` (the
   intent's `created`-state guard before jurisdiction/sanctions/`fraudRisk` — a
   retried or duplicate `/advance` on an already-preflighted intent replays or
-  refuses WITHOUT reserving the velocity window), the WS-L.4 `simDeposit` (before
+  refuses WITHOUT reserving the velocity window), `quoteIntent` and
+  `markIntentSigned` (the SAME `/advance` dispatch: an already-`quoted`/`signed`
+  intent replays its recorded row unchanged rather than 409ing on the absent
+  self-edge, so a lost-response retry cannot strand the client mid-chain and waste
+  the obtained fee quote / wallet signature), the WS-L.4 `simDeposit` (before
   the comprehension + kill-switch gates), the report edge (before the key-material
   scan + rate limits), and the appeal edge (before the same scan):
 
@@ -680,6 +702,18 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 
   Together: the transfer cannot settle outside the ledger and the accounting
   export because its intent expired.
+- **The expiry sweep DRAINS its backlog, like every other sweep.**  `expireIntents`
+  now loops bounded pages (the same shape `reconcileIntents` and the retention
+  sweep already use) instead of reaping a single first-N slice per tick.  It is
+  not merely latency: `created`/`preflighted`/`quoted`/`signed` are all
+  ALLOWANCE_STATES, so every expired-but-unreaped intent keeps counting toward the
+  per-user / per-room deposit caps until a LATER tick finally abandoned it — a
+  burst of >`page` timed intents (a freeze, a wave of abandoned checkouts) could
+  wrongly block a member's fresh deposit for several ticks.  Each round re-reads
+  the head of the expired set (rows abandoned this round drop out of it); a round
+  that abandons NOTHING means the page is all un-abandonable `signed`-with-action
+  rows the next reconcile attaches, so the loop STOPS rather than spinning on the
+  same head, under a `MAX_EXPIRE_ROUNDS` backstop.
 - **A `reserving` action settles nothing — it never forwarded.**  The submit
   reserves the idempotency key by inserting the action `reserving` BEFORE the
   single-use gates, and only advances it to `submitted` once they all pass; a

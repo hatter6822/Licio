@@ -71,7 +71,16 @@ describe('coarseVerdict — the port truth table', () => {
     ['policy missing', { policy: { kind: 'missing' as const } }, 'unknown'],
     ['policy future-dated', { policy: { kind: 'future_dated' as const } }, 'unknown'],
     ['policy malformed', { policy: { kind: 'malformed' as const } }, 'unknown'],
-    ['policy store down', { policy: { kind: 'store_unavailable' as const } }, 'unknown'],
+    // A policy-STORE OUTAGE (region resolved, but the jurisdiction_policies read
+    // threw) fails CLOSED — distinct from an ordinary `missing` policy, which
+    // keeps the permissive `unknown`.  We cannot read the policy that might name
+    // a cell `blocked`, so a resolved-but-unreadable policy must not borrow the
+    // leniency (the unfixed sibling of the declaration-store outage path).
+    [
+      'policy store down (region resolved)',
+      { policy: { kind: 'store_unavailable' as const } },
+      'blocked',
+    ],
   ])('%s → %s', (_label, patch, expected) => {
     expect(coarseVerdict({ ...ELIGIBLE, ...patch })).toBe(expected);
   });
@@ -89,6 +98,21 @@ describe('coarseVerdict — the port truth table', () => {
     // The SAME shape but the declaration read FAILED: a verified-BLOCKED member
     // must not slip through while the store is down, so it fails closed.
     expect(coarseVerdict({ ...noRegion, unavailable: true }, 'wallet_connection')).toBe('blocked');
+  });
+
+  it('wallet_connection/testnet: a POLICY-STORE outage on a RESOLVED region fails closed (sibling of the declaration-store outage)', () => {
+    // A verified DE declaration (region resolved, no `unavailable`), but the
+    // jurisdiction_policies read threw → `store_unavailable`.  DE's real policy
+    // may set wallet_connection='blocked'; the engine cannot read it, so it must
+    // NOT degrade to the permissive `unknown` a truly-`missing` policy carries.
+    const policyDown = { ...ELIGIBLE, policy: { kind: 'store_unavailable' as const } };
+    expect(coarseVerdict(policyDown, 'wallet_connection')).toBe('blocked');
+    expect(coarseVerdict(policyDown, 'testnet_transactions')).toBe('blocked');
+    // …and the region-wide reading too (no cell named).
+    expect(coarseVerdict(policyDown)).toBe('blocked');
+    // A truly MISSING policy (no outage) keeps the shipped permissive posture.
+    const policyMissing = { ...ELIGIBLE, policy: { kind: 'missing' as const } };
+    expect(coarseVerdict(policyMissing, 'wallet_connection')).toBe('unknown');
   });
 
   it('blocked only when EVERY cell is blocked; a testnet-only region is unknown', () => {

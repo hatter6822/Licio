@@ -559,7 +559,20 @@ export function buildSanctionedWalletLinkHook(
     const outcome = await runChainedUnit(
       services.transactor,
       async (stores) => {
-        await stores.pins.pin({
+        // Key the case on the ACTIVE pin, not the permanent wallet id: a
+        // per-wallet key (`sanctions:link:${walletAccountId}`) would dedup a
+        // re-link that re-matches sanctions onto a PRIOR, already-resolved case
+        // (createCaseInTx returns { created:false } for any existing row under
+        // the key regardless of reviewState) — so a re-offending sanctioned
+        // wallet would be silently re-frozen `high` with only a closed case
+        // behind it and NOTHING in the open queue, the exact invariant this
+        // path's own comment forbids.  `pins.pin` returns the active pin (a new
+        // row after a prior release, unchanged on a genuine same-pin retry), so
+        // keying on `pin.id` opens a FRESH incident case for each new freeze
+        // while a lost-response retry of THIS freeze still dedups onto its own
+        // case — the per-active-pin semantics the sibling manual-pin path
+        // (routes/compliance.ts) already documents and keeps.
+        const pin = await stores.pins.pin({
           id: services.uuid(),
           walletAccountId,
           reason: 'Sanctions screening returned a FULL match at wallet link (WS-N.2.2a).',
@@ -574,7 +587,7 @@ export function buildSanctionedWalletLinkHook(
           triggerType: 'sanctions',
           riskLevel: 'critical',
           note: 'A newly-linked wallet matched a sanctions list; the wallet is pinned high.',
-          idempotencyKey: `sanctions:link:${walletAccountId}`,
+          idempotencyKey: `sanctions:link:${pin.id}`,
         });
       },
       'sanctioned wallet link',

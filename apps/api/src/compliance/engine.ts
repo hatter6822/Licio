@@ -243,6 +243,18 @@ export function coarseVerdict(
   // those gates (thread wallet.ts:152).  A resolved-but-unknown region (no
   // verified declaration, no locale) is NOT unavailable and keeps its posture.
   if (input.unavailable === true) return 'blocked';
+  // A jurisdiction-POLICY-store OUTAGE fails CLOSED for every cell, symmetric
+  // with the declaration-store outage above.  `activePolicyForRegion` returns a
+  // DEDICATED `store_unavailable` outcome (policy.ts) when the `jurisdiction_
+  // policies` read throws — distinct from `missing` (no policy authored yet).
+  // Their fail directions are OPPOSITE: `missing` keeps the shipped permissive
+  // `unknown` (a region with no policy still allows wallet connection/testnet),
+  // but a resolved-but-UNREADABLE policy must not borrow that leniency — we
+  // cannot read the policy that might name this cell `blocked`, so degrading to
+  // `unknown` would let a verified-blocked member link a wallet / act on testnet
+  // while the store is down (the exact escape the declaration-store fix closed).
+  // `policyOf` collapses `store_unavailable`→null below, so this MUST precede it.
+  if (input.policy.kind === 'store_unavailable') return 'blocked';
   const policy = policyOf(input.policy);
   if (policy !== null && CRYPTO_FEATURE_CELLS.every((c) => policy.feature_flags[c] === 'blocked')) {
     return 'blocked';
