@@ -205,11 +205,26 @@ export const knomosisActionRecords = knomosisSchema.table(
       .default('pending'),
     /** Client idempotency key, unique per submitting account (WS-L.3.2a). */
     idempotencyKey: uuid('idempotency_key').notNull(),
+    /** The WS-M payment intent this action settles, when it settles one.  A
+     *  SOFT reference (no FK: the treasury is its own bounded context), carried
+     *  so the partial unique below can hold — the intent is the exclusive
+     *  resource, and one intent may mint exactly one action. */
+    paymentIntentId: uuid('payment_intent_id'),
     createdAt: tz('created_at').notNull().defaultNow(),
     updatedAt: tz('updated_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('knomosis_action_idem_idx').on(t.actorUserId, t.idempotencyKey),
+    // ONE LIVE action per intent (migration 0089, the mirror of 0087's one
+    // intent per action).  Partial twice over: a direct action carries no
+    // intent, and a dead attempt (`failed`/`reverted`) has released the intent
+    // for `retryIntent`, so it releases the index too — otherwise the retry's
+    // replacement collides with the corpse and replays it.
+    uniqueIndex('knomosis_action_intent_uq')
+      .on(t.paymentIntentId)
+      .where(
+        sql`${t.paymentIntentId} IS NOT NULL AND ${t.submissionState} NOT IN ('failed', 'reverted')`,
+      ),
     index('knomosis_action_room_idx').on(t.roomId),
     index('knomosis_action_state_idx').on(t.submissionState, t.deploymentId),
   ],

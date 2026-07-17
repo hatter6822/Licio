@@ -18,16 +18,16 @@ export type CatalogLoader = () => Promise<CatalogModule>;
 export type CatalogRegistry = Record<string, CatalogLoader>;
 
 /**
- * Locale → lazy catalog loader. Add real locales here as they are translated:
- *
- *   export const catalogs: CatalogRegistry = {
- *     es: () => import('./catalogs/es.js'),
- *   };
- *
+ * Locale → lazy catalog loader. Add real locales here as they are translated.
  * The pseudo-locale (`en-XA`) is intentionally absent — it is generated at
  * runtime and needs no catalog.
+ *
+ * `de` ships the complete WS-N.1.2b disabled-state message set (the
+ * non-English completeness requirement for the jurisdiction UX).
  */
-export const catalogs: CatalogRegistry = {};
+export const catalogs: CatalogRegistry = {
+  de: () => import('./catalogs/de.js'),
+};
 
 /** Primary language subtag of a BCP-47 locale (`es-MX` → `es`). */
 function baseLanguage(locale: string): string {

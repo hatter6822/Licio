@@ -41,6 +41,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type { ActionNonceStore } from './services.js';
 import type {
   AuditLogCursor,
@@ -73,6 +74,7 @@ import type {
   WalletActorMappingStore,
 } from './stores.js';
 import {
+  DEAD_ACTION_STATES,
   READINESS_QUALIFYING_AUDIT_ACTIONS,
   selectGatewayBoundAction,
   TERMINAL_SUBMISSION_STATES,
@@ -293,13 +295,23 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
   async updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void> {
     // Column-scoped UPDATE: sets ONLY risk_state, so a concurrent unlink mutation
-    // is never clobbered by a stale full-record snapshot (WS-L.2.5c-1).
+    // is never clobbered by a stale full-record snapshot (WS-L.2.5c-1).  When
+    // `expected` is supplied the predicate makes it a CAS — the link-time `clear`
+    // promotes `pending`→`normal` without clobbering a racing escalation.
     await this.db
       .update(walletAccounts)
       .set({ riskState })
-      .where(eq(walletAccounts.walletAccountId, walletAccountId));
+      .where(
+        expected === undefined
+          ? eq(walletAccounts.walletAccountId, walletAccountId)
+          : and(
+              eq(walletAccounts.walletAccountId, walletAccountId),
+              eq(walletAccounts.riskState, expected),
+            ),
+      );
   }
 
   async updateLabel(walletAccountId: string, label: string | null): Promise<void> {
@@ -393,6 +405,27 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
       )
       .returning({ walletAccountId: walletAccounts.walletAccountId });
     return rows.length > 0;
+  }
+
+  async cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null> {
+    // Column-scoped UPDATE predicated on `pending_unlink`: flip it back to active +
+    // clear the cooling-off fields, touching NOTHING else — a full snapshot would
+    // clobber a `high` risk a compliance escalation persisted between the caller's
+    // read and this write (the same clobber updateRiskState/updateLabel avoid).  The
+    // `.returning()` gives the FRESH row, so the caller sees a concurrent escalation.
+    const rows = await this.db
+      .update(walletAccounts)
+      .set({ unlinkState: 'active', unlinkRequestedAt: null, unlinkFinalizeAfter: null })
+      .where(
+        and(
+          eq(walletAccounts.walletAccountId, walletAccountId),
+          eq(walletAccounts.unlinkState, 'pending_unlink'),
+        ),
+      )
+      .returning();
+    // Matched: the fresh, just-reactivated row.  No match ⇒ the row was already
+    // active (idempotent) or finalized by a racing sweep — return its current state.
+    return rows[0] !== undefined ? mapWallet(rows[0]) : this.getById(walletAccountId);
   }
 
   async purgeByUser(userId: string): Promise<number> {
@@ -498,6 +531,7 @@ function mapAction(row: typeof knomosisActionRecords.$inferSelect): KnomosisActi
     indexedEventRef: row.indexedEventRef,
     reconciliationState: row.reconciliationState,
     idempotencyKey: row.idempotencyKey,
+    paymentIntentId: row.paymentIntentId,
     createdAt: iso(row.createdAt),
     updatedAt: iso(row.updatedAt),
   };
@@ -523,6 +557,7 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       indexedEventRef: record.indexedEventRef,
       reconciliationState: record.reconciliationState,
       idempotencyKey: record.idempotencyKey,
+      paymentIntentId: record.paymentIntentId,
       createdAt: new Date(record.createdAt),
       updatedAt: new Date(record.updatedAt),
     });
@@ -555,22 +590,32 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
     return rows[0] ? mapAction(rows[0]) : null;
   }
 
-  async getByRoomIdempotencyKey(
-    roomId: string,
-    idempotencyKey: string,
-  ): Promise<KnomosisActionRecordEntity | null> {
-    // Idempotency is actor-scoped, so racing stewards can share a key within
-    // the room — the EARLIEST row wins deterministically (W14).
+  async getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null> {
     const rows = await this.db
       .select()
       .from(knomosisActionRecords)
       .where(
         and(
-          eq(knomosisActionRecords.roomId, roomId),
-          eq(knomosisActionRecords.idempotencyKey, idempotencyKey),
+          eq(knomosisActionRecords.paymentIntentId, paymentIntentId),
+          // Live only — the same predicate `knomosis_action_intent_uq` uses, so
+          // the row this returns is exactly the row that would have collided.
+          notInArray(knomosisActionRecords.submissionState, [...DEAD_ACTION_STATES]),
         ),
       )
-      .orderBy(asc(knomosisActionRecords.createdAt))
+      .limit(1);
+    return rows[0] ? mapAction(rows[0]) : null;
+  }
+
+  async getLatestByPaymentIntentId(
+    paymentIntentId: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    // ANY state, newest first — the crash-recovery read (see the interface); the
+    // live-only predicate above stays the uniqueness/replay path.
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(eq(knomosisActionRecords.paymentIntentId, paymentIntentId))
+      .orderBy(desc(knomosisActionRecords.createdAt))
       .limit(1);
     return rows[0] ? mapAction(rows[0]) : null;
   }
@@ -1934,15 +1979,11 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
       });
       return entry;
     } catch (error) {
-      // 23505 = unique_violation on the fork-proof chain indexes (migration
-      // 0082) — the writer re-reads the head and retries; anything else rethrows.
-      // Drizzle wraps driver errors, so the SQLSTATE lives on the CAUSE chain
-      // (a direct `.code` check never fires on a DrizzleQueryError).
-      let current: unknown = error;
-      for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-        if ((current as { code?: string }).code === '23505') return null;
-        current = (current as { cause?: unknown }).cause;
-      }
+      // A unique violation on the fork-proof chain indexes (migration 0082)
+      // means the writer must re-read the head and retry; anything else
+      // rethrows.  (Drizzle buries the SQLSTATE on the cause chain — see
+      // `isUniqueViolation`.)
+      if (isUniqueViolation(error)) return null;
       throw error;
     }
   }

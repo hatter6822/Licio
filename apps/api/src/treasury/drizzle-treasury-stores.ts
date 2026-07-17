@@ -22,6 +22,7 @@ import {
 } from '@licio/db';
 import type { PauseFlags, PaymentIntentState } from '@licio/shared';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   ActionBudgetRecord,
   ActionBudgetStore,
@@ -48,7 +49,7 @@ import type {
   TreasuryRecord,
   TreasuryStore,
 } from './stores.js';
-import { projectGrantAggregates } from './stores.js';
+import { projectGrantAggregates, TERMINAL_INTENT_STATES } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -56,19 +57,6 @@ const iso = (value: Date): string => value.toISOString();
 const isoOrNull = (value: Date | null): string | null => (value ? value.toISOString() : null);
 const dateOrNull = (value: string | null | undefined): Date | null =>
   value == null ? null : new Date(value);
-// Drizzle wraps driver errors (DrizzleQueryError → cause: PostgresError), so
-// the SQLSTATE lives on the CAUSE chain — a direct `.code` check never fires
-// and the raced insert would surface as a thrown 500 instead of the designed
-// clean-loser null (the drizzle-debate-store house pattern).
-function isUniqueViolation(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    if ((current as { code?: string }).code === '23505') return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
-
 // ---------------------------------------------------------------------------
 // Governance profiles
 // ---------------------------------------------------------------------------
@@ -582,6 +570,33 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     return rows[0] ? mapIntent(rows[0]) : null;
   }
 
+  async deleteById(paymentIntentId: string): Promise<boolean> {
+    // The create's own atomic rollback only (see the interface): a just-inserted
+    // row with no audit / action / downstream reference.
+    const rows = await this.db
+      .delete(paymentIntents)
+      .where(eq(paymentIntents.paymentIntentId, paymentIntentId))
+      .returning({ paymentIntentId: paymentIntents.paymentIntentId });
+    return rows.length > 0;
+  }
+
+  async deleteIfUntouched(paymentIntentId: string): Promise<boolean> {
+    // CONDITIONAL rollback (see the interface): delete only the still-untouched
+    // insert, so a concurrent idempotent replay that already advanced the row is
+    // never yanked out from under its client.
+    const rows = await this.db
+      .delete(paymentIntents)
+      .where(
+        and(
+          eq(paymentIntents.paymentIntentId, paymentIntentId),
+          eq(paymentIntents.executionState, 'created'),
+          isNull(paymentIntents.actionRecordId),
+        ),
+      )
+      .returning({ paymentIntentId: paymentIntents.paymentIntentId });
+    return rows.length > 0;
+  }
+
   async findByIdempotencyKey(
     userId: string | null,
     roomId: string,
@@ -773,7 +788,11 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     return rows.length;
   }
 
-  async listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]> {
+  async listExpired(
+    nowIso: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<PaymentIntentRecord[]> {
     const rows = await this.db
       .select()
       .from(paymentIntents)
@@ -781,8 +800,10 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
         and(
           inArray(paymentIntents.executionState, ['created', 'preflighted', 'quoted', 'signed']),
           lte(paymentIntents.expiresAt, new Date(nowIso)),
+          afterId === null ? undefined : gt(paymentIntents.paymentIntentId, afterId),
         ),
       )
+      .orderBy(asc(paymentIntents.paymentIntentId))
       .limit(limit);
     return rows.map(mapIntent);
   }
@@ -804,6 +825,49 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
       .orderBy(asc(paymentIntents.paymentIntentId))
       .limit(limit);
     return rows.map(mapIntent);
+  }
+
+  async listByComplianceState(
+    state: PaymentIntentRecord['complianceState'],
+    limit: number,
+  ): Promise<PaymentIntentRecord[]> {
+    // LIVE only (see the in-memory adapter): a fraud-held intent that expired to
+    // a terminal state must not ride the fraud queue nor consume its page.
+    const rows = await this.db
+      .select()
+      .from(paymentIntents)
+      .where(
+        and(
+          eq(paymentIntents.complianceState, state),
+          notInArray(paymentIntents.executionState, [...TERMINAL_INTENT_STATES]),
+        ),
+      )
+      .orderBy(asc(paymentIntents.createdAt))
+      .limit(limit);
+    return rows.map(mapIntent);
+  }
+
+  async updateComplianceState(
+    paymentIntentId: string,
+    from: PaymentIntentRecord['complianceState'],
+    to: PaymentIntentRecord['complianceState'],
+    updatedAt: string,
+  ): Promise<PaymentIntentRecord | null> {
+    const rows = await this.db
+      .update(paymentIntents)
+      .set({ complianceState: to, updatedAt: new Date(updatedAt) })
+      .where(
+        and(
+          eq(paymentIntents.paymentIntentId, paymentIntentId),
+          eq(paymentIntents.complianceState, from),
+          // …AND a LIVE execution state (see the in-memory adapter): a review
+          // decision must not flip a terminal intent's compliance column.
+          notInArray(paymentIntents.executionState, [...TERMINAL_INTENT_STATES]),
+        ),
+      )
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapIntent(row);
   }
 
   async clear(): Promise<void> {

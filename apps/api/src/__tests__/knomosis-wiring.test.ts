@@ -264,6 +264,7 @@ describe('WS-L wiring ports over real in-memory services', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: randomUUID(),
+      paymentIntentId: null,
       createdAt: old,
       updatedAt: old,
     });

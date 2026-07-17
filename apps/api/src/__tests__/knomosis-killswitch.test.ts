@@ -6,6 +6,8 @@
 // deactivation rule (a single operator can never release a switch).
 
 import { describe, expect, it } from 'vitest';
+import { resolveRegion } from '../compliance/region.js';
+import { InMemoryRegionDeclarationStore } from '../compliance/stores.js';
 import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
 import type { AuditStore } from '../identity/audit.js';
@@ -99,6 +101,50 @@ describe('kill-switch scope precedence + immediate effect', () => {
     expect(
       (await killSwitchDecision(configStore, 'action_submission', { region: null })).engaged,
     ).toBe(true);
+  });
+
+  it('a REGIONAL pause catches a member VERIFIED in the paused region even when their locale differs (codex: authoritative kill-switch region)', async () => {
+    const { identity } = freshEventServices();
+    const configStore = new InMemoryPwattConfigStore();
+    // A DE incident pause.
+    await activateKillSwitch(adminDeps(configStore, identity.audit), {
+      switchId: 'action_submission',
+      scopes: { global: false, regions: ['DE'], room_ids: [] },
+      releaseCard: RELEASE_CARD,
+      actorUserId: 'a1111111-1111-4111-8111-111111111111',
+      reason: 'jurisdiction',
+    });
+    // A member reviewer-VERIFIED in DE whose account locale resolves to FR.  The
+    // boot wires `regionResolver` to exactly this ladder (verified declaration →
+    // locale), so the kill-switch scopes by the AUTHORITATIVE region.
+    const declarations = new InMemoryRegionDeclarationStore();
+    const userId = 'b2222222-2222-4222-8222-222222222222';
+    await declarations.upsert({
+      userId,
+      declaredRegion: 'DE',
+      status: 'verified',
+      verificationLevel: 'reviewer_verified',
+      evidenceRef: null,
+      verifiedAt: '2026-07-16T00:00:00.000Z',
+      verifiedBy: null,
+      createdAt: '2026-07-15T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:00:00.000Z',
+    });
+    const authoritative = await resolveRegion(
+      { declarations, localeRegion: async () => 'FR' },
+      userId,
+    );
+    expect(authoritative).toEqual({ region: 'DE', basis: 'verified_declaration' });
+    // The AUTHORITATIVE region (DE) is caught by the DE pause…
+    expect(
+      (await killSwitchDecision(configStore, 'action_submission', { region: authoritative.region }))
+        .engaged,
+    ).toBe(true);
+    // …whereas the locale-only region (FR) would have ESCAPED it — the exact hole
+    // the boot seam closes by resolving the ladder instead of locale.
+    expect(
+      (await killSwitchDecision(configStore, 'action_submission', { region: 'FR' })).engaged,
+    ).toBe(false);
   });
 
   it('a corrupt entry under ANY switch key fails EVERY switch closed (H4)', async () => {

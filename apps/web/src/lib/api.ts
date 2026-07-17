@@ -183,8 +183,10 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
   return run;
 }
 
-/** The typed RPC client. All app calls go through {@link apiFetch}. */
-export const client = hc<AppType>(API_BASE, { fetch: apiFetch });
+/** The typed RPC client. All app calls go through {@link apiFetch}.  The
+ *  explicit annotation keeps the (very large) inferred structural type out of
+ *  the declaration emit (TS7056) without weakening any call-site typing. */
+export const client: ReturnType<typeof hc<AppType>> = hc<AppType>(API_BASE, { fetch: apiFetch });
 
 async function normalizeError(response: Response): Promise<ApiClientError> {
   let code = `http_${response.status}`;

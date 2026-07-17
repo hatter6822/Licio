@@ -17,7 +17,7 @@
 // cannot leak private attention data to a chain-analytics provider.  A unit
 // test asserts the field lists stay clean.
 
-import type { WalletRiskState } from '@licio/shared';
+import type { CryptoFeatureCell, ReviewSubject, WalletRiskState } from '@licio/shared';
 
 /** Sanctions screening verdict for an address (WS-N.2.2a seam). */
 export type SanctionsVerdict = 'clear' | 'blocked' | 'unavailable';
@@ -34,18 +34,106 @@ export interface WalletRiskAssessment {
   nextStep: string | null;
 }
 
+/**
+ * Screen several addresses and fold the answers into ONE verdict, worst-first:
+ * `blocked` if any party is listed, else `unavailable` if any answer was
+ * inconclusive, else `clear`.
+ *
+ * Fail-closed by construction — a transfer is only as clean as its dirtiest
+ * counterparty, and an address we could not screen is not an address we
+ * cleared.  Lives here rather than at the two call sites so the preflight and
+ * its submit re-check cannot fold them differently.
+ */
+export async function worstSanctionsVerdict(
+  compliance: Pick<CompliancePort, 'screenAddress'>,
+  addressesLower: readonly string[],
+  deploymentId: string,
+): Promise<SanctionsVerdict> {
+  let worst: SanctionsVerdict = 'clear';
+  for (const addressLower of addressesLower) {
+    const verdict = await compliance.screenAddress({ addressLower, deploymentId });
+    if (verdict === 'blocked') return 'blocked';
+    if (verdict === 'unavailable') worst = 'unavailable';
+  }
+  return worst;
+}
+
 export interface CompliancePort {
   /** Screen a recipient/actor address.  Payload is the ADDRESS ONLY — no
    *  attention or behavioral fields exist on this seam (WS-L.3.1b). */
   screenAddress(args: { addressLower: string; deploymentId: string }): Promise<SanctionsVerdict>;
-  /** Velocity/pattern fraud risk for an action. */
+  /**
+   * Velocity/pattern fraud risk for an action.
+   *
+   * `reviewRef` identifies the ONE attempted transfer being checked — the
+   * preflight and submit of the same action share it (the bound typed-data
+   * hash), while a different intent/nonce is a different attempt.  A
+   * high-value review a compliance reviewer clears applies to THAT attempt
+   * only; `null` means the caller cannot identify the attempt, so the engine
+   * withholds the cleared-review exit (fail-closed) rather than let one
+   * clearance cover every later transfer of the same amount.
+   *
+   * `reviewSubject` names WHO the review is about, which is not always the
+   * caller: a disbursement from a room treasury belongs to the ROOM, not to
+   * whichever steward happened to authorize it (the same rule the room-owned
+   * payout intent already states about itself).  Attributing it to the actor
+   * would open a separate review per steward for ONE payout, and leave that
+   * review unfindable from the fraud queue — which knows the intent and its
+   * room, never which steward pressed the button.  `null` = the actor is the
+   * subject (a personal pay-in).  Use `reviewSubjectFor` rather than deciding
+   * per call site.
+   *
+   * `userId` stays the ACTOR, and it is the actor's REGION that resolves from
+   * it: a room does not declare a jurisdiction, the human authorizing the
+   * movement does.  The velocity window, though, follows the `reviewSubject` —
+   * a room's payout stream is the room's, so per-steward buckets would hand
+   * each steward a fresh window over the same stream (rotate stewards, walk
+   * through the limit) and spend the steward's personal budget on the room's
+   * money besides.
+   *
+   * All three are REQUIRED, not optional: a caller that forgets one would
+   * silently take the weaker path, so the compiler makes every consumer decide
+   * (see the `jurisdiction` note below).
+   */
   fraudRisk(args: {
     userId: string;
     actionType: string;
     amountMinorUnits: string | null;
+    reviewRef: string | null;
+    reviewSubject: ReviewSubject | null;
   }): Promise<FraudVerdict>;
-  /** Whether crypto features are available in the user's jurisdiction. */
-  jurisdiction(args: { userId: string; region: string | null }): Promise<JurisdictionVerdict>;
+  /**
+   * Whether crypto features are available in the user's jurisdiction.
+   *
+   * `featureCell` names the §22.2 policy cell the caller is about to exercise
+   * (derived from the action type).  A jurisdiction policy is per-cell, so a
+   * region may permit payments while disabling `governance`: WITHOUT the cell
+   * the verdict can only speak for the region as a whole and a governance
+   * signature would ride a payments-enabled `allowed`.  Every real signed
+   * action therefore passes its cell; omitting it keeps the region-wide
+   * reading (no cell claimed, so no cell-specific permission is implied).
+   *
+   * `asset` names the asset a fund-moving action would move.  A policy's
+   * `asset_flags` are a per-region prohibition list in their own right — a
+   * region can permit payments while barring a specific asset — so a
+   * cell-only verdict would let a barred asset through on its cell's
+   * approval.  `null` = this action moves no asset (the governance
+   * signatures).
+   *
+   * Both are REQUIRED with nullable values, deliberately.  As optionals they
+   * were forgettable, and every consumer that forgot one silently got the
+   * broader verdict: three review rounds found the cell missing from a
+   * different caller each time, and the asset gate missing from all of them.
+   * Required-and-nullable makes the compiler ask every call site — including
+   * the next one anyone writes — what it is exercising, so `null` becomes a
+   * decision on the record instead of an omission nobody sees.
+   */
+  jurisdiction(args: {
+    userId: string;
+    region: string | null;
+    featureCell: CryptoFeatureCell | null;
+    asset: string | null;
+  }): Promise<JurisdictionVerdict>;
   /** Coarse wallet risk assessment (WS-L.2.5c-1); label + safe explanation
    *  only — raw sanctions/fraud internals never cross this seam. */
   walletRisk(args: {

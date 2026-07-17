@@ -8,6 +8,7 @@
 export * from './ai-governance.js';
 export * from './audit-log.js';
 export * from './claim.js';
+export * from './compliance.js';
 export * from './contribution.js';
 export * from './debate.js';
 export * from './embedding.js';

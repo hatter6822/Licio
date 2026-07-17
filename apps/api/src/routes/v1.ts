@@ -91,6 +91,7 @@ import { getTelemetryServices } from '../telemetry/service.js';
 import { createAiGovernanceAdminRoutes } from './ai-governance-admin.js';
 import { createAiGovernancePublicRoutes } from './ai-governance-public.js';
 import { createAuthRoutes } from './auth.js';
+import { createComplianceRoutes } from './compliance.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
 import { createGovernanceRoutes } from './governance.js';
@@ -547,6 +548,13 @@ export function createV1Routes() {
       .route('/knomosis', createKnomosisRoutes())
       .route('/', createRoomGovernanceSimRoutes())
       .route('/', createTreasuryGovernanceRoutes())
+
+      // --- Compliance (WS-N) --------------------------------------------------
+      // Feature availability + identity-free region declaration + risk
+      // disclosures (user surface); jurisdiction-policy admin, cases, the
+      // fraud queue, wallet-risk pins (compliance role); SAR/STR + lawful
+      // access + disclosure publication (counsel).  All fail-closed.
+      .route('/compliance', createComplianceRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', async (c) => {

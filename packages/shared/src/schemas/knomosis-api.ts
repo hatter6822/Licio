@@ -159,6 +159,15 @@ export const preflightStepSchema = z.enum(PREFLIGHT_STEPS);
 export const knomosisPreflightRequestSchema = z
   .object({
     action_type: z.string().min(1).max(64),
+    /** The WS-M payment intent this action settles, when it has one.  A
+     *  deposit/payout is reviewed ONCE: the intent preflight and this action
+     *  are two legs of one attempt, and naming the intent lets the compliance
+     *  engine treat them as such (a fraud-queue release then unblocks the
+     *  signed leg instead of meeting a second, unclearable review).  Absent
+     *  for an action minted outside an intent — which is reviewed on its own.
+     *  Unverified by itself: the review key binds the SESSION user and the
+     *  signed amount, so a borrowed intent id buys nothing. */
+    payment_intent_id: uuidSchema.optional(),
     room_id: uuidSchema,
     deployment_id: uuidSchema,
     wallet_account_id: uuidSchema,
@@ -254,6 +263,9 @@ export const knomosisSubmitRequestSchema = z
     /** Client-generated idempotency key (WS-L.3.2a). */
     idempotency_key: uuidSchema,
     action_type: z.string().min(1).max(64),
+    /** The intent this action settles — see the preflight request.  Submit
+     *  re-runs the same compliance gates, so it names the same attempt. */
+    payment_intent_id: uuidSchema.optional(),
     room_id: uuidSchema,
     deployment_id: uuidSchema,
     wallet_account_id: uuidSchema,

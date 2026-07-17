@@ -5,6 +5,8 @@ import {
   type Action,
   assertOwns,
   authorize,
+  isComplianceReviewer,
+  isCounsel,
   isSteward,
   POLICY,
   privateOwnershipOutcome,
@@ -28,7 +30,12 @@ describe('RBAC policy matrix', () => {
       'admin.role.assign',
       // The AI team (WS-K.1.1b): register/version/deprecate models + the deploy gate.
       'ai.model.manage',
+      // Deliberately NO compliance.* action (WS-N.2.1c-2 structural separation):
+      // an admin assigns the compliance/counsel roles but cannot read the data.
     ],
+    // WS-N.2.1c-2 — the financial-compliance plane (least-privilege both ways).
+    compliance: ['self.manage', 'compliance.review'],
+    counsel: ['self.manage', 'compliance.review', 'compliance.counsel.approve'],
   };
 
   for (const role of ROLES) {
@@ -90,5 +97,24 @@ describe('isSteward', () => {
     expect(isSteward(['moderator'])).toBe(false);
     expect(isSteward(['user'])).toBe(false);
     expect(isSteward(['expert'])).toBe(false);
+    // The compliance plane never gains steward surfaces (WS-N.2.1c-2).
+    expect(isSteward(['compliance'])).toBe(false);
+    expect(isSteward(['counsel'])).toBe(false);
+  });
+});
+
+describe('WS-N.2.1c-2 compliance/counsel capabilities', () => {
+  it('reviewer access: compliance + counsel only — steward/admin never pass', () => {
+    expect(isComplianceReviewer(['compliance'])).toBe(true);
+    expect(isComplianceReviewer(['counsel'])).toBe(true);
+    for (const role of ['user', 'expert', 'moderator', 'steward', 'admin'] as const) {
+      expect(isComplianceReviewer([role]), `${role} must not review compliance`).toBe(false);
+    }
+  });
+
+  it('counsel approval is distinct from reviewer access', () => {
+    expect(isCounsel(['counsel'])).toBe(true);
+    expect(isCounsel(['compliance'])).toBe(false);
+    expect(isCounsel(['admin'])).toBe(false);
   });
 });

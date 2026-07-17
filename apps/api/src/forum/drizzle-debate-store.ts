@@ -18,6 +18,7 @@ import type { DbExecutor } from '@licio/db';
 import { debateArenas as debateArenasTable } from '@licio/db';
 import type { Citation, DebateState } from '@licio/shared';
 import { and, asc, count, eq, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   DebateArenaRecord,
   DebateConcessionPatch,
@@ -36,15 +37,6 @@ function iso(value: Date): string {
 
 function isoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    if ((current as { code?: string }).code === '23505') return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
 }
 
 /** Thrown inside the removal-close transaction to trigger a full rollback

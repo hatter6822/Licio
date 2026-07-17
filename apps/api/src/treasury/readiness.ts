@@ -210,7 +210,16 @@ async function evaluateItem(
     }
     case 'jurisdiction_supported': {
       const region = await deps.regionResolver.regionForUser(userId);
-      const verdict = await deps.compliance.jurisdiction({ userId, region });
+      const verdict = await deps.compliance.jurisdiction({
+        userId,
+        region,
+        // Region-WIDE by intent: this item asks whether the region is cleared
+        // for real-asset governance at all, not whether one action's cell is
+        // — so it names no cell and no asset, and `allowed` still requires
+        // both real-funds cells enabled with a verified basis.
+        featureCell: null,
+        asset: null,
+      });
       // Fail-closed: 'unknown' (no WS-N engine) and 'blocked' both fail —
       // production modes require a POSITIVE jurisdiction determination.
       return verdict === 'allowed'

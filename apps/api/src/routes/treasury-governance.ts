@@ -41,6 +41,12 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { disclosureGate } from '../compliance/disclosures.js';
+import {
+  buildDisclosureDeps,
+  complianceServicesConfigured,
+  getComplianceServices,
+} from '../compliance/services.js';
 import { getKnomosisServices } from '../knomosis/services.js';
 import {
   type AuthEnv,
@@ -500,8 +506,6 @@ export function createTreasuryGovernanceRoutes() {
         zValidator('json', paymentIntentCreateRequestSchema),
         async (c) => {
           const auth = requireAuth(c);
-          const gate = flagGate('crypto');
-          if (gate) return c.json(deny(gate.code, gate.message), 503);
           const services = getTreasuryServices();
           const roomId = c.req.valid('param').roomId;
           if (!(await services.rooms.isMember(roomId, auth.userId))) {
@@ -522,8 +526,65 @@ export function createTreasuryGovernanceRoutes() {
               403,
             );
           }
+          // Is this a RETRY of an intent that already exists?  `createPaymentIntent`
+          // answers a replay from the idempotency key before its own gates —
+          // "a replay of an ALREADY-CREATED intent has no new side effects" —
+          // but the disclosure gate below sits in front of it, which undoes
+          // that: a disclosure published after the original create would hand
+          // the retry `disclosure_ack_required` instead of the existing
+          // `payment_intent_id`, so the client never learns its intent id and
+          // the in-flight intent strands behind an unrelated new gate.  Gates
+          // decide whether a NEW intent may be created.
+          const replay = await services.intents.findByIdempotencyKey(
+            auth.userId,
+            roomId,
+            body.idempotency_key,
+          );
+          // The crypto flag gates CREATING an intent, so it sits with the
+          // gates rather than ahead of the replay.  Ahead of it, a retry after
+          // a lost response — with crypto disabled in between — got a 503
+          // instead of the existing `payment_intent_id`, and there is no way to
+          // recover that id afterwards: the intent sat orphaned until it
+          // expired.  Returning it creates nothing.
+          if (replay === null) {
+            const gate = flagGate('crypto');
+            if (gate) return c.json(deny(gate.code, gate.message), 503);
+          }
+          // WS-N.1.2d — the first-financial-action disclosure gate: where the
+          // user's region policy lists risk disclosures, the CURRENT version
+          // of each must be acknowledged before any intent is created here
+          // (fail-closed: an unreadable ack store reports them missing).
+          if (replay === null && complianceServicesConfigured()) {
+            const disclosureCheck = await disclosureGate(
+              buildDisclosureDeps(getComplianceServices()),
+              auth.userId,
+            );
+            if (disclosureCheck.unavailable) {
+              // Policy-store OUTAGE: the disclosure requirement is unreadable, so
+              // fail closed rather than mint an allowance-consuming intent on an
+              // unverified gate.
+              return c.json(
+                deny('disclosure_unavailable', 'Risk disclosures cannot be verified right now.'),
+                503,
+              );
+            }
+            if (disclosureCheck.required) {
+              return c.json(
+                {
+                  error: {
+                    code: 'disclosure_ack_required',
+                    message:
+                      'Acknowledge the current risk disclosures before your first financial action.',
+                  },
+                  missing: disclosureCheck.missing,
+                },
+                403,
+              );
+            }
+          }
           const result = await createPaymentIntent(services, {
             userId: auth.userId,
+            actorUserId: auth.userId,
             roomId,
             targetType: body.target_type,
             targetId: body.target_id,
@@ -596,13 +657,13 @@ export function createTreasuryGovernanceRoutes() {
         ),
         async (c) => {
           const auth = requireAuth(c);
-          const gate = flagGate('crypto');
-          if (gate) return c.json(deny(gate.code, gate.message), 503);
           const services = getTreasuryServices();
           const { roomId, paymentIntentId } = c.req.valid('param');
+          const body = c.req.valid('json');
           // A lifecycle step mutates SOMEONE'S financial intent: it must belong
           // to this room and to the caller (or a room steward) — an intent id
-          // alone is never authorization (mirrors the GET above).
+          // alone is never authorization (mirrors the GET above).  Authorization
+          // FIRST, before the mint gate.
           const target = await services.intents.getById(paymentIntentId);
           if (target === null || target.roomId !== roomId) return c.json(notFound, 404);
           if (
@@ -611,7 +672,18 @@ export function createTreasuryGovernanceRoutes() {
           ) {
             return c.json(notFound, 404);
           }
-          const body = c.req.valid('json');
+          // The crypto flag gates a NEW fund movement — every step EXCEPT the
+          // ATTACH (`signed` + action_record_id).  That step is BOOKKEEPING for an
+          // action `/actions/submit` already placed on chain (attachIntentSubmission
+          // carries no writability guard for exactly this reason, W15), so an
+          // operator disabling crypto between submit and attach must not reject it
+          // with 503 and strand the signed intent outside the ledger/export until
+          // background reconciliation catches it.
+          const isAttach = body.step === 'signed' && body.action_record_id !== undefined;
+          if (!isAttach) {
+            const gate = flagGate('crypto');
+            if (gate) return c.json(deny(gate.code, gate.message), 503);
+          }
           const result =
             body.step === 'preflight'
               ? await preflightIntent(services, paymentIntentId, auth.userId)

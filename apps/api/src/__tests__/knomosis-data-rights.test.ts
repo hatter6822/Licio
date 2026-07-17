@@ -60,6 +60,7 @@ function action(userId: string, id: string): KnomosisActionRecordEntity {
     indexedEventRef: null,
     reconciliationState: 'pending',
     idempotencyKey: `idem-${id}`,
+    paymentIntentId: null,
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-01T00:00:00.000Z',
   };
@@ -138,6 +139,7 @@ describe('WS-L financial wallet data-rights', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -157,6 +159,7 @@ describe('WS-L financial wallet data-rights', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });

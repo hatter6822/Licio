@@ -61,6 +61,7 @@ import type {
   GovernanceSignatureRecord,
   GovernanceSignatureStore,
 } from '../knomosis/stores.js';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { readabilityProblems } from './charter.js';
@@ -301,6 +302,32 @@ export async function createProductionProposal(
   deps: ProposalDeps,
   input: { roomId: string; userId: string; create: ProductionProposalCreate },
 ): Promise<TreasuryGovernanceError | { ok: true; proposal: GovernanceProposalRecord }> {
+  // AUTHORIZATION first (checked on every request, retry or not) — and BEFORE the
+  // mint-only gates, so a non-member never learns a room is frozen/paused.
+  if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
+    return tgErr(403, 'not_member', 'Only room members can open proposals.');
+  }
+  const proposalType = input.create.proposal_type as ProposalType;
+  if (STEWARD_ONLY_TYPES.has(proposalType)) {
+    if (!(await deps.rooms.isSteward(input.roomId, input.userId))) {
+      return tgErr(403, 'steward_required', 'This proposal type requires a room steward.');
+    }
+  }
+
+  // REPLAY before the mint-only gates.  The deterministic id from (room, user,
+  // key) IS the idempotency record, so a lost-response retry must return the
+  // stored proposal even if a freeze/pause landed or the law-pack changed since —
+  // those gates decide whether a NEW proposal may be minted, and this one already
+  // exists.  (The sibling `createPaymentIntent` puts idempotency first, same reason.)
+  const proposalId = deterministicProposalId(
+    input.roomId,
+    input.userId,
+    input.create.idempotency_key,
+  );
+  const existing = await deps.proposals.getById(proposalId);
+  if (existing !== null) return { ok: true, proposal: existing };
+
+  // GATES — may a NEW proposal be minted?
   const guard = await assertGovernanceWritable(deps, input.roomId, 'proposals');
   if (guard !== null) return guard;
   const mode = await deps.roomMode.currentMode(input.roomId);
@@ -312,16 +339,6 @@ export async function createProductionProposal(
       'Production proposals require a real-asset governance mode (simulated rooms practice via the simulation surface).',
     );
   }
-  if (!(await deps.rooms.isMember(input.roomId, input.userId))) {
-    return tgErr(403, 'not_member', 'Only room members can open proposals.');
-  }
-  const proposalType = input.create.proposal_type as ProposalType;
-  if (STEWARD_ONLY_TYPES.has(proposalType)) {
-    if (!(await deps.rooms.isSteward(input.roomId, input.userId))) {
-      return tgErr(403, 'steward_required', 'This proposal type requires a room steward.');
-    }
-  }
-
   // The room's ACTIVE law-pack is pinned onto the proposal (WS-M.1.3d).
   const active = await activeLawPack(deps, input.roomId);
   if (active === null) {
@@ -330,15 +347,6 @@ export async function createProductionProposal(
   if (!active.pack.allowedProposalTypes.includes(proposalType)) {
     return tgErr(409, 'type_not_allowed', `"${proposalType}" is not allowed by the law-pack.`);
   }
-
-  // Idempotency: the deterministic id from (room, user, key) IS the record.
-  const proposalId = deterministicProposalId(
-    input.roomId,
-    input.userId,
-    input.create.idempotency_key,
-  );
-  const existing = await deps.proposals.getById(proposalId);
-  if (existing !== null) return { ok: true, proposal: existing };
 
   // Draft completeness (WS-M.4.1b): spend fields all-or-none, category coherent.
   const spendCategory = SPEND_CATEGORY[proposalType] ?? null;
@@ -610,26 +618,22 @@ export async function createProductionProposal(
     // Two concurrent creates with the same idempotency key both passed the
     // read above; the primary key (the deterministic id IS the idempotency
     // record) makes the loser land here — return the winner's row instead of
-    // surfacing a 500.  The SQLSTATE rides the Drizzle cause chain.
-    let current: unknown = error;
-    for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-      if ((current as { code?: string }).code === '23505') {
-        const winner = await deps.proposals.getById(proposalId);
-        if (winner !== null) {
-          // The loser charged the action budget above but published nothing —
-          // credit the charge back so a retry storm cannot drain the
-          // allowance for one accepted proposal.
-          await refundActionBudget(deps, {
-            roomId: input.roomId,
-            userId: input.userId,
-            units: budget.charged,
-            rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
-          });
-          return { ok: true, proposal: winner };
-        }
-        break;
+    // surfacing a 500.  (The SQLSTATE rides the Drizzle cause chain — see
+    // `isUniqueViolation`.)
+    if (isUniqueViolation(error)) {
+      const winner = await deps.proposals.getById(proposalId);
+      if (winner !== null) {
+        // The loser charged the action budget above but published nothing —
+        // credit the charge back so a retry storm cannot drain the allowance
+        // for one accepted proposal.
+        await refundActionBudget(deps, {
+          roomId: input.roomId,
+          userId: input.userId,
+          units: budget.charged,
+          rules: active.pack.actionBudgetRules ?? NO_BUDGET_RULES,
+        });
+        return { ok: true, proposal: winner };
       }
-      current = (current as { cause?: unknown }).cause;
     }
     throw error;
   }

@@ -8,6 +8,7 @@
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
+import { storeKnomosisConfigValue } from '../knomosis/config.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   createInMemoryTreasuryServices,
@@ -623,6 +624,65 @@ describe('WS-M treasury + payment intents', () => {
       { step: 'preflight' },
     );
     expect(owned.status).toBe(200);
+  });
+
+  it('the ATTACH step bypasses the crypto gate; a mint step does not (bookkeeping vs. authorization)', async () => {
+    const fixture = await wsmFixture();
+    const owner = await seedUserWithSession(fixture.identity, { handle: 'attach_owner' });
+    await fixture.treasury.treasuries.insert({
+      treasuryId: crypto.randomUUID(),
+      roomId: ROOM,
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      treasuryAddress: ADDRESS,
+      acceptedAssets: ['USDC'],
+      balanceSnapshot: null,
+      balancesReconciledAt: null,
+      depositLimits: {
+        perUserPerPeriod: '1000000',
+        perRoomPerPeriod: '10000000',
+        perDepositMax: '500000',
+        periodSeconds: 86_400,
+      },
+      freezeState: 'active',
+      freezeReason: null,
+      freezeCascade: false,
+      pauseFlags: { deposits: false, proposals: false, executions: false },
+      reconciliationState: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+    const created = await req('POST', `/rooms/${ROOM}/treasury/payment-intents`, owner.cookie, {
+      target_type: 'treasury_deposit',
+      target_id: ROOM,
+      asset: 'USDC',
+      amount: '1000',
+      idempotency_key: crypto.randomUUID(),
+    });
+    expect(created.status).toBe(201);
+    const intentId = ((await created.json()) as { payment_intent_id: string }).payment_intent_id;
+    // Crypto is disabled AFTER the intent exists (an operator pausing between
+    // submit and the client's attach call).
+    await storeKnomosisConfigValue(fixture.knomosis.configStore, 'cryptoEnabled', false);
+    await fixture.knomosis.reloadConfig();
+    // A MINT step (preflight) is blocked by the crypto gate…
+    const pf = await req(
+      'POST',
+      `/rooms/${ROOM}/treasury/payment-intents/${intentId}/advance`,
+      owner.cookie,
+      { step: 'preflight' },
+    );
+    expect(pf.status).toBe(503);
+    expect(((await pf.json()) as { error: { code: string } }).error.code).toBe('crypto_disabled');
+    // …but the ATTACH (signed + action_record_id) is BOOKKEEPING for money the
+    // WS-L submit already placed on chain, so it bypasses the mint-only gate: it
+    // reaches attachIntentSubmission (which 404s an unknown action id here), and
+    // is NEVER refused crypto_disabled.
+    const attach = await req(
+      'POST',
+      `/rooms/${ROOM}/treasury/payment-intents/${intentId}/advance`,
+      owner.cookie,
+      { step: 'signed', action_record_id: crypto.randomUUID() },
+    );
+    expect(attach.status).not.toBe(503);
   });
 
   it('the public intent path is deposit-class only (PR #144 review)', async () => {

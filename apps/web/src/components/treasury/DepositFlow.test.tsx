@@ -16,9 +16,11 @@ vi.mock('../../lib/queries.js', () => ({
 
 const mockCreateIntent = vi.fn();
 const mockAdvance = vi.fn();
+const mockFetchIntent = vi.fn();
 vi.mock('../../lib/treasury-api.js', () => ({
   createPaymentIntent: (...args: unknown[]) => mockCreateIntent(...args),
   advancePaymentIntent: (...args: unknown[]) => mockAdvance(...args),
+  fetchPaymentIntent: (...args: unknown[]) => mockFetchIntent(...args),
 }));
 
 const mockPreflightAction = vi.fn();
@@ -29,6 +31,17 @@ vi.mock('../../lib/wallet-api.js', () => ({
 }));
 
 const mockSign = vi.fn();
+// The real panel fetches + renders the region's disclosures; this test is about
+// what the flow does when the user comes BACK from it, so a stand-in that just
+// exposes the acknowledgment keeps the test on its subject.
+vi.mock('../compliance/index.js', () => ({
+  RiskDisclosures: ({ onAcknowledged }: { onAcknowledged: () => void }) => (
+    <button type="button" onClick={onAcknowledged}>
+      acknowledge
+    </button>
+  ),
+}));
+
 vi.mock('../../lib/wallet-signing.js', () => ({
   discoverProviders: () => Promise.resolve([{ info: { rdns: 'io.test' }, provider: {} }]),
   requestAccount: () => Promise.resolve(`0x${'cd'.repeat(20)}`),
@@ -262,6 +275,111 @@ describe('DepositFlow (WS-M.3.1)', () => {
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
+  it('a disclosure published AFTER the preview is acknowledgeable, and the deposit resumes', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    // The WS-L preflight now runs the disclosure gate too (a token outlives a
+    // disclosure bump), so the gate can land AFTER the preview is up.
+    mockPreflightAction.mockRejectedValueOnce(
+      new ApiClientError('disclosure_ack_required', 'Acknowledge the risk disclosures.', 403),
+    );
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    // The panel must be REACHABLE from here — rendered only in the no-pending
+    // branch it would be invisible exactly when it is needed, leaving the user
+    // on the preview with an error and no way forward.
+    await waitFor(() =>
+      expect(screen.getByText(/before your first contribution/i)).toBeInTheDocument(),
+    );
+    expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it('resumes after a disclosure ack WITHOUT re-signing the intent', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    // The gate lands at SUBMIT — after the flow has already advanced the intent
+    // `quoted → signed`.
+    mockPreflightAction.mockResolvedValue({ result: 'pass', preflight_token: 'tok' });
+    mockSubmitAction.mockRejectedValueOnce(
+      new ApiClientError('disclosure_ack_required', 'Acknowledge the risk disclosures.', 403),
+    );
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/before your first contribution/i)).toBeInTheDocument(),
+    );
+    const signedAdvances = () =>
+      mockAdvance.mock.calls.filter((c) => c[2] === 'signed' && c[3] === undefined).length;
+    expect(signedAdvances()).toBe(1);
+
+    // Acknowledge, land back on the preview, and re-sign.
+    mockSubmitAction.mockResolvedValue({ action_record_id: 'a1', submission_state: 'submitted' });
+    fireEvent.click(screen.getByRole('button', { name: /acknowledge/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 1 USDC to the treasury/i }));
+    await waitFor(() => expect(mockSubmitAction).toHaveBeenCalledTimes(2));
+    // The intent is ALREADY `signed`, and the machine has no `signed → signed`
+    // edge — re-running the advance would 409 `invalid_transition` and the
+    // resumed deposit could never submit.
+    expect(signedAdvances()).toBe(1);
+  });
+
+  it('resumes a RELEASED high-value intent instead of replaying its preflight', async () => {
+    // The review flags the intent at preflight and the compliance hold bars
+    // `quoted`, so the user returns to a `preflighted` intent once a reviewer
+    // releases it.  The lifecycle has no `preflighted → preflighted` edge, so
+    // replaying the step 409s and the reviewed deposit could never resume.
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: true,
+    });
+    mockFetchIntent.mockResolvedValue({ execution_state: 'preflighted' });
+    mockAdvance.mockResolvedValue({ execution_state: 'quoted', quote: null });
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('1');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    const steps = mockAdvance.mock.calls.map((c) => c[2]);
+    expect(steps).not.toContain('preflight'); // already done — replaying it 409s
+    expect(steps).toContain('quote'); // …and this is what the release unblocked
+  });
+
   it('asks for a linked wallet when none matches the deployment chain', async () => {
     mockWallets.mockReturnValue({ data: { items: [], nextCursor: null } });
     render(<DepositFlow roomId="r1" treasury={TREASURY} onIntentCreated={() => {}} />);
@@ -328,6 +446,192 @@ describe('DepositFlow (WS-M.3.1)', () => {
     );
     expect(bodies[0]?.idempotency_key).toBeDefined();
     expect(bodies[1]?.idempotency_key).not.toBe(bodies[0]?.idempotency_key);
+  });
+
+  it('canceling a SIGNED intent rotates the attempt key so a restart mints a fresh one (thread-X)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockAdvance.mockResolvedValue({ execution_state: 'ok' }); // preflight/quote/signed all succeed
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    mockPreflightAction.mockResolvedValue({
+      result: 'pass',
+      preflight_token: 'token-1234567890abcdef',
+    });
+    // The `signed` advance succeeds (the server intent is now `signed`); the
+    // SUBMIT then fails.
+    mockSubmitAction.mockRejectedValue(new ApiClientError('network', 'Connection lost.', 503));
+    render(
+      <DepositFlow roomId={TREASURY.room_id} treasury={TREASURY} onIntentCreated={() => {}} />,
+    );
+    enterAmount('2');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /contribute 2 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument()); // submit failed
+    // Cancel, then restart the SAME deposit.  A restart under the old key would
+    // reuse the `signed` intent and 409 on the re-advance, so cancel must rotate
+    // the key: the restart mints a FRESH intent.
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    enterAmount('2');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() => expect(mockCreateIntent).toHaveBeenCalledTimes(2));
+    const bodies = mockCreateIntent.mock.calls.map(
+      (call) => call[1] as { idempotency_key: string },
+    );
+    expect(bodies[1]?.idempotency_key).not.toBe(bodies[0]?.idempotency_key);
+  });
+
+  it('a retry after a lost attach REPLAYS the submit without re-preflighting a spent nonce (thread DepositFlow:266)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    const onIntentCreated = vi.fn();
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    mockPreflightAction.mockResolvedValue({ result: 'pass', preflight_token: 'tok-abc' });
+    mockSubmitAction.mockResolvedValue({
+      action_record_id: '66666666-6666-4666-8666-666666666666',
+      submission_state: 'submitted',
+      reason_code: null,
+      human_message: null,
+    });
+    // The submit REACHES the server (an action row exists), but the following
+    // attach advance (the `signed` call CARRYING an action_record_id) loses its
+    // response the first time — the exact lost-response window the finding names.
+    let attachAttempts = 0;
+    mockAdvance.mockImplementation(
+      (_room: string, _id: string, state: string, actionRecordId?: string) => {
+        if (state === 'preflight') return Promise.resolve({ execution_state: 'preflighted' });
+        if (state === 'quote')
+          return Promise.resolve({
+            execution_state: 'quoted',
+            quote: { estimated_fee: '1000', quoted_at: '2026-07-01T00:00:00.000Z' },
+          });
+        if (state === 'signed' && actionRecordId !== undefined) {
+          attachAttempts += 1;
+          if (attachAttempts === 1)
+            return Promise.reject(new ApiClientError('network', 'Connection lost.', 503));
+          return Promise.resolve({ execution_state: 'ok' });
+        }
+        return Promise.resolve({ execution_state: 'ok' }); // quoted → signed
+      },
+    );
+    render(
+      <DepositFlow
+        roomId={TREASURY.room_id}
+        treasury={TREASURY}
+        onIntentCreated={onIntentCreated}
+      />,
+    );
+    enterAmount('2');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    // First attempt: the attach fails after the submit landed.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 2 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(mockSubmitAction).toHaveBeenCalledTimes(1);
+
+    // The retry must NOT re-sign + re-preflight (the message nonce is spent, so a
+    // re-preflight 409s NONCE_REUSED before the idempotent submit-replay could
+    // recover the action).  It replays the submit with the SAME token + key.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 2 USDC to the treasury/i }));
+    await waitFor(() =>
+      expect(onIntentCreated).toHaveBeenCalledWith('55555555-5555-4555-8555-555555555555'),
+    );
+    expect(mockSign).toHaveBeenCalledTimes(1); // NOT re-signed
+    expect(mockPreflightAction).toHaveBeenCalledTimes(1); // NOT re-preflighted
+    expect(mockSubmitAction).toHaveBeenCalledTimes(2);
+    const submits = mockSubmitAction.mock.calls.map(
+      (call) => call[0] as { idempotency_key: string; preflight_token: string },
+    );
+    // Same idempotency key AND the stored preflight token across both submits.
+    expect(submits[1]?.idempotency_key).toBe(submits[0]?.idempotency_key);
+    expect(submits[0]?.preflight_token).toBe('tok-abc');
+    expect(submits[1]?.preflight_token).toBe('tok-abc');
+  });
+
+  it('recovers a quoted→signed advance whose response was lost, instead of stranding on invalid_transition (thread DepositFlow:331)', async () => {
+    const { ApiClientError } = await import('../../lib/api.js');
+    const onIntentCreated = vi.fn();
+    mockCreateIntent.mockResolvedValue({
+      payment_intent_id: '55555555-5555-4555-8555-555555555555',
+      existing: false,
+    });
+    mockSign.mockResolvedValue({
+      signature: `0x${'11'.repeat(65)}`,
+      message: { roomId: TREASURY.room_id },
+    });
+    mockPreflightAction.mockResolvedValue({ result: 'pass', preflight_token: 'tok-xyz' });
+    mockSubmitAction.mockResolvedValue({
+      action_record_id: '66666666-6666-4666-8666-666666666666',
+      submission_state: 'submitted',
+      reason_code: null,
+      human_message: null,
+    });
+    // The FIRST quoted→signed advance reaches the server but its response is LOST
+    // (so `signedRef` never gets set); the SECOND (retry) re-runs it and the
+    // server 409s `invalid_transition` — there is no signed→signed edge.
+    let signedAdvances = 0;
+    mockAdvance.mockImplementation(
+      (_room: string, _id: string, state: string, actionRecordId?: string) => {
+        if (state === 'preflight') return Promise.resolve({ execution_state: 'preflighted' });
+        if (state === 'quote')
+          return Promise.resolve({
+            execution_state: 'quoted',
+            quote: { estimated_fee: '1000', quoted_at: '2026-07-01T00:00:00.000Z' },
+          });
+        if (state === 'signed' && actionRecordId === undefined) {
+          signedAdvances += 1;
+          if (signedAdvances === 1)
+            return Promise.reject(new ApiClientError('network', 'Connection lost.', 503));
+          return Promise.reject(
+            new ApiClientError('invalid_transition', 'The intent cannot be signed.', 409),
+          );
+        }
+        return Promise.resolve({ execution_state: 'ok' }); // the attach (signed + arid)
+      },
+    );
+    // The recovery fetch confirms the intent is ALREADY `signed` (the lost advance
+    // landed), so the flow continues to submit rather than stranding.
+    mockFetchIntent.mockResolvedValue({ execution_state: 'signed' });
+    render(
+      <DepositFlow
+        roomId={TREASURY.room_id}
+        treasury={TREASURY}
+        onIntentCreated={onIntentCreated}
+      />,
+    );
+    enterAmount('3');
+    fireEvent.click(screen.getByRole('button', { name: /review deposit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: /review before signing/i })).toBeInTheDocument(),
+    );
+    // Attempt 1: the signed advance loses its response.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 3 USDC to the treasury/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    // Retry: the re-advance 409s invalid_transition; a fetch shows `signed`, so
+    // the flow submits instead of stranding until cancel/expiry.
+    fireEvent.click(screen.getByRole('button', { name: /contribute 3 USDC to the treasury/i }));
+    await waitFor(() =>
+      expect(onIntentCreated).toHaveBeenCalledWith('55555555-5555-4555-8555-555555555555'),
+    );
+    expect(mockFetchIntent).toHaveBeenCalled(); // the recovery fetch ran
+    expect(mockSubmitAction).toHaveBeenCalledTimes(1);
   });
 
   it('blocks the flow when deposits are paused', () => {

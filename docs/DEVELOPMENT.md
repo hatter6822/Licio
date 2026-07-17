@@ -682,6 +682,7 @@ pre-seeded, so these development accounts use the email one-time-code path.
 | **admin** | Ada Admin | `admin@licio.test` | Full RBAC: every steward and admin surface. |
 | **steward** | Sam Steward | `steward@licio.test` | WS-J steward roles `ROLE_SAFETY`, `ROLE_APPEALS`, and `ROLE_INTEGRITY`: report queue, appeals, coordinated-report incidents, governance, and ranking/audit reads. |
 | **expert** | Dr. Erin Expert | `expert@licio.test` | Least-privilege `expert` role: can post top-level content in expert-gated rooms such as *Open Science*, without moderation/admin power. |
+| **compliance + counsel** | Cora Compliance | `compliance@licio.test` | The WS-N financial-compliance console at `/compliance-console` (cases, fraud queue, declaration verification) **and** the counsel-only surfaces (SAR drafting/approval, disclosure publishing, lawful-access review). Both roles sit on one dev account for convenience; in production they are separate people. Console actions require step-up MFA — enrol TOTP from **Profile → Security** first. |
 
 There is also a plain demo author, `licio_demo`, that owns most of the seeded
 content. Use the three email accounts above when you need to test role-gated

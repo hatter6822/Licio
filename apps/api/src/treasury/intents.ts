@@ -19,14 +19,22 @@
 
 import { decCompare, decSum, paymentIntentTransitionAllowed } from '@licio/governance';
 import type { PaymentIntentState, PaymentTargetType } from '@licio/shared';
+import {
+  ACTION_TYPE_FOR_PAYMENT_TARGET,
+  featureCellForPaymentTarget,
+  REAL_FUNDS_ENVIRONMENTS,
+  reviewSubjectForAction,
+  TARGET_ID_FIELD_FOR_ACTION,
+} from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import { killSwitchDecision } from '../knomosis/killswitch.js';
 import { pinnedDeployment } from '../knomosis/pin.js';
 import type { CompliancePort, RegionResolverPort } from '../knomosis/ports.js';
-import { REAL_FUNDS_ENVIRONMENTS } from '../knomosis/preflight.js';
+
 import type {
   FinancialWalletStore,
+  KnomosisActionRecordEntity,
   KnomosisActionStore,
   KnomosisReceiptStore,
 } from '../knomosis/stores.js';
@@ -89,6 +97,12 @@ export interface CreateIntentInput {
   /** null = ROOM-owned (grant/compensation payouts): idempotency scopes to
    *  (room, key) and any room steward may drive the lifecycle. */
   userId: string | null;
+  /** The user ACTING (the acting steward for a room-owned payout, the member for
+   *  a deposit) — always present.  Used to scope the regional kill switch: a
+   *  room-owned intent (`userId` null) must resolve the ACTOR's region, or a
+   *  null region reads as inside EVERY regional pause and one region's incident
+   *  halts all room-owned payout creation globally. */
+  actorUserId: string;
   roomId: string;
   targetType: PaymentTargetType;
   targetId: string;
@@ -102,16 +116,20 @@ export async function depositAllowance(
   deps: IntentDeps,
   roomId: string,
   userId: string,
+  asset: string,
 ): Promise<{ userRemaining: string; roomRemaining: string; perDepositMax: string } | null> {
   const treasury = await deps.treasuries.getByRoom(roomId);
   if (treasury === null) return null;
   const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
   // The COMPLETE in-period deposit set (bounded by the period, never a fixed
   // newest-N slice that would let a busy room's older in-period deposits slip
-  // out of the cap math).
+  // out of the cap math), scoped to THIS ASSET: minor units are not comparable
+  // across assets (1 ETH is 1e18, 1 USDC is 1e6), so summing them would let a
+  // deposit in one asset exhaust or distort the allowance for another — the
+  // limits apply per accepted asset.
   const recent = (
     await deps.intents.listDepositsInPeriod(roomId, new Date(periodStart).toISOString())
-  ).filter((intent) => ALLOWANCE_STATES.has(intent.executionState));
+  ).filter((intent) => ALLOWANCE_STATES.has(intent.executionState) && intent.asset === asset);
   const roomUsed = decSum(recent.map((intent) => intent.amount));
   const userUsed = decSum(
     recent.filter((intent) => intent.userId === userId).map((intent) => intent.amount),
@@ -153,8 +171,12 @@ export async function createPaymentIntent(
   const guard = await assertGovernanceWritable(deps, input.roomId, operation);
   if (guard !== null) return guard;
 
-  const region =
-    input.userId === null ? null : await deps.regionResolver.regionForUser(input.userId);
+  // Scope the regional kill switch to the ACTOR's region — the member for a
+  // deposit, the acting steward for a room-owned payout (`userId` null).  Reading
+  // a room-owned intent's region as null let one region's `payment_intent_creation`
+  // pause halt ALL room-owned payout creation globally (a null region matches every
+  // regional scope), while member deposits stayed correctly region-scoped.
+  const region = await deps.regionResolver.regionForUser(input.userId ?? input.actorUserId);
   const killSwitch = await killSwitchDecision(deps.configStore, 'payment_intent_creation', {
     roomId: input.roomId,
     region,
@@ -182,7 +204,7 @@ export async function createPaymentIntent(
         `The deposit exceeds the per-deposit maximum ${treasury.depositLimits.perDepositMax}.`,
       );
     }
-    const allowance = await depositAllowance(deps, input.roomId, input.userId);
+    const allowance = await depositAllowance(deps, input.roomId, input.userId, input.asset);
     if (allowance === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
     if (decCompare(input.amount, allowance.userRemaining) > 0) {
       return tgErr(
@@ -230,9 +252,11 @@ export async function createPaymentIntent(
     // included — an overshoot abandons ITSELF (fail-closed; the client
     // retries and the survivors fit the cap serially).
     const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
+    // Per-asset (see `depositAllowance`): raw minor units are not comparable
+    // across assets, so the re-verify aggregates only THIS asset's deposits.
     const inPeriod = (
       await deps.intents.listDepositsInPeriod(input.roomId, new Date(periodStart).toISOString())
-    ).filter((row) => ALLOWANCE_STATES.has(row.executionState));
+    ).filter((row) => ALLOWANCE_STATES.has(row.executionState) && row.asset === input.asset);
     const roomUsed = decSum(inPeriod.map((row) => row.amount));
     const userUsed = decSum(
       inPeriod.filter((row) => row.userId === input.userId).map((row) => row.amount),
@@ -241,13 +265,19 @@ export async function createPaymentIntent(
       decCompare(userUsed, treasury.depositLimits.perUserPerPeriod) > 0 ||
       decCompare(roomUsed, treasury.depositLimits.perRoomPerPeriod) > 0
     ) {
-      await deps.intents.transition(
-        intent.paymentIntentId,
-        'created',
-        'abandoned',
-        {},
-        new Date(deps.now()).toISOString(),
-      );
+      // DELETE, don't abandon.  This row was inserted moments ago in THIS call,
+      // has no audit / action / downstream reference, and never reached the
+      // caller — abandoning it would leave a terminal intent still OWNING the
+      // idempotency key, so the "please retry" the client is told to do would
+      // replay a dead intent that can never preflight/quote/submit.  Deleting it
+      // frees the key: the retry mints a fresh attempt and re-checks the cap
+      // (fail-closed; the survivors fit serially).  CONDITIONAL on the row still
+      // being the untouched insert: a concurrent idempotent replay can observe
+      // this row and even /advance it before this rollback runs, and yanking a row
+      // the replay client already advanced would hand them a 404 — so the delete
+      // no-ops if the row moved (it now belongs to that request and stays; a later
+      // same-key replay converges on it, not a dead id).
+      await deps.intents.deleteIfUntouched(intent.paymentIntentId);
       return tgErr(
         409,
         'deposit_limit_exceeded',
@@ -280,6 +310,17 @@ const TIMED_STATES: ReadonlySet<PaymentIntentState> = new Set([
   'signed',
 ]);
 
+/** Advancing targets a COMPLIANCE HOLD blocks (WS-N.2.2c): a `flagged` or
+ *  `blocked` intent cannot proceed toward execution — release (`→ cleared`)
+ *  or reject (`→ blocked` + abandon) happens in the fraud queue, never here.
+ *  The hold is the orthogonal compliance column; the 13-state execution
+ *  machine itself is closed and unchanged. */
+const COMPLIANCE_GATED_TARGETS: ReadonlySet<PaymentIntentState> = new Set([
+  'quoted',
+  'signed',
+  'submitted',
+]);
+
 /** Shared CAS + audit for every lifecycle step. */
 async function transitionIntent(
   deps: IntentDeps,
@@ -289,10 +330,28 @@ async function transitionIntent(
   actorUserId: string | null,
 ): Promise<PaymentIntentRecord | null> {
   if (!paymentIntentTransitionAllowed(intent.executionState, to)) return null;
-  // An expired timed state may only move to `abandoned`: a delayed expiry
-  // sweep must never let stale compliance/quote/signing state keep advancing.
+  if (
+    COMPLIANCE_GATED_TARGETS.has(to) &&
+    (intent.complianceState === 'flagged' || intent.complianceState === 'blocked')
+  ) {
+    return null;
+  }
+  // An expired timed state may only move to `abandoned` — or to `submitted`.
+  //
+  // A delayed expiry sweep must never let stale compliance/quote/signing state
+  // AUTHORIZE a movement, which is what this guard is for.  But `submitted` is
+  // reached one way only: `attachIntentSubmission`, recording an action the
+  // WS-L submit ALREADY placed on chain.  That is bookkeeping, not
+  // authorization — the same reason the attach carries no writability guard
+  // (W15) — and refusing it does not stop the transfer, which has happened; it
+  // only severs the intent from it.  A client that died between submit and
+  // attach (the case W13's recovery exists for) leaves the intent `signed`
+  // until its TTL lapses, and this guard then made the recovery impossible:
+  // the money sat on chain while its intent could only be abandoned, settling
+  // outside the ledger and the accounting export with no error anywhere.
   if (
     to !== 'abandoned' &&
+    to !== 'submitted' &&
     TIMED_STATES.has(intent.executionState) &&
     intent.expiresAt <= new Date(deps.now()).toISOString()
   ) {
@@ -329,6 +388,20 @@ export async function preflightIntent(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  // STATE GUARD before the mutable compliance checks below — jurisdiction,
+  // sanctions, and especially `fraudRisk` RESERVE velocity budget and can open a
+  // review.  A retry (or a duplicate `/advance`) on an intent already past
+  // `created` cannot transition again, so running those checks would burn the
+  // member/room velocity window — later blocking legitimate financial actions —
+  // for a transition the CAS below rejects anyway.  An already-`preflighted`
+  // intent REPLAYS (a lost-response retry of a valid preflight); any other
+  // non-`created` state is an invalid transition, refused without touching
+  // velocity.  (The transition CAS still guards a concurrent racer at the end.)
+  if (intent.executionState !== 'created') {
+    return intent.executionState === 'preflighted'
+      ? { ok: true, intent }
+      : tgErr(409, 'invalid_transition', 'The intent is not in a preflightable state.');
+  }
   const guard = await assertGovernanceWritable(
     deps,
     intent.roomId,
@@ -347,7 +420,27 @@ export async function preflightIntent(
   // the party actually executing the on-chain movement.
   const subjectUserId = intent.userId ?? actorUserId;
   const region = await deps.regionResolver.regionForUser(subjectUserId);
-  const jurisdiction = await deps.compliance.jurisdiction({ userId: subjectUserId, region });
+  const jurisdiction = await deps.compliance.jurisdiction({
+    userId: subjectUserId,
+    region,
+    // The intent's OWN cell + asset (WS-N.1.1c): the region-wide reading would
+    // demand both real-funds cells and reject a deposit whose cell is enabled,
+    // and would carry an asset the region bars on the cell's approval.
+    // The cell this intent exercises ON ITS DEPLOYMENT — the same SSOT the
+    // WS-L action leg uses, so one movement cannot be gated against two
+    // different policies, and a testnet intent asks for the testnet cell.
+    // The cell this intent exercises ON ITS DEPLOYMENT — the same SSOT the
+    // WS-L action leg uses, so one movement cannot be gated against two
+    // different policies, and a testnet intent asks for the testnet cell.
+    // An unpinned deployment reads as non-real-funds here exactly as it does
+    // for `realFunds` above; it can never settle either way, since the WS-L
+    // submit rejects an unknown deployment outright.
+    featureCell: featureCellForPaymentTarget(
+      intent.targetType,
+      deployment?.environment ?? 'testnet',
+    ),
+    asset: intent.asset,
+  });
   if (jurisdiction === 'blocked') {
     return tgErr(403, 'jurisdiction_blocked', 'This feature is not available in your region.');
   }
@@ -373,13 +466,44 @@ export async function preflightIntent(
     );
   }
 
+  // WS-N.2.2b/c — velocity/pattern risk through the same seam the gateway
+  // preflight runs (step 8): `blocked` rejects, `unavailable` rejects on real
+  // funds, and `elevated` (the high-value review threshold) FLAGS the intent
+  // into the fraud queue — it preflights but cannot advance until a
+  // compliance reviewer releases it (the orthogonal compliance column).
+  const fraud = await deps.compliance.fraudRisk({
+    userId: subjectUserId,
+    actionType: `payment_intent:${intent.targetType}`,
+    amountMinorUnits: intent.amount,
+    // This intent IS the attempt: a high-value review a compliance reviewer
+    // clears releases this deposit, never every later deposit of the same
+    // amount (each is its own intent, hence its own review).
+    reviewRef: intent.paymentIntentId,
+    // …and the intent's OWNER is the subject.  A room-owned payout belongs to
+    // the treasury — "not to whichever steward happened to accept the
+    // milestone", as its own creation states — so two stewards preflighting it
+    // share ONE review, and the fraud queue (which knows the room, never the
+    // steward) can find that review to release it.
+    reviewSubject: reviewSubjectForAction(ACTION_TYPE_FOR_PAYMENT_TARGET[intent.targetType], {
+      userId: subjectUserId,
+      roomId: intent.roomId,
+    }),
+  });
+  if (fraud === 'blocked') {
+    return tgErr(403, 'fraud_risk', 'This action was flagged by risk checks.');
+  }
+  if (fraud === 'unavailable' && realFunds) {
+    return tgErr(503, 'fraud_risk', 'Risk checks are unavailable; real-fund actions are paused.');
+  }
+
   const updated = await transitionIntent(
     deps,
     intent,
     'preflighted',
     {
       jurisdictionState: jurisdiction === 'allowed' ? 'allowed' : 'restricted',
-      complianceState: sanctions === 'clear' ? 'cleared' : 'pending',
+      complianceState:
+        fraud === 'elevated' ? 'flagged' : sanctions === 'clear' ? 'cleared' : 'pending',
       expiresAt: new Date(deps.now() + deps.wsmConfig().wsmIntentPreflightedTtlMs).toISOString(),
     },
     actorUserId,
@@ -398,6 +522,20 @@ export async function quoteIntent(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  // Lost-response replay (mirrors preflightIntent's already-`preflighted`
+  // branch): an already-`quoted` intent re-reports its recorded quote UNCHANGED
+  // so a dropped HTTP response cannot strand the client at 409 mid-chain — the
+  // `quoted → quoted` self-edge is absent from the transition table, so without
+  // this the retry 409s, the intent TTL-expires to `abandoned`, and the deposit
+  // must restart.  Returning the existing row preserves the recorded fee/
+  // timestamp (a re-quote must not overwrite them).  Only the immediate
+  // predecessor (`preflighted`) proceeds; any other state is a genuine invalid
+  // transition.
+  if (intent.executionState !== 'preflighted') {
+    return intent.executionState === 'quoted'
+      ? { ok: true, intent }
+      : tgErr(409, 'invalid_transition', 'The intent cannot be quoted.');
+  }
   // A freeze/pause landed AFTER preflight must stop the lifecycle here too.
   const guard = await assertGovernanceWritable(
     deps,
@@ -430,6 +568,17 @@ export async function markIntentSigned(
 ): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  // Lost-response replay (same class as quoteIntent above): an already-`signed`
+  // intent re-reports itself UNCHANGED so a dropped response cannot strand the
+  // client at 409 — there is no `signed → signed` self-edge, so without this the
+  // retry 409s, the obtained wallet signature is wasted, and the flow must
+  // re-quote and re-sign.  Only the immediate predecessor (`quoted`) proceeds;
+  // any other state is a genuine invalid transition.
+  if (intent.executionState !== 'quoted') {
+    return intent.executionState === 'signed'
+      ? { ok: true, intent }
+      : tgErr(409, 'invalid_transition', 'The intent cannot be signed.');
+  }
   const guard = await assertGovernanceWritable(
     deps,
     intent.roomId,
@@ -447,37 +596,100 @@ export async function markIntentSigned(
   return { ok: true, intent: updated };
 }
 
-/** The WS-L signed-action type each payment target rides (fail-closed map). */
-const ACTION_TYPE_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
-  treasury_deposit: 'treasury_deposit',
-  bounty_contribution: 'bounty_contribution',
-  grant_payout: 'grant_payout',
-  steward_compensation: 'grant_payout',
-};
-
-/** The SIGNED message field carrying each target's identity: two same-shape
- *  intents (same room/type/amount/asset) must still bind distinct actions. */
-const TARGET_FIELD_FOR_TARGET: Readonly<Record<PaymentTargetType, string>> = {
-  treasury_deposit: 'treasuryId',
-  bounty_contribution: 'bountyId',
-  grant_payout: 'grantId',
-  steward_compensation: 'grantId',
-};
+export interface PayoutRecipientDeps {
+  grants: GrantStore;
+  wallets: FinancialWalletStore;
+  masterSecret: string;
+}
 
 /**
- * The WS-L action idempotency key for the intent's CURRENT attempt (W14):
- * the first attempt uses the payment-intent id (the W13 client convention);
- * every retry rotates the key to `<intentId>:r<retryCount>` so a fresh
- * attempt never dedups onto — nor auto-recovers — a previous attempt's
- * terminal action.  The client derives the same key from the wire
- * `retry_count` when submitting the retried action.
+ * Does the signed payout pay the grant's APPROVED recipient?  A `grant_payout` /
+ * `steward_compensation` intent names a grant, and that grant names who may be
+ * paid — an address, or a `user:<id>` bound to that member's linked wallets.  A
+ * same-grant / same-amount / same-asset action to a DIFFERENT address would
+ * otherwise settle the intent while the money went elsewhere, so this MUST be
+ * checked BEFORE the WS-L action forwards (at the intent-claim authz + the
+ * attach), not only at the attach — which runs after the transfer has already
+ * been placed on chain, leaving the movement outside the intent ledger/export.
+ * Returns null when there is nothing to bind (a non-payout intent) or the
+ * binding holds; a typed error otherwise.  ONE definition, so the pre-forward
+ * gate and the attach can never disagree about who a payout may pay.
  */
-export function intentActionIdempotencyKey(
-  intent: Pick<PaymentIntentRecord, 'paymentIntentId' | 'retryCount'>,
-): string {
-  return intent.retryCount > 0
-    ? `${intent.paymentIntentId}:r${intent.retryCount}`
-    : intent.paymentIntentId;
+export async function bindPayoutRecipient(
+  deps: PayoutRecipientDeps,
+  intent: Pick<PaymentIntentRecord, 'targetType' | 'targetId'>,
+  message: Record<string, unknown>,
+  // The CHAIN the payout settles on (the intent treasury's deployment chain).
+  // A `user:<id>` recipient binds to a wallet ON THIS CHAIN — wallets are
+  // chain-scoped and the actor path enforces `wallet.chainId === deployment
+  // .chain_id`, so binding chain-agnostically would let a payout on chain B
+  // settle to an address the recipient only controls on chain A.  `undefined`
+  // (an unresolvable/unpinned deployment) fails a user-recipient bind CLOSED.
+  deploymentChainId: number | undefined,
+): Promise<TreasuryGovernanceError | null> {
+  if (intent.targetType !== 'grant_payout' && intent.targetType !== 'steward_compensation') {
+    return null;
+  }
+  const grant = await deps.grants.getById(intent.targetId);
+  if (grant === null) {
+    return tgErr(422, 'action_mismatch', 'The payout intent has no backing grant.');
+  }
+  // A clawed-back grant must never receive a new settlement (W9).
+  if (grant.payoutState === 'clawed_back') {
+    return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; payouts are closed.');
+  }
+  const approvedRecipient = grant.recipientRef.toLowerCase();
+  const signedRecipient =
+    typeof message['recipient'] === 'string' ? message['recipient'].toLowerCase() : '';
+  if (/^0x[0-9a-f]{40}$/.test(approvedRecipient)) {
+    if (signedRecipient !== approvedRecipient) {
+      return tgErr(
+        422,
+        'action_mismatch',
+        'The signed recipient differs from the approved grant recipient.',
+      );
+    }
+    return null;
+  }
+  if (/^user:[0-9a-f-]{36}$/.test(grant.recipientRef)) {
+    // A `user:<id>` recipient binds to that member's LINKED wallets: the signed
+    // address must hash to one of them, or a same-grant/same-amount action could
+    // pay an unrelated address and still mark the grant paid (W11).  Addresses
+    // are stored hashed, so the comparison is keyed.
+    if (!/^0x[0-9a-f]{40}$/.test(signedRecipient)) {
+      return tgErr(422, 'action_mismatch', 'The signed recipient is not a valid address.');
+    }
+    // The wallet must be linked ON THE PAYOUT'S CHAIN.  An unresolvable chain
+    // (unpinned deployment) leaves nothing to bind against, so it fails closed —
+    // never bind a user recipient chain-agnostically (the chain-crossing hole).
+    if (deploymentChainId === undefined) {
+      return tgErr(
+        422,
+        'recipient_not_bound',
+        'The payout deployment chain could not be resolved to bind the recipient wallet.',
+      );
+    }
+    const recipientUserId = grant.recipientRef.slice('user:'.length);
+    const linked = (await deps.wallets.listByUser(recipientUserId, false)).filter(
+      (w) => w.unlinkState === 'active' && w.chainId === deploymentChainId,
+    );
+    const signedHash = hashFinancialWalletAddress(deps.masterSecret, signedRecipient);
+    if (!linked.some((w) => w.addressHashHex === signedHash)) {
+      return tgErr(
+        422,
+        'recipient_not_bound',
+        'The signed address is not a linked wallet of the approved recipient on the payout chain.',
+      );
+    }
+    return null;
+  }
+  // Any OTHER opaque ref (a co-op name, free text) has nothing to bind against —
+  // an on-chain payout cannot verify its destination, so it fails CLOSED.
+  return tgErr(
+    422,
+    'recipient_not_bound',
+    'This grant recipient cannot be bound to an on-chain address.',
+  );
 }
 
 /**
@@ -505,13 +717,35 @@ export async function attachIntentSubmission(
   // create/preflight/quote/signing/retry, all upstream of the submit.
   const action = await deps.actions.getById(actionRecordId);
   if (action === null) return tgErr(404, 'not_found', 'Unknown action record.');
+  // IDEMPOTENT re-attach: this action is ALREADY bound to this intent — a prior
+  // attach committed and only its response was lost, so the client (or the sweep)
+  // retries.  Return the already-linked intent as success: re-running the
+  // transition below would be `submitted → submitted`, which has no edge, and the
+  // spurious `invalid_transition` leaves the UI blind to a settlement that already
+  // happened.  Checked BEFORE the state/ownership guards — a bound action stays
+  // bound regardless of what state it has since reconciled to.
+  if (intent.actionRecordId === actionRecordId) {
+    return { ok: true, intent };
+  }
+  // A `reserving` action NEVER forwarded: it is inserted before the post-
+  // reservation gates and only advances to `submitted` once they all pass, and
+  // the retry sweep is submitted-only — so it never reaches the gateway.  Binding
+  // it would settle the intent against a transfer that did not happen (and leave
+  // it waiting for the stale-reservation sweep).  Rejected on BOTH callers — the
+  // client submit-replay AND the reconcile orphan sweep (which is `allowTerminal`,
+  // for a real failed/reverted attempt, NOT this never-started one) — so a dead
+  // reservation can never become an intent's submission.
+  if (action.submissionState === 'reserving') {
+    return tgErr(409, 'action_not_forwarded', 'This action was never submitted to the gateway.');
+  }
   // A DEAD action can settle nothing: manually binding a failed/reverted
   // record (a pre-retry attempt's corpse still matches every belongs-to
   // check) would drive a freshly retried intent straight back to its
   // terminal state, burning the retry budget without a transfer (W14).
   // The reconcile sweep is exempt: recovering the CURRENT attempt's action
-  // — whatever its state — is accurate bookkeeping (the attempt key keeps
-  // older attempts out of its reach).
+  // — whatever its state — is accurate bookkeeping (the payment-intent link
+  // is LIVE-only, so `knomosis_action_intent_uq` keeps at most this one
+  // attachable action; older attempts are dead and out of reach).
   if (
     opts?.allowTerminal !== true &&
     (action.submissionState === 'failed' || action.submissionState === 'reverted')
@@ -525,7 +759,7 @@ export async function attachIntentSubmission(
   if (
     action.roomId !== intent.roomId ||
     (intent.userId !== null && action.actorUserId !== intent.userId) ||
-    action.actionType !== ACTION_TYPE_FOR_TARGET[intent.targetType]
+    action.actionType !== ACTION_TYPE_FOR_PAYMENT_TARGET[intent.targetType]
   ) {
     return tgErr(422, 'action_mismatch', 'The action record does not belong to this intent.');
   }
@@ -540,7 +774,13 @@ export async function attachIntentSubmission(
   // The SIGNED TARGET must be this intent's target: with two same-shape
   // intents, a foreign grant/bounty/treasury action would otherwise settle
   // the wrong record (deposit intents carry the treasury id as their target).
-  const targetField = TARGET_FIELD_FOR_TARGET[intent.targetType];
+  // Every payment target settles through an action that names its target; an
+  // action with no target field cannot carry an intent at all, so an absent
+  // entry is a refusal, never a skipped check.
+  const targetField = TARGET_ID_FIELD_FOR_ACTION[ACTION_TYPE_FOR_PAYMENT_TARGET[intent.targetType]];
+  if (targetField === undefined) {
+    return tgErr(422, 'action_mismatch', 'This intent cannot be settled by a signed action.');
+  }
   const signedTarget = message[targetField];
   const expectedTarget =
     intent.targetType === 'treasury_deposit' ? intent.treasuryId : intent.targetId;
@@ -563,57 +803,18 @@ export async function attachIntentSubmission(
   if (action.deploymentId !== intentTreasury.deploymentId) {
     return tgErr(422, 'action_mismatch', 'The action belongs to a different deployment.');
   }
-  if (intent.targetType === 'grant_payout' || intent.targetType === 'steward_compensation') {
-    const grant = await deps.grants.getById(intent.targetId);
-    if (grant === null) {
-      return tgErr(422, 'action_mismatch', 'The payout intent has no backing grant.');
-    }
-    // A clawed-back grant must never receive a new settlement (W9).
-    if (grant.payoutState === 'clawed_back') {
-      return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; payouts are closed.');
-    }
-    const approvedRecipient = grant.recipientRef.toLowerCase();
-    const signedRecipient =
-      typeof message['recipient'] === 'string' ? message['recipient'].toLowerCase() : '';
-    if (/^0x[0-9a-f]{40}$/.test(approvedRecipient)) {
-      if (signedRecipient !== approvedRecipient) {
-        return tgErr(
-          422,
-          'action_mismatch',
-          'The signed recipient differs from the approved grant recipient.',
-        );
-      }
-    } else if (/^user:[0-9a-f-]{36}$/.test(grant.recipientRef)) {
-      // A `user:<id>` recipient binds to that member's LINKED wallets: the
-      // signed address must hash to one of them, or a same-grant/same-amount
-      // action could pay an unrelated address and still mark the grant paid
-      // (W11).  Addresses are stored hashed, so the comparison is keyed.
-      if (!/^0x[0-9a-f]{40}$/.test(signedRecipient)) {
-        return tgErr(422, 'action_mismatch', 'The signed recipient is not a valid address.');
-      }
-      const recipientUserId = grant.recipientRef.slice('user:'.length);
-      const linked = (await deps.wallets.listByUser(recipientUserId, false)).filter(
-        (w) => w.unlinkState === 'active',
-      );
-      const signedHash = hashFinancialWalletAddress(deps.masterSecret, signedRecipient);
-      if (!linked.some((w) => w.addressHashHex === signedHash)) {
-        return tgErr(
-          422,
-          'recipient_not_bound',
-          'The signed address is not a linked wallet of the approved recipient.',
-        );
-      }
-    } else {
-      // Any OTHER opaque ref (a co-op name, free text) has nothing to bind
-      // against — an on-chain payout cannot verify its destination, so the
-      // attach fails CLOSED.  Re-propose with an address or `user:` recipient.
-      return tgErr(
-        422,
-        'recipient_not_bound',
-        'This grant recipient cannot be bound to an on-chain address.',
-      );
-    }
-  }
+  // The signed payout must pay the grant's APPROVED recipient — the SAME binding
+  // the pre-forward intent-claim gate runs, from the one definition, so the two
+  // can never disagree about who a payout may pay.  A `user:<id>` recipient is
+  // bound to a wallet on the intent treasury's DEPLOYMENT CHAIN (the same chain
+  // the action rode, validated just above), never chain-agnostically.
+  const recipientError = await bindPayoutRecipient(
+    deps,
+    intent,
+    message,
+    pinnedDeployment(intentTreasury.deploymentId)?.chain_id,
+  );
+  if (recipientError !== null) return recipientError;
   // One WS-L action settles exactly ONE intent — a record already bound to
   // another intent would double-count a single transfer in the ledger/export.
   const alreadyBound = await deps.intents.findByActionRecordId(actionRecordId);
@@ -687,22 +888,16 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
     if (candidates.length === 0) break;
     afterId = candidates[candidates.length - 1]?.paymentIntentId ?? null;
     for (const intent of candidates) {
-      // AUTO-ATTACH recovery (W13): the client submits the WS-L action with
-      // idempotency key = the intent's ATTEMPT key (`intentActionIdempotencyKey`
-      // — the intent id, `:r<n>`-suffixed after a retry, W14), so a browser
-      // that died between submit and attach leaves a durable action the server
-      // can re-bind — the full attach validation (bindings, freeze, uniqueness)
-      // still applies, and the intent would otherwise expire while the
-      // transfer finalized off-ledger.  Room-owned payout intents (null owner:
-      // grant/compensation) recover through the room-scoped lookup — ANY
-      // steward's signed action under the attempt key qualifies (W14).
+      // AUTO-ATTACH recovery (W13): the client submits the WS-L action naming
+      // its `payment_intent_id`, so a browser that died between submit and
+      // attach leaves a durable action the server can re-bind by that link
+      // (`getByPaymentIntentId`, LIVE-only) — the full attach validation
+      // (bindings, freeze, uniqueness) still applies, and the intent would
+      // otherwise expire while the transfer finalized off-ledger.  The link is
+      // actor-agnostic, so a room-owned payout intent (null owner:
+      // grant/compensation) recovers ANY steward's signed action for it (W14).
       if (intent.executionState === 'signed') {
-        if (intent.actionRecordId !== null) continue;
-        const attemptKey = intentActionIdempotencyKey(intent);
-        const orphan =
-          intent.userId !== null
-            ? await deps.actions.getByIdempotencyKey(intent.userId, attemptKey)
-            : await deps.actions.getByRoomIdempotencyKey(intent.roomId, attemptKey);
+        const orphan = await orphanActionFor(deps, intent);
         if (orphan !== null) {
           const attached = await attachIntentSubmission(
             deps,
@@ -802,6 +997,13 @@ async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord):
  * cancellation path, W9): same table-checked + audited transition the expiry
  * sweep uses.  Post-submission states are untouched — an on-chain movement in
  * flight cannot be cancelled here; the attach/retry guards handle the rest.
+ *
+ * AND an intent whose money has moved is not abandonable — the same guard the
+ * expiry sweep applies (`orphanActionFor`).  `signed` is a timed state, so a
+ * clawback (or a user cancel) landing after the payout action was submitted but
+ * before the client/auto-attach bound it would otherwise reap the intent that
+ * `reconcileIntents` no longer scans, stranding the settled transfer outside
+ * the ledger and the accounting export.
  */
 export async function abandonOpenIntent(
   deps: IntentDeps,
@@ -809,18 +1011,92 @@ export async function abandonOpenIntent(
 ): Promise<boolean> {
   const intent = await deps.intents.getById(paymentIntentId);
   if (intent === null || !TIMED_STATES.has(intent.executionState)) return false;
+  if ((await orphanActionFor(deps, intent)) !== null) return false;
   return (await transitionIntent(deps, intent, 'abandoned', {}, null)) !== null;
 }
 
-/** The expiry sweep: timed pre-submission states past their TTL → abandoned. */
+/** Backstop on the expiry page loop (100k intents/run) — never an infinite sweep. */
+const MAX_EXPIRE_ROUNDS = 500;
+
+/** The expiry sweep: timed pre-submission states past their TTL → abandoned.
+ *  KEYSET-paged (paymentIntentId ascending) across bounded rounds, exactly like
+ *  the sibling `reconcileIntents`.  A single fixed page would abandon at most
+ *  `limit` rows per tick, and every un-reaped timed row (created/preflighted/
+ *  quoted/signed are all ALLOWANCE_STATES) keeps counting toward per-user/per-room
+ *  deposit caps until a LATER tick finally reaped it — so a burst of >`limit`
+ *  expired intents could wrongly block a member's fresh deposit for several ticks.
+ *  The cursor is essential, not decorative: a plain re-read-head loop that broke on
+ *  "no row abandoned this round" would STOP at a page filled with un-abandonable
+ *  `signed` orphans (an action on chain the next reconcile attaches), stranding
+ *  every expirable created/preflighted/quoted row sitting BEHIND them.  Keyset
+ *  paging PAGES PAST a skipped orphan (its id is below the advancing cursor) and
+ *  reaches the rows after it; abandoned rows simply leave the filter. */
 export async function expireIntents(deps: IntentDeps, limit = 200): Promise<number> {
-  const expired = await deps.intents.listExpired(new Date(deps.now()).toISOString(), limit);
+  const nowIso = new Date(deps.now()).toISOString();
   let abandoned = 0;
-  for (const intent of expired) {
-    const updated = await transitionIntent(deps, intent, 'abandoned', {}, null);
-    if (updated !== null) abandoned += 1;
+  let afterId: string | null = null;
+  for (let round = 0; round < MAX_EXPIRE_ROUNDS; round += 1) {
+    const expired = await deps.intents.listExpired(nowIso, limit, afterId);
+    if (expired.length === 0) break;
+    afterId = expired[expired.length - 1]?.paymentIntentId ?? null;
+    for (const intent of expired) {
+      // AN INTENT WHOSE MONEY HAS MOVED IS NOT ABANDONABLE.  `signed` is a timed
+      // state, so a client that died between submit and attach — the exact case
+      // W13's recovery exists for — leaves an intent that expires while its
+      // action sits on chain.  Reaping it destroys the only link back: the sweep
+      // that would have attached it only looks at `signed` intents, so it never
+      // sees an `abandoned` one again, and the transfer settles OUTSIDE the
+      // ledger and the accounting export with no error anywhere.
+      //
+      // The action is the evidence, so the reaper asks for it — by the same
+      // lookup the sweep uses, because the two must agree.  A skipped intent is
+      // not stuck: the cursor has already moved past it (so this sweep reaches the
+      // rows behind it), the next reconcile attaches it, and if the attach can
+      // never succeed (a binding mismatch) it stays visible as `signed` for an
+      // operator rather than disappearing into `abandoned`.
+      if ((await orphanActionFor(deps, intent)) !== null) continue;
+      const updated = await transitionIntent(deps, intent, 'abandoned', {}, null);
+      if (updated !== null) abandoned += 1;
+    }
+    if (expired.length < limit) break; // a short page ⇒ the expired set is drained
   }
   return abandoned;
+}
+
+/**
+ * The durable action a signed intent's client minted but never attached — the
+ * W13 recovery's evidence.  Found by the intent↔action link the submit stamps
+ * onto the action record (`payment_intent_id`); actor-agnostic, so it recovers a
+ * room-owned payout's action under ANY steward without a room-scoped lookup.
+ *
+ * A LIVE action is recovered at any retry count — `knomosis_action_intent_uq`
+ * scopes the live link to at most one, the SAME row the attach's uniqueness
+ * check collides on, so the sweep that ATTACHES and the reaper that must not
+ * DESTROY see exactly one.
+ *
+ * With NO live action, a TERMINAL action is recovered ONLY on the first attempt
+ * (`retryCount === 0`): a submit that failed/reverted before the browser
+ * attached is then unambiguously THIS attempt's, and recovering it lets the
+ * intent reach `failed`/`reverted` (retryable) instead of expiring off the
+ * ledger to `abandoned`.  Past a retry there is no attempt tag to tell the
+ * current attempt's corpse from a prior one, so a terminal action is NOT
+ * recovered there — doing so would re-bind the previous attempt in a loop; a
+ * post-retry crash+fail expires to `abandoned` (the caller already spent a retry).
+ *
+ * Null when there is nothing to recover: the intent is not `signed`, or it has
+ * already bound its action.
+ */
+async function orphanActionFor(
+  deps: IntentDeps,
+  intent: PaymentIntentRecord,
+): Promise<KnomosisActionRecordEntity | null> {
+  if (intent.executionState !== 'signed' || intent.actionRecordId !== null) return null;
+  const live = await deps.actions.getByPaymentIntentId(intent.paymentIntentId);
+  if (live !== null) return live;
+  if (intent.retryCount === 0) {
+    return await deps.actions.getLatestByPaymentIntentId(intent.paymentIntentId);
+  }
+  return null;
 }
 
 /** Bounded retry: `failed`/`reverted` → `created` (WS-M.3.1b, default 3). */
@@ -852,7 +1128,7 @@ export async function retryIntent(
   if (DEPOSIT_TARGETS.has(intent.targetType) && intent.userId !== null) {
     const treasury = await deps.treasuries.getById(intent.treasuryId);
     if (treasury === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
-    const allowance = await depositAllowance(deps, intent.roomId, intent.userId);
+    const allowance = await depositAllowance(deps, intent.roomId, intent.userId, intent.asset);
     if (allowance === null) return tgErr(404, 'no_treasury', 'This room has no treasury.');
     if (
       decCompare(intent.amount, allowance.userRemaining) > 0 ||
@@ -884,9 +1160,11 @@ export async function retryIntent(
     const treasury = await deps.treasuries.getById(updated.treasuryId);
     if (treasury !== null) {
       const periodStart = deps.now() - treasury.depositLimits.periodSeconds * 1000;
+      // Per-asset (see `depositAllowance`): raw minor units are not comparable
+      // across assets, so the re-verify aggregates only THIS asset's deposits.
       const inPeriod = (
         await deps.intents.listDepositsInPeriod(updated.roomId, new Date(periodStart).toISOString())
-      ).filter((row) => ALLOWANCE_STATES.has(row.executionState));
+      ).filter((row) => ALLOWANCE_STATES.has(row.executionState) && row.asset === updated.asset);
       const roomUsed = decSum(inPeriod.map((row) => row.amount));
       const userUsed = decSum(
         inPeriod.filter((row) => row.userId === updated.userId).map((row) => row.amount),
@@ -895,13 +1173,12 @@ export async function retryIntent(
         decCompare(userUsed, treasury.depositLimits.perUserPerPeriod) > 0 ||
         decCompare(roomUsed, treasury.depositLimits.perRoomPerPeriod) > 0
       ) {
-        await deps.intents.transition(
-          updated.paymentIntentId,
-          'created',
-          'abandoned',
-          {},
-          new Date(deps.now()).toISOString(),
-        );
+        // Through the AUDITED helper — a raw `intents.transition` here would skip
+        // the chained `payment_intent_transition` entry every other lifecycle move
+        // records, so the retry would be visibly `created` then silently
+        // `abandoned`.  A CAS miss (a concurrent move raced this row) still fails
+        // closed: the retry does not proceed.
+        await transitionIntent(deps, updated, 'abandoned', {}, actorUserId);
         return tgErr(
           409,
           'deposit_limit_exceeded',

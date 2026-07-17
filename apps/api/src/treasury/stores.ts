@@ -320,6 +320,21 @@ export interface PaymentIntentStore {
   /** Returns the EXISTING intent on an idempotency-key collision (WS-M.3.1c:
    *  the key row and the intent are one write — the unique index is the record). */
   insert(record: PaymentIntentRecord): Promise<PaymentIntentRecord>;
+  /** Remove a just-created intent that its OWN create call aborted atomically
+   *  (the post-insert allowance race, WS-M.3.1a): it has no audit, no action, and
+   *  no downstream reference, and abandoning it instead would leave a terminal
+   *  row holding the idempotency key — so a retry would replay a dead intent that
+   *  can never preflight/quote/submit.  Deleting frees the key so the retry mints
+   *  a fresh attempt.  NOT a general lifecycle delete: only the create's own
+   *  atomic rollback calls it. */
+  deleteById(paymentIntentId: string): Promise<boolean>;
+  /** CONDITIONAL rollback delete: remove the row ONLY if it is still the untouched
+   *  insert (`created` with no bound action).  The create-overshoot rollback uses
+   *  this so it cannot yank a row a concurrent idempotent replay already observed
+   *  and ADVANCED (e.g. preflighted) — that would leave the replay client with a
+   *  404/dangling id.  Returns false when the row changed (it now belongs to the
+   *  request that advanced it, and stays). */
+  deleteIfUntouched(paymentIntentId: string): Promise<boolean>;
   /** CAS state transition — the ONLY writer of executionState (WS-M.3.1b).
    *  Returns the updated record, or null when the stored state ≠ `from`. */
   transition(
@@ -358,8 +373,14 @@ export interface PaymentIntentStore {
   /** Data-rights scrub (W12): null the OWNER on every intent of a deleted
    *  user — the tombstoned users row never fires the FK's SET NULL. */
   anonymizeUser(userId: string): Promise<number>;
-  /** Timed-out pre-submission intents for the expiry sweep (WS-M.3.1b). */
-  listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]>;
+  /** Timed-out pre-submission intents for the expiry sweep (WS-M.3.1b) —
+   *  keyset-paged (paymentIntentId ascending) so a page of un-abandonable signed
+   *  orphans can never starve later expirable rows sitting BEHIND them. */
+  listExpired(
+    nowIso: string,
+    limit: number,
+    afterId?: string | null,
+  ): Promise<PaymentIntentRecord[]>;
   /** Post-submission intents to reconcile against their action records —
    *  keyset-paged (paymentIntentId ascending) so a stuck first slice can
    *  never starve later reconcilable rows. */
@@ -368,6 +389,20 @@ export interface PaymentIntentStore {
     limit: number,
     afterId?: string | null,
   ): Promise<PaymentIntentRecord[]>;
+  /** Intents in one COMPLIANCE state (the WS-N.2.2c fraud-queue read). */
+  listByComplianceState(
+    state: PaymentIntentRecord['complianceState'],
+    limit: number,
+  ): Promise<PaymentIntentRecord[]>;
+  /** CAS on the ORTHOGONAL compliance column (WS-N.2.2c release/reject:
+   *  flagged → cleared/blocked) — never touches executionState.  Returns
+   *  null when the stored compliance state ≠ `from`. */
+  updateComplianceState(
+    paymentIntentId: string,
+    from: PaymentIntentRecord['complianceState'],
+    to: PaymentIntentRecord['complianceState'],
+    updatedAt: string,
+  ): Promise<PaymentIntentRecord | null>;
   clear(): Promise<void>;
 }
 
@@ -749,12 +784,35 @@ export class InMemoryReservationStore implements ReservationStore {
   }
 }
 
+/** Execution states an intent can never leave — it can neither quote/submit nor
+ *  be recovered.  A row in one of these is done: it must not appear in a LIVE
+ *  view (the fraud queue) or be replayed as a usable intent. */
+export const TERMINAL_INTENT_STATES: ReadonlySet<PaymentIntentState> = new Set([
+  'finalized',
+  'abandoned',
+  'failed',
+  'reverted',
+  'reorged',
+]);
+
 export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   readonly #rows = new Map<string, PaymentIntentRecord>();
 
   async getById(paymentIntentId: string): Promise<PaymentIntentRecord | null> {
     const row = this.#rows.get(paymentIntentId);
     return row ? clone(row) : null;
+  }
+
+  async deleteById(paymentIntentId: string): Promise<boolean> {
+    return this.#rows.delete(paymentIntentId);
+  }
+
+  async deleteIfUntouched(paymentIntentId: string): Promise<boolean> {
+    const row = this.#rows.get(paymentIntentId);
+    if (row === undefined || row.executionState !== 'created' || row.actionRecordId !== null) {
+      return false;
+    }
+    return this.#rows.delete(paymentIntentId);
   }
 
   async findByIdempotencyKey(
@@ -892,10 +950,16 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
     return scrubbed;
   }
 
-  async listExpired(nowIso: string, limit: number): Promise<PaymentIntentRecord[]> {
+  async listExpired(
+    nowIso: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<PaymentIntentRecord[]> {
     const timed: PaymentIntentState[] = ['created', 'preflighted', 'quoted', 'signed'];
     return [...this.#rows.values()]
       .filter((r) => timed.includes(r.executionState) && r.expiresAt <= nowIso)
+      .sort((a, b) => (a.paymentIntentId < b.paymentIntentId ? -1 : 1))
+      .filter((r) => afterId === null || r.paymentIntentId > afterId)
       .slice(0, limit)
       .map(clone);
   }
@@ -911,6 +975,43 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
       .filter((r) => afterId === null || r.paymentIntentId > afterId)
       .slice(0, limit)
       .map(clone);
+  }
+
+  async listByComplianceState(
+    state: PaymentIntentRecord['complianceState'],
+    limit: number,
+  ): Promise<PaymentIntentRecord[]> {
+    // LIVE only — a fraud-held intent that expired/clawed back to a terminal
+    // state (its `complianceState` still `flagged`) must not ride the fraud
+    // queue: the reviewer would see a row they cannot release (it can no longer
+    // quote or submit), and stale rows would consume the page ahead of live
+    // held payments.  Filtered BEFORE the slice so the cap bounds live rows.
+    return [...this.#rows.values()]
+      .filter((r) => r.complianceState === state && !TERMINAL_INTENT_STATES.has(r.executionState))
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+      .slice(0, limit)
+      .map(clone);
+  }
+
+  async updateComplianceState(
+    paymentIntentId: string,
+    from: PaymentIntentRecord['complianceState'],
+    to: PaymentIntentRecord['complianceState'],
+    updatedAt: string,
+  ): Promise<PaymentIntentRecord | null> {
+    const row = this.#rows.get(paymentIntentId);
+    // CAS on the compliance column AND a LIVE execution state: a review decision
+    // (release/reject) must not flip the column of an intent the expiry/clawback
+    // path terminal-ized between the reviewer's read and this write — a
+    // `flagged → cleared` on an `abandoned`/`failed` row would report the transfer
+    // released while it can never quote or submit.  A terminal row fails the CAS
+    // (→ null → 409), the same as a compliance-state mismatch.
+    if (!row || row.complianceState !== from || TERMINAL_INTENT_STATES.has(row.executionState)) {
+      return null;
+    }
+    row.complianceState = to;
+    row.updatedAt = updatedAt;
+    return clone(row);
   }
 
   async clear(): Promise<void> {

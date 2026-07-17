@@ -349,6 +349,7 @@ describe('writability guard + intent limits (WS-M.2.4a-1 / 3.1)', () => {
 
     const wrongAsset = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -360,6 +361,7 @@ describe('writability guard + intent limits (WS-M.2.4a-1 / 3.1)', () => {
 
     const overMax = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -371,6 +373,7 @@ describe('writability guard + intent limits (WS-M.2.4a-1 / 3.1)', () => {
 
     const missingTreasury = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: randomUUID(), // a room with no treasury
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -383,6 +386,7 @@ describe('writability guard + intent limits (WS-M.2.4a-1 / 3.1)', () => {
     // Retry is bounded: an intent at the max retry count refuses another.
     const created = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -425,6 +429,7 @@ describe('accounting export (WS-M.5.2b)', () => {
     // is excluded and counted, never silently included.
     const created = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -628,6 +633,7 @@ describe('second review wave (PR #144): TTL, freeze re-checks, grant-failure ord
     const treasury = await provisionTreasury(services);
     const created = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -661,6 +667,7 @@ describe('second review wave (PR #144): TTL, freeze re-checks, grant-failure ord
     const treasury = await provisionTreasury(services);
     const created = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1002,6 +1009,7 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
     const key = randomUUID();
     const first = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1024,6 +1032,7 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
     // after the original create must not hide it.
     const replay = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1037,6 +1046,7 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
     // A NEW intent is still refused while frozen.
     const fresh = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1074,22 +1084,39 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
         return typeof value === 'function' ? value.bind(target) : value;
       },
     });
+    const key = randomUUID();
     const result = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
       asset: 'USDC',
       amount: '100',
-      idempotencyKey: randomUUID(),
+      idempotencyKey: key,
     });
     expect('code' in result && result.code).toBe('deposit_limit_exceeded');
     services.intents = raw;
-    // The overshooting row abandoned ITSELF — the competitor survives.
+    // The overshooting row DELETED itself (not abandoned) — no terminal row is
+    // left holding the idempotency key.  The competitor survives.
     const epoch = new Date(0).toISOString();
     const rows = await services.intents.listDepositsInPeriod(ROOM, epoch);
-    expect(rows.find((r) => r.amount === '100')?.executionState).toBe('abandoned');
+    expect(rows.find((r) => r.amount === '100')).toBeUndefined();
     expect(rows.find((r) => r.amount === '950')?.executionState).toBe('created');
+    // A retry with the SAME key does NOT replay a dead abandoned intent as a
+    // successful create: the key is free, so the create re-runs and answers the
+    // allowance honestly (never `{ ok: true, existing: true }` for a terminal row).
+    const retry = await createPaymentIntent(services, {
+      userId: USER,
+      actorUserId: USER,
+      roomId: ROOM,
+      targetType: 'treasury_deposit',
+      targetId: treasury.treasuryId,
+      asset: 'USDC',
+      amount: '100',
+      idempotencyKey: key,
+    });
+    expect('code' in retry && retry.code).toBe('deposit_limit_exceeded');
   });
 
   it('self-releases a reservation that a concurrent approval pushed over the window cap', async () => {
@@ -1211,6 +1238,7 @@ describe('fourth review wave (PR #144): races, freezes, attestations, exports', 
     const treasury = await provisionTreasury(services);
     const created = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1421,6 +1449,7 @@ describe('fifth review wave (PR #144): clawback, freezes, CAS tokens, owner pref
     const treasury = await provisionTreasury(services);
     const created = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1453,6 +1482,7 @@ describe('fifth review wave (PR #144): clawback, freezes, CAS tokens, owner pref
     const make = () =>
       createPaymentIntent(services, {
         userId: null,
+        actorUserId: USER,
         roomId: ROOM,
         targetType: 'grant_payout',
         targetId: randomUUID(),
@@ -1472,6 +1502,7 @@ describe('fifth review wave (PR #144): clawback, freezes, CAS tokens, owner pref
     expect(
       await createPaymentIntent(services, {
         userId: null,
+        actorUserId: USER,
         roomId: ROOM,
         targetType: 'treasury_deposit',
         targetId: randomUUID(),
@@ -1490,6 +1521,7 @@ describe('sixth review wave (PR #144): deposit retry caps', () => {
     const treasury = await provisionTreasury(services); // perUserPerPeriod 1000
     const created = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1515,6 +1547,7 @@ describe('sixth review wave (PR #144): deposit retry caps', () => {
     for (let i = 0; i < 10; i += 1) {
       const filler = await createPaymentIntent(services, {
         userId: USER,
+        actorUserId: USER,
         roomId: ROOM,
         targetType: 'treasury_deposit',
         targetId: treasury.treasuryId,
@@ -1542,6 +1575,7 @@ describe('seventh review wave (PR #144): divergence halts funds, freeze-safe poi
     // No operator freeze happened — the divergence ALONE halts fund movement.
     const deposit = await createPaymentIntent(services, {
       userId: USER,
+      actorUserId: USER,
       roomId: ROOM,
       targetType: 'treasury_deposit',
       targetId: treasury.treasuryId,
@@ -1560,6 +1594,7 @@ describe('seventh review wave (PR #144): divergence halts funds, freeze-safe poi
     expect(
       await createPaymentIntent(services, {
         userId: USER,
+        actorUserId: USER,
         roomId: ROOM,
         targetType: 'treasury_deposit',
         targetId: treasury.treasuryId,

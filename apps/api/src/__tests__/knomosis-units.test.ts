@@ -79,6 +79,7 @@ const baseAction = (
   indexedEventRef: null,
   reconciliationState: 'pending',
   idempotencyKey: crypto.randomUUID(),
+  paymentIntentId: null,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
   ...over,
@@ -258,6 +259,7 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
       indexedEventRef: null,
       reconciliationState: 'matched',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -796,7 +798,14 @@ describe('ports (WS-L.3.1b / §19.1 region)', () => {
     expect(
       await defaultCompliancePort.screenAddress({ addressLower: '0x', deploymentId: 'd' }),
     ).toBe('unavailable');
-    expect(await defaultCompliancePort.jurisdiction({ userId: 'u', region: null })).toBe('unknown');
+    expect(
+      await defaultCompliancePort.jurisdiction({
+        userId: 'u',
+        region: null,
+        featureCell: null,
+        asset: null,
+      }),
+    ).toBe('unknown');
     expect(await defaultCompliancePort.walletRisk({ walletAccountId: 'w', userId: 'u' })).toBe(
       'unavailable',
     );
@@ -1065,6 +1074,263 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
     log: fixture.knomosis.log,
   });
 
+  it('ONE action per payment intent: a second reservation replays the winner', async () => {
+    const { InMemoryKnomosisActionStore } = await import('../knomosis/stores.js');
+    const store = new InMemoryKnomosisActionStore();
+    const INTENT = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const base = {
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      actionType: 'treasury_deposit' as const,
+      roomId: '33333333-3333-4333-8333-333333333333',
+      actorWalletAccountId: 'w1',
+      payloadHash: '0xaa',
+      typedDataHash: '0xbb',
+      signedAction: { message: {}, signature: '0x' },
+      submissionState: 'reserving' as const,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending' as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await store.insert({
+      ...base,
+      actionRecordId: 'a1',
+      actorUserId: 'steward-a',
+      idempotencyKey: INTENT,
+      paymentIntentId: INTENT,
+    });
+    // A DIFFERENT steward, with their own actor-scoped key, settling the SAME
+    // intent.  The `(actor, key)` unique cannot see this — it is actor-scoped
+    // on purpose — so without the intent unique both would reserve, both would
+    // forward under their own gateway key, and both would move funds while only
+    // one could ever attach to the intent's ledger.
+    await expect(
+      store.insert({
+        ...base,
+        actionRecordId: 'a2',
+        actorUserId: 'steward-b',
+        idempotencyKey: INTENT,
+        paymentIntentId: INTENT,
+      }),
+    ).rejects.toThrow(/unique constraint violated: knomosis_action_intent_uq/);
+    // …and the loser can find the winner, which is what turns the lost race
+    // into an idempotent replay rather than an error.
+    expect((await store.getByPaymentIntentId(INTENT))?.actionRecordId).toBe('a1');
+
+    // A DEAD attempt releases the intent.  `retryIntent` re-arms a
+    // failed/reverted intent (`failed|reverted → created`) and the next attempt
+    // mints a REPLACEMENT under its OWN fresh key (W14) — an index spanning every
+    // state would collide with the corpse and replay it, stranding the retry.
+    const attempt0 = await store.getById('a1');
+    if (attempt0 === null) throw new Error('attempt 0 missing');
+    await store.update({ ...attempt0, submissionState: 'failed' });
+    expect(await store.getByPaymentIntentId(INTENT)).toBeNull(); // no live action
+    await store.insert({
+      ...base,
+      actionRecordId: 'a5',
+      actorUserId: 'steward-a',
+      idempotencyKey: '11111111-1111-4111-8111-111111111111',
+      paymentIntentId: INTENT,
+    });
+    expect((await store.getByPaymentIntentId(INTENT))?.actionRecordId).toBe('a5');
+    // …and the replacement is itself exclusive while it lives — the collision is
+    // on the intent link, whatever key the second submitter chose.
+    await expect(
+      store.insert({
+        ...base,
+        actionRecordId: 'a6',
+        actorUserId: 'steward-b',
+        idempotencyKey: '22222222-2222-4222-8222-222222222222',
+        paymentIntentId: INTENT,
+      }),
+    ).rejects.toThrow(/unique constraint violated/);
+
+    // A direct action (no intent) is unaffected: two actors, same key, fine.
+    await store.insert({
+      ...base,
+      actionRecordId: 'a3',
+      actorUserId: 'u1',
+      idempotencyKey: 'k',
+      paymentIntentId: null,
+    });
+    await store.insert({
+      ...base,
+      actionRecordId: 'a4',
+      actorUserId: 'u2',
+      idempotencyKey: 'k',
+      paymentIntentId: null,
+    });
+    expect((await store.getById('a4'))?.actorUserId).toBe('u2');
+  });
+
+  it('an intent’s action replays BEFORE the mint-only gates, so a recovery cannot be locked out', async () => {
+    const fixture = await freshKnomosisServices();
+    const INTENT = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    // Steward A already submitted and forwarded this room-owned payout.
+    await fixture.knomosis.actions.insert({
+      actionRecordId: 'winner',
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      actionType: 'grant_payout',
+      roomId: '33333333-3333-4333-8333-333333333333',
+      actorWalletAccountId: 'wallet-a',
+      actorUserId: 'steward-a',
+      payloadHash: '0xaa',
+      typedDataHash: '0xbb',
+      signedAction: { message: {}, signature: '0x' },
+      submissionState: 'submitted',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: INTENT,
+      paymentIntentId: INTENT,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // Steward B recovers, under their OWN actor scope — and would fail every
+    // mint-only gate: no wallet, no room port, a junk token, an empty payload.
+    // None of that applies to an action that already exists and may be on
+    // chain; B needs its id to attach the intent, and the insert conflict that
+    // used to be the only replay is far past all those gates.
+    const { submitAction } = await import('../knomosis/submission.js');
+    const result = await submitAction(s(fixture), {
+      userId: 'steward-b',
+      preflightToken: 'nonexistent-token',
+      // Steward B's OWN free idempotency key — the replay is found by the
+      // payment_intent_id link, not by any shared/derived key.
+      idempotencyKey: '44444444-4444-4444-8444-444444444444',
+      actionType: 'grant_payout',
+      roomId: '33333333-3333-4333-8333-333333333333',
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      walletAccountId: 'wallet-b',
+      paymentIntentId: INTENT,
+      typedDataMessage: {},
+      signature: '0x',
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.actionRecordId).toBe('winner');
+      expect(result.submissionState).toBe('submitted');
+      expect(result.replayed).toBe(true);
+    }
+  });
+
+  it('the preflight token BINDS the intent it was cleared under', async () => {
+    const { buildPreflightBinding, preflightBindingMismatch } = await import(
+      '../knomosis/preflight.js'
+    );
+    const INTENT = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const OTHER = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const base = {
+      userId: 'u1',
+      actionType: 'treasury_deposit' as const,
+      roomId: 'r1',
+      deploymentId: 'd1',
+      walletAccountId: 'w1',
+      typedDataHash: '0xbb',
+    };
+    const bound = buildPreflightBinding({ ...base, paymentIntentId: INTENT });
+    // The same submission passes.
+    expect(
+      preflightBindingMismatch(bound, buildPreflightBinding({ ...base, paymentIntentId: INTENT })),
+    ).toBeNull();
+    // DROPPING the intent must not pass: submit would re-run the fraud check
+    // under the typed-data hash instead — a different review from the one this
+    // token was cleared under — and forward a direct action while the signed
+    // intent stays unattached.
+    expect(preflightBindingMismatch(bound, buildPreflightBinding(base))).not.toBeNull();
+    // …and neither must SWAPPING it.
+    expect(
+      preflightBindingMismatch(bound, buildPreflightBinding({ ...base, paymentIntentId: OTHER })),
+    ).not.toBeNull();
+    // A token minted with no intent may not acquire one at submit.
+    expect(
+      preflightBindingMismatch(
+        buildPreflightBinding(base),
+        buildPreflightBinding({ ...base, paymentIntentId: INTENT }),
+      ),
+    ).not.toBeNull();
+  });
+
+  it('a bogus token reaches NO mutable compliance check (WS-N.2.2a/b)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => true,
+      contentVisibleToUser: async () => true,
+    };
+    await fixture.knomosis.wallets.insert({
+      walletAccountId: 'w1',
+      userId: 'u1',
+      addressHashHex: 'deadbeef',
+      addressTruncated: '0x00…00',
+      chainId: LOCAL_DEPLOYMENT.chain_id,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date().toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    // Count every MUTATING compliance call: `screenAddress` opens a sanctions
+    // case and caches a verdict; `fraudRisk` reserves a velocity check (which a
+    // room payout spends from the ROOM's window) and opens a high-value review.
+    let screened = 0;
+    let fraudChecked = 0;
+    fixture.knomosis.compliance = {
+      screenAddress: async () => {
+        screened += 1;
+        return 'clear' as const;
+      },
+      fraudRisk: async () => {
+        fraudChecked += 1;
+        return 'normal' as const;
+      },
+      jurisdiction: async () => 'allowed' as const,
+      walletRisk: async () => ({ state: 'normal' as const, explanation: 'ok', nextStep: null }),
+    };
+    const { submitAction } = await import('../knomosis/submission.js');
+    const result = await submitAction(s(fixture), {
+      userId: 'u1',
+      preflightToken: 'nonexistent-token',
+      idempotencyKey: crypto.randomUUID(),
+      actionType: 'treasury_deposit',
+      roomId: '33333333-3333-4333-8333-333333333333',
+      deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      walletAccountId: 'w1',
+      typedDataMessage: {
+        roomId: '33333333-3333-4333-8333-333333333333',
+        treasuryId: '44444444-4444-4444-8444-444444444444',
+        asset: 'USDC',
+        amount: '1000000',
+        actor: '0x0000000000000000000000000000000000000001',
+        nonce: '1',
+        expiration: String(Math.floor(Date.now() / 1000) + 600),
+        deploymentId: LOCAL_DEPLOYMENT.deployment_id,
+      },
+      signature: '0x',
+    });
+    // The submission fails at the token gate, as it always would have…
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('PREFLIGHT_EXPIRED');
+    // …but it never touched compliance on the way.  An authorized member could
+    // otherwise sign arbitrary payloads, submit them with junk tokens, and
+    // pollute the review queue / burn velocity budget on requests that were
+    // always going to be rejected.
+    expect(screened).toBe(0);
+    expect(fraudChecked).toBe(0);
+    // The failure is still AUDITED: the reservation exists and is `failed`, so
+    // a retry replays it rather than re-processing.
+    const reserved = (await fixture.knomosis.actions.listByActor('u1', 10)).find(
+      (r) => r.actorWalletAccountId === 'w1',
+    );
+    expect(reserved?.submissionState).toBe('failed');
+  });
+
   it('a missing preflight token is rejected (PREFLIGHT_EXPIRED)', async () => {
     const fixture = await freshKnomosisServices();
     // The pre-reservation gates (deployment/wallet/room) now run BEFORE the
@@ -1267,6 +1533,7 @@ describe('submission fail-closed paths (WS-L.3.2)', () => {
           indexedEventRef: null,
           reconciliationState: 'pending',
           idempotencyKey: crypto.randomUUID(),
+          paymentIntentId: null,
           createdAt,
           updatedAt: createdAt,
         })

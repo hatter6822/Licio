@@ -463,6 +463,7 @@ describe('WS-L.2.5b unlink lifecycle + WS-L.2.5c list/label', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -532,6 +533,112 @@ describe('WS-L.2.5b unlink lifecycle + WS-L.2.5c list/label', () => {
     expect(assessed.ok && assessed.riskState).toBe('elevated');
     const stored = await fixture.knomosis.wallets.getById(linked.wallet.walletAccountId);
     expect(stored?.riskState).toBe('elevated');
+  });
+
+  it('records a link-time `clear` by promoting the wallet out of pending (thread-Y)', async () => {
+    const fixture = await freshKnomosisServices();
+    fixture.knomosis.compliance = {
+      ...fixture.knomosis.compliance,
+      screenAddress: async () => 'clear',
+    };
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1');
+    if (!linked.ok) throw new Error('link failed');
+    // A `clear` verdict at link — the one moment the plaintext address exists —
+    // is the ONLY thing that lifts the fail-closed `pending` state, and it does
+    // so HERE (recorded on the stored row), not from a later absence of signals.
+    expect(linked.wallet.riskState).toBe('normal');
+    const stored = await fixture.knomosis.wallets.getById(linked.wallet.walletAccountId);
+    expect(stored?.riskState).toBe('normal');
+  });
+
+  it('an unscreened link (screening unavailable) is never promoted to normal by an absence-of-signal read-through (thread-Y)', async () => {
+    const fixture = await freshKnomosisServices();
+    // The default port screens `unavailable` (no provider): the link records no
+    // clearance, so the wallet stays fail-closed `pending`.
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1');
+    if (!linked.ok) throw new Error('link failed');
+    expect(linked.wallet.riskState).toBe('pending');
+
+    const deps = walletDeps(fixture);
+    // The WS-N engine recovers and reports `normal` — but that is derived from
+    // the ABSENCE of pins and cases, which is equally true of a wallet that was
+    // NEVER screened.  It must not lift the still-unscreened `pending` wallet
+    // (the pre-fix fail-open: a wallet could move funds having never been cleared).
+    deps.compliance = {
+      ...deps.compliance,
+      walletRisk: async () => ({
+        state: 'normal',
+        explanation: 'No elevated risk signals are associated with this wallet.',
+        nextStep: null,
+      }),
+    };
+    const read = await walletRiskState(deps, {
+      userId,
+      walletAccountId: linked.wallet.walletAccountId,
+    });
+    expect(read.ok && read.riskState).toBe('pending');
+    // The owner-readable copy stays the pending explanation, not "no elevated risk".
+    expect(read.ok && read.explanation).toContain('not completed its first risk assessment');
+    const stored = await fixture.knomosis.wallets.getById(linked.wallet.walletAccountId);
+    expect(stored?.riskState).toBe('pending');
+
+    // …yet a genuine ESCALATION still applies to a pending wallet (strictly more
+    // restrictive is always safe).
+    deps.compliance = {
+      ...deps.compliance,
+      walletRisk: async () => ({
+        state: 'high',
+        explanation: 'This wallet is currently restricted from financial actions pending review.',
+        nextStep: 'Contact support to resolve the restriction.',
+      }),
+    };
+    const escalated = await walletRiskState(deps, {
+      userId,
+      walletAccountId: linked.wallet.walletAccountId,
+    });
+    expect(escalated.ok && escalated.riskState).toBe('high');
+  });
+
+  it('a link-time `blocked` keeps the wallet pending and fires the sanctions hook (thread-Y)', async () => {
+    const fixture = await freshKnomosisServices();
+    const alerts: string[] = [];
+    fixture.knomosis.alert = (event) => alerts.push(event);
+    fixture.knomosis.compliance = {
+      ...fixture.knomosis.compliance,
+      screenAddress: async () => 'blocked',
+    };
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const linked = await linkTestWallet(fixture, userId, 's1');
+    if (!linked.ok) throw new Error('link failed');
+    // A sanctions hit never promotes out of pending; the operator is alerted.
+    expect(linked.wallet.riskState).toBe('pending');
+    expect(alerts).toContain('knomosis.wallet.link_sanctioned');
+  });
+
+  it('an active pending re-link re-screens so a recovered provider can clear it (thread wallet.ts:308)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // First link: the default port screens `unavailable`, so the wallet stays
+    // fail-closed `pending` (and the read-through refuses to promote it — thread-Y).
+    const first = await linkTestWallet(fixture, userId, 's1');
+    if (!first.ok) throw new Error('first link failed');
+    expect(first.wallet.riskState).toBe('pending');
+    // The provider recovers; a re-link of the SAME active address now screens
+    // `clear`.  Without re-screening on the already-linked branch this wallet
+    // would be fund-blocked forever (no unlink→finalize→relink), so the re-link
+    // must re-run link-time screening.
+    fixture.knomosis.compliance = {
+      ...fixture.knomosis.compliance,
+      screenAddress: async () => 'clear',
+    };
+    const second = await linkTestWallet(fixture, userId, 's2');
+    if (!second.ok) throw new Error('relink failed');
+    expect(second.alreadyLinked).toBe(true); // the idempotent active re-link branch
+    expect(second.wallet.riskState).toBe('normal'); // …but it re-screened and cleared
+    const stored = await fixture.knomosis.wallets.getById(second.wallet.walletAccountId);
+    expect(stored?.riskState).toBe('normal');
   });
 
   it('link attempts are rate-limited and fire an integrity alert (WS-L.2.5d)', async () => {

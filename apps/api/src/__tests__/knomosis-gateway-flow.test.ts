@@ -201,7 +201,7 @@ describe('WS-L.3.1 preflight pipeline', () => {
     walletRisk: async () => ({ state: 'normal', explanation: 'cleared', nextStep: null }),
   };
 
-  it('REFRESHES a pending wallet risk via the WS-N seam and passes once cleared (G3)', async () => {
+  it('does NOT clear a pending wallet from an absence-of-signal read-through; a genuinely cleared wallet passes (G3, thread-Y)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     fixture.knomosis.rooms = {
@@ -210,15 +210,25 @@ describe('WS-L.3.1 preflight pipeline', () => {
       isSteward: async () => false,
       contentVisibleToUser: async () => true,
     };
+    // An UNSCREENED `pending` wallet: the link-time screening was unavailable, so
+    // no clearance was ever recorded.
     const walletAccountId = await linkWalletDirectly(fixture, userId, 'pending');
-    // The WS-N engine CLEARS the wallet (and the downstream compliance gates).
+    // The WS-N engine reports `normal` — but that is derived from the ABSENCE of
+    // pins/cases, which is equally true of a wallet that was NEVER screened.  It
+    // must NOT clear `pending`, so the fund transfer stays RISK_BLOCKED.
     fixture.knomosis.compliance = clearCompliance;
     const req = await buildDeposit(userId, walletAccountId);
-    const result = await runPreflight(preflightDeps(fixture), req);
-    // The read-through refresh cleared `pending`→`normal`, so it is NOT RISK_BLOCKED.
-    expect(result.result).toBe('pass');
-    // The refreshed state is PERSISTED (the wallet UI + future actions see it).
-    expect((await fixture.knomosis.wallets.getById(walletAccountId))?.riskState).toBe('normal');
+    const blocked = await runPreflight(preflightDeps(fixture), req);
+    expect(blocked.result).toBe('fail');
+    if (blocked.result === 'fail') expect(blocked.reason_code).toBe('RISK_BLOCKED');
+    // Nothing here certified it — the wallet stays fail-closed `pending`.
+    expect((await fixture.knomosis.wallets.getById(walletAccountId))?.riskState).toBe('pending');
+
+    // A GENUINE clearance — what a link-time `clear` screening records — lifts the
+    // wallet to `normal`; the SAME deposit then passes the preflight risk gate.
+    await fixture.knomosis.wallets.updateRiskState(walletAccountId, 'normal', 'pending');
+    const passed = await runPreflight(preflightDeps(fixture), req);
+    expect(passed.result).toBe('pass');
   });
 
   it('RE-ASSESSES a NON-pending wallet risk for a fund transfer — a since-HIGH wallet blocks (M6)', async () => {
@@ -952,6 +962,56 @@ describe('WS-L.3.2 submission + state machine', () => {
     expect(await fixture.knomosis.actions.listByRoom(ROOM, 100)).toHaveLength(1);
   });
 
+  it('a `reserving` idempotency-key replay returns a RETRYABLE error, never an attachable dead reservation (thread submission.ts:237)', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    const { pre, req } = await preflightPass(fixture, userId, walletAccountId);
+    const idem = crypto.randomUUID();
+    // A prior submit crashed AFTER reserving the idempotency key but BEFORE the
+    // reserving→submitted promotion — the row is stuck `reserving`, and the retry
+    // sweep is submitted-only, so it never forwarded and never will.
+    await fixture.knomosis.actions.insert({
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      actorWalletAccountId: walletAccountId,
+      actorUserId: userId,
+      payloadHash: `0x${'11'.repeat(32)}`,
+      typedDataHash: `0x${'22'.repeat(32)}`,
+      signedAction: { message: req.typedDataMessage, signature: req.signature },
+      submissionState: 'reserving',
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: idem,
+      paymentIntentId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // The retry with the SAME key must NOT return an ok replay (which the deposit
+    // flow treats as attachable and binds to the intent) — it is a retryable error.
+    const result = await submitAction(submissionDeps(fixture), {
+      userId,
+      preflightToken: pre.preflight_token,
+      idempotencyKey: idem,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: req.typedDataMessage,
+      signature: req.signature,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe(503);
+    // The dead reservation was left untouched for the stale-reservation sweep —
+    // never advanced, never replayed as complete.
+    const rows = await fixture.knomosis.actions.listByRoom(ROOM, 100);
+    expect(rows.filter((r) => r.idempotencyKey === idem)).toHaveLength(1);
+    expect(rows.find((r) => r.idempotencyKey === idem)?.submissionState).toBe('reserving');
+  });
+
   it('a production proposal_sign submit records the ACTION but no ledger row (W14)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
@@ -1350,6 +1410,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'matched',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -1385,6 +1446,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
         indexedEventRef: null,
         reconciliationState: 'matched',
         idempotencyKey: `idem-${i}`,
+        paymentIntentId: null,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
@@ -1395,7 +1457,11 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     // re-reconciliation set), so none is left silently skipped as clean.
     const pending = await fixture.knomosis.actions.listUnreconciled(DEPLOYMENT, TOTAL + 10);
     expect(pending).toHaveLength(TOTAL);
-  });
+    // 10_001 sequential in-memory inserts + a full multi-page rebuild is legitimately
+    // heavy, and V8 coverage instrumentation in CI pushes it past the 5s default —
+    // give it room (house convention for the large-dataset suites) rather than let a
+    // load-sensitive timeout flake the run.
+  }, 30_000);
 
   it('a post-reorg revert event flips the action to reverted and updates receipts', async () => {
     const fixture = await freshKnomosisServices();
@@ -1581,6 +1647,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1655,6 +1722,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1726,6 +1794,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1783,6 +1852,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1882,6 +1952,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -1962,6 +2033,7 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     indexedEventRef: null,
     reconciliationState: 'pending',
     idempotencyKey: crypto.randomUUID(),
+    paymentIntentId: null,
     createdAt,
     updatedAt: createdAt,
   });

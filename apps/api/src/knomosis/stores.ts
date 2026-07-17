@@ -24,6 +24,7 @@ import type {
   WalletAccountType,
   WalletRiskState,
 } from '@licio/shared';
+import { UniqueViolationError } from '../lib/pg-errors.js';
 
 type Clock = () => number;
 const iso = (now: Clock): string => new Date(now()).toISOString();
@@ -64,6 +65,17 @@ export interface KnomosisDeploymentRecord {
   createdAt: string;
 }
 
+/**
+ * Action states in which the attempt is DEAD and its intent is free to be
+ * retried (`retryIntent`: `failed|reverted -> created`, WS-M.3.1b).
+ *
+ * ONE definition, matching migration 0089's partial index exactly: the index
+ * decides which reservations collide, and this decides which the in-memory
+ * adapter collides and which the replay read returns — three answers that must
+ * be the same answer.
+ */
+export const DEAD_ACTION_STATES: ReadonlySet<SubmissionState> = new Set(['failed', 'reverted']);
+
 export interface KnomosisActionRecordEntity {
   actionRecordId: string;
   deploymentId: string;
@@ -87,6 +99,12 @@ export interface KnomosisActionRecordEntity {
   indexedEventRef: string | null;
   reconciliationState: ReconciliationState;
   idempotencyKey: string;
+  /** The WS-M payment intent this action settles, when it settles one.  ONE
+   *  action per intent is a DB partial unique (migration 0089): the intent is
+   *  the exclusive resource, so a second reservation for it loses the insert
+   *  and replays the winner — whoever submitted it, under whatever key.  Null
+   *  for a direct action, which carries only its actor-scoped key. */
+  paymentIntentId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -337,10 +355,13 @@ export interface FinancialWalletStore {
    *  A risk read-through (preflight / risk-state route) can overlap another wallet
    *  mutation (e.g. an unlink), so writing back a stale full snapshot would clobber
    *  the lifecycle fields and silently cancel the audited unlink; a column-scoped
-   *  update touches nothing else. */
+   *  update touches nothing else.  When `expected` is given the write is a CAS —
+   *  it applies only if the current `riskState` equals it (the link-time `clear`
+   *  promotes `pending`→`normal` without clobbering a racing escalation). */
   updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void>;
   /** Update ONLY the `label` column (WS-L.2.5c) — never a full-record write.  A
    *  label edit can overlap an unlink/risk mutation, so a stale full snapshot would
@@ -358,6 +379,15 @@ export interface FinancialWalletStore {
     expectedFinalizeAfter: string | null,
     unlinkedAtIso: string,
   ): Promise<boolean>;
+  /** Column-scoped CANCEL of a pending unlink (WS-L.2.5b relink-in-cooldown): flip
+   *  `unlinkState`→`active` + clear the cooling-off fields ONLY, leaving riskState/
+   *  label untouched.  A full-record write would clobber a `high` risk a compliance
+   *  escalation persisted between the caller's read and this write, silently
+   *  restoring the prior `normal` and losing the fail-closed restriction — the same
+   *  clobber `updateRiskState`/`updateLabel` are column-scoped to avoid.  Returns
+   *  the FRESH row (so the caller sees a concurrent escalation), the current row
+   *  unchanged when it is no longer pending_unlink, or null if it vanished. */
+  cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null>;
   /** WS-L data-rights: hard-delete every wallet row for a user on account
    *  deletion; returns the rows removed. */
   purgeByUser(userId: string): Promise<number>;
@@ -379,15 +409,18 @@ export interface KnomosisActionStore {
     actorUserId: string,
     idempotencyKey: string,
   ): Promise<KnomosisActionRecordEntity | null>;
-  /** Room-scoped orphan lookup for the WS-M auto-attach sweep (W14): a
-   *  ROOM-owned payout intent (null owner) recovers the steward-signed action
-   *  by the intent's attempt key regardless of WHICH steward signed it.
-   *  Idempotency is actor-scoped, so several stewards may have raced the same
-   *  key — returns the earliest inserted row for determinism. */
-  getByRoomIdempotencyKey(
-    roomId: string,
-    idempotencyKey: string,
-  ): Promise<KnomosisActionRecordEntity | null>;
+  /** The LIVE action settling this intent, if one already does — the read that
+   *  turns a lost `knomosis_action_intent_uq` race into a replay of the winner.
+   *  Live only, and for the same reason the index is: a dead attempt has
+   *  released the intent for `retryIntent`, so replaying it would hand the
+   *  caller a corpse instead of their replacement. */
+  getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
+  /** The MOST RECENT action for this intent in ANY state (incl. terminal) — the
+   *  crash-recovery read (`orphanActionFor`): a submit that failed/reverted before
+   *  the browser attached is still recoverable so the intent can reach a
+   *  terminal/retryable state instead of expiring off the ledger.  The LIVE-only
+   *  `getByPaymentIntentId` above stays the uniqueness/replay predicate. */
+  getLatestByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
   /** COMPARE-AND-SET the submission state: apply the patch ONLY if the stored row
    *  is still in `expectedState`, returning null when a concurrent writer (e.g.
@@ -962,11 +995,14 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   async updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void> {
     // Column-scoped: re-read the CURRENT row and set only riskState, so a
     // concurrent lifecycle mutation (unlink) is never clobbered by a stale snapshot.
     const row = this.#rows.get(walletAccountId);
     if (row === undefined) return;
+    // CAS: apply only when the current state matches `expected` (when supplied).
+    if (expected !== undefined && row.riskState !== expected) return;
     this.#rows.set(walletAccountId, { ...row, riskState });
   }
 
@@ -1007,6 +1043,24 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
       unlinkedAt: unlinkedAtIso,
     });
     return true;
+  }
+
+  async cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null> {
+    // Column-scoped: re-read the CURRENT row and touch ONLY the unlink lifecycle
+    // fields, so a concurrent risk escalation (a `high` persisted since the caller
+    // read `existing`) survives.  Idempotent — a row already active is returned
+    // unchanged.
+    const row = this.#rows.get(walletAccountId);
+    if (row === undefined) return null;
+    if (row.unlinkState !== 'pending_unlink') return { ...row };
+    const updated: FinancialWalletRecord = {
+      ...row,
+      unlinkState: 'active',
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+    };
+    this.#rows.set(walletAccountId, updated);
+    return { ...updated };
   }
 
   async purgeByUser(userId: string): Promise<number> {
@@ -1114,6 +1168,18 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       ) {
         throw new Error('idempotency key already used');
       }
+      // `knomosis_action_intent_uq` (migration 0089): ONE LIVE action per
+      // intent, whoever submits it and whatever key they chose.  Emulated here
+      // as the in-memory adapters emulate every other DB protection — including
+      // the index's partiality: a DEAD attempt has released the intent for
+      // `retryIntent`, so it must not block the replacement.
+      if (
+        record.paymentIntentId !== null &&
+        existing.paymentIntentId === record.paymentIntentId &&
+        !DEAD_ACTION_STATES.has(existing.submissionState)
+      ) {
+        throw new UniqueViolationError('knomosis_action_intent_uq');
+      }
     }
     this.#rows.set(record.actionRecordId, structuredClone(record));
     return structuredClone(record);
@@ -1136,18 +1202,24 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
     return null;
   }
 
-  async getByRoomIdempotencyKey(
-    roomId: string,
-    idempotencyKey: string,
-  ): Promise<KnomosisActionRecordEntity | null> {
-    // Insertion order IS creation order here — the first match is the
-    // earliest row, mirroring the Drizzle adapter's createdAt ordering.
+  async getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null> {
     for (const row of this.#rows.values()) {
-      if (row.roomId === roomId && row.idempotencyKey === idempotencyKey) {
+      if (row.paymentIntentId === paymentIntentId && !DEAD_ACTION_STATES.has(row.submissionState)) {
         return structuredClone(row);
       }
     }
     return null;
+  }
+
+  async getLatestByPaymentIntentId(
+    paymentIntentId: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    let best: KnomosisActionRecordEntity | null = null;
+    for (const row of this.#rows.values()) {
+      if (row.paymentIntentId !== paymentIntentId) continue;
+      if (best === null || row.createdAt > best.createdAt) best = row;
+    }
+    return best ? structuredClone(best) : null;
   }
 
   async update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity> {

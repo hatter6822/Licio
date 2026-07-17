@@ -72,12 +72,14 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
   'knomosis.room_agent_binding',
   'knomosis.agent_action_log',
   'knomosis.agent_treasury_action',
+  'knomosis.room_pending_remoderation',
   // WS-L Knomosis gateway, wallets, and receipts (migration 0059).  Every new
   // financial table is a BFS seed of the pay-to-rank isolation proof.
   'knomosis.knomosis_deployment',
   'knomosis.on_chain_event',
   'knomosis.knomosis_action_record',
   'knomosis.knomosis_action_nonce',
+  'knomosis.knomosis_gateway_cursor',
   'knomosis.wallet_actor_mapping',
   'knomosis.governance_proposal',
   'knomosis.governance_proposal_vote',
@@ -100,6 +102,26 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
   'knomosis.governance_challenge',
   'knomosis.treasury_reconciliation_snapshot',
   'knomosis.room_readiness_attestation',
+]);
+
+/**
+ * WS-N `compliance` bounded-context tables (migration 0088).  A THIRD isolated
+ * finance-adjacent context: every table seeds the same BFS proof as the wallet
+ * context (compliance state must never join ranking/attention — SPEC §21.5,
+ * WS-N.2.2d), and the fail-closed classification covers the `compliance`
+ * schema so an unclassified new table fails the suite.
+ */
+export const COMPLIANCE_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
+  'compliance.jurisdiction_feature_policy',
+  'compliance.jurisdiction_policy_audit',
+  'compliance.financial_compliance_case',
+  'compliance.compliance_case_audit',
+  'compliance.region_declaration',
+  'compliance.disclosure_version',
+  'compliance.disclosure_acknowledgment',
+  'compliance.wallet_risk_pin',
+  'compliance.sar_report',
+  'compliance.lawful_access_request',
 ]);
 
 /**
@@ -164,11 +186,13 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
 ]);
 
 /** Schemas whose every table must be classified into a context (fail-closed). */
-export const CONTEXT_SCHEMAS: readonly string[] = ['wallet', 'knomosis'];
+export const CONTEXT_SCHEMAS: readonly string[] = ['wallet', 'knomosis', 'compliance'];
 
-/** The canonical isolation contexts consumed by the CI test (WS-D.3.2). */
+/** The canonical isolation contexts consumed by the CI test (WS-D.3.2).
+ *  The BFS seed set is the UNION of the wallet/knomosis and compliance
+ *  contexts: both finance-adjacent planes must be unreachable from ranking. */
 export const ISOLATION_CONTEXTS: IsolationContexts = {
-  walletTables: WALLET_CONTEXT_TABLES,
+  walletTables: new Set<Relation>([...WALLET_CONTEXT_TABLES, ...COMPLIANCE_CONTEXT_TABLES]),
   rankingTables: RANKING_CONTEXT_TABLES,
   articulationNodes: DEFAULT_ARTICULATION,
 };

@@ -7,7 +7,8 @@
 // Security invariants enforced by the shape:
 //   • `session_id` stores sha256(token) — NEVER the live token (a DB leak yields
 //     no usable cookie).
-//   • `ip_hash` is a keyed hash (HMAC), never a plaintext IP (§19.5).
+//   • No IP and no location, ever — not even hashed (the §19.1 amendment removed
+//     the former `ip_hash` column): only a coarse device descriptor is recorded.
 //   • `user_auth` has NO password column — the schema cannot store a password.
 import { boolean, index, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { bytea } from './_custom.js';

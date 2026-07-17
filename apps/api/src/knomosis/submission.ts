@@ -15,21 +15,31 @@
 
 import { decCompare } from '@licio/governance';
 import type { KnomosisReasonCode, KnomosisSignedActionType, SubmissionState } from '@licio/shared';
+import {
+  featureCellForAction,
+  REAL_FUNDS_ENVIRONMENTS,
+  reviewSubjectForAction,
+  screeningTargetsFor,
+} from '@licio/shared';
 import type { AuditStore } from '../identity/audit.js';
 import type { EphemeralStore } from '../identity/ephemeral-store.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import type { KnomosisGateway } from './gateway.js';
 import { pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
+import { worstSanctionsVerdict } from './ports.js';
 import {
   buildEip712Domain,
   buildHumanSummary,
+  buildPreflightBinding,
   CAP_CATEGORY,
   consumePreflightToken,
   FUND_TRANSFER_ACTIONS,
   type LawPackPort,
   MODE_ENVIRONMENTS,
-  REAL_FUNDS_ENVIRONMENTS,
+  type PreflightTokenBinding,
+  peekPreflightToken,
+  preflightBindingMismatch,
   type RoomGovernancePort,
 } from './preflight.js';
 import {
@@ -45,6 +55,7 @@ import type {
   KnomosisActionRecordEntity,
   KnomosisActionStore,
 } from './stores.js';
+import { resolveWalletRiskState } from './wallet-risk-resolve.js';
 
 // ---------------------------------------------------------------------------
 // The §23.5 state machine (WS-L.3.2b).  Invalid transitions are rejected and
@@ -125,6 +136,9 @@ export interface SubmitActionInput {
   preflightToken: string;
   idempotencyKey: string;
   actionType: string;
+  /** The WS-M intent this action settles — the same attempt the preflight
+   *  named, so the re-check lands on the same review. */
+  paymentIntentId?: string | undefined;
   roomId: string;
   deploymentId: string;
   walletAccountId: string;
@@ -147,24 +161,105 @@ export type SubmitActionOutcome =
   | { ok: false; status: 400 | 401 | 409 | 503; code: KnomosisReasonCode; message: string };
 
 /** WS-L.3.2a — submit a preflighted, signed action to the gateway. */
+/**
+ * Does the token permit THIS submission?  Delegates to the shared total
+ * comparison — the token's promise is defined in one place, so a field added to
+ * the binding is checked here without touching this file.
+ */
+function bindingMismatch(
+  binding: PreflightTokenBinding,
+  input: SubmitActionInput,
+  typedDataHash: string,
+): string | null {
+  return preflightBindingMismatch(
+    binding,
+    buildPreflightBinding({
+      userId: input.userId,
+      actionType: input.actionType as KnomosisSignedActionType,
+      roomId: input.roomId,
+      deploymentId: input.deploymentId,
+      walletAccountId: input.walletAccountId,
+      typedDataHash,
+      paymentIntentId: input.paymentIntentId,
+    }),
+  );
+}
+
+/** The replay answer for an action that already exists. */
+function replayOf(record: KnomosisActionRecordEntity): SubmitActionOutcome {
+  return {
+    ok: true,
+    actionRecordId: record.actionRecordId,
+    submissionState: record.submissionState,
+    reasonCode: null,
+    humanMessage: null,
+    replayed: true,
+  };
+}
+
+/**
+ * Replay an existing action — UNLESS it is still `reserving`.  A `reserving` row
+ * never forwarded: it is inserted before the post-reservation gates and only
+ * advances to `submitted` once they all pass, and the retry sweep is
+ * submitted-only, so it will never reach the gateway (a crashed prior attempt),
+ * or it is a concurrent in-flight attempt that has not advanced yet.  Presenting
+ * it as an ok replay lets the deposit flow bind a never-forwarded reservation to
+ * the intent (`attachIntentSubmission` rejects only failed/reverted), settling it
+ * against a transfer that never happened and stranding it on the stale-reservation
+ * sweep.  Return a RETRYABLE error instead: a fresh attempt (or the sweep
+ * reclaiming this row to `failed`) makes progress, and attach also refuses a
+ * `reserving` action (defense in depth).
+ */
+function replayOrRetry(record: KnomosisActionRecordEntity): SubmitActionOutcome {
+  if (record.submissionState === 'reserving') {
+    return {
+      ok: false,
+      status: 503,
+      code: 'GATEWAY_UNAVAILABLE',
+      message: 'A previous submission is still in progress; please retry.',
+    };
+  }
+  return replayOf(record);
+}
+
+/**
+ * Has this submission ALREADY been made?  Both scopes the reservation's uniques
+ * enforce, asked in one place so they cannot drift apart:
+ *
+ *   • `(actor, idempotency_key)` — the caller's own earlier attempt;
+ *   • the payment intent — whoever settled it first, which for a room-owned
+ *     payout is another steward under their own actor scope.
+ *
+ * The intent lookup trusts `input.paymentIntentId` because the ROUTE authorizes
+ * the claim before calling us (owner, room, asset, amount, target) — the same
+ * trust this function's caller already places in it when it writes the column
+ * and names the fraud review ref.  Nothing here is authorization.
+ */
+async function alreadySubmitted(
+  deps: SubmissionDeps,
+  input: SubmitActionInput,
+): Promise<KnomosisActionRecordEntity | null> {
+  const own = await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey);
+  if (own !== null) return own;
+  if (input.paymentIntentId === undefined) return null;
+  return await deps.actions.getByPaymentIntentId(input.paymentIntentId);
+}
+
 export async function submitAction(
   deps: SubmissionDeps,
   input: SubmitActionInput,
 ): Promise<SubmitActionOutcome> {
   const nowIso = new Date(deps.now()).toISOString();
 
-  // Duplicate idempotency keys return the ORIGINAL result, no re-processing.
-  const existing = await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey);
-  if (existing !== null) {
-    return {
-      ok: true,
-      actionRecordId: existing.actionRecordId,
-      submissionState: existing.submissionState,
-      reasonCode: null,
-      humanMessage: null,
-      replayed: true,
-    };
-  }
+  // An ALREADY-MADE submission replays here, BEFORE any gate below.  Those
+  // gates decide whether a NEW action may be minted, and this one exists: its
+  // signature may have expired since, its wallet gone inactive, its cap been
+  // lowered, its compliance verdict flipped — and every one of those would
+  // reject the recovery of an action that is already on chain, leaving the
+  // caller no way to learn the id their intent must attach to.  It used to be
+  // caught only by the insert conflict, which is past all of them.
+  const existing = await alreadySubmitted(deps, input);
+  if (existing !== null) return replayOrRetry(existing);
 
   // The gateway must be configured BEFORE any state is consumed (fail closed,
   // nothing burned on an unconfigured deployment).
@@ -253,14 +348,14 @@ export async function submitAction(
   // preflight-refreshed state (WS-L.3.2a / 2.5c-1).
   let riskState = wallet.riskState;
   if (FUND_TRANSFER_ACTIONS.has(actionType)) {
-    const assessment = await deps.compliance.walletRisk({
+    // The shared read-through (thread-Y): escalations apply, but an absence-of-
+    // signal `normal` never lifts a still-unscreened `pending` wallet, and an
+    // `unavailable` engine leaves the stored state in place.
+    ({ state: riskState } = await resolveWalletRiskState(deps, {
       walletAccountId: wallet.walletAccountId,
       userId: input.userId,
-    });
-    if (assessment !== 'unavailable' && assessment.state !== riskState) {
-      riskState = assessment.state;
-      await deps.wallets.updateRiskState(wallet.walletAccountId, riskState);
-    }
+      riskState,
+    }));
   }
   if (riskState === 'high' || (riskState === 'pending' && FUND_TRANSFER_ACTIONS.has(actionType))) {
     return {
@@ -387,22 +482,42 @@ export async function submitAction(
     }
   }
 
+  // The compliance re-checks below MUTATE state: `screenAddress` opens a
+  // sanctions case, `fraudRisk` reserves a velocity check and opens a
+  // high-value review.  The token proving this submission was preflighted is
+  // not consumed until after the reservation (a single-use consumable must not
+  // burn on a submission that leaves no record), which is far too late to stand
+  // between a bogus token and those side effects: an authorized member could
+  // sign an arbitrary payload, submit it with a junk token, and pollute the
+  // review queue and burn velocity budget on a request that was always going to
+  // fail the gate.
+  //
+  // So the token is PEEKED here — a read, nothing consumed — and a token that
+  // cannot permit this submission SKIPS the re-checks.  It does not reject
+  // here: the flow must still reach the token gate below, which fails the
+  // RESERVED record so the failure is audited and a retry replays it rather
+  // than re-processing.  Skipping is safe because the peek can only be wrong in
+  // one direction: `take` reads the same value the `get` did, so a peek that
+  // says "no" guarantees the gate says "no" (the reverse — a token that lapses
+  // or is used between the two — is exactly what the gate is for).
+  const peeked = await peekPreflightToken(deps.ephemeral, input.preflightToken);
+  const tokenPermitsThis =
+    peeked !== null && bindingMismatch(peeked, input, typedDataHash) === null;
+
   // RE-RUN the §23.5 step-7/7b/8 COMPLIANCE gates at submit: sanctions can be
   // listed, a region blocked, or a fraud signal flip during the preflight-token
   // TTL, so a stale token must NOT forward on a compliance decision that has since
   // changed (WS-L.3.2a re-runs WS-L.3.1b steps 7/7b/8).  Real-funds environments
   // fail closed on unavailable screening / unknown jurisdiction.
   const realFunds = REAL_FUNDS_ENVIRONMENTS.has(deployment.environment);
-  if (FUND_TRANSFER_ACTIONS.has(actionType)) {
-    const screenTarget = (
-      input.typedDataMessage['recipient'] ??
-      input.typedDataMessage['actor'] ??
-      ''
-    ).toLowerCase();
-    const sanctions = await deps.compliance.screenAddress({
-      addressLower: screenTarget,
-      deploymentId: input.deploymentId,
-    });
+  if (FUND_TRANSFER_ACTIONS.has(actionType) && tokenPermitsThis) {
+    // BOTH counterparties — the same rule the preflight applies, from the same
+    // helper (a payout's actor was screened nowhere but at link).
+    const sanctions = await worstSanctionsVerdict(
+      deps.compliance,
+      screeningTargetsFor(input.typedDataMessage),
+      input.deploymentId,
+    );
     if (sanctions === 'blocked') {
       return {
         ok: false,
@@ -420,36 +535,84 @@ export async function submitAction(
       };
     }
   }
-  const region = await deps.regionForUser(input.userId);
-  const jurisdiction = await deps.compliance.jurisdiction({ userId: input.userId, region });
-  if (jurisdiction === 'blocked') {
-    return {
-      ok: false,
-      status: 409,
-      code: 'JURISDICTION_BLOCKED',
-      message: 'This feature is not available in your region.',
-    };
-  }
-  if (jurisdiction === 'unknown' && realFunds) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'JURISDICTION_UNKNOWN',
-      message: 'Your region could not be verified; real-fund actions are unavailable.',
-    };
-  }
-  const fraud = await deps.compliance.fraudRisk({
-    userId: input.userId,
-    actionType,
-    amountMinorUnits: input.typedDataMessage['amount'] ?? null,
-  });
-  if (fraud === 'blocked' || (fraud === 'unavailable' && realFunds)) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'FRAUD_RISK',
-      message: 'This action was flagged by risk checks.',
-    };
+  // The rest of the compliance re-check rides the same peek: `fraudRisk`
+  // reserves velocity and can open a review, so a bogus token must not reach it
+  // either.  (`jurisdiction` is a pure read, but there is nothing to learn from
+  // asking it about a submission that cannot proceed.)
+  if (tokenPermitsThis) {
+    const region = await deps.regionForUser(input.userId);
+    const jurisdiction = await deps.compliance.jurisdiction({
+      userId: input.userId,
+      region,
+      // The SAME cell mapping preflight used.  A region-wide verdict here would
+      // undo the point of the re-check: a token minted before a policy change
+      // that disables `governance` while payments stay enabled would still see
+      // `allowed` and forward the prohibited signature (WS-N.1.1c).
+      // The cell this action exercises ON THIS DEPLOYMENT — the same
+      // environment-aware derivation the preflight used, from the same SSOT.
+      featureCell: featureCellForAction(actionType, deployment.environment),
+      // …and the same asset gate: a region can bar an asset between preflight
+      // and submit, which is exactly what this re-check exists to catch.
+      asset: input.typedDataMessage['asset'] ?? null,
+    });
+    if (jurisdiction === 'blocked') {
+      return {
+        ok: false,
+        status: 409,
+        code: 'JURISDICTION_BLOCKED',
+        message: 'This feature is not available in your region.',
+      };
+    }
+    if (jurisdiction === 'unknown' && realFunds) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'JURISDICTION_UNKNOWN',
+        message: 'Your region could not be verified; real-fund actions are unavailable.',
+      };
+    }
+    const fraud = await deps.compliance.fraudRisk({
+      userId: input.userId,
+      actionType,
+      amountMinorUnits: input.typedDataMessage['amount'] ?? null,
+      // ONLY an intent-backed transfer names a review attempt (its intent id).  A
+      // direct one passes NO ref (the same choice the preflight makes), so its
+      // high-value case is day-bucketed and NEVER honors a clearance — a direct
+      // high-value transfer cannot be cleared-and-reused for an unlimited stream;
+      // it must go through a payment intent to be reviewable.
+      reviewRef: input.paymentIntentId ?? null,
+      // The same subject the WS-M intent leg derives, from the same cell: a
+      // room-treasury payout is the ROOM's review, a pay-in is the payer's.
+      // Classifying it differently here would split one transfer's review in two.
+      reviewSubject: reviewSubjectForAction(actionType, {
+        userId: input.userId,
+        roomId: input.roomId,
+      }),
+    });
+    if (fraud === 'blocked' || (fraud === 'unavailable' && realFunds)) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'FRAUD_RISK',
+        message: 'This action was flagged by risk checks.',
+      };
+    }
+    // Mirrors preflight step 8: `elevated` = manual review required.  An
+    // intent-backed transfer waits for its intent's review; a DIRECT one has no
+    // clearable per-attempt review, so it is refused with guidance to use a
+    // payment intent.  The re-check exists precisely because this verdict can flip
+    // during the token TTL — a high-value case opened after preflight must bite.
+    if (fraud === 'elevated' && FUND_TRANSFER_ACTIONS.has(actionType)) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'FRAUD_RISK',
+        message:
+          input.paymentIntentId === undefined
+            ? 'High-value transfers must go through a payment intent so the amount can be reviewed.'
+            : 'This action is held for compliance review before it can proceed.',
+      };
+    }
   }
 
   // ---- RESERVE (state `reserving`) ------------------------------------------
@@ -481,23 +644,27 @@ export async function submitAction(
     indexedEventRef: null,
     reconciliationState: 'pending',
     idempotencyKey: input.idempotencyKey,
+    // The intent this action settles.  It carries the `knomosis_action_intent_uq`
+    // partial unique (migration 0089): ONE action per intent, so a second
+    // reservation for the same intent loses the insert below and replays the
+    // winner instead of forwarding a second fund movement the intent's ledger
+    // could never account for.
+    paymentIntentId: input.paymentIntentId ?? null,
     createdAt: nowIso,
     updatedAt: nowIso,
   };
   try {
     await deps.actions.insert(record);
   } catch (error) {
-    const winner = await deps.actions.getByIdempotencyKey(input.userId, input.idempotencyKey);
-    if (winner !== null) {
-      return {
-        ok: true,
-        actionRecordId: winner.actionRecordId,
-        submissionState: winner.submissionState,
-        reasonCode: null,
-        humanMessage: null,
-        replayed: true,
-      };
-    }
+    // Whichever unique refused us, the answer is the same: replay the action
+    // that won.  Same lookup as the early one above — a racing writer that
+    // landed between them is exactly what this catch is for.  This is the
+    // CONCURRENT path: the winner was created in THIS same window and is
+    // forwarding now (it may be momentarily `reserving`), so the loser REPLAYS it
+    // — `replayOf`, not `replayOrRetry`, keeps the "exactly one replay" invariant
+    // (attach still refuses a `reserving` action, so nothing binds a dead one).
+    const winner = await alreadySubmitted(deps, input);
+    if (winner !== null) return replayOf(winner);
     throw error; // a different failure — propagate
   }
 
@@ -523,27 +690,12 @@ export async function submitAction(
       'preflight token missing/expired/used',
     );
   }
-  if (
-    binding.userId !== input.userId ||
-    binding.roomId !== input.roomId ||
-    binding.deploymentId !== input.deploymentId ||
-    binding.walletAccountId !== input.walletAccountId ||
-    binding.actionType !== input.actionType
-  ) {
-    return failReserved(
-      409,
-      'PAYLOAD_MISMATCH',
-      'The submission does not match the preflighted action.',
-      'preflight binding mismatch',
-    );
-  }
-  if (typedDataHash !== binding.typedDataHash) {
-    return failReserved(
-      409,
-      'PAYLOAD_MISMATCH',
-      'The submitted payload differs from the preflighted action.',
-      'typed-data hash mismatch',
-    );
+  // The SAME comparison the peek above made — one definition, so the advisory
+  // gate and the authoritative one can never disagree about what this token
+  // permits.  Re-run against the CONSUMED binding: only `take` is atomic.
+  const mismatch = bindingMismatch(binding, input, typedDataHash);
+  if (mismatch !== null) {
+    return failReserved(409, 'PAYLOAD_MISMATCH', mismatch, 'preflight binding mismatch');
   }
 
   // RE-VERIFY the signature (the token binds only the typed-data HASH): a valid
