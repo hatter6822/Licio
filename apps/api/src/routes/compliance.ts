@@ -60,7 +60,14 @@ import {
   runChainedUnit,
   verifyPolicyAuditChain,
 } from '../compliance/audit.js';
-import { addCaseNote, createCase, resolveCaseInTx, transitionCase } from '../compliance/cases.js';
+import {
+  addCaseNote,
+  announceCaseCreated,
+  createCase,
+  createCaseInTx,
+  resolveCaseInTx,
+  transitionCase,
+} from '../compliance/cases.js';
 import { validateComplianceConfigValue } from '../compliance/config.js';
 import {
   acknowledgeDisclosure,
@@ -1274,22 +1281,60 @@ export function createComplianceRoutes() {
       authMiddleware(),
       requireCompliance(),
       zValidator('param', z.object({ walletAccountId: uuidSchema })),
-      zValidator('json', z.object({ reason: z.string().min(1).max(2000) }).strict()),
+      // `subject_ref` is the wallet OWNER: a manual pin blocks the owner's fund
+      // transfers, so — like the link-time sanctions response — it opens an
+      // investigation CASE for that subject in the SAME unit, or the restriction
+      // would have no reviewer-queue entry, case history, or DSAR/export record
+      // explaining it.
+      zValidator(
+        'json',
+        z.object({ reason: z.string().min(1).max(2000), subject_ref: uuidSchema }).strict(),
+      ),
       async (c) => {
         const auth = requireAuth(c);
         const services = getComplianceServices();
         const { walletAccountId } = c.req.valid('param');
-        const record = await services.pins.pin({
-          id: services.uuid(),
-          walletAccountId,
-          reason: c.req.valid('json').reason,
-          pinnedByRef: services.opaqueRef(auth.userId),
-          createdAt: new Date(services.now()).toISOString(),
-          releasedAt: null,
-          releasedByRef: null,
-        });
+        const { reason, subject_ref } = c.req.valid('json');
+        const nowIso = new Date(services.now()).toISOString();
+        // ONE unit: the pin and its case are the two halves of the same response
+        // (the same invariant `buildSanctionedWalletLinkHook` keeps at link) — a
+        // pin with no case is a wallet frozen with nothing in the queue explaining
+        // why.  Idempotent per wallet: re-pinning returns the active pin unchanged
+        // and the `manual-pin:<wallet>` key dedups the case.
+        const outcome = await runChainedUnit(
+          services.transactor,
+          async (stores) => {
+            await stores.pins.pin({
+              id: services.uuid(),
+              walletAccountId,
+              reason,
+              pinnedByRef: services.opaqueRef(auth.userId),
+              createdAt: nowIso,
+              releasedAt: null,
+              releasedByRef: null,
+            });
+            return createCaseInTx(stores, buildCaseDeps(services), {
+              subjectKind: 'user',
+              subjectRef: subject_ref,
+              triggerType: 'manual',
+              riskLevel: 'high',
+              note: `Wallet manually pinned by a compliance reviewer: ${reason}`,
+              idempotencyKey: `manual-pin:${walletAccountId}`,
+            });
+          },
+          'manual wallet pin',
+        ).catch((error: unknown) => ({ ok: false as const, error }));
+        if (!('ok' in outcome) || !outcome.ok) {
+          services.metrics.increment('compliance.wallet_pin.unrecorded');
+          return c.json(deny('pin_unavailable', 'The pin could not be recorded.'), 503);
+        }
+        // Announced OUTSIDE the unit (an external side effect must not replay if a
+        // chain fork runs the unit twice) and only for a case this call opened.
+        if (outcome.created) {
+          await announceCaseCreated(buildCaseDeps(services), outcome.record, subject_ref);
+        }
         services.metrics.increment('compliance.wallet_pin.created');
-        return c.json({ pinned: true, created_at: record.createdAt }, 201);
+        return c.json({ pinned: true, created_at: nowIso }, 201);
       },
     )
 

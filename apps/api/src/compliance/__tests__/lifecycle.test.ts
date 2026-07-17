@@ -841,6 +841,59 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     expect((await runRetentionSweep(sweepDeps())).deferredErasures).toBe(0);
   });
 
+  it('a FAILED deferred erasure (store/chain outage) marks the sweep NOT drained so the next tick retries (thread retention:221)', async () => {
+    const userId = randomUUID();
+    const record = await seedCase({
+      userIdOrRoomId: userId,
+      retentionPolicy: {
+        retention_period_days: 1825,
+        deletion_date: hoursAhead(24), // NOT expired: only the erasure debt applies
+        legal_hold: false,
+        legal_hold_refs: [],
+      },
+    });
+    const deps = buildCaseDeps(services);
+    await setLegalHold(deps, {
+      caseId: record.caseId,
+      hold: true,
+      holdRef: 'sar-hold',
+      actorUserId: ACTOR,
+      reason: 'r',
+    });
+    await scrubUserSubjectForErasure({ caseDeps: deps, log: services.log }, userId); // debt taken
+    await setLegalHold(deps, {
+      caseId: record.caseId,
+      hold: false,
+      holdRef: 'sar-hold',
+      actorUserId: ACTOR,
+      reason: 'r',
+    }); // hold lapses — the debt is now dischargeable
+
+    // A store/chain outage fails the discharge — NOT a fresh hold (which would be
+    // a benign re-held, not an error).
+    const original = services.caseAudit.appendChained.bind(services.caseAudit);
+    services.caseAudit.appendChained = async () => {
+      throw new Error('chain unavailable');
+    };
+    let summary: Awaited<ReturnType<typeof runRetentionSweep>>;
+    try {
+      summary = await runRetentionSweep(sweepDeps());
+    } finally {
+      services.caseAudit.appendChained = original;
+    }
+    // The failure is SURFACED: the run is NOT drained (so the scheduler retries on
+    // the NEXT tick, not a full retention interval later) and it counts as an
+    // error — the person asked to be erased and the obligation has already lapsed.
+    expect(summary.deferredErasures).toBe(0);
+    expect(summary.errors).toBeGreaterThanOrEqual(1);
+    expect(summary.drained).toBe(false);
+    // Nothing was erased — the subject survives for the retry.
+    expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBe(userId);
+    // And once the store recovers, the NEXT sweep discharges it.
+    expect((await runRetentionSweep(sweepDeps())).deferredErasures).toBe(1);
+    expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBeNull();
+  });
+
   it('a hold re-landing mid-discharge takes the erasure entry with it', async () => {
     const userId = randomUUID();
     const record = await seedCase({

@@ -21,12 +21,53 @@ import {
   resolveCaseInTx,
   setLegalHoldInTx,
 } from './cases.js';
-import type { LawfulAccessRecord, LawfulAccessStore } from './stores.js';
+import type { ComplianceTxStores, LawfulAccessRecord, LawfulAccessStore } from './stores.js';
 
 /** This request's hold on its intake case — opaque, so the reviewer-visible
  *  retention policy carries no readable obligation name (WS-N.2.1e). */
 const requestHoldRef = (deps: LawfulAccessDeps, requestId: string): string =>
   deps.caseDeps.opaqueRef(`lawful-access:${requestId}`);
+
+/**
+ * Release THIS request's legal hold and CLOSE its linked intake case, in the
+ * caller's transaction.  Invoked wherever a lawful-access request reaches a state
+ * that LIFTS the anti-tipping-off suppression (`unnotifiedCaseIdsForSubject`) —
+ * denial, and any transition that sets `userNotifiedAt`.  Once the case is no
+ * longer suppressed, an OPEN high-risk case with a live hold would drive a
+ * `compliance_hold` + elevated wallet risk INDEFINITELY for a records request
+ * that is no longer hidden.  The hold cleared is only THIS request's (a SAR on
+ * the same case keeps its own retention protection); the note is GENERIC
+ * (WS-N.2.3d) — this chain is compliance-readable and must not name the request.
+ */
+async function releaseAndCloseLinkedCase(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
+  deps: LawfulAccessDeps,
+  input: { caseId: string; requestId: string; actorUserId: string },
+): Promise<void> {
+  const released = await setLegalHoldInTx(stores, deps.caseDeps, {
+    caseId: input.caseId,
+    hold: false,
+    holdRef: requestHoldRef(deps, input.requestId),
+    actorUserId: input.actorUserId,
+    reason: 'Legal hold released: the restriction has lapsed (WS-N.2.3d).',
+  });
+  // THROW, never return: a returned error is a successful transaction result, so
+  // the surrounding write would COMMIT while the route reports failure.
+  mustApply(released.ok, 'lawful-access: hold release');
+  // From wherever the case now sits (a reviewer may have picked it up while
+  // counsel deliberated).
+  const closed = await resolveCaseInTx(stores, deps.caseDeps, {
+    caseId: input.caseId,
+    actorUserId: input.actorUserId,
+    resolution: {
+      outcome: 'cleared',
+      notes: 'Legal hold released; the restriction has lapsed (WS-N.2.3d).',
+      resolved_by: input.actorUserId,
+      resolved_at: new Date(deps.now()).toISOString(),
+    },
+  });
+  mustApply(closed, 'lawful-access: case close');
+}
 
 /** The stored column and the response schema share this cap. */
 const MAX_PRODUCTION_SUMMARY = 10_000;
@@ -322,14 +363,29 @@ export async function recordLawfulAccessProduction(
       // the notification status — those live on the counsel-only request record
       // (`status`, `productionSummary`, `userNotifiedAt`).
       if (updated.caseId !== null) {
-        await appendCaseAuditInTx(stores, deps, {
-          caseId: updated.caseId,
-          action: 'legal_hold_action',
-          actorRef: deps.opaqueRef(input.actorUserId),
-          beforeState: null,
-          afterState: null,
-          note: 'Counsel action recorded under legal hold (WS-N.2.3d).',
-        });
+        if (input.userNotified) {
+          // Notified in the SAME step ⇒ suppression lifts now ⇒ release this
+          // request's hold and CLOSE the case, or it would drive a compliance
+          // hold + elevated wallet risk indefinitely for a request that is no
+          // longer hidden.
+          await releaseAndCloseLinkedCase(stores, deps, {
+            caseId: updated.caseId,
+            requestId: input.requestId,
+            actorUserId: input.actorUserId,
+          });
+        } else {
+          // Produced but STILL under a gag order (`userNotifiedAt` stays null):
+          // the case stays open + held + suppressed.  Record the counsel action
+          // generically (WS-N.2.3d) — the notify transition lifts it later.
+          await appendCaseAuditInTx(stores, deps, {
+            caseId: updated.caseId,
+            action: 'legal_hold_action',
+            actorRef: deps.opaqueRef(input.actorUserId),
+            beforeState: null,
+            afterState: null,
+            note: 'Counsel action recorded under legal hold (WS-N.2.3d).',
+          });
+        }
       }
       return { ok: true as const, record: updated };
     },
@@ -380,18 +436,17 @@ export async function notifyLawfulAccessSubject(
       }
       // The lift is auditable in the SAME unit as the timestamp write — a
       // notification recorded without its scoped entry cannot be repaired
-      // (the retry would see a non-null `userNotifiedAt` and stop).
+      // (the retry would see a non-null `userNotifiedAt` and stop).  Notifying
+      // LIFTS the suppression, so this is exactly where the linked case must be
+      // released + closed: otherwise it would drive a compliance hold + elevated
+      // wallet risk indefinitely for a request that is no longer hidden.  The
+      // release/close audit entries are themselves GENERIC (WS-N.2.3d): the fact
+      // of a lawful-access notification stays on the counsel-only record.
       if (updated.caseId !== null) {
-        // GENERIC on the compliance-readable case chain (WS-N.2.3d): the fact of
-        // a lawful-access notification, like the production, stays on the
-        // counsel-only record (`userNotifiedAt`).
-        await appendCaseAuditInTx(stores, deps, {
+        await releaseAndCloseLinkedCase(stores, deps, {
           caseId: updated.caseId,
-          action: 'legal_hold_action',
-          actorRef: deps.opaqueRef(input.actorUserId),
-          beforeState: null,
-          afterState: null,
-          note: 'Counsel action recorded under legal hold (WS-N.2.3d).',
+          requestId: input.requestId,
+          actorUserId: input.actorUserId,
         });
       }
       return { ok: true as const, record: updated };

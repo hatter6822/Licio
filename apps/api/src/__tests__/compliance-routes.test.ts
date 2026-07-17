@@ -841,17 +841,36 @@ describe('the fraud queue + wallet pins + runtime config', () => {
     expect(reject.status).toBe(404);
   });
 
-  it('pins a wallet (201), releases it once, and 404s a double release', async () => {
+  it('pins a wallet (201) AND opens an investigation case, releases once, 404s a double release', async () => {
     const reviewer = await seedReviewer();
     const walletId = randomUUID();
+    const subject = randomUUID();
     const pinned = await app().request(
       post(
         `/v1/compliance/admin/wallets/${walletId}/pin`,
-        { reason: 'suspected compromise' },
+        { reason: 'suspected compromise', subject_ref: subject },
         reviewer.cookie,
       ),
     );
     expect(pinned.status).toBe(201);
+    // The pin is paired with a case (WS-N.2.2e/2.3b) — the reviewer queue, case
+    // history, and DSAR export now have an investigation record explaining the
+    // restriction, the same pin+case unit the link-time sanctions path keeps.
+    const opened = await compliance.cases.findByIdempotencyKey(`manual-pin:${walletId}`);
+    expect(opened).not.toBeNull();
+    expect(opened?.userIdOrRoomId).toBe(subject);
+    expect(opened?.subjectKind).toBe('user');
+    // Re-pinning the same wallet does not open a duplicate case (idempotent key).
+    const rePinned = await app().request(
+      post(
+        `/v1/compliance/admin/wallets/${walletId}/pin`,
+        { reason: 'suspected compromise', subject_ref: subject },
+        reviewer.cookie,
+      ),
+    );
+    expect(rePinned.status).toBe(201);
+    const cases = await compliance.cases.listBySubject(subject, 'user', 50);
+    expect(cases.filter((k) => k.idempotencyKey === `manual-pin:${walletId}`)).toHaveLength(1);
     const released = await app().request(
       del(`/v1/compliance/admin/wallets/${walletId}/pin`, reviewer.cookie),
     );
@@ -1057,10 +1076,73 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
     };
     expect(body.request.status).toBe('produced');
     expect(body.request.user_notified_at).not.toBeNull();
+    // The subject was NOTIFIED, so the anti-tipping-off suppression lifts — the
+    // linked intake case is RESOLVED and its hold released.  Left open + held, an
+    // OPEN high-risk case would drive a compliance_hold + elevated wallet risk
+    // indefinitely for a records request that is no longer hidden.
+    const afterCase = await compliance.cases.getById(request.case_id as string);
+    expect(afterCase?.reviewState).toBe('resolved');
+    expect(afterCase?.retentionPolicy.legal_hold).toBe(false);
     const all = (await (
       await app().request(get('/v1/compliance/admin/lawful-access', counsel.cookie))
     ).json()) as { requests: Array<{ status: string }> };
     expect(all.requests).toHaveLength(1);
+  });
+
+  it('a produced-but-NOT-notified request keeps its case suppressed; the notify endpoint lifts it (thread lawful-access:306)', async () => {
+    const counsel = await seedCounsel();
+    const subject = await seedUser({ handle: `s${randomUUID().slice(0, 8)}` });
+    const intake = await app().request(
+      post(
+        '/v1/compliance/admin/lawful-access',
+        {
+          agency: 'District Court',
+          jurisdiction: 'DE',
+          legal_basis: 'court_order',
+          scope: {
+            subject_kind: 'user',
+            subject_ref: subject.userId,
+            time_range_start: null,
+            time_range_end: null,
+          },
+          contact: 'court@example.test',
+        },
+        counsel.cookie,
+      ),
+    );
+    const request = ((await intake.json()) as { request: { request_id: string; case_id: string } })
+      .request;
+    await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/review`,
+        { decision: 'approved', note: 'valid order' },
+        counsel.cookie,
+      ),
+    );
+    // Produced under a STILL-active gag order (`user_notified: false`): the case
+    // stays OPEN + held + suppressed (the subject may not be told yet).
+    await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/produce`,
+        { production_summary: 'records', user_notified: false },
+        counsel.cookie,
+      ),
+    );
+    const held = await compliance.cases.getById(request.case_id);
+    expect(held?.reviewState).not.toBe('resolved');
+    expect(held?.retentionPolicy.legal_hold).toBe(true);
+    // The notify endpoint lifts the gag order — NOW the case is released + closed.
+    const notified = await app().request(
+      post(
+        `/v1/compliance/admin/lawful-access/${request.request_id}/notify`,
+        { note: 'gag order lifted' },
+        counsel.cookie,
+      ),
+    );
+    expect(notified.status).toBe(200);
+    const lifted = await compliance.cases.getById(request.case_id);
+    expect(lifted?.reviewState).toBe('resolved');
+    expect(lifted?.retentionPolicy.legal_hold).toBe(false);
   });
 
   it('a private-P2P room production is FORCED to carry the honest §8/§11.4 determination', async () => {

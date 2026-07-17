@@ -472,7 +472,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   deletion: it lifts once notification is permitted. The exclusion is bounded by
   that subject's own requests, so it cannot reintroduce the paging
   `countOpenByRisk` exists to avoid, and a store failure holds rather than
-  silently disclose what it could not check.
+  silently disclose what it could not check.  **The lift RELEASES the case, it
+  does not merely un-hide it.**  The moment `userNotifiedAt` is set — a production
+  with `user_notified: true`, or the notify endpoint — the linked intake case is
+  RELEASED (this request's hold cleared) and RESOLVED, in the same unit.  Left
+  open + held once suppression lifts, an OPEN high-risk case would flip straight
+  from invisible to driving a `compliance_hold` + elevated wallet risk
+  INDEFINITELY, for a records request that is no longer hidden.  (The denial path
+  already released + closed for the same reason; production/notification now
+  share the one helper.)
 - **A deferred erasure is a debt the case carries.**  When the account-deletion
   scrub meets a legal hold it skips the subject, audits the skip — and marks
   `erasure_pending`. Nothing else would ever come back: the account is
@@ -480,7 +488,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   the subject would sit on the case until normal retention expiry, years after
   the person asked to be erased. The retention sweep discharges it once the hold
   lapses (hold-conditional at write time, and audited on the case's own chain —
-  the erasure is as accountable as the skip).
+  the erasure is as accountable as the skip).  A discharge that FAILS for a
+  reason OTHER than a fresh hold (an audit-chain / store outage) is surfaced, not
+  swallowed: it counts as a sweep error and marks the run NOT `drained`, so the
+  scheduler retries the tombstoned subject on the NEXT tick rather than advancing
+  `lastSweepAtMs` and deferring the retry a full retention interval — the person
+  asked to be erased and the obligation has already lapsed.  (A fresh hold winning
+  the race is NOT an error: the whole unit is abandoned and the debt simply
+  stays, to be retried when the hold next lapses.)
 - **Counsel acts are attributed on counsel-only rows.**  A SAR's filing —
   the legally consequential step, and often not the approver's doing — is
   recorded as `filed_by_ref` on the report itself, NOT as a case-chain entry:
@@ -496,6 +511,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   **denied** request still releases its hold and closes its case explicitly: it
   obliges nothing, and leaving it would keep the subject's records pinned and
   their crypto features disabled on a request counsel rejected.
+- **A wallet pin and its case are one unit** — the manual pin route as much as
+  the link-time sanctions response.  A reviewer pin immediately drives
+  `walletRisk` to `high` and blocks the OWNER's fund transfers, so — like
+  `buildSanctionedWalletLinkHook` — it opens an investigation CASE for the
+  wallet's owner (`subject_ref`) in the SAME `runChainedUnit`, `manual`-triggered
+  and idempotent per wallet (`manual-pin:<wallet>`).  A pin with no case is a
+  wallet frozen with nothing in the reviewer queue, case history, or DSAR/export
+  explaining the restriction — no investigation record, nobody to release it.
 - **A fund transfer screens EVERY counterparty.**  Both legs screened
   `recipient ?? actor`, which quietly means a deposit (no recipient) screens its
   actor at every action while a payout screens only its recipient and NEVER its

@@ -153,7 +153,17 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
   // WS-D sweep will ever name that user again, and without this pass the
   // subject would sit on the case until normal retention expiry, years after
   // the person asked to be erased and long after the obligation lapsed.
-  summary.deferredErasures = await dischargeDeferredErasures(deps);
+  const discharge = await dischargeDeferredErasures(deps);
+  summary.deferredErasures = discharge.discharged;
+  // A deferred erasure that FAILED (not re-held — a store/chain outage) is an
+  // error, and a run with one is NOT drained: a `drained` run lets the scheduler
+  // advance `lastSweepAtMs` and defer the retry a full retention interval, so a
+  // tombstoned subject whose hold has lapsed would sit unerased for a day.  Fold
+  // it into the summary so the next tick retries it.
+  if (discharge.failed > 0) {
+    summary.errors += discharge.failed;
+    summary.drained = false;
+  }
 
   // Held cases are visible in the report (never deleted).
   const held = await deps.caseDeps.cases.listByStates(
@@ -179,8 +189,11 @@ const DEFERRED_ERASURE_PAGE = 500;
  * whose holds have since lapsed.  Each is audited on its own chain, so the
  * erasure is as accountable as the skip that preceded it.
  */
-async function dischargeDeferredErasures(deps: RetentionSweepDeps): Promise<number> {
+async function dischargeDeferredErasures(
+  deps: RetentionSweepDeps,
+): Promise<{ discharged: number; failed: number }> {
   let discharged = 0;
+  let failed = 0;
   const pending = await deps.caseDeps.cases.listDeferredErasures(DEFERRED_ERASURE_PAGE);
   for (const record of pending) {
     try {
@@ -216,6 +229,12 @@ async function dischargeDeferredErasures(deps: RetentionSweepDeps): Promise<numb
       if (done) discharged += 1;
     } catch (error) {
       if (error instanceof UnitNotAppliedError) continue; // re-held; nothing kept
+      // A NON-hold failure (audit-chain / store outage) is a real fault, not a
+      // discharge: count it so the sweep does NOT report `drained` and the
+      // scheduler retries this tombstoned subject on the NEXT tick rather than
+      // after the full retention interval — the person asked to be erased and the
+      // obligation has already lapsed.
+      failed += 1;
       deps.log('compliance.erasure.deferred_failed', {
         caseId: record.caseId,
         message: error instanceof Error ? error.message : 'unknown',
@@ -223,7 +242,7 @@ async function dischargeDeferredErasures(deps: RetentionSweepDeps): Promise<numb
     }
   }
   if (discharged > 0) deps.log('compliance.erasure.deferred_discharged', { discharged });
-  return discharged;
+  return { discharged, failed };
 }
 
 /**
