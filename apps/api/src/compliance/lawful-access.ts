@@ -132,14 +132,23 @@ export async function intakeLawfulAccessRequest(
     scope: LawfulAccessRecord['scope'];
     contact: string;
     actorUserId: string;
+    /** Client idempotency key — becomes the durable `requestId`.  A lost-response
+     *  retry REPLAYS the existing request instead of opening a DUPLICATE case +
+     *  legal hold that would keep suppressing exports until someone found it. */
+    idempotencyKey: string;
   },
 ): Promise<LawfulAccessOutcome> {
+  // Replay on a lost-response retry: the key IS the requestId, so an existing row
+  // means this demand was already intaken.  (The in-unit case key + the request's
+  // primary key make the concurrent race fail closed too — one insert wins.)
+  const replayed = await deps.requests.getById(input.idempotencyKey);
+  if (replayed !== null) return { ok: true, record: replayed };
   try {
     const outcome = await runChainedUnit(
       deps.caseDeps.transactor,
       async (stores) => {
         const nowIso = new Date(deps.now()).toISOString();
-        const requestId = deps.uuid();
+        const requestId = input.idempotencyKey;
         const linked = await createCaseInTx(stores, deps.caseDeps, {
           // The scope's kind carries through 1:1.  Collapsing `transaction` onto
           // `user` would file a transaction id as though it were an account, and
@@ -158,6 +167,10 @@ export async function intakeLawfulAccessRequest(
           // case, so the details live SOLELY in the counsel-gated lawful-access
           // record below; the case note says only that a hold is in force.
           note: 'Legal hold in force pending counsel review (WS-N.2.3d).',
+          // Scoped to THIS request (the idempotency key) so a concurrent retry that
+          // slipped past the replay check above dedups onto the same case rather
+          // than opening a second one for the same demand.
+          idempotencyKey: `lawful:${requestId}`,
         });
         if (!linked.ok) return laErr(linked.status, linked.code, linked.message);
         const held = await setLegalHoldInTx(stores, deps.caseDeps, {

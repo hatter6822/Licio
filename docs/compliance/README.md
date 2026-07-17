@@ -464,6 +464,15 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   capability even to READ; the case audit shows a neutral
   `legal_hold_applied`; the SAR→case FK is `RESTRICT` so a case with a filed
   SAR cannot be swept out from under the record.
+- **The counsel create surfaces are retry-safe.**  A lawful-access intake and a
+  SAR draft each open a legal hold with no cancel/release endpoint, so a
+  lost-response retry that minted a fresh id would leave a DUPLICATE hidden case /
+  report + hold silently suppressing exports until someone found it by hand.  Both
+  now take a client idempotency key that BECOMES the durable `requestId`/`sarId`:
+  a retry with the same key replays the existing record (a `getById` pre-check),
+  and — for the concurrent race that slips past it — the linked case is keyed on
+  the same id (`createCaseInTx` dedups) and the record's own primary key makes the
+  second insert fail closed, so exactly one hold is ever applied.
 - **The no-key filter fails closed on both hex forms.**  ≥12 consecutive
   BIP-39 words is a seed phrase; a 64-hex run — bare or `0x`-prefixed — is a
   private-key export.  A `0x`-prefixed 64-hex value is *also* a transaction

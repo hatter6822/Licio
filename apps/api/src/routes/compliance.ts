@@ -1524,6 +1524,7 @@ export function createComplianceRoutes() {
             jurisdiction: body.jurisdiction,
             narrative: body.narrative,
             actorUserId: auth.userId,
+            idempotencyKey: body.idempotency_key,
           },
         );
         if (!result.ok) return failJson(c, result);
@@ -1606,6 +1607,7 @@ export function createComplianceRoutes() {
           scope: body.scope,
           contact: body.contact,
           actorUserId: auth.userId,
+          idempotencyKey: body.idempotency_key,
         });
         if (!result.ok) return failJson(c, result);
         return c.json({ request: lawfulToWire(result.record) }, 201);

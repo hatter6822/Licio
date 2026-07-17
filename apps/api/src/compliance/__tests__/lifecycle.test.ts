@@ -525,6 +525,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
       },
       contact: 'agent@example.test',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!intake.ok) throw new Error('intake failed');
     // An ordinary case the subject IS entitled to see, for contrast.
@@ -557,6 +558,82 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     ).toContain('manual');
   });
 
+  it('a lawful-access intake is RETRY-SAFE — the same key REPLAYS, never a duplicate case/hold (codex: make lawful-access intake retry-safe)', async () => {
+    const userId = randomUUID();
+    const deps = {
+      requests: services.lawfulAccess,
+      caseDeps: buildCaseDeps(services),
+      roomStorageMode: services.roomStorageMode,
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const key = randomUUID();
+    const body = {
+      agency: 'Agency',
+      jurisdiction: 'US',
+      legalBasis: 'subpoena' as const,
+      scope: {
+        subject_kind: 'user' as const,
+        subject_ref: userId,
+        time_range_start: null,
+        time_range_end: null,
+      },
+      contact: 'agent@example.test',
+      actorUserId: ACTOR,
+      idempotencyKey: key,
+    };
+    const first = await intakeLawfulAccessRequest(deps, body);
+    const retry = await intakeLawfulAccessRequest(deps, body); // lost-response retry
+    if (!first.ok || !retry.ok) throw new Error('intake failed');
+    // The retry REPLAYS the same request (the key IS the requestId), and exactly
+    // ONE request + ONE linked case + ONE hold exist — no duplicate hidden case
+    // silently suppressing exports.
+    expect(retry.record.requestId).toBe(first.record.requestId);
+    expect(first.record.requestId).toBe(key);
+    expect(await services.lawfulAccess.list(null, 50)).toHaveLength(1);
+    const cases = await services.cases.listBySubject(userId, 'user', 50);
+    expect(cases).toHaveLength(1);
+    expect(cases[0]?.retentionPolicy.legal_hold_refs).toHaveLength(1);
+  });
+
+  it('a SAR draft is RETRY-SAFE — the same key REPLAYS, never a duplicate report/hold (codex: make SAR draft retry-safe)', async () => {
+    const userId = randomUUID();
+    const opened = await createCase(buildCaseDeps(services), {
+      subjectKind: 'user',
+      subjectRef: userId,
+      triggerType: 'manual',
+      riskLevel: 'high',
+      note: 'case for the SAR',
+    });
+    if (!opened.ok) throw new Error('case creation failed');
+    const sarDeps = {
+      sars: services.sars,
+      caseDeps: buildCaseDeps(services),
+      opaqueRef: services.opaqueRef,
+      now: services.now,
+      uuid: services.uuid,
+    };
+    const key = randomUUID();
+    const body = {
+      caseId: opened.record.caseId,
+      jurisdiction: 'US',
+      narrative: 'Suspicious pattern narrative.',
+      actorUserId: ACTOR,
+      idempotencyKey: key,
+    };
+    const first = await createSarDraft(sarDeps, body);
+    const retry = await createSarDraft(sarDeps, body); // lost-response retry
+    if (!first.ok || !retry.ok) throw new Error('SAR draft failed');
+    // The retry REPLAYS the same draft (the key IS the sarId); one report, and the
+    // case carries ONE SAR hold ref, not two.
+    expect(retry.record.sarId).toBe(first.record.sarId);
+    expect(first.record.sarId).toBe(key);
+    expect(await services.sars.list(50)).toHaveLength(1);
+    const c = await services.cases.getById(opened.record.caseId);
+    expect(c?.retentionPolicy.legal_hold_refs).toHaveLength(1);
+  });
+
   it('the intake case audit reveals NO lawful-access detail to a compliance reviewer (thread-M)', async () => {
     const userId = randomUUID();
     const deps = {
@@ -579,6 +656,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
       },
       contact: 'agent@example.test',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!intake.ok) throw new Error('intake failed');
     const caseId = intake.record.caseId;
@@ -621,6 +699,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
       },
       contact: 'agent@example.test',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!intake.ok) throw new Error('intake failed');
     const caseId = intake.record.caseId;
@@ -689,6 +768,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
       },
       contact: 'agent@example.test',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!intake.ok) throw new Error('intake failed');
     const caseId = intake.record.caseId;
@@ -744,6 +824,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
       },
       contact: 'agent@example.test',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!intake.ok) throw new Error('intake failed');
     const caseId = intake.record.caseId;
@@ -811,6 +892,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
       },
       contact: 'agent@example.test',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!intake.ok) throw new Error('intake failed');
 
@@ -867,6 +949,7 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
         },
         contact: 'agent@example.test',
         actorUserId: ACTOR,
+        idempotencyKey: crypto.randomUUID(),
       },
     );
     if (!intake.ok) throw new Error('intake failed');
@@ -1454,6 +1537,7 @@ describe('the unit of work (WS-N.1.1g / 2.1c)', () => {
       jurisdiction: 'DE',
       narrative: 'A narrative.',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     expect(drafted.ok).toBe(true);
     expect((await services.cases.getById(record.caseId))?.retentionPolicy.legal_hold).toBe(true);
@@ -1469,6 +1553,7 @@ describe('the unit of work (WS-N.1.1g / 2.1c)', () => {
       jurisdiction: 'DE',
       narrative: 'Never stored.',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     expect(failed.ok).toBe(false);
     expect((await services.cases.getById(other.caseId))?.retentionPolicy.legal_hold).toBe(false);
@@ -1489,6 +1574,7 @@ describe('the unit of work (WS-N.1.1g / 2.1c)', () => {
       jurisdiction: 'DE',
       narrative: 'A narrative.',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!drafted.ok) throw new Error('draft failed');
     const sarId = drafted.record.sarId;
@@ -1534,6 +1620,7 @@ describe('the unit of work (WS-N.1.1g / 2.1c)', () => {
       jurisdiction: 'DE',
       narrative: 'A narrative.',
       actorUserId: ACTOR,
+      idempotencyKey: crypto.randomUUID(),
     });
     if (!drafted.ok) throw new Error('draft failed');
     expect(

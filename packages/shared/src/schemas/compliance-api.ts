@@ -374,6 +374,9 @@ export const sarCreateRequestSchema = z
   .object({
     jurisdiction: regionCodeSchema,
     narrative: z.string().min(1).max(20_000),
+    /** Client idempotency key: a lost-response retry with the same key REPLAYS the
+     *  existing draft rather than opening a duplicate report + legal hold. */
+    idempotency_key: uuidSchema,
   })
   .strict();
 export const sarFileRequestSchema = z
@@ -431,6 +434,11 @@ export type LawfulAccessRequest = z.infer<typeof lawfulAccessRequestSchema>;
 
 export const lawfulAccessCreateRequestSchema = lawfulAccessRequestSchema
   .pick({ agency: true, jurisdiction: true, legal_basis: true, scope: true, contact: true })
+  .extend({
+    /** Client idempotency key: a lost-response retry with the same key REPLAYS the
+     *  existing request rather than opening a duplicate case + legal hold. */
+    idempotency_key: uuidSchema,
+  })
   .strict();
 export const lawfulAccessReviewRequestSchema = z
   .object({

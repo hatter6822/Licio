@@ -42,13 +42,26 @@ export type SarOutcome = SarError | { ok: true; record: SarRecord };
  */
 export async function createSarDraft(
   deps: SarDeps,
-  input: { caseId: string; jurisdiction: string; narrative: string; actorUserId: string },
+  input: {
+    caseId: string;
+    jurisdiction: string;
+    narrative: string;
+    actorUserId: string;
+    /** Client idempotency key — becomes the durable `sarId`.  A lost-response
+     *  retry REPLAYS the existing draft instead of creating a duplicate report
+     *  with its own legal-hold ref (which has no cancel/release endpoint). */
+    idempotencyKey: string;
+  },
 ): Promise<SarOutcome> {
+  // Replay on a lost-response retry: the key IS the sarId, so an existing row means
+  // this draft was already created.
+  const replayed = await deps.sars.getById(input.idempotencyKey);
+  if (replayed !== null) return { ok: true, record: replayed };
   try {
     return await runChainedUnit(
       deps.caseDeps.transactor,
       async (stores) => {
-        const sarId = deps.uuid();
+        const sarId = input.idempotencyKey;
         const held = await setLegalHoldInTx(stores, deps.caseDeps, {
           caseId: input.caseId,
           hold: true,

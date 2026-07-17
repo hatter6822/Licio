@@ -1138,7 +1138,11 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
     const drafted = await app().request(
       post(
         `/v1/compliance/admin/cases/${caseId}/sar`,
-        { jurisdiction: 'DE', narrative: 'Counsel narrative for the regulator.' },
+        {
+          jurisdiction: 'DE',
+          narrative: 'Counsel narrative for the regulator.',
+          idempotency_key: crypto.randomUUID(),
+        },
         counsel.cookie,
       ),
     );
@@ -1207,6 +1211,7 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
             time_range_end: null,
           },
           contact: 'court@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
@@ -1296,6 +1301,7 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
             time_range_end: null,
           },
           contact: 'court@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
@@ -1352,6 +1358,7 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
             time_range_end: null,
           },
           contact: 'agent@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
@@ -1397,6 +1404,7 @@ describe('SAR/STR (WS-N.2.1e) + lawful access (WS-N.2.3d)', () => {
             time_range_end: null,
           },
           contact: 'agent@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
@@ -2053,6 +2061,7 @@ describe('lawful access preserves the scope kind (WS-N.2.3d)', () => {
             time_range_end: null,
           },
           contact: 'unit@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
@@ -2084,6 +2093,7 @@ describe('a denial closes the intake case from wherever it sits (WS-N.2.3d)', ()
             time_range_end: null,
           },
           contact: 'agent@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counselCookie,
       ),
@@ -2167,7 +2177,11 @@ describe('holds and their records are all-or-nothing (WS-N.2.1e / 2.3d)', () => 
     const res = await app().request(
       post(
         `/v1/compliance/admin/cases/${caseId}/sar`,
-        { jurisdiction: 'DE', narrative: 'A narrative that will not persist.' },
+        {
+          jurisdiction: 'DE',
+          narrative: 'A narrative that will not persist.',
+          idempotency_key: crypto.randomUUID(),
+        },
         counsel.cookie,
       ),
     );
@@ -2210,6 +2224,7 @@ describe('holds and their records are all-or-nothing (WS-N.2.1e / 2.3d)', () => 
             time_range_end: null,
           },
           contact: 'court@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
@@ -2273,7 +2288,11 @@ describe('a rolled-back SAR never releases an EARLIER hold (WS-N.2.1e)', () => {
     const first = await app().request(
       post(
         `/v1/compliance/admin/cases/${caseId}/sar`,
-        { jurisdiction: 'DE', narrative: 'The first report, which persists.' },
+        {
+          jurisdiction: 'DE',
+          narrative: 'The first report, which persists.',
+          idempotency_key: crypto.randomUUID(),
+        },
         counsel.cookie,
       ),
     );
@@ -2287,7 +2306,11 @@ describe('a rolled-back SAR never releases an EARLIER hold (WS-N.2.1e)', () => {
     const second = await app().request(
       post(
         `/v1/compliance/admin/cases/${caseId}/sar`,
-        { jurisdiction: 'FR', narrative: 'The second report, which does not persist.' },
+        {
+          jurisdiction: 'FR',
+          narrative: 'The second report, which does not persist.',
+          idempotency_key: crypto.randomUUID(),
+        },
         counsel.cookie,
       ),
     );
@@ -2316,6 +2339,7 @@ describe('a DENIED lawful-access request releases its hold (WS-N.2.3d)', () => {
             time_range_end: null,
           },
           contact: 'court@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
@@ -2362,6 +2386,7 @@ describe('a DENIED lawful-access request releases its hold (WS-N.2.3d)', () => {
             time_range_end: null,
           },
           contact: 'court@example.test',
+          idempotency_key: crypto.randomUUID(),
         },
         counsel.cookie,
       ),
