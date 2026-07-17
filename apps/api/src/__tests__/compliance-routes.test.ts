@@ -856,6 +856,52 @@ describe('the case console (WS-N.2.1b/c)', () => {
     expect(after?.status).toBe('verified');
     expect(after?.declaredRegion).toBe('DE');
   });
+
+  it('a member DELETE (revoke) CASes on the read premises too — a mid-write verify is not clobbered (thread 500)', async () => {
+    const reviewer = await seedReviewer();
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}`, locale: 'en-GB' });
+    await app().request(
+      post('/v1/compliance/region/declaration', { declared_region: 'DE' }, member.cookie),
+    );
+    await app().request(
+      post(
+        `/v1/compliance/admin/declarations/${member.userId}/verify`,
+        { decision: 'verify', note: 'passport checked' },
+        reviewer.cookie,
+      ),
+    );
+    const verifiedRow = await compliance.declarations.get(member.userId);
+    if (verifiedRow === null) throw new Error('verified row missing');
+
+    // The revoke path had the same TOCTOU as the redeclaration: guard reads a
+    // stale `pending` snapshot, the real store is `verified`, and an unconditional
+    // write would clobber `reviewer_verified` → `revoked`.  The CAS must miss.
+    const realGet = compliance.declarations.get.bind(compliance.declarations);
+    let servedStale = false;
+    compliance.declarations.get = async (id: string) => {
+      if (!servedStale && id === member.userId) {
+        servedStale = true;
+        return { ...verifiedRow, status: 'pending', verificationLevel: 'unverified' };
+      }
+      return realGet(id);
+    };
+    try {
+      const revoked = await app().request(
+        new Request('http://localhost/v1/compliance/region/declaration', {
+          method: 'DELETE',
+          headers: json(member.cookie),
+        }),
+      );
+      expect(revoked.status).toBe(409);
+      expect(((await revoked.json()) as { error: { code: string } }).error.code).toBe(
+        'declaration_verified',
+      );
+    } finally {
+      compliance.declarations.get = realGet;
+    }
+    const after = await compliance.declarations.get(member.userId);
+    expect(after?.status).toBe('verified');
+  });
 });
 
 describe('the fraud queue + wallet pins + runtime config', () => {

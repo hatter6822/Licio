@@ -159,11 +159,10 @@ export async function runRetentionSweep(deps: RetentionSweepDeps): Promise<Reten
   // error, and a run with one is NOT drained: a `drained` run lets the scheduler
   // advance `lastSweepAtMs` and defer the retry a full retention interval, so a
   // tombstoned subject whose hold has lapsed would sit unerased for a day.  Fold
-  // it into the summary so the next tick retries it.
-  if (discharge.failed > 0) {
-    summary.errors += discharge.failed;
-    summary.drained = false;
-  }
+  // failures into the summary — and `hasMore` (a backlog past what one sweep
+  // could drain) likewise blocks `drained` — so the next tick retries.
+  if (discharge.failed > 0) summary.errors += discharge.failed;
+  if (discharge.failed > 0 || discharge.hasMore) summary.drained = false;
 
   // Held cases are visible in the report (never deleted).
   const held = await deps.caseDeps.cases.listByStates(
@@ -191,58 +190,78 @@ const DEFERRED_ERASURE_PAGE = 500;
  */
 async function dischargeDeferredErasures(
   deps: RetentionSweepDeps,
-): Promise<{ discharged: number; failed: number }> {
+): Promise<{ discharged: number; failed: number; hasMore: boolean }> {
   let discharged = 0;
   let failed = 0;
-  const pending = await deps.caseDeps.cases.listDeferredErasures(DEFERRED_ERASURE_PAGE);
-  for (const record of pending) {
-    try {
-      // ONE unit: an entry claiming the subject was erased must not outlive a
-      // failed erasure, and a scrub with no entry is unaccountable.
-      const done = await runChainedUnit(
-        deps.caseDeps.transactor,
-        async (stores) => {
-          await appendCaseAuditInTx(stores, deps.caseDeps, {
-            caseId: record.caseId,
-            action: 'erasure_completed_hold_lapsed',
-            actorRef: 'system',
-            beforeState: record.reviewState,
-            afterState: record.reviewState,
-            note: 'Right-to-erasure scrub deferred by a legal hold; the hold has lapsed and the subject is erased.',
-          });
-          // The store re-checks the hold as part of the write; a refusal means
-          // a fresh obligation landed since this page was read, so the entry
-          // above must not stand either.  RETURNING the refusal would commit
-          // it: the chain would say the held-back subject was erased while the
-          // subject is still there.
-          mustApply(
-            await stores.cases.completeDeferredErasure(
-              record.caseId,
-              new Date(deps.now()).toISOString(),
-            ),
-            'deferred erasure',
-          );
-          return true;
-        },
-        'deferred erasure',
-      );
-      if (done) discharged += 1;
-    } catch (error) {
-      if (error instanceof UnitNotAppliedError) continue; // re-held; nothing kept
-      // A NON-hold failure (audit-chain / store outage) is a real fault, not a
-      // discharge: count it so the sweep does NOT report `drained` and the
-      // scheduler retries this tombstoned subject on the NEXT tick rather than
-      // after the full retention interval — the person asked to be erased and the
-      // obligation has already lapsed.
-      failed += 1;
-      deps.log('compliance.erasure.deferred_failed', {
-        caseId: record.caseId,
-        message: error instanceof Error ? error.message : 'unknown',
-      });
+  let hasMore = false;
+  // DRAIN the backlog: a single 500-row page would leave already-eligible
+  // (hold-lapsed) subjects beyond it un-erased until the NEXT sweep interval (24h
+  // by default), the same reason the main sweep loops.  Each round re-reads the
+  // head of the deferred set; a successful discharge clears `erasure_pending`, so
+  // rows this round erased are gone from the next one.
+  for (let round = 0; round < MAX_SWEEP_ROUNDS; round += 1) {
+    const pending = await deps.caseDeps.cases.listDeferredErasures(DEFERRED_ERASURE_PAGE);
+    if (pending.length === 0) break;
+    const dischargedBefore = discharged;
+    for (const record of pending) {
+      try {
+        // ONE unit: an entry claiming the subject was erased must not outlive a
+        // failed erasure, and a scrub with no entry is unaccountable.
+        const done = await runChainedUnit(
+          deps.caseDeps.transactor,
+          async (stores) => {
+            await appendCaseAuditInTx(stores, deps.caseDeps, {
+              caseId: record.caseId,
+              action: 'erasure_completed_hold_lapsed',
+              actorRef: 'system',
+              beforeState: record.reviewState,
+              afterState: record.reviewState,
+              note: 'Right-to-erasure scrub deferred by a legal hold; the hold has lapsed and the subject is erased.',
+            });
+            // The store re-checks the hold as part of the write; a refusal means
+            // a fresh obligation landed since this page was read, so the entry
+            // above must not stand either.  RETURNING the refusal would commit
+            // it: the chain would say the held-back subject was erased while the
+            // subject is still there.
+            mustApply(
+              await stores.cases.completeDeferredErasure(
+                record.caseId,
+                new Date(deps.now()).toISOString(),
+              ),
+              'deferred erasure',
+            );
+            return true;
+          },
+          'deferred erasure',
+        );
+        if (done) discharged += 1;
+      } catch (error) {
+        if (error instanceof UnitNotAppliedError) continue; // re-held; nothing kept
+        // A NON-hold failure (audit-chain / store outage) is a real fault, not a
+        // discharge: count it so the sweep does NOT report `drained` and the
+        // scheduler retries this tombstoned subject on the NEXT tick rather than
+        // after the full retention interval — the person asked to be erased and the
+        // obligation has already lapsed.
+        failed += 1;
+        deps.log('compliance.erasure.deferred_failed', {
+          caseId: record.caseId,
+          message: error instanceof Error ? error.message : 'unknown',
+        });
+      }
     }
+    // No forward progress ⇒ every remaining row is un-dischargeable right now
+    // (a hold re-landed, or the store is faulting); re-reading the same page
+    // would spin, so stop.
+    if (discharged === dischargedBefore) break;
+    // A short page means the eligible set is exhausted.
+    if (pending.length < DEFERRED_ERASURE_PAGE) break;
+    // A FULL page that still made progress at the round cap ⇒ more eligible
+    // subjects remain than one sweep drained: signal it so the run is NOT
+    // reported drained and the scheduler retries on the next tick.
+    if (round + 1 >= MAX_SWEEP_ROUNDS) hasMore = true;
   }
   if (discharged > 0) deps.log('compliance.erasure.deferred_discharged', { discharged });
-  return { discharged, failed };
+  return { discharged, failed, hasMore };
 }
 
 /**

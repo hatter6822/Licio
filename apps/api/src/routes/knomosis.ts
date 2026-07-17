@@ -65,6 +65,7 @@ import {
   requireSteward,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
+import { bindPayoutRecipient } from '../treasury/intents.js';
 import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/services.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
@@ -181,8 +182,27 @@ async function verifyClaimedIntent(input: {
   if (expectedTarget !== input.typedDataMessage[targetField]) return mismatch;
   // Everything above is IDENTITY — whose intent this is and what it settles.
   // A retry stops here: it minted its action already, and the gate below is
-  // about minting.
+  // about minting.  (A payout's RECIPIENT binding is a MINT gate, not identity —
+  // see below — so a replay does not re-run it: the action already forwarded
+  // under a recipient the preflight vetted, and a grant clawed back SINCE must
+  // not now strand that recovery.)
   if (input.identityOnly === true) return null;
+  // A payout must pay the grant's APPROVED recipient, checked BEFORE the action
+  // forwards.  The target match above only proves the action names grant A;
+  // without this a steward could sign a `grant_payout` under A's cleared intent
+  // (same amount/asset) paying a DIFFERENT address, and the transfer would
+  // forward before the attach's recipient check ran — settling outside the intent
+  // ledger.  This is the PREFLIGHT (non-identity) call; the submit rides a token
+  // that binds the exact typed-data hash (recipient included), so it cannot swap
+  // the recipient after this gate.  ONE binding, shared with the attach.
+  const recipientError = await bindPayoutRecipient(
+    getTreasuryServices(),
+    intent,
+    input.typedDataMessage,
+  );
+  if (recipientError !== null) {
+    return { code: recipientError.code, message: recipientError.message };
+  }
   // …and still an attempt IN FLIGHT.  `PAYMENT_INTENT_TIMED_STATES` is exactly
   // the pre-submission window in which an action is being minted (the states
   // the expiry sweep watches); past it the intent's action already exists, so

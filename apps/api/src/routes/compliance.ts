@@ -486,31 +486,54 @@ export function createComplianceRoutes() {
     .delete('/region/declaration', authMiddleware(), async (c) => {
       const auth = requireAuth(c);
       const services = getComplianceServices();
-      const existing = await services.declarations.get(auth.userId);
-      if (existing === null) return c.json(notFound, 404);
-      if (existing.status === 'verified' && existing.verificationLevel === 'reviewer_verified') {
-        return c.json(
-          deny(
-            'declaration_verified',
-            'Your region is verified and cannot be self-revoked; contact compliance to change it.',
-          ),
-          409,
+      const nowIso = new Date(services.now()).toISOString();
+      // READ → GUARD → CAS, retried (mirrors the POST).  A member cannot
+      // self-revoke a VERIFIED declaration, and the guard alone is a TOCTOU: a
+      // reviewer verifying the pending row between our read and our write would be
+      // clobbered to `revoked`/`unverified` by an unconditional upsert — the same
+      // self-service downgrade the guard forbids.  So the write CASes on the read
+      // premises; a miss re-reads (now sees the verify) and 409s.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const existing = await services.declarations.get(auth.userId);
+        if (existing === null) return c.json(notFound, 404);
+        if (existing.status === 'verified' && existing.verificationLevel === 'reviewer_verified') {
+          return c.json(
+            deny(
+              'declaration_verified',
+              'Your region is verified and cannot be self-revoked; contact compliance to change it.',
+            ),
+            409,
+          );
+        }
+        const record = await services.declarations.upsert(
+          {
+            ...existing,
+            status: 'revoked',
+            verificationLevel: 'unverified',
+            verifiedAt: null,
+            verifiedBy: null,
+            updatedAt: nowIso,
+          },
+          {
+            declaredRegion: existing.declaredRegion,
+            status: existing.status,
+            updatedAt: existing.updatedAt,
+          },
         );
+        if (record !== null) {
+          await getIdentityServices().audit.append({
+            actorUserId: auth.userId,
+            eventType: 'region_declaration_change',
+            context: { setting: 'revoke' },
+          });
+          return c.json({ revoked: true });
+        }
+        // CAS miss: the row changed under us — re-read and re-check.
       }
-      await services.declarations.upsert({
-        ...existing,
-        status: 'revoked',
-        verificationLevel: 'unverified',
-        verifiedAt: null,
-        verifiedBy: null,
-        updatedAt: new Date(services.now()).toISOString(),
-      });
-      await getIdentityServices().audit.append({
-        actorUserId: auth.userId,
-        eventType: 'region_declaration_change',
-        context: { setting: 'revoke' },
-      });
-      return c.json({ revoked: true });
+      return c.json(
+        deny('declaration_changed', 'The declaration changed while being updated; try again.'),
+        409,
+      );
     })
 
     .get('/disclosures', authMiddleware(), async (c) => {

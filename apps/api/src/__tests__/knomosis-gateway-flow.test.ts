@@ -1457,7 +1457,11 @@ describe('WS-L.3.3/3.4 ingestion, reorg, reconciliation', () => {
     // re-reconciliation set), so none is left silently skipped as clean.
     const pending = await fixture.knomosis.actions.listUnreconciled(DEPLOYMENT, TOTAL + 10);
     expect(pending).toHaveLength(TOTAL);
-  });
+    // 10_001 sequential in-memory inserts + a full multi-page rebuild is legitimately
+    // heavy, and V8 coverage instrumentation in CI pushes it past the 5s default —
+    // give it room (house convention for the large-dataset suites) rather than let a
+    // load-sensitive timeout flake the run.
+  }, 30_000);
 
   it('a post-reorg revert event flips the action to reverted and updates receipts', async () => {
     const fixture = await freshKnomosisServices();

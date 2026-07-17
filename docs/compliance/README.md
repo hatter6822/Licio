@@ -382,6 +382,9 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   between the guard's read and the upsert would otherwise be clobbered back to
   `pending`/`unverified` by an unconditional write — a CAS miss re-reads (now
   sees the verify) and 409s rather than silently downgrading `reviewer_verified`.
+  BOTH member writes CAS: the redeclaration POST and the member DELETE (revoke)
+  run the same read→guard→CAS loop, since a mid-write verify would clobber
+  `reviewer_verified` on either path.
 - **Velocity counting reserves, never reconciles down.**  Each `fraudRisk`
   call reserves a check (preflight + submit ≈ 2 per action, and the limits
   carry that factor); a rejected action's reservation is deliberately kept.
@@ -506,7 +509,12 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   `lastSweepAtMs` and deferring the retry a full retention interval — the person
   asked to be erased and the obligation has already lapsed.  (A fresh hold winning
   the race is NOT an error: the whole unit is abandoned and the debt simply
-  stays, to be retried when the hold next lapses.)
+  stays, to be retried when the hold next lapses.)  The discharge DRAINS the
+  backlog like the main sweep: it loops page by page (progress-detected, so a
+  page of only re-held/failing rows stops it rather than spinning) instead of
+  processing a single 500-row page and leaving already-eligible subjects beyond
+  it un-erased until the next interval.  A backlog past what one sweep can drain
+  (the round cap) is reported as NOT `drained` too, so the next tick continues.
 - **Counsel acts are attributed on counsel-only rows.**  A SAR's filing —
   the legally consequential step, and often not the approver's doing — is
   recorded as `filed_by_ref` on the report itself, NOT as a case-chain entry:
@@ -610,6 +618,21 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   stale corpse from a prior attempt never re-attaches in a loop.  The ordering
   rule is about answering the client truthfully; the ledger's guarantee is the
   sweep's, and it is stated with it below.
+- **A payout binds its recipient BEFORE the action forwards, not only at the
+  attach.**  A `grant_payout` / `steward_compensation` intent names a grant, and
+  the grant names who may be paid.  Matching the intent's TARGET (grant A),
+  amount, and asset only proves the action names grant A — a steward could sign a
+  payout under A's cleared intent, same amount/asset, to a DIFFERENT address.
+  The attach's recipient check would catch it, but that runs AFTER the WS-L
+  submit forwarded the transfer — the money already moved, outside the intent
+  ledger/export.  So the intent-claim gate (`verifyClaimedIntent`) runs the SAME
+  `bindPayoutRecipient` the attach does — ONE definition, so the pre-forward gate
+  and the attach can never disagree about who a payout may pay — at PREFLIGHT
+  (the mint path); the submit rides a token binding the exact typed-data hash
+  (recipient included), so it cannot swap the recipient after.  A REPLAY skips
+  it: the recipient is a MINT gate, not identity, and the action already
+  forwarded under a vetted recipient — re-checking would let a grant clawed back
+  SINCE strand the recovery.
 - **An intent whose money has moved is never abandonable.**  `signed` is a timed
   state, so a client that dies between submit and attach — the case W13's
   recovery exists for — leaves an intent that expires while its action sits on

@@ -550,6 +550,85 @@ export async function markIntentSigned(
   return { ok: true, intent: updated };
 }
 
+export interface PayoutRecipientDeps {
+  grants: GrantStore;
+  wallets: FinancialWalletStore;
+  masterSecret: string;
+}
+
+/**
+ * Does the signed payout pay the grant's APPROVED recipient?  A `grant_payout` /
+ * `steward_compensation` intent names a grant, and that grant names who may be
+ * paid — an address, or a `user:<id>` bound to that member's linked wallets.  A
+ * same-grant / same-amount / same-asset action to a DIFFERENT address would
+ * otherwise settle the intent while the money went elsewhere, so this MUST be
+ * checked BEFORE the WS-L action forwards (at the intent-claim authz + the
+ * attach), not only at the attach — which runs after the transfer has already
+ * been placed on chain, leaving the movement outside the intent ledger/export.
+ * Returns null when there is nothing to bind (a non-payout intent) or the
+ * binding holds; a typed error otherwise.  ONE definition, so the pre-forward
+ * gate and the attach can never disagree about who a payout may pay.
+ */
+export async function bindPayoutRecipient(
+  deps: PayoutRecipientDeps,
+  intent: Pick<PaymentIntentRecord, 'targetType' | 'targetId'>,
+  message: Record<string, unknown>,
+): Promise<TreasuryGovernanceError | null> {
+  if (intent.targetType !== 'grant_payout' && intent.targetType !== 'steward_compensation') {
+    return null;
+  }
+  const grant = await deps.grants.getById(intent.targetId);
+  if (grant === null) {
+    return tgErr(422, 'action_mismatch', 'The payout intent has no backing grant.');
+  }
+  // A clawed-back grant must never receive a new settlement (W9).
+  if (grant.payoutState === 'clawed_back') {
+    return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; payouts are closed.');
+  }
+  const approvedRecipient = grant.recipientRef.toLowerCase();
+  const signedRecipient =
+    typeof message['recipient'] === 'string' ? message['recipient'].toLowerCase() : '';
+  if (/^0x[0-9a-f]{40}$/.test(approvedRecipient)) {
+    if (signedRecipient !== approvedRecipient) {
+      return tgErr(
+        422,
+        'action_mismatch',
+        'The signed recipient differs from the approved grant recipient.',
+      );
+    }
+    return null;
+  }
+  if (/^user:[0-9a-f-]{36}$/.test(grant.recipientRef)) {
+    // A `user:<id>` recipient binds to that member's LINKED wallets: the signed
+    // address must hash to one of them, or a same-grant/same-amount action could
+    // pay an unrelated address and still mark the grant paid (W11).  Addresses
+    // are stored hashed, so the comparison is keyed.
+    if (!/^0x[0-9a-f]{40}$/.test(signedRecipient)) {
+      return tgErr(422, 'action_mismatch', 'The signed recipient is not a valid address.');
+    }
+    const recipientUserId = grant.recipientRef.slice('user:'.length);
+    const linked = (await deps.wallets.listByUser(recipientUserId, false)).filter(
+      (w) => w.unlinkState === 'active',
+    );
+    const signedHash = hashFinancialWalletAddress(deps.masterSecret, signedRecipient);
+    if (!linked.some((w) => w.addressHashHex === signedHash)) {
+      return tgErr(
+        422,
+        'recipient_not_bound',
+        'The signed address is not a linked wallet of the approved recipient.',
+      );
+    }
+    return null;
+  }
+  // Any OTHER opaque ref (a co-op name, free text) has nothing to bind against —
+  // an on-chain payout cannot verify its destination, so it fails CLOSED.
+  return tgErr(
+    422,
+    'recipient_not_bound',
+    'This grant recipient cannot be bound to an on-chain address.',
+  );
+}
+
 /**
  * `signed → submitted`: bind the WS-L action record minted by the submit path.
  * The action must BELONG to this intent — same room, same actor, the target's
@@ -661,57 +740,11 @@ export async function attachIntentSubmission(
   if (action.deploymentId !== intentTreasury.deploymentId) {
     return tgErr(422, 'action_mismatch', 'The action belongs to a different deployment.');
   }
-  if (intent.targetType === 'grant_payout' || intent.targetType === 'steward_compensation') {
-    const grant = await deps.grants.getById(intent.targetId);
-    if (grant === null) {
-      return tgErr(422, 'action_mismatch', 'The payout intent has no backing grant.');
-    }
-    // A clawed-back grant must never receive a new settlement (W9).
-    if (grant.payoutState === 'clawed_back') {
-      return tgErr(409, 'grant_clawed_back', 'This grant was clawed back; payouts are closed.');
-    }
-    const approvedRecipient = grant.recipientRef.toLowerCase();
-    const signedRecipient =
-      typeof message['recipient'] === 'string' ? message['recipient'].toLowerCase() : '';
-    if (/^0x[0-9a-f]{40}$/.test(approvedRecipient)) {
-      if (signedRecipient !== approvedRecipient) {
-        return tgErr(
-          422,
-          'action_mismatch',
-          'The signed recipient differs from the approved grant recipient.',
-        );
-      }
-    } else if (/^user:[0-9a-f-]{36}$/.test(grant.recipientRef)) {
-      // A `user:<id>` recipient binds to that member's LINKED wallets: the
-      // signed address must hash to one of them, or a same-grant/same-amount
-      // action could pay an unrelated address and still mark the grant paid
-      // (W11).  Addresses are stored hashed, so the comparison is keyed.
-      if (!/^0x[0-9a-f]{40}$/.test(signedRecipient)) {
-        return tgErr(422, 'action_mismatch', 'The signed recipient is not a valid address.');
-      }
-      const recipientUserId = grant.recipientRef.slice('user:'.length);
-      const linked = (await deps.wallets.listByUser(recipientUserId, false)).filter(
-        (w) => w.unlinkState === 'active',
-      );
-      const signedHash = hashFinancialWalletAddress(deps.masterSecret, signedRecipient);
-      if (!linked.some((w) => w.addressHashHex === signedHash)) {
-        return tgErr(
-          422,
-          'recipient_not_bound',
-          'The signed address is not a linked wallet of the approved recipient.',
-        );
-      }
-    } else {
-      // Any OTHER opaque ref (a co-op name, free text) has nothing to bind
-      // against — an on-chain payout cannot verify its destination, so the
-      // attach fails CLOSED.  Re-propose with an address or `user:` recipient.
-      return tgErr(
-        422,
-        'recipient_not_bound',
-        'This grant recipient cannot be bound to an on-chain address.',
-      );
-    }
-  }
+  // The signed payout must pay the grant's APPROVED recipient — the SAME binding
+  // the pre-forward intent-claim gate runs, from the one definition, so the two
+  // can never disagree about who a payout may pay.
+  const recipientError = await bindPayoutRecipient(deps, intent, message);
+  if (recipientError !== null) return recipientError;
   // One WS-L action settles exactly ONE intent — a record already bound to
   // another intent would double-count a single transfer in the ledger/export.
   const alreadyBound = await deps.intents.findByActionRecordId(actionRecordId);

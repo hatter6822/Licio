@@ -949,6 +949,35 @@ describe('the WS-D data-rights hooks (WS-N.2.1a)', () => {
     expect((await services.cases.getById(record.caseId))?.userIdOrRoomId).toBeNull();
   });
 
+  it('drains a deferred-erasure backlog LARGER than one page in a single sweep (thread retention:157)', async () => {
+    // The store hands out a FULL page (500), then a short page, then empty —
+    // simulating a backlog bigger than one page.  Without the drain loop only the
+    // first 500 would discharge and the run would still report drained, so the
+    // scheduler would defer the rest a full retention interval (24h).
+    const makePage = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, i) => ({
+        caseId: `${prefix}-${String(i).padStart(4, '0')}`,
+        reviewState: 'resolved' as const,
+      }));
+    const pages = [makePage(500, 'p1'), makePage(2, 'p2'), []];
+    let round = 0;
+    const realList = services.cases.listDeferredErasures.bind(services.cases);
+    const realComplete = services.cases.completeDeferredErasure.bind(services.cases);
+    services.cases.listDeferredErasures = async () => (pages[round++] ?? []) as never;
+    services.cases.completeDeferredErasure = async () => true;
+    try {
+      const summary = await runRetentionSweep(sweepDeps());
+      // The WHOLE backlog (full page + short page) discharged in ONE sweep, not
+      // just the first 500 — proof the drain loop ran past the first page.
+      expect(summary.deferredErasures).toBe(502);
+      // A full page continued the loop; the short page then exhausted it (2 reads).
+      expect(round).toBe(2);
+    } finally {
+      services.cases.listDeferredErasures = realList;
+      services.cases.completeDeferredErasure = realComplete;
+    }
+  }, 20_000);
+
   it('a hold re-landing mid-discharge takes the erasure entry with it', async () => {
     const userId = randomUUID();
     const record = await seedCase({
