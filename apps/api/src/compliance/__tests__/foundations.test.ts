@@ -352,6 +352,20 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
     expect(gate.required).toBe(true);
   });
 
+  it('fails closed: a POLICY-STORE outage returns `unavailable`, never a silent pass (codex: fail closed when disclosure policy reads fail)', async () => {
+    const s = await withPolicy();
+    s.policyCache.invalidate('DE'); // read the store, not a cache hit
+    s.policies.activeForRegion = async () => {
+      throw new Error('policy store down');
+    };
+    // We cannot read whether DE requires disclosures, so the gate reports
+    // `unavailable` (the create route 503s) rather than clearing to `required:
+    // false` and letting an allowance-consuming intent through.
+    const gate = await disclosureGate(buildDisclosureDeps(s), USER);
+    expect(gate.unavailable).toBe(true);
+    expect(gate.required).toBe(true);
+  });
+
   it('an ack is REGION-scoped: the same id+version elsewhere does not satisfy the gate', async () => {
     const s = await withPolicy();
     const deps = buildDisclosureDeps(s);

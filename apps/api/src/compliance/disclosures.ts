@@ -38,6 +38,9 @@ export interface DisclosureGateResult {
   region: string | null;
   /** The refs still missing an acknowledgment of the CURRENT version. */
   missing: DisclosureRef[];
+  /** The POLICY STORE was unavailable, so the disclosure requirement could not be
+   *  read — the route fails closed (503), never a silent pass. */
+  unavailable?: boolean;
 }
 
 /**
@@ -52,6 +55,15 @@ export async function disclosureGate(
   const resolution = await deps.resolveRegion(userId);
   if (resolution.region === null) return { required: false, region: null, missing: [] };
   const outcome = await deps.activePolicy(deps.policy, resolution.region);
+  if (outcome.kind === 'store_unavailable') {
+    // Policy-store OUTAGE: we cannot read whether this region requires disclosures,
+    // so fail CLOSED — the create route rejects the financial action (503) rather
+    // than let an intent that would consume per-user/per-room deposit allowance
+    // through on an unread gate.  Distinct from a truly `missing`/`future_dated`/
+    // `malformed` policy, which carries no disclosures (the shipped `required:
+    // false`).  This mirrors `coarseVerdict`'s `store_unavailable` fail-closed arm.
+    return { required: true, unavailable: true, region: resolution.region, missing: [] };
+  }
   if (outcome.kind !== 'active' || outcome.policy.disclosure_refs.length === 0) {
     return { required: false, region: resolution.region, missing: [] };
   }

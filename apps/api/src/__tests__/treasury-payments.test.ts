@@ -460,6 +460,59 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect(await store.updateComplianceState(deadId, 'flagged', 'cleared', now)).toBeNull();
   });
 
+  it('deleteIfUntouched removes ONLY the still-created, unbound insert (codex: delete only unobserved overshoot)', async () => {
+    const store = new InMemoryPaymentIntentStore();
+    const base = {
+      userId: USER,
+      roomId: ROOM,
+      treasuryId: crypto.randomUUID(),
+      targetType: 'treasury_deposit' as const,
+      targetId: ROOM,
+      asset: 'USDC',
+      amount: '100',
+      jurisdictionState: 'allowed' as const,
+      complianceState: 'pending' as const,
+      retryCount: 0,
+      quoteRef: null,
+      actionRecordId: null,
+      receiptId: null,
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    // An untouched `created` insert IS rolled back.
+    const a = crypto.randomUUID();
+    await store.insert({
+      ...base,
+      paymentIntentId: a,
+      executionState: 'created',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(await store.deleteIfUntouched(a)).toBe(true);
+    expect(await store.getById(a)).toBeNull();
+    // A row a concurrent replay ADVANCED (preflighted) is NOT yanked.
+    const b = crypto.randomUUID();
+    await store.insert({
+      ...base,
+      paymentIntentId: b,
+      executionState: 'preflighted',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(await store.deleteIfUntouched(b)).toBe(false);
+    expect(await store.getById(b)).not.toBeNull();
+    // A `created` row that already bound an action is NOT deleted either.
+    const c = crypto.randomUUID();
+    await store.insert({
+      ...base,
+      paymentIntentId: c,
+      executionState: 'created',
+      actionRecordId: crypto.randomUUID(),
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(await store.deleteIfUntouched(c)).toBe(false);
+    expect(await store.getById(c)).not.toBeNull();
+  });
+
   it('enforces the three deposit limits including in-flight aggregates', async () => {
     const deps = buildDeps();
     await provisionTreasury(deps);

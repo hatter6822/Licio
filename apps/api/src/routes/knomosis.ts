@@ -410,6 +410,14 @@ export function createKnomosisRoutes() {
               buildDisclosureDeps(getComplianceServices()),
               auth.userId,
             );
+            if (disclosureCheck.unavailable) {
+              // Policy-store OUTAGE: the disclosure requirement is unreadable, so
+              // fail closed rather than mint a fund action on an unverified gate.
+              return c.json(
+                deny('disclosure_unavailable', 'Risk disclosures cannot be verified right now.'),
+                503,
+              );
+            }
             if (disclosureCheck.required) {
               return c.json(
                 {
@@ -560,6 +568,14 @@ export function createKnomosisRoutes() {
               buildDisclosureDeps(getComplianceServices()),
               auth.userId,
             );
+            if (disclosureCheck.unavailable) {
+              // Policy-store OUTAGE: the disclosure requirement is unreadable, so
+              // fail closed rather than mint a fund action on an unverified gate.
+              return c.json(
+                deny('disclosure_unavailable', 'Risk disclosures cannot be verified right now.'),
+                503,
+              );
+            }
             if (disclosureCheck.required) {
               return c.json(
                 {

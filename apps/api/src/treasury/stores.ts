@@ -328,6 +328,13 @@ export interface PaymentIntentStore {
    *  a fresh attempt.  NOT a general lifecycle delete: only the create's own
    *  atomic rollback calls it. */
   deleteById(paymentIntentId: string): Promise<boolean>;
+  /** CONDITIONAL rollback delete: remove the row ONLY if it is still the untouched
+   *  insert (`created` with no bound action).  The create-overshoot rollback uses
+   *  this so it cannot yank a row a concurrent idempotent replay already observed
+   *  and ADVANCED (e.g. preflighted) — that would leave the replay client with a
+   *  404/dangling id.  Returns false when the row changed (it now belongs to the
+   *  request that advanced it, and stays). */
+  deleteIfUntouched(paymentIntentId: string): Promise<boolean>;
   /** CAS state transition — the ONLY writer of executionState (WS-M.3.1b).
    *  Returns the updated record, or null when the stored state ≠ `from`. */
   transition(
@@ -797,6 +804,14 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   }
 
   async deleteById(paymentIntentId: string): Promise<boolean> {
+    return this.#rows.delete(paymentIntentId);
+  }
+
+  async deleteIfUntouched(paymentIntentId: string): Promise<boolean> {
+    const row = this.#rows.get(paymentIntentId);
+    if (row === undefined || row.executionState !== 'created' || row.actionRecordId !== null) {
+      return false;
+    }
     return this.#rows.delete(paymentIntentId);
   }
 

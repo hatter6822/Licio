@@ -271,8 +271,13 @@ export async function createPaymentIntent(
       // idempotency key, so the "please retry" the client is told to do would
       // replay a dead intent that can never preflight/quote/submit.  Deleting it
       // frees the key: the retry mints a fresh attempt and re-checks the cap
-      // (fail-closed; the survivors fit serially).
-      await deps.intents.deleteById(intent.paymentIntentId);
+      // (fail-closed; the survivors fit serially).  CONDITIONAL on the row still
+      // being the untouched insert: a concurrent idempotent replay can observe
+      // this row and even /advance it before this rollback runs, and yanking a row
+      // the replay client already advanced would hand them a 404 — so the delete
+      // no-ops if the row moved (it now belongs to that request and stays; a later
+      // same-key replay converges on it, not a dead id).
+      await deps.intents.deleteIfUntouched(intent.paymentIntentId);
       return tgErr(
         409,
         'deposit_limit_exceeded',

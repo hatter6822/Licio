@@ -580,6 +580,23 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
     return rows.length > 0;
   }
 
+  async deleteIfUntouched(paymentIntentId: string): Promise<boolean> {
+    // CONDITIONAL rollback (see the interface): delete only the still-untouched
+    // insert, so a concurrent idempotent replay that already advanced the row is
+    // never yanked out from under its client.
+    const rows = await this.db
+      .delete(paymentIntents)
+      .where(
+        and(
+          eq(paymentIntents.paymentIntentId, paymentIntentId),
+          eq(paymentIntents.executionState, 'created'),
+          isNull(paymentIntents.actionRecordId),
+        ),
+      )
+      .returning({ paymentIntentId: paymentIntents.paymentIntentId });
+    return rows.length > 0;
+  }
+
   async findByIdempotencyKey(
     userId: string | null,
     roomId: string,

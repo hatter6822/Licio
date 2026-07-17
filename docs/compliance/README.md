@@ -402,7 +402,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   `jurisdiction_policies` read transiently threw, since `policyOf` collapses
   `store_unavailable`→null and the cell reading degraded to the permissive
   `unknown`.  (`evaluateCell` already renders any null policy `available:false`, so
-  the availability CARD was never the leak — only the verdict GATE was.)  The SAME reasoning
+  the availability CARD was never the leak — only the verdict GATE was.)  The
+  DISCLOSURE gate is the third sibling: `disclosureGate` returned `required: false`
+  on a `store_unavailable` policy (no readable `disclosure_refs`), so a policy-store
+  outage cleared the WS-N.1.2d first-financial-action gate and let an
+  allowance-consuming intent through unacknowledged.  It now returns `unavailable`
+  for that outcome, and the create/preflight/submit routes 503 on it — fail closed,
+  distinct from a truly `missing`/`future_dated`/`malformed` policy (no disclosures,
+  the shipped `required: false`).  The SAME reasoning
   bars a SELF-INFLICTED downgrade — via BOTH member paths, since either erases the
   verified basis and drops `resolveRegion` to the weaker locale rung, letting a
   verified-BLOCKED member reach the routes that reject only an explicit `blocked`
@@ -805,7 +812,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   one asset exhaust or distort another's window.  And when the retry re-verify
   overshoots, the row is walked to `abandoned` through the AUDITED `transitionIntent`
   (chained `payment_intent_transition`), never a raw `intents.transition` that would
-  leave the retry visibly `created` then silently abandoned with no trail.
+  leave the retry visibly `created` then silently abandoned with no trail.  The
+  CREATE post-insert re-verify, when it overshoots, rolls its just-inserted row back
+  with `deleteIfUntouched` (delete ONLY if still `created` + unbound), not an
+  unconditional `deleteById`: a concurrent same-key idempotent replay can observe
+  the row and even `/advance` it before the rollback runs, and yanking a row that
+  replay client already advanced would hand them a 404 — so the delete no-ops if the
+  row moved (it belongs to that request; a later same-key replay converges on it).
 - **A `reserving` action settles nothing — it never forwarded.**  The submit
   reserves the idempotency key by inserting the action `reserving` BEFORE the
   single-use gates, and only advances it to `submitted` once they all pass; a

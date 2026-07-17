@@ -559,6 +559,15 @@ export function createTreasuryGovernanceRoutes() {
               buildDisclosureDeps(getComplianceServices()),
               auth.userId,
             );
+            if (disclosureCheck.unavailable) {
+              // Policy-store OUTAGE: the disclosure requirement is unreadable, so
+              // fail closed rather than mint an allowance-consuming intent on an
+              // unverified gate.
+              return c.json(
+                deny('disclosure_unavailable', 'Risk disclosures cannot be verified right now.'),
+                503,
+              );
+            }
             if (disclosureCheck.required) {
               return c.json(
                 {
