@@ -236,7 +236,9 @@ licio/
 │   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),
 │   │       │   │                           block/mute controls, notice inbox + appeal (WS-J.1)
 │   │       │   ├── moderation/          -- ModerationConsole (queue/review/palette/appeals/
-│   │       │   │                           integrity/evidence/audit; server-side authorized) (WS-J.2)
+│   │       │   │                           integrity/sources/audit — the Sources tab is the
+│   │       │   │                           ROLE_EVIDENCE citation-review surface; server-side
+│   │       │   │                           authorized; ?tab= deep-links a section) (WS-J.2)
 │   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
 │   │       │   │                           + LinkInterstitial (WS-G.4.2c)
 │   │       │   ├── reader/              -- SourceReader + readability worker

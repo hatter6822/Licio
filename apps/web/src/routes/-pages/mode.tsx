@@ -9,11 +9,13 @@
 // Always-available surface: it reads the locally-mirrored mode state / transport catalog
 // (no `@licio/lcap` codec import), so this route is not on the lazy bundle-codec chunk.
 
+import { useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
 import { CourierRunner } from '../../components/courier/CourierRunner/index.js';
 import { OperationalModeSelector } from '../../components/lcap/OperationalModeSelector/index.js';
 import { TransportStatus } from '../../components/lcap/TransportStatus/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import { getOperationalMode } from '../../lcap/mode-state.js';
 import type { OperationalMode } from '../../lcap/operational-modes.js';
@@ -22,10 +24,14 @@ import { usePageFocus } from './usePageFocus.js';
 export function OperationalModePage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('lcap.mode.pageTitle', 'Connection mode'));
+  const navigate = useNavigate();
+  // Retrace history to wherever this page was opened from; a cold-loaded deep
+  // link falls back (replacing) to the profile hub.
+  const goBack = useGoBack(() => void navigate({ to: '/profile', replace: true }));
   const [mode, setMode] = useState<OperationalMode>(() => getOperationalMode());
   return (
     <>
-      <PageHeader title={t('lcap.mode.pageTitle', 'Connection mode')} />
+      <PageHeader title={t('lcap.mode.pageTitle', 'Connection mode')} onBack={goBack} />
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 p-4">
         <p className="text-sm text-ink-muted">
           {t(

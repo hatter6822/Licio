@@ -58,8 +58,13 @@ export const queryKeys = {
   modAppeal: (appealId: string) => ['mod-appeal', appealId] as const,
   modAudit: (filterKey: string) => ['mod-audit', filterKey] as const,
   modIncidents: () => ['mod-incidents'] as const,
-  modEvidenceQueue: () => ['mod-evidence-queue'] as const,
-  modEvidenceDecisions: () => ['mod-evidence-decisions'] as const,
+  // The console's Sources tab (the ROLE_EVIDENCE doctrine surface — sourcing is
+  // comment-centric, so the UI cache speaks "source"; the wire keeps evidence-*).
+  modSourceQueue: () => ['mod-source-queue'] as const,
+  modSourceDecisions: () => ['mod-source-decisions'] as const,
+  // WS-N compliance console (server-gated; a 403 renders the access notice).
+  complianceCases: () => ['compliance-cases'] as const,
+  complianceFraudQueue: () => ['compliance-fraud-queue'] as const,
   // WS-L wallets + knomosis.
   wallets: () => ['wallets'] as const,
   walletRiskState: (walletId: string) => ['wallet-risk-state', walletId] as const,

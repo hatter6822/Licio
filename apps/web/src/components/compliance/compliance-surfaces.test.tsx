@@ -7,8 +7,10 @@
 //   • ComplianceConsole — the 403 access notice (server-side authorization),
 //     the queues render, release/reject actions;
 // plus axe on each surface.
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClientError } from '../../lib/api.js';
 import * as complianceApi from '../../lib/compliance-api.js';
@@ -20,6 +22,14 @@ import { RiskDisclosures } from './RiskDisclosures.js';
 vi.mock('../../lib/compliance-api.js');
 
 const mocked = vi.mocked(complianceApi);
+
+// The console reads through TanStack Query (a fresh client per render so a
+// cached queue can never leak between tests); the other WS-N surfaces stay
+// provider-free.
+function ConsoleProviders({ children }: { children: ReactNode }): React.ReactElement {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -188,7 +198,7 @@ describe('ComplianceConsole (WS-N.2.1c / WS-N.2.2c)', () => {
   it('shows the access notice on 403 — authorization is server-side', async () => {
     mocked.adminListCases.mockRejectedValue(new ApiClientError('forbidden', 'nope', 403));
     mocked.adminFetchFraudQueue.mockRejectedValue(new ApiClientError('forbidden', 'nope', 403));
-    render(<ComplianceConsole />);
+    render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     expect(await screen.findByText(/compliance access required/i)).toBeInTheDocument();
     expect(screen.queryByRole('tab')).not.toBeInTheDocument();
   });
@@ -228,7 +238,7 @@ describe('ComplianceConsole (WS-N.2.1c / WS-N.2.2c)', () => {
       payment_intent_id: '22222222-2222-4222-8222-222222222222',
       compliance_state: 'cleared',
     });
-    const { container } = render(<ComplianceConsole />);
+    const { container } = render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     expect(await screen.findByRole('tab', { name: /fraud queue/i })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('tab', { name: /fraud queue/i }));
     expect(await screen.findByText(/sla due/i)).toBeInTheDocument();
@@ -278,7 +288,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
       ],
     });
     mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
-    render(<ComplianceConsole />);
+    render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     // open → assign only; assigned → begin only; investigating → resolve + escalate.
     expect(await screen.findByRole('button', { name: /^assign$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /begin investigation/i })).toBeInTheDocument();
@@ -299,7 +309,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
       ...caseIn('investigating'),
       review_state: 'resolved' as never,
     });
-    render(<ComplianceConsole />);
+    render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     // Gated until the operator supplies the required field. The house Button
     // marks inactivity with aria-disabled (it stays focusable + announced) and
     // swallows the click, so assert BOTH the state and that it cannot fire.
@@ -336,7 +346,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
       ...caseIn('investigating'),
       review_state: 'resolved' as never,
     });
-    render(<ComplianceConsole />);
+    render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     await userEvent.type(
       await screen.findByLabelText(/resolution notes/i),
       'confirmed sanctioned party',
@@ -364,7 +374,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
         409,
       ),
     );
-    render(<ComplianceConsole />);
+    render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     await userEvent.click(await screen.findByRole('button', { name: /begin investigation/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/cannot move/i);
     // The queue is still rendered (the failure is per-action, not fatal).
@@ -374,7 +384,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
   it('renders both empty states and a non-403 load error', async () => {
     mocked.adminListCases.mockResolvedValue({ cases: [] });
     mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
-    const { unmount } = render(<ComplianceConsole />);
+    const { unmount } = render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     expect(await screen.findByTestId('empty-cases')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('tab', { name: /fraud queue/i }));
     expect(await screen.findByTestId('empty-fraud')).toBeInTheDocument();
@@ -385,7 +395,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
     vi.resetAllMocks();
     mocked.adminListCases.mockRejectedValue(new ApiClientError('server_error', 'boom', 500));
     mocked.adminFetchFraudQueue.mockRejectedValue(new ApiClientError('server_error', 'boom', 500));
-    render(<ComplianceConsole />);
+    render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not load/i);
     expect(screen.queryByText(/compliance access required/i)).not.toBeInTheDocument();
   });
@@ -412,7 +422,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
     mocked.adminReviewIntent.mockRejectedValue(
       new ApiClientError('not_flagged', 'The intent is not held for review.', 409),
     );
-    render(<ComplianceConsole />);
+    render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     await userEvent.click(await screen.findByRole('tab', { name: /fraud queue/i }));
     // Exactly ONE row carries the action pair (the held intent).
     expect(await screen.findAllByRole('button', { name: /^release$/i })).toHaveLength(1);
@@ -424,7 +434,7 @@ describe('ComplianceConsole — the case queue state machine + error paths', () 
     mocked.adminListCases.mockResolvedValue({ cases: [] });
     mocked.adminFetchFraudQueue.mockResolvedValue({ items: [] });
     mocked.adminVerifyDeclaration.mockResolvedValue(undefined);
-    const { container } = render(<ComplianceConsole />);
+    const { container } = render(<ComplianceConsole />, { wrapper: ConsoleProviders });
     await userEvent.click(await screen.findByRole('tab', { name: /declarations/i }));
     // The anti-circumvention framing is user-visible (no geolocation exists).
     expect(screen.getByText(/no geolocation anywhere on the platform/i)).toBeInTheDocument();
